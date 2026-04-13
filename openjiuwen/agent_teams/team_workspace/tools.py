@@ -58,20 +58,20 @@ class WorkspaceMetaTool(TeamTool):
 
         Args:
             inputs: Tool inputs with required "action" and optional "path".
-            **kwargs: May contain "member_id" and "member_name" from caller context.
+            **kwargs: May contain "member_name" and "member_name" from caller context.
 
         Returns:
             ToolOutput with action-specific result data.
         """
         action = inputs.get("action")
         path = inputs.get("path", "")
-        member_id = kwargs.get("member_id", "unknown")
-        member_name = kwargs.get("member_name", member_id)
+        member_name = kwargs.get("member_name", "unknown")
+        display_name = kwargs.get("display_name", member_name)
 
         if action == "lock":
             if not path:
                 return ToolOutput(success=False, error="'path' is required for lock action")
-            acquired = await self._ws.acquire_lock(path, member_id, member_name)
+            acquired = await self._ws.acquire_lock(path, member_name, display_name)
             if not acquired:
                 lock = self._ws.get_lock(path)
                 return ToolOutput(
@@ -83,7 +83,7 @@ class WorkspaceMetaTool(TeamTool):
         if action == "unlock":
             if not path:
                 return ToolOutput(success=False, error="'path' is required for unlock action")
-            released = await self._ws.release_lock(path, member_id)
+            released = await self._ws.release_lock(path, member_name)
             return ToolOutput(success=True, data={"released": released})
 
         if action == "locks":

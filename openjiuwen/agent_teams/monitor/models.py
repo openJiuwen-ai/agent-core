@@ -33,9 +33,9 @@ class TeamInfo(BaseModel):
             team: A ``Team`` database row object.
         """
         return cls(
-            team_id=team.team_id,
-            name=team.name,
-            leader_id=team.leader_member_id,
+            team_id=team.team_name,
+            name=team.display_name,
+            leader_id=team.leader_member_name,
             desc=team.desc,
             created=team.created,
         )
@@ -60,9 +60,9 @@ class MemberInfo(BaseModel):
             member: A ``TeamMember`` database row object.
         """
         return cls(
-            member_id=member.member_id,
-            team_id=member.team_id,
-            name=member.name,
+            member_id=member.member_name,
+            team_id=member.team_name,
+            name=member.display_name,
             desc=member.desc,
             status=member.status,
             execution_status=member.execution_status,
@@ -90,7 +90,7 @@ class TaskInfo(BaseModel):
         """
         return cls(
             task_id=task.task_id,
-            team_id=task.team_id,
+            team_id=task.team_name,
             title=task.title,
             content=task.content,
             status=task.status,
@@ -120,9 +120,9 @@ class MessageInfo(BaseModel):
         """
         return cls(
             message_id=msg.message_id,
-            team_id=msg.team_id,
-            from_member=msg.from_member,
-            to_member=msg.to_member,
+            team_id=msg.team_name,
+            from_member=msg.from_member_name,
+            to_member=msg.to_member_name,
             content=msg.content,
             timestamp=msg.timestamp,
             is_broadcast=msg.broadcast,
@@ -237,12 +237,12 @@ class MonitorEvent(BaseModel):
         payload = event_message.payload
         return cls(
             event_type=MonitorEventType(raw_type),
-            team_id=payload.get("team_id", ""),
-            member_id=payload.get("member_id"),
+            team_id=payload.get("team_name", ""),
+            member_id=payload.get("member_name"),
             timestamp=int(round(time.time() * 1000)),
             # Team
-            name=payload.get("name"),
-            leader_id=payload.get("leader_id"),
+            name=payload.get("display_name"),
+            leader_id=payload.get("leader_member_name"),
             created=payload.get("created"),
             # Member
             old_status=payload.get("old_status"),
@@ -255,6 +255,6 @@ class MonitorEvent(BaseModel):
             status=payload.get("status"),
             # Message
             message_id=payload.get("message_id"),
-            from_member=payload.get("from_member"),
-            to_member=payload.get("to_member"),
+            from_member=payload.get("from_member_name"),
+            to_member=payload.get("to_member_name"),
         )

@@ -20,11 +20,11 @@ from openjiuwen.agent_teams.schema.blueprint import (
     TeamAgentSpec,
 )
 from openjiuwen.agent_teams.schema.team import (
-    TeamMemberSpec,
     TeamRole,
     TeamRuntimeContext,
     TeamSpec,
 )
+from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     TeamEvent,
@@ -37,33 +37,27 @@ from openjiuwen.core.single_agent.schema.agent_card import (
 
 
 def _make_leader() -> TeamAgent:
-    leader_member = TeamMemberSpec(
-        member_id="leader-1",
-        name="Leader",
-        role_type=TeamRole.LEADER,
-        persona="PM",
-        domain="management",
-    )
     team_spec = TeamSpec(
-        team_id="test-team",
-        name="test-team",
-        leader_member_id="leader-1",
+        team_name="test-team",
+        display_name="test-team",
+        leader_member_name="leader-1",
     )
 
     spec = TeamAgentSpec(
         agents={"leader": DeepAgentSpec()},
         team_name="test-team",
         leader=LeaderSpec(
-            member_id="leader-1",
-            name="Leader",
+            member_name="leader-1",
+            display_name="Leader",
             persona="PM",
-            domain="management",
         ),
     )
     context = TeamRuntimeContext(
         role=TeamRole.LEADER,
-        member_spec=leader_member,
+        member_name="leader-1",
+        persona="PM",
         team_spec=team_spec,
+        db_config=DatabaseConfig(db_type="memory"),
     )
     agent = TeamAgent(
         AgentCard(
@@ -99,7 +93,7 @@ async def test_wake_feeds_messages_to_agent():
     agent._deep_agent.follow_up = AsyncMock()
     fake_msg = MagicMock()
     fake_msg.message_id = "msg-1"
-    fake_msg.from_member = "dev-1"
+    fake_msg.from_member_name = "dev-1"
     fake_msg.content = "task done"
     fake_msg.broadcast = False
     fake_msg.timestamp = 1000
@@ -139,17 +133,10 @@ def _make_leader_with_teammate() -> TeamAgent:
 
 
 def _make_teammate() -> TeamAgent:
-    member_spec = TeamMemberSpec(
-        member_id="dev-1",
-        name="Dev",
-        role_type=TeamRole.TEAMMATE,
-        persona="dev",
-        domain="backend",
-    )
     team_spec = TeamSpec(
-        team_id="test-team",
-        name="test-team",
-        leader_member_id="leader-1",
+        team_name="test-team",
+        display_name="test-team",
+        leader_member_name="leader-1",
     )
     spec = TeamAgentSpec(
         agents={"leader": DeepAgentSpec()},
@@ -157,8 +144,10 @@ def _make_teammate() -> TeamAgent:
     )
     ctx = TeamRuntimeContext(
         role=TeamRole.TEAMMATE,
-        member_spec=member_spec,
+        member_name="dev-1",
+        persona="dev",
         team_spec=team_spec,
+        db_config=DatabaseConfig(db_type="memory"),
     )
     agent = TeamAgent(AgentCard(id="dev-1", name="dev", description="test"))
     agent.configure(spec, ctx)
@@ -179,7 +168,7 @@ async def test_mention_routes_direct_message():
     await agent._stop_coordination()
 
     agent._message_manager.send_message.assert_called_once_with(
-        "请完成这个任务", "dev-1", from_member="user",
+        "请完成这个任务", "dev-1", from_member_name="user",
     )
     agent._start_agent.assert_not_called()
 
@@ -241,23 +230,21 @@ async def test_mention_no_body_falls_through():
 @pytest.mark.asyncio
 async def test_tool_approval_event_resumes_interrupt():
     """Tool approval result event should resume teammate HITL with InteractiveInput."""
-    member_spec = TeamMemberSpec(
-        member_id="dev-1",
-        name="Dev",
-        role_type=TeamRole.TEAMMATE,
-        persona="dev",
-        domain="backend",
-    )
-    team_spec = TeamSpec(team_id="test-team", name="test-team", leader_member_id="leader-1")
+    team_spec = TeamSpec(
+        team_name="test-team",
+        display_name="test-team",
+        leader_member_name="leader-1")
     spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="test-team")
-    ctx = TeamRuntimeContext(role=TeamRole.TEAMMATE, member_spec=member_spec, team_spec=team_spec)
+    ctx = TeamRuntimeContext(
+        role=TeamRole.TEAMMATE, member_name="dev-1", persona="dev", team_spec=team_spec,
+    )
     agent = TeamAgent(AgentCard(id="dev-1", name="dev", description="test"))
     agent.configure(spec, ctx)
     agent.resume_interrupt = AsyncMock()
 
     event = EventMessage.from_event(ToolApprovalResultEvent(
-        team_id="test-team",
-        member_id="dev-1",
+        team_name="test-team",
+        member_name="dev-1",
         tool_call_id="call-1",
         approved=True,
         feedback="ok",
@@ -285,7 +272,7 @@ async def test_mailbox_messages_deferred_while_interrupt_pending():
 
     fake_msg = MagicMock()
     fake_msg.message_id = "msg-normal"
-    fake_msg.from_member = "dev-2"
+    fake_msg.from_member_name = "dev-2"
     fake_msg.broadcast = False
     fake_msg.timestamp = 1000
     fake_msg.content = "normal mailbox message"
@@ -307,8 +294,8 @@ async def test_resume_interrupt_queues_while_agent_running():
     fake_entry.interrupt_requests = {"call-1": MagicMock()}
     fake_state = MagicMock()
     fake_state.interrupted_tools = {"call-1": fake_entry}
-    agent._session = MagicMock()
-    agent._session.get_state = MagicMock(return_value=fake_state)
+    agent._deep_agent._loop_session = MagicMock()
+    agent._deep_agent._loop_session.get_state = MagicMock(return_value=fake_state)
     agent._agent_task = MagicMock()
     agent._agent_task.done.return_value = False
     agent._start_agent = AsyncMock()
@@ -326,11 +313,16 @@ async def test_resume_interrupt_queues_while_agent_running():
 async def test_teammate_round_completion_wakes_mailbox_after_interrupt_clears():
     """Deferred mailbox messages should be retried immediately after interrupt clears."""
     agent = _make_teammate()
+    # _make_teammate wires a real TeamBackend (with a default sqlite DB path)
+    # during configure(). _update_status would then hit the DB on BUSY/READY
+    # transitions -- skip it by detaching _team_member for this unit test,
+    # which is scoped to the mailbox-wake behavior in _run_one_round.
+    agent._team_member = None
     agent._coordination_loop.enqueue = AsyncMock()
     agent._execute_round = AsyncMock(return_value=None)
     agent.has_pending_interrupt = lambda: False
 
-    await agent._run_one_round("continue work", session=None)
+    await agent._run_one_round("continue work")
 
     agent._coordination_loop.enqueue.assert_awaited_once()
     event = agent._coordination_loop.enqueue.await_args.args[0]

@@ -125,16 +125,16 @@ class TeamMonitor:
         members = await self._db.get_team_members(self._team_id, status=status)
         return [MemberInfo.from_internal(m) for m in members]
 
-    async def get_member(self, member_id: str) -> MemberInfo | None:
+    async def get_member(self, member_name: str) -> MemberInfo | None:
         """Query a single member by ID.
 
         Args:
-            member_id: Member identifier.
+            member_name: Member identifier.
 
         Returns:
             MemberInfo or None if not found.
         """
-        member = await self._db.get_member(member_id)
+        member = await self._db.get_member(member_name, self._team_id)
         if member is None:
             return None
         return MemberInfo.from_internal(member)
@@ -171,12 +171,12 @@ class TeamMonitor:
         """
         if to_member is not None:
             rows = await self._db.get_messages(
-                team_id=self._team_id,
-                to_member=to_member,
-                from_member=from_member,
+                team_name=self._team_id,
+                to_member_name=to_member,
+                from_member_name=from_member,
             )
         else:
-            rows = await self._db.get_team_messages(team_id=self._team_id)
+            rows = await self._db.get_team_messages(team_name=self._team_id)
         return [MessageInfo.from_internal(r) for r in rows]
 
     # ------------------------------------------------------------------
@@ -242,7 +242,7 @@ def create_monitor(team_agent: TeamAgent) -> TeamMonitor:
         raise ValueError("TeamAgent has no team backend configured")
 
     return TeamMonitor(
-        team_id=backend.team_id,
+        team_id=backend.team_name,
         session_id=get_session_id(),
         db=backend.db,
         team_agent=team_agent,

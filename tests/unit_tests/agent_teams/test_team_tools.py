@@ -28,15 +28,17 @@ from openjiuwen.agent_teams.tools.team_tools import (
     BuildTeamTool,
     ClaimTaskTool,
     CleanTeamTool,
-    CompleteTaskTool,
     ListMembersTool,
+    MappedToolOutput,
     SendMessageTool,
     ShutdownMemberTool,
     SpawnMemberTool,
-    TaskManagerToolV2,
+    TaskCreateTool,
+    UpdateTaskTool,
     ViewTaskToolV2,
 )
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
+from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 
@@ -77,13 +79,13 @@ async def agent_team(db, message_bus):
     """Provide initialized AgentTeam instance with pre-created team"""
     team_id = "test_team"
     await db.create_team(
-        team_id=team_id,
-        name="Test Team",
-        leader_member_id="leader1"
+        team_name=team_id,
+        display_name="Test Team",
+        leader_member_name="leader1"
     )
     return TeamBackend(
-        team_id=team_id,
-        member_id="leader1",
+        team_name=team_id,
+        member_name="leader1",
         is_leader=True,
         db=db,
         messager=message_bus,
@@ -94,8 +96,8 @@ async def agent_team(db, message_bus):
 async def agent_team_without_team(db, message_bus):
     """Provide AgentTeam instance without pre-created team (for BuildTeamTool tests)"""
     return TeamBackend(
-        team_id="test_team",
-        member_id="leader1",
+        team_name="test_team",
+        member_name="leader1",
         is_leader=True,
         db=db,
         messager=message_bus,
@@ -132,9 +134,9 @@ class TestBuildTeamTool:
         """Test invoking build team tool successfully"""
         tool = BuildTeamTool(agent_team_without_team, t)
         result = await tool.invoke({
-            "team_name": "My Team",
+            "display_name": "My Team",
             "team_desc": "Test team description",
-            "leader_name": "Lead",
+            "leader_display_name": "Lead",
             "leader_desc": "Project manager",
         })
 
@@ -142,27 +144,27 @@ class TestBuildTeamTool:
         assert result.error is None
         # Verify team was created in database
         team_info = await db.get_team("test_team")
-        assert team_info.name == "My Team"
+        assert team_info.display_name == "My Team"
         assert team_info.desc == "Test team description"
         # Verify leader was registered as a member
-        leader = await db.get_member("leader1")
+        leader = await db.get_member("leader1", "test_team")
         assert leader is not None
-        assert leader.name == "Lead"
+        assert leader.display_name == "Lead"
 
     @pytest.mark.asyncio
     async def test_invoke_with_minimal_args(self, agent_team_without_team, t, db):
         """Test invoking build team tool with minimal arguments"""
         tool = BuildTeamTool(agent_team_without_team, t)
         result = await tool.invoke({
-            "team_name": "Minimal Team",
+            "display_name": "Minimal Team",
             "team_desc": "A minimal team",
-            "leader_name": "Lead",
+            "leader_display_name": "Lead",
             "leader_desc": "PM",
         })
 
         assert result.success is True
         team_info = await db.get_team("test_team")
-        assert team_info.name == "Minimal Team"
+        assert team_info.display_name == "Minimal Team"
         assert team_info.desc == "A minimal team"
 
 
@@ -180,26 +182,26 @@ class TestCleanTeamTool:
     async def test_invoke_success(self, agent_team, t, sample_agent_card, db):
         """Test invoking clean team tool successfully"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card
         )
         # Shutdown member
-        await db.update_member_status("member1", MemberStatus.SHUTDOWN_REQUESTED.value)
-        await db.update_member_status("member1", MemberStatus.SHUTDOWN.value)
+        await db.update_member_status("member1", "test_team", MemberStatus.SHUTDOWN_REQUESTED.value)
+        await db.update_member_status("member1", "test_team", MemberStatus.SHUTDOWN.value)
 
         tool = CleanTeamTool(agent_team, t)
         result = await tool.invoke({})
 
         assert result.success is True
-        assert result.data["team_id"] == agent_team.team_id
+        assert result.data["team_name"] == agent_team.team_name
 
     @pytest.mark.asyncio
     async def test_invoke_fails_when_members_not_shutdown(self, agent_team, t, sample_agent_card):
         """Test invoking clean team tool fails when members not shutdown"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card
         )
 
@@ -228,8 +230,8 @@ class TestSpawnMemberTool:
         """Test invoking spawn member tool successfully"""
         tool = SpawnMemberTool(agent_team, t)
         result = await tool.invoke({
-            "member_id": "member1",
-            "name": "Member One",
+            "member_name": "member1",
+            "display_name": "Member One",
             "desc": "Test member",
             "prompt": "Member prompt"
         })
@@ -252,15 +254,15 @@ class TestShutdownMemberTool:
     async def test_invoke_success(self, agent_team, t, sample_agent_card, db):
         """Test invoking shutdown member tool successfully"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card,
             status=MemberStatus.READY,
         )
 
         tool = ShutdownMemberTool(agent_team, t)
         result = await tool.invoke({
-            "member_id": "member1",
+            "member_name": "member1",
             "force": False
         })
 
@@ -271,15 +273,15 @@ class TestShutdownMemberTool:
     async def test_invoke_with_force(self, agent_team, t, sample_agent_card, db):
         """Test invoking shutdown member tool with force option"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card,
             status=MemberStatus.READY,
         )
 
         tool = ShutdownMemberTool(agent_team, t)
         result = await tool.invoke({
-            "member_id": "member1",
+            "member_name": "member1",
             "force": True
         })
 
@@ -289,7 +291,7 @@ class TestShutdownMemberTool:
     async def test_invoke_member_not_found(self, agent_team, t):
         """Test invoking shutdown member tool for non-existent member"""
         tool = ShutdownMemberTool(agent_team, t)
-        result = await tool.invoke({"member_id": "nonexistent"})
+        result = await tool.invoke({"member_name": "nonexistent"})
 
         assert result.success is False
         assert result.error is not None
@@ -309,14 +311,14 @@ class TestApprovePlanTool:
     async def test_invoke_approve(self, agent_team, t, sample_agent_card):
         """Test invoking approve plan tool to approve"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card
         )
 
         tool = ApprovePlanTool(agent_team, t)
         result = await tool.invoke({
-            "member_id": "member1",
+            "member_name": "member1",
             "approved": True,
             "feedback": "Great plan!"
         })
@@ -328,14 +330,14 @@ class TestApprovePlanTool:
     async def test_invoke_reject(self, agent_team, t, sample_agent_card):
         """Test invoking approve plan tool to reject"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card
         )
 
         tool = ApprovePlanTool(agent_team, t)
         result = await tool.invoke({
-            "member_id": "member1",
+            "member_name": "member1",
             "approved": False,
             "feedback": "Please revise"
         })
@@ -347,7 +349,7 @@ class TestApprovePlanTool:
         """Test invoking approve plan tool for non-existent member"""
         tool = ApprovePlanTool(agent_team, t)
         result = await tool.invoke({
-            "member_id": "nonexistent",
+            "member_name": "nonexistent",
             "approved": True
         })
 
@@ -366,14 +368,14 @@ class TestApproveToolCallTool:
     @pytest.mark.asyncio
     async def test_invoke_approve(self, agent_team, t, sample_agent_card):
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card,
         )
 
         tool = ApproveToolCallTool(agent_team, t)
         result = await tool.invoke({
-            "member_id": "member1",
+            "member_name": "member1",
             "tool_call_id": "call-1",
             "approved": True,
             "feedback": "approved",
@@ -408,13 +410,13 @@ class TestListMembersTool:
     async def test_invoke_with_members(self, agent_team, t, sample_agent_card):
         """Test invoking list members tool with members"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card
         )
         await agent_team.spawn_member(
-            member_id="member2",
-            name="Member Two",
+            member_name="member2",
+            display_name="Member Two",
             agent_card=sample_agent_card
         )
 
@@ -423,7 +425,7 @@ class TestListMembersTool:
 
         assert result.success is True
         assert result.data["count"] == 2
-        member_ids = [m["member_id"] for m in result.data["members"]]
+        member_ids = [m["member_name"] for m in result.data["members"]]
         assert "member1" in member_ids
         assert "member2" in member_ids
 
@@ -431,21 +433,20 @@ class TestListMembersTool:
 # ========== Task Management Tools (V2) ==========
 
 
-class TestTaskManagerToolV2:
-    """Test TaskManagerToolV2 (unified task management)"""
+class TestTaskCreateTool:
+    """Test TaskCreateTool (create tasks)"""
 
     def test_initialization(self, agent_team, t):
         """Test tool initialization"""
-        tool = TaskManagerToolV2(agent_team, t)
-        assert tool.card.name == "task_manager"
-        assert tool.card.id == "team.task_manager"
+        tool = TaskCreateTool(agent_team, t)
+        assert tool.card.name == "create_task"
+        assert tool.card.id == "team.create_task"
 
     @pytest.mark.asyncio
-    async def test_invoke_add_single_task(self, agent_team, t):
-        """Test add action with a single task"""
-        tool = TaskManagerToolV2(agent_team, t)
+    async def test_create_single_task(self, agent_team, t):
+        """Test creating a single task"""
+        tool = TaskCreateTool(agent_team, t)
         result = await tool.invoke({
-            "action": "add",
             "tasks": [{"title": "Task 1", "content": "Content 1"}]
         })
 
@@ -453,22 +454,10 @@ class TestTaskManagerToolV2:
         assert result.data["title"] == "Task 1"
 
     @pytest.mark.asyncio
-    async def test_invoke_add_default_action(self, agent_team, t):
-        """Test that add is the default action"""
-        tool = TaskManagerToolV2(agent_team, t)
+    async def test_create_batch_tasks(self, agent_team, t):
+        """Test batch task creation"""
+        tool = TaskCreateTool(agent_team, t)
         result = await tool.invoke({
-            "tasks": [{"title": "Default Task", "content": "Content"}]
-        })
-
-        assert result.success is True
-        assert result.data["title"] == "Default Task"
-
-    @pytest.mark.asyncio
-    async def test_invoke_add_batch_tasks(self, agent_team, t):
-        """Test add action with batch tasks"""
-        tool = TaskManagerToolV2(agent_team, t)
-        result = await tool.invoke({
-            "action": "add",
             "tasks": [
                 {"title": "Task 1", "content": "Content 1"},
                 {"title": "Task 2", "content": "Content 2"},
@@ -482,52 +471,73 @@ class TestTaskManagerToolV2:
         assert len(result.data["tasks"]) == 3
 
     @pytest.mark.asyncio
-    async def test_invoke_add_no_tasks(self, agent_team, t):
-        """Test add action with empty tasks list"""
-        tool = TaskManagerToolV2(agent_team, t)
-        result = await tool.invoke({"action": "add", "tasks": []})
+    async def test_create_empty_tasks(self, agent_team, t):
+        """Test with empty tasks list"""
+        tool = TaskCreateTool(agent_team, t)
+        result = await tool.invoke({"tasks": []})
 
         assert result.success is False
         assert result.error is not None
 
     @pytest.mark.asyncio
-    async def test_invoke_insert_task(self, agent_team, t):
-        """Test insert action to add task into existing DAG"""
-        tool = TaskManagerToolV2(agent_team, t)
+    async def test_create_task_with_depended_by(self, agent_team, t):
+        """Test creating a task with reverse dependencies (depended_by)"""
+        # Create a base task first
+        base = await agent_team.task_manager.add(title="Base Task", content="Base content")
+
+        tool = TaskCreateTool(agent_team, t)
         result = await tool.invoke({
-            "action": "insert",
-            "title": "Priority Task",
-            "content": "Priority content"
+            "tasks": [{
+                "title": "Priority Task",
+                "content": "Priority content",
+                "depended_by": [base.task_id],
+            }]
         })
 
         assert result.success is True
         assert result.data["title"] == "Priority Task"
 
-    @pytest.mark.asyncio
-    async def test_invoke_update_task(self, agent_team, t):
-        """Test update action"""
-        task = await agent_team.task_manager.add(title="Original Title", content="Original Content")
 
-        tool = TaskManagerToolV2(agent_team, t)
+class TestUpdateTaskTool:
+    """Test UpdateTaskTool (leader: content update + cancel)"""
+
+    def test_initialization(self, agent_team, t):
+        """Test tool initialization"""
+        tool = UpdateTaskTool(agent_team, t)
+        assert tool.card.name == "update_task"
+        assert tool.card.id == "team.update_task"
+        props = tool.card.input_params["properties"]
+        assert "task_id" in props
+        assert "status" in props
+        assert "title" in props
+        assert "content" in props
+
+    @pytest.mark.asyncio
+    async def test_update_content(self, agent_team, t):
+        """Test updating task content"""
+        task = await agent_team.task_manager.add(title="Original", content="Original Content")
+
+        tool = UpdateTaskTool(agent_team, t)
         result = await tool.invoke({
-            "action": "update",
             "task_id": task.task_id,
             "title": "Updated Title",
-            "content": "Updated Content"
+            "content": "Updated Content",
         })
 
         assert result.success is True
         assert result.data["status"] == "updated"
+        assert "title" in result.data["updated_fields"]
+        assert "content" in result.data["updated_fields"]
 
     @pytest.mark.asyncio
-    async def test_invoke_cancel_task(self, agent_team, t):
-        """Test cancel action"""
+    async def test_cancel_task(self, agent_team, t):
+        """Test cancelling a task"""
         task = await agent_team.task_manager.add(title="Task to Cancel", content="Content")
 
-        tool = TaskManagerToolV2(agent_team, t)
+        tool = UpdateTaskTool(agent_team, t)
         result = await tool.invoke({
-            "action": "cancel",
-            "task_id": task.task_id
+            "task_id": task.task_id,
+            "status": "cancelled",
         })
 
         assert result.success is True
@@ -535,16 +545,93 @@ class TestTaskManagerToolV2:
         assert result.data["status"] == "cancelled"
 
     @pytest.mark.asyncio
-    async def test_invoke_cancel_all_tasks(self, agent_team, t, db):
-        """Test cancel_all action"""
+    async def test_cancel_all_tasks(self, agent_team, t, db):
+        """Test cancel all tasks via task_id='*'"""
         await db.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
         await db.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
 
-        tool = TaskManagerToolV2(agent_team, t)
-        result = await tool.invoke({"action": "cancel_all"})
+        tool = UpdateTaskTool(agent_team, t)
+        result = await tool.invoke({"task_id": "*", "status": "cancelled"})
 
         assert result.success is True
         assert result.data["cancelled_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_assign_task(self, agent_team, t, sample_agent_card, db):
+        """Test assigning a task to a member"""
+        await db.create_member(
+            member_name="dev-1",
+            team_name="test_team",
+            display_name="Dev",
+            agent_card=sample_agent_card.model_dump_json(),
+            status=MemberStatus.READY,
+        )
+        task = await agent_team.task_manager.add(title="Task", content="Content")
+
+        tool = UpdateTaskTool(agent_team, t)
+        result = await tool.invoke({
+            "task_id": task.task_id,
+            "assignee": "dev-1",
+        })
+
+        assert result.success is True
+        assert "assignee" in result.data["updated_fields"]
+
+        # Verify assignee is set in DB
+        updated = await agent_team.task_manager.get(task.task_id)
+        assert updated.assignee == "dev-1"
+
+    @pytest.mark.asyncio
+    async def test_assign_already_assigned(self, agent_team, t, sample_agent_card, db):
+        """Test assigning fails when task already has an assignee"""
+        await db.create_member(
+            member_name="dev-1",
+            team_name="test_team",
+            display_name="Dev",
+            agent_card=sample_agent_card.model_dump_json(),
+            status=MemberStatus.READY,
+        )
+        task = await agent_team.task_manager.add(title="Task", content="Content")
+        await db.assign_task(task.task_id, "dev-1")
+
+        tool = UpdateTaskTool(agent_team, t)
+        result = await tool.invoke({
+            "task_id": task.task_id,
+            "assignee": "dev-2",
+        })
+
+        assert result.success is False
+        assert "already assigned" in result.error
+
+    @pytest.mark.asyncio
+    async def test_add_dependencies(self, agent_team, t):
+        """Test adding dependencies to a task"""
+        upstream = await agent_team.task_manager.add(title="Upstream", content="First")
+        downstream = await agent_team.task_manager.add(title="Downstream", content="Second")
+
+        tool = UpdateTaskTool(agent_team, t)
+        result = await tool.invoke({
+            "task_id": downstream.task_id,
+            "add_blocked_by": [upstream.task_id],
+        })
+
+        assert result.success is True
+        assert "blocked_by" in result.data["updated_fields"]
+
+        # Verify task is now blocked
+        updated = await agent_team.task_manager.get(downstream.task_id)
+        assert updated.status == "blocked"
+
+    @pytest.mark.asyncio
+    async def test_no_update_specified(self, agent_team, t):
+        """Test with no update fields"""
+        task = await agent_team.task_manager.add(title="Task", content="Content")
+
+        tool = UpdateTaskTool(agent_team, t)
+        result = await tool.invoke({"task_id": task.task_id})
+
+        assert result.success is False
+        assert "No update specified" in result.error
 
 
 class TestViewTaskToolV2:
@@ -558,7 +645,7 @@ class TestViewTaskToolV2:
 
     @pytest.mark.asyncio
     async def test_invoke_get_single_task(self, agent_team, t):
-        """Test get action for a single task"""
+        """Test get action returns detail with blocked_by and blocks"""
         tm = agent_team.task_manager
         task = await tm.add(title="Single Task", content="Content")
 
@@ -568,6 +655,32 @@ class TestViewTaskToolV2:
         assert result.success is True
         assert result.data["task_id"] == task.task_id
         assert result.data["title"] == "Single Task"
+        assert result.data["content"] == "Content"
+        assert result.data["blocked_by"] == []
+        assert result.data["blocks"] == []
+        assert "team_id" not in result.data
+
+    @pytest.mark.asyncio
+    async def test_invoke_get_with_dependencies(self, agent_team, t):
+        """Test get action returns correct blocked_by and blocks"""
+        tm = agent_team.task_manager
+        upstream = await tm.add(title="Upstream", content="Do first")
+        downstream = await tm.add(
+            title="Downstream", content="Do second",
+            dependencies=[upstream.task_id],
+        )
+
+        tool = ViewTaskToolV2(tm, t)
+
+        # downstream is blocked by upstream
+        result = await tool.invoke({"action": "get", "task_id": downstream.task_id})
+        assert result.success is True
+        assert upstream.task_id in result.data["blocked_by"]
+
+        # upstream blocks downstream
+        result = await tool.invoke({"action": "get", "task_id": upstream.task_id})
+        assert result.success is True
+        assert downstream.task_id in result.data["blocks"]
 
     @pytest.mark.asyncio
     async def test_invoke_get_task_not_found(self, agent_team, t):
@@ -589,7 +702,7 @@ class TestViewTaskToolV2:
 
     @pytest.mark.asyncio
     async def test_invoke_list_tasks_by_status(self, agent_team, t, db):
-        """Test list action filtered by status"""
+        """Test list action returns summary with blocked_by, no content"""
         await db.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
         await db.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
         await db.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
@@ -599,17 +712,34 @@ class TestViewTaskToolV2:
 
         assert result.success is True
         assert result.data["count"] == 1
-        assert result.data["tasks"][0]["title"] == "Task 1"
+        task_summary = result.data["tasks"][0]
+        assert task_summary["title"] == "Task 1"
+        assert "blocked_by" in task_summary
+        assert "content" not in task_summary
+        assert "team_id" not in task_summary
 
     @pytest.mark.asyncio
-    async def test_invoke_claimable_default(self, agent_team, t, db):
-        """Test default action returns claimable tasks"""
+    async def test_invoke_default_action_is_list(self, agent_team, t, db):
+        """Test default action is list (returns all tasks, not just pending)"""
         await db.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
         await db.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
         await db.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
 
         tool = ViewTaskToolV2(agent_team.task_manager, t)
         result = await tool.invoke({})
+
+        assert result.success is True
+        assert result.data["count"] == 3
+
+    @pytest.mark.asyncio
+    async def test_invoke_claimable(self, agent_team, t, db):
+        """Test claimable action returns only pending tasks"""
+        await db.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
+        await db.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
+
+        tool = ViewTaskToolV2(agent_team.task_manager, t)
+        result = await tool.invoke({"action": "claimable"})
 
         assert result.success is True
         assert result.data["count"] == 1
@@ -620,22 +750,25 @@ class TestViewTaskToolV2:
 
 
 class TestClaimTaskTool:
-    """Test ClaimTaskTool"""
+    """Test ClaimTaskTool (member: claim + complete)"""
 
     def test_initialization(self, agent_team, t):
         """Test tool initialization"""
         tool = ClaimTaskTool(agent_team.task_manager, t)
         assert tool.card.name == "claim_task"
         assert tool.card.id == "team.claim_task"
+        props = tool.card.input_params["properties"]
+        assert "task_id" in props
+        assert "status" in props
+        assert tool.card.input_params["required"] == ["task_id", "status"]
 
     @pytest.mark.asyncio
-    async def test_invoke_success(self, agent_team, t, sample_agent_card, db):
-        """Test invoking claim task tool successfully"""
-        # Create a member for claiming (task_manager uses member_id from TeamBackend)
+    async def test_claim_via_status(self, agent_team, t, sample_agent_card, db):
+        """Test claiming a task by setting status=claimed"""
         await db.create_member(
-            member_id="leader1",
-            team_id="test_team",
-            name="Leader",
+            member_name="leader1",
+            team_name="test_team",
+            display_name="Leader",
             agent_card=sample_agent_card.model_dump_json(),
             status=MemberStatus.READY,
         )
@@ -643,28 +776,20 @@ class TestClaimTaskTool:
         task = await tm.add(title="Test Task", content="Test content")
 
         tool = ClaimTaskTool(tm, t)
-        result = await tool.invoke({"task_id": task.task_id})
+        result = await tool.invoke({"task_id": task.task_id, "status": "claimed"})
 
         assert result.success is True
-
-
-class TestCompleteTaskTool:
-    """Test CompleteTaskTool"""
-
-    def test_initialization(self, agent_team, t):
-        """Test tool initialization"""
-        tool = CompleteTaskTool(agent_team.task_manager, t)
-        assert tool.card.name == "complete_task"
-        assert tool.card.id == "team.complete_task"
+        assert "status" in result.data["updated_fields"]
+        assert result.data["status_change"]["to"] == "claimed"
 
     @pytest.mark.asyncio
-    async def test_invoke_success(self, agent_team, t, sample_agent_card, db):
-        """Test invoking complete task tool successfully"""
+    async def test_complete_via_status(self, agent_team, t, sample_agent_card, db):
+        """Test completing a task by setting status=completed"""
         from openjiuwen.agent_teams.schema.status import MemberMode
         await db.create_member(
-            member_id="leader1",
-            team_id="test_team",
-            name="Leader",
+            member_name="leader1",
+            team_name="test_team",
+            display_name="Leader",
             agent_card=sample_agent_card.model_dump_json(),
             status=MemberStatus.READY,
             mode=MemberMode.BUILD_MODE.value,
@@ -673,10 +798,137 @@ class TestCompleteTaskTool:
         task = await tm.add(title="Test Task", content="Test content")
         await tm.claim(task.task_id)
 
-        tool = CompleteTaskTool(tm, t)
-        result = await tool.invoke({"task_id": task.task_id})
+        tool = ClaimTaskTool(tm, t)
+        result = await tool.invoke({"task_id": task.task_id, "status": "completed"})
 
         assert result.success is True
+        assert "status" in result.data["updated_fields"]
+        assert result.data["status_change"]["to"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_task_not_found(self, agent_team, t):
+        """Test updating a non-existent task"""
+        tool = ClaimTaskTool(agent_team.task_manager, t)
+        result = await tool.invoke({"task_id": "nonexistent", "status": "claimed"})
+
+        assert result.success is False
+        assert result.error == "Task not found"
+
+
+
+# ========== Result Mapping ==========
+
+
+class TestMappedToolOutput:
+    """Test MappedToolOutput and map_result integration"""
+
+    def test_str_returns_mapped_content(self):
+        """MappedToolOutput.__str__ returns mapped content, not Pydantic repr"""
+        output = MappedToolOutput.from_output(
+            ToolOutput(success=True, data={"key": "value"}),
+            mapped_content="Custom text for LLM",
+        )
+        assert str(output) == "Custom text for LLM"
+        # underlying data still accessible
+        assert output.success is True
+        assert output.data == {"key": "value"}
+
+    def test_claim_task_map_result_completed_guidance(self, agent_team, t):
+        """ClaimTaskTool.map_result injects behavior guidance on completion"""
+        tool = ClaimTaskTool(agent_team.task_manager, t)
+        output = ToolOutput(
+            success=True,
+            data={
+                "task_id": "t1",
+                "updated_fields": ["status"],
+                "status_change": {"from": "claimed", "to": "completed"},
+            },
+        )
+        result = tool.map_result(output)
+        assert "Task #t1 claimed → completed" in result
+        assert "view_task" in result
+
+    def test_claim_task_map_result_claimed_no_guidance(self, agent_team, t):
+        """ClaimTaskTool.map_result does NOT inject guidance on claim"""
+        tool = ClaimTaskTool(agent_team.task_manager, t)
+        output = ToolOutput(
+            success=True,
+            data={
+                "task_id": "t1",
+                "updated_fields": ["status"],
+                "status_change": {"from": "pending", "to": "claimed"},
+            },
+        )
+        result = tool.map_result(output)
+        assert "Task #t1 pending → claimed" in result
+        assert "view_task" not in result
+
+    def test_view_task_map_result_list(self, agent_team, t):
+        """ViewTaskToolV2.map_result formats list view as compact lines"""
+        tool = ViewTaskToolV2(agent_team.task_manager, t)
+        output = ToolOutput(
+            success=True,
+            data={
+                "tasks": [
+                    {"task_id": "t1", "title": "Fix bug", "status": "pending", "assignee": None, "blocked_by": []},
+                    {"task_id": "t2", "title": "Add test", "status": "claimed", "assignee": "dev-1", "blocked_by": ["t1"]},
+                ],
+                "count": 2,
+            },
+        )
+        result = tool.map_result(output)
+        assert "#t1 [pending] Fix bug" in result
+        assert "(dev-1)" in result
+        assert "[blocked by #t1]" in result
+
+    def test_view_task_map_result_get(self, agent_team, t):
+        """ViewTaskToolV2.map_result formats detail view with dependencies"""
+        tool = ViewTaskToolV2(agent_team.task_manager, t)
+        output = ToolOutput(
+            success=True,
+            data={
+                "task_id": "t1",
+                "title": "Fix bug",
+                "content": "Fix the login bug",
+                "status": "claimed",
+                "assignee": "dev-1",
+                "blocked_by": [],
+                "blocks": ["t2", "t3"],
+            },
+        )
+        result = tool.map_result(output)
+        assert "Task #t1: Fix bug" in result
+        assert "Content: Fix the login bug" in result
+        assert "Blocks: #t2, #t3" in result
+
+    def test_send_message_map_result(self, agent_team, t):
+        """SendMessageTool.map_result formats routing summary"""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        output = ToolOutput(
+            success=True,
+            data={"type": "message", "from": "leader", "to": "dev-1", "summary": None},
+        )
+        assert tool.map_result(output) == "Message sent from leader to dev-1"
+
+    def test_send_message_map_result_broadcast(self, agent_team, t):
+        """SendMessageTool.map_result formats broadcast summary"""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        output = ToolOutput(
+            success=True,
+            data={"type": "broadcast", "from": "leader", "summary": None},
+        )
+        assert tool.map_result(output) == "Broadcast sent from leader"
+
+    def test_default_map_result_json(self, agent_team, t):
+        """TeamTool default map_result returns JSON for data"""
+        tool = ListMembersTool(agent_team, t)
+        output = ToolOutput(
+            success=True,
+            data={"members": [{"member_name": "m1", "display_name": "Dev", "status": "ready"}], "count": 1},
+        )
+        # ListMembersTool overrides map_result, so test directly
+        result = tool.map_result(output)
+        assert "member_name=m1 display_name=Dev status=ready" in result
 
 
 # ========== Messaging Tools ==========
@@ -758,49 +1010,49 @@ class TestSendMessageTool:
 # ========== Skipped Tests (tools temporarily removed) ==========
 
 
-@pytest.mark.skip(reason="tool temporarily removed, functionality merged into TaskManagerToolV2.add")
+@pytest.mark.skip(reason="tool removed, functionality in TaskCreateTool")
 class TestAddTaskTool:
-    """Test AddTaskTool (removed - merged into TaskManagerToolV2)"""
+    """Test AddTaskTool (removed)"""
 
     def test_placeholder(self):
         pass
 
 
-@pytest.mark.skip(reason="tool temporarily removed, functionality merged into TaskManagerToolV2.add (batch)")
+@pytest.mark.skip(reason="tool removed, functionality in TaskCreateTool")
 class TestAddBatchTasksTool:
-    """Test AddBatchTasksTool (removed - merged into TaskManagerToolV2)"""
+    """Test AddBatchTasksTool (removed)"""
 
     def test_placeholder(self):
         pass
 
 
-@pytest.mark.skip(reason="tool temporarily removed, functionality merged into TaskManagerToolV2.insert")
+@pytest.mark.skip(reason="tool removed, functionality in TaskCreateTool")
 class TestAddTaskWithPriorityTool:
-    """Test AddTaskWithPriorityTool (removed - merged into TaskManagerToolV2)"""
+    """Test AddTaskWithPriorityTool (removed)"""
 
     def test_placeholder(self):
         pass
 
 
-@pytest.mark.skip(reason="tool temporarily removed, functionality merged into TaskManagerToolV2.insert")
+@pytest.mark.skip(reason="tool removed, functionality in TaskCreateTool")
 class TestAddTaskAsTopPriorityTool:
-    """Test AddTaskAsTopPriorityTool (removed - merged into TaskManagerToolV2)"""
+    """Test AddTaskAsTopPriorityTool (removed)"""
 
     def test_placeholder(self):
         pass
 
 
-@pytest.mark.skip(reason="tool temporarily removed, functionality merged into TaskManagerToolV2.cancel")
+@pytest.mark.skip(reason="tool removed, functionality in UpdateTaskTool")
 class TestCancelTaskTool:
-    """Test CancelTaskTool (removed - merged into TaskManagerToolV2)"""
+    """Test CancelTaskTool (removed)"""
 
     def test_placeholder(self):
         pass
 
 
-@pytest.mark.skip(reason="tool temporarily removed, functionality merged into TaskManagerToolV2.cancel_all")
+@pytest.mark.skip(reason="tool removed, functionality in UpdateTaskTool")
 class TestCancelAllTasksTool:
-    """Test CancelAllTasksTool (removed - merged into TaskManagerToolV2)"""
+    """Test CancelAllTasksTool (removed)"""
 
     def test_placeholder(self):
         pass
@@ -830,9 +1082,9 @@ class TestGetClaimableTasksTool:
         pass
 
 
-@pytest.mark.skip(reason="tool temporarily removed, functionality merged into TaskManagerToolV2.update")
-class TestUpdateTaskTool:
-    """Test UpdateTaskTool (removed - merged into TaskManagerToolV2)"""
+@pytest.mark.skip(reason="tool removed, functionality in UpdateTaskTool")
+class TestUpdateTaskToolLegacy:
+    """Test UpdateTaskTool legacy (removed)"""
 
     def test_placeholder(self):
         pass

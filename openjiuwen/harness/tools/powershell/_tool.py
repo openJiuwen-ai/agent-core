@@ -3,9 +3,9 @@
 """Enhanced PowerShellTool with command semantics, smart truncation, and security."""
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import (
     Any,
     AsyncIterator,
@@ -57,42 +57,19 @@ class PowerShellTool(Tool):
         self,
         operation: SysOperation,
         language: str = "cn",
-        workspace: str | None = None,
         permission_mode: str = "auto",
         deny_patterns: list[str] | None = None,
         allow_patterns: list[str] | None = None,
         agent_id: Optional[str] = None,
+        **_kwargs: Any,
     ) -> None:
         super().__init__(build_tool_card("powershell", "PowerShellTool", language, agent_id=agent_id))
         self._operation = operation
-        self._workspace: Path | None = Path(workspace).resolve() if workspace else None
         self._permission = PermissionConfig(
             mode=PermissionMode(permission_mode),
             deny_patterns=PermissionConfig.compile_patterns(deny_patterns),
             allow_patterns=PermissionConfig.compile_patterns(allow_patterns),
         )
-
-    def _get_workspace(self) -> Path | None:
-        if self._workspace:
-            return self._workspace
-        wd = self._operation.work_dir
-        return Path(wd).resolve() if wd else None
-
-    def _resolve_workdir(self, workdir: str) -> Path | None:
-        """Resolve workdir and enforce sandbox."""
-        workspace = self._get_workspace()
-        if workspace is None:
-            return Path(workdir).resolve() if workdir else Path.cwd()
-
-        candidate = Path(workdir) if workdir else workspace
-        if not candidate.is_absolute():
-            candidate = workspace / candidate
-        candidate = candidate.resolve()
-        try:
-            candidate.relative_to(workspace)
-        except ValueError:
-            return None
-        return candidate
 
     @staticmethod
     def _parse_inputs(inputs: Dict[str, Any]) -> _PowerShellInputs:
@@ -107,22 +84,19 @@ class PowerShellTool(Tool):
         )
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs: Any) -> ToolOutput:
+        from openjiuwen.core.sys_operation.cwd import get_cwd
+
         p = self._parse_inputs(inputs)
 
         if not p.command:
             return ToolOutput(success=False, error="command cannot be empty")
 
-        resolved_cwd = self._resolve_workdir(p.workdir)
-        if resolved_cwd is None:
-            return ToolOutput(success=False, error="workdir is outside workspace sandbox")
+        resolved_cwd = p.workdir or get_cwd()
 
-        sec = check_injection(p.command)
-        if sec.blocked:
-            return ToolOutput(success=False, error=sec.reason)
-
-        perm = check_permission(p.command, self._permission)
-        if not perm.allowed:
-            return ToolOutput(success=False, error=perm.reason)
+        if os.getenv("OPENJIUWEN_BASH_STRICT") == "1":
+            guard = self._guard(p)
+            if guard is not None:
+                return guard
 
         warning = get_destructive_warning(p.command)
 
@@ -132,7 +106,7 @@ class PowerShellTool(Tool):
         if p.background:
             res = await self._operation.shell().execute_cmd_background(
                 p.command,
-                cwd=str(resolved_cwd),
+                cwd=resolved_cwd,
                 shell_type="powershell",
             )
             if res.code != StatusCode.SUCCESS.code:
@@ -141,7 +115,7 @@ class PowerShellTool(Tool):
 
         res = await self._operation.shell().execute_cmd(
             p.command,
-            cwd=str(resolved_cwd),
+            cwd=resolved_cwd,
             timeout=p.timeout,
             shell_type="powershell",
         )
@@ -176,26 +150,21 @@ class PowerShellTool(Tool):
         )
 
     async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[ToolOutput]:
+        from openjiuwen.core.sys_operation.cwd import get_cwd
+
         p = self._parse_inputs(inputs)
 
         if not p.command:
             yield ToolOutput(success=False, error="command cannot be empty")
             return
 
-        resolved_cwd = self._resolve_workdir(p.workdir)
-        if resolved_cwd is None:
-            yield ToolOutput(success=False, error="workdir is outside workspace sandbox")
-            return
+        resolved_cwd = p.workdir or get_cwd()
 
-        sec = check_injection(p.command)
-        if sec.blocked:
-            yield ToolOutput(success=False, error=sec.reason)
-            return
-
-        perm = check_permission(p.command, self._permission)
-        if not perm.allowed:
-            yield ToolOutput(success=False, error=perm.reason)
-            return
+        if os.getenv("OPENJIUWEN_BASH_STRICT") == "1":
+            guard = self._guard(p)
+            if guard is not None:
+                yield guard
+                return
 
         warning = get_destructive_warning(p.command)
 
@@ -209,7 +178,7 @@ class PowerShellTool(Tool):
 
         async for chunk in self._operation.shell().execute_cmd_stream(
             p.command,
-            cwd=str(resolved_cwd),
+            cwd=resolved_cwd,
             timeout=p.timeout,
             shell_type="powershell",
         ):
@@ -256,3 +225,13 @@ class PowerShellTool(Tool):
             },
             error=truncate_output(accumulated_stderr, p.max_output_chars) if meaning.is_error else None,
         )
+
+    def _guard(self, p: _PowerShellInputs):
+        sec = check_injection(p.command)
+        if sec.blocked:
+            return ToolOutput(success=False, error=sec.reason)
+
+        perm = check_permission(p.command, self._permission)
+        if not perm.allowed:
+            return ToolOutput(success=False, error=perm.reason)
+        return None

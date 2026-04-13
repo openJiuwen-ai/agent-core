@@ -62,7 +62,7 @@ class _MemTask:
         self,
         *,
         task_id: str,
-        team_id: str,
+        team_name: str,
         title: str,
         content: str,
         status: str,
@@ -70,7 +70,7 @@ class _MemTask:
         completed_at: Optional[int] = None,
     ) -> None:
         self.task_id = task_id
-        self.team_id = team_id
+        self.team_name = team_name
         self.title = title
         self.content = content
         self.status = status
@@ -89,12 +89,12 @@ class _MemTaskDep:
         *,
         task_id: str,
         depends_on_task_id: str,
-        team_id: str,
+        team_name: str,
         resolved: bool = False,
     ) -> None:
         self.task_id = task_id
         self.depends_on_task_id = depends_on_task_id
-        self.team_id = team_id
+        self.team_name = team_name
         self.resolved = resolved
 
 
@@ -105,30 +105,30 @@ class _MemMessage:
         self,
         *,
         message_id: str,
-        team_id: str,
-        from_member: str,
+        team_name: str,
+        from_member_name: str,
         content: str,
         timestamp: int,
         broadcast: bool,
-        to_member: Optional[str] = None,
+        to_member_name: Optional[str] = None,
         is_read: bool = False,
     ) -> None:
         self.message_id = message_id
-        self.team_id = team_id
-        self.from_member = from_member
+        self.team_name = team_name
+        self.from_member_name = from_member_name
         self.content = content
         self.timestamp = timestamp
         self.broadcast = broadcast
-        self.to_member = to_member
+        self.to_member_name = to_member_name
         self.is_read = is_read
 
 
 class _MemReadStatus:
     """Plain broadcast-read-status record."""
 
-    def __init__(self, *, member_id: str, team_id: str, read_at: Optional[int] = None) -> None:
-        self.member_id = member_id
-        self.team_id = team_id
+    def __init__(self, *, member_name: str, team_name: str, read_at: Optional[int] = None) -> None:
+        self.member_name = member_name
+        self.team_name = team_name
         self.read_at = read_at
 
 
@@ -187,44 +187,44 @@ class InMemoryTeamDatabase:
 
     async def create_team(
         self,
-        team_id: str,
-        name: str,
-        leader_member_id: str,
+        team_name: str,
+        display_name: str,
+        leader_member_name: str,
         desc: Optional[str] = None,
         prompt: Optional[str] = None,
     ) -> bool:
         async with self._lock:
-            if team_id in self._teams:
-                team_logger.error(f"Team {team_id} already exists")
+            if team_name in self._teams:
+                team_logger.error(f"Team {team_name} already exists")
                 return False
-            self._teams[team_id] = Team(
-                team_id=team_id,
-                name=name,
-                leader_member_id=leader_member_id,
+            self._teams[team_name] = Team(
+                team_name=team_name,
+                display_name=display_name,
+                leader_member_name=leader_member_name,
                 desc=desc,
                 prompt=prompt,
                 created=self.get_current_time(),
             )
-            team_logger.info(f"Team {team_id} created")
+            team_logger.info(f"Team {team_name} created")
             return True
 
-    async def get_team(self, team_id: str) -> Optional[Team]:
-        return self._teams.get(team_id)
+    async def get_team(self, team_name: str) -> Optional[Team]:
+        return self._teams.get(team_name)
 
-    async def delete_team(self, team_id: str) -> bool:
+    async def delete_team(self, team_name: str) -> bool:
         async with self._lock:
-            if team_id not in self._teams:
+            if team_name not in self._teams:
                 return True
-            del self._teams[team_id]
+            del self._teams[team_name]
             # Cascade
-            self._members = {k: v for k, v in self._members.items() if v.team_id != team_id}
-            self._tasks = {k: v for k, v in self._tasks.items() if v.team_id != team_id}
-            self._task_deps = [d for d in self._task_deps if d.team_id != team_id]
-            self._messages = [m for m in self._messages if m.team_id != team_id]
+            self._members = {k: v for k, v in self._members.items() if v.team_name != team_name}
+            self._tasks = {k: v for k, v in self._tasks.items() if v.team_name != team_name}
+            self._task_deps = [d for d in self._task_deps if d.team_name != team_name]
+            self._messages = [m for m in self._messages if m.team_name != team_name]
             self._read_status = {
-                k: v for k, v in self._read_status.items() if v.team_id != team_id
+                k: v for k, v in self._read_status.items() if v.team_name != team_name
             }
-            team_logger.info(f"Team {team_id} deleted")
+            team_logger.info(f"Team {team_name} deleted")
             return True
 
     # =====================================================================
@@ -233,9 +233,9 @@ class InMemoryTeamDatabase:
 
     async def create_member(
         self,
-        member_id: str,
-        team_id: str,
-        name: str,
+        member_name: str,
+        team_name: str,
+        display_name: str,
         agent_card: str,
         status: str,
         *,
@@ -245,13 +245,13 @@ class InMemoryTeamDatabase:
         prompt: Optional[str] = None,
     ) -> bool:
         async with self._lock:
-            if member_id in self._members:
-                team_logger.error(f"Member {member_id} already exists")
+            if member_name in self._members:
+                team_logger.error(f"Member {member_name} already exists")
                 return False
-            self._members[member_id] = TeamMember(
-                member_id=member_id,
-                team_id=team_id,
-                name=name,
+            self._members[member_name] = TeamMember(
+                member_name=member_name,
+                team_name=team_name,
+                display_name=display_name,
                 agent_card=agent_card,
                 status=status,
                 desc=desc,
@@ -259,36 +259,39 @@ class InMemoryTeamDatabase:
                 mode=mode,
                 prompt=prompt,
             )
-            team_logger.info(f"Member {member_id} created")
+            team_logger.info(f"Member {member_name} created")
             return True
 
-    async def get_member(self, member_id: str) -> Optional[TeamMember]:
-        return self._members.get(member_id)
+    async def get_member(self, member_name: str, team_name: str) -> Optional[TeamMember]:
+        member = self._members.get(member_name)
+        if member and member.team_name == team_name:
+            return member
+        return None
 
-    async def get_team_members(self, team_id: str, status: Optional[str] = None) -> List[TeamMember]:
-        members = [m for m in self._members.values() if m.team_id == team_id]
+    async def get_team_members(self, team_name: str, status: Optional[str] = None) -> List[TeamMember]:
+        members = [m for m in self._members.values() if m.team_name == team_name]
         if status is not None:
             members = [m for m in members if m.status == status]
         return members
 
-    async def update_member_status(self, member_id: str, status: str) -> bool:
+    async def update_member_status(self, member_name: str, team_name: str, status: str) -> bool:
         async with self._lock:
-            member = self._members.get(member_id)
-            if not member:
-                team_logger.error(f"Member {member_id} not found")
+            member = self._members.get(member_name)
+            if not member or member.team_name != team_name:
+                team_logger.error(f"Member {member_name} not found in team {team_name}")
                 return False
             if not is_valid_transition(MemberStatus(member.status), MemberStatus(status), MEMBER_TRANSITIONS):
-                team_logger.error(f"Invalid state transition for member {member_id}: {member.status} -> {status}")
+                team_logger.error(f"Invalid state transition for member {member_name}: {member.status} -> {status}")
                 return False
             member.status = status
-            team_logger.info(f"Member {member_id} status updated to {status}")
+            team_logger.info(f"Member {member_name} status updated to {status}")
             return True
 
-    async def update_member_execution_status(self, member_id: str, execution_status: str) -> bool:
+    async def update_member_execution_status(self, member_name: str, team_name: str, execution_status: str) -> bool:
         async with self._lock:
-            member = self._members.get(member_id)
-            if not member:
-                team_logger.error(f"Member {member_id} not found")
+            member = self._members.get(member_name)
+            if not member or member.team_name != team_name:
+                team_logger.error(f"Member {member_name} not found in team {team_name}")
                 return False
             if not is_valid_transition(
                 ExecutionStatus(member.execution_status),
@@ -296,12 +299,12 @@ class InMemoryTeamDatabase:
                 EXECUTION_TRANSITIONS,
             ):
                 team_logger.error(
-                    f"Invalid state transition for member {member_id}: "
+                    f"Invalid state transition for member {member_name}: "
                     f"{member.execution_status} -> {execution_status}"
                 )
                 return False
             member.execution_status = execution_status
-            team_logger.info(f"Member {member_id} execution status updated to {execution_status}")
+            team_logger.info(f"Member {member_name} execution status updated to {execution_status}")
             return True
 
     # =====================================================================
@@ -309,14 +312,14 @@ class InMemoryTeamDatabase:
     # =====================================================================
 
     async def create_task(
-        self, task_id: str, team_id: str, title: str, content: str, status: str
+        self, task_id: str, team_name: str, title: str, content: str, status: str
     ) -> bool:
         async with self._lock:
             if task_id in self._tasks:
                 team_logger.error(f"Task {task_id} already exists")
                 return False
             self._tasks[task_id] = _MemTask(
-                task_id=task_id, team_id=team_id, title=title, content=content, status=status,
+                task_id=task_id, team_name=team_name, title=title, content=content, status=status,
             )
             team_logger.info(f"Task {task_id} created")
             return True
@@ -324,21 +327,21 @@ class InMemoryTeamDatabase:
     async def get_task(self, task_id: str) -> Optional[_MemTask]:
         return self._tasks.get(task_id)
 
-    async def get_team_tasks(self, team_id: str, status: Optional[str] = None) -> List[_MemTask]:
-        tasks = [t for t in self._tasks.values() if t.team_id == team_id]
+    async def get_team_tasks(self, team_name: str, status: Optional[str] = None) -> List[_MemTask]:
+        tasks = [t for t in self._tasks.values() if t.team_name == team_name]
         if status:
             tasks = [t for t in tasks if t.status == status]
         return tasks
 
     async def get_tasks_by_assignee(
-        self, team_id: str, assignee_id: str, status: Optional[str] = None
+        self, team_name: str, assignee_id: str, status: Optional[str] = None
     ) -> List[_MemTask]:
-        tasks = [t for t in self._tasks.values() if t.team_id == team_id and t.assignee == assignee_id]
+        tasks = [t for t in self._tasks.values() if t.team_name == team_name and t.assignee == assignee_id]
         if status:
             tasks = [t for t in tasks if t.status == status]
         return tasks
 
-    async def claim_task(self, task_id: str, member_id: str) -> bool:
+    async def claim_task(self, task_id: str, member_name: str) -> bool:
         async with self._lock:
             task = self._tasks.get(task_id)
             if not task:
@@ -352,8 +355,8 @@ class InMemoryTeamDatabase:
                 team_logger.warning(f"Task {task_id} is already claimed by member {task.assignee}")
                 return False
             task.status = TaskStatus.CLAIMED.value
-            task.assignee = member_id
-            team_logger.info(f"Task {task_id} claimed by member {member_id}")
+            task.assignee = member_name
+            team_logger.info(f"Task {task_id} claimed by member {member_name}")
             return True
 
     async def reset_task(self, task_id: str) -> Optional[_MemTask]:
@@ -425,14 +428,14 @@ class InMemoryTeamDatabase:
                 task.content = content
             return True
 
-    async def add_task_dependency(self, task_id: str, depends_on_task_id: str, team_id: str) -> bool:
+    async def add_task_dependency(self, task_id: str, depends_on_task_id: str, team_name: str) -> bool:
         async with self._lock:
             # Idempotent — skip if already exists
             for d in self._task_deps:
                 if d.task_id == task_id and d.depends_on_task_id == depends_on_task_id:
                     return True
             self._task_deps.append(
-                _MemTaskDep(task_id=task_id, depends_on_task_id=depends_on_task_id, team_id=team_id)
+                _MemTaskDep(task_id=task_id, depends_on_task_id=depends_on_task_id, team_name=team_name)
             )
             team_logger.info(f"Task dependency added: {task_id} -> {depends_on_task_id}")
             return True
@@ -463,7 +466,7 @@ class InMemoryTeamDatabase:
     async def add_task_with_bidirectional_dependencies(
         self,
         task_id: str,
-        team_id: str,
+        team_name: str,
         title: str,
         content: str,
         status: str,
@@ -493,14 +496,14 @@ class InMemoryTeamDatabase:
                 team_logger.error(f"Task {task_id} already exists")
                 return False
             self._tasks[task_id] = _MemTask(
-                task_id=task_id, team_id=team_id, title=title, content=content, status=status,
+                task_id=task_id, team_name=team_name, title=title, content=content, status=status,
             )
 
             # 3. New task depends on existing tasks
             if dependencies:
                 for dep_id in dependencies:
                     self._task_deps.append(
-                        _MemTaskDep(task_id=task_id, depends_on_task_id=dep_id, team_id=team_id)
+                        _MemTaskDep(task_id=task_id, depends_on_task_id=dep_id, team_name=team_name)
                     )
 
             # 4. Existing tasks depend on new task
@@ -529,7 +532,7 @@ class InMemoryTeamDatabase:
                         del self._tasks[task_id]
                         return False
                     self._task_deps.append(
-                        _MemTaskDep(task_id=dependent_id, depends_on_task_id=task_id, team_id=team_id)
+                        _MemTaskDep(task_id=dependent_id, depends_on_task_id=task_id, team_name=team_name)
                     )
                     if dep_task.status == TaskStatus.PENDING.value:
                         dep_task.status = TaskStatus.BLOCKED.value
@@ -571,18 +574,18 @@ class InMemoryTeamDatabase:
             team_logger.info(f"Task {task_id} cancelled")
             return task
 
-    async def cancel_all_tasks(self, team_id: str) -> List[_MemTask]:
+    async def cancel_all_tasks(self, team_name: str) -> List[_MemTask]:
         async with self._lock:
             skip = {TaskStatus.CANCELLED.value, TaskStatus.COMPLETED.value}
             cancelled = []
             for task in self._tasks.values():
-                if task.team_id != team_id or task.status in skip:
+                if task.team_name != team_name or task.status in skip:
                     continue
                 if not is_valid_transition(TaskStatus(task.status), TaskStatus.CANCELLED, TASK_TRANSITIONS):
                     continue
                 task.status = TaskStatus.CANCELLED.value
                 cancelled.append(task)
-            team_logger.info(f"Cancelled {len(cancelled)} tasks for team {team_id}")
+            team_logger.info(f"Cancelled {len(cancelled)} tasks for team {team_name}")
             return cancelled
 
     async def complete_task(self, task_id: str) -> Optional[Dict]:
@@ -623,11 +626,11 @@ class InMemoryTeamDatabase:
             team_logger.info(f"Task {task_id} completed, unblocked {len(unblocked)} tasks")
             return {"task": task, "unblocked_tasks": unblocked}
 
-    async def _verify_and_fix_blocked_tasks(self, team_id: str) -> List[_MemTask]:
+    async def _verify_and_fix_blocked_tasks(self, team_name: str) -> List[_MemTask]:
         async with self._lock:
             fixed = []
             for task in self._tasks.values():
-                if task.team_id != team_id or task.status != TaskStatus.BLOCKED.value:
+                if task.team_name != team_name or task.status != TaskStatus.BLOCKED.value:
                     continue
                 unresolved = sum(1 for d in self._task_deps if d.task_id == task.task_id and not d.resolved)
                 if unresolved == 0:
@@ -636,8 +639,8 @@ class InMemoryTeamDatabase:
                     team_logger.info(f"Task {task.task_id} fixed from BLOCKED to PENDING")
             return fixed
 
-    async def verify_and_fix_task_consistency(self, team_id: str) -> List[_MemTask]:
-        return await self._verify_and_fix_blocked_tasks(team_id)
+    async def verify_and_fix_task_consistency(self, team_name: str) -> List[_MemTask]:
+        return await self._verify_and_fix_blocked_tasks(team_name)
 
     # =====================================================================
     # Message Operations
@@ -652,11 +655,11 @@ class InMemoryTeamDatabase:
     async def create_message(
         self,
         message_id: str,
-        team_id: str,
-        from_member: str,
+        team_name: str,
+        from_member_name: str,
         content: str,
         *,
-        to_member: Optional[str] = None,
+        to_member_name: Optional[str] = None,
         broadcast: bool = False,
     ) -> bool:
         async with self._lock:
@@ -667,10 +670,10 @@ class InMemoryTeamDatabase:
             self._messages.append(
                 _MemMessage(
                     message_id=message_id,
-                    team_id=team_id,
-                    from_member=from_member,
+                    team_name=team_name,
+                    from_member_name=from_member_name,
                     content=content,
-                    to_member=to_member,
+                    to_member_name=to_member_name,
                     timestamp=self.get_current_time(),
                     broadcast=broadcast,
                 )
@@ -680,17 +683,17 @@ class InMemoryTeamDatabase:
 
     async def get_messages(
         self,
-        team_id: str,
-        to_member: str,
+        team_name: str,
+        to_member_name: str,
         unread_only: bool = False,
-        from_member: Optional[str] = None,
+        from_member_name: Optional[str] = None,
     ) -> List[_MemMessage]:
         result = [
             m for m in self._messages
-            if m.team_id == team_id and m.to_member == to_member and not m.broadcast
+            if m.team_name == team_name and m.to_member_name == to_member_name and not m.broadcast
         ]
-        if from_member is not None:
-            result = [m for m in result if m.from_member == from_member]
+        if from_member_name is not None:
+            result = [m for m in result if m.from_member_name == from_member_name]
         if unread_only:
             result = [m for m in result if not m.is_read]
         result.sort(key=lambda m: m.timestamp)
@@ -698,37 +701,37 @@ class InMemoryTeamDatabase:
 
     async def get_broadcast_messages(
         self,
-        team_id: str,
-        member_id: str,
+        team_name: str,
+        member_name: str,
         unread_only: bool = False,
-        from_member: Optional[str] = None,
+        from_member_name: Optional[str] = None,
     ) -> List[_MemMessage]:
         result = [
             m for m in self._messages
-            if m.team_id == team_id and m.broadcast and m.from_member != member_id
+            if m.team_name == team_name and m.broadcast and m.from_member_name != member_name
         ]
-        if from_member is not None:
-            result = [m for m in result if m.from_member == from_member]
+        if from_member_name is not None:
+            result = [m for m in result if m.from_member_name == from_member_name]
         result.sort(key=lambda m: m.timestamp)
 
         if not unread_only:
             return result
 
-        rs = self._read_status.get((member_id, team_id))
+        rs = self._read_status.get((member_name, team_name))
         if rs is None:
             return result
         return [m for m in result if m.timestamp > rs.read_at]
 
     async def get_team_messages(
-        self, team_id: str, broadcast: Optional[bool] = None
+        self, team_name: str, broadcast: Optional[bool] = None
     ) -> List[_MemMessage]:
-        result = [m for m in self._messages if m.team_id == team_id]
+        result = [m for m in self._messages if m.team_name == team_name]
         if broadcast is not None:
             result = [m for m in result if m.broadcast == broadcast]
         result.sort(key=lambda m: m.timestamp)
         return result
 
-    async def mark_message_read(self, message_id: str, member_id: str) -> bool:
+    async def mark_message_read(self, message_id: str, member_name: str) -> bool:
         async with self._lock:
             msg = None
             for m in self._messages:
@@ -738,20 +741,20 @@ class InMemoryTeamDatabase:
             if not msg:
                 team_logger.error(f"Message {message_id} not found")
                 return False
-            if member_id not in self._members:
-                team_logger.error(f"Member {member_id} not found")
+            if member_name not in self._members:
+                team_logger.error(f"Member {member_name} not found")
                 return False
 
             if msg.broadcast:
-                key = (member_id, msg.team_id)
+                key = (member_name, msg.team_name)
                 rs = self._read_status.get(key)
                 if rs is None:
                     self._read_status[key] = _MemReadStatus(
-                        member_id=member_id, team_id=msg.team_id, read_at=msg.timestamp,
+                        member_name=member_name, team_name=msg.team_name, read_at=msg.timestamp,
                     )
                 else:
                     rs.read_at = msg.timestamp
             else:
                 msg.is_read = True
-            team_logger.info(f"Message {message_id} marked as read by {member_id}")
+            team_logger.info(f"Message {message_id} marked as read by {member_name}")
             return True

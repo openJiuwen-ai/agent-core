@@ -79,12 +79,12 @@ class TestWorktreeSession:
     def test_minimal(self):
         session = WorktreeSession(
             original_cwd="/home/user/repo",
-            worktree_path="/home/user/repo/.agent_teams/worktrees/test",
+            worktree_path="/home/user/workspace/.worktrees/test",
             worktree_name="test",
         )
         assert session.original_cwd == "/home/user/repo"
         assert session.worktree_branch is None
-        assert session.member_id is None
+        assert session.member_name is None
         assert session.hook_based is False
         assert session.lifecycle_policy == WorktreeLifecyclePolicy.AUTO
         assert session.creation_duration_ms is None
@@ -94,13 +94,13 @@ class TestWorktreeSession:
     def test_full(self):
         session = WorktreeSession(
             original_cwd="/repo",
-            worktree_path="/repo/.agent_teams/worktrees/feat",
+            worktree_path="/workspace/.worktrees/feat",
             worktree_name="feat",
             worktree_branch="worktree-feat",
             original_branch="main",
             original_head_commit="abc123",
-            member_id="m1",
-            team_id="t1",
+            member_name="m1",
+            team_name="t1",
             hook_based=True,
             lifecycle_policy=WorktreeLifecyclePolicy.DURABLE,
             team_lifecycle="persistent",
@@ -115,11 +115,11 @@ class TestWorktreeSession:
     def test_serialization_roundtrip(self):
         session = WorktreeSession(
             original_cwd="/repo",
-            worktree_path="/repo/.agent_teams/worktrees/test",
+            worktree_path="/workspace/.worktrees/test",
             worktree_name="test",
             worktree_branch="worktree-test",
             original_branch="main",
-            member_id="m1",
+            member_name="m1",
         )
         data = session.model_dump()
         restored = WorktreeSession.model_validate(data)
@@ -129,7 +129,7 @@ class TestWorktreeSession:
     def test_json_roundtrip(self):
         session = WorktreeSession(
             original_cwd="/repo",
-            worktree_path="/repo/.agent_teams/worktrees/x",
+            worktree_path="/workspace/.worktrees/x",
             worktree_name="x",
         )
         json_str = session.model_dump_json()

@@ -20,6 +20,7 @@ import pdfplumber
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import SysOperation
+from openjiuwen.core.sys_operation.cwd import get_cwd
 from openjiuwen.harness.prompts.sections.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
@@ -91,10 +92,7 @@ def _resolve_tool_file_path(operation: SysOperation, file_path: str) -> str:
     if expanded.startswith("\\\\") or expanded.startswith("//") or os.path.isabs(expanded):
         return expanded
 
-    work_dir = getattr(operation, "work_dir", None)
-    if not work_dir:
-        raise ValueError("file_path must be an absolute path")
-
+    work_dir = get_cwd()
     return str((pathlib.Path(work_dir).expanduser().resolve() / expanded).resolve())
 
 
@@ -1159,8 +1157,7 @@ class GlobTool(Tool):
     def _resolve_search_path(self, path: Optional[str]) -> str:
         if path:
             return _resolve_tool_file_path(self.operation, path)
-        work_dir = getattr(self.operation, "work_dir", None)
-        return str(pathlib.Path(work_dir).expanduser().resolve()) if work_dir else "."
+        return str(pathlib.Path(get_cwd()).expanduser().resolve())
 
     def _relativize_paths(self, paths: List[str], base_path: str) -> List[str]:
         relative_paths: List[str] = []
@@ -1320,8 +1317,7 @@ class GrepTool(Tool):
     def _resolve_search_path(self, path: Optional[str]) -> str:
         if path:
             return _resolve_tool_file_path(self.operation, path)
-        work_dir = getattr(self.operation, "work_dir", None)
-        return str(pathlib.Path(work_dir).expanduser().resolve()) if work_dir else "."
+        return str(pathlib.Path(get_cwd()).expanduser().resolve())
 
     def _build_rg_command(
             self,

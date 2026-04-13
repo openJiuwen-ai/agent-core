@@ -4,10 +4,13 @@
 
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+pytestmark = pytest.mark.skipif(sys.platform == "darwin", reason="PowerShell tests are not supported on macOS")
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.harness.tools.powershell import PowerShellTool

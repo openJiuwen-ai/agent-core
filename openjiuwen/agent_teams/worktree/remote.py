@@ -101,16 +101,27 @@ class RemoteWorktreeBackend:
         self._node_id = node_id
         self._pending: dict[str, asyncio.Future[WorktreeRemoteResponse]] = {}
 
-    async def create(self, slug: str, repo_root: str) -> WorktreeCreateResult:
+    async def create(
+        self,
+        slug: str,
+        repo_root: str,
+        target_path: str,
+    ) -> WorktreeCreateResult:
         """Request the remote node to create a worktree.
 
         Args:
             slug: Validated worktree name.
             repo_root: Local repository root (used to determine remote URL).
+            target_path: Local target path computed by the caller.
+                Ignored here -- the remote node owns its own filesystem
+                layout and resolves its own target path from its local
+                DeepAgent workspace.  Accepted to satisfy the
+                ``WorktreeBackend`` protocol.
 
         Returns:
             WorktreeCreateResult with path and metadata from the remote node.
         """
+        del target_path
         request = WorktreeRemoteRequest(
             action="create",
             slug=slug,

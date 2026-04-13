@@ -7,7 +7,7 @@ from openjiuwen.agent_teams.spawn import InProcessSpawnHandle
 from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 from openjiuwen.agent_teams.messager import (
     create_messager,
-    TeamRuntimeMessager,
+    InProcessMessager,
     Messager,
     MessagerPeerConfig,
     MessagerTransportConfig,

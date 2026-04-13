@@ -17,6 +17,7 @@ from openjiuwen.agent_teams.schema.status import (
     MemberMode,
     TaskStatus,
 )
+from openjiuwen.agent_teams.schema.task import TaskDetail, TaskListResult, TaskSummary
 from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
     TeamTaskBase,
@@ -49,23 +50,23 @@ class TeamTaskManager:
 
     Attributes:
         db: Team database instance
-        team_id: Team identifier
-        member_id: Current member identifier
+        team_name: Team identifier
+        member_name: Current member identifier
         messager: Messager instance for event publishing
     """
 
-    def __init__(self, team_id: str, member_id: str, db: TeamDatabase, messager: Messager):
+    def __init__(self, team_name: str, member_name: str, db: TeamDatabase, messager: Messager):
         """Initialize task manager.
 
         Args:
             db: Team database instance.
-            team_id: Team identifier.
-            member_id: Current member identifier.
+            team_name: Team identifier.
+            member_name: Current member identifier.
             messager: Messager instance for event publishing.
         """
         self.db = db
-        self.team_id = team_id
-        self.member_id = member_id
+        self.team_name = team_name
+        self.member_name = member_name
         self.messager = messager
 
     async def add_batch(
@@ -158,7 +159,7 @@ class TeamTaskManager:
         # Create task
         success = await self.db.create_task(
             task_id=task_id,
-            team_id=self.team_id,
+            team_name=self.team_name,
             title=title,
             content=content,
             status=status
@@ -174,16 +175,16 @@ class TeamTaskManager:
                 await self.db.add_task_dependency(
                     task_id=task_id,
                     depends_on_task_id=dep_task_id,
-                    team_id=self.team_id
+                    team_name=self.team_name
                 )
             team_logger.debug(f"Added task {task_id} with dependencies: {dependencies}")
 
         # Publish task created event
         try:
             await self.messager.publish(
-                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_id),
+                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
                 message=EventMessage.from_event(TaskCreatedEvent(
-                    team_id=self.team_id,
+                    team_name=self.team_name,
                     task_id=task_id,
                     status=status
                 )),
@@ -194,7 +195,7 @@ class TeamTaskManager:
 
         return TeamTaskBase(
             task_id=task_id,
-            team_id=self.team_id,
+            team_name=self.team_name,
             title=title,
             content=content,
             status=status,
@@ -260,7 +261,7 @@ class TeamTaskManager:
         # Use database method for atomic operation with cycle detection
         success = await self.db.add_task_with_bidirectional_dependencies(
             task_id=task_id,
-            team_id=self.team_id,
+            team_name=self.team_name,
             title=title,
             content=content,
             status=status,
@@ -275,9 +276,9 @@ class TeamTaskManager:
         # Publish task created event
         try:
             await self.messager.publish(
-                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_id),
+                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
                 message=EventMessage.from_event(TaskCreatedEvent(
-                    team_id=self.team_id,
+                    team_name=self.team_name,
                     task_id=task_id,
                     status=status
                 )),
@@ -288,7 +289,7 @@ class TeamTaskManager:
 
         return TeamTaskBase(
             task_id=task_id,
-            team_id=self.team_id,
+            team_name=self.team_name,
             title=title,
             content=content,
             status=status,
@@ -342,7 +343,7 @@ class TeamTaskManager:
         # Use database method for atomic operation with cycle detection
         success = await self.db.add_task_with_bidirectional_dependencies(
             task_id=task_id,
-            team_id=self.team_id,
+            team_name=self.team_name,
             title=title,
             content=content,
             status=status,
@@ -361,9 +362,9 @@ class TeamTaskManager:
         # Publish task created event
         try:
             await self.messager.publish(
-                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_id),
+                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
                 message=EventMessage.from_event(TaskCreatedEvent(
-                    team_id=self.team_id,
+                    team_name=self.team_name,
                     task_id=task_id,
                     status=status
                 )),
@@ -374,11 +375,70 @@ class TeamTaskManager:
 
         return TeamTaskBase(
             task_id=task_id,
-            team_id=self.team_id,
+            team_name=self.team_name,
             title=title,
             content=content,
             status=status,
             assignee=None
+        )
+
+    async def list_tasks_with_deps(self, status: Optional[str] = None) -> TaskListResult:
+        """List tasks with blocked_by info (summary view, no content).
+
+        Returns a lightweight task list where each entry includes unresolved
+        dependency IDs. Suitable for list/claimable actions.
+
+        Args:
+            status: Optional status filter.
+
+        Returns:
+            TaskListResult containing task summaries with dependency info.
+        """
+        tasks = await self.list_tasks(status=status)
+        summaries = []
+        for task in tasks:
+            deps = await self.get_dependencies(task.task_id)
+            unresolved = [d.depends_on_task_id for d in deps if not d.resolved]
+            summaries.append(TaskSummary(
+                task_id=task.task_id,
+                title=task.title,
+                status=task.status,
+                assignee=task.assignee,
+                blocked_by=unresolved,
+            ))
+        return TaskListResult(tasks=summaries, count=len(summaries))
+
+    async def get_task_detail(self, task_id: str) -> Optional[TaskDetail]:
+        """Get single task with full detail including dependency info.
+
+        Returns complete task information with both upstream (blocked_by)
+        and downstream (blocks) dependency relationships.
+
+        Args:
+            task_id: Task identifier.
+
+        Returns:
+            TaskDetail if found, None otherwise.
+        """
+        task = await self.get(task_id=task_id)
+        if not task:
+            return None
+
+        deps = await self.get_dependencies(task_id)
+        blocked_by = [d.depends_on_task_id for d in deps if not d.resolved]
+
+        downstream = await self.db.get_tasks_depending_on(task_id)
+        blocks = [t.task_id for t in downstream]
+
+        return TaskDetail(
+            task_id=task.task_id,
+            title=task.title,
+            content=task.content,
+            status=task.status,
+            assignee=task.assignee,
+            blocked_by=blocked_by,
+            blocks=blocks,
+            completed_at=task.completed_at,
         )
 
     async def get(self, task_id: str) -> Optional[TeamTaskBase]:
@@ -392,21 +452,94 @@ class TeamTaskManager:
         """
         return await self.db.get_task(task_id)
 
+    async def assign(self, task_id: str, assignee: str) -> bool:
+        """Assign a task to a member (Leader only).
+
+        Sets the assignee without changing task status. Only succeeds when
+        the task currently has no assignee. Sends a notification message
+        to the assigned member's mailbox.
+
+        Args:
+            task_id: Task identifier.
+            assignee: Member ID to assign.
+
+        Returns:
+            True if assigned, False otherwise.
+        """
+        task = await self.get(task_id)
+        if not task:
+            team_logger.error(f"Task {task_id} not found")
+            return False
+
+        success = await self.db.assign_task(task_id, assignee)
+        if not success:
+            return False
+
+        # Notify the assigned member via message
+        content = f"Task #{task_id} \"{task.title}\" has been assigned to you."
+        await self.messager.publish(
+            topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
+            message=EventMessage.from_event(TaskClaimedEvent(
+                team_name=self.team_name,
+                task_id=task_id,
+                member_name=assignee,
+            )),
+        )
+        team_logger.info(f"Task {task_id} assigned to {assignee}, notification sent")
+        return True
+
+    async def add_dependencies(self, task_id: str, depends_on_ids: List[str]) -> bool:
+        """Add dependencies to an existing task and refresh its status.
+
+        For each new dependency, adds the dependency edge. Then checks
+        whether the task should be blocked (has unresolved deps) or
+        unblocked (all deps resolved).
+
+        Args:
+            task_id: Task to add dependencies to.
+            depends_on_ids: Task IDs that this task should depend on.
+
+        Returns:
+            True if all dependencies added, False on error.
+        """
+        task = await self.get(task_id)
+        if not task:
+            team_logger.error(f"Task {task_id} not found")
+            return False
+
+        for dep_id in depends_on_ids:
+            await self.db.add_task_dependency(
+                task_id=task_id,
+                depends_on_task_id=dep_id,
+                team_name=self.team_name,
+            )
+
+        # Refresh: if task has unresolved deps, it should be blocked
+        unresolved = await self.db.get_unresolved_dependencies_count(task_id)
+        if unresolved > 0 and task.status == TaskStatus.PENDING.value:
+            await self.db.update_task_status(task_id, TaskStatus.BLOCKED.value)
+            team_logger.info(f"Task {task_id} blocked ({unresolved} unresolved deps)")
+        elif unresolved == 0 and task.status == TaskStatus.BLOCKED.value:
+            await self.db.update_task_status(task_id, TaskStatus.PENDING.value)
+            team_logger.info(f"Task {task_id} unblocked (all deps resolved)")
+
+        return True
+
     async def claim(self, task_id: str) -> bool:
         """Claim a task for the current member.
 
         Args:
             task_id: Task identifier.
         """
-        member_id = self.member_id
+        member_name = self.member_name
         task = await self.get(task_id)
         if not task:
             team_logger.error(f"Task {task_id} not found")
             return False
 
-        member = await self.db.get_member(member_id)
+        member = await self.db.get_member(member_name, self.team_name)
         if not member:
-            team_logger.error(f"Member {member_id} not found")
+            team_logger.error(f"Member {member_name} not found in team {self.team_name}")
             return False
 
         # Validate state transition
@@ -427,18 +560,18 @@ class TeamTaskManager:
             return False
 
         # Claim task
-        success = await self.db.claim_task(task_id, member_id)
+        success = await self.db.claim_task(task_id, member_name)
         if success:
-            team_logger.info(f"Task {task_id} claimed by member {member_id}")
+            team_logger.info(f"Task {task_id} claimed by member {member_name}")
 
             # Publish task claimed event
             try:
                 await self.messager.publish(
-                    topic_id=TeamTopic.TASK.build(get_session_id(), self.team_id),
+                    topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
                     message=EventMessage.from_event(TaskClaimedEvent(
-                        team_id=self.team_id,
+                        team_name=self.team_name,
                         task_id=task_id,
-                        member_id=member_id
+                        member_name=member_name
                     )),
                 )
                 team_logger.debug(f"Task claimed event published: {task_id}")
@@ -465,9 +598,9 @@ class TeamTaskManager:
             success = task_manager.complete(task_id="task123")
         """
         # Get member to check mode
-        member = await self.db.get_member(self.member_id)
+        member = await self.db.get_member(self.member_name, self.team_name)
         if not member:
-            team_logger.error(f"Member {self.member_id} not found")
+            team_logger.error(f"Member {self.member_name} not found in team {self.team_name}")
             return False
 
         # Check if member is in PLAN_MODE
@@ -502,11 +635,11 @@ class TeamTaskManager:
         # Publish task completed event
         try:
             await self.messager.publish(
-                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_id),
+                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
                 message=EventMessage.from_event(TaskCompletedEvent(
-                    team_id=self.team_id,
+                    team_name=self.team_name,
                     task_id=task_id,
-                    member_id=completed_task.assignee
+                    member_name=completed_task.assignee
                 )),
             )
             team_logger.debug(f"Task completed event published: {task_id}")
@@ -517,9 +650,9 @@ class TeamTaskManager:
         for unblocked_task in unblocked_tasks:
             try:
                 await self.messager.publish(
-                    topic_id=TeamTopic.TASK.build(get_session_id(), self.team_id),
+                    topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
                     message=EventMessage.from_event(TaskUnblockedEvent(
-                        team_id=self.team_id,
+                        team_name=self.team_name,
                         task_id=unblocked_task.task_id
                     )),
                 )
@@ -552,9 +685,9 @@ class TeamTaskManager:
             # Publish task cancelled event
             try:
                 await self.messager.publish(
-                    topic_id=TeamTopic.TASK.build(get_session_id(), self.team_id),
+                    topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
                     message=EventMessage.from_event(TaskCancelledEvent(
-                        team_id=self.team_id,
+                        team_name=self.team_name,
                         task_id=task_id
                     )),
                 )
@@ -574,19 +707,19 @@ class TeamTaskManager:
             List of cancelled TeamTask objects
         """
         # Cancel all tasks atomically
-        cancelled_tasks = await self.db.cancel_all_tasks(self.team_id)
+        cancelled_tasks = await self.db.cancel_all_tasks(self.team_name)
 
         if not cancelled_tasks:
-            team_logger.info(f"No tasks to cancel in team {self.team_id}")
+            team_logger.info(f"No tasks to cancel in team {self.team_name}")
             return []
 
         # Publish task cancelled event for each cancelled task
         for task in cancelled_tasks:
             try:
                 await self.messager.publish(
-                    topic_id=TeamTopic.TASK.build(get_session_id(), self.team_id),
+                    topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
                     message=EventMessage.from_event(TaskCancelledEvent(
-                        team_id=self.team_id,
+                        team_name=self.team_name,
                         task_id=task.task_id
                     )),
                 )
@@ -612,7 +745,7 @@ class TeamTaskManager:
             # Get all tasks
             all_tasks = task_manager.list_tasks()
         """
-        return await self.db.get_team_tasks(self.team_id, status)
+        return await self.db.get_team_tasks(self.team_name, status)
 
     async def get_dependencies(self, task_id: str) -> List[TeamTaskDependencyBase]:
         """Get task dependencies
@@ -635,17 +768,17 @@ class TeamTaskManager:
         """
         return await self.list_tasks(status=TaskStatus.PENDING.value)
 
-    async def get_tasks_by_assignee(self, member_id: str, status: Optional[str] = None) -> List[TeamTaskBase]:
+    async def get_tasks_by_assignee(self, member_name: str, status: Optional[str] = None) -> List[TeamTaskBase]:
         """Get tasks assigned to a specific member
 
         Args:
-            member_id: Member identifier who is assigned tasks
+            member_name: Member identifier who is assigned tasks
             status: Optional status filter
 
         Returns:
             List of Task objects assigned to the member
         """
-        return await self.db.get_tasks_by_assignee(self.team_id, member_id, status)
+        return await self.db.get_tasks_by_assignee(self.team_name, member_name, status)
 
     async def update_task(
         self,
@@ -687,9 +820,9 @@ class TeamTaskManager:
         # Publish task updated event
         try:
             await self.messager.publish(
-                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_id),
+                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
                 message=EventMessage.from_event(TaskUpdatedEvent(
-                    team_id=self.team_id,
+                    team_name=self.team_name,
                     task_id=task_id
                 )),
             )

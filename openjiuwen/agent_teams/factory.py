@@ -46,7 +46,7 @@ def create_agent_team(
         spawn_mode: How teammates are launched — "process" (child
             subprocess) or "inprocess" (asyncio coroutine in the
             same event loop).
-        leader: Leader identity specification (persona, domain, etc.).
+        leader: Leader identity specification (persona, etc.).
         predefined_members: Pre-configured team members. When provided,
             leader skips ``spawn_member`` and ``build_team`` registers
             all members automatically.

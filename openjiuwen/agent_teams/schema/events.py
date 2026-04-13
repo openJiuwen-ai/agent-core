@@ -5,7 +5,7 @@
 
 This module defines team event type constants for use with Messager.
 Events are published via Messager.publish() with topic_id as event type
-and session_id as team_id for team isolation.
+and session_id as team_name for team isolation.
 """
 
 from enum import Enum
@@ -26,17 +26,17 @@ class TeamTopic(str, Enum):
     TASK = "task"
     MESSAGE = "message"
 
-    def build(self, session_id: str, team_id: str) -> str:
+    def build(self, session_id: str, team_name: str) -> str:
         """Build the final topic string.
 
         Args:
             session_id: The session identifier.
-            team_id: The team identifier.
+            team_name: The team identifier (human-chosen unique name).
 
         Returns:
-            Topic string in the format "{session_id}:{team_id}:{topic}".
+            Topic string in the format "session:{session_id}:team:{team_name}:{topic}".
         """
-        return f"session:{session_id}:team:{team_id}:{self.value}"
+        return f"session:{session_id}:team:{team_name}:{self.value}"
 
 
 class TeamEvent:
@@ -44,7 +44,7 @@ class TeamEvent:
 
     These events are published via Messager.publish() where:
     - event_type is used as topic_id
-    - team_id is used as session_id for team isolation
+    - team_name is used as session_id for team isolation
     """
 
     # Team lifecycle events
@@ -92,17 +92,17 @@ class TeamEvent:
 class BaseEventMessage(BaseModel):
     """Base class for all team event messages
 
-    All events include team_id for routing and tracking purposes.
-    member_id is optional — present on member-scoped events.
+    All events include team_name for routing and tracking purposes.
+    member_name is optional — present on member-scoped events.
     """
-    team_id: str = Field(..., description="Team identifier for event routing")
-    member_id: Optional[str] = Field(default=None, description="Member identifier, present on member-scoped events")
+    team_name: str = Field(..., description="Team identifier for event routing")
+    member_name: Optional[str] = Field(default=None, description="Member identifier, present on member-scoped events")
 
 
 class TeamCreatedEvent(BaseEventMessage):
     """Event published when a team is created"""
-    name: str = Field(..., description="Team name")
-    leader_id: str = Field(..., description="Leader member ID")
+    display_name: str = Field(..., description="Team display label")
+    leader_member_name: str = Field(..., description="Leader member name")
     created: int = Field(..., description="Creation timestamp")
 
 
@@ -163,14 +163,14 @@ class ToolApprovalResultEvent(BaseEventMessage):
 class MessageEvent(BaseEventMessage):
     """Event published when a point-to-point message is sent"""
     message_id: str = Field(..., description="Message unique identifier")
-    from_member: str = Field(..., description="Sender member ID")
-    to_member: str = Field(..., description="Receiver member ID")
+    from_member_name: str = Field(..., description="Sender member name")
+    to_member_name: str = Field(..., description="Receiver member name")
 
 
 class BroadcastEvent(BaseEventMessage):
     """Event published when a broadcast message is sent"""
     message_id: str = Field(..., description="Message unique identifier")
-    from_member: str = Field(..., description="Sender member ID")
+    from_member_name: str = Field(..., description="Sender member name")
 
 
 class TaskCreatedEvent(BaseEventMessage):

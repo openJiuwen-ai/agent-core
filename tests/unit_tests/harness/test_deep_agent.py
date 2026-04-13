@@ -874,7 +874,7 @@ def test_create_subagent_uses_research_agent_factory() -> None:
 
 @pytest.mark.asyncio
 async def test_create_deep_agent_with_restrict_to_work_dir_enabled() -> None:
-    """Test that restrict_to_work_dir=True uses workspace root_path."""
+    """Test that restrict_to_work_dir=False results in no sandbox."""
     agent = create_deep_agent(
         model=_create_dummy_model(),
         workspace=Workspace(root_path="./"),
@@ -886,4 +886,5 @@ async def test_create_deep_agent_with_restrict_to_work_dir_enabled() -> None:
 
     sys_op = Runner.resource_mgr.get_sys_operation(f"{agent.card.name}_{agent.card.id}")
     assert sys_op is not None
-    assert sys_op._run_config.work_dir != "./"
+    assert sys_op._run_config.sandbox_root is None
+    assert sys_op._run_config.restrict_to_sandbox is False

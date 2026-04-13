@@ -71,7 +71,7 @@ class EnterWorktreeTool(TeamTool):
 
         Args:
             inputs: Tool inputs. Optional "name" key for worktree slug.
-            **kwargs: May contain "member_id" and "team_id" from caller context.
+            **kwargs: May contain "member_name" and "team_name" from caller context.
 
         Returns:
             ToolOutput with worktree_path, worktree_branch, and message on success.
@@ -98,14 +98,20 @@ class EnterWorktreeTool(TeamTool):
         try:
             session = await self._manager.enter(
                 slug,
-                member_id=kwargs.get("member_id"),
-                team_id=kwargs.get("team_id"),
+                member_name=kwargs.get("member_name"),
+                team_name=kwargs.get("team_name"),
             )
         except (RuntimeError, GitError) as e:
             return ToolOutput(
                 success=False,
                 error=f"Failed to create worktree: {e}",
             )
+
+        from openjiuwen.core.sys_operation.cwd import set_cwd, set_original_cwd
+
+        set_cwd(session.worktree_path)
+        set_original_cwd(session.worktree_path)
+        # project_root stays unchanged (mirrors Claude Code behavior)
 
         return ToolOutput(
             success=True,
@@ -114,7 +120,8 @@ class EnterWorktreeTool(TeamTool):
                 "worktree_branch": session.worktree_branch,
                 "message": (
                     f"Created worktree at {session.worktree_path} "
-                    f"on branch {session.worktree_branch}."
+                    f"on branch {session.worktree_branch}. "
+                    f"CWD switched to worktree."
                 ),
             },
         )
@@ -161,7 +168,8 @@ class ExitWorktreeTool(TeamTool):
             **kwargs: Unused.
 
         Returns:
-            ToolOutput with exit result data on success.
+            ToolOutput with exit result data including action, paths,
+            optional change counts, and a human-readable message.
         """
         session = get_current_session()
         if not session:
@@ -179,6 +187,15 @@ class ExitWorktreeTool(TeamTool):
 
         discard = inputs.get("discard_changes", False)
 
+        # Count changes before exit for reporting (remove + discard only).
+        discarded_files: int | None = None
+        discarded_commits: int | None = None
+        if action == "remove" and discard:
+            summary = await self._manager.count_changes(session)
+            if summary:
+                discarded_files = summary.changed_files
+                discarded_commits = summary.commits
+
         try:
             result = await self._manager.exit(action, discard_changes=discard)
         except (RuntimeError, GitError) as e:
@@ -186,7 +203,33 @@ class ExitWorktreeTool(TeamTool):
                 success=False,
                 error=f"Failed to exit worktree: {e}",
             )
+        except ValueError as e:
+            # Two-phase confirmation: worktree has changes, discard_changes not set.
+            return ToolOutput(success=False, error=str(e))
 
-        return ToolOutput(success=True, data=result)
+        from openjiuwen.core.sys_operation.cwd import set_cwd, set_original_cwd
+
+        original_cwd = result.get("original_cwd")
+        if original_cwd:
+            set_cwd(original_cwd)
+            set_original_cwd(original_cwd)
+
+        # Build human-readable message (spec §2.5).
+        branch = result.get("worktree_branch") or "unknown"
+        if action == "keep":
+            message = f"Kept worktree (branch {branch}). Returned to {original_cwd}"
+        else:
+            message = f"Removed worktree (branch {branch}). Returned to {original_cwd}"
+
+        data = {
+            **result,
+            "message": message,
+        }
+        if discarded_files is not None:
+            data["discarded_files"] = discarded_files
+        if discarded_commits is not None:
+            data["discarded_commits"] = discarded_commits
+
+        return ToolOutput(success=True, data=data)
 
 

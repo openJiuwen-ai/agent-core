@@ -38,7 +38,7 @@ async def sys_op_sandboxed_fixture():
     card_id = "test_bash_tool_sandboxed_op"
     card = SysOperationCard(
         id=card_id, mode=OperationMode.LOCAL,
-        work_config=LocalWorkConfig(work_dir=workspace),
+        work_config=LocalWorkConfig(),
     )
     Runner.resource_mgr.add_sys_operation(card)
     op = Runner.resource_mgr.get_sys_operation(card_id)
@@ -133,13 +133,14 @@ async def test_injection_dollar_paren_blocked(sys_op) -> None:
 # ── workspace sandbox ─────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_workdir_escape_blocked(sys_op_sandboxed) -> None:
+async def test_workdir_nonexistent_dir_fails(sys_op_sandboxed) -> None:
+    """BashTool no longer enforces sandbox; non-existent workdir simply fails at shell level."""
     op, workspace = sys_op_sandboxed
     tool = BashTool(op)
-    escape = os.path.join(workspace, "..", "..", "etc")
-    res = await tool.invoke({"command": "echo hi", "workdir": escape})
+    missing = os.path.join(workspace, "definitely_does_not_exist_xyz")
+    res = await tool.invoke({"command": "echo hi", "workdir": missing})
     assert res.success is False
-    assert "sandbox" in res.error
+    assert res.error is not None
 
 
 # ── output truncation ─────────────────────────────────────────
@@ -170,7 +171,7 @@ async def test_no_truncation_within_limit(sys_op) -> None:
 async def test_background_pid(sys_op) -> None:
     tool = BashTool(sys_op)
     cmd = "ping -n 5 127.0.0.1 > nul" if os.name == "nt" else "sleep 5"
-    res = await tool.invoke({"command": cmd, "background": True})
+    res = await tool.invoke({"command": cmd, "run_in_background": True})
     assert res.success is True
     assert isinstance(res.data["pid"], int)
     assert res.data["pid"] > 0

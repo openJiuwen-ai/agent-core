@@ -27,9 +27,9 @@ from openjiuwen.agent_teams.worktree.models import WorktreeConfig
 from openjiuwen.agent_teams.worktree.slug import worktrees_dir
 
 EPHEMERAL_PATTERNS: list[re.Pattern[str]] = [
-    # teammate-<member_id first 8 hex chars>
+    # teammate-<member_name first 8 hex chars>
     re.compile(r"^teammate-[0-9a-f]{8}$"),
-    # agent-<7hex> (Claude Code compatibility)
+    # agent-<7hex> (legacy compatibility)
     re.compile(r"^agent-[0-9a-f]{7}$"),
 ]
 
@@ -69,11 +69,17 @@ async def cleanup_stale_worktrees(
     Returns:
         Number of worktrees removed.
     """
-    repo_root = await find_canonical_git_root(os.getcwd())
+    from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
+    repo_root = await find_canonical_git_root(get_cwd())
     if not repo_root:
         return 0
 
-    wt_dir = worktrees_dir(repo_root)
+    workspace = get_workspace()
+    if workspace is None:
+        # Without an agent workspace we can't locate the worktrees
+        # subtree -- skip cleanup rather than guessing.
+        return 0
+    wt_dir = worktrees_dir(workspace)
     try:
         entries = os.listdir(wt_dir)
     except FileNotFoundError:

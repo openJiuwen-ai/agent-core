@@ -64,26 +64,33 @@ def worktree_branch_name(slug: str) -> str:
     return f"worktree-{slug.replace('/', '+')}"
 
 
-def worktree_path_for(repo_root: str, slug: str) -> str:
-    """Compute worktree directory path under repo root.
+def worktree_path_for(base_dir: str, slug: str) -> str:
+    """Compute worktree directory path under a base directory.
+
+    Worktrees live in ``{base_dir}/.worktrees/{slug}``.  ``base_dir``
+    is normally the owning DeepAgent's workspace root, so each agent's
+    worktrees are isolated under its own workspace rather than the
+    source git repository.
 
     Args:
-        repo_root: Absolute path to the git repository root.
+        base_dir: Absolute path to the directory that owns the
+            worktrees subtree (typically the DeepAgent workspace root).
         slug: Validated worktree slug.
 
     Returns:
         Absolute path to the worktree directory.
     """
-    return os.path.join(repo_root, ".agent_teams", "worktrees", slug)
+    return os.path.join(base_dir, ".worktrees", slug)
 
 
-def worktrees_dir(repo_root: str) -> str:
-    """Return the parent directory for all worktrees.
+def worktrees_dir(base_dir: str) -> str:
+    """Return the parent directory for all worktrees under ``base_dir``.
 
     Args:
-        repo_root: Absolute path to the git repository root.
+        base_dir: Absolute path to the directory that owns the
+            worktrees subtree (typically the DeepAgent workspace root).
 
     Returns:
         Absolute path to the worktrees parent directory.
     """
-    return os.path.join(repo_root, ".agent_teams", "worktrees")
+    return os.path.join(base_dir, ".worktrees")

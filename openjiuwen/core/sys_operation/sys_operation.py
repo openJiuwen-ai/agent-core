@@ -93,7 +93,7 @@ class SysOperationCard(BaseCard):
         card = SysOperationCard(
             id="sys_op",
             mode=OperationMode.LOCAL,
-            work_config=LocalWorkConfig(work_dir="/tmp/test")
+            work_config=LocalWorkConfig(sandbox_root=["/tmp/test"])
         )
 
         # 2. Register the operation with resource manager
@@ -193,13 +193,6 @@ class SysOperation:
         if OperationRegistry.get_operation_info(name, self.mode):
             return lambda: self._get_operation(name)
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
-
-    @property
-    def work_dir(self) -> Optional[str]:
-        """Return the configured work directory (local mode only), or None if not set."""
-        if self.mode == OperationMode.LOCAL:
-            return getattr(self._run_config, "work_dir", None)
-        return None
 
     @property
     def isolation_key_template(self) -> Optional[str]:

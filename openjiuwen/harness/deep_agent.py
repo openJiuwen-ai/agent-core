@@ -3,6 +3,7 @@
 """DeepAgent implementation."""
 from __future__ import annotations
 
+import os
 import sys
 from typing import (
     Any, AsyncIterator, Dict, List, Optional,
@@ -503,6 +504,17 @@ class DeepAgent(BaseAgent):
         if self._initialized:
             return
 
+        # Initialize ContextVar CWD in the current asyncio Task context.
+        # Each agent sets its own CWD unconditionally — ContextVar copies
+        # are per-Task, so this won't affect the parent agent.
+        if self._deep_config and self._deep_config.workspace:
+            from openjiuwen.core.sys_operation.cwd import init_cwd
+
+            init_cwd(
+                self._deep_config.workspace.root_path or os.getcwd(),
+                workspace=self._deep_config.workspace.root_path,
+            )
+
         await self._register_pending_mcps()
 
         if self._needs_workspace_init():
@@ -557,6 +569,11 @@ class DeepAgent(BaseAgent):
                 root_path=self._deep_config.workspace.root_path,
             )
             await builder.build(self._deep_config.workspace.directories)
+
+    @property
+    def loop_session(self) -> Optional[Session]:
+        """The active loop session, or None if no session is running."""
+        return self._loop_session
 
     @property
     def react_config(self) -> ReActAgentConfig:

@@ -88,17 +88,17 @@ class TestWorktreeBranchName:
 
 class TestWorktreePathFor:
     def test_generates_correct_path(self):
-        result = worktree_path_for("/home/user/repo", "my-feature")
-        assert result == "/home/user/repo/.agent_teams/worktrees/my-feature"
+        result = worktree_path_for("/home/user/workspace", "my-feature")
+        assert result == "/home/user/workspace/.worktrees/my-feature"
         logger.info("worktree_path_for verified")
 
     def test_with_slash_slug(self):
-        result = worktree_path_for("/repo", "user/feat")
-        assert result == "/repo/.agent_teams/worktrees/user/feat"
+        result = worktree_path_for("/ws", "user/feat")
+        assert result == "/ws/.worktrees/user/feat"
 
 
 class TestWorktreesDir:
     def test_generates_correct_path(self):
-        result = worktrees_dir("/home/user/repo")
-        assert result == "/home/user/repo/.agent_teams/worktrees"
+        result = worktrees_dir("/home/user/workspace")
+        assert result == "/home/user/workspace/.worktrees"
         logger.info("worktrees_dir verified")

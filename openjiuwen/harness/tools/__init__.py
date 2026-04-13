@@ -67,7 +67,6 @@ __all__ = [
     "EditFileTool",
     "GlobTool",
     "GrepTool",
-    "BashTool",
     "create_cron_tools",
     "ListSkillTool",
     "SearchToolsTool",

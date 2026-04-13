@@ -4,15 +4,19 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import (
+    Protocol,
+    runtime_checkable,
+    TYPE_CHECKING,
+)
 
 from openjiuwen.agent_teams.agent.coordinator import (
     CoordinationEvent,
     InnerEventMessage,
     InnerEventType,
 )
-from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.schema.events import TeamEvent
+from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
@@ -38,7 +42,7 @@ class DispatcherHost(Protocol):
         ...
 
     @property
-    def member_id(self) -> str | None:
+    def member_name(self) -> str | None:
         ...
 
     @property
@@ -53,7 +57,7 @@ class DispatcherHost(Protocol):
     def team_spec(self) -> TeamSpec | None:
         ...
 
-    async def has_team_member(self, member_id: str) -> bool:
+    async def has_team_member(self, member_name: str) -> bool:
         ...
 
     def is_agent_ready(self) -> bool:
@@ -134,16 +138,16 @@ class EventDispatcher:
             return
 
         # --- Transport events (cross-process EventMessage) ---
-        member_id = host.member_id
-        if not member_id:
-            team_logger.debug("no member_id, skipping transport event")
+        member_name = host.member_name
+        if not member_name:
+            team_logger.debug("no member_name, skipping transport event")
             return
 
         event_type = event.event_type
-        team_logger.debug("transport event: type={}, member_id={}", event_type, member_id)
+        # team_logger.debug("transport event: type={}, member_name={}", event_type, member_name)
 
         if event_type == TeamEvent.STANDBY:
-            team_logger.info("[{}] received TEAM_STANDBY, pausing polls", member_id)
+            team_logger.info("[{}] received TEAM_STANDBY, pausing polls", member_name)
             await host.pause_polls()
             return
 
@@ -157,13 +161,13 @@ class EventDispatcher:
 
         if event_type in (TeamEvent.MESSAGE, TeamEvent.BROADCAST) and host.message_manager:
             await host.resume_polls()
-            await self._process_unread_messages(member_id)
+            await self._process_unread_messages(member_name)
             return
 
         if event_type in self._TASK_EVENTS and not host.is_agent_running() and host.task_manager:
             await host.resume_polls()
-            team_logger.debug("task trigger detected, nudging idle agent: member_id={}", member_id)
-            await self._nudge_idle_agent(member_id)
+            team_logger.debug("task trigger detected, nudging idle agent: member_name={}", member_name)
+            await self._nudge_idle_agent(member_name)
 
     _MENTION_RE = re.compile(r"^@(\S+)\s+([\s\S]+)$")
 
@@ -190,26 +194,26 @@ class EventDispatcher:
             return
 
         if event.event_type == InnerEventType.POLL_TASK:
-            member_id = host.member_id
-            team_logger.debug("poll task: member_id={}, agent_running={}", member_id, host.is_agent_running())
-            if member_id and not host.is_agent_running() and host.task_manager:
-                await self._nudge_idle_agent(member_id)
+            member_name = host.member_name
+            team_logger.debug("poll task: member_name={}, agent_running={}", member_name, host.is_agent_running())
+            if member_name and not host.is_agent_running() and host.task_manager:
+                await self._nudge_idle_agent(member_name)
             return
 
         if event.event_type == InnerEventType.POLL_MAILBOX:
-            member_id = host.member_id
-            team_logger.debug("poll mailbox: member_id={}", member_id)
-            if member_id and host.message_manager:
-                await self._process_unread_messages(member_id)
+            member_name = host.member_name
+            team_logger.debug("poll mailbox: member_name={}", member_name)
+            if member_name and host.message_manager:
+                await self._process_unread_messages(member_name)
 
     # ------------------------------------------------------------------
     # User @mention helpers
     # ------------------------------------------------------------------
 
     async def _parse_mention(self, content: str) -> tuple[str, str] | None:
-        """Parse ``@member_id message`` from user input.
+        """Parse ``@member_name message`` from user input.
 
-        Returns (member_id, message_body) when the target member exists
+        Returns (member_name, message_body) when the target member exists
         in the database, otherwise None (falls through to normal path).
         """
         m = self._MENTION_RE.match(content)
@@ -221,14 +225,14 @@ class EventDispatcher:
             return None
         return target, body
 
-    async def _send_user_direct_message(self, to_member: str, content: str) -> None:
+    async def _send_user_direct_message(self, to_member_name: str, content: str) -> None:
         """Write a user→member direct message via the existing message manager."""
         mm = self._host.message_manager
         if mm is None:
             team_logger.warning("message_manager unavailable, cannot send user direct message")
             return
-        msg_id = await mm.send_message(content, to_member, from_member="user")
-        team_logger.info("user direct message sent to {}: {}", to_member, msg_id)
+        msg_id = await mm.send_message(content, to_member_name, from_member_name="user")
+        team_logger.info("user direct message sent to {}: {}", to_member_name, msg_id)
 
     # ------------------------------------------------------------------
     # Member events
@@ -247,19 +251,19 @@ class EventDispatcher:
 
     async def _handle_teammate_member_event(self, event: CoordinationEvent) -> None:
         """Handle member events as a teammate — only react to events targeting self."""
-        member_id = self._host.member_id
-        target_id = event.get_payload().member_id
-        if target_id is None or target_id != member_id:
+        member_name = self._host.member_name
+        target_id = event.get_payload().member_name
+        if target_id is None or target_id != member_name:
             return
         if event.event_type == TeamEvent.MEMBER_CANCELED:
             await self._host.cancel_agent()
         elif event.event_type == TeamEvent.MEMBER_SHUTDOWN:
-            await self._process_unread_messages(member_id, use_steer=True)
+            await self._process_unread_messages(member_name, use_steer=True)
 
     async def _handle_leader_member_event(self, event: CoordinationEvent) -> None:
         """Handle member events as the leader — observe other members' lifecycle."""
         payload = event.payload
-        target_id = payload.get("member_id", "")
+        target_id = payload.get("member_name", "")
         event_type = event.event_type
         if event_type == TeamEvent.MEMBER_SPAWNED:
             text = f"[成员事件] 成员 {target_id} 已上线"
@@ -292,11 +296,11 @@ class EventDispatcher:
     async def _handle_tool_approval_result(self, event: CoordinationEvent) -> None:
         """Resume a teammate HITL interrupt from a structured approval event."""
         host = self._host
-        member_id = host.member_id
+        member_name = host.member_name
         payload = event.get_payload()
-        target_id = payload.member_id
+        target_id = payload.member_name
 
-        if target_id is None or target_id != member_id:
+        if target_id is None or target_id != member_name:
             return
 
         from openjiuwen.core.session import InteractiveInput
@@ -312,41 +316,41 @@ class EventDispatcher:
         )
         team_logger.info(
             "[{}] received tool approval result for tool_call_id={}, approved={}",
-            member_id,
+            member_name,
             payload.tool_call_id,
             payload.approved,
         )
         await host.resume_interrupt(interactive_input)
 
-    async def _process_unread_messages(self, member_id: str, *, use_steer: bool = True) -> None:
+    async def _process_unread_messages(self, member_name: str, *, use_steer: bool = True) -> None:
         """Read unread messages, feed to agent one by one, loop until no new messages.
 
         Args:
-            member_id: Current member ID.
+            member_name: Current member ID.
             use_steer: When True, use steer instead of follow_up for running agent.
         """
         host = self._host
         seen_ids: set[str] = set()
 
         while True:
-            all_unread = await self._read_all_unread(member_id)
+            all_unread = await self._read_all_unread(member_name)
             new_messages = [m for m in all_unread if m.message_id not in seen_ids]
 
             if not new_messages:
                 break
 
-            team_logger.info("[{}] processing {} unread messages (steer={})", member_id, len(new_messages), use_steer)
+            team_logger.info("[{}] processing {} unread messages (steer={})", member_name, len(new_messages), use_steer)
             for msg in new_messages:
                 seen_ids.add(msg.message_id)
                 if host.has_pending_interrupt():
                     team_logger.info(
                         "[{}] deferring mailbox message {} until pending interrupt is resolved",
-                        member_id,
+                        member_name,
                         msg.message_id,
                     )
                     return
                 text = self._format_message(msg)
-                team_logger.info("[{}] message from={}, id={}", member_id, msg.from_member, msg.message_id)
+                team_logger.info("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
                 if not host.is_agent_running():
                     await host.start_agent(text)
@@ -354,16 +358,16 @@ class EventDispatcher:
                     await host.steer(text)
                 else:
                     await host.follow_up(text)
-                await host.message_manager.mark_message_read(msg.message_id, member_id)
+                await host.message_manager.mark_message_read(msg.message_id, member_name)
 
-    async def _read_all_unread(self, member_id: str) -> list:
+    async def _read_all_unread(self, member_name: str) -> list:
         """Read all unread messages (direct + broadcast).
 
         Returns merged list sorted by timestamp descending (newest first).
         """
         mm = self._host.message_manager
-        direct = await mm.get_messages(to_member=member_id, unread_only=True)
-        broadcasts = await mm.get_broadcast_messages(member_id=member_id, unread_only=True)
+        direct = await mm.get_messages(to_member_name=member_name, unread_only=True)
+        broadcasts = await mm.get_broadcast_messages(member_name=member_name, unread_only=True)
         merged = list(direct) + list(broadcasts)
         merged.sort(key=lambda m: m.timestamp, reverse=True)
         return merged
@@ -378,16 +382,16 @@ class EventDispatcher:
         msg_type = "广播消息" if msg.broadcast else "单播消息"
         return (
             f"[收到{msg_type}] message_id={msg.message_id}, "
-            f"来自: {msg.from_member}\n"
+            f"来自: {msg.from_member_name}\n"
             f"内容: {msg.content}\n"
-            f"提示: 如果对方在提问或等待回复，请务必通过 send_message 工具回复 {msg.from_member}"
+            f"提示: 如果对方在提问或等待回复，请务必通过 send_message 工具回复 {msg.from_member_name}"
         )
 
     # ------------------------------------------------------------------
     # Task nudging
     # ------------------------------------------------------------------
 
-    async def _nudge_idle_agent(self, member_id: str) -> None:
+    async def _nudge_idle_agent(self, member_name: str) -> None:
         """Feed task context to an idle agent.
 
         Leader: reviews full task board to decide whether to re-plan or conclude.
@@ -398,7 +402,7 @@ class EventDispatcher:
         _terminal = {"completed", "cancelled"}
         incomplete = [t for t in all_tasks if t.status not in _terminal]
 
-        team_logger.info("[{}] nudge_idle_agent: {} incomplete tasks", member_id, len(incomplete))
+        team_logger.info("[{}] nudge_idle_agent: {} incomplete tasks", member_name, len(incomplete))
         if host.role == TeamRole.LEADER:
             if not incomplete:
                 lifecycle = host.lifecycle

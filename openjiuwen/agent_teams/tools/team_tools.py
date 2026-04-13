@@ -7,6 +7,7 @@ This module provides tool wrappers for agent team functionality,
 exposing team management, member management, task management,
 and messaging capabilities as tools for agents to use.
 """
+import json
 from abc import ABC
 from functools import wraps
 from typing import (
@@ -19,6 +20,8 @@ from typing import (
     Optional,
     Set,
 )
+
+from pydantic import PrivateAttr
 
 from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
@@ -35,8 +38,45 @@ from openjiuwen.core.foundation.tool.base import (
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
 
+class MappedToolOutput(ToolOutput):
+    """ToolOutput with custom string representation for LLM consumption.
+
+    The ability_manager converts tool results to LLM messages via str(result).
+    This subclass overrides __str__ to return model-optimized text instead of
+    Pydantic's default representation.
+    """
+
+    _mapped_content: str = PrivateAttr(default="")
+
+    @classmethod
+    def from_output(cls, output: ToolOutput, mapped_content: str) -> "MappedToolOutput":
+        """Create a MappedToolOutput from an existing ToolOutput."""
+        obj = cls(success=output.success, data=output.data, error=output.error)
+        obj._mapped_content = mapped_content
+        return obj
+
+    def __str__(self) -> str:
+        return self._mapped_content
+
+
 class TeamTool(Tool, ABC):
-    """Base class for team tools that provides a default no-op stream implementation."""
+    """Base class for team tools with model-facing result mapping.
+
+    Subclasses override map_result() to control what the LLM sees.
+    Default implementation returns JSON for success, error text for failure.
+    """
+
+    def map_result(self, output: ToolOutput) -> str:
+        """Map tool output to model-facing text.
+
+        Override in subclasses for custom formatting. The returned string
+        becomes the ToolMessage.content that the LLM receives.
+        """
+        if not output.success:
+            return output.error or "Operation failed"
+        if output.data is None:
+            return "OK"
+        return json.dumps(output.data, ensure_ascii=False)
 
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         raise NotImplementedError("TeamTool does not support streaming")
@@ -52,14 +92,16 @@ LEADER_ONLY_TOOLS: Set[str] = {
     "shutdown_member",         # Shutdown a team member
     "approve_plan",            # Approve or reject a member's plan
     "approve_tool",            # Approve or reject a teammate tool call
-    "task_manager",            # Manager task (unified - supports:
-                               # add single/batch/priority/top task or cancel/cancel_all/update task)
+    "create_task",             # Create tasks (batch / with deps)
+    "update_task",             # Update task content / cancel tasks
 }
 
 # Tools that only members can use
 MEMBER_ONLY_TOOLS: Set[str] = {
-    "claim_task",              # Claim a task for a member
-    "complete_task",           # Complete a task
+    "claim_task",              # Claim or complete a task
+    # Worktree tools — members work in isolated worktrees
+    "enter_worktree",          # Enter an isolated git worktree
+    "exit_worktree",           # Exit the current worktree session
 }
 
 # Tools that both leader and members can use
@@ -72,9 +114,6 @@ SHARED_TOOLS: Set[str] = {
     "view_task",              # View tasks (unified - supports get/list/claimable)
     # Messaging tools
     "send_message",            # Send a message (point-to-point or broadcast)
-    # Worktree tools
-    "enter_worktree",          # Enter an isolated git worktree
-    "exit_worktree",           # Exit the current worktree session
     "workspace_meta",          # Workspace lock management and version history
 }
 
@@ -100,23 +139,46 @@ class BuildTeamTool(TeamTool):
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "team_name": {"type": "string", "description": t("build_team", "team_name")},
+                "display_name": {"type": "string", "description": t("build_team", "display_name")},
                 "team_desc": {"type": "string", "description": t("build_team", "team_desc")},
-                "leader_name": {"type": "string", "description": t("build_team", "leader_name")},
+                "leader_display_name": {
+                    "type": "string",
+                    "description": t("build_team", "leader_display_name"),
+                },
                 "leader_desc": {"type": "string", "description": t("build_team", "leader_desc")},
             },
-            "required": ["team_name", "team_desc", "leader_name", "leader_desc"]
+            "required": ["display_name", "team_desc", "leader_display_name", "leader_desc"],
         }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
-        team_name = inputs.get("team_name")
+        display_name = inputs.get("display_name")
+        leader_display_name = inputs["leader_display_name"]
         await self.team.build_team(
-            name=team_name,
+            display_name=display_name,
             desc=inputs.get("team_desc"),
-            leader_name=inputs["leader_name"],
+            leader_display_name=leader_display_name,
             leader_desc=inputs["leader_desc"],
         )
-        return ToolOutput(success=True)
+        return ToolOutput(
+            success=True,
+            data={
+                "team_name": self.team.team_name,
+                "display_name": display_name,
+                "leader_member_name": self.team.member_name,
+                "leader_display_name": leader_display_name,
+            },
+        )
+
+    def map_result(self, output: ToolOutput) -> str:
+        if not output.success:
+            return output.error or "Failed to build team"
+        d = output.data or {}
+        return (
+            f"Team created: team_name={d.get('team_name')} "
+            f"display_name={d.get('display_name')} "
+            f"leader_member_name={d.get('leader_member_name')} "
+            f"leader_display_name={d.get('leader_display_name')}"
+        )
 
 
 class CleanTeamTool(TeamTool):
@@ -135,17 +197,22 @@ class CleanTeamTool(TeamTool):
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         try:
-            team_id = self.team.team_id
+            team_name = self.team.team_name
             success = await self.team.clean_team()
             if not success:
                 return ToolOutput(
                     success=False,
                     error="Active members remain. Use shutdown_member to close all members first.",
                 )
-            return ToolOutput(success=True, data={"team_id": team_id})
+            return ToolOutput(success=True, data={"team_name": team_name})
         except Exception as e:
             team_logger.error(f"clean_team failed: {e}")
             return ToolOutput(success=False, error=f"Internal error: {e}")
+
+    def map_result(self, output: ToolOutput) -> str:
+        if not output.success:
+            return output.error or "Failed to clean team"
+        return f"Team cleaned: team_name={output.data['team_name']}"
 
 
 # ========== Member Management ==========
@@ -153,45 +220,66 @@ class CleanTeamTool(TeamTool):
 class SpawnMemberTool(TeamTool):
     """Create a new team member"""
 
-    def __init__(self, team: TeamBackend, t: Translator):
+    def __init__(
+        self, team: TeamBackend, t: Translator, *,
+        model_config_allocator: Optional[Callable[[], Optional[str]]] = None,
+    ):
         super().__init__(
             ToolCard(id="team.spawn_member", name="spawn_member", description=t("spawn_member"))
         )
         self.team = team
+        self._allocate_model_config = model_config_allocator
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "member_id": {"type": "string", "description": t("spawn_member", "member_id")},
-                "name": {"type": "string", "description": t("spawn_member", "name")},
+                "member_name": {
+                    "type": "string",
+                    "description": t("spawn_member", "member_name"),
+                },
+                "display_name": {
+                    "type": "string",
+                    "description": t("spawn_member", "display_name"),
+                },
                 "desc": {"type": "string", "description": t("spawn_member", "desc")},
                 "prompt": {"type": "string", "description": t("spawn_member", "prompt")},
             },
-            "required": ["member_id", "name", "desc"],
+            "required": ["member_name", "display_name", "desc"],
         }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
         from openjiuwen.agent_teams.schema.status import MemberMode
 
-        member_id = inputs.get("member_id")
-        name = inputs.get("name")
+        member_name = inputs.get("member_name")
+        display_name = inputs.get("display_name")
         desc = inputs.get("desc", "")
         mode_str = self.team.teammate_mode.value
         mode = MemberMode(mode_str)
 
-        agent_card = AgentCard(id=member_id, name=name, description=desc)
+        member_model = self._allocate_model_config() if self._allocate_model_config else None
+
+        card_id = f"{self.team.team_name}_{member_name}"
+        agent_card = AgentCard(id=card_id, name=display_name, description=desc)
         success = await self.team.spawn_member(
-            member_id=member_id,
-            name=name,
+            member_name=member_name,
+            display_name=display_name,
             agent_card=agent_card,
             desc=desc,
             prompt=inputs.get("prompt"),
             mode=mode,
+            member_model=member_model,
         )
         return ToolOutput(
             success=success,
-            error=None if success else "Failed to spawn member"
+            data={"member_name": member_name, "display_name": display_name},
+            error=None if success else "Failed to spawn member",
         )
+
+    def map_result(self, output: ToolOutput) -> str:
+        if not output.success:
+            return output.error or "Failed to spawn member"
+        d = output.data
+        return f"Member spawned: member_name={d['member_name']} display_name={d['display_name']}"
 
 
 class ShutdownMemberTool(TeamTool):
@@ -205,21 +293,31 @@ class ShutdownMemberTool(TeamTool):
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "member_id": {"type": "string", "description": t("shutdown_member", "member_id")},
+                "member_name": {
+                    "type": "string",
+                    "description": t("shutdown_member", "member_name"),
+                },
                 "force": {"type": "boolean", "description": t("shutdown_member", "force")},
             },
-            "required": ["member_id"]
+            "required": ["member_name"],
         }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+        member_name = inputs.get("member_name")
         success = await self.team.shutdown_member(
-            member_id=inputs.get("member_id"),
-            force=inputs.get("force", False)
+            member_name=member_name,
+            force=inputs.get("force", False),
         )
         return ToolOutput(
             success=success,
-            error=None if success else "Failed to shutdown member"
+            data={"member_name": member_name},
+            error=None if success else "Failed to shutdown member",
         )
+
+    def map_result(self, output: ToolOutput) -> str:
+        if not output.success:
+            return output.error or "Failed to shutdown member"
+        return f"Member shutdown: member_name={output.data['member_name']}"
 
 
 class ApprovePlanTool(TeamTool):
@@ -233,23 +331,36 @@ class ApprovePlanTool(TeamTool):
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "member_id": {"type": "string", "description": t("approve_plan", "member_id")},
+                "member_name": {
+                    "type": "string",
+                    "description": t("approve_plan", "member_name"),
+                },
                 "approved": {"type": "boolean", "description": t("approve_plan", "approved")},
                 "feedback": {"type": "string", "description": t("approve_plan", "feedback")},
             },
-            "required": ["member_id", "approved"]
+            "required": ["member_name", "approved"],
         }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+        member_name = inputs.get("member_name")
+        approved = inputs.get("approved")
         success = await self.team.approve_plan(
-            member_id=inputs.get("member_id"),
-            approved=inputs.get("approved"),
-            feedback=inputs.get("feedback")
+            member_name=member_name,
+            approved=approved,
+            feedback=inputs.get("feedback"),
         )
         return ToolOutput(
             success=success,
-            error=None if success else "Failed to approve/reject plan"
+            data={"member_name": member_name, "approved": approved},
+            error=None if success else "Failed to approve/reject plan",
         )
+
+    def map_result(self, output: ToolOutput) -> str:
+        if not output.success:
+            return output.error or "Failed to approve/reject plan"
+        d = output.data
+        decision = "approved" if d["approved"] else "rejected"
+        return f"Plan {decision}: member_name={d['member_name']} decision={decision}"
 
 
 class ApproveToolCallTool(TeamTool):
@@ -263,26 +374,43 @@ class ApproveToolCallTool(TeamTool):
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "member_id": {"type": "string", "description": t("approve_tool", "member_id")},
+                "member_name": {
+                    "type": "string",
+                    "description": t("approve_tool", "member_name"),
+                },
                 "tool_call_id": {"type": "string", "description": t("approve_tool", "tool_call_id")},
                 "approved": {"type": "boolean", "description": t("approve_tool", "approved")},
                 "feedback": {"type": "string", "description": t("approve_tool", "feedback")},
                 "auto_confirm": {"type": "boolean", "description": t("approve_tool", "auto_confirm")},
             },
-            "required": ["member_id", "tool_call_id", "approved"],
+            "required": ["member_name", "tool_call_id", "approved"],
         }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+        member_name = inputs.get("member_name")
+        tool_call_id = inputs.get("tool_call_id")
+        approved = inputs.get("approved")
         success = await self.team.approve_tool(
-            member_id=inputs.get("member_id"),
-            tool_call_id=inputs.get("tool_call_id"),
-            approved=inputs.get("approved"),
+            member_name=member_name,
+            tool_call_id=tool_call_id,
+            approved=approved,
             feedback=inputs.get("feedback"),
             auto_confirm=inputs.get("auto_confirm", False),
         )
         return ToolOutput(
             success=success,
+            data={"member_name": member_name, "tool_call_id": tool_call_id, "approved": approved},
             error=None if success else "Failed to approve/reject tool call",
+        )
+
+    def map_result(self, output: ToolOutput) -> str:
+        if not output.success:
+            return output.error or "Failed to approve/reject tool call"
+        d = output.data
+        decision = "approved" if d["approved"] else "rejected"
+        return (
+            f"Tool call {decision}: tool_call_id={d['tool_call_id']} "
+            f"member_name={d['member_name']} decision={decision}"
         )
 
 
@@ -307,33 +435,49 @@ class ListMembersTool(TeamTool):
             data={"members": [member.model_dump() for member in members], "count": len(members)}
         )
 
+    def map_result(self, output: ToolOutput) -> str:
+        if not output.success:
+            return output.error or "Failed to list members"
+        members = output.data["members"]
+        if not members:
+            return "No members"
+        lines = [
+            f"member_name={m['member_name']} display_name={m['display_name']} status={m['status']}"
+            for m in members
+        ]
+        return "\n".join(lines)
+
 
 # ========== Task Management ==========
 
-class TaskManagerToolV2(TeamTool):
-    """Unified task management tool (V2).
+class TaskCreateTool(TeamTool):
+    """Create team tasks (Leader only).
 
-    Inspired by TeamTasksTool — flat action enum, tasks as structured array,
-    priority per-task instead of top-level, no mode param.
+    Unified creation: tasks with depended_by auto-route to add_with_priority(),
+    plain tasks route to add() / add_batch().
     """
 
     def __init__(self, agent_team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="team.task_manager", name="task_manager", description=t("task_manager"))
+            ToolCard(id="team.create_task", name="create_task", description=t("create_task"))
         )
-        self.agent_team = agent_team
         self.task_manager = agent_team.task_manager
 
         _task_schema: dict = {
             "type": "object",
             "properties": {
-                "task_id": {"type": "string", "description": t("task_manager", "task.task_id")},
-                "title": {"type": "string", "description": t("task_manager", "task.title")},
-                "content": {"type": "string", "description": t("task_manager", "task.content")},
+                "task_id": {"type": "string", "description": t("create_task", "task.task_id")},
+                "title": {"type": "string", "description": t("create_task", "task.title")},
+                "content": {"type": "string", "description": t("create_task", "task.content")},
                 "depends_on": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": t("task_manager", "task.depends_on"),
+                    "description": t("create_task", "task.depends_on"),
+                },
+                "depended_by": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": t("create_task", "task.depended_by"),
                 },
             },
             "required": ["title", "content"],
@@ -342,65 +486,39 @@ class TaskManagerToolV2(TeamTool):
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["add", "insert", "update", "cancel", "cancel_all"],
-                    "description": t("task_manager", "action"),
-                },
-                # add
                 "tasks": {
                     "type": "array",
                     "items": _task_schema,
-                    "description": t("task_manager", "tasks"),
-                },
-                # insert / update / cancel
-                "task_id": {"type": "string", "description": t("task_manager", "task_id")},
-                "title": {"type": "string", "description": t("task_manager", "title")},
-                "content": {"type": "string", "description": t("task_manager", "content")},
-                "depends_on": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": t("task_manager", "depends_on"),
-                },
-                "depended_by": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": t("task_manager", "depended_by"),
+                    "description": t("create_task", "tasks"),
                 },
             },
-            "required": [],
+            "required": ["tasks"],
         }
 
-    async def _cancel_member_if_claimed(self, task_id: str) -> None:
-        """Cancel the assignee if task is currently claimed."""
-        task = await self.task_manager.get(task_id)
-        if task and task.status == TaskStatus.CLAIMED.value and task.assignee:
-            await self.agent_team.cancel_member(member_id=task.assignee)
-
-    async def _cancel_claimed_members(self) -> None:
-        """Cancel all members who have claimed tasks."""
-        claimed_tasks = await self.task_manager.list_tasks(status=TaskStatus.CLAIMED.value)
-        cancelled = set()
-        for task in claimed_tasks:
-            if task.assignee and task.assignee not in cancelled:
-                await self.agent_team.cancel_member(member_id=task.assignee)
-                cancelled.add(task.assignee)
-
-    async def _add_single(self, task_spec: dict) -> ToolOutput:
-        """Add one task."""
-        task = await self.task_manager.add(
-            title=task_spec.get("title"),
-            content=task_spec.get("content"),
-            task_id=task_spec.get("task_id"),
-            dependencies=task_spec.get("depends_on"),
-        )
+    async def _create_single(self, spec: dict) -> ToolOutput:
+        """Create one task, routing by presence of depended_by."""
+        if spec.get("depended_by"):
+            task = await self.task_manager.add_with_priority(
+                title=spec["title"],
+                content=spec["content"],
+                task_id=spec.get("task_id"),
+                dependencies=spec.get("depends_on"),
+                dependent_task_ids=spec.get("depended_by"),
+            )
+        else:
+            task = await self.task_manager.add(
+                title=spec["title"],
+                content=spec["content"],
+                task_id=spec.get("task_id"),
+                dependencies=spec.get("depends_on"),
+            )
         if task:
             return ToolOutput(success=True, data=task.brief())
-        return ToolOutput(success=False, error="Failed to add task")
+        return ToolOutput(success=False, error="Failed to create task (possibly circular dependency)")
 
     @staticmethod
-    def _normalize_task_spec(spec: dict) -> dict:
-        """Map V2 schema keys to internal task_manager keys for add_batch."""
+    def _normalize(spec: dict) -> dict:
+        """Map input schema keys to internal task_manager keys."""
         return {
             "title": spec.get("title"),
             "content": spec.get("content"),
@@ -409,54 +527,32 @@ class TaskManagerToolV2(TeamTool):
         }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
-        action = inputs.get("action", "add")
-
-        if action == "cancel_all":
-            await self._cancel_claimed_members()
-            count = await self.agent_team.cancel_all_tasks()
-            return ToolOutput(success=True, data={"cancelled_count": count})
-
-        if action == "cancel":
-            task_id = inputs.get("task_id")
-            await self._cancel_member_if_claimed(task_id)
-            success = await self.agent_team.cancel_task(task_id=task_id)
-            if not success:
-                return ToolOutput(success=False, error="Failed to cancel task")
-            return ToolOutput(success=True, data={"task_id": task_id, "status": "cancelled"})
-
-        if action == "update":
-            task_id = inputs.get("task_id")
-            await self._cancel_member_if_claimed(task_id)
-            success = await self.task_manager.update_task(
-                task_id=task_id, title=inputs.get("title"), content=inputs.get("content"),
-            )
-            if not success:
-                return ToolOutput(success=False, error="Failed to update task")
-            return ToolOutput(success=True, data={"task_id": task_id, "status": "updated"})
-
-        if action == "insert":
-            task = await self.task_manager.add_with_priority(
-                title=inputs.get("title"),
-                content=inputs.get("content"),
-                task_id=inputs.get("task_id"),
-                dependencies=inputs.get("depends_on"),
-                dependent_task_ids=inputs.get("depended_by"),
-            )
-            if task:
-                return ToolOutput(success=True, data=task.brief())
-            return ToolOutput(success=False, error="Failed to insert task (possibly circular dependency)")
-
-        # action == "add"
         tasks = inputs.get("tasks", [])
         if not tasks:
-            return ToolOutput(success=False, error="No tasks provided")
+            return ToolOutput(success=False, error="'tasks' is required")
 
         if len(tasks) == 1:
-            return await self._add_single(tasks[0])
+            return await self._create_single(tasks[0])
 
-        # Batch: normalize keys then delegate
-        normalized = [self._normalize_task_spec(t) for t in tasks]
-        created = await self.task_manager.add_batch(normalized)
+        # Batch: separate priority tasks (with depended_by) from normal tasks
+        priority_specs = [s for s in tasks if s.get("depended_by")]
+        normal_specs = [s for s in tasks if not s.get("depended_by")]
+
+        created = []
+        if normal_specs:
+            normalized = [self._normalize(s) for s in normal_specs]
+            created.extend(await self.task_manager.add_batch(normalized))
+        for spec in priority_specs:
+            task = await self.task_manager.add_with_priority(
+                title=spec["title"],
+                content=spec["content"],
+                task_id=spec.get("task_id"),
+                dependencies=spec.get("depends_on"),
+                dependent_task_ids=spec.get("depended_by"),
+            )
+            if task:
+                created.append(task)
+
         return ToolOutput(
             success=True,
             data={
@@ -465,6 +561,19 @@ class TaskManagerToolV2(TeamTool):
                 "skipped": len(tasks) - len(created),
             },
         )
+
+    def map_result(self, output: ToolOutput) -> str:
+        if not output.success:
+            return output.error or "Operation failed"
+        d = output.data
+        # Single task
+        if "task_id" in d and "title" in d:
+            return f"Task created: task_id={d['task_id']} title={d['title']}"
+        # Batch
+        tasks = d.get("tasks", [])
+        lines = [f"task_id={t['task_id']} title={t['title']}" for t in tasks]
+        lines.append(f"Created {d['count']}, skipped {d.get('skipped', 0)}")
+        return "\n".join(lines)
 
 
 class ViewTaskToolV2(TeamTool):
@@ -496,30 +605,185 @@ class ViewTaskToolV2(TeamTool):
         }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
-        action = inputs.get("action", "claimable")
+        action = inputs.get("action", "list")
 
         if action == "get":
             task_id = inputs.get("task_id")
             if not task_id:
                 return ToolOutput(success=False, error="task_id required for get action")
-            result = await self.task_manager.get(task_id=task_id)
-            if result:
-                return ToolOutput(success=True, data=result.model_dump())
+            detail = await self.task_manager.get_task_detail(task_id=task_id)
+            if detail:
+                return ToolOutput(success=True, data=detail.model_dump(exclude_none=True))
             return ToolOutput(success=False, error="Task not found")
 
-        if action == "list":
-            result = await self.task_manager.list_tasks(status=inputs.get("status"))
+        if action == "claimable":
+            result = await self.task_manager.list_tasks_with_deps(
+                status=TaskStatus.PENDING.value,
+            )
         else:
-            result = await self.task_manager.get_claimable_tasks()
+            result = await self.task_manager.list_tasks_with_deps(
+                status=inputs.get("status"),
+            )
 
-        return ToolOutput(
-            success=True,
-            data={"tasks": [t.model_dump() for t in result], "count": len(result)},
+        return ToolOutput(success=True, data=result.model_dump())
+
+    def map_result(self, output: ToolOutput) -> str:
+        """Map view_task result — tiered output by action."""
+        if not output.success:
+            return output.error or "Task not found"
+        d = output.data
+        # Detail view (get action) — mirrors TaskGetTool
+        if "content" in d:
+            lines = [
+                f"Task #{d['task_id']}: {d['title']}",
+                f"Status: {d['status']}",
+                f"Content: {d['content']}",
+            ]
+            if d.get("assignee"):
+                lines.append(f"Assignee: {d['assignee']}")
+            if d.get("blocked_by"):
+                lines.append(f"Blocked by: {', '.join(f'#{tid}' for tid in d['blocked_by'])}")
+            if d.get("blocks"):
+                lines.append(f"Blocks: {', '.join(f'#{tid}' for tid in d['blocks'])}")
+            return "\n".join(lines)
+        # List view (list/claimable action) — mirrors TaskListTool
+        tasks = d.get("tasks", [])
+        if not tasks:
+            return "No tasks found"
+        lines = []
+        for t in tasks:
+            parts = [f"#{t['task_id']} [{t['status']}] {t['title']}"]
+            if t.get("assignee"):
+                parts.append(f"({t['assignee']})")
+            if t.get("blocked_by"):
+                parts.append(f"[blocked by {', '.join(f'#{tid}' for tid in t['blocked_by'])}]")
+            lines.append(" ".join(parts))
+        return "\n".join(lines)
+
+
+class UpdateTaskTool(TeamTool):
+    """Update task content or cancel tasks (Leader only)."""
+
+    def __init__(self, agent_team: TeamBackend, t: Translator):
+        super().__init__(
+            ToolCard(id="team.update_task", name="update_task", description=t("update_task"))
         )
+        self.agent_team = agent_team
+        self.task_manager = agent_team.task_manager
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": t("update_task", "task_id")},
+                "status": {
+                    "type": "string",
+                    "enum": ["cancelled"],
+                    "description": t("update_task", "status"),
+                },
+                "title": {"type": "string", "description": t("update_task", "title")},
+                "content": {"type": "string", "description": t("update_task", "content")},
+                "assignee": {"type": "string", "description": t("update_task", "assignee")},
+                "add_blocked_by": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": t("update_task", "add_blocked_by"),
+                },
+            },
+            "required": ["task_id"],
+        }
+
+    async def _cancel_member_if_claimed(self, task_id: str) -> None:
+        """Cancel the assignee if task is currently claimed."""
+        task = await self.task_manager.get(task_id)
+        if task and task.status == TaskStatus.CLAIMED.value and task.assignee:
+            await self.agent_team.cancel_member(member_name=task.assignee)
+
+    async def _cancel_claimed_members(self) -> None:
+        """Cancel all members who have claimed tasks."""
+        claimed_tasks = await self.task_manager.list_tasks(status=TaskStatus.CLAIMED.value)
+        cancelled: set[str] = set()
+        for task in claimed_tasks:
+            if task.assignee and task.assignee not in cancelled:
+                await self.agent_team.cancel_member(member_name=task.assignee)
+                cancelled.add(task.assignee)
+
+    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+        task_id = inputs.get("task_id")
+        if not task_id:
+            return ToolOutput(success=False, error="'task_id' is required")
+
+        status = inputs.get("status")
+        title = inputs.get("title")
+        content = inputs.get("content")
+        assignee = inputs.get("assignee")
+        add_blocked_by = inputs.get("add_blocked_by")
+
+        # cancel_all: task_id="*" + status="cancelled"
+        if task_id == "*" and status == "cancelled":
+            await self._cancel_claimed_members()
+            count = await self.agent_team.cancel_all_tasks()
+            return ToolOutput(success=True, data={"cancelled_count": count})
+
+        task = await self.task_manager.get(task_id)
+        if not task:
+            return ToolOutput(success=False, error="Task not found")
+
+        # Cancel single task
+        if status == "cancelled":
+            await self._cancel_member_if_claimed(task_id)
+            success = await self.agent_team.cancel_task(task_id=task_id)
+            if not success:
+                return ToolOutput(success=False, error="Failed to cancel task")
+            return ToolOutput(success=True, data={"task_id": task_id, "status": "cancelled"})
+
+        # Collect all field updates in one pass
+        updated: list[str] = []
+
+        # Content update (title and/or content)
+        if title or content:
+            await self._cancel_member_if_claimed(task_id)
+            success = await self.task_manager.update_task(task_id, title=title, content=content)
+            if not success:
+                return ToolOutput(success=False, error="Failed to update task")
+            if title:
+                updated.append("title")
+            if content:
+                updated.append("content")
+
+        # Assign task to member (only when currently unassigned)
+        if assignee:
+            success = await self.task_manager.assign(task_id, assignee)
+            if not success:
+                return ToolOutput(success=False, error=f"Failed to assign task (already assigned or member not found)")
+            updated.append("assignee")
+
+        # Add dependencies (blocked_by edges)
+        if add_blocked_by:
+            success = await self.task_manager.add_dependencies(task_id, add_blocked_by)
+            if not success:
+                return ToolOutput(success=False, error="Failed to add dependencies")
+            updated.append("blocked_by")
+
+        if not updated:
+            return ToolOutput(success=False,
+                              error="No update specified — provide status, title, content, assignee, or add_blocked_by")
+
+        return ToolOutput(success=True, data={
+            "task_id": task_id,
+            "status": "updated",
+            "updated_fields": updated,
+        })
+
+    def map_result(self, output: ToolOutput) -> str:
+        if not output.success:
+            return output.error or "Operation failed"
+        d = output.data
+        if "cancelled_count" in d:
+            return f"Cancelled {d['cancelled_count']} tasks"
+        return f"Task #{d['task_id']} {d['status']}"
 
 
 class ClaimTaskTool(TeamTool):
-    """Claim a task for a member"""
+    """Claim or complete a task (Teammate only)."""
 
     def __init__(self, task_manager: TeamTaskManager, t: Translator):
         super().__init__(
@@ -530,40 +794,54 @@ class ClaimTaskTool(TeamTool):
             "type": "object",
             "properties": {
                 "task_id": {"type": "string", "description": t("claim_task", "task_id")},
+                "status": {
+                    "type": "string",
+                    "enum": ["claimed", "completed"],
+                    "description": t("claim_task", "status"),
+                },
             },
-            "required": ["task_id"]
+            "required": ["task_id", "status"],
         }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
-        success = await self.task_manager.claim(task_id=inputs.get("task_id"))
-        return ToolOutput(
-            success=success,
-            error=None if success else "Failed to claim task"
-        )
+        task_id = inputs.get("task_id")
+        status = inputs.get("status")
 
+        task = await self.task_manager.get(task_id)
+        if not task:
+            return ToolOutput(success=False, error="Task not found")
 
-class CompleteTaskTool(TeamTool):
-    """Complete a task"""
+        if status == "claimed":
+            success = await self.task_manager.claim(task_id=task_id)
+            if not success:
+                return ToolOutput(success=False, error="Failed to claim task")
+            status_change = {"from": task.status, "to": TaskStatus.CLAIMED.value}
 
-    def __init__(self, task_manager: TeamTaskManager, t: Translator):
-        super().__init__(
-            ToolCard(id="team.complete_task", name="complete_task", description=t("complete_task"))
-        )
-        self.task_manager = task_manager
-        self.card.input_params = {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": t("complete_task", "task_id")},
-            },
-            "required": ["task_id"]
-        }
+        elif status == "completed":
+            success = await self.task_manager.complete(task_id=task_id)
+            if not success:
+                return ToolOutput(success=False, error="Failed to complete task")
+            status_change = {"from": task.status, "to": TaskStatus.COMPLETED.value}
 
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
-        success = await self.task_manager.complete(task_id=inputs.get("task_id"))
-        return ToolOutput(
-            success=success,
-            error=None if success else "Failed to complete task"
-        )
+        else:
+            return ToolOutput(success=False, error=f"Invalid status: {status}")
+
+        return ToolOutput(success=True, data={
+            "task_id": task_id,
+            "updated_fields": ["status"],
+            "status_change": status_change,
+        })
+
+    def map_result(self, output: ToolOutput) -> str:
+        """Map claim_task result with behavior guidance on completion."""
+        if not output.success:
+            return output.error or "Task not found"
+        d = output.data
+        sc = d["status_change"]
+        result = f"Task #{d['task_id']} {sc['from']} → {sc['to']}"
+        if sc["to"] == TaskStatus.COMPLETED.value:
+            result += "\n\nTask completed. Call view_task now to find your next available task."
+        return result
 
 
 # ========== Messaging ==========
@@ -619,7 +897,7 @@ class SendMessageTool(TeamTool):
             return ToolOutput(success=False, error="Failed to broadcast message")
         return ToolOutput(success=True, data={
             "type": "broadcast",
-            "from": self.message_manager.member_id,
+            "from": self.message_manager.member_name,
             "summary": summary or None,
         })
 
@@ -629,12 +907,12 @@ class SendMessageTool(TeamTool):
             if not member:
                 return ToolOutput(success=False, error=f"Member '{to}' not found")
         await self._auto_start_members()
-        msg_id = await self.message_manager.send_message(content=content, to_member=to)
+        msg_id = await self.message_manager.send_message(content=content, to_member_name=to)
         if not msg_id:
             return ToolOutput(success=False, error=f"Failed to send message to '{to}'")
         return ToolOutput(success=True, data={
             "type": "message",
-            "from": self.message_manager.member_id,
+            "from": self.message_manager.member_name,
             "to": to,
             "summary": summary or None,
         })
@@ -646,6 +924,14 @@ class SendMessageTool(TeamTool):
             if started:
                 team_logger.info(f"Auto-started members: {started}")
 
+    def map_result(self, output: ToolOutput) -> str:
+        if not output.success:
+            return output.error or "Failed to send message"
+        d = output.data
+        if d["type"] == "broadcast":
+            return f"Broadcast sent from {d['from']}"
+        return f"Message sent from {d['from']} to {d['to']}"
+
 
 # ========== Tool Factory ==========
 
@@ -655,6 +941,7 @@ def create_team_tools(
     role: str,
     agent_team: TeamBackend,
     on_teammate_created: Optional[Callable[[str], Awaitable[None]]] = None,
+    model_config_allocator: Optional[Callable[[], Optional[str]]] = None,
     exclude_tools: Optional[Set[str]] = None,
     lang: str = "cn",
 ) -> List[Tool]:
@@ -664,6 +951,7 @@ def create_team_tools(
         role: "leader" or "teammate".
         agent_team: AgentTeam instance providing task/message/db/messager.
         on_teammate_created: Callback invoked when a teammate is created.
+        model_config_allocator: Callback that returns the next model config JSON.
         exclude_tools: Tool names to exclude from the allowed set.
         lang: Locale code ("cn" or "en") for tool descriptions.
     """
@@ -678,16 +966,16 @@ def create_team_tools(
         "build_team": BuildTeamTool(agent_team, t),
         "clean_team": CleanTeamTool(agent_team, t),
         # Member management
-        "spawn_member": SpawnMemberTool(agent_team, t),
+        "spawn_member": SpawnMemberTool(agent_team, t, model_config_allocator=model_config_allocator),
         "shutdown_member": ShutdownMemberTool(agent_team, t),
         "approve_plan": ApprovePlanTool(agent_team, t),
         "approve_tool": ApproveToolCallTool(agent_team, t),
         "list_members": ListMembersTool(agent_team, t),
         # Task management
-        "task_manager": TaskManagerToolV2(agent_team, t),
+        "create_task": TaskCreateTool(agent_team, t),
+        "update_task": UpdateTaskTool(agent_team, t),
         "view_task": ViewTaskToolV2(task_mgr, t),
         "claim_task": ClaimTaskTool(task_mgr, t),
-        "complete_task": CompleteTaskTool(task_mgr, t),
         # Messaging
         "send_message": SendMessageTool(
             msg_mgr, t, team=agent_team, on_teammate_created=on_teammate_created,
@@ -709,15 +997,23 @@ def create_team_tools(
 
 
 def _wrap_invoke_with_logging(tool: Tool) -> None:
-    """Wrap a tool's invoke method with debug logging for inputs and outputs."""
+    """Wrap a tool's invoke method with debug logging and result mapping.
+
+    For TeamTool instances, the wrapper also calls map_result() to produce
+    a MappedToolOutput whose __str__ returns model-optimized text.
+    """
     original_invoke = tool.invoke
     tool_name = tool.card.name
+    is_team_tool = isinstance(tool, TeamTool)
 
     @wraps(original_invoke)
     async def logged_invoke(inputs: Dict[str, Any], **kwargs: Any) -> ToolOutput:
         team_logger.debug(f"[{tool_name}] invoke start, inputs={inputs}")
         result = await original_invoke(inputs, **kwargs)
         team_logger.debug(f"[{tool_name}] invoke end, output={result}")
+        if is_team_tool:
+            mapped = tool.map_result(result)  # type: ignore[union-attr]
+            return MappedToolOutput.from_output(result, mapped)
         return result
 
     tool.invoke = logged_invoke

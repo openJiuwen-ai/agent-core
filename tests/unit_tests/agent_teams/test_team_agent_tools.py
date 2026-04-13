@@ -9,7 +9,6 @@ from openjiuwen.agent_teams.schema.blueprint import (
     TransportSpec,
 )
 from openjiuwen.agent_teams.schema.team import (
-    TeamMemberSpec,
     TeamRole,
     TeamRuntimeContext,
 )
@@ -44,7 +43,7 @@ def test_leader_gets_management_tools():
         transport=_PYZMQ_TRANSPORT,
     )
     names = _tool_names(leader)
-    assert "task_manager" in names
+    assert "create_task" in names
     assert "build_team" in names
     assert "spawn_member" in names
     assert "approve_tool" in names
@@ -63,24 +62,19 @@ def test_teammate_gets_execution_tools():
         team_name="test",
         transport=_PYZMQ_TRANSPORT,
     )
-    member_spec = TeamMemberSpec(
-        member_id="dev-1",
-        name="Dev",
-        role_type=TeamRole.TEAMMATE,
-        persona="dev",
-        domain="backend",
-    )
     ctx = TeamRuntimeContext(
         role=TeamRole.TEAMMATE,
-        member_spec=member_spec,
+        member_id="dev-1",
+        name="Dev",
+        persona="dev",
         team_spec=leader._ctx.team_spec,
         messager_config=leader._ctx.messager_config,
         db_config=leader._ctx.db_config,
     )
     card = leader.card.model_copy(update={
-        "id": member_spec.member_id,
-        "name": member_spec.name,
-        "description": f"Teammate for domain {member_spec.domain}",
+        "id": "dev-1",
+        "name": "Dev",
+        "description": "Teammate: dev",
     })
     teammate = TeamAgent(card)
     teammate.configure(leader._spec, ctx)
@@ -88,12 +82,11 @@ def test_teammate_gets_execution_tools():
 
     # Execution tools present
     assert "claim_task" in names
-    assert "complete_task" in names
     assert "send_message" in names
     assert "view_task" in names
 
     # Leader-only tools absent
-    assert "task_manager" not in names
+    assert "create_task" not in names
     assert "build_team" not in names
     assert "spawn_member" not in names
 
@@ -124,24 +117,19 @@ def test_teammate_registers_tool_approval_rail_from_deep_agent_spec():
         team_name="test",
         transport=_PYZMQ_TRANSPORT,
     )
-    member_spec = TeamMemberSpec(
-        member_id="dev-1",
-        name="Dev",
-        role_type=TeamRole.TEAMMATE,
-        persona="dev",
-        domain="backend",
-    )
     ctx = TeamRuntimeContext(
         role=TeamRole.TEAMMATE,
-        member_spec=member_spec,
+        member_id="dev-1",
+        name="Dev",
+        persona="dev",
         team_spec=leader._ctx.team_spec,
         messager_config=leader._ctx.messager_config,
         db_config=leader._ctx.db_config,
     )
     card = leader.card.model_copy(update={
-        "id": member_spec.member_id,
-        "name": member_spec.name,
-        "description": f"Teammate for domain {member_spec.domain}",
+        "id": "dev-1",
+        "name": "Dev",
+        "description": "Teammate: dev",
     })
     teammate = TeamAgent(card)
     teammate.configure(leader._spec, ctx)

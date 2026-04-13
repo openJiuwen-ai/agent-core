@@ -38,7 +38,9 @@ from openjiuwen.core.common.logging.events import (
 from openjiuwen.core.common.logging.manager import LogManager
 from openjiuwen.core.common.logging.protocol import LoggerProtocol
 from openjiuwen.core.common.logging.utils import (
+    get_member_id,
     get_session_id,
+    set_member_id,
     set_session_id,
 )
 
@@ -188,6 +190,8 @@ __all__ = [
     "LogManager",
     "set_session_id",
     "get_session_id",
+    "set_member_id",
+    "get_member_id",
     # General loggers
     "logger",
     "interface_logger",

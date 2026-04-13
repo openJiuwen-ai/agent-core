@@ -38,12 +38,25 @@ class TeamWorkspaceRail(DeepAgentRail):
     WRITE_TOOLS = frozenset({"write_file", "edit_file"})
     READ_TOOLS = frozenset({"read_file", "glob", "grep", "list_files"})
 
-    def __init__(self, workspace_manager: TeamWorkspaceManager, member_id: str):
+    def __init__(self, workspace_manager: TeamWorkspaceManager, member_name: str):
         super().__init__()
         self._ws = workspace_manager
-        self._member_id = member_id
+        self._member_name = member_name
         self._last_pull_time: float = 0.0
         self._pull_interval: float = 5.0
+
+    def init(self, agent) -> None:
+        """Populate team_workspace on the agent's CwdState.
+
+        Runs inside the owning agent's asyncio Task context (invoked
+        from ``DeepAgent._ensure_initialized`` after ``init_cwd``), so
+        the ContextVar-based CwdState created there is the one we
+        mutate here.  Future tool calls in this agent can read the
+        team workspace root via ``get_team_workspace()``.
+        """
+        from openjiuwen.core.sys_operation.cwd import set_team_workspace
+
+        set_team_workspace(self._ws.workspace_path)
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Before file operations on .team/: pull for reads, check lock for writes.
@@ -54,13 +67,9 @@ class TeamWorkspaceRail(DeepAgentRail):
         Args:
             ctx: Agent callback context with tool_call in inputs.
         """
-        tool_call = ctx.inputs.get("tool_call")
-        if not tool_call:
-            return
-
-        tool_name = getattr(tool_call, "tool_name", None) or ctx.inputs.get("tool_name", "")
-        arguments = getattr(tool_call, "arguments", {}) or {}
-        path = arguments.get("file_path", "")
+        tool_name = ctx.inputs.tool_name
+        tool_args = ctx.inputs.tool_args if isinstance(ctx.inputs.tool_args, dict) else {}
+        path = tool_args.get("file_path", "")
         if not path or not path.startswith(self.TEAM_PREFIX):
             return
 
@@ -77,7 +86,7 @@ class TeamWorkspaceRail(DeepAgentRail):
 
         if self._ws.config.conflict_strategy == ConflictStrategy.LOCK:
             lock = self._ws.get_lock(path)
-            if lock and lock.holder_id != self._member_id and not lock.is_expired():
+            if lock and lock.holder_id != self._member_name and not lock.is_expired():
                 tool_msg_text = (
                     f"File '{path}' is locked by {lock.holder_name} ({lock.holder_id})"
                 )
@@ -91,16 +100,12 @@ class TeamWorkspaceRail(DeepAgentRail):
         Args:
             ctx: Agent callback context with tool_call in inputs.
         """
-        tool_call = ctx.inputs.get("tool_call")
-        if not tool_call:
-            return
-
-        tool_name = getattr(tool_call, "tool_name", None) or ctx.inputs.get("tool_name", "")
+        tool_name = ctx.inputs.tool_name
         if tool_name not in self.WRITE_TOOLS:
             return
 
-        arguments = getattr(tool_call, "arguments", {}) or {}
-        path = arguments.get("file_path", "")
+        tool_args = ctx.inputs.tool_args if isinstance(ctx.inputs.tool_args, dict) else {}
+        path = tool_args.get("file_path", "")
         if not path.startswith(self.TEAM_PREFIX):
             return
 
@@ -108,7 +113,7 @@ class TeamWorkspaceRail(DeepAgentRail):
 
         # Auto version control (includes push in distributed mode)
         if self._ws.config.version_control:
-            await self._ws.auto_commit(real_path, self._member_id)
+            await self._ws.auto_commit(real_path, self._member_name)
 
         # Publish event via callback
         if self._ws.publish_event:
@@ -117,8 +122,8 @@ class TeamWorkspaceRail(DeepAgentRail):
             await self._ws.publish_event(
                 TeamEvent.WORKSPACE_ARTIFACT_UPDATED,
                 WorkspaceArtifactEvent(
-                    team_id=self._ws.team_id,
-                    member_id=self._member_id,
+                    team_name=self._ws.team_name,
+                    member_name=self._member_name,
                     artifact_path=real_path,
                 ),
             )
@@ -137,10 +142,10 @@ class TeamWorkspaceRail(DeepAgentRail):
         """Extract the workspace-relative path from a .team/ prefixed path.
 
         Handles both layouts:
-        - Hub: ``.team/{team_id}/artifacts/report.md`` → ``artifacts/report.md``
+        - Hub: ``.team/{team_name}/artifacts/report.md`` → ``artifacts/report.md``
         - Legacy: ``.team/artifacts/report.md`` → ``artifacts/report.md``
 
-        Uses ``self._ws.team_id`` to detect the hub layout.
+        Uses ``self._ws.team_name`` to detect the hub layout.
 
         Args:
             path: File path starting with ".team/".
@@ -149,8 +154,8 @@ class TeamWorkspaceRail(DeepAgentRail):
             Path relative to the team workspace root.
         """
         after_prefix = path[len(self.TEAM_PREFIX):]
-        # Hub layout: first segment matches team_id
-        team_id_prefix = self._ws.team_id + "/"
-        if after_prefix.startswith(team_id_prefix):
-            return after_prefix[len(team_id_prefix):]
+        # Hub layout: first segment matches team_name
+        team_name_prefix = self._ws.team_name + "/"
+        if after_prefix.startswith(team_name_prefix):
+            return after_prefix[len(team_name_prefix):]
         return after_prefix

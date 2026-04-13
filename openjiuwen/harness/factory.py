@@ -230,7 +230,7 @@ def create_deep_agent(
                 id=f"{card.name}_{card.id}",
                 mode=OperationMode.LOCAL,
                 work_config=LocalWorkConfig(
-                    work_dir=workspace_obj.root_path if restrict_to_work_dir else Path.cwd().anchor
+                    restrict_to_sandbox=restrict_to_work_dir,
                 ),
             )
         add_result = Runner.resource_mgr.add_sys_operation(sysop_card)

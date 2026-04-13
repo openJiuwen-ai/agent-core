@@ -23,27 +23,35 @@ class Team(SQLModel, table=True):
     """Team info table model"""
     __tablename__ = "team_info"
 
-    team_id: str = Field(primary_key=True)
-    name: str = Field(nullable=False)
-    leader_member_id: str = Field(nullable=False)
+    team_name: str = Field(primary_key=True)
+    display_name: str = Field(nullable=False)
+    leader_member_name: str = Field(nullable=False)
     desc: Optional[str] = Field(default=None, nullable=True)
     prompt: Optional[str] = Field(default=None, nullable=True)
     created: int = Field(nullable=False)
+    # Bumped on every roster-affecting write so consumers (e.g. TeamRail
+    # prompt cache) can probe a single column for change detection.
+    updated_at: Optional[int] = Field(default=None, nullable=True)
 
 
 class TeamMember(SQLModel, table=True):
     """Team member table model"""
     __tablename__ = "team_member"
 
-    member_id: str = Field(primary_key=True)
-    team_id: str = Field(primary_key=True, foreign_key="team_info.team_id", ondelete="CASCADE")
-    name: str = Field(nullable=False)
+    member_name: str = Field(primary_key=True)
+    team_name: str = Field(primary_key=True, foreign_key="team_info.team_name", ondelete="CASCADE")
+    display_name: str = Field(nullable=False)
     desc: Optional[str] = Field(default=None, nullable=True)
     agent_card: str = Field(nullable=False)
     status: str = Field(nullable=False)
     execution_status: Optional[str] = Field(default=None, nullable=True)
     mode: str = Field(nullable=False)
     prompt: Optional[str] = Field(default=None, nullable=True)
+    model_config_json: Optional[str] = Field(default=None, nullable=True)
+    # Set on roster mutations only (create_member).  Status / execution
+    # status updates intentionally do NOT bump this column because they
+    # do not change how the # 成员关系 prompt section is rendered.
+    updated_at: Optional[int] = Field(default=None, nullable=True)
 
 
 # ============== Dynamic Table Base Classes (abstract) ==============
@@ -53,7 +61,7 @@ class TeamTaskBase(SQLModel):
     __abstract__ = True
 
     task_id: str = Field(primary_key=True)
-    team_id: str = Field(nullable=False, foreign_key="team_info.team_id", ondelete="CASCADE", index=True)
+    team_name: str = Field(nullable=False, foreign_key="team_info.team_name", ondelete="CASCADE", index=True)
     title: str = Field(nullable=False)
     content: str = Field(nullable=False)
     status: str = Field(nullable=False, index=True)
@@ -69,7 +77,7 @@ class TeamTaskDependencyBase(SQLModel):
     """Base class for task dependency tables (one per session)"""
     __abstract__ = True
 
-    team_id: str = Field(nullable=False, foreign_key="team_info.team_id", ondelete="CASCADE", index=True)
+    team_name: str = Field(nullable=False, foreign_key="team_info.team_name", ondelete="CASCADE", index=True)
     resolved: Optional[bool] = Field(default=False, nullable=True, index=True)
 
 
@@ -78,9 +86,9 @@ class TeamMessageBase(SQLModel):
     __abstract__ = True
 
     message_id: str = Field(primary_key=True)
-    team_id: str = Field(nullable=False, foreign_key="team_info.team_id", ondelete="CASCADE", index=True)
-    from_member: str = Field(nullable=False)
-    to_member: Optional[str] = Field(default=None, nullable=True, index=True)
+    team_name: str = Field(nullable=False, foreign_key="team_info.team_name", ondelete="CASCADE", index=True)
+    from_member_name: str = Field(nullable=False)
+    to_member_name: Optional[str] = Field(default=None, nullable=True, index=True)
     content: str = Field(nullable=False)
     timestamp: int = Field(nullable=False, index=True)
     broadcast: bool = Field(nullable=False, index=True)
@@ -96,8 +104,8 @@ class MessageReadStatusBase(SQLModel):
     """
     __abstract__ = True
 
-    member_id: str = Field(primary_key=True)
-    team_id: str = Field(primary_key=True, foreign_key="team_info.team_id", ondelete="CASCADE")
+    member_name: str = Field(primary_key=True)
+    team_name: str = Field(primary_key=True, foreign_key="team_info.team_name", ondelete="CASCADE")
     read_at: Optional[int] = Field(default=None, nullable=True, index=True)
 
 

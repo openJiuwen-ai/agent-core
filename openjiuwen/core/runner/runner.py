@@ -308,7 +308,7 @@ class _RunnerImpl:
             await agent_session.post_run()
 
     async def run_agent_team(self,
-                             agent_team: Union[str, 'BaseTeam'],
+                             agent_team: Union[str, 'BaseTeam', BaseAgent],
                              inputs: Any,
                              *,
                              session: Optional[str | AgentTeamSession] = None,
@@ -318,8 +318,11 @@ class _RunnerImpl:
         """
         Execute a team of agents with given inputs.
 
+        TeamAgent (a BaseAgent subclass) is also accepted; pass it directly
+        instead of using run_agent to get proper AgentTeamSession lifecycle.
+
         Args:
-            agent_team: AgentTeam name or instance to execute
+            agent_team: AgentTeam name, BaseTeam instance, or TeamAgent instance
             inputs: Input data for the agent team
             session: Existing session ID or Session instance for context persistence
             context: model contex
@@ -328,15 +331,18 @@ class _RunnerImpl:
         agent_team_instance = await self._prepare_agent_team(agent_team)
         agent_team_session = self._create_agent_team_session(agent_team_instance, session)
         await agent_team_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
-        agent_team_instance.runtime.bind_team_session(agent_team_session)
+        team_runtime = getattr(agent_team_instance, "runtime", None)
+        if team_runtime is not None:
+            team_runtime.bind_team_session(agent_team_session)
         try:
             return await agent_team_instance.invoke(inputs, session=agent_team_session)
         finally:
-            agent_team_instance.runtime.unbind_team_session(agent_team_session.get_session_id())
+            if team_runtime is not None:
+                team_runtime.unbind_team_session(agent_team_session.get_session_id())
             await agent_team_session.post_run()
 
     async def run_agent_team_streaming(self,
-                                       agent_team: Union[str, 'BaseTeam'],
+                                       agent_team: Union[str, 'BaseTeam', BaseAgent],
                                        inputs: Any,
                                        *,
                                        session: Optional[str | AgentTeamSession] = None,
@@ -347,8 +353,12 @@ class _RunnerImpl:
         """
         Execute a team of agents with streaming output support.
 
+        TeamAgent (a BaseAgent subclass) is also accepted; pass it directly
+        instead of using run_agent_streaming to get proper AgentTeamSession
+        lifecycle and checkpointing.
+
         Args:
-            agent_team: AgentTeam name or instance to execute
+            agent_team: AgentTeam name, BaseTeam instance, or TeamAgent instance
             inputs: Input data for the agent team
             session: Existing session ID or Session instance for context persistence
             context: model context
@@ -358,12 +368,15 @@ class _RunnerImpl:
         agent_team_instance = await self._prepare_agent_team(agent_team)
         agent_team_session = self._create_agent_team_session(agent_team_instance, session)
         await agent_team_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
-        agent_team_instance.runtime.bind_team_session(agent_team_session)
+        team_runtime = getattr(agent_team_instance, "runtime", None)
+        if team_runtime is not None:
+            team_runtime.bind_team_session(agent_team_session)
         try:
             async for chunk in agent_team_instance.stream(inputs, session=agent_team_session):
                 yield chunk
         finally:
-            agent_team_instance.runtime.unbind_team_session(agent_team_session.get_session_id())
+            if team_runtime is not None:
+                team_runtime.unbind_team_session(agent_team_session.get_session_id())
             await agent_team_session.post_run()
 
     async def release(self, session_id: str):
@@ -398,7 +411,7 @@ class _RunnerImpl:
             if isinstance(agent, str):
                 agent_instance = await self._resource_manager.get_agent(agent_id=agent)
                 if agent_instance is None:
-                    raise build_error(StatusCode.RUNNER_RUN_AGENT_ERROR, agent_id=agent, reason="agent not exist")
+                    raise build_error(StatusCode.RUNNER_RUN_AGENT_ERROR, agent=agent, reason="agent not exist")
                 await session.pre_run(inputs=inputs)
                 return agent_instance, session
             await session.pre_run(inputs=inputs)
@@ -408,7 +421,7 @@ class _RunnerImpl:
         if isinstance(agent, str):
             agent_instance = await self._resource_manager.get_agent(agent_id=agent)
             if agent_instance is None:
-                raise build_error(StatusCode.RUNNER_RUN_AGENT_ERROR, agent_id=agent, reason="agent not exist")
+                raise build_error(StatusCode.RUNNER_RUN_AGENT_ERROR, agent=agent, reason="agent not exist")
             if isinstance(agent_instance, RemoteAgent):
                 if self._AGENT_CONVERSATION_ID not in inputs:
                     inputs[self._AGENT_CONVERSATION_ID] = session_id
@@ -853,18 +866,21 @@ class Runner:
     @classmethod
     async def run_agent_team(
         cls,
-        agent_team: Union[str, 'BaseTeam'],
+        agent_team: Union[str, 'BaseTeam', BaseAgent],
         inputs: Any,
         *,
-            session: Optional[str | AgentTeamSession] = None,
+        session: Optional[str | AgentTeamSession] = None,
         context: Optional[ModelContext] = None,
         envs: Optional[dict[str, Any]] = None
     ) -> Any:
         """
         Execute a team of agents with given inputs.
 
+        TeamAgent (a BaseAgent subclass) is also accepted; pass it directly
+        instead of using run_agent to get proper AgentTeamSession lifecycle.
+
         Args:
-            agent_team: AgentTeam name or instance to execute
+            agent_team: AgentTeam name, BaseTeam instance, or TeamAgent instance
             inputs: Input data for the agent team
             session: Existing session ID or Session instance for context persistence
             context: model context
@@ -877,14 +893,14 @@ class Runner:
             context=context,
             envs=envs
         )
-    
+
     @classmethod
     async def run_agent_team_streaming(
         cls,
-        agent_team: Union[str, 'BaseTeam'],
+        agent_team: Union[str, 'BaseTeam', BaseAgent],
         inputs: Any,
         *,
-            session: Optional[str | AgentTeamSession] = None,
+        session: Optional[str | AgentTeamSession] = None,
         context: Optional[ModelContext] = None,
         stream_modes: Optional[list[BaseStreamMode]] = None,
         envs: Optional[dict[str, Any]] = None,
@@ -892,8 +908,12 @@ class Runner:
         """
         Execute a team of agents with streaming output support.
 
+        TeamAgent (a BaseAgent subclass) is also accepted; pass it directly
+        instead of using run_agent_streaming to get proper AgentTeamSession
+        lifecycle and checkpointing.
+
         Args:
-            agent_team: AgentTeam name or instance to execute
+            agent_team: AgentTeam name, BaseTeam instance, or TeamAgent instance
             inputs: Input data for the agent team
             session: Existing session ID or Session instance for context persistence
             context: model context

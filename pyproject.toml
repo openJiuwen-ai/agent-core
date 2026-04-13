@@ -131,7 +131,10 @@ default = true
 include = ["openjiuwen*"]
 
 [tool.setuptools.package-data]
-openjiuwen = ["**/prompts/**/*.md"]
+openjiuwen = [
+    "**/prompts/**/*.md",
+    "**/locales/**/*.md",
+]
 
 [tool.coverage.run]
 omit = ["tests/*"]

@@ -3,6 +3,7 @@
 
 """Unit tests for TeamTaskManager module"""
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -56,19 +57,19 @@ async def message_bus():
 async def task_manager(db, message_bus):
     """Provide initialized task manager instance"""
     await db.create_team(
-        team_id="test_team",
-        name="Test Team",
-        leader_member_id="leader1"
+            team_name="test_team",
+            display_name="Test Team",
+            leader_member_name="leader1"
     )
     await db.create_member(
-        member_id="member1",
-        team_id="test_team",
-        name="member1",
+            member_name="member1",
+            team_name="test_team",
+            display_name="member1",
         agent_card=AgentCard().model_dump_json(),
         status="BUSY",
         mode=MemberMode.BUILD_MODE.value
     )
-    return TeamTaskManager(db=db, member_id="member1", team_id="test_team", messager=message_bus)
+    return TeamTaskManager(team_name="test_team", member_name="member1", db=db, messager=message_bus)
 
 
 class TestTeamTaskManager:
@@ -85,7 +86,7 @@ class TestTeamTaskManager:
         assert task.title == "Test Task"
         assert task.content == "Test content"
         assert task.status == TaskStatus.PENDING.value
-        assert task.team_id == "test_team"
+        assert task.team_name == "test_team"
 
     @pytest.mark.asyncio
     async def test_add_task_with_dependencies(self, task_manager):
@@ -182,6 +183,95 @@ class TestTaskCompletionWithDependencyResolution:
         task3_after = await task_manager.get(task3.task_id)
         assert task2_after.status == TaskStatus.PENDING.value
         assert task3_after.status == TaskStatus.PENDING.value
+
+    @pytest.mark.asyncio
+    async def test_complete_task_unblocks_under_concurrent_sessions(
+        self, tmp_path, message_bus
+    ):
+        """File-backed regression: complete_task must still unblock dependents
+        when a second coroutine is hammering the database in parallel.
+
+        StaticPool used to hand the same DBAPI connection to every
+        async session, so a sibling coroutine's COMMIT could land in
+        the middle of complete_task's "resolve deps -> select dependents"
+        sequence and silently roll back / mask the dependency update,
+        leaving downstream tasks blocked. AsyncAdaptedQueuePool with
+        size=1 prevents that by enforcing exclusive checkout.
+        """
+        token = set_session_id("concurrent_session")
+        db_path = tmp_path / "team_concurrent.sqlite"
+        database = TeamDatabase(
+            DatabaseConfig(
+                db_type=DatabaseType.SQLITE,
+                connection_string=str(db_path),
+            )
+        )
+        try:
+            await database.initialize()
+            await database.create_team(
+                team_name="t",
+                display_name="t",
+                leader_member_name="leader",
+            )
+            await database.create_member(
+                member_name="m1",
+                team_name="t",
+                display_name="m1",
+                agent_card=AgentCard().model_dump_json(),
+                status="BUSY",
+                mode=MemberMode.BUILD_MODE.value,
+            )
+            tm = TeamTaskManager(
+                team_name="t",
+                member_name="m1",
+                db=database,
+                messager=message_bus,
+            )
+
+            # Build a chain count-1 -> count-2 -> ... -> count-5
+            await tm.add(title="c1", content="", task_id="count-1")
+            for i in range(2, 6):
+                await tm.add(
+                    title=f"c{i}",
+                    content="",
+                    task_id=f"count-{i}",
+                    dependencies=[f"count-{i - 1}"],
+                )
+
+            assert await tm.claim("count-1")
+
+            # While complete() runs, a second coroutine pounds the DB
+            # with read+commit cycles to maximise the chance of session
+            # interleaving on the shared connection.
+            stop = asyncio.Event()
+
+            async def hammer():
+                while not stop.is_set():
+                    await database.get_team_tasks("t")
+                    await database.get_team("t")
+                    await asyncio.sleep(0)
+
+            hammer_task = asyncio.create_task(hammer())
+            try:
+                assert await tm.complete("count-1")
+            finally:
+                stop.set()
+                await hammer_task
+
+            count2 = await database.get_task("count-2")
+            assert count2 is not None
+            assert count2.status == TaskStatus.PENDING.value, (
+                f"count-2 should be unblocked after count-1 completion, "
+                f"got status={count2.status!r}"
+            )
+
+            unresolved = await database.get_unresolved_dependencies_count("count-2")
+            assert unresolved == 0, (
+                f"count-2 should have 0 unresolved deps, got {unresolved}"
+            )
+        finally:
+            await database.close()
+            reset_session_id(token)
 
 
 class TestAddWithPriority:
@@ -710,7 +800,7 @@ class TestGetTasksByAssignee:
     @pytest.mark.asyncio
     async def test_get_tasks_by_assignee_empty(self, task_manager):
         """Test getting tasks by assignee when none exist"""
-        tasks = await task_manager.get_tasks_by_assignee(member_id="member1")
+        tasks = await task_manager.get_tasks_by_assignee(member_name="member1")
         assert tasks == []
 
     @pytest.mark.asyncio
@@ -722,7 +812,7 @@ class TestGetTasksByAssignee:
         task2 = await task_manager.add(title="Task 2", content="Content 2")
         await task_manager.claim(task2.task_id)
 
-        tasks = await task_manager.get_tasks_by_assignee(member_id="member1")
+        tasks = await task_manager.get_tasks_by_assignee(member_name="member1")
         assert len(tasks) == 2
         task_ids = [t.task_id for t in tasks]
         assert task1.task_id in task_ids
@@ -740,7 +830,7 @@ class TestGetTasksByAssignee:
 
         # Get only claimed tasks
         claimed_tasks = await task_manager.get_tasks_by_assignee(
-            member_id="member1",
+            member_name="member1",
             status=TaskStatus.CLAIMED.value
         )
         assert len(claimed_tasks) == 1
@@ -749,7 +839,7 @@ class TestGetTasksByAssignee:
         await task_manager.complete(task2.task_id)
         # Get only completed tasks
         completed_tasks = await task_manager.get_tasks_by_assignee(
-            member_id="member1",
+            member_name="member1",
             status=TaskStatus.COMPLETED.value
         )
         assert len(completed_tasks) == 1
@@ -761,8 +851,8 @@ class TestGetTasksByAssignee:
         task1 = await task_manager.add(title="Task 1", content="Content 1")
         await task_manager.claim(task1.task_id)
 
-        tasks_member1 = await task_manager.get_tasks_by_assignee(member_id="member1")
+        tasks_member1 = await task_manager.get_tasks_by_assignee(member_name="member1")
         assert len(tasks_member1) == 1
 
-        tasks_member2 = await task_manager.get_tasks_by_assignee(member_id="member2")
+        tasks_member2 = await task_manager.get_tasks_by_assignee(member_name="member2")
         assert len(tasks_member2) == 0

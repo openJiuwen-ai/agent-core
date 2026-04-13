@@ -23,34 +23,9 @@ def _clip_text(value: str, max_chars: int) -> str:
 class BashTool(Tool):
 
     def __init__(self, operation: SysOperation, language: str = "cn",
-                 workspace: Optional[str] = None, agent_id: Optional[str] = None):
+                 workspace: Optional[str] = None, agent_id: Optional[str] = None, **_kwargs):
         super().__init__(build_tool_card("bash", "BashTool", language, agent_id=agent_id))
         self.operation = operation
-        self._workspace: Optional[Path] = Path(workspace).resolve() if workspace else None
-
-    def _get_workspace(self) -> Optional[Path]:
-        if self._workspace:
-            return self._workspace
-        wd_val = self.operation.work_dir
-        if wd_val:
-            return Path(wd_val).resolve()
-        return None
-
-    def _resolve_workdir(self, workdir: str) -> Optional[Path]:
-        """Resolve workdir and enforce sandbox. Returns None if path escapes workspace."""
-        workspace = self._get_workspace()
-        if workspace is None:
-            return Path(workdir).resolve() if workdir else Path.cwd()
-
-        candidate = Path(workdir) if workdir else workspace
-        if not candidate.is_absolute():
-            candidate = workspace / candidate
-        candidate = candidate.resolve()
-        try:
-            candidate.relative_to(workspace)
-        except ValueError:
-            return None
-        return candidate
 
     _VALID_SHELL_TYPES = {"auto", "cmd", "powershell", "bash", "sh"}
 
@@ -67,9 +42,8 @@ class BashTool(Tool):
         if not command:
             return ToolOutput(success=False, error="command cannot be empty")
 
-        resolved_cwd = self._resolve_workdir(workdir)
-        if resolved_cwd is None:
-            return ToolOutput(success=False, error="workdir is outside workspace sandbox")
+        from openjiuwen.core.sys_operation.cwd import get_cwd
+        resolved_cwd = workdir or get_cwd()
 
         if background:
             res = await self.operation.shell().execute_cmd_background(
