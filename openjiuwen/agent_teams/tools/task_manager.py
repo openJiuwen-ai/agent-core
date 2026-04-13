@@ -542,6 +542,11 @@ class TeamTaskManager:
             team_logger.error(f"Member {member_name} not found in team {self.team_name}")
             return False
 
+        # Idempotent re-claim: if the caller already owns this task, succeed silently.
+        if task.assignee == member_name and task.status == TaskStatus.CLAIMED.value:
+            team_logger.debug(f"Task {task_id} already claimed by {member_name}; no-op")
+            return True
+
         # Validate state transition
         if not is_valid_transition(
             TaskStatus(task.status),
@@ -554,7 +559,7 @@ class TeamTaskManager:
             )
             return False
 
-        # Check if task is already claimed
+        # Check if task is already claimed by someone else
         if task.assignee:
             team_logger.warning(f"Task {task_id} is already claimed by {task.assignee}")
             return False
