@@ -110,6 +110,60 @@ def get_or_create_plan_slug(workspace_root: str) -> str:
     return generate_word_slug()
 
 
+_ENTER_PLAN_EXISTS_MSG = {
+    "en": (
+        "Plan file already exists at: {plan_path}\n"
+        "Continue the 5-phase Plan workflow in your instructions, initial understanding-design-review-final plan-end."
+    ),
+    "cn": (
+        "计划文件已存在，路径：{plan_path}\n"
+        "请按照提示词中的Plan工作流继续制定计划，初始理解-方案设计-审查-撰写计划-结束规划。\n"
+    ),
+}
+
+_ENTER_PLAN_CREATED_MSG = {
+    "en": (
+        "Plan file created at: {plan_path}\n"
+        "Continue the 5-phase Plan workflow in your instructions, initial understanding-design-review-final plan-end."
+        "DO NOT edit any files except the plan file.\n"
+    ),
+    "cn": (
+        "计划文件已创建于：{plan_path}\n"
+        "请按照提示词中的Plan工作流继续制定计划，初始理解-方案设计-审查-撰写计划-结束规划。\n"
+        "除计划文件外，请勿编辑任何其他文件。\n"
+    ),
+}
+
+_EXIT_PLAN_EMPTY_MSG = {
+    "en": (
+        "Plan mode ended. You can now exit the turn.\n"
+        "Plan file: {plan_path}"
+    ),
+    "cn": (
+        "规划模式已结束。你现在可以结束本轮。\n"
+        "计划文件：{plan_path}"
+    ),
+}
+
+_EXIT_PLAN_WITH_CONTENT_PREFIX = {
+    "en": (
+        "Plan mode ended. \n"
+        "Plan file: {plan_path}\n\n"
+        "## Plan:\n"
+    ),
+    "cn": (
+        "规划模式已结束。\n"
+        "计划文件：{plan_path}\n\n"
+        "## 计划：\n"
+    ),
+}
+
+
+def _plan_mode_tool_language(language: str) -> str:
+    """Normalize tool result language to a supported code."""
+    return language if language == "en" else "cn"
+
+
 class EnterPlanModeTool(Tool):
     """Create the plan file and return its path.
 
@@ -134,6 +188,7 @@ class EnterPlanModeTool(Tool):
             )
         )
         self._agent_ref = agent_ref
+        self._language = language
 
     async def invoke(self, inputs: Input, **kwargs) -> str:
         """Create the plan file and return its path.
@@ -155,27 +210,19 @@ class EnterPlanModeTool(Tool):
                 state.plan_mode.plan_slug,
             )
             if existing_path.exists():
-                return (
-                    f"Plan file already exists at: {existing_path}\n"
-                    "Proceed with the 5-phase workflow."
-                )
+                lang = _plan_mode_tool_language(self._language)
+                return _ENTER_PLAN_EXISTS_MSG[lang].format(plan_path=existing_path)
 
         workspace_root = agent.deep_config.workspace.root_path
         slug = get_or_create_plan_slug(workspace_root)
         plan_path = resolve_plan_file_path(workspace_root, slug)
         plan_path.parent.mkdir(parents=True, exist_ok=True)
-        plan_path.touch()
 
         state.plan_mode.plan_slug = slug
         agent.save_state(session, state)
 
-        return (
-            f"Plan file created at: {plan_path}\n\n"
-            "You should now explore the codebase and design an implementation approach.\n"
-            "DO NOT edit any files except the plan file.\n"
-            "Use write_file/edit_file to write your plan to the above file path.\n"
-            "Follow the 5-phase workflow in your instructions."
-        )
+        lang = _plan_mode_tool_language(self._language)
+        return _ENTER_PLAN_CREATED_MSG[lang].format(plan_path=plan_path)
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         pass
@@ -203,6 +250,7 @@ class ExitPlanModeTool(Tool):
             )
         )
         self._agent_ref = agent_ref
+        self._language = language
 
     async def invoke(self, inputs: Input, **kwargs) -> str:
         """Read plan file and restore auto mode.
@@ -223,17 +271,12 @@ class ExitPlanModeTool(Tool):
             plan_text = plan_path.read_text(encoding="utf-8")
 
         plan_path_str = str(plan_path) if plan_path else ""
+        lang = _plan_mode_tool_language(self._language)
         if not plan_text.strip():
-            return (
-                "Plan mode ended. You can now exit the turn.\n"
-                f"Plan file: {plan_path_str}"
-            )
+            return _EXIT_PLAN_EMPTY_MSG[lang].format(plan_path=plan_path_str)
 
-        return (
-            "Plan mode ended. \n"
-            f"Plan file: {plan_path_str}\n\n"
-            f"## Plan:\n{plan_text}"
-        )
+        prefix = _EXIT_PLAN_WITH_CONTENT_PREFIX[lang].format(plan_path=plan_path_str)
+        return prefix + plan_text
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         pass

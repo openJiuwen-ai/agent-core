@@ -43,6 +43,7 @@ from openjiuwen.harness.tools.web_tools import (
     WebFreeSearchTool,
     WebPaidSearchTool,
 )
+from openjiuwen.harness.tools.mode_tools import SwitchModeTool
 from openjiuwen.harness.tools.plan_mode_tools import (
     EnterPlanModeTool,
     ExitPlanModeTool,
@@ -94,6 +95,7 @@ __all__ = [
     "create_vision_tools",
     "EnterPlanModeTool",
     "ExitPlanModeTool",
+    "SwitchModeTool",
     "generate_word_slug",
     "get_or_create_plan_slug",
     "resolve_plan_file_path",

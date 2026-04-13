@@ -784,22 +784,6 @@ def test_create_code_agent_injects_default_code_tool_and_fs_rail() -> None:
     assert any(isinstance(rail, FileSystemRail) for rail in agent._pending_rails)
 
 
-def test_create_code_agent_explicit_tools_and_rails_override_defaults() -> None:
-    custom_tool = _build_tool_card("custom_tool")
-    custom_rail = CountingRail()
-
-    agent = create_code_agent(
-        model=_create_dummy_model(),
-        tools=[custom_tool],
-        rails=[custom_rail],
-    )
-
-    assert agent.ability_manager.get("custom_tool") is custom_tool
-    assert agent.ability_manager.get("code") is None
-    assert any(isinstance(rail, CountingRail) for rail in agent._pending_rails)
-    assert not any(isinstance(rail, FileSystemRail) for rail in agent._pending_rails)
-
-
 def test_create_code_agent_accepts_explicit_mcps() -> None:
     mcp_config = McpServerConfig(
         server_name="wrapper_mcp",

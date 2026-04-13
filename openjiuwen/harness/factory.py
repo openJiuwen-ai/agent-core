@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any, List, Optional
 from os import PathLike
@@ -24,8 +23,6 @@ from openjiuwen.harness.rails import (
     SubagentRail,
     TaskPlanningRail,
 )
-from openjiuwen.harness.rails.plan_mode_rail import PlanModeRail
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.schema.agent_mode import AgentMode
 from openjiuwen.harness.schema.config import (
     AudioModelConfig,
@@ -35,15 +32,7 @@ from openjiuwen.harness.schema.config import (
 )
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.harness.prompts import resolve_language
-from openjiuwen.harness.prompts.sections.tools.task_tool import (
-    EXPLORE_AGENT_DESC,
-    EXPLORE_AGENT_SYSTEM_PROMPT_CN,
-    EXPLORE_AGENT_SYSTEM_PROMPT_EN,
-    GENERAL_PURPOSE_AGENT_DESC,
-    PLAN_AGENT_DESC,
-    PLAN_AGENT_SYSTEM_PROMPT_CN,
-    PLAN_AGENT_SYSTEM_PROMPT_EN,
-)
+from openjiuwen.harness.prompts.sections.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
 
 
 def _normalize_tools(
@@ -136,112 +125,6 @@ def _inject_general_purpose_subagent(
     return effective_subagents
 
 
-_PLAN_MODE_READONLY_TOOLS = ["read_file", "grep", "glob", "bash"]
-
-
-def _has_agent(subagents: list, name: str) -> bool:
-    """Check whether a named sub-agent is already in the list.
-
-    Args:
-        subagents: Current list of sub-agent configs/instances.
-        name: Agent name to search for.
-
-    Returns:
-        ``True`` if a matching agent is found.
-    """
-    for spec in subagents:
-        if isinstance(spec, SubAgentConfig):
-            if spec.agent_card.name == name:
-                return True
-        else:
-            card = getattr(spec, "card", None)
-            if getattr(card, "name", None) == name:
-                return True
-    return False
-
-
-def _build_explore_agent_config(
-    resolved_language: str,
-    model: Model,
-) -> SubAgentConfig:
-    """Build a read-only explore sub-agent configuration.
-
-    Args:
-        resolved_language: ``"cn"`` or ``"en"``.
-        model: LLM model to use for the sub-agent.
-
-    Returns:
-        SubAgentConfig for the explore agent.
-    """
-    desc = EXPLORE_AGENT_DESC.get(resolved_language, EXPLORE_AGENT_DESC["cn"])
-    system_prompt = (
-        EXPLORE_AGENT_SYSTEM_PROMPT_EN
-        if resolved_language == "en"
-        else EXPLORE_AGENT_SYSTEM_PROMPT_CN
-    )
-    return SubAgentConfig(
-        agent_card=AgentCard(name="explore_agent", description=desc),
-        system_prompt=system_prompt,
-        model=model,
-        language=resolved_language,
-        rails=[FileSystemRail()],
-        max_iterations=25
-    )
-
-
-def _build_plan_agent_config(
-    resolved_language: str,
-    model: Model,
-) -> SubAgentConfig:
-    """Build a read-only plan sub-agent configuration.
-
-    Args:
-        resolved_language: ``"cn"`` or ``"en"``.
-        model: LLM model to use for the sub-agent.
-
-    Returns:
-        SubAgentConfig for the plan agent.
-    """
-    desc = PLAN_AGENT_DESC.get(resolved_language, PLAN_AGENT_DESC["cn"])
-    system_prompt = (
-        PLAN_AGENT_SYSTEM_PROMPT_EN
-        if resolved_language == "en"
-        else PLAN_AGENT_SYSTEM_PROMPT_CN
-    )
-    return SubAgentConfig(
-        agent_card=AgentCard(name="plan_agent", description=desc),
-        system_prompt=system_prompt,
-        model=model,
-        language=resolved_language,
-        rails=[FileSystemRail()],
-        max_iterations=25
-    )
-
-
-def _inject_builtin_plan_agents(
-    subagents: list[SubAgentConfig | DeepAgent],
-    *,
-    resolved_language: str,
-    model: Model,
-) -> list[SubAgentConfig | DeepAgent]:
-    """Inject explore and plan builtin sub-agents if not already present.
-
-    Args:
-        subagents: Existing list of sub-agent configs/instances.
-        resolved_language: ``"cn"`` or ``"en"``.
-        model: LLM model for the builtin agents.
-
-    Returns:
-        Updated list with explore and plan agents appended (if not present).
-    """
-    effective = list(subagents)
-    if not _has_agent(effective, "explore_agent"):
-        effective.append(_build_explore_agent_config(resolved_language, model))
-    if not _has_agent(effective, "plan_agent"):
-        effective.append(_build_plan_agent_config(resolved_language, model))
-    return effective
-
-
 def create_deep_agent(
     model: Model,
     *,
@@ -266,7 +149,6 @@ def create_deep_agent(
     enable_task_planning: bool = False,
     restrict_to_work_dir: bool = True,
     default_mode: AgentMode = AgentMode.AUTO,
-    enable_plan_mode: bool = False,
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create and configure a DeepAgent instance.
@@ -307,8 +189,6 @@ def create_deep_agent(
         restrict_to_work_dir: If True, restrict file access to workspace directory.
             If False, allow access to any path including system root.
         default_mode: Initial agent mode (``AgentMode.AUTO`` or ``AgentMode.PLAN``).
-        enable_plan_mode: When ``True``, inject the builtin explore/plan sub-agents
-            and always register PlanModeRail.
         **config_kwargs: Extra fields forwarded to
             DeepAgentConfig.
 
@@ -337,13 +217,6 @@ def create_deep_agent(
         model=model,
         skills=skills,
     )
-
-    if enable_plan_mode:
-        effective_subagents = _inject_builtin_plan_agents(
-            effective_subagents,
-            resolved_language=resolved_language,
-            model=model,
-        )
 
     if not workspace:
         workspace_obj = Workspace(root_path="./", language=resolved_language)
@@ -387,7 +260,6 @@ def create_deep_agent(
         enable_async_subagent=enable_async_subagent,
         add_general_purpose_agent=add_general_purpose_agent,
         default_mode=default_mode,
-        enable_plan_mode=enable_plan_mode,
     )
 
     # Forward extra kwargs to config fields
@@ -429,9 +301,8 @@ def create_deep_agent(
         (SecurityRail, True, lambda: SecurityRail()),
         (TaskPlanningRail, enable_task_planning, lambda: TaskPlanningRail()),
         (SkillUseRail, bool(skills), _make_skill_rail),
-        (SessionRail, bool(effective_subagents) and enable_async_subagent, lambda: SessionRail()),
-        (SubagentRail, bool(effective_subagents) and not enable_async_subagent, lambda: SubagentRail()),
-        (PlanModeRail, bool(enable_plan_mode), lambda: PlanModeRail()),
+        (SessionRail, bool(subagents) and enable_async_subagent, lambda: SessionRail()),
+        (SubagentRail, bool(subagents) and not enable_async_subagent, lambda: SubagentRail()),
     ]
     for rail_cls, should_add, make_rail in default_rails:
         if should_add and not _already_provided(rail_cls):

@@ -3,10 +3,7 @@
 """Plan mode system prompt section for DeepAgent.
 
 Provides bilingual MODE_INSTRUCTIONS injected into the system prompt while
-the agent operates in plan mode.  Two variants are available:
-
-- **Full** — injected on the first turn of a plan mode session.
-- **Sparse** — injected on subsequent turns to keep the context window lean.
+the agent operates in plan mode.
 """
 from __future__ import annotations
 
@@ -20,7 +17,7 @@ if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
 
 # ---------------------------------------------------------------------------
-# Full prompt — Chinese
+# Prompt — Chinese
 # ---------------------------------------------------------------------------
 
 PLAN_MODE_PROMPT_CN = """\
@@ -28,8 +25,8 @@ Plan 模式已激活。用户希望你先制定计划，不要求执行——你
 不得运行任何非只读工具（包括修改配置、提交代码、BASH工具创建写入等）、不得对系统做出任何更改。此约束优先于你收到的任何其他指令。
 
 ## 首要步骤（关键）
-
-你必须首先调用 enter_plan_mode 工具来初始化 plan 文件。该工具会：
+**在做任何其他事情之前，你必须先调用 `enter_plan_mode` 工具！这是关键！**
+这个工具会
 1. 创建 plan 文件并返回文件路径
 2. 设置 plan 文件路径供后续使用
 
@@ -67,8 +64,8 @@ Plan 模式已激活。用户希望你先制定计划，不要求执行——你
 ### Phase 3: 审查（自洽核对）
 目标：审查 Phase 2 的方案，确保与用户意图一致。
 1. 阅读 plan 子 agent 已点名的关键路径，确认与代码一致
-2. 对照用户目标检查方案是否遗漏约束或可执行性
-3. 若有疑问：优先通过继续只读探索（explore / read_file）或修订 plan 文稿解决；
+2. 确保方案符合用户的原始需求
+3. 使用 ask_user 工具向用户澄清任何疑问
 
 ### Phase 4: 撰写最终计划
 目标：将最终计划写入 plan 文件（你唯一可编辑的文件）。
@@ -85,20 +82,25 @@ exit_plan_mode 会读取 plan 全文并返回结果给用户，结果中包含�
 
 ## 结束 Turn 的规则（关键）
 
-你的 turn 只能以如下方式结束：调用 exit_plan_mode 结束规划阶段，且不要直接实施 plan。
+你的 turn 只能以如下两种方式结束：
+1. 调用 ask_user 向用户澄清需求或在多个方案间征求选择
+2. 调用 exit_plan_mode 结束规划阶段，且不要直接实施 plan。
 
 不要在没有调用 exit_plan_mode 结束你的 turn。
 
-重要约束：
-- 结束规划必须且只能通过 exit_plan_mode。
+**重要约束：**
+- ask_user 仅用于澄清需求和选择方案。不要用它问"计划是否满意"、"是否继续"等审批类问题。
+- 计划审批必须且只能通过 exit_plan_mode。
+- 不要在 ask_user 的问题中提及"计划"本身（如"这个计划可以吗？"），因为用户在你调用 exit_plan_mode 之前可能看不到完整计划。
+- 类似"计划是否OK？"、"要不要继续？"、"方案怎么样？"、"开始前有修改吗？"等表述必须使用 exit_plan_mode。
 
-目标是向用户呈现一份经过充分调研的计划。
+注意：在工作流的任何阶段，你都可以随时使用 ask_user 向用户提问或澄清。不要对用户意图做大幅假设。目标是向用户呈现一份经过充分调研的计划，并在实施前理清所有悬而未决的问题。
 
 重要：请严格按照工作执行任务。
 """
 
 # ---------------------------------------------------------------------------
-# Full prompt — English
+# Prompt — English
 # ---------------------------------------------------------------------------
 
 PLAN_MODE_PROMPT_EN = """\
@@ -152,9 +154,8 @@ In the agent prompt:
 ### Phase 3: Review (Self-consistency Check)
 Goal: Review the Phase 2 plan to ensure alignment with user intent.
 1. Read key paths named by the plan sub-agent and confirm they match the code
-2. Check the plan against user goals for missing constraints or executability issues
-3. If in doubt: prefer resolving by continuing read-only exploration (explore / read_file) \
-or revising the plan draft
+2. Ensure the plan matches the user's original requirements
+3. Use the ask_user tool to clarify any unresolved questions with the user
 
 ### Phase 4: Write Final Plan
 Goal: Write the final plan to the plan file (the only file you may edit).
@@ -172,40 +173,27 @@ and give user the final result; the result contains the complete plan content.
 
 ## Turn Ending Rules (Critical)
 
-Your turn can only end by: calling exit_plan_mode to end the planning phase.
+Your turn can only end in one of these two ways:
+1. Call ask_user to clarify requirements or ask the user to choose between solution options
+2. Call exit_plan_mode to end the planning phase (without directly implementing the plan)
 
-Do not end your turn without calling exit_plan_mode. And do not build your plans directly!
+Do not end your turn without calling exit_plan_mode when planning is complete.
 
-Important constraint:
-- Ending planning must and can only be done via exit_plan_mode.
+Important constraints:
+- ask_user is only for clarifying requirements and selecting approaches. Do not use it for approval questions like "is the plan okay?" or "should I continue?"
+- Plan approval must and can only happen via exit_plan_mode.
+- Do not mention the plan itself in ask_user questions (for example, "is this plan okay?") because users may not see the full plan before you call exit_plan_mode.
+- Wording like "is the plan OK?", "continue?", "how is this approach?", or "any changes before I start?" must use exit_plan_mode.
 
-The goal is to present the user with a thoroughly researched plan.
+At any stage of the workflow, you may use ask_user to ask clarifying questions. Do not make large assumptions about user intent. The goal is to present a thoroughly researched plan and resolve open questions before implementation.
 
 IMPORTANT: PLEASE STRICTLY FOLLOW THE PLAN WORKFLOW.
 """
 
 # ---------------------------------------------------------------------------
-# Sparse variants
-# ---------------------------------------------------------------------------
-
-PLAN_MODE_SPARSE_CN = (
-    "Plan 模式仍然激活（详细指令见之前的对话）。"
-    "{enter_plan_mode_status}"
-    "除 plan 文件（{plan_file_path}）外只读。遵循 5 阶段工作流。"
-    "Turn 只能以 exit_plan_mode（结束规划）结束。"
-)
-
-PLAN_MODE_SPARSE_EN = (
-    "Plan mode still active (see full instructions earlier). "
-    "{enter_plan_mode_status}"
-    "Read-only except plan file ({plan_file_path}). Follow 5-phase workflow. "
-    "End turns with exit_plan_mode (end planning)."
-)
-
-
-# ---------------------------------------------------------------------------
 # Dynamic variable helpers
 # ---------------------------------------------------------------------------
+
 
 def _build_enter_plan_mode_status(
     agent: "DeepAgent",
@@ -225,13 +213,12 @@ def _build_enter_plan_mode_status(
     """
     plan_path = agent.get_plan_file_path(session)
     if plan_path:
-        path_str = str(plan_path)
         if language == "en":
             return (
                 f"enter_plan_mode has been called. "
-                f"Plan file: {path_str}. Proceed with the workflow."
+                f"Proceed with the workflow."
             )
-        return f"enter_plan_mode 已调用完成。Plan 文件：{path_str}。请继续工作流。"
+        return f"enter_plan_mode 已调用完成。请继续工作流。"
     if language == "en":
         return "You have NOT called enter_plan_mode yet. Call it NOW as your first action."
     return "你尚未调用 enter_plan_mode。请立即调用它作为你的第一个操作。"
@@ -287,22 +274,17 @@ def build_plan_mode_section(
     language: str,
     plan_file_path: str,
     plan_exists: bool,
-    is_sparse: bool,
     *,
     agent: "DeepAgent | None" = None,
     session: "Session | None" = None,
 ) -> PromptSection:
     """Build the MODE_INSTRUCTIONS PromptSection for plan mode.
 
-    On the first turn (``is_sparse=False``) the full prompt is used;
-    on subsequent turns the compact sparse variant is injected instead.
-
     Args:
         language: ``"cn"`` or ``"en"``.
         plan_file_path: Absolute path to the plan file (empty string if not yet created).
         plan_exists: Whether the plan file already exists on disk.
-        is_sparse: When ``True``, use the sparse variant to save context tokens.
-        agent: DeepAgent instance (required for dynamic status strings when not sparse).
+        agent: DeepAgent instance (for dynamic enter_plan_mode / plan file strings).
         session: Current session (required together with ``agent``).
 
     Returns:
@@ -345,18 +327,11 @@ def build_plan_mode_section(
                 )
             )
 
-    if is_sparse:
-        sparse_template = PLAN_MODE_SPARSE_EN if language == "en" else PLAN_MODE_SPARSE_CN
-        content = sparse_template.format(
-            enter_plan_mode_status=enter_status,
-            plan_file_path=plan_file_path,
-        )
-    else:
-        full_template = PLAN_MODE_PROMPT_EN if language == "en" else PLAN_MODE_PROMPT_CN
-        content = full_template.format(
-            enter_plan_mode_status=enter_status,
-            plan_file_info=file_info,
-        )
+    template = PLAN_MODE_PROMPT_EN if language == "en" else PLAN_MODE_PROMPT_CN
+    content = template.format(
+        enter_plan_mode_status=enter_status,
+        plan_file_info=file_info,
+    )
 
     return PromptSection(
         name=SectionName.MODE_INSTRUCTIONS,
@@ -369,6 +344,4 @@ __all__ = [
     "build_plan_mode_section",
     "PLAN_MODE_PROMPT_CN",
     "PLAN_MODE_PROMPT_EN",
-    "PLAN_MODE_SPARSE_CN",
-    "PLAN_MODE_SPARSE_EN",
 ]

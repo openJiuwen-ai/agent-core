@@ -31,6 +31,7 @@ from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.plan_mode import build_plan_mode_section
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.config import SubAgentConfig
+from openjiuwen.harness.tools.mode_tools import SwitchModeTool
 from openjiuwen.harness.tools.plan_mode_tools import EnterPlanModeTool, ExitPlanModeTool
 from openjiuwen.harness.tools.task_tool import create_task_tool
 
@@ -48,8 +49,10 @@ _HIDDEN_IN_PLAN = _TODO_TOOL_NAMES | _SESSION_TOOL_NAMES
 _PLAN_FILE_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
 
 DEFAULT_PLAN_MODE_ALLOWED_TOOLS: tuple[str, ...] = (
+    "switch_mode",
     "enter_plan_mode",
     "exit_plan_mode",
+    "ask_user",
     "task_tool",
     "read_file",
     "grep",
@@ -88,8 +91,8 @@ class PlanModeRail(DeepAgentRail):
         self._allowed_tools: frozenset[str] = frozenset(names)
         self._owns_task_tool: bool = False
         self._task_tools: Optional[List[Tool]] = None
+        self._owned_task_tool_names: set[str] = set()
         self._tools: List[Tool] = []
-        self._plan_mode_turn_count: int = 0
         self.system_prompt_builder = None
 
     def init(self, agent: "DeepAgent") -> None:
@@ -103,6 +106,7 @@ class PlanModeRail(DeepAgentRail):
         language = self.system_prompt_builder.language
 
         self._tools = [
+            SwitchModeTool(agent_ref=agent, language=language),
             EnterPlanModeTool(agent_ref=agent, language=language),
             ExitPlanModeTool(agent_ref=agent, language=language),
         ]
@@ -143,6 +147,7 @@ class PlanModeRail(DeepAgentRail):
 
         if plan_state.mode != "plan":
             self.system_prompt_builder.remove_section(SectionName.MODE_INSTRUCTIONS)
+            self._sync_task_tool_for_model_tool_inputs(ctx)
             return
 
         # 1. Inject MODE_INSTRUCTIONS
@@ -154,12 +159,10 @@ class PlanModeRail(DeepAgentRail):
             language=self.system_prompt_builder.language,
             plan_file_path=plan_file_path_str,
             plan_exists=plan_exists,
-            is_sparse=self._plan_mode_turn_count > 0,
             agent=agent,
             session=session,
         )
         self.system_prompt_builder.add_section(section)
-        self._plan_mode_turn_count += 1
 
         # 2. Remove Todo/Session sections added by higher-priority rails
         self.system_prompt_builder.remove_section(SectionName.TODO)
@@ -171,6 +174,42 @@ class PlanModeRail(DeepAgentRail):
                 t for t in ctx.inputs.tools
                 if getattr(t, "name", "") not in _HIDDEN_IN_PLAN
             ]
+
+        self._sync_task_tool_for_model_tool_inputs(ctx)
+
+    def _sync_task_tool_for_model_tool_inputs(self, ctx: AgentCallbackContext) -> None:
+        """Sync task_tool visibility in model-visible tools.
+
+        In react-agent flows, ``ctx.inputs.tools`` may be reused across turns.
+        This keeps ``task_tool`` consistent with current registration state:
+        - owned + registered: ensure present once
+        - not owned: ensure absent
+
+        Args:
+            ctx: Callback context.
+        """
+        if not isinstance(ctx.inputs.tools, list):
+            return
+        if self._owns_task_tool and self._task_tools:
+            existing_names = {
+                getattr(t, "name", "")
+                for t in ctx.inputs.tools
+                if getattr(t, "name", None)
+            }
+            for tool in self._task_tools:
+                if tool.card.name not in existing_names:
+                    ctx.inputs.tools.append(tool.card.tool_info())
+            return
+        
+        # only filter task_tool registered by plan mode rail
+        if (not self._owns_task_tool) and self._owned_task_tool_names:
+            ctx.inputs.tools = [
+                t for t in ctx.inputs.tools
+                if getattr(t, "name", "") not in self._owned_task_tool_names
+            ]
+            self._owned_task_tool_names.clear()
+
+        return
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Intercept tool calls and enforce plan mode restrictions.
@@ -207,6 +246,8 @@ class PlanModeRail(DeepAgentRail):
         # ----------------------------------------------------------------
         # Segment 3: plan mode — whitelist + path check + hard-block
         # ----------------------------------------------------------------
+        if ctx.extra.get("_skip_tool"):
+            return
 
         # 3a. Hard-block todo/session tools (belt-and-suspenders)
         if tool_name in _HIDDEN_IN_PLAN:
@@ -249,12 +290,22 @@ class PlanModeRail(DeepAgentRail):
         agent = self._agent
 
         if tool_name == "enter_plan_mode" and not ctx.extra.get("_skip_tool"):
-            self._plan_mode_turn_count = 0
             self._register_task_tool(agent)
 
         elif tool_name == "exit_plan_mode" and not ctx.extra.get("_skip_tool"):
             self._unregister_task_tool(agent)
 
+    def _is_task_tool_registered(self) -> bool:
+        """Find if task_tool already registered in Runner."""
+        tools = Runner.resource_mgr.get_tool()
+        if tools is None:
+            return False
+        if not isinstance(tools, list):
+            tools = [tools]
+        return any(
+            getattr(getattr(t, "card", None), "name", None) == "task_tool"
+            for t in tools
+        )
 
     def _register_task_tool(self, agent: "DeepAgent") -> None:
         """Register task_tool if not already present after enter_plan_mode.
@@ -264,8 +315,9 @@ class PlanModeRail(DeepAgentRail):
         """
         if self._owns_task_tool:
             return
-        existing = Runner.resource_mgr.get_tool("task_tool")
-        if existing is not None:
+        existing = self._is_task_tool_registered()
+        if existing:
+            logger.info("[PlanModeRail] task tool already registered, skip register")
             return
         if not agent.deep_config.subagents:
             return
@@ -276,6 +328,10 @@ class PlanModeRail(DeepAgentRail):
             available_agents=available_agents,
             language=self.system_prompt_builder.language,
         )
+        self._owned_task_tool_names = {
+            tool.card.name for tool in (self._task_tools or [])
+            if getattr(getattr(tool, "card", None), "name", None)
+        }
         Runner.resource_mgr.add_tool(list(self._task_tools))
         for tool in self._task_tools:
             agent.ability_manager.add(tool.card)
@@ -289,18 +345,19 @@ class PlanModeRail(DeepAgentRail):
             agent: Parent DeepAgent.
         """
         if not self._owns_task_tool or not self._task_tools:
+            logger.info("[PlanModeRail] no task tool registered, skip unregister")
             return
         for tool in self._task_tools:
             try:
-                agent.ability_manager.remove(tool.name)
+                agent.ability_manager.remove(tool.card.name)
                 Runner.resource_mgr.remove_tool(tool.card.id)
+                logger.info("[PlanModeRail] Unregistered plan-mode task_tool")
             except Exception as exc:
                 logger.warning(
                     f"[PlanModeRail] Failed to unregister task_tool '{tool.name}': {exc}"
                 )
         self._task_tools = None
         self._owns_task_tool = False
-        logger.info("[PlanModeRail] Unregistered plan-mode task_tool")
 
     def _build_available_agents(
         self,
