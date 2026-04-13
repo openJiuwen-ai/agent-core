@@ -4,6 +4,7 @@
 # DEPRECATED: Use openjiuwen.harness.tools.bash.BashTool instead.
 # This module is kept for backward compatibility only.
 #
+import os
 from pathlib import Path
 from typing import Dict, Any, AsyncIterator, Optional
 
@@ -29,9 +30,23 @@ class BashTool(Tool):
 
     _VALID_SHELL_TYPES = {"auto", "cmd", "powershell", "bash", "sh"}
 
+    @staticmethod
+    def _resolve_timeout(raw_value: Any, default: int = 300) -> int:
+        """Parse and validate a timeout value."""
+        try:
+            timeout = int(raw_value)
+        except (TypeError, ValueError):
+            timeout = default
+        try:
+            max_timeout = int(os.getenv("BASH_TOOL_MAX_TIMEOUT_SECONDS") or "3600")
+        except ValueError:
+            max_timeout = 3600
+        max_timeout = max(1, max_timeout)
+        return max(1, min(timeout, max_timeout))
+
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         command = (inputs.get("command") or "").strip()
-        timeout = max(1, min(int(inputs.get("timeout", 30)), 300))
+        timeout = self._resolve_timeout(inputs.get("timeout", 300))
         workdir = inputs.get("workdir", "")
         background = bool(inputs.get("background", False))
         max_output_chars = max(200, min(int(inputs.get("max_output_chars", 8000)), 20000))

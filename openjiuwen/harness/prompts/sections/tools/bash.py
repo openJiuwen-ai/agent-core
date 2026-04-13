@@ -42,7 +42,7 @@ DESCRIPTION: Dict[str, str] = {
         "（例如 cd \"path with spaces/file.txt\"）\n"
         " - 尽量使用绝对路径维持当前工作目录，避免使用 `cd`；"
         "除非用户明确要求\n"
-        " - 可通过 timeout 参数指定超时（秒），默认 30 秒，上限 300 秒\n"
+        " - 可通过 timeout 参数指定超时（秒），默认 300 秒，上限 3600 秒\n"
         " - 可将 run_in_background 设为 true 来后台运行命令。"
         "仅在不需要立即获取结果时使用，命令完成后会收到通知。"
         "使用该参数时无需在命令末尾加 `&`\n"
@@ -104,8 +104,8 @@ DESCRIPTION: Dict[str, str] = {
         " - Try to maintain your current working directory throughout the "
         "session by using absolute paths and avoiding usage of `cd`. "
         "You may use `cd` if the user explicitly requests it.\n"
-        " - You may specify an optional timeout in seconds (up to 300s / "
-        "5 minutes). By default, your command will timeout after 30s.\n"
+        " - You may specify an optional timeout in seconds (up to 3600s / 60 minutes). "
+        "By default, your command will timeout after 300s.\n"
         " - You can use the `run_in_background` parameter to run the "
         "command in the background. Only use this if you don't need the "
         "result immediately and are OK being notified when the command "
@@ -200,8 +200,8 @@ BASH_PARAMS: Dict[str, Dict[str, str]] = {
         "en": "The command to execute",
     },
     "timeout": {
-        "cn": "可选超时时间（秒），上限 300",
-        "en": "Optional timeout in seconds (max 300)",
+        "cn": "可选超时时间（秒），默认 300，上限 3600",
+        "en": "Optional timeout in seconds, default 300, max 3600",
     },
     "description": {
         "cn": _DESCRIPTION_PARAM_CN,
