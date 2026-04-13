@@ -16,11 +16,10 @@ from openjiuwen.core.memory.lite.coding_memory_tools import (
     coding_memory_write,
     coding_memory_edit,
     _read_file_safe,
-    _read_file_safe_async,
     _read_head_async,
     _count_memory_files_async,
-    _upsert_memory_index_async,
-    _remove_from_memory_index_async,
+    _upsert_memory_index,
+    _remove_from_memory_index,
     _validate_coding_memory_path,
 )
 from openjiuwen.core.memory.lite.frontmatter import (
@@ -57,17 +56,15 @@ async def memory_test_setup(temp_dir):
         ]
     )
 
-    coding_memory_tools._global_workspace = workspace
-    coding_memory_tools._global_sys_operation = sys_op
-    coding_memory_tools._global_coding_memory_dir = coding_memory_dir
-    coding_memory_tools._global_agent_id = "test"
+    coding_memory_tools.coding_memory_workspace = workspace
+    coding_memory_tools.coding_memory_sys_operation = sys_op
+    coding_memory_tools.coding_memory_dir = coding_memory_dir
 
     yield sys_op, coding_memory_dir
 
-    coding_memory_tools._global_workspace = None
-    coding_memory_tools._global_sys_operation = None
-    coding_memory_tools._global_coding_memory_dir = None
-    coding_memory_tools._global_agent_id = "default"
+    coding_memory_tools.coding_memory_workspace = None
+    coding_memory_tools.coding_memory_sys_operation = None
+    coding_memory_tools.coding_memory_dir = "coding_memory"
     Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
     await Runner.stop()
 
@@ -312,11 +309,11 @@ async def test_upsert_memory_index(memory_test_setup):
     sys_op, coding_memory_dir = memory_test_setup
 
     print(f"DEBUG: before upsert, coding_memory_dir = {coding_memory_dir}")
-    await _upsert_memory_index_async(coding_memory_dir, "test.md", {"name": "test", "description": "测试"})
+    await _upsert_memory_index(coding_memory_dir, "test.md", {"name": "test", "description": "测试"})
 
     index_path = os.path.join(coding_memory_dir, "MEMORY.md")
     print(f"DEBUG: index_path = {index_path}")
-    index_content = await _read_file_safe_async(index_path)
+    index_content = await _read_file_safe(index_path)
     print(f"DEBUG: index_content = '{index_content}'")
     assert "test.md" in index_content
 
@@ -325,11 +322,11 @@ async def test_upsert_memory_index(memory_test_setup):
 async def test_remove_from_memory_index(memory_test_setup):
     sys_op, coding_memory_dir = memory_test_setup
 
-    await _upsert_memory_index_async(coding_memory_dir, "to_remove.md", {"name": "remove", "description": "删除"})
-    await _remove_from_memory_index_async(coding_memory_dir, "to_remove.md")
+    await _upsert_memory_index(coding_memory_dir, "to_remove.md", {"name": "remove", "description": "删除"})
+    await _remove_from_memory_index(coding_memory_dir, "to_remove.md")
 
     index_path = os.path.join(coding_memory_dir, "MEMORY.md")
-    index_content = await _read_file_safe_async(index_path)
+    index_content = await _read_file_safe(index_path)
     assert "to_remove.md" not in index_content
 
 
