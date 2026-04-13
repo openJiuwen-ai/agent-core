@@ -423,6 +423,7 @@ class TeamAgent(BaseAgent):
                 persona=ctx.persona,
                 member_name=member_name,
                 lifecycle=spec.lifecycle,
+                teammate_mode=spec.teammate_mode,
                 language=resolved_language,
                 predefined_team=bool(spec.predefined_members),
                 base_prompt=agent_spec.system_prompt,

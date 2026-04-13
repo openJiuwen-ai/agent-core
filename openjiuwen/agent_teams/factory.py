@@ -22,7 +22,7 @@ def create_agent_team(
     *,
     team_name: str = "agent_team",
     lifecycle: str = "temporary",
-    teammate_mode: str = "plan_mode",
+    teammate_mode: str = "build_mode",
     spawn_mode: str = "process",
     leader: Optional[LeaderSpec] = None,
     predefined_members: list[TeamMemberSpec] | None = None,
@@ -41,8 +41,8 @@ def create_agent_team(
         lifecycle: Team lifecycle mode — "temporary" (disband after
             completion) or "persistent" (retain team across sessions).
         teammate_mode: Default execution mode for spawned teammates —
-            "plan_mode" (require leader approval) or "build_mode"
-            (complete tasks directly).
+            "build_mode" (complete tasks directly) or "plan_mode"
+            (require leader approval). Defaults to "build_mode".
         spawn_mode: How teammates are launched — "process" (child
             subprocess) or "inprocess" (asyncio coroutine in the
             same event loop).

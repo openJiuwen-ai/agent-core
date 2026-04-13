@@ -13,6 +13,7 @@
 - 只有在完全完成任务后才能标记 completed
 - 如果遇到错误、阻塞或无法完成，保持任务为 claimed 状态
 - 被阻塞时，通过 send_message 通知 leader
+- 认领任务后若长时间无法完成，应及时通过 send_message 与 leader 沟通，调整任务范围或拆分任务
 - 以下情况不得标记 completed：
   - 测试未通过
   - 实现不完整

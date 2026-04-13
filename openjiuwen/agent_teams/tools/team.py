@@ -68,7 +68,7 @@ class TeamBackend:
         is_leader: bool,
         db: TeamDatabase,
         messager: Messager,
-        teammate_mode: MemberMode = MemberMode.PLAN_MODE,
+        teammate_mode: MemberMode = MemberMode.BUILD_MODE,
         predefined_members: list[TeamMemberSpec] | None = None,
         model_config_allocator: Optional[Callable[[], Optional[str]]] = None,
     ):
@@ -105,7 +105,7 @@ class TeamBackend:
         desc: Optional[str] = None, prompt: Optional[str] = None,
         status: MemberStatus = MemberStatus.UNSTARTED,
         execution_status: ExecutionStatus = ExecutionStatus.IDLE,
-        mode: MemberMode = MemberMode.PLAN_MODE,
+        mode: MemberMode = MemberMode.BUILD_MODE,
         member_model: Optional["TeamModelConfig"] = None,
     ) -> bool:
         """Create a team member record in the database.
@@ -121,7 +121,7 @@ class TeamBackend:
             prompt: Startup instruction for the member.
             status: Initial member status.
             execution_status: Initial execution status.
-            mode: Member mode (PLAN_MODE or BUILD_MODE).
+            mode: Member mode (BUILD_MODE or PLAN_MODE).
             member_model: TeamModelConfig allocated for this member.
         """
         success = await self.db.create_member(

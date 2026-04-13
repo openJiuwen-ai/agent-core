@@ -241,7 +241,7 @@ class InMemoryTeamDatabase:
         *,
         desc: Optional[str] = None,
         execution_status: Optional[str] = None,
-        mode: str = MemberMode.PLAN_MODE.value,
+        mode: str = MemberMode.BUILD_MODE.value,
         prompt: Optional[str] = None,
     ) -> bool:
         async with self._lock:

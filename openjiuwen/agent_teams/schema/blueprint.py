@@ -128,7 +128,7 @@ class TeamAgentSpec(BaseModel):
     agents: dict[str, DeepAgentSpec]
     team_name: str = "agent_team"
     lifecycle: str = TeamLifecycle.TEMPORARY
-    teammate_mode: str = "plan_mode"
+    teammate_mode: str = "build_mode"
     spawn_mode: str = "process"
     leader: LeaderSpec = LeaderSpec()
     predefined_members: list[TeamMemberSpec] = []
