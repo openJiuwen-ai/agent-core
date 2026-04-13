@@ -177,3 +177,28 @@ class ContextUtils:
             return -1
         target_round = rounds[min(n, len(rounds)) - 1]
         return target_round[0]
+
+    @staticmethod
+    def tool_call_matches_id(tool_call: Any, tool_call_id: str) -> bool:
+        """Check if a tool_call object matches a given tool_call_id."""
+        if isinstance(tool_call, dict):
+            return tool_call.get("id") == tool_call_id
+        return getattr(tool_call, "id", None) == tool_call_id
+
+    @staticmethod
+    def extract_tool_name(tool_call: Any) -> Optional[str]:
+        """Extract the tool name from a tool_call object (dict or object)."""
+        if isinstance(tool_call, dict):
+            function = tool_call.get("function")
+            if isinstance(function, dict):
+                function_name = function.get("name")
+                if isinstance(function_name, str) and function_name:
+                    return function_name
+            name = tool_call.get("name")
+            return name if isinstance(name, str) and name else None
+        function = getattr(tool_call, "function", None)
+        function_name = getattr(function, "name", None) if function is not None else None
+        if isinstance(function_name, str) and function_name:
+            return function_name
+        name = getattr(tool_call, "name", None)
+        return name if isinstance(name, str) and name else None

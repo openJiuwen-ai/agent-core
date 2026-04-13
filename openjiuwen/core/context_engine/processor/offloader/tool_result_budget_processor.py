@@ -221,6 +221,8 @@ class ToolResultBudgetProcessor(MessageOffloader):
             preview=preview,
             has_more=has_more,
         )
+        # 获取 sys_operation 从 context (如果可用)
+        sys_operation = getattr(context, "_sys_operation", None)
         offload_message = await self.offload_messages(
             role="tool",
             content=persisted_content,
@@ -228,12 +230,14 @@ class ToolResultBudgetProcessor(MessageOffloader):
             context=context,
             tool_call_id=message.tool_call_id,
             name=message.name,
+            sys_operation=sys_operation,
         )
         if offload_message is not None:
             actual_handle = getattr(offload_message, "offload_handle", "unknown")
+            actual_offload_type = getattr(offload_message, "offload_type", "unknown")
             offload_message.content = self._build_persisted_output_message(
                 original_size=len(message.content),
-                offload_handle=f"[[OFFLOAD: handle={actual_handle}, type=in_memory]]",
+                offload_handle=f"[[OFFLOAD: handle={actual_handle}, type={actual_offload_type}]]",
                 preview=preview,
                 has_more=has_more,
             )

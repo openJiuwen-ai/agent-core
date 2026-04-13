@@ -378,3 +378,290 @@ class TestMessageOffloader:
             dict(offload_handle=offloaded_tools[0].offload_handle, offload_type="in_memory")
         )
         assert "LONG_TOOL_RESPONSE" in reloaded
+
+    # ========== protected_tool_names: tool protection tests ==========
+
+    @pytest.mark.asyncio
+    async def test_protected_tool_by_name_not_offloaded(self):
+        """Tool messages from protected tool names are never offloaded."""
+        config = MessageOffloaderConfig(
+            messages_threshold=2,
+            large_message_threshold=10,
+            trim_size=5,
+            offload_message_type=["tool"],
+            messages_to_keep=None,
+            keep_last_round=False,
+            protected_tool_names=["reload_original_context_messages"],
+        )
+        ctx = await create_context_with_offloader(config)
+        long_content = "X" * 200
+        msgs = [
+            UserMessage(content="u"),
+            AssistantMessage(
+                content="a",
+                tool_calls=[ToolCall(
+                    id="tc-reload",
+                    name="reload_original_context_messages",
+                    type="function",
+                    arguments="{}"
+                )]
+            ),
+            ToolMessage(content=long_content, tool_call_id="tc-reload"),
+        ]
+        await ctx.add_messages(msgs)
+        result = ctx.get_messages()
+        tool_msg = result[2]
+        assert not isinstance(tool_msg, OffloadMixin)
+        assert tool_msg.content == long_content
+
+    @pytest.mark.asyncio
+    async def test_unprotected_tool_is_offloaded(self):
+        """Tool messages from unprotected tools are offloaded when large."""
+        config = MessageOffloaderConfig(
+            messages_threshold=2,
+            large_message_threshold=10,
+            trim_size=5,
+            offload_message_type=["tool"],
+            messages_to_keep=None,
+            keep_last_round=False,
+            protected_tool_names=["reload_original_context_messages"],
+        )
+        ctx = await create_context_with_offloader(config)
+        long_content = "X" * 200
+        msgs = [
+            UserMessage(content="u"),
+            AssistantMessage(content="a", tool_calls=create_tool_call_list(["tc-other"])),
+            ToolMessage(content=long_content, tool_call_id="tc-other"),
+        ]
+        await ctx.add_messages(msgs)
+        result = ctx.get_messages()
+        tool_msg = result[2]
+        assert isinstance(tool_msg, OffloadMixin)
+        assert tool_msg.content.startswith("X" * 5)
+
+    @pytest.mark.asyncio
+    async def test_protected_tool_with_pattern_matches(self):
+        """Tool messages are protected when tool_name:pattern format matches args."""
+        config = MessageOffloaderConfig(
+            messages_threshold=2,
+            large_message_threshold=10,
+            trim_size=5,
+            offload_message_type=["tool"],
+            messages_to_keep=None,
+            keep_last_round=False,
+            protected_tool_names=["view_file:*.md"],
+        )
+        ctx = await create_context_with_offloader(config)
+        long_content = "X" * 200
+        msgs = [
+            UserMessage(content="u"),
+            AssistantMessage(
+                content="a",
+                tool_calls=[ToolCall(
+                    id="tc-1",
+                    name="view_file",
+                    type="function",
+                    arguments='{"path": "README.md"}'
+                )]
+            ),
+            ToolMessage(content=long_content, tool_call_id="tc-1"),
+        ]
+        await ctx.add_messages(msgs)
+        result = ctx.get_messages()
+        tool_msg = result[2]
+        assert not isinstance(tool_msg, OffloadMixin)
+        assert tool_msg.content == long_content
+
+    @pytest.mark.asyncio
+    async def test_protected_tool_with_pattern_not_matches(self):
+        """Tool messages are offloaded when tool_name matches but pattern does not."""
+        config = MessageOffloaderConfig(
+            messages_threshold=2,
+            large_message_threshold=10,
+            trim_size=5,
+            offload_message_type=["tool"],
+            messages_to_keep=None,
+            keep_last_round=False,
+            protected_tool_names=["read_file:*USER.md"],
+        )
+        ctx = await create_context_with_offloader(config)
+        long_content = "X" * 200
+        msgs = [
+            UserMessage(content="u"),
+            AssistantMessage(
+                content="a",
+                tool_calls=[ToolCall(
+                    id="tc-data",
+                    name="read_file",
+                    type="function",
+                    arguments='{"path": "data.txt"}'
+                )]
+            ),
+            ToolMessage(content=long_content, tool_call_id="tc-data"),
+        ]
+        await ctx.add_messages(msgs)
+        result = ctx.get_messages()
+        tool_msg = result[2]
+        assert isinstance(tool_msg, OffloadMixin)
+
+    @pytest.mark.asyncio
+    async def test_protected_tool_with_wildcard_pattern(self):
+        """fnmatch wildcard patterns (* and ?) work for argument matching."""
+        config = MessageOffloaderConfig(
+            messages_threshold=2,
+            large_message_threshold=10,
+            trim_size=5,
+            offload_message_type=["tool"],
+            messages_to_keep=None,
+            keep_last_round=False,
+            protected_tool_names=["read:path/to/*.py"],
+        )
+        ctx = await create_context_with_offloader(config)
+        long_content = "X" * 200
+
+        # Matching path should be protected
+        msgs_match = [
+            UserMessage(content="u"),
+            AssistantMessage(
+                content="a",
+                tool_calls=[ToolCall(
+                    id="tc-1",
+                    name="read",
+                    type="function",
+                    arguments='{"path": "path/to/main.py"}'
+                )]
+            ),
+            ToolMessage(content=long_content, tool_call_id="tc-1"),
+        ]
+        await ctx.add_messages(msgs_match)
+        result = ctx.get_messages()
+        tool_msg = result[2]
+        assert not isinstance(tool_msg, OffloadMixin)
+
+    @pytest.mark.asyncio
+    async def test_protected_tool_with_question_mark_pattern(self):
+        """Question mark (?) wildcard matches single character."""
+        config = MessageOffloaderConfig(
+            messages_threshold=2,
+            large_message_threshold=10,
+            trim_size=5,
+            offload_message_type=["tool"],
+            messages_to_keep=None,
+            keep_last_round=False,
+            protected_tool_names=["read:file?.txt"],
+        )
+        ctx = await create_context_with_offloader(config)
+        long_content = "X" * 200
+
+        # "file1.txt" matches "file?.txt"
+        msgs_match = [
+            UserMessage(content="u"),
+            AssistantMessage(
+                content="a",
+                tool_calls=[ToolCall(
+                    id="tc-1",
+                    name="read",
+                    type="function",
+                    arguments='{"path": "file1.txt"}'
+                )]
+            ),
+            ToolMessage(content=long_content, tool_call_id="tc-1"),
+        ]
+        await ctx.add_messages(msgs_match)
+        result = ctx.get_messages()
+        tool_msg = result[2]
+        assert not isinstance(tool_msg, OffloadMixin)
+
+        # "file12.txt" does NOT match "file?.txt"
+        msgs_no_match = [
+            UserMessage(content="u2"),
+            AssistantMessage(
+                content="a2",
+                tool_calls=[ToolCall(
+                    id="tc-2",
+                    name="read",
+                    type="function",
+                    arguments='{"path": "file12.txt"}'
+                )]
+            ),
+            ToolMessage(content=long_content, tool_call_id="tc-2"),
+        ]
+        await ctx.add_messages(msgs_no_match)
+        result = ctx.get_messages()
+        tool_msg = result[5]
+        assert isinstance(tool_msg, OffloadMixin)
+
+    @pytest.mark.asyncio
+    async def test_multiple_protected_patterns(self):
+        """Multiple protected patterns can be configured together."""
+        config = MessageOffloaderConfig(
+            messages_threshold=2,
+            large_message_threshold=10,
+            trim_size=5,
+            offload_message_type=["tool"],
+            messages_to_keep=None,
+            keep_last_round=False,
+            protected_tool_names=[
+                "reload_original_context_messages",
+                "view_file:*.md",
+                "read:*.py",
+            ],
+        )
+        ctx = await create_context_with_offloader(config)
+        long_content = "X" * 200
+
+        # Test reload_original_context_messages is protected (exact match)
+        msgs_reload = [
+            UserMessage(content="u"),
+            AssistantMessage(
+                content="a",
+                tool_calls=[ToolCall(
+                    id="tc-reload",
+                    name="reload_original_context_messages",
+                    type="function",
+                    arguments="{}"
+                )]
+            ),
+            ToolMessage(content=long_content, tool_call_id="tc-reload"),
+        ]
+        await ctx.add_messages(msgs_reload)
+        result = ctx.get_messages()
+        assert not isinstance(result[2], OffloadMixin)
+
+    @pytest.mark.asyncio
+    async def test_dict_tool_call_format(self):
+        """Tool calls as dict format are handled correctly for pattern matching."""
+        config = MessageOffloaderConfig(
+            messages_threshold=2,
+            large_message_threshold=10,
+            trim_size=5,
+            offload_message_type=["tool"],
+            messages_to_keep=None,
+            keep_last_round=False,
+            protected_tool_names=["read_file:*.json"],
+        )
+        ctx = await create_context_with_offloader(config)
+        long_content = "X" * 200
+
+        # dict format tool_call
+        msgs = [
+            UserMessage(content="u"),
+            AssistantMessage(
+                content="a",
+                tool_calls=[{
+                    "id": "tc-1",
+                    "name": "read_file",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path": "config.json"}'
+                    }
+                }]
+            ),
+            ToolMessage(content=long_content, tool_call_id="tc-1"),
+        ]
+        await ctx.add_messages(msgs)
+        result = ctx.get_messages()
+        tool_msg = result[2]
+        assert not isinstance(tool_msg, OffloadMixin)
+        assert tool_msg.content == long_content

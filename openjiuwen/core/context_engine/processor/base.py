@@ -3,17 +3,21 @@
 
 from abc import abstractmethod
 from typing import List, Dict, Any, Tuple, Optional
+import os
 import uuid
+import json
 
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.context_engine import ModelContext, ContextWindow
 from openjiuwen.core.context_engine.schema.messages import create_offload_message
 from openjiuwen.core.foundation.llm import BaseMessage
+from openjiuwen.core.sys_operation import SysOperation
 
 
 _PROCESSOR_TYPE_ATTR: str = "__processor_type"
 _OFFLOAD_MESSAGE_HANDLE: str = "[[OFFLOAD: handle={handle}, type={type}]]"
+_OFFLOAD_MESSAGE_HANDLE_WITH_PATH: str = "[[OFFLOAD: handle={handle}, type={type}, path={path}]]"
 
 
 class MetaContextProcessor(type):
@@ -173,7 +177,8 @@ class ContextProcessor(metaclass=MetaContextProcessor):
             *,
             context: ModelContext = None,
             offload_handle: str = None,
-            offload_type: str = "in_memory",
+            offload_type: str = "filesystem",
+            offload_path: str = None,
             **kwargs
     ) -> Optional[BaseMessage]:
         if not messages:
@@ -182,11 +187,43 @@ class ContextProcessor(metaclass=MetaContextProcessor):
         if not offload_handle:
             offload_handle = uuid.uuid4().hex
 
-        if context is not None and offload_type == "in_memory":
-            return self._offload_messages_to_memory(
-                role, content, messages, context, offload_handle, **kwargs
-            )
+        if context is not None:
+            if offload_type == "in_memory":
+                return self._offload_messages_to_memory(
+                    role, content, messages, context, offload_handle, **kwargs
+                )
+            elif offload_type == "filesystem":
+                session_id = context.session_id()
+                workspace_dir = context.workspace_dir()
+                # 生成 offload_path
+                if not offload_path:
+                    offload_path = self._generate_offload_path(workspace_dir, session_id, offload_handle)
+                # 写入原始内容到文件，失败时 fallback 到 in_memory
+                sys_operation = kwargs.get("sys_operation")
+                write_success = await self._write_offload_to_file(
+                    session_id=session_id,
+                    offload_handle=offload_handle,
+                    offload_path=offload_path,
+                    messages=messages,
+                    sys_operation=sys_operation,
+                )
+                if not write_success:
+                    return self._offload_messages_to_memory(
+                        role, content, messages, context, offload_handle, **kwargs
+                    )
+                return await self._offload_messages_to_filesystem(
+                    role, content, offload_handle, offload_path, session_id=session_id, **kwargs
+                )
         return None
+
+    @staticmethod
+    def _generate_offload_path(workspace_dir: str, session_id: str, offload_handle: str) -> str:
+        """生成 offload 文件路径"""
+        if workspace_dir:
+            return os.path.join(
+                workspace_dir, "context", session_id + "_context", "offload", offload_handle + ".json"
+            )
+        return os.path.join("memory", "offloads", session_id, offload_handle + ".json")
 
     @staticmethod
     def _offload_messages_to_memory(
@@ -209,3 +246,64 @@ class ContextProcessor(metaclass=MetaContextProcessor):
                 **kwargs
             )
         return None
+
+    @staticmethod
+    async def _offload_messages_to_filesystem(
+            role: str,
+            content: str,
+            offload_handle: str = None,
+            offload_path: str = None,
+            session_id: str = None,
+            **kwargs
+    ) -> Optional[BaseMessage]:
+        if offload_path:
+            content = content + _OFFLOAD_MESSAGE_HANDLE_WITH_PATH.format(
+                handle=offload_handle, type="filesystem", path=offload_path
+            )
+        else:
+            content = content + _OFFLOAD_MESSAGE_HANDLE.format(
+                handle=offload_handle, type="filesystem"
+            )
+
+        # 如果有原始内容需要写入文件
+        return create_offload_message(
+            role=role,
+            content=content,
+            offload_handle=offload_handle,
+            offload_type="filesystem",
+            **kwargs
+        )
+
+    async def _write_offload_to_file(
+            self,
+            session_id: str,
+            offload_handle: str,
+            offload_path: str,
+            messages: List[BaseMessage],
+            sys_operation=None,
+    ) -> bool:
+        """
+        使用 SysOperation 写入 offload 内容到文件系统。
+
+        目录结构: {workspace_dir}/context/{session_id}_context/offload/{handle}.json
+        如果 workspace_dir 未设置，使用绝对路径 offload_path。
+
+        Returns:
+            bool: True if file was written successfully, False if failed.
+        """
+        if offload_path:
+            file_path = offload_path
+        else:
+            file_path = f"memory/offloads/{session_id}/{offload_handle}.json"
+
+        message_data = {
+            "offload_handle": offload_handle,
+            "messages": [msg.model_dump() if hasattr(msg, "model_dump") else str(msg) for msg in messages],
+        }
+        content_json = json.dumps(message_data, ensure_ascii=False, indent=2)
+        if sys_operation is None:
+            from openjiuwen.core.common.logging import logger
+            logger.warning("_write_offload_to_file: no sys_operation available, falling back to in_memory")
+            return False
+        await sys_operation.fs().write_file(file_path, content_json)
+        return True

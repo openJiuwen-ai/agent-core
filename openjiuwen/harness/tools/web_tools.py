@@ -82,6 +82,8 @@ _LOW_FETCH_VALUE_DOMAINS = {
 }
 _FREE_SEARCH_DEBUG_ENV = "FREE_SEARCH_DEBUG"
 _FREE_SEARCH_DEBUG_DIR_ENV = "FREE_SEARCH_DEBUG_DIR"
+_FREE_SEARCH_DDG_ENABLED_ENV = "FREE_SEARCH_DDG_ENABLED"
+_FREE_SEARCH_BING_ENABLED_ENV = "FREE_SEARCH_BING_ENABLED"
 _FETCH_WEBPAGE_DEFAULT_MAX_CHARS = 20000
 _FETCH_WEBPAGE_DEFAULT_TIMEOUT_SECONDS = 45
 _FETCH_WEBPAGE_MAX_TIMEOUT_ENV = "MCP_FETCH_WEBPAGE_MAX_TIMEOUT_SECONDS"
@@ -319,6 +321,14 @@ def _write_debug_payload(run_id: str, engine: str, stage: str, payload: dict[str
 def _contains_cjk(value: str) -> bool:
     """Whether the string contains CJK Unified Ideographs."""
     return any("\u4e00" <= ch <= "\u9fff" for ch in (value or ""))
+
+
+def _env_flag(name: str, default: bool = True) -> bool:
+    """Parse bool-like env values, preserving a default for empty values."""
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on", "enabled"}
 
 
 def _search_request_headers(query: str) -> dict[str, str]:
@@ -744,11 +754,22 @@ class WebFreeSearchTool(Tool):
         best_engine = ""
         best_rows: list[dict[str, str]] = []
 
-        engines: list[tuple[str, Any]] = [
-            ("duckduckgo", WebFreeSearchTool._search_duckduckgo_sync),
-            ("duckduckgo-jina", WebFreeSearchTool._search_duckduckgo_via_jina_sync),
-            ("bing", WebFreeSearchTool._search_bing_sync),
-        ]
+        engines: list[tuple[str, Any]] = []
+        if _env_flag(_FREE_SEARCH_DDG_ENABLED_ENV, default=True):
+            engines.extend(
+                [
+                    ("duckduckgo", WebFreeSearchTool._search_duckduckgo_sync),
+                    ("duckduckgo-jina", WebFreeSearchTool._search_duckduckgo_via_jina_sync),
+                ]
+            )
+        if _env_flag(_FREE_SEARCH_BING_ENABLED_ENV, default=True):
+            engines.append(("bing", WebFreeSearchTool._search_bing_sync))
+
+        if not engines:
+            raise build_error(
+                StatusCode.TOOL_WEB_SEARCH_ALL_ENGINES_FAILED,
+                errors="all free search engines are disabled",
+            )
 
         for engine_name, runner in engines:
             candidate_queries = [query]

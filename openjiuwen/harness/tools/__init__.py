@@ -50,6 +50,8 @@ from openjiuwen.harness.tools.plan_mode_tools import (
     get_or_create_plan_slug,
     resolve_plan_file_path,
 )
+from openjiuwen.harness.tools.lsp_tool import LspTool
+from openjiuwen.harness.prompts.sections.tools.lsp_tool import LspToolMetadataProvider
 
 __all__ = [
     "AudioMetadataTool",
@@ -85,6 +87,8 @@ __all__ = [
     "WebFreeSearchTool",
     "WebPaidSearchTool",
     "WriteFileTool",
+    "LspTool",
+    "LspToolMetadataProvider",
     "create_audio_tools",
     "create_todos_tool",
     "create_vision_tools",

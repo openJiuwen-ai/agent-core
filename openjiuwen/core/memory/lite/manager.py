@@ -1268,7 +1268,7 @@ class MemoryIndexManager:
         if self.db:
             self.db.close()
 
-        cache_key = f"{self.agent_id}:{self.memory_dir}"
+        cache_key = f"{self.agent_id}:{self.node_name}:{self.memory_dir}"
         if cache_key in INDEX_CACHE:
             del INDEX_CACHE[cache_key]
 

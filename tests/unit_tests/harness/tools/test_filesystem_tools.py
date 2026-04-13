@@ -11,6 +11,10 @@ import pytest_asyncio
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
+from openjiuwen.harness.prompts.sections.tools.filesystem import (
+    get_glob_input_params,
+    get_grep_input_params,
+)
 from openjiuwen.harness.tools.filesystem import (
     ReadFileTool, WriteFileTool, EditFileTool,
     GlobTool, ListDirTool, GrepTool, _FILE_READ_REGISTRY,
@@ -189,6 +193,64 @@ async def test_glob_and_ls(sys_op, temp_dir):
 
 
 @pytest.mark.asyncio
+async def test_glob_tool_returns_structured_output(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op)
+    glob_tool = GlobTool(sys_op)
+
+    os.makedirs(os.path.join(temp_dir, "subdir"), exist_ok=True)
+    await write_tool.invoke({"file_path": os.path.join(temp_dir, "a.py"), "content": "1"})
+    await write_tool.invoke({"file_path": os.path.join(temp_dir, "subdir", "b.py"), "content": "2"})
+    await write_tool.invoke({"file_path": os.path.join(temp_dir, "c.txt"), "content": "3"})
+
+    glob_res = await glob_tool.invoke({"pattern": "**/*.py", "path": temp_dir})
+
+    assert glob_res.success is True
+    assert sorted(glob_res.data["filenames"]) == ["a.py", os.path.join("subdir", "b.py")]
+    assert glob_res.data["numFiles"] == 2
+    assert glob_res.data["count"] == 2
+    assert glob_res.data["truncated"] is False
+    assert isinstance(glob_res.data["durationMs"], int)
+    assert len(glob_res.data["matching_files"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_glob_tool_defaults_to_workdir_when_path_omitted(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op)
+    glob_tool = GlobTool(sys_op)
+
+    await write_tool.invoke({"file_path": os.path.join(temp_dir, "a.py"), "content": "1"})
+
+    original_workdir = getattr(sys_op._run_config, "work_dir", None)
+    sys_op._run_config.work_dir = temp_dir
+    try:
+        glob_res = await glob_tool.invoke({"pattern": "*.py"})
+    finally:
+        sys_op._run_config.work_dir = original_workdir
+
+    assert glob_res.success is True
+    assert glob_res.data["filenames"] == ["a.py"]
+    assert glob_res.data["numFiles"] == 1
+
+
+@pytest.mark.asyncio
+async def test_glob_tool_truncates_results(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op)
+    glob_tool = GlobTool(sys_op)
+
+    for idx in range(105):
+        await write_tool.invoke({"file_path": os.path.join(temp_dir, f"file_{idx}.py"), "content": str(idx)})
+
+    glob_res = await glob_tool.invoke({"pattern": "*.py", "path": temp_dir})
+
+    assert glob_res.success is True
+    assert glob_res.data["truncated"] is True
+    assert glob_res.data["numFiles"] == 100
+    assert glob_res.data["count"] == 100
+    assert len(glob_res.data["filenames"]) == 100
+    assert len(glob_res.data["matching_files"]) == 100
+
+
+@pytest.mark.asyncio
 async def test_grep_tool(sys_op, temp_dir):
     if not shutil.which("rg") and not shutil.which("grep"):
         pytest.skip("Neither rg nor grep found in PATH")
@@ -207,6 +269,133 @@ async def test_grep_tool(sys_op, temp_dir):
     assert grep_res.success is True
     assert grep_res.data["count"] == 2
     assert "Other Line" not in grep_res.data["stdout"]
+
+
+@pytest.mark.asyncio
+async def test_grep_tool_content_mode_supports_pagination_and_glob(sys_op, temp_dir):
+    if not shutil.which("rg") and not shutil.which("grep"):
+        pytest.skip("Neither rg nor grep found in PATH")
+
+    write_tool = WriteFileTool(sys_op)
+    grep_tool = GrepTool(sys_op)
+
+    await write_tool.invoke({"file_path": os.path.join(temp_dir, "a.py"), "content": "Target 1\nskip\nTarget 2\n"})
+    await write_tool.invoke({"file_path": os.path.join(temp_dir, "b.txt"), "content": "Target txt\n"})
+
+    grep_res = await grep_tool.invoke({
+        "pattern": "Target",
+        "path": temp_dir,
+        "glob": "*.py",
+        "output_mode": "content",
+        "head_limit": 1,
+        "offset": 1,
+    })
+
+    assert grep_res.success is True
+    assert grep_res.data["mode"] == "content"
+    assert grep_res.data["numLines"] == 1
+    assert grep_res.data["appliedOffset"] == 1
+    assert "a.py" in grep_res.data["content"]
+    assert "Target 2" in grep_res.data["content"]
+    assert "Target txt" not in grep_res.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_grep_tool_files_mode_excludes_vcs_directory(sys_op, temp_dir):
+    if not shutil.which("rg") and not shutil.which("grep"):
+        pytest.skip("Neither rg nor grep found in PATH")
+
+    write_tool = WriteFileTool(sys_op)
+    grep_tool = GrepTool(sys_op)
+
+    git_dir = os.path.join(temp_dir, ".git")
+    os.makedirs(git_dir, exist_ok=True)
+
+    await write_tool.invoke({"file_path": os.path.join(temp_dir, "main.py"), "content": "needle\n"})
+    await write_tool.invoke({"file_path": os.path.join(git_dir, "ignored.txt"), "content": "needle\n"})
+
+    grep_res = await grep_tool.invoke({
+        "pattern": "needle",
+        "path": temp_dir,
+        "output_mode": "files_with_matches",
+    })
+
+    assert grep_res.success is True
+    assert grep_res.data["mode"] == "files_with_matches"
+    assert grep_res.data["filenames"] == ["main.py"]
+    assert grep_res.data["numFiles"] == 1
+
+
+@pytest.mark.asyncio
+async def test_grep_tool_defaults_to_content_mode(sys_op, temp_dir):
+    if not shutil.which("rg") and not shutil.which("grep"):
+        pytest.skip("Neither rg nor grep found in PATH")
+
+    write_tool = WriteFileTool(sys_op)
+    grep_tool = GrepTool(sys_op)
+
+    await write_tool.invoke({"file_path": os.path.join(temp_dir, "main.py"), "content": "needle\n"})
+
+    grep_res = await grep_tool.invoke({
+        "pattern": "needle",
+        "path": temp_dir,
+    })
+
+    assert grep_res.success is True
+    assert grep_res.data["mode"] == "content"
+    assert "main.py" in grep_res.data["content"]
+    assert grep_res.data["numLines"] == 1
+
+
+@pytest.mark.asyncio
+async def test_grep_tool_count_mode_returns_structured_counts(sys_op, temp_dir):
+    if not shutil.which("rg") and not shutil.which("grep"):
+        pytest.skip("Neither rg nor grep found in PATH")
+
+    write_tool = WriteFileTool(sys_op)
+    grep_tool = GrepTool(sys_op)
+
+    await write_tool.invoke({"file_path": os.path.join(temp_dir, "one.py"), "content": "hit\nhit\n"})
+    await write_tool.invoke({"file_path": os.path.join(temp_dir, "two.py"), "content": "hit\n"})
+
+    grep_res = await grep_tool.invoke({
+        "pattern": "hit",
+        "path": temp_dir,
+        "glob": "*.py",
+        "output_mode": "count",
+    })
+
+    assert grep_res.success is True
+    assert grep_res.data["mode"] == "count"
+    assert grep_res.data["numFiles"] == 2
+    assert grep_res.data["numMatches"] == 3
+    assert "one.py:2" in grep_res.data["content"]
+    assert "two.py:1" in grep_res.data["content"]
+
+
+def test_glob_input_params_keep_pattern_required_and_path_optional():
+    schema = get_glob_input_params("en")
+
+    assert schema["required"] == ["pattern"]
+    assert "path" in schema["properties"]
+
+
+def test_grep_input_params_expose_structured_fields():
+    schema = get_grep_input_params("en")
+
+    assert schema["required"] == ["pattern"]
+    assert "output_mode" in schema["properties"]
+    assert "glob" in schema["properties"]
+    assert "head_limit" in schema["properties"]
+    assert "offset" in schema["properties"]
+    assert "-B" in schema["properties"]
+    assert "-A" in schema["properties"]
+    assert "-C" in schema["properties"]
+    assert "context" in schema["properties"]
+    assert "-n" in schema["properties"]
+    assert "-i" in schema["properties"]
+    assert "type" in schema["properties"]
+    assert "multiline" in schema["properties"]
 
 
 @pytest.mark.asyncio

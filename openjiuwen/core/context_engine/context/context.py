@@ -39,7 +39,9 @@ class SessionModelContext(ModelContext):
             *,
             history_messages: List[BaseMessage] = None,
             processors: List[ContextProcessor] = None,
-            token_counter: TokenCounter = None
+            token_counter: TokenCounter = None,
+            workspace=None,
+            sys_operation=None,
     ):
         self._message_id = 0
         self._validate_and_init_messages(history_messages)
@@ -48,11 +50,18 @@ class SessionModelContext(ModelContext):
         self._message_buffer = ContextMessageBuffer(history_messages or [], config.max_context_message_num)
         self._default_window_size = config.default_window_message_num
         self._enable_reload = config.enable_reload
+        self._workspace = workspace
+        self._sys_operation = sys_operation
         self._default_dialogue_round = config.default_window_round_num
         self._token_counter = token_counter
         self._processors = processors
         self._kv_cache_manager = KVCacheManager(session_id) if config.enable_kv_cache_release else None
         self._offload_message_buffer = OffloadMessageBuffer()
+        self._offload_message_buffer.set_sys_operation(sys_operation)
+        self._offload_message_buffer.set_workspace_info(
+            workspace.root_path if workspace else "",
+            session_id
+        )
         self._reloader_tool_card = ToolCard(
             id=f"reload_{session_id}_{context_id}",
             name="reload_original_context_messages",
@@ -89,12 +98,19 @@ class SessionModelContext(ModelContext):
     def context_id(self) -> str:
         return self._context_id
 
+    def workspace_dir(self) -> str:
+        if self._workspace:
+            return self._workspace.root_path
+        return ""
+
     @_fw.emit_after(ContextEvents.CONTEXT_UPDATED, result_key="messages")
     async def add_messages(
             self,
             messages: BaseMessage | List[BaseMessage],
             **kwargs
     ) -> List[BaseMessage]:
+        # Inject sys_operation if not provided
+        kwargs.setdefault("sys_operation", self._sys_operation)
         self._validate_and_init_messages(messages)
         messages_to_add = messages if isinstance(messages, list) else [messages]
         for processor in self._processors:
@@ -179,6 +195,7 @@ class SessionModelContext(ModelContext):
         )
 
         kwargs.update({"window_size": window_size})
+        kwargs.setdefault("sys_operation", self._sys_operation)
         for processor in self._processors:
             try:
                 if await processor.trigger_get_context_window(self, window):
@@ -329,8 +346,8 @@ class SessionModelContext(ModelContext):
 
     def reloader_tool(self) -> Tool:
         @tool(card=self._reloader_tool_card)
-        def reload_original_context_messages(offload_handle: str, offload_type: str) -> str:
-            reloaded_messages = self._offload_message_buffer.reload(offload_handle, offload_type)
+        async def reload_original_context_messages(offload_handle: str, offload_type: str) -> str:
+            reloaded_messages = await self._offload_message_buffer.reload(offload_handle, offload_type)
             if not reloaded_messages:
                 return f"Failed to reload messages with offload_handle={offload_handle} and offload_type={offload_type}"
             return ContextUtils.format_reloaded_messages(offload_handle, reloaded_messages)

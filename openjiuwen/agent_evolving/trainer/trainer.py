@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from tqdm import tqdm
@@ -20,7 +19,7 @@ from openjiuwen.agent_evolving.constant import TuneConstant
 from openjiuwen.agent_evolving.updater import Updater
 from openjiuwen.agent_evolving.evaluator import BaseEvaluator
 from openjiuwen.agent_evolving.trainer.progress import Progress, Callbacks
-from openjiuwen.agent_evolving.trajectory import ExecutionSpec, Trajectory, Updates, TracerTrajectoryExtractor
+from openjiuwen.agent_evolving.trajectory import Trajectory, Updates, TracerTrajectoryExtractor
 from openjiuwen.agent_evolving.checkpointing import FileCheckpointStore, DefaultCheckpointManager
 from openjiuwen.core.operator import Operator
 from openjiuwen.core.session.agent import create_agent_session
@@ -287,8 +286,7 @@ class Trainer:
 
         trajectories: List[Trajectory] = []
         for case, sess in zip(cases.get_cases(), sessions):
-            exec_spec = ExecutionSpec(case_id=case.case_id, execution_id=str(uuid.uuid4()))
-            trajectories.append(self._extractor.extract(sess, exec_spec))
+            trajectories.append(self._extractor.extract(sess, case_id=case.case_id))
         return score, evaluated, trajectories, sessions
 
     def evaluate(self, agent: BaseAgent, cases: Optional[CaseLoader]) -> Tuple[float, List[EvaluatedCase]]:

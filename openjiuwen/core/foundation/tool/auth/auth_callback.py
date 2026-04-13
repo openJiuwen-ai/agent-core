@@ -6,6 +6,7 @@ from typing import AsyncGenerator, Dict, Type, Optional
 import aiohttp
 import httpx
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.runner.callback.events import ToolCallEvents
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.foundation.tool.auth.auth import ToolAuthConfig, ToolAuthResult
@@ -39,11 +40,18 @@ class SSLAuthStrategy(AuthStrategy):
             auth_config.config.get("ssl_cert_env", "SSL_CERT"),
             ["false"],
         )
-        if ssl_verify:
-            ssl_context = SslUtils.create_strict_ssl_context(ssl_cert)
-            connector = aiohttp.TCPConnector(ssl=ssl_context)
-        else:
-            connector = aiohttp.TCPConnector(ssl=False)
+        try:
+            if ssl_verify:
+                ssl_context = SslUtils.create_strict_ssl_context(ssl_cert)
+                connector = aiohttp.TCPConnector(ssl=ssl_context)
+            else:
+                connector = aiohttp.TCPConnector(ssl=False)
+        except Exception as e:
+            logger.error(f"Failed to create SSL connector: {e}")
+            raise AbortError(
+                f"Failed to create SSL connector: {e}",
+                cause=e
+            ) from e
         return ToolAuthResult(
             success=True,
             auth_data={"connector": connector},

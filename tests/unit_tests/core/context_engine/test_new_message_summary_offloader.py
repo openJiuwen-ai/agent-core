@@ -50,6 +50,7 @@ sys.modules.setdefault("pymilvus.client.utils", pymilvus_utils_module)
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.context_engine import ContextEngineConfig
 from openjiuwen.core.context_engine.context.context import SessionModelContext
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.processor.offloader.message_summary_offloader import (
     TRUNCATED_MARKER,
     MessageSummaryOffloader,
@@ -528,20 +529,17 @@ class TestMessageSummaryOffloader:
 
     @staticmethod
     def test_tool_call_matches_id_handles_dict_and_object(adaptive_config):
-        """Test _tool_call_matches_id handles both dict and object formats."""
-        with patch("openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model"):
-            offloader = MessageSummaryOffloader(adaptive_config)
-
+        """Test ContextUtils.tool_call_matches_id handles both dict and object formats."""
         # Dict format
         dict_call = {"id": "call-123", "name": "test_tool"}
-        assert offloader._tool_call_matches_id(dict_call, "call-123") is True
-        assert offloader._tool_call_matches_id(dict_call, "call-456") is False
+        assert ContextUtils.tool_call_matches_id(dict_call, "call-123") is True
+        assert ContextUtils.tool_call_matches_id(dict_call, "call-456") is False
 
         # Object format
         obj_call = MagicMock()
         obj_call.id = "call-456"
-        assert offloader._tool_call_matches_id(obj_call, "call-456") is True
-        assert offloader._tool_call_matches_id(obj_call, "call-123") is False
+        assert ContextUtils.tool_call_matches_id(obj_call, "call-456") is True
+        assert ContextUtils.tool_call_matches_id(obj_call, "call-123") is False
 
     @staticmethod
     def test_get_step_from_chain_default_extracts_user_content(adaptive_config, context):

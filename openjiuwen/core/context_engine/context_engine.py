@@ -40,8 +40,12 @@ class ContextEngine:
 
     def __init__(self,
                  config: ContextEngineConfig = None,
+                 workspace=None,
+                 sys_operation=None,
                  ):
         self._config = config or ContextEngineConfig()
+        self._workspace = workspace
+        self._sys_operation = sys_operation
         self._context_pool: Dict[str, ModelContext] = dict()
 
     @_fw.emit_after(ContextEvents.CONTEXT_RETRIEVED, result_key="context")
@@ -96,6 +100,8 @@ class ContextEngine:
             history_messages=history_messages or [],
             processors=processor_instances,
             token_counter=token_counter,
+            workspace=self._workspace,
+            sys_operation=self._sys_operation,
         )
         self._load_state_from_session(context, session, history_messages)
         self._context_pool[full_context_id] = context

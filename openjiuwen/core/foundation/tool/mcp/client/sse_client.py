@@ -7,7 +7,7 @@ import httpx
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpToolCard
-from openjiuwen.core.foundation.tool.auth.auth import ToolAuthConfig
+from openjiuwen.core.foundation.tool.auth.auth import ToolAuthConfig, ToolAuthResult
 from openjiuwen.core.foundation.tool.mcp.base import McpServerConfig, NO_TIMEOUT
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
 from openjiuwen.core.runner.callback.events import ToolCallEvents
@@ -51,8 +51,11 @@ class SseClient(McpClient):
                     tool_id=self._server_id
                 ),
             )
-            self._auth_provider = next(item for item in auth_result
-                                       if item is not None).auth_data.get("auth_provider")
+            if isinstance(auth_result, list):
+                for item in auth_result:
+                    if item and isinstance(item, ToolAuthResult) and item.success:
+                        self._auth_provider = item.auth_data.get("auth_provider")
+                        break
             actual_timeout = timeout if timeout != NO_TIMEOUT else 60.0
             self._client = sse_client(self._server_path, timeout=actual_timeout, auth=self._auth_provider)
             self._read, self._write = await self._exit_stack.enter_async_context(self._client)

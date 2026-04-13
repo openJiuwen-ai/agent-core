@@ -191,6 +191,8 @@ class ReActAgentConfig(BaseModel):
         description="Context processors configuration"
     )
 
+    workspace: Optional[Any] = Field(default=None, description="Workspace instance for filesystem operations")
+
     def configure_model(self, model_name: str) -> 'ReActAgentConfig':
         """Configure model name
 
@@ -414,8 +416,15 @@ class ReActAgent(BaseAgent):
             card: Agent card (required)
         """
         self._config = self._create_default_config()
+        # Get sys_operation if configured
+        sys_operation = None
+        if self._config.sys_operation_id:
+            from openjiuwen.core.runner import Runner
+            sys_operation = Runner.resource_mgr.get_sys_operation(self._config.sys_operation_id)
         self.context_engine = ContextEngine(
-            self._config.context_engine_config
+            self._config.context_engine_config,
+            workspace=self._config.workspace,
+            sys_operation=sys_operation,
         )
         self._llm = None
         self.prompt_builder: SystemPromptBuilder = SystemPromptBuilder()
@@ -452,10 +461,18 @@ class ReActAgent(BaseAgent):
             self._llm = None
             self._kv_release_warning_logged = False
 
+        # Get sys_operation from Runner.resource_mgr if sys_operation_id is configured
+        sys_operation = None
+        if config.sys_operation_id:
+            from openjiuwen.core.runner import Runner
+            sys_operation = Runner.resource_mgr.get_sys_operation(config.sys_operation_id)
+
         # Update context_engine if context window limit changed
         if old_config.context_engine_config != config.context_engine_config:
             self.context_engine = ContextEngine(
-                config.context_engine_config
+                config.context_engine_config,
+                workspace=config.workspace,
+                sys_operation=sys_operation,
             )
             self._ability_manager.set_context_engine(self.context_engine)
         # Reset sys operation id if changed

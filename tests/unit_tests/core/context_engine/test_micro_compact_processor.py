@@ -11,7 +11,7 @@ from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.processor.compressor.micro_compact_processor import (
     MicroCompactProcessorConfig,
 )
-from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage
+from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage, UserMessage
 
 
 def create_tool_call_list(ids: List[str], names: List[str]) -> List[ToolCall]:
@@ -36,14 +36,17 @@ async def create_context_with_micro_compact(
 
 class TestMicroCompactProcessor:
     @pytest.mark.asyncio
-    async def test_trigger_get_context_window_true_when_candidates_reach_threshold(self):
+    async def test_trigger_add_messages_clears_old_tool_messages(self):
+        """Test that MicroCompactProcessor clears old tool messages when new ones are added."""
         config = MicroCompactProcessorConfig(
             trigger_threshold=2,
             compactable_tool_names=["read_file"],
             keep_recent_per_tool=1,
         )
         ctx = await create_context_with_micro_compact(config)
-        messages = [
+
+        # First batch: 2 tool messages (reaches trigger_threshold)
+        batch1 = [
             AssistantMessage(
                 content="",
                 tool_calls=create_tool_call_list(["tc-1"], ["read_file"]),
@@ -55,22 +58,29 @@ class TestMicroCompactProcessor:
             ),
             ToolMessage(content="file-content-2", tool_call_id="tc-2"),
         ]
-        await ctx.add_messages(messages)
+        # Second batch: add more messages to trigger the processor
+        await ctx.add_messages(batch1)
+        await ctx.add_messages([UserMessage(content="trigger message")])
 
-        window = await ctx.get_context_window()
-        cleared = [msg for msg in window.context_messages if isinstance(msg, ToolMessage)]
-        assert cleared[0].content == config.cleared_marker
-        assert cleared[1].content == "file-content-2"
+        agent_messages = ctx.get_messages()
+        tool_messages = [msg for msg in agent_messages if isinstance(msg, ToolMessage)]
+        # First tool message should be cleared, second should be kept (keep_recent_per_tool=1)
+        assert len(tool_messages) == 2
+        assert tool_messages[0].content == config.cleared_marker
+        assert tool_messages[1].content == "file-content-2"
 
     @pytest.mark.asyncio
     async def test_keep_recent_per_tool_is_applied_per_tool_name(self):
+        """Test that keep_recent_per_tool is applied per tool name."""
         config = MicroCompactProcessorConfig(
             trigger_threshold=1,
             compactable_tool_names=["read_file", "grep"],
             keep_recent_per_tool=1,
         )
         ctx = await create_context_with_micro_compact(config)
-        messages = [
+
+        # First batch: 2 tool messages for different tools
+        batch1 = [
             AssistantMessage(
                 content="",
                 tool_calls=create_tool_call_list(["read-1"], ["read_file"]),
@@ -81,6 +91,13 @@ class TestMicroCompactProcessor:
                 tool_calls=create_tool_call_list(["grep-1"], ["grep"]),
             ),
             ToolMessage(content="grep-old", tool_call_id="grep-1"),
+        ]
+        # Second batch: add more to trigger processor
+        await ctx.add_messages(batch1)
+        await ctx.add_messages([UserMessage(content="trigger")])
+
+        # Third batch: new tool results
+        batch2 = [
             AssistantMessage(
                 content="",
                 tool_calls=create_tool_call_list(["read-2"], ["read_file"]),
@@ -92,10 +109,12 @@ class TestMicroCompactProcessor:
             ),
             ToolMessage(content="grep-new", tool_call_id="grep-2"),
         ]
-        await ctx.add_messages(messages)
+        await ctx.add_messages(batch2)
+        await ctx.add_messages([UserMessage(content="trigger again")])
 
-        window = await ctx.get_context_window()
-        tool_messages = [msg for msg in window.context_messages if isinstance(msg, ToolMessage)]
+        agent_messages = ctx.get_messages()
+        tool_messages = [msg for msg in agent_messages if isinstance(msg, ToolMessage)]
+        # Old messages should be cleared, new ones kept
         assert [msg.content for msg in tool_messages] == [
             config.cleared_marker,
             config.cleared_marker,
@@ -105,6 +124,7 @@ class TestMicroCompactProcessor:
 
     @pytest.mark.asyncio
     async def test_cleared_messages_are_not_reprocessed(self):
+        """Test that already cleared messages are not reprocessed."""
         config = MicroCompactProcessorConfig(
             trigger_threshold=1,
             compactable_tool_names=["read_file"],
@@ -124,8 +144,9 @@ class TestMicroCompactProcessor:
         ]
         ctx = await create_context_with_micro_compact(config, history_messages=history)
 
-        window = await ctx.get_context_window()
-        tool_messages = [msg for msg in window.context_messages if isinstance(msg, ToolMessage)]
+        agent_messages = ctx.get_messages()
+        tool_messages = [msg for msg in agent_messages if isinstance(msg, ToolMessage)]
+        # Cleared marker should remain, fresh content should remain
         assert [msg.content for msg in tool_messages] == [
             config.cleared_marker,
             "fresh-content",

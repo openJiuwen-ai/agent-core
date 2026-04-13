@@ -73,16 +73,16 @@ class OpenApiClient(McpClient):
     """
     __client_name__ = "openapi"
 
-    def __init__(self, server_config: McpServerConfig):
-        super().__init__(server_config)
+    def __init__(self, config: McpServerConfig):
+        super().__init__(config)
         self._director = None
         self._spec = None
         self.openapi_spec = None
-        self._name = server_config.server_name
+        self._name = config.server_name
         self._client = httpx.AsyncClient()
         self._tool_manager = ToolManager()
         self._used_names: defaultdict[str, int] = defaultdict(int)
-        self._server_path = server_config.server_path
+        self._server_path = config.server_path
 
     def _generate_tool_name(self, route: "HTTPRoute") -> str:
         if route.operation_id:
