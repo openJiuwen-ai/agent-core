@@ -73,6 +73,43 @@ class TestWebFreeSearchTool:
         assert "Bing Result 1" in result
 
     @pytest.mark.asyncio
+    async def test_ddg_toggle_disables_duckduckgo_engines(self, tool, monkeypatch):
+        monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "false")
+        monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "true")
+
+        bing_response = MagicMock()
+        bing_response.status_code = 200
+        bing_response.text = """
+        <html>
+        <main aria-label="Search Results">
+          <li class="b_algo">
+            <h2><a href="https://example.com/page1">Bing Result 1</a></h2>
+            <div class="b_caption"><p>Bing snippet 1</p></div>
+          </li>
+        </main>
+        </html>
+        """
+        bing_response.raise_for_status = MagicMock()
+
+        with patch("openjiuwen.harness.tools.web_tools._http_request", return_value=bing_response) as mock_request:
+            result = await tool.invoke({"query": "test query", "max_results": 5})
+
+        requested_urls = [call.args[1] for call in mock_request.call_args_list]
+        assert all("duckduckgo.com" not in url for url in requested_urls)
+        assert all("r.jina.ai" not in url for url in requested_urls)
+        assert "Free search results (Bing)" in result
+
+    @pytest.mark.asyncio
+    async def test_all_free_search_engines_disabled_returns_error(self, tool, monkeypatch):
+        monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "false")
+        monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "false")
+
+        result = await tool.invoke({"query": "test query", "max_results": 5})
+
+        assert "[ERROR]: free search failed:" in result
+        assert "all free search engines are disabled" in result
+
+    @pytest.mark.asyncio
     async def test_best_effort_returns_low_quality_bing_rows(self, tool):
         ddg_response = MagicMock()
         ddg_response.status_code = 500
