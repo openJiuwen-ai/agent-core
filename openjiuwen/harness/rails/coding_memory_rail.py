@@ -92,6 +92,10 @@ class CodingMemoryRail(DeepAgentRail):
         # 获取 system_prompt_builder
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
         
+        # 保存 agent_id
+        agent_id = getattr(getattr(agent, "card", None), "id", None)
+        self._agent_id = agent_id
+        
         # 注册工具（参考 MemoryRail 的工具注册方式）
         self._register_coding_memory_tools(agent)
     
@@ -452,7 +456,16 @@ class CodingMemoryRail(DeepAgentRail):
                 recursive=False
             )
             if result and hasattr(result, 'data') and result.data:
-                return sum(1 for f in result.data.list_items if f.name != "MEMORY.md")
+                count = 0
+                for f in result.data.list_items:
+                    if f.is_directory:
+                        continue
+                    if not f.name.lower().endswith(".md"):
+                        continue
+                    if f.name.casefold() == "memory.md":
+                        continue
+                    count += 1
+                return count
             return 0
         except Exception:
             return 0
