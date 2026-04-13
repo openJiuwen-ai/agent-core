@@ -8,7 +8,7 @@ import httpx
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpToolCard
 from openjiuwen.core.foundation.tool.auth.auth import ToolAuthConfig, ToolAuthResult
-from openjiuwen.core.foundation.tool.mcp.base import McpServerConfig, NO_TIMEOUT
+from openjiuwen.core.foundation.tool.mcp.base import McpServerConfig, NO_TIMEOUT, extract_mcp_tool_result_content
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
 from openjiuwen.core.runner.callback.events import ToolCallEvents
 
@@ -31,6 +31,25 @@ class SseClient(McpClient):
         self._server_id = config.server_id
         self._auth_provider = None
 
+    @staticmethod
+    def _extract_auth_provider(auth_result: Any) -> Any:
+        if auth_result is None:
+            return None
+        if isinstance(auth_result, (list, tuple)):
+            auth_items = list(auth_result)
+        else:
+            auth_items = [auth_result]
+
+        for item in reversed(auth_items):
+            if item is None:
+                continue
+            if isinstance(item, ToolAuthResult) and not item.success:
+                continue
+            auth_data = getattr(item, "auth_data", None)
+            if isinstance(auth_data, dict) and "auth_provider" in auth_data:
+                return auth_data.get("auth_provider")
+        return None
+
     async def connect(self, *, timeout: float = NO_TIMEOUT) -> bool:
         from mcp import ClientSession
         from mcp.client.sse import sse_client
@@ -51,11 +70,7 @@ class SseClient(McpClient):
                     tool_id=self._server_id
                 ),
             )
-            if isinstance(auth_result, list):
-                for item in auth_result:
-                    if item and isinstance(item, ToolAuthResult) and item.success:
-                        self._auth_provider = item.auth_data.get("auth_provider")
-                        break
+            self._auth_provider = self._extract_auth_provider(auth_result)
             actual_timeout = timeout if timeout != NO_TIMEOUT else 60.0
             self._client = sse_client(self._server_path, timeout=actual_timeout, auth=self._auth_provider)
             self._read, self._write = await self._exit_stack.enter_async_context(self._client)
@@ -121,10 +136,7 @@ class SseClient(McpClient):
         try:
             logger.info(f"Calling tool '{tool_name}' via SSE with arguments: {arguments}")
             tool_result = await self._session.call_tool(tool_name, arguments=arguments)
-            # Extract text content from tool result
-            result_content = None
-            if tool_result.content and len(tool_result.content) > 0:
-                result_content = tool_result.content[-1].text
+            result_content = extract_mcp_tool_result_content(tool_result)
             logger.info(f"Tool '{tool_name}' call completed via SSE")
             return result_content
         except Exception as e:

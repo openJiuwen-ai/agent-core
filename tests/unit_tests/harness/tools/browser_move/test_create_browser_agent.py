@@ -139,6 +139,15 @@ def test_default_wiring_main_agent_has_browser_runtime_rail() -> None:
     assert any(isinstance(rail, BrowserRuntimeRail) for rail in rails)
 
 
+def test_default_wiring_does_not_add_filesystem_rail() -> None:
+    calls, fake = _capture_create_deep_agent()
+    with _patch_all(fake)[0]:
+        create_browser_agent(_fake_model(), settings=_fake_settings())
+
+    rails = calls[0].get("rails", [])
+    assert not any(type(rail).__name__ == "FileSystemRail" for rail in rails)
+
+
 def test_default_wiring_build_tools_called_with_runtime_instance() -> None:
     calls, fake = _capture_create_deep_agent()
     ctx, mock_runtime_cls, mock_build_tools, _tools = _patch_all(fake)

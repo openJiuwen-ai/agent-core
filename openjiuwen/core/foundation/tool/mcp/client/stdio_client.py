@@ -6,7 +6,7 @@ from typing import Any, List, Optional, Dict
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
-from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
+from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT, extract_mcp_tool_result_content
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
 
 
@@ -111,10 +111,7 @@ class StdioClient(McpClient):
         try:
             logger.info(f"Calling tool '{tool_name}' via Stdio with arguments: {arguments}")
             tool_result = await self._session.call_tool(tool_name, arguments=arguments)
-            # Extract text content from tool result
-            result_content = None
-            if tool_result.content and len(tool_result.content) > 0:
-                result_content = tool_result.content[-1].text
+            result_content = extract_mcp_tool_result_content(tool_result)
             logger.info(f"Tool '{tool_name}' call completed via Stdio")
             return result_content
         except Exception as e:

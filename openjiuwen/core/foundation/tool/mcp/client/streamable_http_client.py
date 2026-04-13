@@ -7,7 +7,7 @@ import httpx
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
-from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
+from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT, extract_mcp_tool_result_content
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
 from openjiuwen.core.foundation.tool.auth.auth import ToolAuthConfig, ToolAuthResult
 from openjiuwen.core.runner.callback.events import ToolCallEvents
@@ -164,9 +164,7 @@ class StreamableHttpClient(McpClient):
         try:
             logger.info(f"Calling tool '{tool_name}' via streamable-http with arguments: {arguments}")
             tool_result = await self._session.call_tool(tool_name, arguments=arguments)
-            result_content = None
-            if tool_result.content and len(tool_result.content) > 0:
-                result_content = tool_result.content[-1].text
+            result_content = extract_mcp_tool_result_content(tool_result)
             logger.info(f"Tool '{tool_name}' call completed via streamable-http")
             return result_content
         except Exception as e:
