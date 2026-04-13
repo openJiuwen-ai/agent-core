@@ -8,7 +8,7 @@ Includes:
 - BaseEvaluator, DefaultEvaluator, MetricEvaluator: Evaluation interfaces
 - BaseOptimizer, TextualParameter, InstructionOptimizer: Optimization
 - Case, EvaluatedCase, CaseLoader: Dataset handling
-- Trajectory, TrajectoryStep, ExecutionSpec: Execution trace types
+- Trajectory, TrajectoryStep: Execution trace types
 - SingleDimUpdater, MultiDimUpdater: Update generation
 - Checkpointing: State persistence
 """
