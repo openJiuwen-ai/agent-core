@@ -727,6 +727,17 @@ class TeamAgent(BaseAgent):
         # set_session_id() so create_cur_session_tables uses the right names.
         if self._team_backend:
             await self._team_backend.db.initialize()
+
+        # Leader-startup recovery: if the team is already persisted in the
+        # DB (e.g. a previous run with the same team_name), re-launch every
+        # teammate from DB state regardless of their last status. Any prior
+        # processes are assumed dead. On a fresh team build, get_team()
+        # returns None and this is a no-op until build_team runs.
+        if self.role == TeamRole.LEADER and self._team_backend:
+            existing = await self._team_backend.db.get_team(self._team_backend.team_name)
+            if existing is not None:
+                await self.recover_team()
+
         # Async workspace initialization (git init + artifact dirs), idempotent.
         if self._workspace_manager and not self._workspace_initialized:
             await self._workspace_manager.initialize(
@@ -1283,8 +1294,13 @@ class TeamAgent(BaseAgent):
         """Restart a teammate process, recovering config from DB.
 
         Retries with exponential backoff. Publishes MemberRestartedEvent
-        on success; marks ERROR on exhaustion.
+        on success; marks ERROR on exhaustion. Any prior spawn handle for
+        ``member_name`` is force-killed first so callers (recover_team,
+        unhealthy detection, leader-startup recovery) can invoke this
+        idempotently without leaking processes.
         """
+        await self._cleanup_teammate(member_name)
+
         ctx = await self._build_context_from_db(member_name)
         if ctx is None:
             team_logger.error("Cannot recover spawn config for {}", member_name)
@@ -1359,10 +1375,13 @@ class TeamAgent(BaseAgent):
             self._persist_leader_config(session)
 
     async def recover_team(self) -> list[str]:
-        """Re-launch all non-shutdown teammates from database state.
+        """Re-launch every teammate from database state.
 
         Called after the leader has been reconstructed (e.g. via
-        ``recover_from_session``) to bring the full team back online.
+        ``recover_from_session``) or whenever the leader starts on a
+        team that already exists in the DB. All non-leader members are
+        re-spawned regardless of their last persisted status — any prior
+        process is assumed dead and replaced with a fresh one.
         """
         if not self._team_backend:
             return []
@@ -1374,8 +1393,6 @@ class TeamAgent(BaseAgent):
 
         for member in all_members:
             if member.member_name == leader_member_name:
-                continue
-            if member.status == MemberStatus.SHUTDOWN.value:
                 continue
             await self._team_backend.db.update_member_status(
                 member.member_name, self._team_name(), MemberStatus.RESTARTING.value,

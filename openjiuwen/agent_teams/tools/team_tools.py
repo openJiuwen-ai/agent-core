@@ -912,7 +912,9 @@ class SendMessageTool(TeamTool):
         })
 
     async def _send(self, to: str, content: str, summary: str) -> ToolOutput:
-        if self._team:
+        # "user" is the pseudo-member representing the human caller; skip
+        # roster validation so teammates can reply through the same tool.
+        if self._team and to != "user":
             member = await self._team.get_member(to)
             if not member:
                 return ToolOutput(success=False, error=f"Member '{to}' not found")
