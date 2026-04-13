@@ -114,7 +114,8 @@ STRINGS: dict[str, str] = {
 
     # ===== send_message ========================================================
     # send_message._desc lives in descs/en/send_message.md
-    "send_message.to": 'Recipient: member_name for point-to-point (e.g. "backend-dev-1"), '
+    "send_message.to": 'Recipient: member_name for point-to-point (e.g. "backend-dev-1"); '
+                       '"user" (teammates only, to reply to the user); '
                        '"*" for broadcast',
     "send_message.content": "Message content with clear action guidance or information",
     "send_message.summary": "5-10 word summary for message preview and logging",

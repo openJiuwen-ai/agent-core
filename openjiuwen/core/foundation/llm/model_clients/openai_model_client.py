@@ -355,6 +355,11 @@ class OpenAIModelClient(BaseModelClient):
                 is_stream=True)
 
         except Exception as e:
+            # Many stream-layer exceptions (httpx.RemoteProtocolError,
+            # APIConnectionError wrappers, asyncio.CancelledError) return an
+            # empty str(), which leaves the error log unactionable. Always
+            # surface the exception type so the cause is identifiable.
+            error_detail = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
             await trigger(
                 LLMCallEvents.LLM_CALL_ERROR,
                 model_name=params.get("model"),
@@ -372,11 +377,11 @@ class OpenAIModelClient(BaseModelClient):
                 top_p=params.get("top_p"),
                 max_tokens=params.get("max_tokens"),
                 is_stream=True,
-                exception=str(e)
+                exception=error_detail
             )
             raise build_error(
                 StatusCode.MODEL_CALL_FAILED,
-                error_msg=f"openAI API async stream error: {str(e)}"
+                error_msg=f"openAI API async stream error: {error_detail}"
             ) from e
         finally:
             if async_client is not None:

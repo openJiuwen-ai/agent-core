@@ -81,7 +81,7 @@ STRINGS: dict[str, str] = {
 
     # ===== send_message ========================================================
     # send_message._desc lives in descs/cn/send_message.md
-    "send_message.to": '收件人：填 member_name（如 "backend-dev-1"）发送点对点消息，填 "*" 广播给所有成员',
+    "send_message.to": '收件人：填 member_name（如 "backend-dev-1"）发送点对点消息；填 "user"（仅 teammate 用于回复用户）；填 "*" 广播给所有成员',
     "send_message.content": "消息内容，应包含明确的行动指引或信息",
     "send_message.summary": "5-10 词摘要，用于消息预览和日志",
 

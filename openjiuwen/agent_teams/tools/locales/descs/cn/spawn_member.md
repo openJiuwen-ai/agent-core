@@ -7,4 +7,4 @@
 | **desc** | 长期角色定义：写清专业背景、核心专长、优先认领的任务范围，以及不负责的边界 |
 | **prompt** | 启动时的首条指令：说明首次启动后的优先级、约束或协作要求，不重复通用工作流 |
 
-必须先调用 build_team 组建团队，才能调用 spawn_member。调用顺序：build_team → task_manager → spawn_member → send_message。spawn_member 只创建成员记录（状态为 UNSTARTED），首次调用 send_message 时系统会自动拉起所有未启动成员。成员完成后调用 shutdown_member 关闭。若 member_name 已存在，创建会失败，请使用不冲突的名称。desc 用于定义成员的长期专业定位；prompt 用于指定成员启动时收到的首条指令。不要把 prompt 写成"开始工作""查看任务列表"这类空泛启动语句，应写明该成员启动后优先关注什么。
+必须先调用 build_team 组建团队，才能调用 spawn_member。调用顺序：build_team → create_task → spawn_member → send_message。spawn_member 只创建成员记录（状态为 UNSTARTED），首次调用 send_message 时系统会自动拉起所有未启动成员。成员完成后调用 shutdown_member 关闭。若 member_name 已存在，创建会失败，请使用不冲突的名称。desc 用于定义成员的长期专业定位；prompt 用于指定成员启动时收到的首条指令。不要把 prompt 写成"开始工作""查看任务列表"这类空泛启动语句，应写明该成员启动后优先关注什么。

@@ -630,33 +630,6 @@ class WorktreeManager:
 
     # -- Internal helpers -----------------------------------------------------
 
-    def _resolve_target_path(self, slug: str) -> str:
-        """Compute the worktree filesystem path for ``slug``.
-
-        Reads the agent workspace from the current ContextVar (set by
-        ``DeepAgent._ensure_initialized``).  Worktrees live under the
-        owning DeepAgent's workspace, not the source git repo.
-
-        Args:
-            slug: Validated worktree slug.
-
-        Returns:
-            Absolute path to the worktree directory.
-
-        Raises:
-            RuntimeError: If the agent workspace is not set in the
-                current context.  Worktree creation requires a
-                workspace to be configured on the DeepAgent.
-        """
-        workspace = get_workspace()
-        if workspace is None:
-            raise RuntimeError(
-                "Cannot resolve worktree path: DeepAgent workspace is not set. "
-                "Worktrees must be created from an agent that has a workspace "
-                "configured (init_cwd was called with workspace=...)."
-            )
-        return worktree_path_for(workspace, slug)
-
     @staticmethod
     def _resolve_target_path(slug: str) -> str:
         """Compute the worktree filesystem path for ``slug``.
