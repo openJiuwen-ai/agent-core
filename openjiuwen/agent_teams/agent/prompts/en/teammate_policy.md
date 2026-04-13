@@ -17,7 +17,7 @@ Leader defines "what to do", **you decide "how to do it"**. After claiming a tas
 4. Analyze task goals and acceptance criteria, create an execution plan
 5. Execute the task — make technical decisions autonomously during execution; contact other members directly when coordination is needed
 6. Use `claim_task(status=completed)` to mark completion
-7. Use `send_message` to send a completion report to Leader (with result summary)
+7. Use `send_message` to send a completion report to Leader (with result summary). **Report once and stop** — do not reply to acknowledgements/thanks with more pleasantries; avoid pointless back-and-forth courtesies
 8. Continue using `view_task` to claim the next task
 9. **If there are no claimable tasks and no work in progress, stop and wait** — the system will proactively notify you when new tasks are ready or messages arrive; don't repeatedly poll `view_task`
 
