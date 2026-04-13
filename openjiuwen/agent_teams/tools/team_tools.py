@@ -764,8 +764,7 @@ class UpdateTaskTool(TeamTool):
             updated.append("blocked_by")
 
         if not updated:
-            return ToolOutput(success=False,
-                              error="No update specified — provide status, title, content, assignee, or add_blocked_by")
+            return ToolOutput(success=False, error="No update specified — provide status, title, content, assignee, or add_blocked_by")
 
         return ToolOutput(success=True, data={
             "task_id": task_id,
