@@ -241,9 +241,6 @@ def create_code_agent(
         resolved_language, DEFAULT_CODE_AGENT_SYSTEM_PROMPT["cn"]
     )
 
-    # Full override rule: if user passes tools explicitly, do not inject defaults.
-    final_tools = tools if tools is not None else [build_tool_card("code", "CodeTool", resolved_language)]
-
     # Plan-mode composition now belongs to code_agent (not deep_agent).
     effective_subagents = _inject_builtin_plan_agents(
         list(subagents or []),
@@ -264,7 +261,7 @@ def create_code_agent(
         model=model,
         card=final_card,
         system_prompt=final_prompt,
-        tools=final_tools,
+        tools=tools,
         mcps=mcps,
         subagents=effective_subagents,
         rails=final_rails,

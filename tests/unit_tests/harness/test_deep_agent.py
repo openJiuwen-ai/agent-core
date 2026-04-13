@@ -780,7 +780,6 @@ def test_create_code_agent_injects_default_code_tool_and_fs_rail() -> None:
 
     assert isinstance(agent, DeepAgent)
     assert agent.card.name == "code_agent"
-    assert agent.ability_manager.get("code") is not None
     assert any(isinstance(rail, FileSystemRail) for rail in agent._pending_rails)
 
 
