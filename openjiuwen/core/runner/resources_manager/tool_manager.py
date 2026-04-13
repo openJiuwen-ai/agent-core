@@ -108,8 +108,10 @@ class ToolMgr:
             if client is None or not isinstance(client, McpClient):
                 raise ValueError(f"Unsupported MCP client type: {config.client_type}")
             return client
-        except Exception as e:
+        except ValueError as e:
             raise ValueError(f"Unsupported MCP client type: {config.client_type}") from e
+        except Exception as e:
+            raise e
 
     def get_mcp_server_ids(self, server_name: str):
         return self._mcp_server_name_to_ids.get(server_name, [])
