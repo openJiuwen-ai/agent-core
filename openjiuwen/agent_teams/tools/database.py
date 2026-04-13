@@ -1471,7 +1471,10 @@ class TeamDatabase:
                         to_member_name=to_member_name,
                         content=content,
                         timestamp=self.get_current_time(),
-                        broadcast=broadcast
+                        broadcast=broadcast,
+                        # Broadcast rows must leave is_read NULL — per-member
+                        # read state lives in MessageReadStatus instead.
+                        is_read=None if broadcast else False,
                     )
                     session.add(message)
                     await session.commit()
@@ -1637,17 +1640,34 @@ class TeamDatabase:
                 team_logger.error(f"Message {message_id} not found")
                 return False
 
-            # Verify member exists
-            result = await session.execute(
-                select(TeamMember).where(TeamMember.member_name == member_name,
-                                         TeamMember.team_name == message.team_name)
-            )
-            member = result.scalar_one_or_none()
-            if not member:
-                team_logger.error(f"Member {member_name} not found")
-                return False
+            # "user" is the pseudo-member representing the human caller and
+            # has no row in TeamMember. Skip the existence check for it on
+            # direct messages so the leader can mark a teammate→user reply
+            # as read on the user's behalf. Broadcasts to "user" are
+            # nonsensical and rejected.
+            if member_name == "user":
+                if message.broadcast:
+                    team_logger.error(
+                        f"'user' pseudo-member cannot read broadcast message {message_id}"
+                    )
+                    return False
+            else:
+                result = await session.execute(
+                    select(TeamMember).where(TeamMember.member_name == member_name,
+                                             TeamMember.team_name == message.team_name)
+                )
+                member = result.scalar_one_or_none()
+                if not member:
+                    team_logger.error(f"Member {member_name} not found")
+                    return False
 
             if message.broadcast:
+                # ``read_at`` is a high-water mark: get_broadcast_messages
+                # treats a row as unread iff ``timestamp > read_at``. The
+                # update must be monotonic — overwriting unconditionally
+                # would regress the marker if an older broadcast is acked
+                # after a newer one, silently re-surfacing already-read
+                # broadcasts in the unread queue.
                 read_result = await session.execute(
                     select(read_status_model).where(
                         read_status_model.member_name == member_name,
@@ -1662,7 +1682,7 @@ class TeamDatabase:
                         read_at=message.timestamp,
                     )
                     session.add(read_status)
-                else:
+                elif read_status.read_at is None or message.timestamp > read_status.read_at:
                     read_status.read_at = message.timestamp
             else:
                 message.is_read = True

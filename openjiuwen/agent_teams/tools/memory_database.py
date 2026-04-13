@@ -99,7 +99,12 @@ class _MemTaskDep:
 
 
 class _MemMessage:
-    """Plain message record."""
+    """Plain message record.
+
+    ``is_read`` only applies to direct (non-broadcast) messages. Broadcast
+    rows leave it as ``None``; per-recipient read state lives in
+    ``_MemReadStatus`` (high-water mark by timestamp).
+    """
 
     def __init__(
         self,
@@ -111,7 +116,7 @@ class _MemMessage:
         timestamp: int,
         broadcast: bool,
         to_member_name: Optional[str] = None,
-        is_read: bool = False,
+        is_read: Optional[bool] = False,
     ) -> None:
         self.message_id = message_id
         self.team_name = team_name
@@ -676,6 +681,9 @@ class InMemoryTeamDatabase:
                     to_member_name=to_member_name,
                     timestamp=self.get_current_time(),
                     broadcast=broadcast,
+                    # Broadcast rows leave is_read NULL — per-member read
+                    # state lives in _MemReadStatus instead.
+                    is_read=None if broadcast else False,
                 )
             )
             team_logger.info(f"Message {message_id} created")

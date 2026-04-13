@@ -92,8 +92,12 @@ class TeamMessageBase(SQLModel):
     content: str = Field(nullable=False)
     timestamp: int = Field(nullable=False, index=True)
     broadcast: bool = Field(nullable=False, index=True)
-    # is_read only for non-broadcast messages, indicates if the recipient has read the message
-    is_read: bool = Field(default=False, nullable=True, index=True)
+    # Read state for direct (point-to-point) messages only.  Broadcast rows
+    # carry NULL here because per-recipient read state for broadcasts lives
+    # in MessageReadStatus (high-water mark by timestamp); a single bool on
+    # the message row cannot represent "read by A, unread by B".  Writers
+    # must enforce this — see ``create_message``.
+    is_read: Optional[bool] = Field(default=False, nullable=True, index=True)
 
 
 class MessageReadStatusBase(SQLModel):

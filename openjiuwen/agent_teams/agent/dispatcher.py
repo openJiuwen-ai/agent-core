@@ -15,7 +15,7 @@ from openjiuwen.agent_teams.agent.coordinator import (
     InnerEventMessage,
     InnerEventType,
 )
-from openjiuwen.agent_teams.schema.events import TeamEvent
+from openjiuwen.agent_teams.schema.events import MessageEvent, TeamEvent
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
 
@@ -160,6 +160,11 @@ class EventDispatcher:
             return
 
         if event_type in (TeamEvent.MESSAGE, TeamEvent.BROADCAST) and host.message_manager:
+            # Leader auto-acks teammate→user replies. The "user" pseudo-member
+            # has no agent process polling its mailbox, so without this the
+            # message would stay unread forever and re-fire dispatcher wakes.
+            if host.role == TeamRole.LEADER and event_type == TeamEvent.MESSAGE:
+                await self._ack_user_bound_message(event)
             await host.resume_polls()
             await self._process_unread_messages(member_name)
             return
@@ -359,6 +364,27 @@ class EventDispatcher:
                 else:
                     await host.follow_up(text)
                 await host.message_manager.mark_message_read(msg.message_id, member_name)
+
+    async def _ack_user_bound_message(self, event: CoordinationEvent) -> None:
+        """Mark a teammate→user direct message as read on the user's behalf.
+
+        The leader observes every direct-message event on the team topic;
+        when the recipient is the ``user`` pseudo-member (no real polling
+        process), the leader flips ``is_read`` so the message does not
+        accumulate as unread and keep waking the dispatcher.
+        """
+        payload: MessageEvent = event.get_payload()
+        if payload.to_member_name != "user":
+            return
+        mm = self._host.message_manager
+        if mm is None:
+            return
+        await mm.mark_message_read(payload.message_id, "user")
+        team_logger.debug(
+            "leader auto-acked user-bound message {} from {}",
+            payload.message_id,
+            payload.from_member_name,
+        )
 
     async def _read_all_unread(self, member_name: str) -> list:
         """Read all unread messages (direct + broadcast).
