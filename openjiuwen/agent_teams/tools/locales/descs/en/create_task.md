@@ -23,4 +23,8 @@ All tasks start as `pending` (or `blocked` if they have unresolved dependencies)
 - Describe goals, not steps: content should contain goals, acceptance criteria, and constraints
 - Single owner: each task should be one independently deliverable outcome
 - Use depends_on / depended_by to build the dependency DAG
-- Check view_task first to avoid creating duplicate tasks
+
+## Required Workflow
+
+1. **Before creating**: you MUST call `view_task` first to inspect the current task board — prevents duplicates, surfaces missing dependencies, and reveals reusable task IDs
+2. **After creating, before notifying members**: call `view_task` again to verify the write landed correctly (titles, dependencies, assignees). Only after this re-check should you `send_message` the affected members, so you never broadcast a wrong task
