@@ -53,8 +53,9 @@ class TeamWorkspaceConfig(BaseModel):
     """Enable shared workspace for the team."""
 
     root_path: str | None = None
-    """Workspace root directory. When None, resolved at runtime to
-    ``~/.openjiuwen/.agent_teams/{team_name}/team-workspace/``."""
+    """Workspace root directory.  When None, resolved at runtime to
+    ``{team_home(team_name)}/team-workspace/`` — see
+    ``openjiuwen.agent_teams.paths``."""
 
     artifact_dirs: list[str] = Field(
         default=["artifacts/code", "artifacts/docs", "artifacts/reports"],

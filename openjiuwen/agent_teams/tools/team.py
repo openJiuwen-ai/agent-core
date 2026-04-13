@@ -6,6 +6,9 @@
 This module implements Agent Team which manages team members, tasks, and messages.
 """
 
+import asyncio
+import shutil
+from pathlib import Path
 from typing import (
     Awaitable,
     Callable,
@@ -98,7 +101,50 @@ class TeamBackend:
         self.task_manager = TeamTaskManager(self.team_name, member_name, self.db, messager)
         self.message_manager = TeamMessageManager(self.team_name, member_name, self.db, messager)
 
+        # Filesystem paths to remove when the team is cleaned.
+        # Populated by the hosting TeamAgent once the actual (possibly
+        # user-customized) workspace / member-workspace directories are
+        # resolved, so ``clean_team`` wipes the real locations instead of
+        # only the default ones.
+        self._cleanup_paths: set[str] = set()
+
         team_logger.info(f"AgentTeam manager initialized for {team_name}, member={member_name}")
+
+    def register_cleanup_path(self, path: Optional[str]) -> None:
+        """Register a filesystem path to remove on ``clean_team``.
+
+        Accepts absolute directory paths. No-ops for empty or None input.
+        Idempotent: the same path is only stored once.
+        """
+        if not path:
+            return
+        self._cleanup_paths.add(str(Path(path).expanduser()))
+
+    async def _remove_cleanup_paths(self) -> None:
+        """Remove every registered cleanup path with ``shutil.rmtree``.
+
+        Sorts paths by depth (deepest first) so that a parent directory
+        and its descendants both get removed cleanly even if the caller
+        registered overlapping entries.  Failures are logged and do not
+        abort the overall cleanup.
+        """
+        if not self._cleanup_paths:
+            return
+
+        ordered = sorted(
+            self._cleanup_paths,
+            key=lambda p: len(Path(p).parts),
+            reverse=True,
+        )
+        for raw in ordered:
+            target = Path(raw)
+            if not target.is_dir():
+                continue
+            try:
+                await asyncio.to_thread(shutil.rmtree, str(target))
+                team_logger.info(f"Removed team filesystem path: {target}")
+            except Exception as e:
+                team_logger.error(f"Failed to remove path {target}: {e}")
 
     async def spawn_member(
         self, member_name: str, display_name: str, agent_card: AgentCard, *,
@@ -498,6 +544,15 @@ class TeamBackend:
 
         # Delete team from database
         await self.db.delete_team(self.team_name)
+
+        # Remove registered filesystem paths for the team.  TeamAgent
+        # registers the actual resolved locations of the team shared
+        # workspace, member workspaces, and the team-named parent
+        # directory via ``register_cleanup_path``.  ``shutil.rmtree``
+        # does not follow symlinks, so independent member workspaces
+        # linked in from ``~/.openjiuwen/{member_name}_workspace/`` are
+        # preserved.
+        await self._remove_cleanup_paths()
 
         # Publish team cleaned event
         try:

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from pathlib import Path
 from typing import (
     Any,
     Dict,
@@ -21,6 +20,10 @@ from openjiuwen.agent_teams.agent.coordinator import (
 from openjiuwen.agent_teams.agent.member import TeamMember
 from openjiuwen.agent_teams.agent.policy import role_policy
 from openjiuwen.agent_teams.agent.team_rail import TeamRail
+from openjiuwen.agent_teams.paths import (
+    independent_member_workspace,
+    team_home,
+)
 from openjiuwen.agent_teams.messager import (
     create_messager,
     Messager,
@@ -330,9 +333,7 @@ class TeamAgent(BaseAgent):
 
         ws_config = spec.workspace
         team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
-        ws_path = ws_config.root_path or str(
-            Path.home() / ".openjiuwen" / ".agent_teams" / team_name / "team-workspace"
-        )
+        ws_path = ws_config.root_path or str(team_home(team_name) / "team-workspace")
         os.makedirs(ws_path, exist_ok=True)
         team_logger.info("Team workspace directory ensured at {}", ws_path)
         return TeamWorkspaceManager(
@@ -370,21 +371,27 @@ class TeamAgent(BaseAgent):
         member_name = ctx.member_name
 
         # Resolve workspace: fallback to leader's, adjust stable_base path.
-        # ~/.openjiuwen/.agent_teams/{team_name}/workspaces/{member_name}_workspace/
+        # Stable workspace lives under
+        # ``team_home(team_name)/workspaces/{member_name}_workspace``.
         #
         # If the member is a predefined independent DeepAgent whose workspace
-        # already exists at ~/.openjiuwen/{member_name}_workspace/, create a
-        # symlink instead of a new directory so the agent keeps its identity.
+        # already exists at ``independent_member_workspace(member_name)``,
+        # create a symlink instead of a new directory so the agent keeps
+        # its identity.
         ws_spec = agent_spec.workspace or spec.agents.get("leader", agent_spec).workspace
         if ws_spec and ws_spec.stable_base:
             team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
-            base = Path.home() / ".openjiuwen" / ".agent_teams" / team_name / "workspaces"
+            base = team_home(team_name) / "workspaces"
             team_ws_path = base / f"{member_name}_workspace"
-            independent_ws = Path.home() / ".openjiuwen" / f"{member_name}_workspace"
+            independent_ws = independent_member_workspace(member_name)
             if independent_ws.is_dir() and not team_ws_path.exists():
                 base.mkdir(parents=True, exist_ok=True)
                 os.symlink(str(independent_ws), str(team_ws_path), target_is_directory=True)
             ws_spec = ws_spec.model_copy(update={"root_path": str(team_ws_path)})
+
+        # Record the resolved workspace path so clean_team can remove it.
+        if ws_spec and ws_spec.root_path and self._team_backend:
+            self._team_backend.register_cleanup_path(ws_spec.root_path)
 
         # Resolve model: member_model (allocated by leader) takes priority.
         model_config = ctx.member_model or agent_spec.model
@@ -528,6 +535,19 @@ class TeamAgent(BaseAgent):
         self._team_backend = agent_team
         self._task_manager = agent_team.task_manager
         self._message_manager = agent_team.message_manager
+
+        # Record the team shared workspace path (possibly user-customized)
+        # so clean_team removes the real directory, not the default one.
+        if self._workspace_manager:
+            agent_team.register_cleanup_path(self._workspace_manager.workspace_path)
+
+        # Record the team-named parent directory (``team_home``) that
+        # this module uses as the root for ``stable_base`` member
+        # workspaces (see ``_setup_agent``) and the default team shared
+        # workspace (see ``_create_workspace_manager``).  Registering it
+        # also catches teammate workspace dirs the leader never saw
+        # (teammates run in separate processes).
+        agent_team.register_cleanup_path(str(team_home(team_name)))
 
         exclude = {"spawn_member"} if spec.predefined_members else None
         lang = (ctx.team_spec.metadata.get("lang") if ctx.team_spec else None) or "cn"

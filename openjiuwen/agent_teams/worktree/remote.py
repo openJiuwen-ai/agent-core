@@ -16,6 +16,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from openjiuwen.agent_teams.paths import AGENT_TEAMS_HOME
 from openjiuwen.agent_teams.worktree.git import (
     _run_git,
     fetch_ref,
@@ -305,8 +306,9 @@ class WorktreeRemoteHandler:
     async def _ensure_repo(self, repo_url: str) -> str:
         """Clone the repo if not already present on this node.
 
-        Uses a content-addressable directory under ~/.agent_teams/remote_repos/
-        so the same URL always maps to the same local path.
+        Uses a content-addressable directory under
+        ``{AGENT_TEAMS_HOME}/remote_repos/`` so the same URL always maps
+        to the same local path.
 
         Args:
             repo_url: Git remote URL to clone.
@@ -318,12 +320,7 @@ class WorktreeRemoteHandler:
             return self._cloned_repos[repo_url]
 
         repo_hash = hashlib.sha256(repo_url.encode()).hexdigest()[:12]
-        local_path = os.path.join(
-            os.path.expanduser("~"),
-            ".agent_teams",
-            "remote_repos",
-            repo_hash,
-        )
+        local_path = str(AGENT_TEAMS_HOME / "remote_repos" / repo_hash)
 
         if not os.path.isdir(os.path.join(local_path, ".git")):
             os.makedirs(os.path.dirname(local_path), exist_ok=True)
