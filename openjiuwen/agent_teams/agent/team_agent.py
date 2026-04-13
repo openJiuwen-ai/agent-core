@@ -641,15 +641,7 @@ class TeamAgent(BaseAgent):
                 last_result = chunk
             return last_result
         finally:
-            if self.lifecycle == "persistent":
-                await self._pause_coordination()
-                if self._team_member:
-                    await self._team_member.update_status(MemberStatus.READY)
-            else:
-                await self._stop_coordination()
-                if self._team_member:
-                    await self._team_member.update_status(MemberStatus.SHUTDOWN)
-            self._stream_queue = None
+            await self._finalize_round()
 
     async def stream(self, inputs, session=None, stream_modes=None):
         """Stream via CoordinatorLoop-driven rounds.
@@ -669,15 +661,32 @@ class TeamAgent(BaseAgent):
                     break
                 yield chunk
         finally:
-            if self.lifecycle == "persistent":
-                await self._pause_coordination()
-                if self._team_member:
-                    await self._team_member.update_status(MemberStatus.READY)
-            else:
-                await self._stop_coordination()
-                if self._team_member:
-                    await self._team_member.update_status(MemberStatus.SHUTDOWN)
-            self._stream_queue = None
+            await self._finalize_round()
+
+    async def _finalize_round(self) -> None:
+        """Tear down a finished invoke/stream round.
+
+        Routes by (lifecycle, shutdown_requested):
+        * shutdown requested → fully stop coordination and transition the
+          member to SHUTDOWN, regardless of lifecycle. SHUTDOWN_REQUESTED
+          can only legally transition to SHUTDOWN/ERROR, so the persistent
+          path must NOT push the member back to READY here.
+        * persistent + no shutdown → pause coordination, mark READY.
+        * temporary → fully stop coordination, mark SHUTDOWN.
+        """
+        shutdown_requested = (
+            self._team_member is not None
+            and await self._team_member.status() == MemberStatus.SHUTDOWN_REQUESTED
+        )
+        if self.lifecycle == "persistent" and not shutdown_requested:
+            await self._pause_coordination()
+            if self._team_member:
+                await self._team_member.update_status(MemberStatus.READY)
+        else:
+            await self._stop_coordination()
+            if self._team_member:
+                await self._team_member.update_status(MemberStatus.SHUTDOWN)
+        self._stream_queue = None
 
     async def interact(self, message: str) -> None:
         """Inject user input into CoordinatorLoop as USER_INPUT event."""
@@ -729,14 +738,31 @@ class TeamAgent(BaseAgent):
             await self._team_backend.db.initialize()
 
         # Leader-startup recovery: if the team is already persisted in the
-        # DB (e.g. a previous run with the same team_name), re-launch every
-        # teammate from DB state regardless of their last status. Any prior
-        # processes are assumed dead. On a fresh team build, get_team()
-        # returns None and this is a no-op until build_team runs.
+        # DB (e.g. a previous run with the same team_name), decide between
+        # finalizing a stalled cleanup and re-launching all teammates.
+        # On a fresh team build, get_team() returns None and this whole
+        # block is a no-op until build_team runs.
         if self.role == TeamRole.LEADER and self._team_backend:
             existing = await self._team_backend.db.get_team(self._team_backend.team_name)
             if existing is not None:
-                await self.recover_team()
+                non_leader_members = await self._team_backend.list_members()
+                # Stale shutdown: every teammate is already SHUTDOWN, which
+                # only happens when a previous run finished shutdown_member
+                # for everyone but never reached clean_team. Finalize the
+                # cleanup ourselves so the leader doesn't restart corpses
+                # and so the same team_name can be re-built cleanly.
+                if non_leader_members and all(
+                    m.status == MemberStatus.SHUTDOWN.value for m in non_leader_members
+                ):
+                    team_logger.warning(
+                        "[{}] team {} found with all teammates in SHUTDOWN — "
+                        "finalizing prior incomplete cleanup",
+                        self._member_name() or "?",
+                        self._team_backend.team_name,
+                    )
+                    await self._team_backend.clean_team()
+                else:
+                    await self.recover_team()
 
         # Async workspace initialization (git init + artifact dirs), idempotent.
         if self._workspace_manager and not self._workspace_initialized:
@@ -925,7 +951,15 @@ class TeamAgent(BaseAgent):
         await self._update_status(MemberStatus.BUSY)
         try:
             await self._execute_round(message)
-            await self._update_status(MemberStatus.READY)
+            # If a shutdown request landed mid-round, leave the status in
+            # SHUTDOWN_REQUESTED — the state machine forbids
+            # SHUTDOWN_REQUESTED → READY, and ``_finalize_round`` will
+            # transition it to SHUTDOWN once the round loop unwinds.
+            if (
+                self._team_member is None
+                or await self._team_member.status() != MemberStatus.SHUTDOWN_REQUESTED
+            ):
+                await self._update_status(MemberStatus.READY)
         except BaseException as e:
             team_logger.error("Failed to execute deep agent, {}", e, exc_info=True)
             await self._update_status(MemberStatus.ERROR)
