@@ -410,6 +410,7 @@ class DeepAgent(BaseAgent):
         )
         if cfg.context_engine_config is not None:
             react_config.context_engine_config = cfg.context_engine_config
+        react_config.workspace = cfg.workspace
 
         language = resolve_language(cfg.language)
         mode = resolve_mode(cfg.prompt_mode)

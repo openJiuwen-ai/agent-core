@@ -31,37 +31,43 @@ class MicroCompactProcessor(ContextProcessor):
     def config(self) -> MicroCompactProcessorConfig:
         return self._config
 
-    async def trigger_get_context_window(
+    async def trigger_add_messages(
         self,
         context: ModelContext,
-        context_window: ContextWindow,
+        messages_to_add: List[BaseMessage],
         **kwargs: Any,
     ) -> bool:
-        candidates = self._collect_compactable_indices(context_window.context_messages)
+        all_messages = context.get_messages() + messages_to_add
+        candidates = self._collect_compactable_indices(all_messages)
         return len(candidates) >= self.config.trigger_threshold
 
-    async def on_get_context_window(
+    async def on_add_messages(
         self,
         context: ModelContext,
-        context_window: ContextWindow,
+        messages_to_add: List[BaseMessage],
         **kwargs: Any,
-    ) -> Tuple[ContextEvent | None, ContextWindow]:
-        indices_to_clear = self._collect_indices_to_clear(context_window.context_messages)
-        if not indices_to_clear:
-            return None, context_window
+    ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
+        old_messages = context.get_messages()
+        all_messages = old_messages + messages_to_add
+        indices_to_clear = self._collect_indices_to_clear(all_messages)
 
-        updated_messages = list(context_window.context_messages)
+        if not indices_to_clear:
+            return None, messages_to_add
+
+        modified_indices: List[int] = []
         for index in indices_to_clear:
-            message = updated_messages[index]
+            if index >= len(old_messages):
+                continue
+            message = old_messages[index]
             if not isinstance(message, ToolMessage):
                 continue
-            updated_messages[index] = message.model_copy(update={"content": self.config.cleared_marker})
+            if message.content == self.config.cleared_marker:
+                continue
+            old_messages[index] = message.model_copy(update={"content": self.config.cleared_marker})
+            modified_indices.append(index)
 
-        context_window.context_messages = updated_messages
-        return ContextEvent(
-            event_type=self.processor_type(),
-            messages_to_modify=indices_to_clear,
-        ), context_window
+        context.set_messages(old_messages)
+        return ContextEvent(event_type=self.processor_type(), messages_to_modify=modified_indices), messages_to_add
 
     def _collect_indices_to_clear(self, messages: List[BaseMessage]) -> List[int]:
         grouped: dict[str, List[int]] = {}
@@ -113,7 +119,7 @@ class MicroCompactProcessor(ContextProcessor):
         return None
 
     def load_state(self, state: Dict[str, Any]) -> None:
-        return
+        pass
 
     def save_state(self) -> Dict[str, Any]:
         return {}

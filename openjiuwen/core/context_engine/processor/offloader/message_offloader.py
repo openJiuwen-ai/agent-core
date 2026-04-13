@@ -15,6 +15,7 @@ from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import BaseMessage, AssistantMessage, ToolMessage
+from openjiuwen.core.sys_operation import SysOperation
 
 
 class MessageOffloaderConfig(BaseModel):
@@ -79,7 +80,7 @@ class MessageOffloader(ContextProcessor):
     ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
         context_messages = context.get_messages() + messages_to_add
         context_size = len(context)
-        event, processed_messages = await self._offload_large_messages(context_messages, context)
+        event, processed_messages = await self._offload_large_messages(context_messages, context, **kwargs)
         context_messages, messages_to_add = (
             processed_messages[:context_size],
             processed_messages[context_size:]
@@ -123,7 +124,8 @@ class MessageOffloader(ContextProcessor):
     async def _offload_large_messages(
             self,
             messages: List[BaseMessage],
-            context: ModelContext
+            context: ModelContext,
+            **kwargs
     ) -> Tuple[ContextEvent, List[BaseMessage]]:
         processed_messages = messages[:]
         offload_range = self._get_offload_range(messages)
@@ -133,7 +135,7 @@ class MessageOffloader(ContextProcessor):
             msg = processed_messages[idx]
             if not self._should_offload_message(msg, processed_messages, context):
                 continue
-            offload_msg = await self._offload_message(msg, context)
+            offload_msg = await self._offload_message(msg, context, **kwargs)
             processed_messages = ContextUtils.replace_messages(
                 processed_messages, [offload_msg], idx, idx
             )
@@ -141,7 +143,12 @@ class MessageOffloader(ContextProcessor):
 
         return event, processed_messages
 
-    async def _offload_message(self, message: BaseMessage, context: ModelContext) -> BaseMessage:
+    async def _offload_message(
+            self,
+            message: BaseMessage,
+            context: ModelContext,
+            **kwargs
+    ) -> BaseMessage:
         trimmed_content = message.content[:self.config.trim_size] + OMIT_STRING
         extra_fields = message.model_dump()
         extra_fields.pop("role", None)
@@ -151,7 +158,8 @@ class MessageOffloader(ContextProcessor):
             content=trimmed_content,
             messages=[message],
             context=context,
-            **extra_fields
+            **extra_fields,
+            **kwargs
         )
         return offload_message
 
