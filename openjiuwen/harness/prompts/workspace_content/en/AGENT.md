@@ -49,12 +49,6 @@ Skills provide your specialized capabilities. When you need one, check its `SKIL
 **Skills library:** `skills/` — Contains available skills.
 **Sub-agents:** `agents/` — Sub-agent configurations.
 
-## Output File Placement
-Generated artifacts (code files, documents, data files, etc.) produced during user task execution must follow these placement rules:
-- **General Artifacts**: Non-skill-related artifacts must be placed in an appropriate location within the working directory, organized according to file purpose and project structure for unified user management and access
-- **Skill Artifacts**: Artifacts from skill execution must be placed in the skill's dedicated directory `skills/{skill_name}/` to ensure independence and maintainability
-Strictly follow these rules to avoid scattering artifacts in arbitrary directories.
-
 ## Task Management
 Track your tasks in `todo/`. Keep it organized and actionable.
 
