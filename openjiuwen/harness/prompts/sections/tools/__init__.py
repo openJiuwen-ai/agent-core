@@ -121,6 +121,7 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     VisualQuestionAnsweringMetadataProvider(),
     VideoUnderstandingMetadataProvider(),
     TaskMetadataProvider(),
+    LspToolMetadataProvider(),
     FreeSearchMetadataProvider(),
     PaidSearchMetadataProvider(),
     FetchWebpageMetadataProvider(),

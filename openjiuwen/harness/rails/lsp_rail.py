@@ -97,11 +97,12 @@ class LspRail(DeepAgentRail):
             effective_cwd = self.options.cwd
         elif self.workspace:
             try:
-                effective_cwd = str(self.workspace.root)
+                effective_cwd = str(self.workspace.root_path)
             except Exception as exc:
                 logger.warning("LspRail: failed to get workspace root: %s", exc)
 
         # 如果 options 中没有 cwd，则构建一个
+        import asyncio
         import copy
         opts = self.options
         if opts is None:
@@ -114,17 +115,34 @@ class LspRail(DeepAgentRail):
         # 初始化 LSP 子系统
         try:
             import asyncio
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._async_init_lsp(opts))
-        except RuntimeError:
-            logger.warning("LspRail: no running event loop, cannot initialize LSP")
+            from openjiuwen.harness.lsp.core.manager import LSPServerManager
+
+            if LSPServerManager.get_instance() is not None:
+                logger.info("LspRail: LSP subsystem already initialized")
+            else:
+                async def _init_with_timeout():
+                    try:
+                        await asyncio.wait_for(self._async_init_lsp(opts), timeout=15.0)
+                    except asyncio.TimeoutError:
+                        logger.warning("LspRail: LSP initialization timed out after 15s")
+                    except Exception as e:
+                        logger.warning("LspRail: LSP initialization failed: %s", e)
+
+                try:
+                    loop = asyncio.get_running_loop()
+                    asyncio.create_task(_init_with_timeout())
+                except RuntimeError:
+                    asyncio.run(_init_with_timeout())
+
+        except Exception as exc:
+            logger.warning("LspRail: failed to initialize LSP subsystem: %s", exc)
 
         # 创建 LspTool 实例（从 config 获取语言设置、sys_operation、workspace 和 agent_id）
         language = getattr(agent, "deep_config", None)
         language = getattr(language, "language", "cn") if language else "cn"
         agent_id = getattr(getattr(agent, "card", None), "id", None)
         sys_op = getattr(agent.deep_config, "sys_operation", None) if agent.deep_config else None
-        workspace_root = self.workspace.root if self.workspace else None
+        workspace_root = self.workspace.root_path if self.workspace else None
         self._lsp_tool = LspTool(
             operation=sys_op,
             language=language,

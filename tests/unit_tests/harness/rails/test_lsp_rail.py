@@ -41,7 +41,7 @@ def _make_deep_config(workspace_root="/workspace", language="cn"):
     cfg = MagicMock()
     cfg.sys_operation = MagicMock()
     cfg.workspace = MagicMock()
-    cfg.workspace.root = workspace_root
+    cfg.workspace.root_path = workspace_root
     cfg.language = language
     return cfg
 
@@ -117,6 +117,16 @@ class TestLspRailInit:
 # ===========================================================================
 
 class TestLspRailInitMethod:
+    @pytest.fixture(autouse=True)
+    def _reset_singleton(self):
+        """Reset LSPServerManager singleton before each test."""
+        from openjiuwen.harness.lsp.core.manager import LSPServerManager
+        LSPServerManager._instance = None
+        LSPServerManager._lock = None
+        yield
+        LSPServerManager._instance = None
+        LSPServerManager._lock = None
+
     def test_registers_tool_instance_in_resource_manager(self):
         rail = LspRail()
         agent = _make_agent()
@@ -201,6 +211,16 @@ class TestLspRailInitMethod:
 # ===========================================================================
 
 class TestLspRailCwdResolution:
+    @pytest.fixture(autouse=True)
+    def _reset_singleton(self):
+        """Reset LSPServerManager singleton before each test."""
+        from openjiuwen.harness.lsp.core.manager import LSPServerManager
+        LSPServerManager._instance = None
+        LSPServerManager._lock = None
+        yield
+        LSPServerManager._instance = None
+        LSPServerManager._lock = None
+
     def _captured_opts(self, rail, agent):
         """Run init() and return the InitializeOptions passed to initialize_lsp."""
         captured = {}
