@@ -9,7 +9,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
 from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
-from openjiuwen.core.foundation.tool.auth.auth import ToolAuthConfig
+from openjiuwen.core.foundation.tool.auth.auth import ToolAuthConfig, ToolAuthResult
 from openjiuwen.core.runner.callback.events import ToolCallEvents
 
 
@@ -42,13 +42,6 @@ class StreamableHttpClient(McpClient):
         self._auth_query_params = resolved_config.auth_query_params
         self._server_id = resolved_config.server_id
         self._auth_provider = None
-        if resolved_config.auth_headers is not None or resolved_config.auth_query_params is not None:
-            from openjiuwen.core.foundation.tool.auth.auth_callback import AuthHeaderAndQueryProvider
-            self._auth_provider = AuthHeaderAndQueryProvider(
-                auth_headers=resolved_config.auth_headers or {},
-                auth_query_params=resolved_config.auth_query_params or {},
-            )
-            logger.info("Using custom header and query authorization for streamable-http client")
 
     @staticmethod
     def _normalize_config(
@@ -98,9 +91,11 @@ class StreamableHttpClient(McpClient):
                     tool_id=self._server_id
                 ),
             )
-            auth_items = [item for item in (auth_result or []) if item is not None]
-            if auth_items:
-                self._auth_provider = auth_items[-1].auth_data.get("auth_provider")
+            if isinstance(auth_result, list):
+                for item in auth_result:
+                    if item and isinstance(item, ToolAuthResult) and item.success:
+                        self._auth_provider = item.auth_data.get("auth_provider")
+                        break
             actual_timeout = timeout if timeout != NO_TIMEOUT else 60.0
             streamable_http_client = getattr(streamable_http_module, "streamablehttp_client", None)
             if streamable_http_client is None:

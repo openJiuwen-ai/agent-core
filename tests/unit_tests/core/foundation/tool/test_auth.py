@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 import httpx
 import pytest
 
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.tool.auth.auth import ToolAuthConfig, ToolAuthResult
 from openjiuwen.core.foundation.tool.auth.auth_callback import (
     AuthStrategyRegistry,
@@ -407,6 +408,44 @@ class TestSseClientAuth:
             assert auth_config.config["auth_headers"] == {"Authorization": "Bearer test-token"}
             assert auth_config.config["auth_query_params"] == {"api_key": "test-key"}
             assert auth_config.tool_type == "test-server"
+    
+    @staticmethod
+    @pytest.mark.skip(reason="cannot operate normally in pipeline")
+    @pytest.mark.asyncio
+    async def test_ssl_auth_missing_cert_raises_exception():
+        """
+        Test when ssl_util raise error, auth flow should fail
+        """
+        with patch('os.getenv') as mock_getenv:
+
+            def mock_getenv_side_effect(key):
+                if key == "SAFE_CERT_DIR":
+                    return None
+
+            mock_getenv.side_effect = mock_getenv_side_effect
+            with patch('openjiuwen.core.foundation.tool.auth.auth_callback.SslUtils.get_ssl_config') as mock_get_ssl:
+                # Mock return
+                mock_get_ssl.return_value = (True, r"tests\unit_tests\core\foundation\tool\test_auth.py")
+
+                # 2. Build AuthConfig
+                auth_config = ToolAuthConfig(
+                    auth_type=AuthType.SSL,
+                    config={
+                        "verify_switch_env": "ANY_DUMMY_VALUE",
+                        "ssl_cert_env": "DUMMY_CERT_ENV"
+                    },
+                    tool_type="test_tool"
+                )
+
+                # 3. Trigger auth flow
+                with pytest.raises(BaseError) as excinfo:
+                    from openjiuwen.core.runner import Runner
+                    framework = Runner.callback_framework
+                    await framework.trigger(
+                        event=ToolCallEvents.TOOL_AUTH,
+                        auth_config=auth_config
+                    )
+                assert "common ssl_context initialization failed" in str(excinfo.value)
 
 
 class TestStreamableHttpClientAuth:

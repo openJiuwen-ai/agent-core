@@ -6,6 +6,7 @@ from unittest.mock import patch, AsyncMock, MagicMock
 import httpx
 import pytest
 
+from openjiuwen.core.foundation.tool.auth.auth import ToolAuthResult
 from openjiuwen.core.foundation.tool.auth.auth_callback import AuthHeaderAndQueryProvider
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.foundation.tool.mcp.client.sse_client import SseClient
@@ -40,7 +41,10 @@ class TestToolValidation:
             
             # Configure mock_trigger return value
             mock_auth_provider = AuthHeaderAndQueryProvider(auth_headers, auth_query_params)
-            mock_trigger.return_value = [None, MagicMock(auth_data={"auth_provider": mock_auth_provider})]
+            mock_trigger.return_value = [
+                None,
+                ToolAuthResult(success=True, auth_data={"auth_provider": mock_auth_provider})
+            ]
             
             # Configure mock_sse_client
             mock_read, mock_write = AsyncMock(), AsyncMock()
@@ -91,7 +95,10 @@ class TestToolValidation:
             
             # Configure mock_trigger return value
             mock_auth_provider = AuthHeaderAndQueryProvider(auth_headers, auth_query_params)
-            mock_trigger.return_value = [None, MagicMock(auth_data={"auth_provider": mock_auth_provider})]
+            mock_trigger.return_value = [
+                None,
+                ToolAuthResult(success=True, auth_data={"auth_provider": mock_auth_provider})
+            ]
             
             # Configure mock_streamable_client
             mock_read, mock_write = AsyncMock(), AsyncMock()

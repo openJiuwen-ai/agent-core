@@ -16,7 +16,7 @@ from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.foundation.tool import Tool
-from openjiuwen.core.foundation.tool.auth.auth import ToolAuthConfig
+from openjiuwen.core.foundation.tool.auth.auth import ToolAuthConfig, ToolAuthResult
 from openjiuwen.core.foundation.tool.base import Input, Output, ToolCard
 from openjiuwen.core.foundation.tool.form_handler.form_handler_manager import FormHandlerManager
 from openjiuwen.core.foundation.tool.service_api.api_param_mapper import APIParamLocation, APIParamMapper
@@ -221,8 +221,12 @@ class RestfulApi(Tool):
                 tool_id=self.card.id,
             ),
         )
-        connector = next(item for item in auth_result
-                         if item is not None).auth_data.get("connector")
+        connector = None
+        if isinstance(auth_result, list):
+            for item in auth_result:
+                if item and isinstance(item, ToolAuthResult) and item.success:
+                    connector = item.auth_data.get("connector")
+                    break
         url = self._url
         path_params = {k: str(v) for k, v in map_results.get(APIParamLocation.PATH).items()}
         if path_params:
