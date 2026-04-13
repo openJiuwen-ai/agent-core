@@ -582,15 +582,16 @@ class TestUpdateTaskTool:
         assert updated.assignee == "dev-1"
 
     @pytest.mark.asyncio
-    async def test_assign_already_assigned(self, agent_team, t, sample_agent_card, db):
-        """Test assigning fails when task already has an assignee"""
-        await db.create_member(
-            member_name="dev-1",
-            team_name="test_team",
-            display_name="Dev",
-            agent_card=sample_agent_card.model_dump_json(),
-            status=MemberStatus.READY,
-        )
+    async def test_assign_reassigns_to_new_member(self, agent_team, t, sample_agent_card, db):
+        """Reassigning a claimed task cancels the old owner and binds the new one."""
+        for member_name in ("dev-1", "dev-2"):
+            await db.create_member(
+                member_name=member_name,
+                team_name="test_team",
+                display_name=member_name,
+                agent_card=sample_agent_card.model_dump_json(),
+                status=MemberStatus.READY,
+            )
         task = await agent_team.task_manager.add(title="Task", content="Content")
         await db.assign_task(task.task_id, "dev-1")
 
@@ -600,8 +601,10 @@ class TestUpdateTaskTool:
             "assignee": "dev-2",
         })
 
-        assert result.success is False
-        assert "already assigned" in result.error
+        assert result.success is True
+        assert "assignee" in result.data["updated_fields"]
+        updated = await agent_team.task_manager.get(task.task_id)
+        assert updated.assignee == "dev-2"
 
     @pytest.mark.asyncio
     async def test_add_dependencies(self, agent_team, t):

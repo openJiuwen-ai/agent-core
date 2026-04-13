@@ -27,7 +27,7 @@ from openjiuwen.agent_teams.schema.team import (
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
-    TeamEvent,
+    MessageEvent,
     ToolApprovalResultEvent,
 )
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
@@ -98,6 +98,7 @@ async def test_wake_feeds_messages_to_agent():
     fake_msg.broadcast = False
     fake_msg.timestamp = 1000
     agent._message_manager = MagicMock()
+    agent._message_manager.mark_message_read = AsyncMock(return_value=True)
     agent._dispatcher._read_all_unread = AsyncMock(
         side_effect=[[fake_msg], []],
     )
@@ -106,10 +107,12 @@ async def test_wake_feeds_messages_to_agent():
 
     await agent._start_coordination(session=None)
 
-    event = EventMessage(
-        event_type=TeamEvent.MESSAGE,
-        payload={},
-    )
+    event = EventMessage.from_event(MessageEvent(
+        team_name="test-team",
+        message_id="msg-1",
+        from_member_name="dev-1",
+        to_member_name="leader-1",
+    ))
     await agent.coordination_loop.enqueue(event)
     await asyncio.sleep(0.1)
 
