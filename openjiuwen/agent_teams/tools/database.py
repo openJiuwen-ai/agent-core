@@ -587,17 +587,20 @@ class TeamDatabase:
             return result.scalars().all()
 
     async def assign_task(self, task_id: str, member_name: str) -> bool:
-        """Assign a task to a member without changing status.
+        """Assign a task to a member and mark it as claimed.
 
-        Only succeeds when the task has no current assignee (assignee is None).
-        Does not change the task status — it remains in its current state.
+        Only succeeds when the task has no current assignee and its current
+        status permits a transition to CLAIMED. Atomically sets the
+        ``assignee`` and flips ``status`` to ``CLAIMED`` so leader-driven
+        assignment matches member-driven self-claim semantics.
 
         Args:
             task_id: Task identifier.
             member_name: Member ID to assign.
 
         Returns:
-            True if assigned, False if task not found or already assigned.
+            True if assigned, False if task not found, already assigned, or
+            in a status that cannot transition to CLAIMED.
         """
         await self._ensure_initialized()
         team_task_model = _get_task_model()
@@ -612,9 +615,20 @@ class TeamDatabase:
             if task.assignee:
                 team_logger.warning(f"Task {task_id} already assigned to {task.assignee}")
                 return False
+            if not is_valid_transition(
+                TaskStatus(task.status),
+                TaskStatus.CLAIMED,
+                TASK_TRANSITIONS
+            ):
+                team_logger.error(
+                    f"Invalid state transition for task {task_id}: "
+                    f"{task.status} -> {TaskStatus.CLAIMED.value}"
+                )
+                return False
             task.assignee = member_name
+            task.status = TaskStatus.CLAIMED.value
             await session.commit()
-            team_logger.info(f"Task {task_id} assigned to {member_name}")
+            team_logger.info(f"Task {task_id} assigned to {member_name} (status=claimed)")
             return True
 
     async def claim_task(self, task_id: str, member_name: str) -> bool:

@@ -453,23 +453,33 @@ class TeamTaskManager:
         return await self.db.get_task(task_id)
 
     async def assign(self, task_id: str, assignee: str) -> bool:
-        """Assign a task to a member (Leader only).
+        """Assign a task to a member and mark it as claimed (Leader only).
 
-        Sets the assignee without changing task status. Only succeeds when
-        the task currently has no assignee. Sends a notification message
-        to the assigned member's mailbox.
+        Atomically sets the assignee and transitions the task to ``CLAIMED``
+        so leader-driven assignment is symmetric with a member self-claim.
+        Idempotent when the task is already claimed by ``assignee``. Fails
+        when the task is currently held by a different member; the caller
+        must reset the task first (see ``reset``) for true reassignment.
+        Sends a notification message to the assigned member's mailbox on
+        success.
 
         Args:
             task_id: Task identifier.
             assignee: Member ID to assign.
 
         Returns:
-            True if assigned, False otherwise.
+            True if assigned (or already assigned to the same member),
+            False otherwise.
         """
         task = await self.get(task_id)
         if not task:
             team_logger.error(f"Task {task_id} not found")
             return False
+
+        # Idempotent re-assign: same member, status already claimed → no-op success.
+        if task.assignee == assignee and task.status == TaskStatus.CLAIMED.value:
+            team_logger.debug(f"Task {task_id} already assigned to {assignee}; no-op")
+            return True
 
         success = await self.db.assign_task(task_id, assignee)
         if not success:

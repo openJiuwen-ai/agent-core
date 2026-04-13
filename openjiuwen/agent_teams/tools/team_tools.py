@@ -90,18 +90,19 @@ LEADER_ONLY_TOOLS: Set[str] = {
     "clean_team",              # Clean up a team
     "spawn_member",            # Create a new team member
     "shutdown_member",         # Shutdown a team member
-    "approve_plan",            # Approve or reject a member's plan
-    "approve_tool",            # Approve or reject a teammate tool call
+    # "approve_plan",            # Approve or reject a member's plan
+    # "approve_tool",            # Approve or reject a teammate tool call
     "create_task",             # Create tasks (batch / with deps)
     "update_task",             # Update task content / cancel tasks
+    "list_members",            # List all members
 }
 
 # Tools that only members can use
 MEMBER_ONLY_TOOLS: Set[str] = {
     "claim_task",              # Claim or complete a task
     # Worktree tools — members work in isolated worktrees
-    "enter_worktree",          # Enter an isolated git worktree
-    "exit_worktree",           # Exit the current worktree session
+    # "enter_worktree",          # Enter an isolated git worktree
+    # "exit_worktree",           # Exit the current worktree session
 }
 
 # Tools that both leader and members can use
@@ -109,7 +110,6 @@ SHARED_TOOLS: Set[str] = {
     # Query tools
     # "get_team_info",           # Get team information
     # "get_member",              # Get member information
-    "list_members",            # List all members
 
     "view_task",              # View tasks (unified - supports get/list/claimable)
     # Messaging tools
@@ -749,11 +749,22 @@ class UpdateTaskTool(TeamTool):
             if content:
                 updated.append("content")
 
-        # Assign task to member (only when currently unassigned)
+        # Assign task to member. When the task is already claimed by a
+        # different member, treat this as a leader-driven reassignment:
+        # cancel the previous claimer's execution, reset the task back to
+        # PENDING, then assign to the new member. Same-member is idempotent.
         if assignee:
+            if task.assignee and task.assignee != assignee:
+                await self.agent_team.cancel_member(member_name=task.assignee)
+                reset_ok = await self.task_manager.reset(task_id)
+                if not reset_ok:
+                    return ToolOutput(
+                        success=False,
+                        error=f"Failed to reset task before reassigning from {task.assignee} to {assignee}",
+                    )
             success = await self.task_manager.assign(task_id, assignee)
             if not success:
-                return ToolOutput(success=False, error=f"Failed to assign task (already assigned or member not found)")
+                return ToolOutput(success=False, error=f"Failed to assign task (member not found or invalid status)")
             updated.append("assignee")
 
         # Add dependencies (blocked_by edges)
