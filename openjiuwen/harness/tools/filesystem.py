@@ -7,8 +7,11 @@ import io
 import json
 import os
 import pathlib
+import re
+import shlex
 import sys
 import shutil
+import time
 from dataclasses import dataclass
 from typing import Dict, Any, AsyncIterator, List, Optional, Tuple
 
@@ -1146,25 +1149,59 @@ class EditFileTool(Tool):
 
 
 class GlobTool(Tool):
+    DEFAULT_MAX_RESULTS: int = 100
 
     def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
         super().__init__(
             build_tool_card("glob", "GlobTool", language, agent_id=agent_id))
         self.operation = operation
 
+    def _resolve_search_path(self, path: Optional[str]) -> str:
+        if path:
+            return _resolve_tool_file_path(self.operation, path)
+        work_dir = getattr(self.operation, "work_dir", None)
+        return str(pathlib.Path(work_dir).expanduser().resolve()) if work_dir else "."
+
+    def _relativize_paths(self, paths: List[str], base_path: str) -> List[str]:
+        relative_paths: List[str] = []
+        for item in paths:
+            try:
+                relative_paths.append(os.path.relpath(item, base_path))
+            except ValueError:
+                relative_paths.append(item)
+        return relative_paths
+
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         pattern = inputs.get("pattern")
-        path = inputs.get("path", ".")
+        if not pattern:
+            return ToolOutput(success=False, error="pattern is required")
+
+        try:
+            path = self._resolve_search_path(inputs.get("path"))
+        except ValueError as exc:
+            return ToolOutput(success=False, error=str(exc))
+
+        started_at = time.perf_counter()
 
         res = await self.operation.fs().search_files(path, pattern)
         if res.code != StatusCode.SUCCESS.code:
             return ToolOutput(success=False, error=res.message)
 
+        matching_files = [item.path for item in res.data.matching_files] if res.data else []
+        truncated = len(matching_files) > self.DEFAULT_MAX_RESULTS
+        limited_files = matching_files[:self.DEFAULT_MAX_RESULTS]
+        filenames = self._relativize_paths(limited_files, path)
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+
         return ToolOutput(
             success=True,
             data={
-                "matching_files": [item.path for item in res.data.matching_files] if res.data else [],
-                "count": len(res.data.matching_files) if res.data else 0
+                "durationMs": duration_ms,
+                "numFiles": len(filenames),
+                "filenames": filenames,
+                "truncated": truncated,
+                "matching_files": limited_files,
+                "count": len(filenames),
             }
         )
 
@@ -1214,23 +1251,361 @@ class ListDirTool(Tool):
 
 
 class GrepTool(Tool):
+    DEFAULT_HEAD_LIMIT: int = 250
+    MAX_COLUMNS: int = 500
+    VCS_DIRECTORIES_TO_EXCLUDE: Tuple[str, ...] = (".git", ".svn", ".hg", ".bzr", ".jj", ".sl")
 
     def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
         super().__init__(
             build_tool_card("grep", "GrepTool", language, agent_id=agent_id))
         self.operation = operation
 
+    @staticmethod
+    def _shell_quote(value: Any) -> str:
+        text = str(value)
+        if os.name == "nt":
+            return "'" + text.replace("'", "''") + "'"
+        return shlex.quote(text)
+
+    @staticmethod
+    def _as_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return default
+
+    @staticmethod
+    def _as_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+        if value is None or value == "":
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @classmethod
+    def _apply_head_limit(
+            cls, items: List[str], limit: Optional[int], offset: int = 0
+    ) -> Tuple[List[str], Optional[int]]:
+        offset = max(0, offset)
+        if limit == 0:
+            return items[offset:], None
+
+        effective_limit = limit if limit is not None else cls.DEFAULT_HEAD_LIMIT
+        sliced = items[offset: offset + effective_limit]
+        was_truncated = len(items) - offset > effective_limit
+        return sliced, effective_limit if was_truncated else None
+
+    @staticmethod
+    def _split_glob_patterns(glob_value: Optional[str]) -> List[str]:
+        if not glob_value:
+            return []
+
+        glob_patterns: List[str] = []
+        for raw_pattern in str(glob_value).split():
+            if "{" in raw_pattern and "}" in raw_pattern:
+                glob_patterns.append(raw_pattern)
+            else:
+                glob_patterns.extend(part for part in raw_pattern.split(",") if part)
+        return glob_patterns
+
+    def _resolve_search_path(self, path: Optional[str]) -> str:
+        if path:
+            return _resolve_tool_file_path(self.operation, path)
+        work_dir = getattr(self.operation, "work_dir", None)
+        return str(pathlib.Path(work_dir).expanduser().resolve()) if work_dir else "."
+
+    def _build_rg_command(
+            self,
+            *,
+            pattern: str,
+            path: str,
+            glob: Optional[str],
+            output_mode: str,
+            context_before: Optional[int],
+            context_after: Optional[int],
+            context_c: Optional[int],
+            context: Optional[int],
+            show_line_numbers: bool,
+            case_insensitive: bool,
+            file_type: Optional[str],
+            multiline: bool,
+    ) -> str:
+        parts: List[str] = [
+            "rg",
+            "--hidden",
+            "--color=never",
+            "--max-columns",
+            str(self.MAX_COLUMNS),
+        ]
+
+        if multiline:
+            parts.extend(["-U", "--multiline-dotall"])
+        if case_insensitive:
+            parts.append("-i")
+
+        if output_mode == "files_with_matches":
+            parts.append("-l")
+        elif output_mode == "count":
+            parts.append("-c")
+        elif show_line_numbers:
+            parts.append("-n")
+
+        if output_mode == "content":
+            if context is not None:
+                parts.extend(["-C", str(context)])
+            elif context_c is not None:
+                parts.extend(["-C", str(context_c)])
+            else:
+                if context_before is not None:
+                    parts.extend(["-B", str(context_before)])
+                if context_after is not None:
+                    parts.extend(["-A", str(context_after)])
+
+        for directory in self.VCS_DIRECTORIES_TO_EXCLUDE:
+            parts.extend(["--glob", self._shell_quote(f"!{directory}")])
+
+        if file_type:
+            parts.extend(["--type", self._shell_quote(file_type)])
+
+        for glob_pattern in self._split_glob_patterns(glob):
+            parts.extend(["--glob", self._shell_quote(glob_pattern)])
+
+        if pattern.startswith("-"):
+            parts.extend(["-e", self._shell_quote(pattern)])
+        else:
+            parts.append(self._shell_quote(pattern))
+
+        parts.append(self._shell_quote(path))
+        return " ".join(parts)
+
+    def _build_grep_command(
+            self,
+            *,
+            pattern: str,
+            path: str,
+            glob: Optional[str],
+            output_mode: str,
+            context_before: Optional[int],
+            context_after: Optional[int],
+            context_c: Optional[int],
+            context: Optional[int],
+            show_line_numbers: bool,
+            case_insensitive: bool,
+            multiline: bool,
+    ) -> Optional[str]:
+        if multiline:
+            return None
+
+        parts: List[str] = ["grep", "-R", "--binary-files=without-match"]
+
+        for directory in self.VCS_DIRECTORIES_TO_EXCLUDE:
+            parts.append(f"--exclude-dir={self._shell_quote(directory)}")
+
+        if case_insensitive:
+            parts.append("-i")
+
+        if output_mode == "files_with_matches":
+            parts.append("-l")
+        elif output_mode == "count":
+            parts.append("-c")
+        elif show_line_numbers:
+            parts.append("-n")
+
+        if output_mode == "content":
+            if context is not None:
+                parts.extend(["-C", str(context)])
+            elif context_c is not None:
+                parts.extend(["-C", str(context_c)])
+            else:
+                if context_before is not None:
+                    parts.extend(["-B", str(context_before)])
+                if context_after is not None:
+                    parts.extend(["-A", str(context_after)])
+
+        for glob_pattern in self._split_glob_patterns(glob):
+            parts.append(f"--include={self._shell_quote(glob_pattern)}")
+
+        parts.extend([self._shell_quote(pattern), self._shell_quote(path)])
+        return " ".join(parts)
+
+    @staticmethod
+    def _extract_file_path_from_line(line: str, mode: str) -> Optional[str]:
+        if not line:
+            return None
+        if mode == "files_with_matches":
+            return line
+        if mode == "count":
+            if ":" not in line:
+                return None
+            return line.rsplit(":", 1)[0]
+
+        match = re.match(r"^(.*?):(\d+|[-]+):(.*)$", line)
+        if match:
+            return match.group(1)
+        return line.split(":", 1)[0] if ":" in line else None
+
+    @staticmethod
+    def _relativize_line(line: str, base_path: str, mode: str) -> str:
+        file_path = GrepTool._extract_file_path_from_line(line, mode)
+        if not file_path:
+            return line
+
+        try:
+            relative_path = os.path.relpath(file_path, base_path)
+        except ValueError:
+            return line
+
+        if mode == "files_with_matches":
+            return relative_path
+
+        prefix = file_path + ":"
+        if line.startswith(prefix):
+            return relative_path + ":" + line[len(prefix):]
+        return line
+
+    def _build_structured_output(
+            self,
+            *,
+            stdout: str,
+            stderr: str,
+            exit_code: int,
+            output_mode: str,
+            head_limit: Optional[int],
+            offset: int,
+            base_path: str,
+    ) -> Dict[str, Any]:
+        raw_lines = [line for line in stdout.splitlines() if line.strip()]
+        limited_lines, applied_limit = self._apply_head_limit(raw_lines, head_limit, offset)
+        final_lines = [self._relativize_line(line, base_path, output_mode) for line in limited_lines]
+        content = "\n".join(final_lines)
+
+        data: Dict[str, Any] = {
+            "stdout": content,
+            "stderr": stderr,
+            "exit_code": exit_code,
+            "mode": output_mode,
+            "appliedOffset": offset if offset > 0 else None,
+            "appliedLimit": applied_limit,
+        }
+
+        if output_mode == "content":
+            data.update({
+                "content": content,
+                "filenames": [],
+                "numFiles": 0,
+                "numLines": len(final_lines),
+                "count": len(final_lines),
+            })
+            return data
+
+        if output_mode == "count":
+            total_matches = 0
+            file_count = 0
+            for line in final_lines:
+                if ":" not in line:
+                    continue
+                count_str = line.rsplit(":", 1)[1]
+                try:
+                    total_matches += int(count_str)
+                    file_count += 1
+                except ValueError:
+                    continue
+            data.update({
+                "content": content,
+                "filenames": [],
+                "numFiles": file_count,
+                "numMatches": total_matches,
+                "count": total_matches,
+            })
+            return data
+
+        data.update({
+            "filenames": final_lines,
+            "numFiles": len(final_lines),
+            "count": len(final_lines),
+        })
+        return data
+
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         pattern = inputs.get("pattern")
-        path = inputs.get("path")
-        ignore_case = inputs.get("ignore_case", False)
+        if not pattern:
+            return ToolOutput(success=False, error="pattern is required")
+
+        try:
+            path = self._resolve_search_path(inputs.get("path"))
+        except ValueError as exc:
+            return ToolOutput(success=False, error=str(exc))
+
+        output_mode = str(inputs.get("output_mode") or "content")
+        if output_mode not in {"content", "files_with_matches", "count"}:
+            return ToolOutput(success=False, error="output_mode must be one of: content, files_with_matches, count")
+
+        ignore_case = self._as_bool(inputs.get("-i", inputs.get("ignore_case", False)))
+        show_line_numbers = self._as_bool(inputs.get("-n", True), default=True)
+        context_before = self._as_int(inputs.get("-B"))
+        context_after = self._as_int(inputs.get("-A"))
+        context_c = self._as_int(inputs.get("-C"))
+        context = self._as_int(inputs.get("context"))
+        head_limit = self._as_int(inputs.get("head_limit"))
+        offset = self._as_int(inputs.get("offset"), 0) or 0
+        multiline = self._as_bool(inputs.get("multiline", False))
+        glob = inputs.get("glob")
+        file_type = inputs.get("type")
+
+        has_context_controls = any(
+            value is not None for value in [context_before, context_after, context_c, context]
+        )
+        if output_mode != "content" and has_context_controls:
+            context_before = None
+            context_after = None
+            context_c = None
+            context = None
 
         if shutil.which("rg"):
-            cmd = f"rg --line-number --color=never {'-i' if ignore_case else ''} \"{pattern}\" \"{path}\""
-            res = await self.operation.shell().execute_cmd(cmd, timeout=30)
+            cmd = self._build_rg_command(
+                pattern=str(pattern),
+                path=path,
+                glob=glob,
+                output_mode=output_mode,
+                context_before=context_before,
+                context_after=context_after,
+                context_c=context_c,
+                context=context,
+                show_line_numbers=show_line_numbers,
+                case_insensitive=ignore_case,
+                file_type=file_type,
+                multiline=multiline,
+            )
         else:
-            cmd = f"grep -rn {'-i' if ignore_case else ''} \"{pattern}\" \"{path}\""
-            res = await self.operation.shell().execute_cmd(cmd, timeout=30)
+            if file_type:
+                return ToolOutput(success=False, error="type filter requires ripgrep (rg) to be installed")
+            cmd = self._build_grep_command(
+                pattern=str(pattern),
+                path=path,
+                glob=glob,
+                output_mode=output_mode,
+                context_before=context_before,
+                context_after=context_after,
+                context_c=context_c,
+                context=context,
+                show_line_numbers=show_line_numbers,
+                case_insensitive=ignore_case,
+                multiline=multiline,
+            )
+            if cmd is None:
+                return ToolOutput(success=False, error="multiline search requires ripgrep (rg) to be installed")
+
+        shell_type = "powershell" if os.name == "nt" else "auto"
+        res = await self.operation.shell().execute_cmd(cmd, timeout=30, shell_type=shell_type)
 
         if res.code != StatusCode.SUCCESS.code:
             return ToolOutput(success=False, error=res.message)
@@ -1242,12 +1617,15 @@ class GrepTool(Tool):
 
         return ToolOutput(
             success=success,
-            data={
-                "stdout": stdout,
-                "stderr": stderr,
-                "exit_code": exit_code,
-                "count": len([line for line in stdout.splitlines() if line.strip()])
-            },
+            data=self._build_structured_output(
+                stdout=stdout,
+                stderr=stderr,
+                exit_code=exit_code,
+                output_mode=output_mode,
+                head_limit=head_limit,
+                offset=offset,
+                base_path=path if os.path.isdir(path) else os.path.dirname(path) or ".",
+            ),
             error=stderr if not success else None
         )
 

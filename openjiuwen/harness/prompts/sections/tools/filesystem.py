@@ -66,7 +66,7 @@ EDIT_FILE_DESCRIPTION: Dict[str, str] = {
 
 GLOB_DESCRIPTION: Dict[str, str] = {
     "cn": "使用 glob 模式查找文件。",
-    "en": "Find files using glob patterns.",
+    "en": "Find files using glob patterns with structured results, optional path input, and default result truncation.",
 }
 
 LIST_DIR_DESCRIPTION: Dict[str, str] = {
@@ -76,7 +76,10 @@ LIST_DIR_DESCRIPTION: Dict[str, str] = {
 
 GREP_DESCRIPTION: Dict[str, str] = {
     "cn": "在文件中搜索内容。支持正则表达式。",
-    "en": "Search file contents. Supports regular expressions.",
+    "en": (
+        "Search file contents with regex, structured output modes, pagination, "
+        "context lines, file-type filters, and glob filters."
+    ),
 }
 
 # ---------------------------------------------------------------------------
@@ -149,7 +152,10 @@ EDIT_FILE_PARAMS: Dict[str, Dict[str, str]] = {
 
 GLOB_PARAMS: Dict[str, Dict[str, str]] = {
     "pattern": {"cn": "glob 模式（如 *.py, **/*.js）", "en": "Glob pattern (e.g. *.py, **/*.js)"},
-    "path": {"cn": "搜索根目录", "en": "Root directory to search"},
+    "path": {
+        "cn": "搜索目录，省略时默认当前工作目录",
+        "en": "Directory to search. Defaults to the current working directory when omitted",
+    },
 }
 
 LIST_DIR_PARAMS: Dict[str, Dict[str, str]] = {
@@ -159,8 +165,41 @@ LIST_DIR_PARAMS: Dict[str, Dict[str, str]] = {
 
 GREP_PARAMS: Dict[str, Dict[str, str]] = {
     "pattern": {"cn": "搜索模式（正则表达式）", "en": "Search pattern (regular expression)"},
-    "path": {"cn": "搜索路径（文件或目录）", "en": "Search path (file or directory)"},
-    "ignore_case": {"cn": "忽略大小写", "en": "Ignore case"},
+    "path": {
+        "cn": "搜索路径（文件或目录），默认为当前工作目录",
+        "en": "Search path (file or directory). Defaults to the current working directory",
+    },
+    "ignore_case": {"cn": "忽略大小写（兼容旧字段）", "en": "Ignore case (legacy compatibility alias)"},
+    "glob": {"cn": "glob 过滤模式，例如 *.py 或 *.{ts,tsx}", "en": "Glob filter pattern such as *.py or *.{ts,tsx}"},
+    "output_mode": {
+        "cn": "输出模式：content、files_with_matches 或 count，默认 content",
+        "en": "Output mode: content, files_with_matches, or count. Defaults to content",
+    },
+    "-B": {
+        "cn": "每个匹配前显示的上下文行数，仅在 content 模式生效",
+        "en": "Lines of leading context before each match; only used in content mode",
+    },
+    "-A": {
+        "cn": "每个匹配后显示的上下文行数，仅在 content 模式生效",
+        "en": "Lines of trailing context after each match; only used in content mode",
+    },
+    "-C": {
+        "cn": "每个匹配前后都显示的上下文行数，仅在 content 模式生效",
+        "en": "Lines of context before and after each match; only used in content mode",
+    },
+    "context": {"cn": "-C 的别名，用于设置前后对称上下文行数", "en": "Alias of -C for symmetric context lines"},
+    "-n": {"cn": "在 content 模式显示行号，默认 true", "en": "Show line numbers in content mode. Defaults to true"},
+    "-i": {"cn": "大小写不敏感搜索", "en": "Case-insensitive search"},
+    "type": {"cn": "文件类型过滤，例如 py、js、ts，需要 rg", "en": "File type filter such as py, js, or ts. Requires rg"},
+    "head_limit": {
+        "cn": "只返回前 N 条记录或行。0 表示不限制，默认 250",
+        "en": "Return only the first N entries or lines. Use 0 for unlimited. Defaults to 250",
+    },
+    "offset": {
+        "cn": "先跳过前 N 条记录或行，再应用 head_limit，默认 0",
+        "en": "Skip the first N entries or lines before applying head_limit. Defaults to 0",
+    },
+    "multiline": {"cn": "启用多行正则模式，需要 rg", "en": "Enable multiline regex mode. Requires rg"},
 }
 
 
@@ -243,8 +282,24 @@ def get_grep_input_params(language: str = "cn") -> Dict[str, Any]:
             "pattern": {"type": "string", "description": _desc(p, "pattern", language)},
             "path": {"type": "string", "description": _desc(p, "path", language)},
             "ignore_case": {"type": "boolean", "description": _desc(p, "ignore_case", language)},
+            "glob": {"type": "string", "description": _desc(p, "glob", language)},
+            "output_mode": {
+                "type": "string",
+                "enum": ["content", "files_with_matches", "count"],
+                "description": _desc(p, "output_mode", language),
+            },
+            "-B": {"type": "integer", "description": _desc(p, "-B", language)},
+            "-A": {"type": "integer", "description": _desc(p, "-A", language)},
+            "-C": {"type": "integer", "description": _desc(p, "-C", language)},
+            "context": {"type": "integer", "description": _desc(p, "context", language)},
+            "-n": {"type": "boolean", "description": _desc(p, "-n", language)},
+            "-i": {"type": "boolean", "description": _desc(p, "-i", language)},
+            "type": {"type": "string", "description": _desc(p, "type", language)},
+            "head_limit": {"type": "integer", "description": _desc(p, "head_limit", language)},
+            "offset": {"type": "integer", "description": _desc(p, "offset", language)},
+            "multiline": {"type": "boolean", "description": _desc(p, "multiline", language)},
         },
-        "required": ["pattern", "path"],
+        "required": ["pattern"],
     }
 
 
