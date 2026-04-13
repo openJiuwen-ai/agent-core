@@ -5,6 +5,7 @@ from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRail
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
 from openjiuwen.harness.rails.interrupt.interrupt_base import BaseInterruptRail
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.rails.lsp_rail import LspRail
 from openjiuwen.harness.rails.security_rail import SecurityRail
 from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
 from openjiuwen.harness.rails.task_memory_rail import (
@@ -34,5 +35,6 @@ __all__ = [
     "BaseInterruptRail",
     "SecurityRail",
     "MemoryRail",
+    "LspRail",
     "PlanModeRail",
 ]

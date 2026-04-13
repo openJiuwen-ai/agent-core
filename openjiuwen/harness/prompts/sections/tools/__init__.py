@@ -73,6 +73,9 @@ from openjiuwen.harness.prompts.sections.tools.vision import (
     ImageOCRMetadataProvider,
     VisualQuestionAnsweringMetadataProvider,
 )
+from openjiuwen.harness.prompts.sections.tools.lsp_tool import (
+    LspToolMetadataProvider,
+)
 from openjiuwen.harness.prompts.sections.tools.task_tool import (
     TaskMetadataProvider,
 )
