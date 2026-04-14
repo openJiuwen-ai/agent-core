@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import time
 from typing import (
     Protocol,
     runtime_checkable,
@@ -121,8 +122,14 @@ class EventDispatcher:
         }
     )
 
+    _STALE_CLAIM_SECONDS = 60.0
+
     def __init__(self, host: DispatcherHost) -> None:
         self._host = host
+        # task_id -> monotonic timestamp used to measure how long a task
+        # has been sitting in CLAIMED state. Rearmed after each stale nudge
+        # so follow-up nudges fire at most every ``_STALE_CLAIM_SECONDS``.
+        self._claim_clock_start: dict[str, float] = {}
 
     async def dispatch(self, event: CoordinationEvent) -> None:
         """Entry point called by CoordinatorLoop on every wake-up.
@@ -202,8 +209,10 @@ class EventDispatcher:
         if event.event_type == InnerEventType.POLL_TASK:
             member_name = host.member_name
             team_logger.debug("poll task: member_name={}, agent_running={}", member_name, host.is_agent_running())
-            if member_name and not host.is_agent_running() and host.task_manager:
-                await self._nudge_idle_agent(member_name)
+            if member_name and host.task_manager:
+                await self._check_stale_claimed_tasks()
+                if not host.is_agent_running():
+                    await self._nudge_idle_agent(member_name)
             return
 
         if event.event_type == InnerEventType.POLL_MAILBOX:
@@ -517,3 +526,83 @@ class EventDispatcher:
             lines.append(f"- [{task.task_id}] [{task.status}] {task.title}: {task.content}{assignee}")
 
         await host.start_agent("\n".join(lines))
+
+    async def _check_stale_claimed_tasks(self) -> None:
+        """Find claimed tasks that have been running past the stale threshold.
+
+        For each task the current agent cares about (its own claimed work,
+        or — if leader — any claimed task on the board), measure how long
+        it has been in the CLAIMED state using an in-memory clock. When the
+        elapsed time exceeds ``_STALE_CLAIM_SECONDS`` the assignee is nudged
+        via the local agent loop (self) or a direct message (leader → other
+        member), and the clock is rearmed so follow-up nudges throttle to
+        roughly one per threshold window.
+        """
+        host = self._host
+        task_manager = host.task_manager
+        if task_manager is None:
+            return
+
+        claimed = await task_manager.list_tasks(status=TaskStatus.CLAIMED.value)
+        own_name = host.member_name
+        is_leader = host.role == TeamRole.LEADER
+        relevant = [
+            t for t in claimed
+            if t.assignee and (t.assignee == own_name or is_leader)
+        ]
+
+        current_ids = {t.task_id for t in relevant}
+        for tid in [k for k in self._claim_clock_start if k not in current_ids]:
+            self._claim_clock_start.pop(tid, None)
+
+        if not relevant:
+            return
+
+        now = time.monotonic()
+        for task in relevant:
+            started = self._claim_clock_start.setdefault(task.task_id, now)
+            elapsed = now - started
+            if elapsed < self._STALE_CLAIM_SECONDS:
+                continue
+            self._claim_clock_start[task.task_id] = now
+            await self._nudge_stale_claim(task)
+
+    async def _nudge_stale_claim(self, task) -> None:
+        """Dispatch a stale-claim nudge to self or to the assigned member."""
+        host = self._host
+        assignee = task.assignee
+        if assignee and assignee == host.member_name:
+            await self._self_nudge_stale_claim(task)
+        elif host.role == TeamRole.LEADER and assignee:
+            await self._leader_nudge_stale_claim(task)
+
+    @staticmethod
+    def _format_stale_claim_nudge(task) -> str:
+        return (
+            f"[催促] 你已认领的任务 [{task.task_id}] {task.title} "
+            f"已超过 60 秒仍未完成，请继续推进：{task.content}"
+        )
+
+    async def _self_nudge_stale_claim(self, task) -> None:
+        """Feed a nudge input into the local agent loop."""
+        host = self._host
+        content = self._format_stale_claim_nudge(task)
+        if host.is_agent_running():
+            await host.steer(content)
+        else:
+            await host.start_agent(content)
+        team_logger.info(
+            "[{}] self-nudged stale claimed task {}", host.member_name, task.task_id,
+        )
+
+    async def _leader_nudge_stale_claim(self, task) -> None:
+        """Send a direct reminder to the member holding a stale claim."""
+        host = self._host
+        if host.message_manager is None:
+            return
+        content = self._format_stale_claim_nudge(task)
+        await host.message_manager.send_message(content, task.assignee)
+        team_logger.info(
+            "[leader] nudged {} about stale claimed task {}",
+            task.assignee, task.task_id,
+        )

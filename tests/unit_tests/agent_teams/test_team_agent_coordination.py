@@ -411,6 +411,121 @@ async def test_member_status_unchanged_skips_nudge():
     agent._message_manager.send_message.assert_not_called()
 
 
+def _make_claimed_task(task_id: str, assignee: str, title: str = "Fix bug"):
+    task = MagicMock()
+    task.task_id = task_id
+    task.title = title
+    task.content = f"Work on {task_id}"
+    task.status = "claimed"
+    task.assignee = assignee
+    return task
+
+
+@pytest.mark.asyncio
+async def test_stale_claim_leader_messages_assignee():
+    """Leader sends a direct message when another member's claimed task goes stale."""
+    agent = _make_leader()
+    stale_task = _make_claimed_task("task-1", assignee="dev-1")
+
+    agent._task_manager = MagicMock()
+    agent._task_manager.list_tasks = AsyncMock(return_value=[stale_task])
+    agent._message_manager = MagicMock()
+    agent._message_manager.send_message = AsyncMock(return_value="msg-1")
+
+    # Prime the clock so the next tick sees the task as already past threshold.
+    agent._dispatcher._claim_clock_start["task-1"] = 0.0
+
+    await agent._dispatcher._check_stale_claimed_tasks()
+
+    agent._task_manager.list_tasks.assert_awaited_once_with(status="claimed")
+    agent._message_manager.send_message.assert_awaited_once()
+    content, to_name = agent._message_manager.send_message.await_args.args
+    assert to_name == "dev-1"
+    assert "task-1" in content
+    # Clock rearmed → no longer zero.
+    assert agent._dispatcher._claim_clock_start["task-1"] != 0.0
+
+
+@pytest.mark.asyncio
+async def test_stale_claim_first_observation_does_not_nudge():
+    """First time we see a claimed task we only start the clock — no nudge yet."""
+    agent = _make_leader()
+    fresh_task = _make_claimed_task("task-2", assignee="dev-1")
+
+    agent._task_manager = MagicMock()
+    agent._task_manager.list_tasks = AsyncMock(return_value=[fresh_task])
+    agent._message_manager = MagicMock()
+    agent._message_manager.send_message = AsyncMock()
+
+    await agent._dispatcher._check_stale_claimed_tasks()
+
+    agent._message_manager.send_message.assert_not_called()
+    assert "task-2" in agent._dispatcher._claim_clock_start
+
+
+@pytest.mark.asyncio
+async def test_stale_claim_self_nudge_when_idle():
+    """Teammate steers itself when its own claimed task goes stale and agent idle."""
+    agent = _make_teammate()
+    agent._team_member = None
+    own_task = _make_claimed_task("task-3", assignee="dev-1")
+
+    agent._task_manager = MagicMock()
+    agent._task_manager.list_tasks = AsyncMock(return_value=[own_task])
+    agent._is_agent_running = lambda: False
+    agent._start_agent = AsyncMock()
+    agent.steer = AsyncMock()
+
+    agent._dispatcher._claim_clock_start["task-3"] = 0.0
+    await agent._dispatcher._check_stale_claimed_tasks()
+
+    agent._start_agent.assert_awaited_once()
+    agent.steer.assert_not_called()
+    content = agent._start_agent.await_args.args[0]
+    assert "task-3" in content
+
+
+@pytest.mark.asyncio
+async def test_stale_claim_self_nudge_steers_when_running():
+    """A running self-owned stale task is nudged via steer rather than start."""
+    agent = _make_teammate()
+    agent._team_member = None
+    own_task = _make_claimed_task("task-4", assignee="dev-1")
+
+    agent._task_manager = MagicMock()
+    agent._task_manager.list_tasks = AsyncMock(return_value=[own_task])
+    agent._is_agent_running = lambda: True
+    agent._start_agent = AsyncMock()
+    agent.steer = AsyncMock()
+
+    agent._dispatcher._claim_clock_start["task-4"] = 0.0
+    await agent._dispatcher._check_stale_claimed_tasks()
+
+    agent.steer.assert_awaited_once()
+    agent._start_agent.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stale_claim_clock_drops_unrelated_entries():
+    """Clock entries for tasks no longer in the relevant set are cleaned up."""
+    agent = _make_leader()
+    still_claimed = _make_claimed_task("task-5", assignee="dev-1")
+
+    agent._task_manager = MagicMock()
+    agent._task_manager.list_tasks = AsyncMock(return_value=[still_claimed])
+    agent._message_manager = MagicMock()
+    agent._message_manager.send_message = AsyncMock()
+
+    # task-5 will be tracked; task-6 should be evicted.
+    agent._dispatcher._claim_clock_start["task-5"] = 0.0
+    agent._dispatcher._claim_clock_start["task-6"] = 0.0
+
+    await agent._dispatcher._check_stale_claimed_tasks()
+
+    assert "task-6" not in agent._dispatcher._claim_clock_start
+    assert "task-5" in agent._dispatcher._claim_clock_start
+
+
 @pytest.mark.asyncio
 async def test_teammate_round_completion_wakes_mailbox_after_interrupt_clears():
     """Deferred mailbox messages should be retried immediately after interrupt clears."""

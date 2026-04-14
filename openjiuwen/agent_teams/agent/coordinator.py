@@ -77,8 +77,8 @@ class CoordinatorLoop:
         *,
         role: TeamRole,
         wake_callback: Optional[WakeCallback] = None,
-        mailbox_poll_interval: float = 3000.0,
-        task_poll_interval: float = 3000.0,
+        mailbox_poll_interval: float = 30.0,
+        task_poll_interval: float = 30.0,
     ) -> None:
         self._role = role
         self._wake_callback = wake_callback
