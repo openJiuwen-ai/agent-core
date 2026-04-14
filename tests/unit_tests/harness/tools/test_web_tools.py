@@ -6,7 +6,13 @@ import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.harness.tools.web_tools import WebFetchWebpageTool, WebFreeSearchTool, WebPaidSearchTool
+from openjiuwen.harness.tools.web_tools import (
+    WebFetchWebpageTool,
+    WebFreeSearchTool,
+    WebPaidSearchTool,
+    create_web_tools,
+    is_free_search_enabled,
+)
 
 
 class TestWebFreeSearchTool:
@@ -108,6 +114,24 @@ class TestWebFreeSearchTool:
 
         assert "[ERROR]: free search failed:" in result
         assert "all free search engines are disabled" in result
+
+    def test_create_web_tools_omits_free_search_when_all_engines_disabled(self, monkeypatch):
+        monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "false")
+        monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "false")
+
+        tools = create_web_tools(language="cn")
+
+        assert is_free_search_enabled() is False
+        assert [tool.card.name for tool in tools] == ["fetch_webpage"]
+
+    def test_create_web_tools_restores_free_search_when_any_engine_enabled(self, monkeypatch):
+        monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "false")
+        monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "true")
+
+        tools = create_web_tools(language="cn")
+
+        assert is_free_search_enabled() is True
+        assert [tool.card.name for tool in tools] == ["free_search", "fetch_webpage"]
 
     @pytest.mark.asyncio
     async def test_best_effort_returns_low_quality_bing_rows(self, tool):

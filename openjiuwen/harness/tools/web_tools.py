@@ -20,7 +20,7 @@ from bs4 import BeautifulSoup
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import tool_logger
-from openjiuwen.core.foundation.tool.base import Tool
+from openjiuwen.core.foundation.tool.base import Tool, ToolCard
 from openjiuwen.harness.prompts.sections.tools import build_tool_card
 
 _USER_AGENT = (
@@ -331,6 +331,14 @@ def _env_flag(name: str, default: bool = True) -> bool:
     return raw in {"1", "true", "yes", "on", "enabled"}
 
 
+def is_free_search_enabled() -> bool:
+    """Whether at least one free-search backend is enabled."""
+    return (
+        _env_flag(_FREE_SEARCH_DDG_ENABLED_ENV, default=True)
+        or _env_flag(_FREE_SEARCH_BING_ENABLED_ENV, default=True)
+    )
+
+
 def _search_request_headers(query: str) -> dict[str, str]:
     """Return browser-like headers aligned to the query language."""
     headers = dict(_REQUEST_HEADERS)
@@ -501,8 +509,15 @@ def _extract_bing_answer_cards(soup: BeautifulSoup, fallback_url: str) -> list[d
 class WebFreeSearchTool(Tool):
     """Free search via DuckDuckGo. Input query and return ranked URLs with snippets."""
 
-    def __init__(self, language: str = "cn", agent_id: Optional[str] = None):
-        super().__init__(build_tool_card("free_search", "WebFreeSearchTool", language, agent_id=agent_id))
+    def __init__(
+        self,
+        language: str = "cn",
+        agent_id: Optional[str] = None,
+        card: Optional[ToolCard] = None,
+    ):
+        super().__init__(
+            card or build_tool_card("free_search", "WebFreeSearchTool", language, agent_id=agent_id)
+        )
 
     @staticmethod
     def _is_ddg_challenge_page(status_code: int, html: str) -> bool:
@@ -1443,3 +1458,22 @@ class WebFetchWebpageTool(Tool):
         """Stream is not supported for this tool."""
         yield "Stream is not supported for this tool."
         raise build_error(StatusCode.TOOL_STREAM_NOT_SUPPORTED, card=self._card)
+
+
+def create_web_tools(
+    *,
+    language: str = "cn",
+    agent_id: Optional[str] = None,
+    include_free_search: bool = True,
+    include_paid_search: bool = False,
+    include_fetch_webpage: bool = True,
+) -> list[Tool]:
+    """Create web tools, omitting free_search when all free engines are disabled."""
+    tools: list[Tool] = []
+    if include_free_search and is_free_search_enabled():
+        tools.append(WebFreeSearchTool(language=language, agent_id=agent_id))
+    if include_paid_search:
+        tools.append(WebPaidSearchTool(language=language, agent_id=agent_id))
+    if include_fetch_webpage:
+        tools.append(WebFetchWebpageTool(language=language, agent_id=agent_id))
+    return tools

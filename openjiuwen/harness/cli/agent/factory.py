@@ -20,8 +20,7 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.tools import (
-    WebFetchWebpageTool,
-    WebFreeSearchTool,
+    create_web_tools,
 )
 from openjiuwen.harness.workspace.workspace import Workspace
 
@@ -537,10 +536,7 @@ def create_agent(
     # auto-injected by the factory.
 
     # Web tools are not part of FileSystemRail
-    web_tools = [
-        WebFreeSearchTool(language="en"),
-        WebFetchWebpageTool(language="en"),
-    ]
+    web_tools = create_web_tools(language="en")
 
     # MCP servers from ~/.openjiuwen/mcp.json
     mcp_configs = _load_mcp_configs()

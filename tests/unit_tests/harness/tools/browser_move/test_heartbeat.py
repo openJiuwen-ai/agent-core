@@ -10,7 +10,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import BrowserRunGuardrails
 from openjiuwen.harness.tools.browser_move.playwright_runtime.service import BrowserService
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_tools import ensure_browser_runtime_client_patch
+from openjiuwen.harness.tools.browser_move.clients.stdio_client import BrowserMoveStdioClient
 from openjiuwen.core.foundation.tool import McpServerConfig
+from openjiuwen.core.runner.resources_manager.tool_manager import ToolMgr
 
 
 def _run(coro):
@@ -113,6 +116,22 @@ def test_check_connection_raises_when_client_not_found() -> None:
                 assert "client" in str(exc).lower() or "not found" in str(exc).lower()
 
     _run(_test())
+
+
+def test_browser_runtime_stdio_patch_creates_pingable_client() -> None:
+    ensure_browser_runtime_client_patch()
+    config = McpServerConfig(
+        server_id="test-stdio-patch",
+        server_name="test-stdio-patch",
+        server_path="stdio://playwright",
+        client_type="stdio",
+        params={"cwd": "."},
+    )
+
+    client = ToolMgr._create_client(config)
+
+    assert isinstance(client, BrowserMoveStdioClient)
+    assert hasattr(client, "ping")
 
 
 def test_check_connection_raises_when_ping_fails() -> None:

@@ -42,6 +42,8 @@ from openjiuwen.harness.tools.web_tools import (
     WebFetchWebpageTool,
     WebFreeSearchTool,
     WebPaidSearchTool,
+    create_web_tools,
+    is_free_search_enabled,
 )
 from openjiuwen.harness.tools.mode_tools import SwitchModeTool
 from openjiuwen.harness.tools.plan_mode_tools import (
@@ -86,6 +88,8 @@ __all__ = [
     "WebFetchWebpageTool",
     "WebFreeSearchTool",
     "WebPaidSearchTool",
+    "create_web_tools",
+    "is_free_search_enabled",
     "WriteFileTool",
     "LspTool",
     "LspToolMetadataProvider",

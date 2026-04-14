@@ -43,6 +43,7 @@ from openjiuwen.harness.subagents.research_agent import (
 from openjiuwen.harness.task_loop.task_loop_event_handler import TaskLoopEventHandler
 from openjiuwen.harness.task_loop.loop_coordinator import LoopCoordinator
 from openjiuwen.harness.tools.task_tool import create_task_tool
+from openjiuwen.harness.tools.web_tools import WebFreeSearchTool
 
 
 def _create_dummy_model() -> Model:
@@ -447,6 +448,51 @@ def test_create_deep_agent_registers_tool_instances() -> None:
         assert Runner.resource_mgr.get_tool(tool.card.id) is not None
     finally:
         Runner.resource_mgr.remove_tool(tool.card.id)
+
+
+def test_create_deep_agent_skips_free_search_when_all_free_engines_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "false")
+    monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "false")
+    tool = WebFreeSearchTool(language="cn", agent_id="disabled")
+
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        tools=[tool],
+    )
+
+    assert agent.ability_manager.get("free_search") is None
+    assert Runner.resource_mgr.get_tool(tool.card.id) is None
+
+
+def test_deep_agent_hot_reload_removes_and_restores_free_search(monkeypatch) -> None:
+    monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "true")
+    monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "false")
+    tool = WebFreeSearchTool(language="cn", agent_id="hot_reload")
+
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        tools=[tool],
+    )
+
+    try:
+        assert agent.ability_manager.get("free_search") is tool.card
+        assert Runner.resource_mgr.get_tool(tool.card.id) is not None
+
+        monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "false")
+        monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "false")
+        agent.configure(DeepAgentConfig(tools=[tool.card]))
+
+        assert agent.ability_manager.get("free_search") is None
+        assert Runner.resource_mgr.get_tool(tool.card.id) is None
+
+        monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "true")
+        agent.configure(DeepAgentConfig(tools=[tool.card], language="cn"))
+
+        assert agent.ability_manager.get("free_search") is tool.card
+        assert Runner.resource_mgr.get_tool(tool.card.id) is not None
+    finally:
+        if Runner.resource_mgr.get_tool(tool.card.id) is not None:
+            Runner.resource_mgr.remove_tool(tool.card.id)
 
 
 def test_create_deep_agent_reuses_same_tool_instance_across_agents() -> None:
