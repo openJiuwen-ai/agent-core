@@ -142,6 +142,45 @@ class TestAddAsTopPriority:
         assert task3_updated.status == TaskStatus.BLOCKED.value
 
 
+class TestClaimConflict:
+    """Test claim conflict reporting."""
+
+    @pytest.mark.asyncio
+    async def test_claim_by_second_member_reports_conflict_not_transition_error(self, db, message_bus):
+        """A second member claiming a held task should fail with the real reason."""
+        await db.create_team(
+            team_name="conflict_team",
+            display_name="Conflict Team",
+            leader_member_name="leader",
+        )
+        for name in ("m1", "m2"):
+            await db.create_member(
+                member_name=name,
+                team_name="conflict_team",
+                display_name=name,
+                agent_card=AgentCard().model_dump_json(),
+                status="BUSY",
+                mode=MemberMode.BUILD_MODE.value,
+            )
+        m1 = TeamTaskManager(
+            team_name="conflict_team", member_name="m1", db=db, messager=message_bus,
+        )
+        m2 = TeamTaskManager(
+            team_name="conflict_team", member_name="m2", db=db, messager=message_bus,
+        )
+
+        task = await m1.add(title="Shared Task", content="Work")
+        assert await m1.claim(task.task_id) is True
+
+        # Second member tries to claim; must report assignee conflict and fail
+        # cleanly instead of raising an "invalid claimed → claimed" transition.
+        assert await m2.claim(task.task_id) is False
+
+        task_state = await m1.get(task.task_id)
+        assert task_state.status == TaskStatus.CLAIMED.value
+        assert task_state.assignee == "m1"
+
+
 class TestTaskCompletionWithDependencyResolution:
     """Test task completion and dependency resolution"""
 

@@ -646,7 +646,15 @@ class TeamDatabase:
                 team_logger.error(f"Task {task_id} not found")
                 return False
 
-            # Validate state transition
+            # Conflict check first: a task already held by another member would
+            # otherwise trip the state-transition check as "claimed → claimed",
+            # which hides the real reason.
+            if task.assignee:
+                team_logger.warning(
+                    f"Task {task_id} is already claimed by member {task.assignee}"
+                )
+                return False
+
             if not is_valid_transition(
                 TaskStatus(task.status),
                 TaskStatus.CLAIMED,
@@ -656,10 +664,6 @@ class TeamDatabase:
                     f"Invalid state transition for task {task_id}: "
                     f"{task.status} -> {TaskStatus.CLAIMED.value}"
                 )
-                return False
-
-            if task.assignee:
-                team_logger.warning(f"Task {task_id} is already claimed by member {task.assignee}")
                 return False
 
             task.status = TaskStatus.CLAIMED.value

@@ -359,12 +359,17 @@ class InMemoryTeamDatabase:
             if not task:
                 team_logger.error(f"Task {task_id} not found")
                 return False
+            # Surface assignee conflicts before the state-transition check so
+            # a task already held by another member does not masquerade as an
+            # "invalid claimed → claimed transition" error.
+            if task.assignee:
+                team_logger.warning(
+                    f"Task {task_id} is already claimed by member {task.assignee}"
+                )
+                return False
             if not is_valid_transition(TaskStatus(task.status), TaskStatus.CLAIMED, TASK_TRANSITIONS):
                 team_logger.error(
                     f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.CLAIMED.value}")
-                return False
-            if task.assignee:
-                team_logger.warning(f"Task {task_id} is already claimed by member {task.assignee}")
                 return False
             task.status = TaskStatus.CLAIMED.value
             task.assignee = member_name

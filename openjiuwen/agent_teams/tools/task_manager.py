@@ -557,7 +557,17 @@ class TeamTaskManager:
             team_logger.debug(f"Task {task_id} already claimed by {member_name}; no-op")
             return True
 
-        # Validate state transition
+        # Claim conflict must be reported before the state-transition check —
+        # otherwise a CLAIMED task held by someone else surfaces as the
+        # misleading "invalid claimed → claimed transition" error.
+        if task.assignee:
+            team_logger.warning(
+                f"Task {task_id} is already claimed by {task.assignee}, "
+                f"{member_name} cannot claim it"
+            )
+            return False
+
+        # Validate state transition (blocks e.g. COMPLETED/CANCELLED/BLOCKED claims).
         if not is_valid_transition(
             TaskStatus(task.status),
             TaskStatus.CLAIMED,
@@ -567,11 +577,6 @@ class TeamTaskManager:
                 f"Invalid state transition for task {task_id}: "
                 f"{task.status} -> {TaskStatus.CLAIMED.value}"
             )
-            return False
-
-        # Check if task is already claimed by someone else
-        if task.assignee:
-            team_logger.warning(f"Task {task_id} is already claimed by {task.assignee}")
             return False
 
         # Claim task
