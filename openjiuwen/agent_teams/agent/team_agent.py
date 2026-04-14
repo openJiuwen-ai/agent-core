@@ -948,6 +948,10 @@ class TeamAgent(BaseAgent):
         message: Any,
     ) -> None:
         """Execute one DeepAgent stream round via Runner."""
+        # Pull the member back to READY before transitioning to BUSY so a
+        # still-live member that ended its previous round in ERROR can
+        # recover. READY → READY is a no-op at the member layer.
+        await self._update_status(MemberStatus.READY)
         await self._update_status(MemberStatus.BUSY)
         try:
             await self._execute_round(message)
