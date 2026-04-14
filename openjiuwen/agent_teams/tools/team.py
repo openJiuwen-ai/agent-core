@@ -582,6 +582,40 @@ class TeamBackend:
         team_logger.info(f"Team {self.team_name} cleaned successfully")
         return True
 
+    async def force_clean_team(self, shutdown_members: bool = True) -> bool:
+        """Force cleanup for the current session's team state.
+
+        Unlike ``clean_team()``, this method does not wait for every
+        member to reach SHUTDOWN. It can be used during session
+        switching to aggressively discard the old team's runtime and
+        persisted session data.
+        """
+        if shutdown_members:
+            members = await self.db.get_team_members(self.team_name)
+            for member_data in members:
+                if member_data.member_name == self.member_name:
+                    continue
+                try:
+                    await self.shutdown_member(member_data.member_name, force=True)
+                except Exception as e:
+                    team_logger.warning(
+                        "Failed to request shutdown for member {} during force cleanup: {}",
+                        member_data.member_name,
+                        e,
+                    )
+
+        success = await self.db.force_delete_team_session(self.team_name)
+
+        try:
+            await self._remove_cleanup_paths()
+        except Exception as e:
+            team_logger.error("Failed to remove cleanup paths for {}: {}", self.team_name, e)
+            success = False
+
+        if success:
+            team_logger.info(f"Team {self.team_name} force cleaned successfully")
+        return success
+
     async def get_member(self, member_name: str) -> Optional[TeamMember]:
         """Get a member by ID
 

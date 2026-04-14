@@ -334,6 +334,28 @@ class TeamDatabase:
             team_logger.info(f"Team {team_name} deleted")
             return True
 
+    async def force_delete_team_session(self, team_name: str) -> bool:
+        """Force delete a team's records and current session tables.
+
+        This is intended for session-switch teardown where the caller
+        wants to drop the persisted team row and also remove any
+        dynamic per-session tables tied to the current session context.
+        """
+        deleted = await self.delete_team(team_name)
+
+        try:
+            await self.drop_cur_session_tables()
+        except Exception as e:
+            team_logger.error(
+                "Failed to drop current session tables for team {}: {}",
+                team_name,
+                e,
+            )
+            return False
+
+        team_logger.info("Force deleted team session data for {}", team_name)
+        return deleted
+
     async def get_team_updated_at(self, team_name: str) -> int:
         """Probe ``team_info.updated_at`` for change detection.
 

@@ -238,6 +238,23 @@ class TeamAgent(BaseAgent):
         team_logger.debug("[{}] cancel_agent requested", self._member_name() or "?")
         await self._cancel_agent()
 
+    async def destroy_team(self, force: bool = True) -> bool:
+        """Destroy this team's runtime and persisted current-session state."""
+        try:
+            await self.cancel_agent()
+        except Exception as e:
+            team_logger.warning("[{}] cancel_agent during destroy failed: {}", self._member_name() or "?", e)
+
+        try:
+            await self._stop_coordination()
+        except Exception as e:
+            team_logger.warning("[{}] stop coordination during destroy failed: {}", self._member_name() or "?", e)
+
+        if not self._team_backend:
+            return False
+
+        return await self._team_backend.force_clean_team(shutdown_members=force)
+
     async def pause_polls(self) -> None:
         """Pause periodic polling in the coordination loop."""
         if self._coordination_loop:
@@ -736,6 +753,7 @@ class TeamAgent(BaseAgent):
         # set_session_id() so create_cur_session_tables uses the right names.
         if self._team_backend:
             await self._team_backend.db.initialize()
+            await self._team_backend.db.create_cur_session_tables()
 
         # Leader-startup recovery: if the team is already persisted in the
         # DB (e.g. a previous run with the same team_name), decide between
