@@ -13,21 +13,17 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
-from openjiuwen.harness.prompts.sections.tools import build_tool_card
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.prompts.sections.tools.task_tool import (
-    EXPLORE_AGENT_DESC,
-    EXPLORE_AGENT_SYSTEM_PROMPT_CN,
-    EXPLORE_AGENT_SYSTEM_PROMPT_EN,
     PLAN_AGENT_DESC,
     PLAN_AGENT_SYSTEM_PROMPT_CN,
     PLAN_AGENT_SYSTEM_PROMPT_EN,
 )
-from openjiuwen.harness.rails import ConfirmInterruptRail
 from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRail
 from openjiuwen.harness.rails.plan_mode_rail import PlanModeRail
 from openjiuwen.harness.schema.config import SubAgentConfig
+from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
 from openjiuwen.harness.workspace.workspace import Workspace
 
 CODE_AGENT_FACTORY_NAME = "code_agent"
@@ -74,24 +70,6 @@ def _has_agent(subagents: list[SubAgentConfig | DeepAgent], name: str) -> bool:
     return False
 
 
-def _build_explore_agent_config(resolved_language: str, model: Model) -> SubAgentConfig:
-    """Build read-only explore sub-agent config for plan mode."""
-    desc = EXPLORE_AGENT_DESC.get(resolved_language, EXPLORE_AGENT_DESC["cn"])
-    system_prompt = (
-        EXPLORE_AGENT_SYSTEM_PROMPT_EN
-        if resolved_language == "en"
-        else EXPLORE_AGENT_SYSTEM_PROMPT_CN
-    )
-    return SubAgentConfig(
-        agent_card=AgentCard(name="explore_agent", description=desc),
-        system_prompt=system_prompt,
-        model=model,
-        language=resolved_language,
-        rails=[FileSystemRail()],
-        max_iterations=25,
-    )
-
-
 def _build_plan_agent_config(resolved_language: str, model: Model) -> SubAgentConfig:
     """Build read-only plan sub-agent config for plan mode."""
     desc = PLAN_AGENT_DESC.get(resolved_language, PLAN_AGENT_DESC["cn"])
@@ -118,8 +96,14 @@ def _inject_builtin_plan_agents(
 ) -> list[SubAgentConfig | DeepAgent]:
     """Inject explore and plan builtin sub-agents if missing."""
     effective = list(subagents)
-    if not _has_agent(effective, "explore_agent"):
-        effective.append(_build_explore_agent_config(resolved_language, model))
+    if not _has_agent(effective, "Explore"):
+        effective.append(
+            build_explore_agent_config(
+                model=model,
+                language=resolved_language,
+                max_iterations=25,
+            )
+        )
     if not _has_agent(effective, "plan_agent"):
         effective.append(_build_plan_agent_config(resolved_language, model))
     return effective

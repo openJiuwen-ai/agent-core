@@ -41,7 +41,7 @@ Plan 模式已激活。用户希望你先制定计划，不要求执行——你
 ## Plan 工作流
 
 ### Phase 1: 初始理解
-目标：全面理解用户的需求，阅读代码。本阶段只使用 explore 子 agent。
+目标：通过阅读代码并向用户提问，全面理解用户的需求。本阶段只使用 explore 子 agent。
 
 1. 聚焦于理解现有架构和模式。识别相关文件和依赖即可。
 
@@ -129,7 +129,7 @@ the only file you are allowed to edit — beyond this, you can only perform read
 ## Plan Workflow
 
 ### Phase 1: Initial Understanding
-Goal: Thoroughly understand the user's requirements and read the relevant code. \
+Goal: Gain a comprehensive understanding of the user's request by reading through code and asking them questions. \
 Use only the explore sub-agent in this phase.
 
 1. Focused on understanding existing architecture and patterns. Identifying relevant files and dependencies.
