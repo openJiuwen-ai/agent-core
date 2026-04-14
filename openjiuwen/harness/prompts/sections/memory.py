@@ -24,10 +24,11 @@ MEMORY_PROMPT_CN_READ_ONLY = """# 持久化存储体系（只读模式）
 
 #### 历史检索机制
 
- 1.**历史信息检索（强制）** — **回答任何关于历史事件、日期、人物、过去对话的问题前，必须先调用 `memory_search` 工具检索相关记忆**
+ — 仅在回答**关于历史事件、日期、人物、过去对话的问题前，先调用 `memory_search` 工具检索相关记忆**
    - 搜索查询应包含问题中的关键信息（人名、日期、事件关键词）
    - 如果搜索结果不足，尝试用不同的关键词再次搜索
    - 基于检索到的记忆信息回答问题，不要依赖预训练知识
+   - 对于不涉及上述历史事件、日期、人物、过去对话的问题，不要调用工具来检索记忆
 """
 
 MEMORY_PROMPT_EN_READ_ONLY = """# Persistent Storage System (Read-Only Mode)
@@ -40,10 +41,11 @@ MEMORY_PROMPT_EN_READ_ONLY = """# Persistent Storage System (Read-Only Mode)
 
 #### History Retrieval Mechanism
 
-1. **Historical information retrieval (mandatory):** Before answering any question about historical events, dates, people, or past conversations, you must call `memory_search` first
+- Only before answering question about historical events, dates, people, or past conversations, you can call `memory_search` first
    - Search query should include key information from the question (names, dates, event keywords)
    - If results are insufficient, retry with different keywords
    - Answer based on retrieved memory results, not pretraining knowledge
+   - If question is not about historical events, dates, people, or past conversations, you should not call any memory tool to search memory
 
 **Note:** In cron job mode, only reading and searching memories is supported. Writing or modifying memory files is not allowed.
 """
@@ -84,15 +86,16 @@ MEMORY_PROMPT_CN = """# 持久化存储体系
 5. **用户请求记录（request_memory）**：记录用户明确请求的信息，帮助后续服务，比如用户要求记住某个信息、用户要求某个动作等。
    - **存储**：写入 `YYYY-MM-DD.md`。
 
-6. **其他信息（others）**：当用户提到任何有价值的细节或信息时，或每次文件操作后，自动调用 write_memory 使用 append=true 参数追加记录至 YYYY-MM-DD.md。
-    有价值的信息包括但不限于：用户提供的联系人信息、项目细节、任务指令、偏好、文件路径、存储位置、任何可提高效率的信息等。发现的项目背景、技术细节、工作流程等也要写入相关文件。
+6. **其他信息（others）**：当用户提到有价值的细节或信息时，或每次文件操作后，需要调用 write_memory 使用 append=true 参数追加记录至 YYYY-MM-DD.md。
+   - 注意：进行信息筛选，仅需要记录有价值的信息。有价值的信息包括但不限于：用户提供的联系人信息、项目细节、任务指令、偏好、文件路径、存储位置、任何可提高效率的信息等。发现的项目背景、技术细节、工作流程等也要写入相关文件。
 
 #### 历史检索机制
 
- 1.**历史信息检索（强制）** — **回答任何关于历史事件、日期、人物、过去对话的问题前，必须先调用 `memory_search` 工具检索相关记忆**
+ — 仅在回答**关于历史事件、日期、人物、过去对话的问题前，先调用 `memory_search` 工具检索相关记忆**
    - 搜索查询应包含问题中的关键信息（人名、日期、事件关键词）
    - 如果搜索结果不足，尝试用不同的关键词再次搜索
    - 基于检索到的记忆信息回答问题，不要依赖预训练知识
+   - 对于不涉及上述历史事件、日期、人物、过去对话的问题，不要调用工具来检索记忆
 """
 
 MEMORY_PROMPT_EN = """# Persistent Storage System
@@ -131,15 +134,16 @@ When valuable information appears during the conversation, classify it and store
 5. **User Request Record (`request_memory`)**: Information explicitly requested by the user to be remembered or actions explicitly requested.
    - **Storage**: Write to `YYYY-MM-DD.md`.
 
-6. **Other Information (`others`)**: Whenever the user mentions any valuable detail, or after each file operation, automatically call `write_memory` with `append=true` to append to `YYYY-MM-DD.md` immediately
-   Valuable details include but not limited to project details, task instructions, preferences, file paths, storage locations, and any efficiency-improving details. Discovered project background, technical details, and workflows should also be written to relevant files.
+6. **Other Information (`others`)**: Whenever the user mentions any valuable detail, or after each file operation, you need to call `write_memory` with `append=true` to append to `YYYY-MM-DD.md` immediately
+   - Attention: You need to filter the information. Only Valuable information needs to be recorded. Valuable information include but not limited to project details, task instructions, preferences, file paths, storage locations, and any efficiency-improving details. Discovered project background, technical details, and workflows should also be written to relevant files.
 
 #### History Retrieval Mechanism
 
-1. **Historical information retrieval (mandatory):** Before answering any question about historical events, dates, people, or past conversations, you must call `memory_search` first
+- Only before answering question about historical events, dates, people, or past conversations, you can call `memory_search` first
    - Search query should include key information from the question (names, dates, event keywords)
    - If results are insufficient, retry with different keywords
    - Answer based on retrieved memory results, not pretraining knowledge
+   - If question is not about historical events, dates, people, or past conversations, you should not call any memory tool to search memory
 """
 
 MEMORY_MGMT_PROMPT_CN = """### 存储管理规范
