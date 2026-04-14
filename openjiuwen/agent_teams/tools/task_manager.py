@@ -20,6 +20,7 @@ from openjiuwen.agent_teams.schema.status import (
     TaskStatus,
 )
 from openjiuwen.agent_teams.schema.task import (
+    TaskCreateResult,
     TaskDetail,
     TaskListResult,
     TaskOpResult,
@@ -74,31 +75,27 @@ class TeamTaskManager:
     async def add_batch(
         self,
         tasks: List[dict]
-    ) -> List[TeamTaskBase]:
-        """Add multiple tasks to the team in batch
+    ) -> List[TaskCreateResult]:
+        """Add multiple tasks to the team in batch.
 
-        Creates multiple tasks in a single operation for efficiency.
-        Each task in the list is a dictionary with keys:
-        - title: Task title (required)
-        - content: Task content (required)
-        - task_id: Optional custom task ID (auto-generated if not provided)
-        - dependencies: Optional list of task IDs this task depends on
+        Creates multiple tasks in a single operation for efficiency. Each
+        task in the list is a dictionary with keys ``title``, ``content``,
+        optional ``task_id`` and ``dependencies``. Invalid specs (missing
+        title/content) are skipped silently.
 
         Args:
-            tasks: List of task dictionaries
+            tasks: List of task dictionaries.
 
         Returns:
-            List of TeamTask objects created (successful tasks only)
-
-        Example:
-            tasks = [
-                {"title": "Task 1", "content": "First task"},
-                {"title": "Task 2", "content": "Second task", "dependencies": ["task1_id"]},
-                {"title": "Task 3", "content": "Third task"}
-            ]
-            created_tasks = task_manager.add_batch(tasks)
+            List of ``TaskCreateResult`` — one per successfully created
+            task. Failed specs (missing fields, creation errors) are
+            omitted so callers can still treat the return value as a
+            list of created tasks. Because ``TaskCreateResult`` delegates
+            attribute lookups to the wrapped task, existing call sites
+            that iterate and read ``.task_id`` / ``.title`` work
+            unchanged.
         """
-        created_tasks = []
+        created_tasks: List[TaskCreateResult] = []
         for task_spec in tasks:
             title = task_spec.get("title")
             content = task_spec.get("content")
@@ -109,14 +106,18 @@ class TeamTaskManager:
                 team_logger.warning(f"Skipping invalid task: {task_spec}")
                 continue
 
-            task = await self.add(
+            result = await self.add(
                 title=title,
                 content=content,
                 task_id=task_id,
                 dependencies=dependencies
             )
-            if task:
-                created_tasks.append(task)
+            if result.ok:
+                created_tasks.append(result)
+            else:
+                team_logger.warning(
+                    f"Batch add skipped task {task_id or title!r}: {result.reason}"
+                )
 
         team_logger.info(f"Batch added {len(created_tasks)} tasks")
         return created_tasks
@@ -127,27 +128,23 @@ class TeamTaskManager:
         content: str,
         task_id: Optional[str] = None,
         dependencies: Optional[List[str]] = None
-    ) -> Optional[TeamTaskBase]:
-        """Add a task to the team
+    ) -> TaskCreateResult:
+        """Add a task to the team.
 
         Creates a task in the team_task table and optionally adds
         task dependencies to the team_task_dependency table.
 
         Args:
-            title: Task title
-            content: Task content
-            task_id: Optional custom task ID (auto-generated if not provided)
-            dependencies: List of task IDs this task depends on
+            title: Task title.
+            content: Task content.
+            task_id: Optional custom task ID (auto-generated if not provided).
+            dependencies: List of task IDs this task depends on.
 
         Returns:
-            TeamTask object if successful, None otherwise
-
-        Example:
-            task = task_manager.add(
-                title="Analyze data",
-                content="Analyze the sales data for Q4",
-                dependencies=["task1", "task2"]
-            )
+            ``TaskCreateResult`` — on success ``result.task`` carries the
+            created task (and attribute access like ``result.task_id``
+            / ``result.title`` transparently delegates to it); on
+            failure ``result.reason`` holds the specific cause.
         """
         if task_id is None:
             task_id = str(uuid.uuid4())
@@ -168,8 +165,9 @@ class TeamTaskManager:
         )
 
         if not success:
-            team_logger.error(f"Failed to create task {task_id}")
-            return None
+            return TaskCreateResult.fail(
+                f"Failed to create task {task_id} (likely a task_id collision)"
+            )
 
         # Add dependencies if provided
         if dependencies:
@@ -195,14 +193,14 @@ class TeamTaskManager:
         except Exception as e:
             team_logger.error(f"Failed to publish task created event for {task_id}: {e}")
 
-        return TeamTaskBase(
+        return TaskCreateResult.success(TeamTaskBase(
             task_id=task_id,
             team_name=self.team_name,
             title=title,
             content=content,
             status=status,
-            assignee=None
-        )
+            assignee=None,
+        ))
 
     async def add_with_priority(
         self,
@@ -211,7 +209,7 @@ class TeamTaskManager:
         task_id: Optional[str] = None,
         dependencies: Optional[List[str]] = None,
         dependent_task_ids: Optional[List[str]] = None
-    ) -> Optional[TeamTaskBase]:
+    ) -> TaskCreateResult:
         """Add a task with bidirectional dependency support (prioritized task)
 
         This method allows creating a task that can:
@@ -232,23 +230,9 @@ class TeamTaskManager:
             dependent_task_ids: List of existing task IDs that should depend on the new task
 
         Returns:
-            TeamTask object if successful, None otherwise (e.g., circular dependency detected)
-
-        Example:
-            # High priority task - existing tasks wait for this task to complete
-            task = task_manager.add_with_priority(
-                title="Fix critical bug",
-                content="Fix critical security issue",
-                dependent_task_ids=["task1", "task2"]  # task1, task2 now wait for this task
-            )
-
-            # Insert task between other tasks - depends on A, B waits for this task
-            task = task_manager.add_with_priority(
-                title="Verify fix",
-                content="Verify the fix works",
-                dependencies=["taskA"],  # This task depends on taskA
-                dependent_task_ids=["taskB"]  # taskB waits for this task
-            )
+            ``TaskCreateResult`` describing the outcome. On failure
+            ``result.reason`` typically points at a circular dependency
+            or a conflicting task_id.
         """
         if task_id is None:
             task_id = str(uuid.uuid4())
@@ -272,8 +256,10 @@ class TeamTaskManager:
         )
 
         if not success:
-            team_logger.error(f"Failed to create prioritized task {task_id} (possibly circular dependency)")
-            return None
+            return TaskCreateResult.fail(
+                f"Failed to create prioritized task {task_id} "
+                f"(circular dependency, missing dependent task, or task_id collision)"
+            )
 
         # Publish task created event
         try:
@@ -289,21 +275,21 @@ class TeamTaskManager:
         except Exception as e:
             team_logger.error(f"Failed to publish task created event for {task_id}: {e}")
 
-        return TeamTaskBase(
+        return TaskCreateResult.success(TeamTaskBase(
             task_id=task_id,
             team_name=self.team_name,
             title=title,
             content=content,
             status=status,
-            assignee=None
-        )
+            assignee=None,
+        ))
 
     async def add_as_top_priority(
         self,
         title: str,
         content: str,
         task_id: Optional[str] = None
-    ) -> Optional[TeamTaskBase]:
+    ) -> TaskCreateResult:
         """Add a task as top priority (blocks all existing pending/blockable tasks)
 
         This method creates a new task and makes all existing tasks that can be blocked
@@ -316,19 +302,12 @@ class TeamTaskManager:
         This operation is atomic and prevents circular dependencies.
 
         Args:
-            title: Task title
-            content: Task content
-            task_id: Optional custom task ID (auto-generated if not provided)
+            title: Task title.
+            content: Task content.
+            task_id: Optional custom task ID (auto-generated if not provided).
 
         Returns:
-            TeamTask object if successful, None otherwise (e.g., circular dependency detected)
-
-        Example:
-            # Insert an urgent task that all pending tasks must wait for
-            urgent_task = task_manager.add_as_top_priority(
-                title="Fix critical bug",
-                content="Fix critical security issue immediately"
-            )
+            ``TaskCreateResult`` describing the outcome.
         """
         if task_id is None:
             task_id = str(uuid.uuid4())
@@ -354,8 +333,10 @@ class TeamTaskManager:
         )
 
         if not success:
-            team_logger.error(f"Failed to create top priority task {task_id} (possibly circular dependency)")
-            return None
+            return TaskCreateResult.fail(
+                f"Failed to create top priority task {task_id} "
+                f"(circular dependency or task_id collision)"
+            )
 
         team_logger.info(
             f"Added top priority task {task_id}, blocking {len(dependent_task_ids)} existing tasks"
@@ -375,14 +356,14 @@ class TeamTaskManager:
         except Exception as e:
             team_logger.error(f"Failed to publish task created event for {task_id}: {e}")
 
-        return TeamTaskBase(
+        return TaskCreateResult.success(TeamTaskBase(
             task_id=task_id,
             team_name=self.team_name,
             title=title,
             content=content,
             status=status,
-            assignee=None
-        )
+            assignee=None,
+        ))
 
     async def list_tasks_with_deps(self, status: Optional[str] = None) -> TaskListResult:
         """List tasks with blocked_by info (summary view, no content).

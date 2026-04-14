@@ -260,7 +260,7 @@ class SpawnMemberTool(TeamTool):
 
         card_id = f"{self.team.team_name}_{member_name}"
         agent_card = AgentCard(id=card_id, name=display_name, description=desc)
-        success = await self.team.spawn_member(
+        result = await self.team.spawn_member(
             member_name=member_name,
             display_name=display_name,
             agent_card=agent_card,
@@ -270,9 +270,9 @@ class SpawnMemberTool(TeamTool):
             member_model=member_model,
         )
         return ToolOutput(
-            success=success,
+            success=result.ok,
             data={"member_name": member_name, "display_name": display_name},
-            error=None if success else "Failed to spawn member",
+            error=None if result.ok else result.reason,
         )
 
     def map_result(self, output: ToolOutput) -> str:
@@ -304,14 +304,14 @@ class ShutdownMemberTool(TeamTool):
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         member_name = inputs.get("member_name")
-        success = await self.team.shutdown_member(
+        result = await self.team.shutdown_member(
             member_name=member_name,
             force=inputs.get("force", False),
         )
         return ToolOutput(
-            success=success,
+            success=result.ok,
             data={"member_name": member_name},
-            error=None if success else "Failed to shutdown member",
+            error=None if result.ok else result.reason,
         )
 
     def map_result(self, output: ToolOutput) -> str:
@@ -495,36 +495,26 @@ class TaskCreateTool(TeamTool):
             "required": ["tasks"],
         }
 
-    async def _create_single(self, spec: dict) -> ToolOutput:
-        """Create one task, routing by presence of depended_by."""
+    async def _create_one(self, spec: dict):
+        """Create one task via the right add path; returns a TaskCreateResult."""
         if spec.get("depended_by"):
-            task = await self.task_manager.add_with_priority(
+            return await self.task_manager.add_with_priority(
                 title=spec["title"],
                 content=spec["content"],
                 task_id=spec.get("task_id"),
                 dependencies=spec.get("depends_on"),
                 dependent_task_ids=spec.get("depended_by"),
             )
-        else:
-            task = await self.task_manager.add(
-                title=spec["title"],
-                content=spec["content"],
-                task_id=spec.get("task_id"),
-                dependencies=spec.get("depends_on"),
-            )
-        if task:
-            return ToolOutput(success=True, data=task.brief())
-        return ToolOutput(success=False, error="Failed to create task (possibly circular dependency)")
+        return await self.task_manager.add(
+            title=spec["title"],
+            content=spec["content"],
+            task_id=spec.get("task_id"),
+            dependencies=spec.get("depends_on"),
+        )
 
     @staticmethod
-    def _normalize(spec: dict) -> dict:
-        """Map input schema keys to internal task_manager keys."""
-        return {
-            "title": spec.get("title"),
-            "content": spec.get("content"),
-            "task_id": spec.get("task_id"),
-            "dependencies": spec.get("depends_on"),
-        }
+    def _spec_label(spec: dict) -> str:
+        return spec.get("task_id") or spec.get("title") or "<unnamed>"
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         tasks = inputs.get("tasks", [])
@@ -532,33 +522,52 @@ class TaskCreateTool(TeamTool):
             return ToolOutput(success=False, error="'tasks' is required")
 
         if len(tasks) == 1:
-            return await self._create_single(tasks[0])
+            spec = tasks[0]
+            if not spec.get("title") or not spec.get("content"):
+                return ToolOutput(
+                    success=False,
+                    error=f"Task {self._spec_label(spec)!r} missing required title/content",
+                )
+            result = await self._create_one(spec)
+            if not result.ok:
+                return ToolOutput(success=False, error=result.reason)
+            return ToolOutput(success=True, data=result.task.brief())
 
-        # Batch: separate priority tasks (with depended_by) from normal tasks
-        priority_specs = [s for s in tasks if s.get("depended_by")]
-        normal_specs = [s for s in tasks if not s.get("depended_by")]
+        # Batch path — call add* one by one so we can capture per-task reasons
+        # and return them to the LLM. The previous implementation routed
+        # plain specs through add_batch() which silently dropped failures.
+        created: list = []
+        failures: list[dict] = []
+        for spec in tasks:
+            if not spec.get("title") or not spec.get("content"):
+                failures.append({
+                    "spec": self._spec_label(spec),
+                    "reason": "missing required title/content",
+                })
+                continue
+            result = await self._create_one(spec)
+            if result.ok:
+                created.append(result.task)
+            else:
+                failures.append({
+                    "spec": self._spec_label(spec),
+                    "reason": result.reason,
+                })
 
-        created = []
-        if normal_specs:
-            normalized = [self._normalize(s) for s in normal_specs]
-            created.extend(await self.task_manager.add_batch(normalized))
-        for spec in priority_specs:
-            task = await self.task_manager.add_with_priority(
-                title=spec["title"],
-                content=spec["content"],
-                task_id=spec.get("task_id"),
-                dependencies=spec.get("depends_on"),
-                dependent_task_ids=spec.get("depended_by"),
+        if not created and failures:
+            joined = "; ".join(f"{f['spec']}: {f['reason']}" for f in failures)
+            return ToolOutput(
+                success=False,
+                error=f"All {len(failures)} task creations failed: {joined}",
             )
-            if task:
-                created.append(task)
 
         return ToolOutput(
             success=True,
             data={
                 "tasks": [t.brief() for t in created],
                 "count": len(created),
-                "skipped": len(tasks) - len(created),
+                "skipped": len(failures),
+                "failures": failures,
             },
         )
 
@@ -573,6 +582,8 @@ class TaskCreateTool(TeamTool):
         tasks = d.get("tasks", [])
         lines = [f"task_id={t['task_id']} title={t['title']}" for t in tasks]
         lines.append(f"Created {d['count']}, skipped {d.get('skipped', 0)}")
+        for f in d.get("failures", []) or []:
+            lines.append(f"  - skipped {f['spec']}: {f['reason']}")
         return "\n".join(lines)
 
 

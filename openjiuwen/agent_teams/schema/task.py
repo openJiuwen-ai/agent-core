@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -31,6 +31,53 @@ class TaskOpResult:
     @classmethod
     def fail(cls, reason: str) -> "TaskOpResult":
         return cls(ok=False, reason=reason)
+
+
+@dataclass(frozen=True, slots=True)
+class TaskCreateResult:
+    """Outcome of a task-creation mutation.
+
+    Carries the created ``task`` on success and a human-readable failure
+    ``reason`` otherwise. ``__getattr__`` transparently delegates missing
+    attribute lookups to the wrapped task, so existing call sites that
+    treat the return value like a bare ``TeamTaskBase`` (``result.title``,
+    ``result.task_id``) keep working without an unwrap. Callers that
+    care about failure reasons check ``.ok`` / ``.reason`` directly.
+
+    Typed as ``Any`` instead of ``TeamTaskBase`` to avoid a cross-package
+    import cycle (models → schema).
+    """
+
+    task: Any = None
+    reason: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.task is not None
+
+    def __bool__(self) -> bool:
+        return self.task is not None
+
+    def __getattr__(self, name: str) -> Any:
+        # Only called when normal lookup misses — i.e. `name` is neither a
+        # slot (task / reason), a method, nor a property. Delegate to the
+        # wrapped task so `result.title`, `result.task_id`, etc. work.
+        task = object.__getattribute__(self, "task")
+        if task is None:
+            reason = object.__getattribute__(self, "reason")
+            raise AttributeError(
+                f"TaskCreateResult has no attribute {name!r}; "
+                f"task creation failed: {reason}"
+            )
+        return getattr(task, name)
+
+    @classmethod
+    def success(cls, task: Any) -> "TaskCreateResult":
+        return cls(task=task)
+
+    @classmethod
+    def fail(cls, reason: str) -> "TaskCreateResult":
+        return cls(task=None, reason=reason)
 
 
 class TaskSummary(BaseModel):

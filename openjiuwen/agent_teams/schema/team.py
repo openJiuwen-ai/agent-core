@@ -2,6 +2,7 @@
 """Team-level schemas."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
@@ -10,6 +11,31 @@ from pydantic import BaseModel, ConfigDict, Field
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
+
+
+@dataclass(frozen=True, slots=True)
+class MemberOpResult:
+    """Outcome of a team-member mutation with the failure reason preserved.
+
+    TeamBackend mutation methods (spawn_member, shutdown_member, …) return
+    this so tool wrappers can surface the real cause back to the LLM rather
+    than dropping it into the log sink. ``__bool__`` falls through to
+    ``ok`` so legacy truthy call sites keep working.
+    """
+
+    ok: bool
+    reason: str = ""
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+    @classmethod
+    def success(cls) -> "MemberOpResult":
+        return cls(ok=True)
+
+    @classmethod
+    def fail(cls, reason: str) -> "MemberOpResult":
+        return cls(ok=False, reason=reason)
 
 
 class TeamLifecycle(str, Enum):

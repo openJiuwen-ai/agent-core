@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
 
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.schema.team import TeamMemberSpec
+from openjiuwen.agent_teams.schema.team import MemberOpResult, TeamMemberSpec
 from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
     Team,
@@ -153,7 +153,7 @@ class TeamBackend:
         execution_status: ExecutionStatus = ExecutionStatus.IDLE,
         mode: MemberMode = MemberMode.BUILD_MODE,
         member_model: Optional["TeamModelConfig"] = None,
-    ) -> bool:
+    ) -> MemberOpResult:
         """Create a team member record in the database.
 
         Only persists the member data — does NOT start the member.
@@ -169,7 +169,18 @@ class TeamBackend:
             execution_status: Initial execution status.
             mode: Member mode (BUILD_MODE or PLAN_MODE).
             member_model: TeamModelConfig allocated for this member.
+
+        Returns:
+            ``MemberOpResult`` describing the outcome. ``__bool__`` falls
+            through to ``ok`` so legacy ``if await spawn_member(...): ...``
+            patterns keep working.
         """
+        existing = await self.db.get_member(member_name, self.team_name)
+        if existing is not None:
+            return MemberOpResult.fail(
+                f"Member {member_name} already exists in team {self.team_name}"
+            )
+
         success = await self.db.create_member(
             member_name=member_name,
             team_name=self.team_name,
@@ -183,11 +194,13 @@ class TeamBackend:
             model_config_json=member_model.model_dump_json() if member_model else None,
         )
         if not success:
-            team_logger.error(f"Failed to create member {member_name}")
-            return False
+            return MemberOpResult.fail(
+                f"Database rejected create_member for {member_name} "
+                f"in team {self.team_name}"
+            )
 
         team_logger.info(f"Member {member_name} created successfully")
-        return True
+        return MemberOpResult.success()
 
     async def startup(
         self,
@@ -359,8 +372,8 @@ class TeamBackend:
         )
         return True
 
-    async def shutdown_member(self, member_name: str, force: bool = False) -> bool:
-        """Shutdown a member
+    async def shutdown_member(self, member_name: str, force: bool = False) -> MemberOpResult:
+        """Shutdown a member.
 
         Sends a shutdown request to member. Supports interrupting
         member's current execution.
@@ -373,31 +386,30 @@ class TeamBackend:
         4. Member process receives event and handles its own shutdown sequence
 
         Args:
-            member_name: Member identifier
-            force: Whether to force shutdown (bypass normal shutdown sequence)
+            member_name: Member identifier.
+            force: Whether to force shutdown (bypass normal shutdown sequence).
 
         Returns:
-            True if successful, False otherwise
-
-        Example:
-            success = team.shutdown_member(member_name="member123", force=True)
+            ``MemberOpResult`` describing the outcome. ``__bool__`` falls
+            through to ``ok`` so legacy truthy call sites keep working.
         """
         # Check if member exists in database
         member_data = await self.db.get_member(member_name, self.team_name)
         if not member_data:
-            team_logger.error(f"Member {member_name} not found in team {self.team_name}")
-            return False
+            return MemberOpResult.fail(
+                f"Member {member_name} not found in team {self.team_name}"
+            )
 
         current_status = MemberStatus(member_data.status)
 
-        # Check if already shutdown
+        # Check if already shutdown — idempotent success path
         if current_status == MemberStatus.SHUTDOWN or current_status == MemberStatus.SHUTDOWN_REQUESTED:
             team_logger.debug(
                 f"Member {member_name} already shutdown"
                 if current_status == MemberStatus.SHUTDOWN
                 else f"Member {member_name} is shutting down"
             )
-            return True
+            return MemberOpResult.success()
 
         # Validate state transition
         from openjiuwen.agent_teams.schema.status import (
@@ -406,11 +418,10 @@ class TeamBackend:
         )
 
         if not is_valid_transition(current_status, MemberStatus.SHUTDOWN_REQUESTED, MEMBER_TRANSITIONS):
-            team_logger.error(
-                f"Invalid status transition for member {member_name}: "
-                f"{current_status.value} -> {MemberStatus.SHUTDOWN_REQUESTED.value}"
+            return MemberOpResult.fail(
+                f"Member {member_name} cannot shut down from status "
+                f"'{current_status.value}'"
             )
-            return False
 
         team_logger.info(
             f"Shutting down member {member_name}: {current_status.value} -> {MemberStatus.SHUTDOWN_REQUESTED.value}"
@@ -420,13 +431,17 @@ class TeamBackend:
         # Update member status in database (team management layer)
         success = await self.db.update_member_status(member_name, self.team_name, MemberStatus.SHUTDOWN_REQUESTED.value)
         if not success:
-            team_logger.error(f"Failed to update member {member_name} status")
-            return False
+            return MemberOpResult.fail(
+                f"Database rejected status update for member {member_name}"
+            )
 
         # Note: execution_status is managed by member process internally
         # Team leader only sets member status and notifies member via message and event
-        success = await self.message_manager.send_message(content="当前任务已全部完成，请结束流程", to_member_name=member_name)
-        if not success:
+        msg_id = await self.message_manager.send_message(
+            content="当前任务已全部完成，请结束流程",
+            to_member_name=member_name,
+        )
+        if not msg_id:
             team_logger.warning(f"Failed to send shutdown request message to member {member_name}")
 
         # Publish shutdown event (for cross-process notification to member)
@@ -444,7 +459,7 @@ class TeamBackend:
             team_logger.error(f"Failed to publish member shutdown event for {member_name}: {e}")
 
         team_logger.info(f"Shutdown request sent to member {member_name}")
-        return True
+        return MemberOpResult.success()
 
     async def cancel_member(self, member_name: str) -> bool:
         """Cancel member execution

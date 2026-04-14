@@ -122,7 +122,7 @@ class EventDispatcher:
         }
     )
 
-    _STALE_CLAIM_SECONDS = 60.0
+    _STALE_CLAIM_SECONDS = 2 * 60.0
 
     def __init__(self, host: DispatcherHost) -> None:
         self._host = host
@@ -212,8 +212,8 @@ class EventDispatcher:
             team_logger.debug("poll task: member_name={}, agent_running={}", member_name, host.is_agent_running())
             if member_name and host.task_manager:
                 await self._check_stale_claimed_tasks()
-                if not host.is_agent_running():
-                    await self._nudge_idle_agent(member_name)
+                # if not host.is_agent_running():
+                #     await self._nudge_idle_agent(member_name)
             return
 
         if event.event_type == InnerEventType.POLL_MAILBOX:

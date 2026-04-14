@@ -136,7 +136,7 @@ class TestSpawnMember:
             prompt="Member prompt"
         )
 
-        assert result is True
+        assert result.ok
         assert await agent_team.get_member("member1")
 
     @pytest.mark.asyncio
@@ -174,6 +174,25 @@ class TestSpawnMember:
         assert len(members) == 2
 
     @pytest.mark.asyncio
+    async def test_spawn_member_duplicate_returns_reason(self, agent_team, sample_agent_card):
+        """Spawning a member that already exists should report the collision."""
+        first = await agent_team.spawn_member(
+            member_name="member1",
+            display_name="Member One",
+            agent_card=sample_agent_card,
+        )
+        assert first.ok
+
+        second = await agent_team.spawn_member(
+            member_name="member1",
+            display_name="Duplicate",
+            agent_card=sample_agent_card,
+        )
+        assert not second.ok
+        assert "member1" in second.reason
+        assert "already exists" in second.reason
+
+    @pytest.mark.asyncio
     async def test_spawn_member_with_minimal_args(self, agent_team, sample_agent_card):
         """Test spawning member with minimal arguments"""
         result = await agent_team.spawn_member(
@@ -182,7 +201,7 @@ class TestSpawnMember:
             agent_card=sample_agent_card
         )
 
-        assert result is True
+        assert result.ok
         members = await agent_team.list_members()
         assert len(members) == 1
         assert "member1" == members[0].member_name
@@ -345,7 +364,7 @@ class TestShutdownMember:
 
         result = await agent_team.shutdown_member(member_name="member1", force=False)
 
-        assert result is True
+        assert result.ok
 
     @pytest.mark.asyncio
     async def test_shutdown_member_updates_status(self, agent_team, sample_agent_card, db):
@@ -378,13 +397,14 @@ class TestShutdownMember:
 
         # Try to shutdown again
         result = await agent_team.shutdown_member(member_name="member1")
-        assert result is True
+        assert result.ok
 
     @pytest.mark.asyncio
     async def test_shutdown_member_not_found(self, agent_team):
-        """Test shutting down non-existent member"""
+        """Test shutting down non-existent member surfaces the reason."""
         result = await agent_team.shutdown_member(member_name="nonexistent_member")
-        assert result is False
+        assert not result.ok
+        assert "not found" in result.reason
 
 
 class TestCancelMember:

@@ -142,6 +142,55 @@ class TestAddAsTopPriority:
         assert task3_updated.status == TaskStatus.BLOCKED.value
 
 
+class TestAddFailureReasons:
+    """Verify that failed creates surface a reason instead of a bare None."""
+
+    @pytest.mark.asyncio
+    async def test_add_duplicate_task_id_returns_reason(self, task_manager):
+        """Reusing an existing task_id should report the collision."""
+        first = await task_manager.add(
+            title="Original",
+            content="Content",
+            task_id="dup-1",
+        )
+        assert first.ok
+
+        second = await task_manager.add(
+            title="Conflict",
+            content="Content",
+            task_id="dup-1",
+        )
+        assert not second.ok
+        assert "dup-1" in second.reason
+
+    @pytest.mark.asyncio
+    async def test_add_with_priority_circular_dep_returns_reason(self, task_manager):
+        """Circular dependency rejection should surface a clear reason."""
+        task_a = await task_manager.add(title="A", content="ca", task_id="a")
+        assert task_a.ok
+
+        # Create B depending on A — fine.
+        task_b = await task_manager.add_with_priority(
+            title="B",
+            content="cb",
+            task_id="b",
+            dependencies=["a"],
+        )
+        assert task_b.ok
+
+        # Now try to insert C such that A depends on C and C depends on B,
+        # which would form A → C → B → A. The DB should reject it.
+        result = await task_manager.add_with_priority(
+            title="C",
+            content="cc",
+            task_id="c",
+            dependencies=["b"],
+            dependent_task_ids=["a"],
+        )
+        assert not result.ok
+        assert "c" in result.reason
+
+
 class TestClaimConflict:
     """Test claim conflict reporting."""
 
