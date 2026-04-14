@@ -56,7 +56,13 @@ class MemoryDatabaseConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 class _MemTask:
-    """Plain task record."""
+    """Plain task record.
+
+    ``updated_at`` carries the millisecond timestamp of the most recent
+    status transition. Its interpretation depends on the current status
+    (claimed → claim time, completed → completion time, …). Title/content
+    edits do not bump this field.
+    """
 
     def __init__(
         self,
@@ -67,7 +73,7 @@ class _MemTask:
         content: str,
         status: str,
         assignee: Optional[str] = None,
-        completed_at: Optional[int] = None,
+        updated_at: Optional[int] = None,
     ) -> None:
         self.task_id = task_id
         self.team_name = team_name
@@ -75,7 +81,7 @@ class _MemTask:
         self.content = content
         self.status = status
         self.assignee = assignee
-        self.completed_at = completed_at
+        self.updated_at = updated_at
 
     def brief(self) -> dict:
         return {"task_id": self.task_id, "title": self.title, "status": self.status}
@@ -324,7 +330,8 @@ class InMemoryTeamDatabase:
                 team_logger.error(f"Task {task_id} already exists")
                 return False
             self._tasks[task_id] = _MemTask(
-                task_id=task_id, team_name=team_name, title=title, content=content, status=status,
+                task_id=task_id, team_name=team_name, title=title, content=content,
+                status=status, updated_at=self.get_current_time(),
             )
             team_logger.info(f"Task {task_id} created")
             return True
@@ -361,6 +368,7 @@ class InMemoryTeamDatabase:
                 return False
             task.status = TaskStatus.CLAIMED.value
             task.assignee = member_name
+            task.updated_at = self.get_current_time()
             team_logger.info(f"Task {task_id} claimed by member {member_name}")
             return True
 
@@ -381,6 +389,7 @@ class InMemoryTeamDatabase:
                 return None
             task.status = TaskStatus.PENDING.value
             task.assignee = None
+            task.updated_at = self.get_current_time()
             team_logger.info(f"Task {task_id} reset to PENDING")
             return task
 
@@ -396,6 +405,7 @@ class InMemoryTeamDatabase:
                 )
                 return None
             task.status = TaskStatus.PLAN_APPROVED.value
+            task.updated_at = self.get_current_time()
             team_logger.info(f"Task {task_id} approved from CLAIMED to PLAN_APPROVED")
             return task
 
@@ -409,9 +419,8 @@ class InMemoryTeamDatabase:
                 team_logger.error(f"Invalid state transition for task {task_id}: {task.status} -> {status}")
                 return False
             task.status = status
+            task.updated_at = self.get_current_time()
             if status == TaskStatus.COMPLETED.value:
-                now = self.get_current_time()
-                task.completed_at = now
                 for dep in self._task_deps:
                     if dep.depends_on_task_id == task_id and not dep.resolved:
                         dep.resolved = True
@@ -500,8 +509,10 @@ class InMemoryTeamDatabase:
             if task_id in self._tasks:
                 team_logger.error(f"Task {task_id} already exists")
                 return False
+            now = self.get_current_time()
             self._tasks[task_id] = _MemTask(
-                task_id=task_id, team_name=team_name, title=title, content=content, status=status,
+                task_id=task_id, team_name=team_name, title=title, content=content,
+                status=status, updated_at=now,
             )
 
             # 3. New task depends on existing tasks
@@ -541,6 +552,7 @@ class InMemoryTeamDatabase:
                     )
                     if dep_task.status == TaskStatus.PENDING.value:
                         dep_task.status = TaskStatus.BLOCKED.value
+                        dep_task.updated_at = now
 
             team_logger.info(f"Task {task_id} created with bidirectional dependencies")
             return True
@@ -576,6 +588,7 @@ class InMemoryTeamDatabase:
                     f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.CANCELLED.value}")
                 return None
             task.status = TaskStatus.CANCELLED.value
+            task.updated_at = self.get_current_time()
             team_logger.info(f"Task {task_id} cancelled")
             return task
 
@@ -583,12 +596,14 @@ class InMemoryTeamDatabase:
         async with self._lock:
             skip = {TaskStatus.CANCELLED.value, TaskStatus.COMPLETED.value}
             cancelled = []
+            now = self.get_current_time()
             for task in self._tasks.values():
                 if task.team_name != team_name or task.status in skip:
                     continue
                 if not is_valid_transition(TaskStatus(task.status), TaskStatus.CANCELLED, TASK_TRANSITIONS):
                     continue
                 task.status = TaskStatus.CANCELLED.value
+                task.updated_at = now
                 cancelled.append(task)
             team_logger.info(f"Cancelled {len(cancelled)} tasks for team {team_name}")
             return cancelled
@@ -608,7 +623,7 @@ class InMemoryTeamDatabase:
 
             now = self.get_current_time()
             task.status = TaskStatus.COMPLETED.value
-            task.completed_at = now
+            task.updated_at = now
 
             # Resolve deps
             for dep in self._task_deps:
@@ -625,6 +640,7 @@ class InMemoryTeamDatabase:
                 unresolved = sum(1 for d in self._task_deps if d.task_id == dtid and not d.resolved)
                 if unresolved == 0:
                     dt.status = TaskStatus.PENDING.value
+                    dt.updated_at = now
                     unblocked.append(dt)
                     team_logger.info(f"Task {dtid} unblocked (from BLOCKED to PENDING)")
 
@@ -634,12 +650,14 @@ class InMemoryTeamDatabase:
     async def _verify_and_fix_blocked_tasks(self, team_name: str) -> List[_MemTask]:
         async with self._lock:
             fixed = []
+            now = self.get_current_time()
             for task in self._tasks.values():
                 if task.team_name != team_name or task.status != TaskStatus.BLOCKED.value:
                     continue
                 unresolved = sum(1 for d in self._task_deps if d.task_id == task.task_id and not d.resolved)
                 if unresolved == 0:
                     task.status = TaskStatus.PENDING.value
+                    task.updated_at = now
                     fixed.append(task)
                     team_logger.info(f"Task {task.task_id} fixed from BLOCKED to PENDING")
             return fixed

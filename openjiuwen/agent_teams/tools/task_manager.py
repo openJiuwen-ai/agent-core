@@ -438,7 +438,7 @@ class TeamTaskManager:
             assignee=task.assignee,
             blocked_by=blocked_by,
             blocks=blocks,
-            completed_at=task.completed_at,
+            updated_at=task.updated_at,
         )
 
     async def get(self, task_id: str) -> Optional[TeamTaskBase]:

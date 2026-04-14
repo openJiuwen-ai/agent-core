@@ -126,10 +126,11 @@ class EventDispatcher:
 
     def __init__(self, host: DispatcherHost) -> None:
         self._host = host
-        # task_id -> monotonic timestamp used to measure how long a task
-        # has been sitting in CLAIMED state. Rearmed after each stale nudge
-        # so follow-up nudges fire at most every ``_STALE_CLAIM_SECONDS``.
-        self._claim_clock_start: dict[str, float] = {}
+        # task_id -> wall-clock seconds when we last fired a stale-claim
+        # nudge. Used only to throttle follow-up nudges; the ``is this
+        # task stale?`` decision itself reads ``task.updated_at`` from the
+        # database so we never lose state across process restarts.
+        self._last_stale_nudge: dict[str, float] = {}
 
     async def dispatch(self, event: CoordinationEvent) -> None:
         """Entry point called by CoordinatorLoop on every wake-up.
@@ -530,13 +531,13 @@ class EventDispatcher:
     async def _check_stale_claimed_tasks(self) -> None:
         """Find claimed tasks that have been running past the stale threshold.
 
-        For each task the current agent cares about (its own claimed work,
-        or — if leader — any claimed task on the board), measure how long
-        it has been in the CLAIMED state using an in-memory clock. When the
-        elapsed time exceeds ``_STALE_CLAIM_SECONDS`` the assignee is nudged
-        via the local agent loop (self) or a direct message (leader → other
-        member), and the clock is rearmed so follow-up nudges throttle to
-        roughly one per threshold window.
+        Measures how long a task has been in CLAIMED state by reading the
+        database ``updated_at`` column (bumped on every status transition,
+        so for a claimed task it is the claim timestamp). When the
+        elapsed time exceeds ``_STALE_CLAIM_SECONDS`` the assignee is
+        nudged via the local agent loop (self) or a direct message
+        (leader → other member). A per-task throttle prevents follow-up
+        polls from re-nudging inside the same stale window.
         """
         host = self._host
         task_manager = host.task_manager
@@ -552,19 +553,24 @@ class EventDispatcher:
         ]
 
         current_ids = {t.task_id for t in relevant}
-        for tid in [k for k in self._claim_clock_start if k not in current_ids]:
-            self._claim_clock_start.pop(tid, None)
+        for tid in [k for k in self._last_stale_nudge if k not in current_ids]:
+            self._last_stale_nudge.pop(tid, None)
 
         if not relevant:
             return
 
-        now = time.monotonic()
+        now = time.time()
+        threshold_ms = self._STALE_CLAIM_SECONDS * 1000
         for task in relevant:
-            started = self._claim_clock_start.setdefault(task.task_id, now)
-            elapsed = now - started
-            if elapsed < self._STALE_CLAIM_SECONDS:
+            if task.updated_at is None:
                 continue
-            self._claim_clock_start[task.task_id] = now
+            elapsed_ms = now * 1000 - task.updated_at
+            if elapsed_ms < threshold_ms:
+                continue
+            last_nudge = self._last_stale_nudge.get(task.task_id, 0.0)
+            if now - last_nudge < self._STALE_CLAIM_SECONDS:
+                continue
+            self._last_stale_nudge[task.task_id] = now
             await self._nudge_stale_claim(task)
 
     async def _nudge_stale_claim(self, task) -> None:

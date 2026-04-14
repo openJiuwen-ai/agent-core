@@ -146,16 +146,19 @@ class TestTaskCompletionWithDependencyResolution:
     """Test task completion and dependency resolution"""
 
     @pytest.mark.asyncio
-    async def test_complete_task_sets_completed_at(self, task_manager):
-        """Test that completing a task sets completed_at"""
+    async def test_complete_task_sets_updated_at(self, task_manager):
+        """Completing a task bumps updated_at so it reflects completion time."""
         task = await task_manager.add(title="Test Task", content="Content")
         assert await task_manager.claim(task.task_id)
-        assert task.completed_at is None
+        claimed = await task_manager.get(task.task_id)
+        claimed_at = claimed.updated_at
+        assert claimed_at is not None
 
         await task_manager.complete(task.task_id)
 
         task_updated = await task_manager.get(task.task_id)
-        assert task_updated.completed_at is not None
+        assert task_updated.updated_at is not None
+        assert task_updated.updated_at >= claimed_at
         assert task_updated.status == TaskStatus.COMPLETED.value
 
     @pytest.mark.asyncio

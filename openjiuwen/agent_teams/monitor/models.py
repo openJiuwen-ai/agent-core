@@ -71,7 +71,12 @@ class MemberInfo(BaseModel):
 
 
 class TaskInfo(BaseModel):
-    """Task information."""
+    """Task information.
+
+    ``updated_at`` is the millisecond wall-clock timestamp of the most
+    recent status transition on this task. Its semantic meaning is tied
+    to the current ``status``.
+    """
 
     task_id: str
     team_id: str
@@ -79,7 +84,7 @@ class TaskInfo(BaseModel):
     content: str
     status: str = Field(description="TaskStatus value")
     assignee: str | None = None
-    completed_at: int | None = None
+    updated_at: int | None = None
 
     @classmethod
     def from_internal(cls, task) -> TaskInfo:
@@ -95,7 +100,7 @@ class TaskInfo(BaseModel):
             content=task.content,
             status=task.status,
             assignee=task.assignee,
-            completed_at=task.completed_at,
+            updated_at=task.updated_at,
         )
 
 

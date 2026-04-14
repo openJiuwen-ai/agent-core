@@ -18,7 +18,13 @@ class TaskSummary(BaseModel):
 
 
 class TaskDetail(BaseModel):
-    """Full task detail returned by get action."""
+    """Full task detail returned by get action.
+
+    ``updated_at`` is the millisecond wall-clock timestamp of the last
+    status transition. Its semantic meaning depends on ``status`` —
+    when status=claimed it is the claim time, when status=completed it
+    is the completion time, etc.
+    """
 
     task_id: str
     title: str
@@ -27,7 +33,7 @@ class TaskDetail(BaseModel):
     assignee: Optional[str] = None
     blocked_by: list[str] = Field(default_factory=list)
     blocks: list[str] = Field(default_factory=list)
-    completed_at: Optional[int] = None
+    updated_at: Optional[int] = None
 
 
 class TaskListResult(BaseModel):

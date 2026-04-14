@@ -530,7 +530,8 @@ class TeamDatabase:
                     team_name=team_name,
                     title=title,
                     content=content,
-                    status=status
+                    status=status,
+                    updated_at=self.get_current_time(),
                 )
                 session.add(task)
                 await session.commit()
@@ -627,6 +628,7 @@ class TeamDatabase:
                 return False
             task.assignee = member_name
             task.status = TaskStatus.CLAIMED.value
+            task.updated_at = self.get_current_time()
             await session.commit()
             team_logger.info(f"Task {task_id} assigned to {member_name} (status=claimed)")
             return True
@@ -662,6 +664,7 @@ class TeamDatabase:
 
             task.status = TaskStatus.CLAIMED.value
             task.assignee = member_name
+            task.updated_at = self.get_current_time()
             await session.commit()
             team_logger.info(f"Task {task_id} claimed by member {member_name}")
             return True
@@ -713,6 +716,7 @@ class TeamDatabase:
             origin_task_status = task.status
             task.status = TaskStatus.PENDING.value
             task.assignee = None
+            task.updated_at = self.get_current_time()
             await session.commit()
             team_logger.info(f"Task {task_id} reset from {origin_task_status} to PENDING")
 
@@ -754,6 +758,7 @@ class TeamDatabase:
                 return None
 
             task.status = TaskStatus.PLAN_APPROVED.value
+            task.updated_at = self.get_current_time()
             await session.commit()
             team_logger.info(f"Task {task_id} approved from CLAIMED to PLAN_APPROVED")
 
@@ -785,17 +790,15 @@ class TeamDatabase:
                 )
                 return False
 
+            now = self.get_current_time()
             task.status = status
+            task.updated_at = now
 
-            # When completing a task, set completed_at and resolve dependencies
-            # Using the same timestamp for both to maintain consistency
+            # Resolving dependencies is part of the completion handshake —
+            # unblock downstream tasks that were waiting on this one.
             if status == TaskStatus.COMPLETED.value:
-                now = self.get_current_time()
-                task.completed_at = now
                 team_logger.info(f"Task {task_id} completed at {now}")
 
-                # Resolve all dependencies that depend on this task
-                # This unblocks tasks that were waiting for this one
                 dep_update_result = await session.execute(
                     update(task_dependency_model).where(
                         task_dependency_model.depends_on_task_id == task_id,
@@ -994,12 +997,14 @@ class TeamDatabase:
                                 return False
 
                 # 2. Create new task
+                now = self.get_current_time()
                 new_task = team_task_model(
                     task_id=task_id,
                     team_name=team_name,
                     title=title,
                     content=content,
-                    status=status
+                    status=status,
+                    updated_at=now,
                 )
                 session.add(new_task)
                 await session.flush()
@@ -1049,6 +1054,7 @@ class TeamDatabase:
                         # Update dependent task status from pending to blocked
                         if dep_task.status == TaskStatus.PENDING.value:
                             dep_task.status = TaskStatus.BLOCKED.value
+                            dep_task.updated_at = now
 
                 # 5. Commit transaction - atomic and acquires write lock
                 await session.commit()
@@ -1190,6 +1196,7 @@ class TeamDatabase:
 
             # Update task status
             task.status = TaskStatus.CANCELLED.value
+            task.updated_at = self.get_current_time()
             await session.commit()
             team_logger.info(f"Task {task_id} cancelled")
 
@@ -1226,6 +1233,7 @@ class TeamDatabase:
                 return []
 
             cancelled_tasks = []
+            now = self.get_current_time()
 
             # Cancel each task (all in same transaction)
             for task in tasks:
@@ -1243,6 +1251,7 @@ class TeamDatabase:
 
                 # Update task status
                 task.status = TaskStatus.CANCELLED.value
+                task.updated_at = now
                 cancelled_tasks.append(task)
 
             await session.commit()
@@ -1304,7 +1313,7 @@ class TeamDatabase:
             # Complete task and resolve dependencies atomically
             now = self.get_current_time()
             task.status = TaskStatus.COMPLETED.value
-            task.completed_at = now
+            task.updated_at = now
             team_logger.info(f"Task {task_id} completed at {now}")
 
             # Resolve all dependencies that depend on this task
@@ -1353,6 +1362,7 @@ class TeamDatabase:
                 # If no unresolved dependencies, unblock atomically
                 if unresolved_count == 0:
                     dependent_task.status = TaskStatus.PENDING.value
+                    dependent_task.updated_at = now
                     unblocked_tasks.append(dependent_task)
                     team_logger.info(
                         f"Task {dep.task_id} unblocked (from BLOCKED to PENDING)"
@@ -1393,6 +1403,7 @@ class TeamDatabase:
             blocked_tasks = result.scalars().all()
 
             updated_tasks = []
+            now = self.get_current_time()
             for task in blocked_tasks:
                 # Check if all dependencies are resolved
                 deps_result = await session.execute(
@@ -1406,6 +1417,7 @@ class TeamDatabase:
                 # If no unresolved dependencies, update to PENDING
                 if len(unresolved_deps) == 0:
                     task.status = TaskStatus.PENDING.value
+                    task.updated_at = now
                     updated_tasks.append(task)
                     team_logger.info(f"Task {task.task_id} fixed from BLOCKED to PENDING")
 
