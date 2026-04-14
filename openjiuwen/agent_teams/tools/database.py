@@ -476,7 +476,7 @@ class TeamDatabase:
 
             member.status = status
             await session.commit()
-            team_logger.info(f"Member {member_name} status updated to {status}")
+            team_logger.debug(f"Member {member_name} status updated to {status}")
             return True
 
     async def update_member_execution_status(self, member_name: str, team_name: str, execution_status: str) -> bool:
@@ -508,7 +508,7 @@ class TeamDatabase:
 
             member.execution_status = execution_status
             await session.commit()
-            team_logger.info(f"Member {member_name} execution status updated to {execution_status}")
+            team_logger.debug(f"Member {member_name} execution status updated to {execution_status}")
             return True
 
     # ----------------- Task Operations -----------------

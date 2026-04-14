@@ -292,7 +292,7 @@ class EventDispatcher:
         else:
             return
 
-        team_logger.info(text)
+        team_logger.debug(text)
 
     # ------------------------------------------------------------------
     # Message handling
@@ -319,7 +319,7 @@ class EventDispatcher:
                 "auto_confirm": payload.auto_confirm,
             },
         )
-        team_logger.info(
+        team_logger.debug(
             "[{}] received tool approval result for tool_call_id={}, approved={}",
             member_name,
             payload.tool_call_id,
@@ -355,7 +355,7 @@ class EventDispatcher:
                     )
                     return
                 text = self._format_message(msg)
-                team_logger.info("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
+                team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
                 if not host.is_agent_running():
                     await host.start_agent(text)

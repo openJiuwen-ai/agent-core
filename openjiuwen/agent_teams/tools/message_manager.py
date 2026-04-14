@@ -96,7 +96,7 @@ class TeamMessageManager:
         except Exception as e:
             team_logger.error(f"Failed to publish message event for {message_id}: {e}")
 
-        team_logger.info(f"Message sent from {sender} to {to_member_name}: {message_id}")
+        team_logger.debug(f"Message sent from {sender} to {to_member_name}: {message_id}")
         return message_id
 
     async def broadcast_message(self, content: str) -> Optional[str]:
@@ -132,7 +132,7 @@ class TeamMessageManager:
         except Exception as e:
             team_logger.error(f"Failed to publish broadcast event for {message_id}: {e}")
 
-        team_logger.info(f"Broadcast message sent from {self.member_name}: {message_id}")
+        team_logger.debug(f"Broadcast message sent from {self.member_name}: {message_id}")
         return message_id
 
     async def get_messages(
@@ -227,7 +227,7 @@ class TeamMessageManager:
         """
         success = await self.db.mark_message_read(message_id=message_id, member_name=member_name)
         if success:
-            team_logger.info(f"Message {message_id} marked as read by {member_name}")
+            team_logger.debug(f"Message {message_id} marked as read by {member_name}")
         else:
             team_logger.error(f"Failed to mark message {message_id} as read by {member_name}")
         return success

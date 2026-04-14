@@ -99,7 +99,7 @@ class TeamMember:
             team_logger.error(f"Failed to update member status for {self.member_name}: {new_status.value}")
             return False
 
-        team_logger.info(
+        team_logger.debug(
             f"Member {self.member_name} status: {old_status.value} -> {new_status.value}"
         )
 
@@ -142,7 +142,7 @@ class TeamMember:
             team_logger.error(f"Failed to update member execution status for {self.member_name}: {new_status.value}")
             return False
 
-        team_logger.info(
+        team_logger.debug(
             f"Member {self.member_name} execution status: "
             f"{old_status.value} -> {new_status.value}"
         )

@@ -289,7 +289,7 @@ class InMemoryTeamDatabase:
                 team_logger.error(f"Invalid state transition for member {member_name}: {member.status} -> {status}")
                 return False
             member.status = status
-            team_logger.info(f"Member {member_name} status updated to {status}")
+            team_logger.debug(f"Member {member_name} status updated to {status}")
             return True
 
     async def update_member_execution_status(self, member_name: str, team_name: str, execution_status: str) -> bool:
@@ -309,7 +309,7 @@ class InMemoryTeamDatabase:
                 )
                 return False
             member.execution_status = execution_status
-            team_logger.info(f"Member {member_name} execution status updated to {execution_status}")
+            team_logger.debug(f"Member {member_name} execution status updated to {execution_status}")
             return True
 
     # =====================================================================
@@ -686,7 +686,7 @@ class InMemoryTeamDatabase:
                     is_read=None if broadcast else False,
                 )
             )
-            team_logger.info(f"Message {message_id} created")
+            team_logger.debug(f"Message {message_id} created")
             return True
 
     async def get_messages(
@@ -764,5 +764,5 @@ class InMemoryTeamDatabase:
                     rs.read_at = msg.timestamp
             else:
                 msg.is_read = True
-            team_logger.info(f"Message {message_id} marked as read by {member_name}")
+            team_logger.debug(f"Message {message_id} marked as read by {member_name}")
             return True

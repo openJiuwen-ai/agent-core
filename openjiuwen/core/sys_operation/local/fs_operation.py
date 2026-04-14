@@ -1061,10 +1061,13 @@ class FsOperation(BaseFsOperation):
             get_workspace,
         )
 
-        # Path resolution: based on ContextVar CWD
+        # Path resolution: based on ContextVar CWD. Resolve symlinks with
+        # strict=False so the comparison matches sandbox roots (which are
+        # also resolved) even on platforms where the base directory is a
+        # symlink (e.g. macOS /var → /private/var for tempfile paths).
         base = pathlib.Path(get_cwd())
         raw = base / path
-        normalized = pathlib.Path(os.path.normpath(raw))
+        normalized = pathlib.Path(os.path.normpath(raw)).resolve(strict=False)
 
         # Sandbox check: based on config (independent of CWD)
         restrict = getattr(self._run_config, 'restrict_to_sandbox', False)
