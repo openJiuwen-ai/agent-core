@@ -17,7 +17,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
 from pydantic import Field, BaseModel
 
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import agent_logger as logger
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm.schema.config import (

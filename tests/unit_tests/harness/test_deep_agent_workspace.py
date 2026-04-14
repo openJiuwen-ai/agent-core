@@ -77,10 +77,13 @@ class _TrackingDirectoryBuilder:
 
 def _make_sys_operation(tmp_path: Path):
     """Create a local SysOperation for tests."""
+    from openjiuwen.core.sys_operation.cwd import init_cwd
+    init_cwd(str(tmp_path))
+
     card = SysOperationCard(
         id=f"test_workspace_sysop_{tmp_path.name}_{int(time.time() * 1000)}",
         mode=OperationMode.LOCAL,
-        work_config=LocalWorkConfig(work_dir=str(tmp_path)),
+        work_config=LocalWorkConfig(),
     )
     Runner.resource_mgr.add_sys_operation(card)
     return Runner.resource_mgr.get_sys_operation(card.id)

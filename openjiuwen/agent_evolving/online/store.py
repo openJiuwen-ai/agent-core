@@ -20,6 +20,14 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.sys_operation import SysOperation
 
 _EVOLUTION_FILENAME = "evolutions.json"
+_LANG_TO_EXT = {
+    "python": "py", "javascript": "js", "typescript": "ts",
+    "shell": "sh", "bash": "sh",
+}
+_EVOLUTION_INDEX_PATTERN = re.compile(
+    r"<!-- evolution-index-start -->.*?<!-- evolution-index-end -->",
+    re.DOTALL,
+)
 
 
 class EvolutionStore:
@@ -179,10 +187,18 @@ class EvolutionStore:
         return evo_log
 
     async def append_record(self, name: str, record: EvolutionRecord) -> None:
-        """Append or merge one evolution record to evolutions.json."""
+        """Append or merge one evolution record to evolutions.json.
+
+        For script records, the source code is persisted as a standalone file
+        under ``evolution/scripts/`` and replaced with a file-path reference
+        in the JSON entry to avoid bloating ``evolutions.json``.
+        """
         skill_dir = self._resolve_skill_dir(name, create=True)
         if skill_dir is None:
             return
+
+        if record.change.target == EvolutionTarget.SCRIPT:
+            await self._persist_script(skill_dir, record)
 
         evo_log = await self._load_full_evolution_log(name)
         merge_target = record.change.merge_target
@@ -212,6 +228,8 @@ class EvolutionStore:
             record.id,
             record.change.target.value,
         )
+
+        await self.render_evolution_markdown(name)
 
     async def _load_full_evolution_log(self, name: str) -> EvolutionLog:
         skill_dir = self._resolve_skill_dir(name)
@@ -299,6 +317,185 @@ class EvolutionStore:
             insert_pos = matched.start(2)
             return content[:insert_pos] + addition + content[insert_pos:]
         return content.rstrip() + f"\n\n## {section}\n{patch.content}\n"
+
+    # ── Script persistence ─────────────────────────────────────────────
+
+    async def _persist_script(self, skill_dir: Path, record: EvolutionRecord) -> None:
+        """Write script source code to a standalone file; replace content with a reference."""
+        scripts_dir = skill_dir / "evolution" / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+
+        lang = record.change.script_language or "py"
+        ext = _LANG_TO_EXT.get(lang, lang)
+        filename = record.change.script_filename or f"{record.id}_script.{ext}"
+        script_path = scripts_dir / filename
+
+        await self._write_file_text(script_path, record.change.content)
+        logger.info("[EvolutionStore] persisted script %s for record %s", filename, record.id)
+
+        record.change.script_filename = filename
+        record.change.content = (
+            f"Script: {filename}\n"
+            f"Language: {record.change.script_language or 'unknown'}\n"
+            f"Purpose: {record.change.script_purpose or ''}"
+        )
+
+    # ── Markdown rendering (P1 portability) ─────────────────────────────
+
+    async def render_evolution_markdown(self, name: str) -> None:
+        """Render all evolution entries to human-readable Markdown files.
+
+        Produces:
+        - ``evolution/{section}.md`` for each non-script section
+        - ``evolution/scripts/_index.md`` with a table of persisted scripts
+        - An index block appended/replaced inside SKILL.md
+        """
+        skill_dir = self._resolve_skill_dir(name)
+        if skill_dir is None:
+            return
+
+        evo_log = await self._load_full_evolution_log(name)
+        active_entries = [r for r in evo_log.entries if not r.change.skip_reason]
+        if not active_entries:
+            return
+
+        evo_dir = skill_dir / "evolution"
+        evo_dir.mkdir(parents=True, exist_ok=True)
+
+        section_groups: Dict[str, List[EvolutionRecord]] = {}
+        script_entries: List[EvolutionRecord] = []
+        for record in active_entries:
+            if record.change.target == EvolutionTarget.SCRIPT:
+                script_entries.append(record)
+            else:
+                section_groups.setdefault(record.change.section, []).append(record)
+
+        for section, records in section_groups.items():
+            await self._render_section_file(evo_dir, section, records)
+
+        if script_entries:
+            scripts_dir = evo_dir / "scripts"
+            scripts_dir.mkdir(parents=True, exist_ok=True)
+            await self._render_script_index(scripts_dir, script_entries)
+
+        await self._update_skill_md_index(skill_dir, active_entries)
+        logger.info("[EvolutionStore] rendered markdown for skill '%s' (%d entries)", name, len(active_entries))
+
+    async def _render_section_file(
+        self,
+        evo_dir: Path,
+        section: str,
+        records: List[EvolutionRecord],
+    ) -> None:
+        """Write ``evolution/{section_lower}.md`` with all entries for *section*."""
+        lines = [
+            f"# {section}",
+            "",
+            "> Auto-generated from evolutions.json. Do not edit directly.",
+            "",
+        ]
+        for record in records:
+            parts = record.change.content.split("\n", 1) if record.change.content else [""]
+            lines.append(f"### [{record.id}] {parts[0]}")
+            if len(parts) > 1 and parts[1].strip():
+                lines.append(parts[1].rstrip())
+            applied_tag = " | applied" if record.applied else ""
+            lines.extend([
+                "",
+                f"*Source: {record.source} | {record.timestamp}{applied_tag}*",
+                "",
+                "---",
+                "",
+            ])
+
+        filename = section.lower().replace(" ", "_") + ".md"
+        await self._write_file_text(evo_dir / filename, "\n".join(lines))
+
+    async def _render_script_index(
+        self,
+        scripts_dir: Path,
+        entries: List[EvolutionRecord],
+    ) -> None:
+        """Write ``evolution/scripts/_index.md`` summarising all persisted scripts."""
+        lines = [
+            "# Script Index",
+            "",
+            "> Auto-generated from evolutions.json. Do not edit directly.",
+            "",
+            "| File | Language | Purpose | Source |",
+            "|------|----------|---------|--------|",
+        ]
+        for record in entries:
+            fname = record.change.script_filename or record.id
+            lang = record.change.script_language or "unknown"
+            purpose = record.change.script_purpose or ""
+            date = record.timestamp[:10] if len(record.timestamp) >= 10 else record.timestamp
+            lines.append(f"| [{fname}]({fname}) | {lang} | {purpose} | {date} |")
+        lines.append("")
+        await self._write_file_text(scripts_dir / "_index.md", "\n".join(lines))
+
+    async def _update_skill_md_index(
+        self,
+        skill_dir: Path,
+        entries: List[EvolutionRecord],
+    ) -> None:
+        """Insert or replace the evolution index block at the end of SKILL.md."""
+        skill_md_path = self._find_skill_md(skill_dir)
+        if skill_md_path is None:
+            return
+
+        body_count = desc_count = script_count = 0
+        section_counts: Dict[str, int] = {}
+        for record in entries:
+            target = record.change.target
+            if target == EvolutionTarget.BODY:
+                body_count += 1
+            elif target == EvolutionTarget.DESCRIPTION:
+                desc_count += 1
+            elif target == EvolutionTarget.SCRIPT:
+                script_count += 1
+            if target != EvolutionTarget.SCRIPT:
+                section_counts[record.change.section] = section_counts.get(record.change.section, 0) + 1
+
+        total = len(entries)
+        parts = ", ".join(
+            f"{v} {k}" for k, v in [("body", body_count), ("description", desc_count), ("script", script_count)] if v
+        )
+
+        table_lines: List[str] = []
+        for section, cnt in sorted(section_counts.items()):
+            filename = section.lower().replace(" ", "_") + ".md"
+            table_lines.append(
+                f"| {section} | {cnt} | [→ evolution/{filename}](evolution/{filename}) |"
+            )
+        if script_count:
+            table_lines.append(
+                f"| Scripts | {script_count} | "
+                f"[→ evolution/scripts/_index.md](evolution/scripts/_index.md) |"
+            )
+
+        now = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
+        index_block = "\n".join([
+            "<!-- evolution-index-start -->",
+            "## Evolution Experiences",
+            "",
+            f"This skill has accumulated **{total}** evolution experiences ({parts}).",
+            "",
+            "| Type | Count | Details |",
+            "|------|-------|---------|",
+            *table_lines,
+            "",
+            f"*Last updated: {now}*",
+            "<!-- evolution-index-end -->",
+        ])
+
+        content = await self._read_file_text(skill_md_path)
+        if _EVOLUTION_INDEX_PATTERN.search(content):
+            content = _EVOLUTION_INDEX_PATTERN.sub(index_block, content)
+        else:
+            content = content.rstrip() + "\n\n" + index_block + "\n"
+
+        await self._write_file_text(skill_md_path, content)
 
     # ── Formatting / display ──────────────────────────────────────────
 

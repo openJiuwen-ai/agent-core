@@ -221,6 +221,7 @@
         - [reranker](2.开发指南/API文档/openjiuwen.core/retrieval/reranker/README.md)
           - [base](2.开发指南/API文档/openjiuwen.core/retrieval/reranker/base.md)
           - [standard_reranker](2.开发指南/API文档/openjiuwen.core/retrieval/reranker/standard_reranker.md)
+          - [dashscope_reranker](2.开发指南/API文档/openjiuwen.core/retrieval/reranker/dashscope_reranker.md)
           - [chat_reranker](2.开发指南/API文档/openjiuwen.core/retrieval/reranker/chat_reranker.md)
         - [indexing](2.开发指南/API文档/openjiuwen.core/retrieval/indexing/README.md)
           - [indexer](2.开发指南/API文档/openjiuwen.core/retrieval/indexing/indexer/README.md)

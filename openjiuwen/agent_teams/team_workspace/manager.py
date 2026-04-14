@@ -48,7 +48,7 @@ class TeamWorkspaceManager:
         self,
         config: TeamWorkspaceConfig,
         workspace_path: str,
-        team_id: str,
+        team_name: str,
         *,
         mode: WorkspaceMode = WorkspaceMode.LOCAL,
         messager: Any | None = None,
@@ -58,7 +58,7 @@ class TeamWorkspaceManager:
     ):
         self.config = config
         self.workspace_path = workspace_path
-        self.team_id = team_id
+        self.team_name = team_name
         self.mode = mode
         self.publish_event = publish_event
 
@@ -130,22 +130,22 @@ class TeamWorkspaceManager:
     # ── Workspace / worktree mount ─────────────────────────────
 
     def mount_into_workspace(self, workspace_root: str) -> None:
-        """Create .team/{team_id} symlink in an agent workspace.
+        """Create .team/{team_name} symlink in an agent workspace.
 
         Mounts this team workspace into the agent's workspace hub so
-        the agent can access shared files via ``.team/{team_id}/...``.
+        the agent can access shared files via ``.team/{team_name}/...``.
 
         Args:
             workspace_root: Absolute path to the agent workspace root.
         """
         team_dir = os.path.join(workspace_root, ".team")
         os.makedirs(team_dir, exist_ok=True)
-        link_path = os.path.join(team_dir, self.team_id)
+        link_path = os.path.join(team_dir, self.team_name)
         if not os.path.exists(link_path):
             os.symlink(self.workspace_path, link_path, target_is_directory=True)
             team_logger.debug(
                 "Mounted team workspace %s into %s",
-                self.team_id,
+                self.team_name,
                 link_path,
             )
 
@@ -215,7 +215,7 @@ class TeamWorkspaceManager:
 
     # ── Version control ──────────────────────────────────────
 
-    async def auto_commit(self, relative_path: str, member_id: str) -> str | None:
+    async def auto_commit(self, relative_path: str, member_name: str) -> str | None:
         """Auto-commit a file change, then push if distributed.
 
         Stages the file, checks for actual changes, commits, and pushes
@@ -223,7 +223,7 @@ class TeamWorkspaceManager:
 
         Args:
             relative_path: File path relative to workspace root.
-            member_id: ID of the member making the change.
+            member_name: ID of the member making the change.
 
         Returns:
             Commit SHA on success, None if nothing to commit or commit failed.
@@ -234,7 +234,7 @@ class TeamWorkspaceManager:
         if status.ok:
             return None  # Nothing staged
 
-        msg = f"[{member_id}] Update {relative_path}"
+        msg = f"[{member_name}] Update {relative_path}"
         result = await _run_git(["commit", "-m", msg], cwd=self.workspace_path)
         if not result.ok:
             return None
@@ -309,8 +309,8 @@ class TeamWorkspaceManager:
     async def acquire_lock(
         self,
         file_path: str,
-        member_id: str,
         member_name: str,
+        display_name: str,
         *,
         timeout_seconds: int = 300,
     ) -> bool:
@@ -324,8 +324,8 @@ class TeamWorkspaceManager:
 
         Args:
             file_path: File path relative to workspace root.
-            member_id: ID of the member requesting the lock.
-            member_name: Display name of the requesting member.
+            member_name: ID of the member requesting the lock.
+            display_name: Display name of the requesting member.
             timeout_seconds: Lock timeout in seconds.
 
         Returns:
@@ -334,8 +334,8 @@ class TeamWorkspaceManager:
         if self.mode == WorkspaceMode.DISTRIBUTED and self._leader_id != self._node_id:
             return await self._remote_acquire_lock(
                 file_path,
-                member_id,
                 member_name,
+                display_name,
                 timeout_seconds=timeout_seconds,
             )
 
@@ -343,20 +343,20 @@ class TeamWorkspaceManager:
         async with self._lock_mutex:
             existing = self._locks.get(file_path)
 
-            if existing and not existing.is_expired() and existing.holder_id != member_id:
+            if existing and not existing.is_expired() and existing.holder_id != member_name:
                 return False
 
             now = datetime.now(timezone.utc)
             self._locks[file_path] = WorkspaceFileLock(
                 file_path=file_path,
-                holder_id=member_id,
-                holder_name=member_name,
+                holder_id=member_name,
+                holder_name=display_name,
                 acquired_at=now.isoformat(),
                 timeout_seconds=timeout_seconds,
             )
             return True
 
-    async def release_lock(self, file_path: str, member_id: str) -> bool:
+    async def release_lock(self, file_path: str, member_name: str) -> bool:
         """Release a file lock.
 
         LOCAL mode or leader: direct release from in-memory dict.
@@ -364,17 +364,17 @@ class TeamWorkspaceManager:
 
         Args:
             file_path: File path relative to workspace root.
-            member_id: ID of the member releasing the lock.
+            member_name: ID of the member releasing the lock.
 
         Returns:
             True if lock was released, False if not held by this member.
         """
         if self.mode == WorkspaceMode.DISTRIBUTED and self._leader_id != self._node_id:
-            return await self._remote_release_lock(file_path, member_id)
+            return await self._remote_release_lock(file_path, member_name)
 
         async with self._lock_mutex:
             existing = self._locks.get(file_path)
-            if not existing or existing.holder_id != member_id:
+            if not existing or existing.holder_id != member_name:
                 return False
             del self._locks[file_path]
             return True
@@ -399,8 +399,8 @@ class TeamWorkspaceManager:
     async def _remote_acquire_lock(
         self,
         file_path: str,
-        member_id: str,
         member_name: str,
+        display_name: str,
         *,
         timeout_seconds: int = 300,
     ) -> bool:
@@ -410,8 +410,8 @@ class TeamWorkspaceManager:
 
         Args:
             file_path: File path relative to workspace root.
-            member_id: ID of the requesting member.
-            member_name: Display name of the requesting member.
+            member_name: ID of the requesting member.
+            display_name: Display name of the requesting member.
             timeout_seconds: Lock timeout in seconds.
 
         Raises:
@@ -419,14 +419,14 @@ class TeamWorkspaceManager:
         """
         raise NotImplementedError("Distributed lock acquire is Phase 3")
 
-    async def _remote_release_lock(self, file_path: str, member_id: str) -> bool:
+    async def _remote_release_lock(self, file_path: str, member_name: str) -> bool:
         """Send lock release request to leader via Messager.
 
         Phase 3 implementation. Currently raises NotImplementedError.
 
         Args:
             file_path: File path relative to workspace root.
-            member_id: ID of the member releasing the lock.
+            member_name: ID of the member releasing the lock.
 
         Raises:
             NotImplementedError: Distributed lock coordination is Phase 3.
@@ -464,14 +464,14 @@ class TeamWorkspaceManager:
         if request.action == "acquire":
             granted = await self.acquire_lock(
                 request.file_path,
-                request.member_id or "",
-                request.holder_name or request.member_id or "",
+                request.member_name or "",
+                request.holder_name or request.member_name or "",
                 timeout_seconds=request.timeout_seconds or 300,
             )
         elif request.action == "release":
             granted = await self.release_lock(
                 request.file_path,
-                request.member_id or "",
+                request.member_name or "",
             )
 
         holder_dict = None
@@ -481,8 +481,8 @@ class TeamWorkspaceManager:
                 holder_dict = existing.model_dump()
 
         return WorkspaceLockResponseEvent(
-            team_id=self.team_id,
-            member_id=request.member_id or "",
+            team_name=self.team_name,
+            member_name=request.member_name or "",
             file_path=request.file_path,
             granted=granted,
             holder=holder_dict,

@@ -13,7 +13,6 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     RuntimeSettings,
@@ -198,7 +197,7 @@ def create_browser_agent(
     injected_rails = [BrowserRuntimeRail(browser_backend)]
     final_tools = list(tools or []) + injected_tools
     final_mcps = list(mcps or [])
-    final_rails = list(rails or [FileSystemRail()]) + injected_rails
+    final_rails = list(rails or []) + injected_rails
 
     return create_deep_agent(
         model=model,

@@ -30,8 +30,8 @@ class MessagerPeerConfig(BaseModel):
 class MessagerTransportConfig(BaseModel):
     """JSON-safe configuration for messager transports."""
 
-    backend: str = "team_runtime"
-    team_id: str = "default"
+    backend: str = "inprocess"
+    team_name: str = "default"
     node_id: Optional[str] = None
     direct_addr: Optional[str] = None
     pubsub_publish_addr: Optional[str] = None
@@ -43,7 +43,7 @@ class MessagerTransportConfig(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     def broadcast_topic(self) -> str:
-        return f"team:{self.team_id}:broadcast"
+        return f"team:{self.team_name}:broadcast"
 
 
 class SubscriptionHandle(BaseModel):
@@ -57,17 +57,13 @@ class SubscriptionHandle(BaseModel):
 
 def create_messager(
     config: MessagerTransportConfig,
-    *,
-    runtime=None,
 ) -> "Messager":
     """Build one messager transport from JSON-safe config."""
 
-    if config.backend == "team_runtime":
-        from openjiuwen.agent_teams.messager.team_runtime import TeamRuntimeMessager
+    if config.backend == "inprocess":
+        from openjiuwen.agent_teams.messager.inprocess import InProcessMessager
 
-        if runtime is None:
-            raise ValueError("Team runtime backend requires a runtime instance.")
-        return TeamRuntimeMessager(runtime=runtime, config=config)
+        return InProcessMessager(config=config)
     if config.backend == "pyzmq":
         from openjiuwen.agent_teams.messager.pyzmq_backend import PyZmqMessager
 

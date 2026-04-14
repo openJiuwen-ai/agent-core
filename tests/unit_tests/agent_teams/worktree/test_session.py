@@ -18,7 +18,7 @@ from tests.test_logger import logger
 def _make_session(name: str = "test") -> WorktreeSession:
     return WorktreeSession(
         original_cwd="/repo",
-        worktree_path=f"/repo/.agent_teams/worktrees/{name}",
+        worktree_path=f"/workspace/.worktrees/{name}",
         worktree_name=name,
     )
 
@@ -64,35 +64,38 @@ class TestRequireCurrentSession:
 
 
 @pytest.mark.asyncio
-class TestContextVarIsolation:
-    async def test_isolation_across_tasks(self):
-        """ContextVar should be isolated between tasks spawned independently."""
+class TestSharedContainerAcrossGather:
+    async def test_mutation_propagates_within_gather(self):
+        """Tasks spawned via asyncio.gather share the same mutable session holder.
+
+        This is the documented contract (see session.py module docstring):
+        asyncio.gather copies the ContextVar *binding* (reference to the
+        holder), not the holder itself, so sibling tasks see each other's
+        mutations. This property is relied upon so that tool calls within
+        a single agent's turn observe a consistent session.
+        """
         set_current_session(None)
-        barrier = asyncio.Event()
         results: dict[str, WorktreeSession | None] = {}
+        a_done = asyncio.Event()
 
         async def task_a():
-            session_a = _make_session("task-a")
-            set_current_session(session_a)
-            barrier.set()
-            # Let task_b run
-            await asyncio.sleep(0.01)
+            set_current_session(_make_session("shared"))
+            a_done.set()
             results["a"] = get_current_session()
 
         async def task_b():
-            await barrier.wait()
-            # task_b never sets a session — should see None
+            # Wait until task_a mutated the shared holder
+            await a_done.wait()
             results["b"] = get_current_session()
 
-        await asyncio.gather(
-            asyncio.create_task(task_a()),
-            asyncio.create_task(task_b()),
-        )
+        await asyncio.gather(task_a(), task_b())
 
         assert results["a"] is not None
-        assert results["a"].worktree_name == "task-a"
-        assert results["b"] is None
-        logger.info("ContextVar isolation across tasks verified")
+        assert results["a"].worktree_name == "shared"
+        # task_b never called set_current_session itself, but because the
+        # holder is shared by reference it observes task_a's mutation.
+        assert results["b"] is results["a"]
+        logger.info("Shared session holder across gather tasks verified")
 
         # Cleanup
         set_current_session(None)

@@ -1729,7 +1729,7 @@ class ResourceMgr:
         if not resource_id:
             raise build_error(
                 StatusCode.RESOURCE_ID_VALUE_INVALID,
-                resource_id=resource_id,
+                resource_type=resource_type,
                 reason=f"{resource_type} id list cannot be empty or None"
             )
         if isinstance(resource_id, str):
@@ -1743,7 +1743,7 @@ class ResourceMgr:
                 except ValidationError as e:
                     raise build_error(
                         StatusCode.RESOURCE_ID_VALUE_INVALID,
-                        resource_id=resource_id,
+                        resource_type=resource_type,
                         reason=(
                             f"invalid {resource_type} id at idx {idx}: {e.message}"
                         )
@@ -1752,7 +1752,7 @@ class ResourceMgr:
                 if rid in tmp_ids:
                     raise build_error(
                         StatusCode.RESOURCE_ID_VALUE_INVALID,
-                        resource_id=resource_id,
+                        resource_type=resource_type,
                         reason=(
                             f"duplicate {resource_type} id found: "
                             f"'{rid}' appears multiple times in the list"

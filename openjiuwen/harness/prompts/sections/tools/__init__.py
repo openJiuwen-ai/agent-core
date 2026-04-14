@@ -85,6 +85,7 @@ from openjiuwen.harness.prompts.sections.tools.web_tools import (
     FetchWebpageMetadataProvider,
 )
 from openjiuwen.harness.prompts.sections.tools.plan_mode import (
+    SwitchModeMetadataProvider,
     EnterPlanModeMetadataProvider,
     ExitPlanModeMetadataProvider,
 )
@@ -120,9 +121,11 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     VisualQuestionAnsweringMetadataProvider(),
     VideoUnderstandingMetadataProvider(),
     TaskMetadataProvider(),
+    LspToolMetadataProvider(),
     FreeSearchMetadataProvider(),
     PaidSearchMetadataProvider(),
     FetchWebpageMetadataProvider(),
+    SwitchModeMetadataProvider(),
     EnterPlanModeMetadataProvider(),
     ExitPlanModeMetadataProvider(),
 ]

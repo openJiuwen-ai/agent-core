@@ -31,9 +31,12 @@ def work_dir():
 @pytest_asyncio.fixture(name="sys_op")
 async def sys_op_fixture(work_dir):
     """Fixture to setup and teardown Runner and SysOperation"""
+    from openjiuwen.core.sys_operation.cwd import init_cwd
+    init_cwd(work_dir)
+
     await Runner.start()
     card_id = "test_shell_op"
-    config = LocalWorkConfig(work_dir=work_dir, shell_allowlist=None)
+    config = LocalWorkConfig(shell_allowlist=None)
     card = SysOperationCard(id=card_id, mode=OperationMode.LOCAL, work_config=config)
 
     add_res = Runner.resource_mgr.add_sys_operation(card)
@@ -297,7 +300,7 @@ async def test_execute_cmd_stream_allowlist(sys_op, work_dir):
     # Recreate sys_op with allowlist
     await Runner.start()
     card_id = "test_stream_allowlist"
-    config = LocalWorkConfig(work_dir=work_dir, shell_allowlist=["echo"])
+    config = LocalWorkConfig(shell_allowlist=["echo"])
     card = SysOperationCard(id=card_id, mode=OperationMode.LOCAL, work_config=config)
     Runner.resource_mgr.add_sys_operation(card)
     op = Runner.resource_mgr.get_sys_operation(card_id)

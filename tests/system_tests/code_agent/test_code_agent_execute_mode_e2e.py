@@ -1,17 +1,15 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""DeepAgent 运行模式切换测试"""
+"""CodeAgent 运行模式切换测试"""
 
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
-from typing import List, cast
-from unittest.mock import patch
+from typing import List
 
 import pytest
 
@@ -21,14 +19,14 @@ from openjiuwen.core.foundation.llm import (
     ModelRequestConfig,
 )
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.single_agent import create_agent_session
+from openjiuwen.core.session import InteractiveInput
+from openjiuwen.core.single_agent import AgentCard, create_agent_session
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentRail,
     ToolCallInputs,
 )
-from openjiuwen.harness import create_deep_agent
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness.subagents.code_agent import create_code_agent
 
 API_BASE = os.getenv("API_BASE", "")
 API_KEY = os.getenv("API_KEY", "")
@@ -59,8 +57,10 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
         self._tmp_dir = tempfile.TemporaryDirectory(prefix="deepagent_plan_mode_e2e_")
         self._work_dir = self._tmp_dir.name
         self._session = create_agent_session(
-            session_id=f"deepagent_plan_mode_{uuid.uuid4().hex}"
+            session_id=f"deepagent_plan_mode_{uuid.uuid4().hex}",
+            card=AgentCard(id="code_agent", name="code_agent", description="code agent test session"),
         )
+
 
     async def asyncTearDown(self) -> None:
         self._tmp_dir.cleanup()
@@ -95,28 +95,28 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
     @pytest.mark.asyncio
     @unittest.skip("skip system test")
     async def test_plan_mode_with_real_model_end_to_end(self) -> None:
-        """真实模型用例：首次写入 plan，二次切换auto模式，按照plan执行。"""
+        """真实模型用例：首次写入 plan，二次主动切换auto模式，按照plan执行。"""
         self._require_llm_config()
         trace = ToolTraceRail()
-        fs_rail = FileSystemRail()
-        agent = create_deep_agent(
-            model=self._create_real_model(),
+        runtime_model = self._create_real_model()
+        agent = create_code_agent(
+            model=runtime_model,
             system_prompt=(
                 "你是一个 AI 编程助手，当用户要求你写代码、创建文件、修改文件时，你**必须**调用相应的工具，**绝对不能**直接在回复中输出代码。"
                 "你必须严格按照plan模式的工作流执行"
             ),
-            rails=[trace, fs_rail],
+            rails=[trace],
             enable_task_loop=True,
             max_iterations=24,
             workspace=self._work_dir,
-            enable_plan_mode=True,
-            enable_task_planning=True,
+            enable_task_planning=True
         )
 
         agent.switch_mode(self._session, "plan")
-        first = await agent.invoke(
+        first = await Runner.run_agent(agent, 
             {
-                "query": "帮我规划一个简单的模块开发任务，创建一个动态展示城市信息的网页"
+                "query": "帮我规划一个简单的模块开发任务，创建一个动态展示城市信息的网页。"
+                         "所有问题你自己决定即可！"
             },
             session=self._session,
         )
@@ -133,7 +133,7 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
         first_call_count = len(trace.tool_calls)
 
         agent.switch_mode(self._session, "auto")
-        second = await agent.invoke(
+        second = await Runner.run_agent(agent, 
             {
                 "query": "按照计划执行把"
             },
@@ -153,24 +153,24 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
         """真实模型用例：首次写入 plan，二次不切换模式修正plan，三次切换模式根据修正后的plan执行。"""
         self._require_llm_config()
         trace = ToolTraceRail()
-        fs_rail = FileSystemRail()
-        agent = create_deep_agent(
-            model=self._create_real_model(),
+        runtime_model = self._create_real_model()
+        agent = create_code_agent(
+            model=runtime_model,
             system_prompt=(
                 "你是一个 AI 编程助手，当用户要求你写代码、创建文件、修改文件时，你**必须**调用相应的工具，**绝对不能**直接在回复中输出代码。"
             ),
-            rails=[trace, fs_rail],
+            rails=[trace],
             enable_task_loop=True,
             max_iterations=24,
             workspace=self._work_dir,
-            enable_plan_mode=True,
             enable_task_planning=True,
         )
 
         agent.switch_mode(self._session, "plan")
-        first = await agent.invoke(
+        first = await Runner.run_agent(agent, 
             {
-                "query": "帮我规划一个简单的模块开发任务，创建一个动态展示城市信息的网页"
+                "query": "帮我规划一个简单的模块开发任务，创建一个动态展示城市信息的网页。"
+                         "所有问题你自己决定即可！"
             },
             session=self._session,
         )
@@ -194,7 +194,7 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(plan_mds), 1)
         self.assertEqual(plan_mds[0].resolve(), plan_path.resolve())
 
-        second = await agent.invoke(
+        second = await Runner.run_agent(agent, 
             {
                 "query": "太复杂，继续简化你的方案"
             },
@@ -217,7 +217,7 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(content_after_second, content_after_first)
 
         agent.switch_mode(self._session, "auto")
-        third = await agent.invoke(
+        third = await Runner.run_agent(agent, 
             {
                 "query": "按照计划执行"
             },
@@ -234,32 +234,33 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
     async def test_plan_mode_new_session_creates_distinct_plan_file(self) -> None:
         """真实模型用例：同一 workspace 下新 Session 仍会创建独立 plan 文件，不与旧会话冲突。"""
         self._require_llm_config()
-        fs_rail = FileSystemRail()
-        agent = create_deep_agent(
-            model=self._create_real_model(),
+        runtime_model = self._create_real_model()
+        agent = create_code_agent(
+            model=runtime_model,
             system_prompt=(
                 "你是一个 AI 编程助手，当用户要求你写代码、创建文件、修改文件时，你**必须**调用相应的工具，**绝对不能**直接在回复中输出代码。"
                 "你必须严格按照plan模式的工作流执行"
             ),
-            rails=[fs_rail],
             enable_task_loop=True,
             max_iterations=24,
             workspace=self._work_dir,
-            enable_plan_mode=True,
             enable_task_planning=True,
         )
 
         session_a = create_agent_session(
-            session_id=f"deepagent_plan_mode_a_{uuid.uuid4().hex}"
+            session_id=f"deepagent_plan_mode_a_{uuid.uuid4().hex}",
+            card=AgentCard(id="code_agent", name="code_agent", description="code agent test session"),
         )
         session_b = create_agent_session(
-            session_id=f"deepagent_plan_mode_b_{uuid.uuid4().hex}"
+            session_id=f"deepagent_plan_mode_b_{uuid.uuid4().hex}",
+            card=AgentCard(id="code_agent", name="code_agent", description="code agent test session"),
         )
 
         agent.switch_mode(session_a, "plan")
-        first = await agent.invoke(
+        first = await Runner.run_agent(agent, 
             {
-                "query": "帮我规划一个简单的模块开发任务，创建一个动态展示城市信息的网页"
+                "query": "帮我规划一个简单的模块开发任务，创建一个动态展示城市信息的网页。"
+                         "所有问题你自己决定即可！"
             },
             session=session_a,
         )
@@ -281,7 +282,7 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan_mds_after_a[0].resolve(), plan_path_a.resolve())
 
         agent.switch_mode(session_b, "plan")
-        second = await agent.invoke(
+        second = await Runner.run_agent(agent, 
             {
                 "query": "帮我规划另一个简单任务：给项目加一个 README，说明如何本地运行"
             },
@@ -316,6 +317,183 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(plan_path_a_again)
         assert plan_path_a_again is not None
         self.assertEqual(plan_path_a_again.resolve(), plan_path_a.resolve())
+
+    @pytest.mark.asyncio
+    @unittest.skip("skip system test")
+    async def test_plan_mode_ask_user_interrupt_and_resume(self) -> None:
+        """Plan 模式下 ask_user 中断后，用户输入可恢复并继续规划。"""
+        self._require_llm_config()
+        trace = ToolTraceRail()
+        runtime_model = self._create_real_model()
+
+        agent = create_code_agent(
+            model=runtime_model,
+            system_prompt=(
+                "你是一个 AI 编程助手。"
+                "在 plan 模式中，若需求缺少关键信息，你必须调用 ask_user 提问澄清；"
+                "收到用户回答后继续完善计划。"
+            ),
+            rails=[trace],
+            enable_task_loop=True,
+            max_iterations=24,
+            workspace=self._work_dir,
+            enable_task_planning=True,
+        )
+
+        agent.switch_mode(self._session, "plan")
+
+        # 1) 触发 ask_user 中断
+        first = await Runner.run_agent(agent, 
+            {
+                "query": (
+                    "我想要创建一个动态展示城市信息的简易网页，但我暂时不告诉你是哪个城市。"
+                    "你最多只能询问用户一个城市相关问题。其他问题你自行决定即可。"
+                )
+            },
+            session=self._session,
+        )
+
+        self.assertEqual(first.get("result_type"), "interrupt")
+        interrupt_ids = first.get("interrupt_ids", [])
+        self.assertEqual(len(interrupt_ids), 1)
+        tool_call_id = interrupt_ids[0]
+
+        # 2) 用 InteractiveInput 恢复
+        interactive_input = InteractiveInput()
+        interactive_input.update(
+            tool_call_id,
+            {"answer": "展示美国西雅图的信息"}
+        )
+
+        second = await Runner.run_agent(
+            agent,
+            {"query": interactive_input},
+            session=self._session,
+        )
+
+        # 3) 恢复后应继续执行并产出正常回答
+        self.assertEqual(second.get("result_type"), "answer")
+        self.assertIn("ask_user", trace.tool_calls)
+
+        state = agent.load_state(self._session)
+        plan_path = agent.get_plan_file_path(self._session)
+        self.assertEqual(state.plan_mode.mode, "plan")
+        self.assertTrue(bool(state.plan_mode.plan_slug))
+        self.assertIsNotNone(plan_path)
+        assert plan_path is not None
+        self.assertTrue(plan_path.exists())
+        self.assertTrue(bool(plan_path.read_text(encoding="utf-8").strip()))
+
+        # 关键回归：恢复阶段不应出现白名单拒绝 ask_user 的痕迹
+        answer_text = str(second.get("answer", ""))
+        self.assertNotIn("Tool 'ask_user' is not available in plan mode", answer_text)
+
+    @pytest.mark.asyncio
+    @unittest.skip("skip system test")
+    async def test_query_switch_plan_to_auto_and_execute(self) -> None:
+        """用户query 触发 plan->auto 切换并按计划执行。"""
+        self._require_llm_config()
+        trace = ToolTraceRail()
+        runtime_model = self._create_real_model()
+        agent = create_code_agent(
+            model=runtime_model,
+            system_prompt=(
+                "你是一个 AI 编程助手，你可以根据用户的意图自动切换模式"
+            ),
+            rails=[trace],
+            enable_task_loop=True,
+            max_iterations=24,
+            workspace=self._work_dir,
+            enable_task_planning=True,
+        )
+
+        agent.switch_mode(self._session, "plan")
+        first = await Runner.run_agent(
+            agent,
+            {
+                "query": "先帮我做一个简单开发计划：创建动态展示城市信息的网页，细节你自行决定。"
+            },
+            session=self._session,
+        )
+        self.assertEqual(first.get("result_type"), "answer")
+
+        first_call_count = len(trace.tool_calls)
+        second = await Runner.run_agent(
+            agent,
+            {
+                "query": "按刚才的计划直接执行。"
+            },
+            session=self._session,
+        )
+        self.assertEqual(second.get("result_type"), "answer")
+
+        second_call_slice = trace.tool_calls[first_call_count:]
+        self.assertIn("switch_mode", second_call_slice)
+        self.assertNotIn("enter_plan_mode", second_call_slice)
+        self.assertIn("todo_create", second_call_slice)
+
+        state_after_second = agent.load_state(self._session)
+        self.assertEqual(state_after_second.plan_mode.mode, "auto")
+
+    @pytest.mark.asyncio
+    @unittest.skip("skip system test")
+    async def test_query_switch_auto_to_plan_and_generate_plan(self) -> None:
+        """用户query 触发 auto->plan 切换并生成计划文件。"""
+        self._require_llm_config()
+        trace = ToolTraceRail()
+        runtime_model = self._create_real_model()
+        agent = create_code_agent(
+            model=runtime_model,
+            rails=[trace],
+            enable_task_loop=True,
+            max_iterations=24,
+            workspace=self._work_dir,
+            enable_task_planning=True,
+        )
+
+        agent.switch_mode(self._session, "auto")
+
+        first = await Runner.run_agent(
+            agent,
+            {
+                "query": "给我一个计划：做一个简易城市信息展示网页。"
+            },
+            session=self._session,
+        )
+
+        if first.get("result_type") == "interrupt":
+            interrupt_ids = first.get("interrupt_ids", [])
+            self.assertTrue(bool(interrupt_ids))
+            tool_call_id = interrupt_ids[0]
+
+            interactive_input = InteractiveInput()
+            interactive_input.update(tool_call_id, {"answer": "你自行决定方案，越简单越好"})
+
+            second = await Runner.run_agent(
+                agent,
+                {"query": interactive_input},
+                session=self._session,
+            )
+            self.assertEqual(second.get("result_type"), "answer")
+        else:
+            self.assertEqual(first.get("result_type"), "answer")
+
+        self.assertIn("switch_mode", trace.tool_calls)
+        self.assertIn("enter_plan_mode", trace.tool_calls)
+
+        state = agent.load_state(self._session)
+        plan_path = agent.get_plan_file_path(self._session)
+        self.assertEqual(state.plan_mode.mode, "plan")
+        self.assertTrue(bool(state.plan_mode.plan_slug))
+        self.assertIsNotNone(plan_path)
+        assert plan_path is not None
+        self.assertTrue(plan_path.exists())
+        self.assertTrue(bool(plan_path.read_text(encoding="utf-8").strip()))
+
+        plans_dir = Path(self._work_dir) / ".plans"
+        plan_mds = list(plans_dir.glob("*.md"))
+        self.assertEqual(len(plan_mds), 1)
+        self.assertEqual(plan_mds[0].resolve(), plan_path.resolve())
 
 
 if __name__ == "__main__":

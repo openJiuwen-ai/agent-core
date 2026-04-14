@@ -144,37 +144,52 @@ async def execute_agent(
     """
     from openjiuwen.core.runner.runner import Runner
 
+    session = agent_config.session_id
     if agent_config.agent_kind == SpawnAgentKind.CLASS_AGENT:
         class_config = ClassAgentSpawnConfig.model_validate(agent_config.model_dump(mode="json"))
         module = importlib.import_module(class_config.agent_module)
         agent_cls = getattr(module, class_config.agent_class)
         agent = agent_cls(**class_config.init_kwargs)
+        if streaming:
+            result_chunks = []
+            async for chunk in Runner.run_agent_streaming(
+                agent=agent,
+                inputs=inputs,
+                session=session,
+                stream_modes=stream_modes,
+            ):
+                stream_message = Message(
+                    type=MessageType.STREAM_CHUNK,
+                    payload=chunk,
+                )
+                await write_output_to_stdout(stream_message, writer)
+                result_chunks.append(chunk)
+            return result_chunks
+        else:
+            return await Runner.run_agent(agent=agent, inputs=inputs, session=session)
     elif agent_config.agent_kind == SpawnAgentKind.TEAM_AGENT:
         from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 
         agent = await TeamAgent.from_spawn_payload(agent_config.payload)
+        if streaming:
+            result_chunks = []
+            async for chunk in Runner.run_agent_team_streaming(
+                agent_team=agent,
+                inputs=inputs,
+                session=session,
+                stream_modes=stream_modes,
+            ):
+                stream_message = Message(
+                    type=MessageType.STREAM_CHUNK,
+                    payload=chunk,
+                )
+                await write_output_to_stdout(stream_message, writer)
+                result_chunks.append(chunk)
+            return result_chunks
+        else:
+            return await Runner.run_agent_team(agent_team=agent, inputs=inputs, session=session)
     else:
         raise ValueError(f"Unsupported spawned agent kind: {agent_config.agent_kind}")
-
-    session = agent_config.session_id
-    if streaming:
-        result_chunks = []
-        async for chunk in Runner.run_agent_streaming(
-            agent=agent,
-            inputs=inputs,
-            session=session,
-            stream_modes=stream_modes,
-        ):
-            stream_message = Message(
-                type=MessageType.STREAM_CHUNK,
-                payload=chunk,
-            )
-            await write_output_to_stdout(stream_message, writer)
-            result_chunks.append(chunk)
-        return result_chunks
-    else:
-        result = await Runner.run_agent(agent=agent, inputs=inputs, session=session)
-        return result
 
 
 async def _run_agent_task(

@@ -7,6 +7,7 @@ import locale
 import os
 import platform
 import re
+import shlex
 import shutil
 from typing import Optional, Dict, Any, AsyncIterator, Callable, List, Literal, Tuple
 
@@ -77,8 +78,8 @@ class ShellOperation(BaseShellOperation):
 
     _BUFFERING_WRAPPERS: Dict[str, Callable[[str], str]] = {
         "windows": lambda cmd: cmd,
-        "linux": lambda cmd: f"stdbuf -oL -eL {cmd}",
-        "darwin": lambda cmd: f"script -q /dev/null {cmd}",
+        "linux": lambda cmd: f"stdbuf -oL -eL /bin/sh -c {shlex.quote(cmd)}",
+        "darwin": lambda cmd: f"script -q /dev/null /bin/sh -c {shlex.quote(cmd)}",
     }
 
     @staticmethod
@@ -141,8 +142,10 @@ class ShellOperation(BaseShellOperation):
         command: str,
         cwd: pathlib.Path,
         env: Dict[str, str],
+        *,
         shell_type: ShellType = ShellType.AUTO,
         background: bool = False,
+        stream: bool = False,
     ) -> asyncio.subprocess.Process:
         """Create an asyncio subprocess with the appropriate shell.
 
@@ -152,6 +155,11 @@ class ShellOperation(BaseShellOperation):
             env: Environment variables.
             shell_type: Shell selection (auto/cmd/powershell/bash/sh).
             background: If True, redirect all I/O to DEVNULL (no output capture).
+            stream: If True, apply OS-specific buffering wrapper for
+                real-time line output (e.g. ``script`` on macOS).  Only
+                meaningful for streaming execution; one-shot
+                ``execute_cmd`` should pass False to avoid PTY side
+                effects such as git launching a pager.
 
         Returns:
             asyncio.subprocess.Process
@@ -165,10 +173,10 @@ class ShellOperation(BaseShellOperation):
         else:
             stdout = asyncio.subprocess.PIPE
             stderr = asyncio.subprocess.PIPE
-            stdin = None
+            stdin = asyncio.subprocess.DEVNULL
 
         if use_shell:
-            cmd = self._wrap_command_with_buffering(args) if not background else args
+            cmd = self._wrap_command_with_buffering(args) if (stream and not background) else args
             return await asyncio.create_subprocess_shell(
                 cmd,
                 cwd=str(cwd),
@@ -386,7 +394,9 @@ class ShellOperation(BaseShellOperation):
                 if system_encoding and system_encoding.lower() not in ("utf-8", "utf8"):
                     lang_encoding = self._get_lang_encoding(system_encoding)
                     exec_env["LANG"] = f"C.{lang_encoding}"
-            process = await self._create_subprocess(command, actual_cwd, exec_env, shell_type=shell_type_enum)
+            process = await self._create_subprocess(
+                command, actual_cwd, exec_env, shell_type=shell_type_enum, stream=True,
+            )
 
             chunk_size = (options or {}).get("chunk_size", 1024)
             encoding = (options or {}).get("encoding", self._detect_shell_encoding())
@@ -594,22 +604,15 @@ class ShellOperation(BaseShellOperation):
                    for allowed in self._run_config.shell_allowlist)
 
     def _resolve_cwd(self, cwd: Optional[str]) -> pathlib.Path:
-        """Resolve CWD against work_dir (if configured)."""
-        work_dir_val = getattr(self._run_config, 'work_dir', None)
+        """Resolve CWD: explicit param -> ContextVar -> os.getcwd()."""
+        from openjiuwen.core.sys_operation.cwd import get_cwd
 
-        if work_dir_val is None:
-            if not cwd:
-                return pathlib.Path.cwd()
-            return pathlib.Path(cwd).expanduser().resolve()
-
-        work_dir = pathlib.Path(work_dir_val).resolve()
         if not cwd:
-            return work_dir
+            return pathlib.Path(get_cwd())
 
         target = pathlib.Path(cwd).expanduser()
         if not target.is_absolute():
-            target = work_dir / target
-
+            target = pathlib.Path(get_cwd()) / target
         return target.resolve()
 
     def _wrap_command_with_buffering(self, command: str) -> str:

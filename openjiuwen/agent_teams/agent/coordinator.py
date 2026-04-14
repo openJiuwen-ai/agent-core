@@ -22,10 +22,13 @@ from typing import (
     Union,
 )
 
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    Field,
+)
 
-from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.schema.events import EventMessage
+from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
 
 
@@ -201,7 +204,7 @@ class CoordinatorLoop:
         self,
         event: CoordinationEvent,
     ) -> None:
-        team_logger.debug("received message {}", event)
+        # team_logger.debug("received message {}", event)
         """Push an event into the processing queue."""
         await self._event_queue.put(event)
 

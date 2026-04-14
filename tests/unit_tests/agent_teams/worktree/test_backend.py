@@ -15,25 +15,33 @@ from openjiuwen.agent_teams.worktree.models import WorktreeConfig
 from tests.test_logger import logger
 
 
+def _wt_target(tmp_path, slug: str) -> str:
+    """Compute a deterministic worktree target path under a tmp workspace."""
+    import os
+    return os.path.join(str(tmp_path), "ws", ".worktrees", slug)
+
+
 class TestGitBackendCreate:
     @pytest.mark.asyncio
-    async def test_create_new_worktree(self, tmp_git_repo: str, worktree_config: WorktreeConfig):
+    async def test_create_new_worktree(self, tmp_git_repo: str, worktree_config: WorktreeConfig, tmp_path):
         backend = GitBackend(worktree_config)
-        result = await backend.create("test-slug", tmp_git_repo)
+        target = _wt_target(tmp_path, "test-slug")
+        result = await backend.create("test-slug", tmp_git_repo, target)
 
         assert not result.existed
-        assert result.worktree_path.endswith("test-slug")
+        assert result.worktree_path == target
         assert result.worktree_branch == "worktree-test-slug"
         assert result.head_commit is not None
         logger.info("GitBackend.create new worktree: path=%s", result.worktree_path)
 
     @pytest.mark.asyncio
-    async def test_create_fast_recovery(self, tmp_git_repo: str, worktree_config: WorktreeConfig):
+    async def test_create_fast_recovery(self, tmp_git_repo: str, worktree_config: WorktreeConfig, tmp_path):
         backend = GitBackend(worktree_config)
-        first = await backend.create("recover-slug", tmp_git_repo)
+        target = _wt_target(tmp_path, "recover-slug")
+        first = await backend.create("recover-slug", tmp_git_repo, target)
         assert not first.existed
 
-        second = await backend.create("recover-slug", tmp_git_repo)
+        second = await backend.create("recover-slug", tmp_git_repo, target)
         assert second.existed
         assert second.worktree_path == first.worktree_path
         assert second.head_commit is not None
@@ -42,9 +50,10 @@ class TestGitBackendCreate:
 
 class TestGitBackendRemove:
     @pytest.mark.asyncio
-    async def test_remove_existing(self, tmp_git_repo: str, worktree_config: WorktreeConfig):
+    async def test_remove_existing(self, tmp_git_repo: str, worktree_config: WorktreeConfig, tmp_path):
         backend = GitBackend(worktree_config)
-        result = await backend.create("remove-me", tmp_git_repo)
+        target = _wt_target(tmp_path, "remove-me")
+        result = await backend.create("remove-me", tmp_git_repo, target)
         assert not result.existed
 
         ok = await backend.remove(result.worktree_path, tmp_git_repo)
@@ -63,9 +72,10 @@ class TestGitBackendRemove:
 
 class TestGitBackendExists:
     @pytest.mark.asyncio
-    async def test_exists_true(self, tmp_git_repo: str, worktree_config: WorktreeConfig):
+    async def test_exists_true(self, tmp_git_repo: str, worktree_config: WorktreeConfig, tmp_path):
         backend = GitBackend(worktree_config)
-        result = await backend.create("exists-check", tmp_git_repo)
+        target = _wt_target(tmp_path, "exists-check")
+        result = await backend.create("exists-check", tmp_git_repo, target)
         assert await backend.exists(result.worktree_path) is True
         logger.info("GitBackend.exists returns True for valid worktree")
 

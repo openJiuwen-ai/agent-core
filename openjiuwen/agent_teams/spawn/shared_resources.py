@@ -2,9 +2,9 @@
 """Process-global shared resources for agent teams.
 
 Database and TeamRuntime are **process-global singletons** — they are
-NOT partitioned by team_id or session_id.  Multiple teams and sessions
+NOT partitioned by team_name or session_id.  Multiple teams and sessions
 coexist inside the same instance; data isolation is handled internally
-via team_id / session_id fields.
+via team_name / session_id fields.
 
 This applies to both single-process (in-process) mode and multi-process
 mode: within a single OS process, all TeamAgent instances must share the
@@ -47,7 +47,7 @@ def get_shared_db(config: Any) -> Union["TeamDatabase", "InMemoryTeamDatabase"]:
     * ``db_type == "sqlite"``  → one TeamDatabase per connection_string.
 
     Multiple teams and sessions share the same instance; row-level
-    isolation is provided by team_id / session_id columns.
+    isolation is provided by team_name / session_id columns.
     """
     if config.db_type == "memory":
         return _get_shared_memory_db()
@@ -60,6 +60,10 @@ def cleanup_shared_resources() -> None:
     _runtime = None
     _memory_db = None
     _sqlite_dbs.clear()
+
+    from openjiuwen.agent_teams.messager.inprocess import cleanup_inprocess_bus
+
+    cleanup_inprocess_bus()
 
 
 # ---- internals -----------------------------------------------------------

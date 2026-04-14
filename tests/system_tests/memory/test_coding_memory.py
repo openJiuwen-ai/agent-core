@@ -28,8 +28,8 @@ from openjiuwen.core.memory.lite.coding_memory_tools import (
     coding_memory_read,
     coding_memory_write,
     coding_memory_edit,
-    _upsert_memory_index_async,
-    _read_file_safe_async,
+    _upsert_memory_index,
+    _read_file_safe,
 )
 
 
@@ -61,10 +61,9 @@ async def coding_memory_system_env():
         root_path=work_dir,
         directories=[{"name": "coding_memory", "path": "coding_memory"}]
     )
-    coding_memory_tools._global_workspace = workspace
-    coding_memory_tools._global_sys_operation = sys_op
-    coding_memory_tools._global_coding_memory_dir = coding_memory_dir
-    coding_memory_tools._global_agent_id = "test_agent"
+    coding_memory_tools.coding_memory_workspace = workspace
+    coding_memory_tools.coding_memory_sys_operation = sys_op
+    coding_memory_tools.coding_memory_dir = coding_memory_dir
     
     yield {
         "tmp_dir": tmp_dir,
@@ -75,10 +74,9 @@ async def coding_memory_system_env():
     }
     
     # 清理
-    coding_memory_tools._global_workspace = None
-    coding_memory_tools._global_sys_operation = None
-    coding_memory_tools._global_coding_memory_dir = None
-    coding_memory_tools._global_agent_id = "default"
+    coding_memory_tools.coding_memory_workspace = None
+    coding_memory_tools.coding_memory_sys_operation = None
+    coding_memory_tools.coding_memory_dir = "coding_memory"
     
     try:
         Runner.resource_mgr.remove_sys_operation(sys_operation_id=sys_operation_id)
@@ -234,7 +232,7 @@ type: user
         env = coding_memory_system_env
         
         # 直接使用异步版本更新索引
-        await _upsert_memory_index_async(
+        await _upsert_memory_index(
             env["coding_memory_dir"], 
             "code_style.md", 
             {"name": "Code Style Guide", "description": "Prefer integration tests over mocks"}
@@ -242,7 +240,7 @@ type: user
         
         # 验证 MEMORY.md 更新
         index_path = os.path.join(env["coding_memory_dir"], "MEMORY.md")
-        index_content = await _read_file_safe_async(index_path)
+        index_content = await _read_file_safe(index_path)
         
         assert "Code Style Guide" in index_content
         assert "code_style.md" in index_content
@@ -347,7 +345,7 @@ type: user
         assert result["success"] is True
         
         # 手动更新索引验证
-        await _upsert_memory_index_async(
+        await _upsert_memory_index(
             env["coding_memory_dir"], 
             "test.md", 
             {"name": "New Name", "description": "Old description"}
@@ -355,7 +353,7 @@ type: user
         
         # 验证索引更新
         index_path = os.path.join(env["coding_memory_dir"], "MEMORY.md")
-        index_content = await _read_file_safe_async(index_path)
+        index_content = await _read_file_safe(index_path)
         
         assert "New Name" in index_content
     
@@ -633,7 +631,7 @@ class TestCodingMemoryPromptInjection:
         env = coding_memory_system_env
         
         # 创建索引文件
-        await _upsert_memory_index_async(
+        await _upsert_memory_index(
             env["coding_memory_dir"], 
             "test.md", 
             {"name": "Test Memory", "description": "Test description"}
@@ -679,7 +677,7 @@ class TestCodingMemoryPromptInjection:
         env = coding_memory_system_env
         
         # 创建索引文件
-        await _upsert_memory_index_async(
+        await _upsert_memory_index(
             env["coding_memory_dir"], 
             "test.md", 
             {"name": "Test", "description": "Test"}
@@ -751,7 +749,7 @@ type: feedback
         assert "PostgreSQL" in read_result["content"]
         
         # 3. 手动更新索引验证
-        await _upsert_memory_index_async(
+        await _upsert_memory_index(
             env["coding_memory_dir"], 
             "db_pref.md", 
             {"name": "Database Preference", "description": "Prefer PostgreSQL over MySQL"}
@@ -759,7 +757,7 @@ type: feedback
         
         # 4. 验证索引更新
         index_path = os.path.join(env["coding_memory_dir"], "MEMORY.md")
-        index_content = await _read_file_safe_async(index_path)
+        index_content = await _read_file_safe(index_path)
         assert "Database Preference" in index_content
     
     @pytest.mark.asyncio
@@ -788,7 +786,7 @@ type: {mem_type}
             assert result["type"] == mem_type
             
             # 手动更新索引
-            await _upsert_memory_index_async(
+            await _upsert_memory_index(
                 env["coding_memory_dir"], 
                 filename, 
                 {"name": name, "description": desc}
@@ -801,7 +799,7 @@ type: {mem_type}
         
         # 验证索引包含所有条目
         index_path = os.path.join(env["coding_memory_dir"], "MEMORY.md")
-        index_content = await _read_file_safe_async(index_path)
+        index_content = await _read_file_safe(index_path)
         
         for filename, _, name, _ in memories:
             assert name in index_content, f"Index should contain {name}"
@@ -842,7 +840,7 @@ type: project
         assert "架构设计" in read_result["content"]
         
         # 4. 手动更新索引验证
-        await _upsert_memory_index_async(
+        await _upsert_memory_index(
             env["coding_memory_dir"], 
             filename, 
             {"name": f"Team Member {unique_id}", "description": "Updated team member info"}
@@ -850,7 +848,7 @@ type: project
         
         # 5. 验证索引更新
         index_path = os.path.join(env["coding_memory_dir"], "MEMORY.md")
-        index_content = await _read_file_safe_async(index_path)
+        index_content = await _read_file_safe(index_path)
         assert f"Team Member {unique_id}" in index_content
 
 
@@ -923,7 +921,7 @@ type: user
             await coding_memory_write.invoke({"path": f"mem_{i}.md", "content": content})
             
             # 手动更新索引
-            await _upsert_memory_index_async(
+            await _upsert_memory_index(
                 env["coding_memory_dir"], 
                 f"mem_{i}.md", 
                 {"name": f"Memory {i}", "description": f"Test memory {i}"}
@@ -931,7 +929,7 @@ type: user
         
         # 验证索引文件存在
         index_path = os.path.join(env["coding_memory_dir"], "MEMORY.md")
-        index_content = await _read_file_safe_async(index_path)
+        index_content = await _read_file_safe(index_path)
         
         # 验证所有条目都在索引中
         for i in range(10):

@@ -13,6 +13,96 @@ from openjiuwen.harness.prompts.sections.tools.base import ToolMetadataProvider
 
 
 # ---------------------------------------------------------------------------
+# switch_mode
+# ---------------------------------------------------------------------------
+
+SWITCH_MODE_DESCRIPTION_CN = (
+    "在 auto 与 plan 模式间切换当前会话模式。"
+    "\n\n"
+    "何时使用："
+    "\n"
+    "- 用户明确要求只做规划、不做实现时，（e.g.切到 plan 模式）。"
+    "\n"
+    "- 你判断当前模式不适合该任务。"
+    "\n"
+    "- 任务的复杂度或需求发生显著变化。"
+    "\n\n"
+    "模式说明："
+    "\n"
+    "- plan：规划优先。除 plan 文件外仅允许只读操作。"
+    "\n"
+    "- auto：完整的开发权限，可修改文件并执行命令。"
+    "\n\n"
+    "注意："
+    "\n"
+    "- 在意图不明确时先用 ask_user 澄清，再切换模式。"
+)
+
+SWITCH_MODE_DESCRIPTION_EN = (
+    "Switch the current session between auto and plan modes."
+    "\n\n"
+    "When to use:"
+    "\n"
+    "- Switch to plan when the user explicitly wants planning only and no implementation."
+    "\n"
+    "- You determine the current mode is inappropriate for the task"
+    "\n"
+    "- A task's complexity or requirements have changed significantly."
+    "\n\n"
+    "Mode characteristics:"
+    "\n"
+    "- plan: Structured planning before execution, read-only with plan file writing only."
+    "\n"
+    "- auto: Full development actions are allowed (editing files, running commands, etc.)."
+    "\n\n"
+    "Note:"
+    "\n"
+    "- If intent is ambiguous, call ask_user first before switching mode."
+)
+
+SWITCH_MODE_INPUT_PARAMS_CN: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "mode": {
+            "type": "string",
+            "enum": ["auto", "plan"],
+            "description": "目标模式：auto 或 plan",
+        }
+    },
+    "required": ["mode"],
+}
+
+SWITCH_MODE_INPUT_PARAMS_EN: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "mode": {
+            "type": "string",
+            "enum": ["auto", "plan"],
+            "description": "Target mode: auto or plan",
+        }
+    },
+    "required": ["mode"],
+}
+
+
+class SwitchModeMetadataProvider(ToolMetadataProvider):
+    """Metadata provider for the ``switch_mode`` tool."""
+
+    def get_name(self) -> str:
+        return "switch_mode"
+
+    def get_description(self, language: str = "cn") -> str:
+        if language == "en":
+            return SWITCH_MODE_DESCRIPTION_EN
+        return SWITCH_MODE_DESCRIPTION_CN
+
+    def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
+        if language == "en":
+            return SWITCH_MODE_INPUT_PARAMS_EN
+        return SWITCH_MODE_INPUT_PARAMS_CN
+
+
+# ---------------------------------------------------------------------------
 # enter_plan_mode
 # ---------------------------------------------------------------------------
 
@@ -110,6 +200,7 @@ class ExitPlanModeMetadataProvider(ToolMetadataProvider):
 
 
 __all__ = [
+    "SwitchModeMetadataProvider",
     "EnterPlanModeMetadataProvider",
     "ExitPlanModeMetadataProvider",
 ]

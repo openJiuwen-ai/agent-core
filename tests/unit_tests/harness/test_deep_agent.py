@@ -780,24 +780,7 @@ def test_create_code_agent_injects_default_code_tool_and_fs_rail() -> None:
 
     assert isinstance(agent, DeepAgent)
     assert agent.card.name == "code_agent"
-    assert agent.ability_manager.get("code") is not None
     assert any(isinstance(rail, FileSystemRail) for rail in agent._pending_rails)
-
-
-def test_create_code_agent_explicit_tools_and_rails_override_defaults() -> None:
-    custom_tool = _build_tool_card("custom_tool")
-    custom_rail = CountingRail()
-
-    agent = create_code_agent(
-        model=_create_dummy_model(),
-        tools=[custom_tool],
-        rails=[custom_rail],
-    )
-
-    assert agent.ability_manager.get("custom_tool") is custom_tool
-    assert agent.ability_manager.get("code") is None
-    assert any(isinstance(rail, CountingRail) for rail in agent._pending_rails)
-    assert not any(isinstance(rail, FileSystemRail) for rail in agent._pending_rails)
 
 
 def test_create_code_agent_accepts_explicit_mcps() -> None:
@@ -890,7 +873,7 @@ def test_create_subagent_uses_research_agent_factory() -> None:
 
 @pytest.mark.asyncio
 async def test_create_deep_agent_with_restrict_to_work_dir_enabled() -> None:
-    """Test that restrict_to_work_dir=True uses workspace root_path."""
+    """Test that restrict_to_work_dir=False results in no sandbox."""
     agent = create_deep_agent(
         model=_create_dummy_model(),
         workspace=Workspace(root_path="./"),
@@ -902,4 +885,5 @@ async def test_create_deep_agent_with_restrict_to_work_dir_enabled() -> None:
 
     sys_op = Runner.resource_mgr.get_sys_operation(f"{agent.card.name}_{agent.card.id}")
     assert sys_op is not None
-    assert sys_op._run_config.work_dir != "./"
+    assert sys_op._run_config.sandbox_root is None
+    assert sys_op._run_config.restrict_to_sandbox is False

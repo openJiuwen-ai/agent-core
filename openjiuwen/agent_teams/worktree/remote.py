@@ -16,6 +16,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from openjiuwen.agent_teams.paths import AGENT_TEAMS_HOME
 from openjiuwen.agent_teams.worktree.git import (
     _run_git,
     fetch_ref,
@@ -101,16 +102,27 @@ class RemoteWorktreeBackend:
         self._node_id = node_id
         self._pending: dict[str, asyncio.Future[WorktreeRemoteResponse]] = {}
 
-    async def create(self, slug: str, repo_root: str) -> WorktreeCreateResult:
+    async def create(
+        self,
+        slug: str,
+        repo_root: str,
+        target_path: str,
+    ) -> WorktreeCreateResult:
         """Request the remote node to create a worktree.
 
         Args:
             slug: Validated worktree name.
             repo_root: Local repository root (used to determine remote URL).
+            target_path: Local target path computed by the caller.
+                Ignored here -- the remote node owns its own filesystem
+                layout and resolves its own target path from its local
+                DeepAgent workspace.  Accepted to satisfy the
+                ``WorktreeBackend`` protocol.
 
         Returns:
             WorktreeCreateResult with path and metadata from the remote node.
         """
+        del target_path
         request = WorktreeRemoteRequest(
             action="create",
             slug=slug,
@@ -294,8 +306,9 @@ class WorktreeRemoteHandler:
     async def _ensure_repo(self, repo_url: str) -> str:
         """Clone the repo if not already present on this node.
 
-        Uses a content-addressable directory under ~/.agent_teams/remote_repos/
-        so the same URL always maps to the same local path.
+        Uses a content-addressable directory under
+        ``{AGENT_TEAMS_HOME}/remote_repos/`` so the same URL always maps
+        to the same local path.
 
         Args:
             repo_url: Git remote URL to clone.
@@ -307,12 +320,7 @@ class WorktreeRemoteHandler:
             return self._cloned_repos[repo_url]
 
         repo_hash = hashlib.sha256(repo_url.encode()).hexdigest()[:12]
-        local_path = os.path.join(
-            os.path.expanduser("~"),
-            ".agent_teams",
-            "remote_repos",
-            repo_hash,
-        )
+        local_path = str(AGENT_TEAMS_HOME / "remote_repos" / repo_hash)
 
         if not os.path.isdir(os.path.join(local_path, ".git")):
             os.makedirs(os.path.dirname(local_path), exist_ok=True)

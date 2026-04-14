@@ -53,6 +53,7 @@ from openjiuwen.agent_teams.worktree.slug import (
     worktrees_dir,
 )
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
 
 
 class WorktreeManager:
@@ -92,8 +93,8 @@ class WorktreeManager:
         self,
         slug: str,
         *,
-        member_id: str | None = None,
-        team_id: str | None = None,
+        member_name: str | None = None,
+        team_name: str | None = None,
     ) -> WorktreeSession:
         """Create or recover a worktree and enter it.
 
@@ -101,8 +102,8 @@ class WorktreeManager:
 
         Args:
             slug: Worktree name (validated for safety).
-            member_id: Team member this worktree belongs to.
-            team_id: Team this worktree belongs to.
+            member_name: Team member this worktree belongs to.
+            team_name: Team this worktree belongs to.
 
         Returns:
             The active WorktreeSession.
@@ -113,15 +114,16 @@ class WorktreeManager:
         """
         validate_slug(slug)
 
-        repo_root = await find_canonical_git_root(os.getcwd())
+        repo_root = await find_canonical_git_root(get_cwd())
         if not repo_root:
             raise RuntimeError("Cannot create worktree: not in a git repository")
 
-        original_cwd = os.getcwd()
+        original_cwd = get_cwd()
         original_branch = await get_current_branch(repo_root)
+        target_path = self._resolve_target_path(slug)
 
         start = time.monotonic()
-        result = await self._backend.create(slug, repo_root)
+        result = await self._backend.create(slug, repo_root, target_path)
         duration_ms = (time.monotonic() - start) * 1000
 
         if not result.existed:
@@ -134,8 +136,8 @@ class WorktreeManager:
             worktree_branch=result.worktree_branch,
             original_branch=original_branch,
             original_head_commit=result.head_commit,
-            member_id=member_id,
-            team_id=team_id,
+            member_name=member_name,
+            team_name=team_name,
             hook_based=result.hook_based,
             creation_duration_ms=duration_ms,
             used_sparse_paths=bool(self._config.sparse_paths),
@@ -156,8 +158,8 @@ class WorktreeManager:
             await self._publish_event(
                 TeamEvent.WORKTREE_CREATED,
                 WorktreeCreatedEvent(
-                    team_id=team_id or "",
-                    member_id=member_id or "",
+                    team_name=team_name or "",
+                    member_name=member_name or "",
                     worktree_name=slug,
                     worktree_path=result.worktree_path,
                     existed=result.existed,
@@ -220,17 +222,24 @@ class WorktreeManager:
 
         # action == "remove"
         if repo_root:
-            await self._backend.remove(session.worktree_path, repo_root)
+            await self._remove_worktree_and_unlink(
+                session.worktree_path,
+                repo_root,
+                slug=session.worktree_name,
+            )
+        else:
+            # No git root -- still drop the workspace symlink so it
+            # doesn't dangle against the already-gone worktree path.
+            self._unlink_worktree_from_workspace(session.worktree_name)
 
-        self._unlink_worktree_from_workspace(session.worktree_name)
         set_current_session(None)
 
         if self._publish_event:
             await self._publish_event(
                 TeamEvent.WORKTREE_REMOVED,
                 WorktreeRemovedEvent(
-                    team_id=session.team_id or "",
-                    member_id=session.member_id or "",
+                    team_name=session.team_name or "",
+                    member_name=session.member_name or "",
                     worktree_name=session.worktree_name,
                     worktree_path=session.worktree_path,
                 ),
@@ -272,11 +281,12 @@ class WorktreeManager:
         """
         validate_slug(slug)
 
-        repo_root = await find_canonical_git_root(os.getcwd())
+        repo_root = await find_canonical_git_root(get_cwd())
         if not repo_root:
             raise RuntimeError("Cannot create agent worktree: not in a git repository")
 
-        result = await self._backend.create(slug, repo_root)
+        target_path = self._resolve_target_path(slug)
+        result = await self._backend.create(slug, repo_root, target_path)
 
         if not result.existed:
             await self._post_creation_setup(repo_root, result.worktree_path)
@@ -291,15 +301,29 @@ class WorktreeManager:
     # -- Workspace link management ---------------------------------------------
 
     def _link_worktree_to_workspace(self, slug: str, worktree_path: str) -> None:
-        """Create .worktree/{slug} symlink in workspace if workspace_root is set."""
+        """Create .worktree/{slug} symlink in workspace if workspace_root is set.
+
+        Replaces any pre-existing symlink at the target path -- stale
+        links from previous sessions (e.g. broken links pointing at a
+        removed worktree) would otherwise block ``os.symlink`` with
+        ``FileExistsError``.
+        """
         if not self._workspace_root:
             return
         wt_dir = os.path.join(self._workspace_root, ".worktree")
         os.makedirs(wt_dir, exist_ok=True)
         link = os.path.join(wt_dir, slug)
-        if not os.path.exists(link):
-            os.symlink(worktree_path, link, target_is_directory=True)
-            team_logger.debug("Linked worktree '%s' into workspace at %s", slug, link)
+        if os.path.lexists(link):
+            if os.path.islink(link):
+                os.unlink(link)
+            else:
+                team_logger.warning(
+                    "Workspace worktree link path '%s' exists and is not a symlink -- skipping",
+                    link,
+                )
+                return
+        os.symlink(worktree_path, link, target_is_directory=True)
+        team_logger.debug("Linked worktree '%s' into workspace at %s", slug, link)
 
     def _unlink_worktree_from_workspace(self, slug: str) -> None:
         """Remove .worktree/{slug} symlink from workspace if it exists."""
@@ -309,6 +333,34 @@ class WorktreeManager:
         if os.path.islink(link):
             os.unlink(link)
             team_logger.debug("Unlinked worktree '%s' from workspace", slug)
+
+    async def _remove_worktree_and_unlink(
+        self,
+        wt_path: str,
+        repo_root: str,
+        *,
+        slug: str | None = None,
+    ) -> bool:
+        """Remove a worktree via backend and clean up its workspace symlink.
+
+        Single choke point for worktree teardown: callers must use this
+        method instead of calling ``backend.remove`` directly so that
+        the ``{team_ws}/.worktree/{slug}`` symlink stays in lockstep
+        with the worktree directory.
+
+        Args:
+            wt_path: Absolute path to the worktree directory.
+            repo_root: Git root that owns the worktree.
+            slug: Worktree slug; defaults to ``basename(wt_path)``.
+
+        Returns:
+            True if the backend successfully removed the worktree.
+        """
+        ok = await self._backend.remove(wt_path, repo_root)
+        resolved_slug = slug or os.path.basename(wt_path.rstrip("/"))
+        if resolved_slug:
+            self._unlink_worktree_from_workspace(resolved_slug)
+        return ok
 
     # -- Change detection -----------------------------------------------------
 
@@ -460,8 +512,8 @@ class WorktreeManager:
 
     async def recover_worktree_for_member(
         self,
-        member_id: str,
-        team_id: str,
+        member_name: str,
+        team_name: str,
     ) -> WorktreeSession | None:
         """Recover an existing worktree session for a persistent team member.
 
@@ -471,18 +523,18 @@ class WorktreeManager:
         Called during resume_persistent_team() for each re-launched member.
 
         Args:
-            member_id: Team member identifier.
-            team_id: Team identifier.
+            member_name: Team member identifier.
+            team_name: Team identifier.
 
         Returns:
             Recovered WorktreeSession, or None if worktree was cleaned up.
         """
-        slug = self._member_slug(member_id)
-        repo_root = await find_canonical_git_root(os.getcwd())
+        slug = self._member_slug(member_name)
+        repo_root = await find_canonical_git_root(get_cwd())
         if not repo_root:
             return None
 
-        wt_path = worktree_path_for(repo_root, slug)
+        wt_path = self._resolve_target_path(slug)
         head_sha = await read_worktree_head_sha(wt_path)
         if not head_sha:
             return None
@@ -494,8 +546,8 @@ class WorktreeManager:
             worktree_name=slug,
             worktree_branch=branch,
             original_head_commit=head_sha,
-            member_id=member_id,
-            team_id=team_id,
+            member_name=member_name,
+            team_name=team_name,
             lifecycle_policy=self._resolve_policy(),
         )
 
@@ -503,7 +555,7 @@ class WorktreeManager:
 
     async def cleanup_team_worktrees(
         self,
-        team_id: str,
+        team_name: str,
         *,
         force: bool = False,
     ) -> list[str]:
@@ -513,7 +565,7 @@ class WorktreeManager:
         For DURABLE policy, requires force=True to proceed.
 
         Args:
-            team_id: Team identifier.
+            team_name: Team identifier.
             force: If True, remove even durable worktrees with changes.
 
         Returns:
@@ -523,15 +575,22 @@ class WorktreeManager:
         if policy == WorktreeLifecyclePolicy.DURABLE and not force:
             team_logger.info(
                 "Skipping worktree cleanup for team %s: durable policy active",
-                team_id,
+                team_name,
             )
             return []
 
-        repo_root = await find_canonical_git_root(os.getcwd())
+        repo_root = await find_canonical_git_root(get_cwd())
         if not repo_root:
             return []
 
-        wt_dir = worktrees_dir(repo_root)
+        workspace = get_workspace()
+        if workspace is None:
+            team_logger.info(
+                "Skipping worktree cleanup for team %s: agent workspace not set",
+                team_name,
+            )
+            return []
+        wt_dir = worktrees_dir(workspace)
         try:
             entries = os.listdir(wt_dir)
         except FileNotFoundError:
@@ -549,7 +608,7 @@ class WorktreeManager:
                     team_logger.warning("Skipping worktree '%s': has uncommitted changes", slug)
                     continue
 
-            if await self._backend.remove(wt_path, repo_root):
+            if await self._remove_worktree_and_unlink(wt_path, repo_root, slug=slug):
                 removed.append(wt_path)
 
         if removed:
@@ -567,21 +626,49 @@ class WorktreeManager:
         Returns:
             True if the worktree was successfully removed.
         """
-        return await self._backend.remove(worktree_path, repo_root)
+        return await self._remove_worktree_and_unlink(worktree_path, repo_root)
 
     # -- Internal helpers -----------------------------------------------------
 
     @staticmethod
-    def _member_slug(member_id: str) -> str:
+    def _resolve_target_path(slug: str) -> str:
+        """Compute the worktree filesystem path for ``slug``.
+
+        Reads the agent workspace from the current ContextVar (set by
+        ``DeepAgent._ensure_initialized``).  Worktrees live under the
+        owning DeepAgent's workspace, not the source git repo.
+
+        Args:
+            slug: Validated worktree slug.
+
+        Returns:
+            Absolute path to the worktree directory.
+
+        Raises:
+            RuntimeError: If the agent workspace is not set in the
+                current context.  Worktree creation requires a
+                workspace to be configured on the DeepAgent.
+        """
+        workspace = get_workspace()
+        if workspace is None:
+            raise RuntimeError(
+                "Cannot resolve worktree path: DeepAgent workspace is not set. "
+                "Worktrees must be created from an agent that has a workspace "
+                "configured (init_cwd was called with workspace=...)."
+            )
+        return worktree_path_for(workspace, slug)
+
+    @staticmethod
+    def _member_slug(member_name: str) -> str:
         """Derive worktree slug from member ID.
 
         Args:
-            member_id: Team member identifier.
+            member_name: Team member identifier.
 
         Returns:
             Slug in the format "teammate-<first 8 chars>".
         """
-        return f"teammate-{member_id[:8]}"
+        return f"teammate-{member_name[:8]}"
 
     def _resolve_policy(self) -> WorktreeLifecyclePolicy:
         """Resolve the effective lifecycle policy.

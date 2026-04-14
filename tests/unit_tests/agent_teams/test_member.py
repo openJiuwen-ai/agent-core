@@ -62,22 +62,22 @@ async def message_bus():
 async def team_member(db, agent_card, message_bus):
     """Provide initialized TeamMember instance"""
     await db.create_team(
-        team_id="test_team",
-        name="Test Team",
-        leader_member_id="leader1"
+        team_name="test_team",
+        display_name="Test Team",
+        leader_member_name="leader1"
     )
     await db.create_member(
-        member_id="member1",
-        team_id="test_team",
-        name="Test Member",
+        member_name="member1",
+        team_name="test_team",
+        display_name="Test Member",
         agent_card=agent_card.model_dump_json(),
         status=MemberStatus.READY.value,
         execution_status=ExecutionStatus.IDLE.value
     )
     return TeamMember(
-        member_id="member1",
-        team_id="test_team",
-        name="Test Member",
+        member_name="member1",
+        team_name="test_team",
+        display_name="Test Member",
         agent_card=agent_card,
         db=db,
         messager=message_bus
@@ -90,9 +90,9 @@ class TestTeamMemberInit:
     @pytest.mark.asyncio
     async def test_member_initialization(self, team_member, agent_card):
         """Test that member is initialized with correct values"""
-        assert team_member.member_id == "member1"
-        assert team_member.team_id == "test_team"
-        assert team_member.name == "Test Member"
+        assert team_member.member_name == "member1"
+        assert team_member.team_name == "test_team"
+        assert team_member.display_name == "Test Member"
         assert team_member.agent_card == agent_card
         assert await team_member.status() == MemberStatus.READY
         assert await team_member.execution_status() == ExecutionStatus.IDLE
@@ -101,15 +101,15 @@ class TestTeamMemberInit:
     async def test_member_with_optional_fields(self, db, agent_card, message_bus):
         """Test member initialization with optional fields"""
         await db.create_team(
-            team_id="test_team",
-            name="Test Team",
-            leader_member_id="leader1"
+            team_name="test_team",
+            display_name="Test Team",
+            leader_member_name="leader1"
         )
 
         member = TeamMember(
-            member_id="member2",
-            team_id="test_team",
-            name="Test Member with Options",
+            member_name="member2",
+            team_name="test_team",
+            display_name="Test Member with Options",
             agent_card=agent_card,
             db=db,
             messager=message_bus,

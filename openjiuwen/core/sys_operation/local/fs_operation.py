@@ -1043,39 +1043,62 @@ class FsOperation(BaseFsOperation):
         return items
 
     def _resolve_path(self, path: str, create_parent: bool = False) -> pathlib.Path:
-        """Resolve path, enforce work_dir sandbox, and sanitize filenames.
+        """Resolve path against ContextVar CWD, enforce sandbox if configured.
 
-        Uses normpath (not resolve) to avoid dereferencing symlinks.
-        This means the sandbox checks the LOGICAL path -- ".team/foo"
-        stays within work_dir -- while the OS follows the symlink
-        transparently at I/O time.
+        Path resolution uses ``get_cwd()`` as base for relative paths.
+        Sandbox enforcement uses ``sandbox_root`` from config -- a list of
+        allowed root directories.  A path is accepted when it falls within
+        any one of the entries.  When ``sandbox_root`` is ``None``, the
+        effective list falls back to ``[get_workspace(), get_project_root()]``
+        read from the per-agent CwdState ContextVar so every DeepAgent gets
+        sensible defaults without having to plumb paths through config.
+        The sandbox list is independent of CWD so the security boundary
+        stays fixed even when CWD moves (e.g. worktree enter).
         """
-        work_dir_val = getattr(self._run_config, 'work_dir', None)
+        from openjiuwen.core.sys_operation.cwd import (
+            get_cwd,
+            get_project_root,
+            get_workspace,
+        )
 
-        if work_dir_val is None:
-            final_path = pathlib.Path(path).expanduser().resolve()
-        else:
-            work_dir = pathlib.Path(work_dir_val).expanduser().resolve()
-            # normpath: collapses ".." without following symlinks
-            raw = work_dir / path
-            normalized = pathlib.Path(os.path.normpath(raw))
-            try:
-                rel_path = normalized.relative_to(work_dir)
-            except ValueError as e:
+        # Path resolution: based on ContextVar CWD
+        base = pathlib.Path(get_cwd())
+        raw = base / path
+        normalized = pathlib.Path(os.path.normpath(raw))
+
+        # Sandbox check: based on config (independent of CWD)
+        restrict = getattr(self._run_config, 'restrict_to_sandbox', False)
+        if restrict:
+            configured = getattr(self._run_config, 'sandbox_root', None)
+            if configured:
+                roots = list(configured)
+            else:
+                roots = [p for p in (get_workspace(), get_project_root()) if p]
+
+            resolved_roots = [pathlib.Path(r).expanduser().resolve() for r in roots]
+            if not any(self._is_within(normalized, root) for root in resolved_roots):
                 raise build_error(
                     status=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR,
                     execution="resolve_path",
-                    error_msg=f"Access denied: Path {path} traverses outside {work_dir}",
-                    cause=e,
-                ) from e
+                    error_msg=(
+                        f"Access denied: Path {path} outside sandbox "
+                        f"{[str(r) for r in resolved_roots]}"
+                    ),
+                )
 
-            sanitized_parts = [re.sub(r'[^\w.-]', '_', part) for part in rel_path.parts]
-            final_path = work_dir.joinpath(*sanitized_parts)
-
+        final_path = normalized
         if create_parent:
             final_path.parent.mkdir(parents=True, exist_ok=True)
-
         return final_path
+
+    @staticmethod
+    def _is_within(path: pathlib.Path, root: pathlib.Path) -> bool:
+        """Return True when ``path`` is equal to or nested under ``root``."""
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            return False
 
     @staticmethod
     def _apply_permissions(path: pathlib.Path, permissions: str | int) -> None:

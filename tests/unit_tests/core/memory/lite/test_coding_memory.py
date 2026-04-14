@@ -13,10 +13,10 @@ from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.core.memory.lite import coding_memory_tools
 from openjiuwen.core.memory.lite.coding_memory_tools import (
     _validate_coding_memory_path,
-    _upsert_memory_index_async,
-    _remove_from_memory_index_async,
+    _upsert_memory_index,
+    _remove_from_memory_index,
     _count_memory_files_async,
-    _read_file_safe_async,
+    _read_file_safe,
 )
 from openjiuwen.core.memory.lite.frontmatter import (
     parse_frontmatter,
@@ -53,17 +53,15 @@ async def memory_test_setup(temp_dir):
         ]
     )
 
-    coding_memory_tools._global_workspace = workspace
-    coding_memory_tools._global_sys_operation = sys_op
-    coding_memory_tools._global_coding_memory_dir = coding_memory_dir
-    coding_memory_tools._global_agent_id = "test"
+    coding_memory_tools.coding_memory_workspace = workspace
+    coding_memory_tools.coding_memory_sys_operation = sys_op
+    coding_memory_tools.coding_memory_dir = coding_memory_dir
 
     yield sys_op, coding_memory_dir
 
-    coding_memory_tools._global_workspace = None
-    coding_memory_tools._global_sys_operation = None
-    coding_memory_tools._global_coding_memory_dir = None
-    coding_memory_tools._global_agent_id = "default"
+    coding_memory_tools.coding_memory_workspace = None
+    coding_memory_tools.coding_memory_sys_operation = None
+    coding_memory_tools.coding_memory_dir = "coding_memory"
     Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
     await Runner.stop()
 
@@ -165,8 +163,8 @@ class TestPathValidation:
     async def test_set_and_get_coding_memory_dir(self, memory_test_setup):
         """测试设置和获取 coding memory 目录."""
         new_dir = tempfile.mkdtemp()
-        coding_memory_tools._global_coding_memory_dir = new_dir
-        assert coding_memory_tools._global_coding_memory_dir == new_dir
+        coding_memory_tools.coding_memory_dir = new_dir
+        assert coding_memory_tools.coding_memory_dir == new_dir
         shutil.rmtree(new_dir, ignore_errors=True)
 
 
@@ -182,10 +180,10 @@ class TestMemoryIndex:
             "description": "Senior Python developer",
             "type": "user"
         }
-        await _upsert_memory_index_async(coding_memory_dir, "user_role.md", fm)
+        await _upsert_memory_index(coding_memory_dir, "user_role.md", fm)
 
         index_path = os.path.join(coding_memory_dir, "MEMORY.md")
-        index_content = await _read_file_safe_async(index_path)
+        index_content = await _read_file_safe(index_path)
         assert "Developer Role" in index_content
         assert "user_role.md" in index_content
 
@@ -194,13 +192,13 @@ class TestMemoryIndex:
         """测试更新已有条目."""
         sys_op, coding_memory_dir = memory_test_setup
         fm1 = {"name": "Old Name", "description": "Old desc", "type": "user"}
-        await _upsert_memory_index_async(coding_memory_dir, "user_role.md", fm1)
+        await _upsert_memory_index(coding_memory_dir, "user_role.md", fm1)
 
         fm2 = {"name": "New Name", "description": "New desc", "type": "user"}
-        await _upsert_memory_index_async(coding_memory_dir, "user_role.md", fm2)
+        await _upsert_memory_index(coding_memory_dir, "user_role.md", fm2)
 
         index_path = os.path.join(coding_memory_dir, "MEMORY.md")
-        index_content = await _read_file_safe_async(index_path)
+        index_content = await _read_file_safe(index_path)
         assert "New Name" in index_content
         assert "Old Name" not in index_content
 
@@ -209,12 +207,12 @@ class TestMemoryIndex:
         """测试从索引删除."""
         sys_op, coding_memory_dir = memory_test_setup
         fm = {"name": "To Delete", "description": "Will be deleted", "type": "user"}
-        await _upsert_memory_index_async(coding_memory_dir, "to_delete.md", fm)
+        await _upsert_memory_index(coding_memory_dir, "to_delete.md", fm)
 
-        await _remove_from_memory_index_async(coding_memory_dir, "to_delete.md")
+        await _remove_from_memory_index(coding_memory_dir, "to_delete.md")
 
         index_path = os.path.join(coding_memory_dir, "MEMORY.md")
-        index_content = await _read_file_safe_async(index_path)
+        index_content = await _read_file_safe(index_path)
         assert "To Delete" not in index_content
 
     @pytest.mark.asyncio
@@ -252,12 +250,16 @@ class TestFileHelpers:
         file_path = os.path.join(coding_memory_dir, "test.txt")
         await sys_op.fs().write_file(file_path, content="测试内容", create_if_not_exist=True)
 
-        content = await _read_file_safe_async(file_path)
+        content = await _read_file_safe(file_path)
         assert "测试内容" in content
 
     @pytest.mark.asyncio
     async def test_read_file_safe_not_found(self):
         """测试安全读取不存在的文件."""
-        coding_memory_tools._global_sys_operation = None
-        content = await _read_file_safe_async("/nonexistent/path/file.txt")
-        assert content == ""
+        prev = coding_memory_tools.coding_memory_sys_operation
+        try:
+            coding_memory_tools.coding_memory_sys_operation = None
+            content = await _read_file_safe("/nonexistent/path/file.txt")
+            assert content == ""
+        finally:
+            coding_memory_tools.coding_memory_sys_operation = prev

@@ -3,9 +3,9 @@
 """Enhanced BashTool with command semantics, smart truncation, and security."""
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import (
     Any,
     AsyncIterator,
@@ -47,7 +47,7 @@ class _BashInputs:
     command: str
     timeout: int
     workdir: str
-    background: bool
+    run_in_background: bool
     max_output_chars: int
     shell_type: str
     description: str
@@ -62,47 +62,19 @@ class BashTool(Tool):
         self,
         operation: SysOperation,
         language: str = "cn",
-        workspace: str | None = None,
         permission_mode: str = "auto",
         deny_patterns: list[str] | None = None,
         allow_patterns: list[str] | None = None,
         agent_id: Optional[str] = None,
+        **_kwargs: Any,
     ) -> None:
         super().__init__(build_tool_card("bash", "BashTool", language, agent_id=agent_id))
         self._operation = operation
-        self._workspace: Path | None = Path(workspace).resolve() if workspace else None
         self._permission = PermissionConfig(
             mode=PermissionMode(permission_mode),
             deny_patterns=PermissionConfig.compile_patterns(deny_patterns),
             allow_patterns=PermissionConfig.compile_patterns(allow_patterns),
         )
-
-    # ── workspace sandbox ─────────────────────────────────────
-
-    def _get_workspace(self) -> Path | None:
-        if self._workspace:
-            return self._workspace
-        wd = self._operation.work_dir
-        return Path(wd).resolve() if wd else None
-
-    def _resolve_workdir(self, workdir: str) -> Path | None:
-        """Resolve workdir and enforce sandbox.
-
-        Returns None if the resolved path escapes the workspace.
-        """
-        workspace = self._get_workspace()
-        if workspace is None:
-            return Path(workdir).resolve() if workdir else Path.cwd()
-
-        candidate = Path(workdir) if workdir else workspace
-        if not candidate.is_absolute():
-            candidate = workspace / candidate
-        candidate = candidate.resolve()
-        try:
-            candidate.relative_to(workspace)
-        except ValueError:
-            return None
-        return candidate
 
     # ── input parsing ─────────────────────────────────────────
 
@@ -116,7 +88,7 @@ class BashTool(Tool):
             command=(inputs.get("command") or "").strip(),
             timeout=max(1, min(int(inputs.get("timeout", 30)), 300)),
             workdir=inputs.get("workdir", ""),
-            background=bool(inputs.get("background", False)),
+            run_in_background=bool(inputs.get("run_in_background", False)),
             max_output_chars=max(200, min(int(inputs.get("max_output_chars", 8000)), 20000)),
             shell_type=shell_type,
             description=inputs.get("description", ""),
@@ -125,24 +97,22 @@ class BashTool(Tool):
     # ── invoke ────────────────────────────────────────────────
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs: Any) -> ToolOutput:
+        from openjiuwen.core.sys_operation.cwd import get_cwd
+
         p = self._parse_inputs(inputs)
 
         if not p.command:
             return ToolOutput(success=False, error="command cannot be empty")
 
-        resolved_cwd = self._resolve_workdir(p.workdir)
-        if resolved_cwd is None:
-            return ToolOutput(success=False, error="workdir is outside workspace sandbox")
+        if os.getenv("OPENJIUWEN_BASH_STRICT") == "1":
+            guard = self._guard(p)
+            if guard is not None:
+                return guard
 
-        # tool-layer injection check (supplements sys_operation safety)
-        sec = check_injection(p.command)
-        if sec.blocked:
-            return ToolOutput(success=False, error=sec.reason)
+        resolved_cwd = p.workdir or get_cwd()
 
-        # permission pipeline (deny/allow patterns + mode enforcement)
-        perm = check_permission(p.command, self._permission)
-        if not perm.allowed:
-            return ToolOutput(success=False, error=perm.reason)
+        if p.workdir and not os.path.isdir(resolved_cwd):
+            return ToolOutput(success=False, error=f"workdir does not exist: {resolved_cwd}")
 
         warning = get_destructive_warning(p.command)
 
@@ -150,9 +120,9 @@ class BashTool(Tool):
             sys_operation_logger.debug("BashTool: %s — %s", p.description, p.command)
 
         # ── background execution ──────────────────────────────
-        if p.background:
+        if p.run_in_background:
             res = await self._operation.shell().execute_cmd_background(
-                p.command, cwd=str(resolved_cwd), shell_type=p.shell_type,
+                p.command, cwd=resolved_cwd, shell_type=p.shell_type,
             )
             if res.code != StatusCode.SUCCESS.code:
                 return ToolOutput(success=False, error=res.message)
@@ -160,7 +130,7 @@ class BashTool(Tool):
 
         # ── normal execution ──────────────────────────────────
         res = await self._operation.shell().execute_cmd(
-            p.command, cwd=str(resolved_cwd), timeout=p.timeout, shell_type=p.shell_type,
+            p.command, cwd=resolved_cwd, timeout=p.timeout, shell_type=p.shell_type,
         )
         if res.code != StatusCode.SUCCESS.code:
             return ToolOutput(success=False, error=res.message)
@@ -196,26 +166,21 @@ class BashTool(Tool):
     # ── stream ────────────────────────────────────────────────
 
     async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[ToolOutput]:
+        from openjiuwen.core.sys_operation.cwd import get_cwd
+
         p = self._parse_inputs(inputs)
 
         if not p.command:
             yield ToolOutput(success=False, error="command cannot be empty")
             return
 
-        resolved_cwd = self._resolve_workdir(p.workdir)
-        if resolved_cwd is None:
-            yield ToolOutput(success=False, error="workdir is outside workspace sandbox")
-            return
+        resolved_cwd = p.workdir or get_cwd()
 
-        sec = check_injection(p.command)
-        if sec.blocked:
-            yield ToolOutput(success=False, error=sec.reason)
-            return
-
-        perm = check_permission(p.command, self._permission)
-        if not perm.allowed:
-            yield ToolOutput(success=False, error=perm.reason)
-            return
+        if os.getenv("OPENJIUWEN_BASH_STRICT") == "1":
+            guard = self._guard(p)
+            if guard is not None:
+                yield guard
+                return
 
         warning = get_destructive_warning(p.command)
 
@@ -228,7 +193,7 @@ class BashTool(Tool):
         final_exit_code: int = -1
 
         async for chunk in self._operation.shell().execute_cmd_stream(
-            p.command, cwd=str(resolved_cwd), timeout=p.timeout, shell_type=p.shell_type,
+            p.command, cwd=resolved_cwd, timeout=p.timeout, shell_type=p.shell_type,
         ):
             if chunk.code != StatusCode.SUCCESS.code:
                 yield ToolOutput(success=False, error=chunk.message)
@@ -274,3 +239,15 @@ class BashTool(Tool):
             },
             error=truncate_output(accumulated_stderr, p.max_output_chars) if meaning.is_error else None,
         )
+
+    def _guard(self, p: _BashInputs):
+        # tool-layer injection check (supplements sys_operation safety)
+        sec = check_injection(p.command)
+        if sec.blocked:
+            return ToolOutput(success=False, error=sec.reason)
+
+        # permission pipeline (deny/allow patterns + mode enforcement)
+        perm = check_permission(p.command, self._permission)
+        if not perm.allowed:
+            return ToolOutput(success=False, error=perm.reason)
+        return None

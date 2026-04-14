@@ -13,14 +13,18 @@ from openjiuwen.agent_teams.worktree.models import (
     WorktreeLifecyclePolicy,
 )
 from openjiuwen.agent_teams.worktree.session import get_current_session, set_current_session
+from openjiuwen.core.sys_operation.cwd import CwdState, _cwd_state, init_cwd
 from tests.test_logger import logger
+
+
+MOCK_WORKSPACE = "/mock/workspace"
 
 
 @pytest.fixture
 def mock_backend():
     backend = AsyncMock()
     backend.create = AsyncMock(return_value=WorktreeCreateResult(
-        worktree_path="/tmp/test-wt",
+        worktree_path="/mock/workspace/.worktrees/test-wt",
         worktree_branch="worktree-test",
         head_commit="abc123",
         existed=False,
@@ -32,10 +36,18 @@ def mock_backend():
 
 @pytest.fixture(autouse=True)
 def _clean_session():
-    """Ensure ContextVar is clean before and after each test."""
+    """Ensure ContextVar state is clean before and after each test.
+
+    Also seeds CwdState with a workspace so ``_resolve_target_path``
+    can derive a worktree target without raising.  On teardown the
+    CwdState is reset to a fresh empty instance so subsequent test
+    files in the same process don't see leaked mock paths.
+    """
     set_current_session(None)
+    init_cwd("/mock/cwd", workspace=MOCK_WORKSPACE)
     yield
     set_current_session(None)
+    _cwd_state.set(CwdState())
 
 
 def _make_manager(
@@ -63,14 +75,18 @@ class TestEnter:
         mock_branch.return_value = "main"
 
         mgr = _make_manager(mock_backend)
-        session = await mgr.enter("my-slug", member_id="m1", team_id="t1")
+        session = await mgr.enter("my-slug", member_name="m1", team_name="t1")
 
-        assert session.worktree_path == "/tmp/test-wt"
+        assert session.worktree_path == "/mock/workspace/.worktrees/test-wt"
         assert session.worktree_name == "my-slug"
-        assert session.member_id == "m1"
-        assert session.team_id == "t1"
+        assert session.member_name == "m1"
+        assert session.team_name == "t1"
         assert session.original_branch == "main"
-        mock_backend.create.assert_awaited_once_with("my-slug", "/repo")
+        mock_backend.create.assert_awaited_once_with(
+            "my-slug",
+            "/repo",
+            f"{MOCK_WORKSPACE}/.worktrees/my-slug",
+        )
 
         # ContextVar should be set
         assert get_current_session() is session
@@ -102,7 +118,7 @@ class TestEnter:
 
         publish = AsyncMock()
         mgr = _make_manager(mock_backend, publish_event=publish)
-        await mgr.enter("ev-slug", member_id="m1", team_id="t1")
+        await mgr.enter("ev-slug", member_name="m1", team_name="t1")
 
         publish.assert_awaited_once()
         logger.info("enter publishes WorktreeCreatedEvent")
@@ -198,7 +214,7 @@ class TestCreateAgentWorktree:
         mgr = _make_manager(mock_backend)
         result = await mgr.create_agent_worktree("agent-slug")
 
-        assert result.worktree_path == "/tmp/test-wt"
+        assert result.worktree_path == "/mock/workspace/.worktrees/test-wt"
         assert get_current_session() is None
         logger.info("create_agent_worktree does not set ContextVar")
 

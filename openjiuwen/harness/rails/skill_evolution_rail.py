@@ -11,12 +11,13 @@ from typing import Any, List, Optional, Union
 
 from openjiuwen.agent_evolving.online.evolver import SkillEvolver
 from openjiuwen.agent_evolving.online.schema import (
+    EvolutionCategory,
     EvolutionRecord,
     EvolutionSignal,
     EvolutionContext,
     EvolutionTarget,
 )
-from openjiuwen.agent_evolving.online.signal_detector import SignalDetector
+from openjiuwen.agent_evolving.online.signal_detector import SignalDetector, make_signal_fingerprint
 from openjiuwen.agent_evolving.online.store import EvolutionStore
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session.stream import OutputSchema
@@ -47,7 +48,7 @@ class SkillEvolutionRail(DeepAgentRail):
         self._store = EvolutionStore(skills_dir)
         self._evolver = SkillEvolver(llm, model, language)
         self._auto_scan = auto_scan
-        self._processed_signal_keys: set[tuple[str, str]] = set()
+        self._processed_signal_keys: set[tuple[str, ...]] = set()
         self._auto_save = auto_save
         self._pending_approval_events: list[OutputSchema] = []
     
@@ -60,7 +61,7 @@ class SkillEvolutionRail(DeepAgentRail):
         return self._evolver
 
     @property
-    def processed_signal_keys(self) -> set[tuple[str, str]]:
+    def processed_signal_keys(self) -> set[tuple[str, ...]]:
         return self._processed_signal_keys
 
     @property
@@ -138,8 +139,26 @@ class SkillEvolutionRail(DeepAgentRail):
                 return
 
             signals = self._detect_signals(parsed_messages, skill_names)
+
             if not signals:
-                return
+                primary_skill = self._infer_primary_skill(parsed_messages, skill_names)
+                if primary_skill:
+                    signals = [EvolutionSignal(
+                        signal_type="conversation_review",
+                        evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
+                        section="",
+                        excerpt="[Auto] No rule-based signals. Analyze conversation for implicit experiences.",
+                        skill_name=primary_skill,
+                    )]
+                else:
+                    return
+
+            attributed_skills = {s.skill_name for s in signals if s.skill_name}
+            unattributed = [s for s in signals if not s.skill_name]
+            if len(attributed_skills) == 1 and unattributed:
+                fallback_skill = next(iter(attributed_skills))
+                for s in unattributed:
+                    s.skill_name = fallback_skill
 
             skill_groups: dict[str, List[EvolutionSignal]] = {}
             for signal in signals:
@@ -275,13 +294,12 @@ class SkillEvolutionRail(DeepAgentRail):
         detector = SignalDetector(existing_skills=existing_skills)
         detected = detector.detect(parsed_messages)
 
-        new_signals = [
-            signal
-            for signal in detected
-            if (signal.signal_type, signal.excerpt[:100]) not in self._processed_signal_keys
-        ]
-        for signal in new_signals:
-            self._processed_signal_keys.add((signal.signal_type, signal.excerpt[:100]))
+        new_signals: List[EvolutionSignal] = []
+        for signal in detected:
+            fp = make_signal_fingerprint(signal)
+            if fp not in self._processed_signal_keys:
+                self._processed_signal_keys.add(fp)
+                new_signals.append(signal)
 
         if len(self._processed_signal_keys) > _MAX_PROCESSED_SIGNAL_KEYS:
             self._processed_signal_keys.clear()
@@ -293,6 +311,30 @@ class SkillEvolutionRail(DeepAgentRail):
                 len(detected) - len(new_signals),
             )
         return new_signals
+
+    def _infer_primary_skill(
+        self,
+        parsed_messages: List[dict],
+        skill_names: List[str],
+    ) -> Optional[str]:
+        """Infer the most likely active skill from SKILL.md read traces in the conversation."""
+        skill_set = set(skill_names)
+        hits: dict[str, int] = {}
+        for msg in parsed_messages:
+            role = msg.get("role", "")
+            texts: list[str] = []
+            if role in ("tool", "function"):
+                texts.append(msg.get("content", ""))
+            elif role == "assistant":
+                texts.extend(tc.get("arguments", "") for tc in msg.get("tool_calls", []))
+            for text in texts:
+                for matched in self._SKILL_MD_RE.finditer(text):
+                    name = matched.group(1)
+                    if name in skill_set:
+                        hits[name] = hits.get(name, 0) + 1
+        if not hits:
+            return None
+        return max(hits, key=hits.get)  # type: ignore[arg-type]
 
     async def _generate_experience_for_skill(
         self,

@@ -10,7 +10,17 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.agent_evolving.online.evolver import SkillEvolver, build_conversation_snippet
+from openjiuwen.agent_evolving.online.evolver import (
+    SkillEvolver,
+    build_conversation_snippet,
+    _build_context,
+    _extract_json,
+    _fix_json_text,
+    _looks_truncated,
+    _preview_section,
+    _split_into_sections,
+    _summarize_skill_content,
+)
 from openjiuwen.agent_evolving.online.schema import (
     EvolutionCategory,
     EvolutionContext,
@@ -168,11 +178,290 @@ class TestSkillEvolverParsing:
         assert patches2[0].target == EvolutionTarget.BODY
 
     @staticmethod
-    def test_parse_llm_response_invalid_returns_empty():
-        assert SkillEvolver._parse_llm_response("not json at all") == []
+    def test_parse_llm_response_invalid_returns_none():
+        assert SkillEvolver._parse_llm_response("not json at all") is None
 
     @staticmethod
     def test_parse_single_patch_skip():
         patch = SkillEvolver._parse_single_patch({"action": "skip", "skip_reason": "irrelevant"})
         assert patch.action == "skip"
         assert patch.skip_reason == "irrelevant"
+
+    @staticmethod
+    def test_parse_single_patch_with_script_fields():
+        patch = SkillEvolver._parse_single_patch({
+            "action": "append",
+            "target": "script",
+            "section": "Scripts",
+            "content": "import os",
+            "script_filename": "setup.py",
+            "script_language": "python",
+            "script_purpose": "environment setup",
+        })
+        assert patch.target == EvolutionTarget.SCRIPT
+        assert patch.script_filename == "setup.py"
+        assert patch.script_language == "python"
+        assert patch.script_purpose == "environment setup"
+
+    @staticmethod
+    def test_parse_llm_response_with_trailing_comma():
+        raw = '[{"action":"append","target":"body","section":"Troubleshooting","content":"fix",},]'
+        patches = SkillEvolver._parse_llm_response(raw)
+        assert patches is not None
+        assert len(patches) == 1
+
+    @staticmethod
+    def test_parse_llm_response_with_comments():
+        raw = """[
+  // this is a comment
+  {"action":"append","target":"body","section":"Troubleshooting","content":"fix"}
+]"""
+        patches = SkillEvolver._parse_llm_response(raw)
+        assert patches is not None
+        assert len(patches) == 1
+
+
+class TestSummarizeSkillContent:
+    @staticmethod
+    def test_short_content_unchanged():
+        raw = "# Skill\nshort content"
+        assert _summarize_skill_content(raw) == raw
+
+    @staticmethod
+    def test_long_content_summarized():
+        sections = ["# Intro\n" + "a" * 500]
+        for i in range(10):
+            sections.append(f"## Section {i}\n" + "b" * 1000)
+        raw = "\n".join(sections)
+        result = _summarize_skill_content(raw, max_chars=2000)
+        assert len(result) <= 2100
+        assert "# Intro" in result
+        assert "## Section 0" in result
+        assert "以下章节仅保留标题与开头摘要" in result
+
+
+class TestSplitIntoSections:
+    @staticmethod
+    def test_splits_on_headings():
+        text = "# A\ncontent a\n## B\ncontent b\n### C\ncontent c"
+        sections = _split_into_sections(text)
+        assert len(sections) == 3
+        assert sections[0].startswith("# A")
+        assert sections[1].startswith("## B")
+
+    @staticmethod
+    def test_no_headings():
+        text = "just plain text\nno headings"
+        sections = _split_into_sections(text)
+        assert len(sections) == 1
+
+
+class TestPreviewSection:
+    @staticmethod
+    def test_short_body_unchanged():
+        section = "## Title\nShort body"
+        assert _preview_section(section) == section
+
+    @staticmethod
+    def test_long_body_truncated():
+        section = "## Title\n" + "x" * 500
+        result = _preview_section(section, preview_chars=100)
+        assert result.startswith("## Title")
+        assert result.endswith("...")
+        assert len(result) < len(section)
+
+    @staticmethod
+    def test_heading_only():
+        assert _preview_section("## Empty") == "## Empty"
+
+
+class TestFixJsonText:
+    @staticmethod
+    def test_removes_markdown_fences():
+        text = '```json\n[{"a": 1}]\n```'
+        assert _fix_json_text(text) == '[{"a": 1}]'
+
+    @staticmethod
+    def test_removes_comments_and_trailing_commas():
+        text = '[{"a": 1}, // comment\n]'
+        fixed = _fix_json_text(text)
+        assert "//" not in fixed
+        import json
+        assert json.loads(fixed) == [{"a": 1}]
+
+
+class TestExtractJson:
+    @staticmethod
+    def test_direct_parse():
+        assert _extract_json('[1, 2]') == [1, 2]
+
+    @staticmethod
+    def test_with_markdown_fence():
+        assert _extract_json('```json\n{"a": 1}\n```') == {"a": 1}
+
+    @staticmethod
+    def test_embedded_json_extraction():
+        raw = 'Some text before [{"action":"append"}] some text after'
+        result = _extract_json(raw)
+        assert result == [{"action": "append"}]
+
+    @staticmethod
+    def test_empty_string():
+        assert _extract_json("") is None
+        assert _extract_json("   ") is None
+
+    @staticmethod
+    def test_completely_broken():
+        assert _extract_json("no json here at all!!!") is None
+
+
+class TestBuildContext:
+    @staticmethod
+    def test_empty_signals():
+        assert _build_context([]) == ""
+
+    @staticmethod
+    def test_budget_splitting():
+        signals = [
+            SimpleNamespace(signal_type="a", excerpt="x" * 1000),
+            SimpleNamespace(signal_type="b", excerpt="y" * 1000),
+        ]
+        result = _build_context(signals, max_chars=500)
+        assert "[a]" in result
+        assert "[b]" in result
+        assert "..." in result
+
+    @staticmethod
+    def test_short_signals_no_truncation():
+        signals = [SimpleNamespace(signal_type="err", excerpt="short")]
+        result = _build_context(signals)
+        assert result == "[err] short"
+
+
+class TestLooksTruncated:
+    @staticmethod
+    def test_balanced_not_truncated():
+        assert _looks_truncated('[{"a": 1}]') is False
+
+    @staticmethod
+    def test_unbalanced_is_truncated():
+        assert _looks_truncated('[{"a": 1}, {"b":') is True
+
+    @staticmethod
+    def test_slight_imbalance_not_truncated():
+        assert _looks_truncated('[{"a": 1}') is False
+
+
+class TestConversationSnippetTruncation:
+    @staticmethod
+    def test_long_content_gets_truncated():
+        messages = [{"role": "user", "content": "x" * 1000}]
+        snippet = build_conversation_snippet(messages, content_preview_chars=50, language="en")
+        assert "truncated" in snippet
+        assert len(snippet) < 1000
+
+    @staticmethod
+    def test_recency_bias_last_messages_get_more_budget():
+        messages = [{"role": "user", "content": "x" * 400} for _ in range(10)]
+        snippet = build_conversation_snippet(
+            messages, content_preview_chars=200, language="cn",
+        )
+        lines = snippet.strip().split("\n")
+        last_line = lines[-1]
+        first_line = lines[0]
+        assert len(last_line) > len(first_line)
+
+
+class TestSkillEvolverRetryParse:
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_retry_on_malformed_json_sends_fix_prompt():
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            return_value=SimpleNamespace(
+                content='[{"action":"append","target":"body","section":"Troubleshooting","content":"fixed"}]'
+            )
+        )
+        evolver = SkillEvolver(llm=llm, model="dummy", language="cn")
+        # balanced braces so _looks_truncated returns False → fix path
+        patches = await evolver._retry_parse(
+            broken_raw='[{"action":"append" invalid json}]',
+            original_prompt="original prompt here",
+        )
+        assert len(patches) == 1
+        assert patches[0].content == "fixed"
+        call_args = llm.invoke.call_args
+        prompt_sent = call_args.kwargs["messages"][0]["content"]
+        assert "修复" in prompt_sent or "invalid json" in prompt_sent
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_retry_on_truncated_uses_original_prompt():
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            return_value=SimpleNamespace(
+                content='[{"action":"skip","skip_reason":"irrelevant"}]'
+            )
+        )
+        evolver = SkillEvolver(llm=llm, model="dummy", language="cn")
+        truncated_raw = '[{"action":"append","target":"body","section":"Troubleshooting","content":"partial'
+        patches = await evolver._retry_parse(
+            broken_raw=truncated_raw,
+            original_prompt="THE ORIGINAL PROMPT",
+        )
+        assert len(patches) == 1
+        call_args = llm.invoke.call_args
+        prompt_sent = call_args.kwargs["messages"][0]["content"]
+        assert prompt_sent == "THE ORIGINAL PROMPT"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_retry_returns_empty_on_double_failure():
+        llm = MagicMock()
+        llm.invoke = AsyncMock(return_value=SimpleNamespace(content="still broken"))
+        evolver = SkillEvolver(llm=llm, model="dummy", language="cn")
+        patches = await evolver._retry_parse("bad", original_prompt="p")
+        assert patches == []
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_retry_returns_empty_on_llm_exception():
+        llm = MagicMock()
+        llm.invoke = AsyncMock(side_effect=RuntimeError("network"))
+        evolver = SkillEvolver(llm=llm, model="dummy", language="cn")
+        patches = await evolver._retry_parse("bad", original_prompt="p")
+        assert patches == []
+
+
+class TestSkillEvolverScriptLimit:
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_text_and_script_limits_independent():
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            return_value=SimpleNamespace(
+                content="""[
+  {"action":"append","target":"body","section":"Troubleshooting","content":"A"},
+  {"action":"append","target":"body","section":"Examples","content":"B"},
+  {"action":"append","target":"body","section":"Instructions","content":"C-overflow"},
+  {"action":"append","target":"script","section":"Scripts","content":"import os","script_filename":"s.py","script_language":"python","script_purpose":"test"},
+  {"action":"append","target":"script","section":"Scripts","content":"import sys","script_filename":"s2.py","script_language":"python","script_purpose":"test2"}
+]"""
+            )
+        )
+        evolver = SkillEvolver(llm=llm, model="dummy", language="en")
+        ctx = EvolutionContext(
+            skill_name="skill-a",
+            signals=[make_signal()],
+            skill_content="# skill",
+            messages=[{"role": "user", "content": "hello"}],
+            existing_desc_records=[],
+            existing_body_records=[],
+        )
+        records = await evolver.generate_skill_experience(ctx)
+        text_recs = [r for r in records if r.change.target != EvolutionTarget.SCRIPT]
+        script_recs = [r for r in records if r.change.target == EvolutionTarget.SCRIPT]
+        assert len(text_recs) == 2
+        assert len(script_recs) == 1
+        assert text_recs[0].change.content == "A"
+        assert text_recs[1].change.content == "B"

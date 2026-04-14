@@ -1,53 +1,34 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Unit tests for plan mode execution using mock LLM-driven invoke (no real API)."""
+"""CodeAgent 运行模式切换（Mock）测试。"""
 
 from __future__ import annotations
 
+import json
+import tempfile
+import unittest
 import uuid
 from pathlib import Path
-from typing import List, cast
-from unittest.mock import patch
+from typing import List
 
 import pytest
-import pytest_asyncio
 
-from openjiuwen.core.foundation.llm import Model
+from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.runner.runner_config import DEFAULT_RUNNER_CONFIG
-from openjiuwen.core.single_agent import create_agent_session
+from openjiuwen.core.session import InteractiveInput
+from openjiuwen.core.single_agent import AgentCard, create_agent_session
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail, ToolCallInputs
-from openjiuwen.harness import create_deep_agent
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness.subagents.code_agent import create_code_agent
+
 from tests.unit_tests.fixtures.mock_llm import (
-    MockLLMModel,
     create_text_response,
     create_tool_call_response,
+    mock_llm_context,
 )
 
 
-class _MockRuntimeModel:
-    """Expose MockLLMModel through DeepAgent public model contract."""
-
-    def __init__(self, client: MockLLMModel) -> None:
-        self.client = client
-        self.model_client_config = client.model_client_config
-        self.model_config = client.model_config
-
-    async def invoke(self, *args, **kwargs):
-        return await self.client.invoke(*args, **kwargs)
-
-    async def stream(self, *args, **kwargs):
-        async for chunk in self.client.stream(*args, **kwargs):
-            yield chunk
-
-
-def _build_mock_runtime_model(mock_llm: MockLLMModel) -> Model:
-    return cast(Model, _MockRuntimeModel(mock_llm))
-
-
 class ToolTraceRail(AgentRail):
-    """Record tool names seen in before_tool_call (same idea as execute_mode e2e)."""
+    """记录工具调用顺序，供测试断言。"""
 
     def __init__(self) -> None:
         super().__init__()
@@ -58,104 +39,187 @@ class ToolTraceRail(AgentRail):
             self.tool_calls.append(ctx.inputs.tool_name)
 
 
-@pytest_asyncio.fixture
-async def runner():
-    # Isolate from tests that leave Runner in distributed_mode / custom config.
-    Runner.set_config(DEFAULT_RUNNER_CONFIG)
-    await Runner.start()
-    yield
-    await Runner.stop()
-    Runner.set_config(DEFAULT_RUNNER_CONFIG)
+class TestCodeAgentExecutionModeMock(unittest.IsolatedAsyncioTestCase):
+    """参考 e2e 场景的 mock 版本单测。"""
 
+    async def asyncSetUp(self) -> None:
+        await Runner.start()
+        self._tmp_dir = tempfile.TemporaryDirectory(prefix="code_agent_mode_mock_")
+        self._work_dir = self._tmp_dir.name
+        self._session = create_agent_session(
+            session_id=f"code_agent_mode_{uuid.uuid4().hex}",
+            card=AgentCard(id="code_agent", name="code_agent", description="code agent test session"),
+        )
 
-@pytest.mark.asyncio
-async def test_plan_mode_mock_invoke_blocks_illegal_write_keeps_plan_write(
-    tmp_path: Path,
-    runner,
-) -> None:
-    """Mock：先 todo_list（硬拦），再 enter，非法写被拒，合法写 plan，exit。
-    """
-    _ = runner
-    root = tmp_path.resolve()
-    fixed_slug = "ut-mock-plan-slug-two"
-    plan_path = root / ".plans" / f"{fixed_slug}.md"
-    illegal_path = root / "illegal.txt"
-    trace = ToolTraceRail()
-    fs_rail = FileSystemRail()
-    mock_llm = MockLLMModel()
-    mock_llm.set_responses(
-        [
-            create_tool_call_response("todo_list", "{}", "call_todo_ut2"),
-            create_tool_call_response("enter_plan_mode", "{}", "call_enter_ut2"),
-            create_tool_call_response(
-                "write_file",
-                '{"file_path": "illegal.txt", "content": "SHOULD_NOT_WRITE"}',
-                "call_write_bad_ut2",
+    async def asyncTearDown(self) -> None:
+        self._tmp_dir.cleanup()
+        await Runner.stop()
+
+    @staticmethod
+    def _create_mock_model() -> Model:
+        """创建可被 mock_llm_context 接管的 Model。"""
+        return Model(
+            model_client_config=ModelClientConfig(
+                client_provider="OpenAI",
+                api_key="mock-key",
+                api_base="http://mock-base",
+                verify_ssl=False,
             ),
-            create_tool_call_response(
-                "write_file",
-                (
-                    '{"file_path": "%s", "content": "# Plan\\n- ok"}'
-                    % str(plan_path).replace("\\", "\\\\")
+            model_config=ModelRequestConfig(
+                model="mock-model",
+                temperature=0.2,
+                top_p=0.9,
+            ),
+        )
+
+    def _create_agent(self, trace: ToolTraceRail):
+        return create_code_agent(
+            model=self._create_mock_model(),
+            rails=[trace],
+            enable_task_loop=True,
+            max_iterations=12,
+            workspace=self._work_dir,
+            enable_task_planning=True,
+        )
+
+    def _prepare_plan_file(self, agent, content: str = "# 初始计划\n- step 1") -> Path:
+        """为 plan 模式准备一个已有计划文件，贴近 e2e 第二轮/第三轮场景。"""
+        state = agent.load_state(self._session)
+        if not state.plan_mode.plan_slug:
+            state.plan_mode.plan_slug = "mock-plan"
+            agent.save_state(self._session, state)
+
+        plan_path = agent.get_plan_file_path(self._session)
+        assert plan_path is not None
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        plan_path.write_text(content, encoding="utf-8")
+        return plan_path
+
+    def _resume_answer(self, interrupt_result: dict, answer: str):
+        """复用 ask_user 中断恢复逻辑，避免重复 mock 代码。"""
+        self.assertEqual(interrupt_result.get("result_type"), "interrupt")
+        interrupt_ids = interrupt_result.get("interrupt_ids", [])
+        self.assertEqual(len(interrupt_ids), 1)
+
+        interactive_input = InteractiveInput()
+        interactive_input.update(interrupt_ids[0], {"answer": answer})
+        return interactive_input
+
+    @pytest.mark.asyncio
+    async def test_manual_switch_mode_shows_switching_scene(self) -> None:
+        """agent.switch_mode 显式切换场景。"""
+        trace = ToolTraceRail()
+        agent = self._create_agent(trace)
+
+        origin_state = agent.load_state(self._session)
+        self.assertEqual(origin_state.plan_mode.mode, "auto")
+
+        agent.switch_mode(self._session, "plan")
+        state = agent.load_state(self._session)
+        self.assertEqual(state.plan_mode.mode, "plan")
+
+        self._prepare_plan_file(agent)
+
+        with mock_llm_context() as mock_llm:
+            mock_llm.set_responses([create_text_response("当前处于 plan 模式，等待你的下一步指令。")])
+            result = await Runner.run_agent(agent, {"query": "当前是什么模式？"}, session=self._session)
+
+        self.assertEqual(result.get("result_type"), "answer")
+        self.assertNotIn("switch_mode", trace.tool_calls)
+
+    @pytest.mark.asyncio
+    async def test_query_auto_triggers_switch_mode_from_plan_to_auto(self) -> None:
+        """用户 query 自动触发 switch_mode 工具切换场景。"""
+        trace = ToolTraceRail()
+        agent = self._create_agent(trace)
+        agent.switch_mode(self._session, "plan")
+        self._prepare_plan_file(agent)
+
+        with mock_llm_context() as mock_llm:
+            mock_llm.set_responses([
+                create_tool_call_response("switch_mode", json.dumps({"mode": "auto"}, ensure_ascii=False)),
+                create_text_response("已切换到 auto 模式并开始执行计划。"),
+            ])
+            result = await Runner.run_agent(agent, {"query": "按计划直接执行"}, session=self._session)
+
+        self.assertEqual(result.get("result_type"), "answer")
+        self.assertIn("switch_mode", trace.tool_calls)
+        self.assertEqual(agent.load_state(self._session).plan_mode.mode, "auto")
+
+    @pytest.mark.asyncio
+    async def test_user_interacts_via_ask_user_to_update_plan(self) -> None:
+        """用户可通过 ask_user 交互更新计划。"""
+        trace = ToolTraceRail()
+        agent = self._create_agent(trace)
+        agent.switch_mode(self._session, "plan")
+        self._prepare_plan_file(agent, content="# 初始计划\n- 城市待确认")
+
+        with mock_llm_context() as mock_llm:
+            mock_llm.set_responses([
+                create_tool_call_response(
+                    "ask_user",
+                    json.dumps({"question": "你希望展示哪个城市？"}, ensure_ascii=False),
+                    tool_call_id="ask_city_1",
                 ),
-                "call_write_plan_ut2",
-            ),
-            create_tool_call_response("exit_plan_mode", "{}", "call_exit_ut2"),
-            create_text_response("完成。"),
-        ]
-    )
-    session = create_agent_session(session_id=f"plan_mock_{uuid.uuid4().hex}")
-    agent = create_deep_agent(
-        model=_build_mock_runtime_model(mock_llm),
-        rails=[trace, fs_rail],
-        enable_task_loop=True,
-        max_iterations=20,
-        workspace=str(root),
-        enable_plan_mode=True,
-        enable_task_planning=True,
-    )
-    with patch(
-        "openjiuwen.harness.tools.plan_mode_tools.generate_word_slug",
-        return_value=fixed_slug,
-    ):
-        agent.switch_mode(session, "plan")
-        result = await agent.invoke({"query": "验证 plan 约束"}, session=session)
-    assert result.get("result_type") == "answer"
-    assert "todo_list" in trace.tool_calls
-    assert "enter_plan_mode" in trace.tool_calls
-    assert "exit_plan_mode" in trace.tool_calls
-    assert not illegal_path.exists()
-    assert plan_path.is_file()
+                create_text_response("收到你的反馈，计划已更新为展示上海城市信息。"),
+            ])
+            first = await Runner.run_agent(
+                agent,
+                {"query": "继续完善计划，城市你先问我"},
+                session=self._session,
+            )
+            interactive_input = self._resume_answer(first, "上海")
+            second = await Runner.run_agent(agent, {"query": interactive_input}, session=self._session)
+
+        self.assertEqual(second.get("result_type"), "answer")
+        self.assertIn("ask_user", trace.tool_calls)
+        self.assertEqual(agent.load_state(self._session).plan_mode.mode, "plan")
+
+    @pytest.mark.asyncio
+    async def test_user_can_invoke_again_to_update_plan(self) -> None:
+        """用户在 ask_user 交互后可再次 invoke 更新计划。"""
+        trace = ToolTraceRail()
+        agent = self._create_agent(trace)
+        agent.switch_mode(self._session, "plan")
+        plan_path = self._prepare_plan_file(agent, content="# 计划\n- 先确认城市")
+
+        with mock_llm_context() as mock_llm:
+            mock_llm.set_responses([
+                create_tool_call_response(
+                    "ask_user",
+                    json.dumps({"question": "是否需要天气模块？"}, ensure_ascii=False),
+                    tool_call_id="ask_feature_1",
+                ),
+                create_text_response("已记录：需要天气模块。"),
+                create_tool_call_response(
+                    "read_file",
+                    json.dumps({"file_path": str(plan_path)}, ensure_ascii=False),
+                ),
+                create_tool_call_response(
+                    "write_file",
+                    json.dumps(
+                        {
+                            "file_path": str(plan_path),
+                            "content": "# 更新后计划\n- 展示北京\n- 增加天气模块",
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+                create_text_response("计划二次更新完成。"),
+            ])
+
+            first = await Runner.run_agent(agent, {"query": "先问我一个问题再继续"}, session=self._session)
+            interactive_input = self._resume_answer(first, "需要")
+            resumed_answer = await Runner.run_agent(agent, {"query": interactive_input}, session=self._session)
+            self.assertEqual(resumed_answer.get("result_type"), "answer")
+
+            second_invoke = await Runner.run_agent(agent, {"query": "继续更新计划并写入"}, session=self._session)
+
+        self.assertEqual(second_invoke.get("result_type"), "answer")
+        self.assertIn("ask_user", trace.tool_calls)
+        self.assertIn("write_file", trace.tool_calls)
+        self.assertIn("天气模块", plan_path.read_text(encoding="utf-8"))
 
 
-@pytest.mark.asyncio
-async def test_plan_mode_mock_enter_invokes_task_tool_registered(
-    tmp_path: Path,
-    runner,
-) -> None:
-    """enter_plan_mode 成功后 after_tool_call 应挂上 task_tool（内置子 agent 已注入）。"""
-    _ = runner
-    root = tmp_path.resolve()
-    fixed_slug = "ut-mock-plan-slug-task"
-    mock_llm = MockLLMModel()
-    mock_llm.set_responses(
-        [
-            create_tool_call_response("enter_plan_mode", "{}", "call_enter_task"),
-            create_text_response("done"),
-        ]
-    )
-    session = create_agent_session(session_id=f"plan_mock_{uuid.uuid4().hex}")
-    agent = create_deep_agent(
-        model=_build_mock_runtime_model(mock_llm),
-        enable_task_loop=True,
-        max_iterations=8,
-        workspace=str(root),
-        enable_plan_mode=True,
-    )
-    with patch(
-        "openjiuwen.harness.tools.plan_mode_tools.generate_word_slug",
-        return_value=fixed_slug,
-    ):
-        agent.switch_mode(session, "plan")
-        await agent.invoke({"query": "enter only"}, session=session)
-    assert agent.ability_manager.get("task_tool") is not None
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "-s"])

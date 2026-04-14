@@ -24,8 +24,8 @@ CODE_PARAMS: Dict[str, Dict[str, str]] = {
         "en": "Programming language, supports python or javascript, default python",
     },
     "timeout": {
-        "cn": "超时时间（秒），默认 300",
-        "en": "Timeout in seconds, default 300",
+        "cn": "超时时间（秒），默认 300，上限 3600",
+        "en": "Timeout in seconds, default 300, max 3600",
     },
 }
 

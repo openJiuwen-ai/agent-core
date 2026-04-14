@@ -6,6 +6,7 @@ from __future__ import annotations
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.tools import BashTool
 from openjiuwen.harness.tools.code import CodeTool
 from openjiuwen.harness.tools.filesystem import (
     EditFileTool,
@@ -15,7 +16,6 @@ from openjiuwen.harness.tools.filesystem import (
     ReadFileTool,
     WriteFileTool,
 )
-from openjiuwen.harness.tools.bash import BashTool
 
 
 class FileSystemRail(DeepAgentRail):

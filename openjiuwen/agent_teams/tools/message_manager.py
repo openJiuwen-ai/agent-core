@@ -34,48 +34,48 @@ class TeamMessageManager:
     Both team leader and members can use this class to send messages.
 
     Attributes:
-        team_id: Team identifier
-        member_id: Current member identifier, used as sender in messages
+        team_name: Team identifier
+        member_name: Current member identifier, used as sender in messages
         db: Team database instance
         messager: Messager instance for event publishing
     """
 
-    def __init__(self, team_id: str, member_id: str, db: TeamDatabase, messager: Messager):
+    def __init__(self, team_name: str, member_name: str, db: TeamDatabase, messager: Messager):
         """Initialize team messaging manager
 
         Args:
-            team_id: Team identifier
-            member_id: Current member identifier
+            team_name: Team identifier
+            member_name: Current member identifier
             db: Team database instance
             messager: Messager instance for event publishing
         """
-        self.team_id = team_id
-        self.member_id = member_id
+        self.team_name = team_name
+        self.member_name = member_name
         self.db = db
         self.messager = messager
 
     async def send_message(
         self,
         content: str,
-        to_member: str,
-        from_member: str | None = None,
+        to_member_name: str,
+        from_member_name: str | None = None,
     ) -> Optional[str]:
         """Send a point-to-point message.
 
         Args:
             content: Message content.
-            to_member: Recipient member ID.
-            from_member: Override sender ID. Defaults to self.member_id.
+            to_member_name: Recipient member ID.
+            from_member_name: Override sender ID. Defaults to self.member_name.
         """
-        sender = from_member or self.member_id
+        sender = from_member_name or self.member_name
         message_id = str(uuid.uuid4())
 
         success = await self.db.create_message(
             message_id=message_id,
-            team_id=self.team_id,
-            from_member=sender,
+            team_name=self.team_name,
+            from_member_name=sender,
             content=content,
-            to_member=to_member,
+            to_member_name=to_member_name,
             broadcast=False,
         )
         if not success:
@@ -84,19 +84,19 @@ class TeamMessageManager:
 
         try:
             await self.messager.publish(
-                topic_id=TeamTopic.MESSAGE.build(get_session_id(), self.team_id),
+                topic_id=TeamTopic.MESSAGE.build(get_session_id(), self.team_name),
                 message=EventMessage.from_event(MessageEvent(
                     message_id=message_id,
-                    team_id=self.team_id,
-                    from_member=sender,
-                    to_member=to_member,
+                    team_name=self.team_name,
+                    from_member_name=sender,
+                    to_member_name=to_member_name,
                 )),
             )
             team_logger.debug(f"Message event published: {message_id}")
         except Exception as e:
             team_logger.error(f"Failed to publish message event for {message_id}: {e}")
 
-        team_logger.info(f"Message sent from {sender} to {to_member}: {message_id}")
+        team_logger.info(f"Message sent from {sender} to {to_member_name}: {message_id}")
         return message_id
 
     async def broadcast_message(self, content: str) -> Optional[str]:
@@ -109,10 +109,10 @@ class TeamMessageManager:
 
         success = await self.db.create_message(
             message_id=message_id,
-            team_id=self.team_id,
-            from_member=self.member_id,
+            team_name=self.team_name,
+            from_member_name=self.member_name,
             content=content,
-            to_member=None,
+            to_member_name=None,
             broadcast=True,
         )
         if not success:
@@ -121,113 +121,113 @@ class TeamMessageManager:
 
         try:
             await self.messager.publish(
-                topic_id=TeamTopic.MESSAGE.build(get_session_id(), self.team_id),
+                topic_id=TeamTopic.MESSAGE.build(get_session_id(), self.team_name),
                 message=EventMessage.from_event(BroadcastEvent(
                     message_id=message_id,
-                    team_id=self.team_id,
-                    from_member=self.member_id,
+                    team_name=self.team_name,
+                    from_member_name=self.member_name,
                 )),
             )
             team_logger.debug(f"Broadcast event published: {message_id}")
         except Exception as e:
             team_logger.error(f"Failed to publish broadcast event for {message_id}: {e}")
 
-        team_logger.info(f"Broadcast message sent from {self.member_id}: {message_id}")
+        team_logger.info(f"Broadcast message sent from {self.member_name}: {message_id}")
         return message_id
 
     async def get_messages(
         self,
-        to_member: str,
+        to_member_name: str,
         unread_only: bool = False,
-        from_member: Optional[str] = None
+        from_member_name: Optional[str] = None
     ) -> List[TeamMessageBase]:
         """Get direct (point-to-point) messages for a member
 
         Args:
-            to_member: Member ID who is recipient of the messages
+            to_member_name: Member ID who is recipient of the messages
             unread_only: Whether to only return unread messages
-            from_member: Optional filter for messages from a specific sender
+            from_member_name: Optional filter for messages from a specific sender
 
         Returns:
             List of TeamMessage objects
 
         Example:
             # Get all direct messages for a member
-            messages = messaging.get_messages(to_member="member1")
+            messages = messaging.get_messages(to_member_name="member1")
 
             # Get unread direct messages for a member
-            messages = messaging.get_messages(to_member="member1", unread_only=True)
+            messages = messaging.get_messages(to_member_name="member1", unread_only=True)
 
             # Get direct messages from a specific sender
-            messages = messaging.get_messages(to_member="member1", from_member="leader")
+            messages = messaging.get_messages(to_member_name="member1", from_member_name="leader")
         """
         return await self.db.get_messages(
-            team_id=self.team_id,
-            to_member=to_member,
+            team_name=self.team_name,
+            to_member_name=to_member_name,
             unread_only=unread_only,
-            from_member=from_member
+            from_member_name=from_member_name
         )
 
     async def get_broadcast_messages(
         self,
-        member_id: str,
+        member_name: str,
         unread_only: bool = False,
-        from_member: Optional[str] = None
+        from_member_name: Optional[str] = None
     ) -> List[TeamMessageBase]:
         """Get broadcast messages for a member, with read status
 
         Args:
-            member_id: Member ID to check read status for
+            member_name: Member ID to check read status for
             unread_only: Whether to only return unread broadcast messages
-            from_member: Optional filter for messages from a specific sender
+            from_member_name: Optional filter for messages from a specific sender
 
         Returns:
             List of TeamMessage objects
 
         Example:
             # Get all broadcast messages for a member
-            messages = messaging.get_broadcast_messages(member_id="member1")
+            messages = messaging.get_broadcast_messages(member_name="member1")
 
             # Get unread broadcast messages for a member
-            messages = messaging.get_broadcast_messages(member_id="member1", unread_only=True)
+            messages = messaging.get_broadcast_messages(member_name="member1", unread_only=True)
 
             # Get broadcast messages from a specific sender
-            messages = messaging.get_broadcast_messages(member_id="member1", from_member="leader")
+            messages = messaging.get_broadcast_messages(member_name="member1", from_member_name="leader")
         """
         return await self.db.get_broadcast_messages(
-            team_id=self.team_id,
-            member_id=member_id,
+            team_name=self.team_name,
+            member_name=member_name,
             unread_only=unread_only,
-            from_member=from_member
+            from_member_name=from_member_name
         )
 
-    async def get_team_messages(self, team_id: str) -> List[TeamMessageBase]:
+    async def get_team_messages(self, team_name: str) -> List[TeamMessageBase]:
         """Get all messages for a team
 
         Args:
-            team_id: Team ID
+            team_name: Team ID
 
         Returns:
             List of TeamMessage objects
         """
-        return await self.db.get_team_messages(team_id=team_id)
+        return await self.db.get_team_messages(team_name=team_name)
 
-    async def mark_message_read(self, message_id: str, member_id: str) -> bool:
+    async def mark_message_read(self, message_id: str, member_name: str) -> bool:
         """Mark a message as read by a member
 
         Args:
             message_id: Message ID to mark as read
-            member_id: Member ID who is reading the message
+            member_name: Member ID who is reading the message
 
         Returns:
             True if successful, False otherwise
 
         Example:
-            success = messaging.mark_message_read(message_id="msg_123", member_id="member1")
+            success = messaging.mark_message_read(message_id="msg_123", member_name="member1")
         """
-        success = await self.db.mark_message_read(message_id=message_id, member_id=member_id)
+        success = await self.db.mark_message_read(message_id=message_id, member_name=member_name)
         if success:
-            team_logger.info(f"Message {message_id} marked as read by {member_id}")
+            team_logger.info(f"Message {message_id} marked as read by {member_name}")
         else:
-            team_logger.error(f"Failed to mark message {message_id} as read by {member_id}")
+            team_logger.error(f"Failed to mark message {message_id} as read by {member_name}")
         return success

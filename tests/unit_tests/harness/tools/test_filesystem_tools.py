@@ -11,6 +11,7 @@ import pytest_asyncio
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
+from openjiuwen.core.sys_operation.cwd import get_cwd, set_cwd
 from openjiuwen.harness.prompts.sections.tools.filesystem import (
     get_glob_input_params,
     get_grep_input_params,
@@ -220,12 +221,12 @@ async def test_glob_tool_defaults_to_workdir_when_path_omitted(sys_op, temp_dir)
 
     await write_tool.invoke({"file_path": os.path.join(temp_dir, "a.py"), "content": "1"})
 
-    original_workdir = getattr(sys_op._run_config, "work_dir", None)
-    sys_op._run_config.work_dir = temp_dir
+    original_workdir = get_cwd()
+    set_cwd(temp_dir)
     try:
         glob_res = await glob_tool.invoke({"pattern": "*.py"})
     finally:
-        sys_op._run_config.work_dir = original_workdir
+        set_cwd(original_workdir)
 
     assert glob_res.success is True
     assert glob_res.data["filenames"] == ["a.py"]
@@ -586,9 +587,14 @@ async def test_read_file_tool_text_and_unchanged(sys_op, temp_dir):
     assert second.data["unchanged"] is True
     assert "File unchanged since last read" in second.data["content"]
 
-    relative = await read_tool.invoke({"file_path": "max.txt"})
-    assert relative.success is False
-    assert "absolute path" in relative.error
+    # Relative paths resolve against get_cwd(); the file is not in the default cwd.
+    relative_missing = await read_tool.invoke({"file_path": "max.txt"})
+    assert relative_missing.success is False
+
+    # With cwd pointing at temp_dir, relative paths resolve correctly.
+    set_cwd(temp_dir)
+    relative_found = await read_tool.invoke({"file_path": "max.txt"})
+    assert relative_found.success is True
 
 
 def test_read_file_tool_capability_flags_keep_backward_compatibility():

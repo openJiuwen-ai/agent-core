@@ -66,13 +66,13 @@ async def agent_team(db, message_bus):
     """Provide initialized AgentTeam instance"""
     team_id = "test_team"
     await db.create_team(
-        team_id=team_id,
-        name="Test Team",
-        leader_member_id="leader1"
+        team_name=team_id,
+        display_name="Test Team",
+        leader_member_name="leader1"
     )
     return TeamBackend(
-        team_id=team_id,
-        member_id="leader1",
+        team_name=team_id,
+        member_name="leader1",
         db=db,
         messager=message_bus,
         is_leader=True
@@ -95,23 +95,23 @@ class TestAgentTeamInit:
     @pytest.mark.asyncio
     async def test_agent_team_init(self, agent_team):
         """Test AgentTeam initialization"""
-        assert agent_team.team_id == "test_team"
-        assert agent_team.member_id == "leader1"
+        assert agent_team.team_name == "test_team"
+        assert agent_team.member_name == "leader1"
         assert agent_team.task_manager is not None
 
     @pytest.mark.asyncio
     async def test_agent_team_with_optional_fields(self, db, message_bus):
         """Test AgentTeam with optional description and prompt"""
         await db.create_team(
-            team_id="team_with_optional",
-            name="Optional Team",
-            leader_member_id="leader1",
+            team_name="team_with_optional",
+            display_name="Optional Team",
+            leader_member_name="leader1",
             desc="Team description",
             prompt="Team prompt"
         )
         team = TeamBackend(
-            team_id="team_with_optional",
-            member_id="leader1",
+            team_name="team_with_optional",
+            member_name="leader1",
             db=db,
             messager=message_bus,
             is_leader=True
@@ -129,8 +129,8 @@ class TestSpawnMember:
     async def test_spawn_member_success(self, agent_team, sample_agent_card):
         """Test spawning a member successfully"""
         result = await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card,
             desc="Test member",
             prompt="Member prompt"
@@ -143,16 +143,16 @@ class TestSpawnMember:
     async def test_spawn_member_creates_in_database(self, agent_team, sample_agent_card, db):
         """Test that spawn_member creates member in database"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card
         )
 
-        member = await db.get_member("member1")
+        member = await db.get_member("member1", "test_team")
         assert member is not None
-        assert member.member_id == "member1"
-        assert member.name == "Member One"
-        assert member.team_id == "test_team"
+        assert member.member_name == "member1"
+        assert member.display_name == "Member One"
+        assert member.team_name == "test_team"
         assert member.status == MemberStatus.UNSTARTED.value
         assert member.execution_status == ExecutionStatus.IDLE.value
 
@@ -160,13 +160,13 @@ class TestSpawnMember:
     async def test_spawn_member_multiple(self, agent_team, sample_agent_card):
         """Test spawning multiple members"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card
         )
         await agent_team.spawn_member(
-            member_id="member2",
-            name="Member Two",
+            member_name="member2",
+            display_name="Member Two",
             agent_card=sample_agent_card
         )
 
@@ -177,15 +177,15 @@ class TestSpawnMember:
     async def test_spawn_member_with_minimal_args(self, agent_team, sample_agent_card):
         """Test spawning member with minimal arguments"""
         result = await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card
         )
 
         assert result is True
         members = await agent_team.list_members()
         assert len(members) == 1
-        assert "member1" == members[0].member_id
+        assert "member1" == members[0].member_name
 
 
 class TestApprovePlan:
@@ -196,14 +196,14 @@ class TestApprovePlan:
         """Test approving a plan successfully"""
         # Create a member first
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card
         )
 
         # Approve plan
         result = await agent_team.approve_plan(
-            member_id="member1",
+            member_name="member1",
             approved=True,
             feedback="Plan looks good"
         )
@@ -214,15 +214,15 @@ class TestApprovePlan:
     async def test_approve_plan_sends_message(self, agent_team, sample_agent_card):
         """Test that approve_plan sends a message"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card
         )
 
         with patch.object(agent_team.message_manager, 'send_message', new_callable=AsyncMock,
                           return_value="msg123") as mock_send:
             await agent_team.approve_plan(
-                member_id="member1",
+                member_name="member1",
                 approved=True,
                 feedback="Great plan!"
             )
@@ -230,7 +230,7 @@ class TestApprovePlan:
             mock_send.assert_called_once()
             call_args = mock_send.call_args
             content = call_args.kwargs.get('content') or call_args[1].get('content')
-            to_member = call_args.kwargs.get('to_member') or call_args[1].get('to_member')
+            to_member = call_args.kwargs.get('to_member_name') or call_args[1].get('to_member_name')
 
             assert "APPROVED" in content
             assert "Great plan!" in content
@@ -240,15 +240,15 @@ class TestApprovePlan:
     async def test_reject_plan_sends_message(self, agent_team, sample_agent_card):
         """Test that rejecting a plan sends appropriate message"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card
         )
 
         with patch.object(agent_team.message_manager, 'send_message', new_callable=AsyncMock,
                           return_value="msg123") as mock_send:
             await agent_team.approve_plan(
-                member_id="member1",
+                member_name="member1",
                 approved=False,
                 feedback="Please revise"
             )
@@ -264,7 +264,7 @@ class TestApprovePlan:
     async def test_approve_plan_member_not_found(self, agent_team):
         """Test approving plan for non-existent member"""
         result = await agent_team.approve_plan(
-            member_id="nonexistent_member",
+            member_name="nonexistent_member",
             approved=True
         )
 
@@ -274,15 +274,15 @@ class TestApprovePlan:
     async def test_approve_plan_without_feedback(self, agent_team, sample_agent_card):
         """Test approving plan without feedback"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card
         )
 
         with patch.object(agent_team.message_manager, 'send_message', new_callable=AsyncMock,
                           return_value="msg123") as mock_send:
             await agent_team.approve_plan(
-                member_id="member1",
+                member_name="member1",
                 approved=True
             )
 
@@ -297,13 +297,13 @@ class TestApproveTool:
     @pytest.mark.asyncio
     async def test_approve_tool_success(self, agent_team, sample_agent_card):
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card,
         )
 
         result = await agent_team.approve_tool(
-            member_id="member1",
+            member_name="member1",
             tool_call_id="call-1",
             approved=True,
             feedback="Looks safe",
@@ -314,7 +314,7 @@ class TestApproveTool:
         agent_team.messager.publish.assert_awaited()
         published_message = agent_team.messager.publish.await_args.kwargs["message"]
         assert published_message.event_type == TeamEvent.TOOL_APPROVAL_RESULT
-        assert published_message.payload["member_id"] == "member1"
+        assert published_message.payload["member_name"] == "member1"
         assert published_message.payload["tool_call_id"] == "call-1"
         assert published_message.payload["approved"] is True
         assert published_message.payload["auto_confirm"] is True
@@ -322,7 +322,7 @@ class TestApproveTool:
     @pytest.mark.asyncio
     async def test_approve_tool_member_not_found(self, agent_team):
         result = await agent_team.approve_tool(
-            member_id="missing",
+            member_name="missing",
             tool_call_id="call-1",
             approved=False,
         )
@@ -337,13 +337,13 @@ class TestShutdownMember:
     async def test_shutdown_member_success(self, agent_team, sample_agent_card, db):
         """Test shutting downser successfully"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card,
             status=MemberStatus.READY
         )
 
-        result = await agent_team.shutdown_member(member_id="member1", force=False)
+        result = await agent_team.shutdown_member(member_name="member1", force=False)
 
         assert result is True
 
@@ -351,38 +351,39 @@ class TestShutdownMember:
     async def test_shutdown_member_updates_status(self, agent_team, sample_agent_card, db):
         """Test that shutdown_member updates member status"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card,
             status=MemberStatus.READY
         )
 
-        await agent_team.shutdown_member(member_id="member1")
+        await agent_team.shutdown_member(member_name="member1")
 
-        member = await db.get_member("member1")
+        member = await db.get_member("member1", "test_team")
         assert member.status == MemberStatus.SHUTDOWN_REQUESTED.value
 
     @pytest.mark.asyncio
     async def test_shutdown_member_already_shutdown(self, agent_team, sample_agent_card, db):
         """Test shutting down an already shutdown member"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
-            agent_card=sample_agent_card
+            member_name="member1",
+            display_name="Member One",
+            agent_card=sample_agent_card,
+            status=MemberStatus.READY
         )
 
         # First shutdown
-        await agent_team.shutdown_member(member_id="member1")
-        await db.update_member_status("member1", MemberStatus.SHUTDOWN.value)
+        await agent_team.shutdown_member(member_name="member1")
+        await db.update_member_status("member1", "team1", MemberStatus.SHUTDOWN.value)
 
         # Try to shutdown again
-        result = await agent_team.shutdown_member(member_id="member1")
+        result = await agent_team.shutdown_member(member_name="member1")
         assert result is True
 
     @pytest.mark.asyncio
     async def test_shutdown_member_not_found(self, agent_team):
         """Test shutting down non-existent member"""
-        result = await agent_team.shutdown_member(member_id="nonexistent_member")
+        result = await agent_team.shutdown_member(member_name="nonexistent_member")
         assert result is False
 
 
@@ -393,12 +394,12 @@ class TestCancelMember:
     async def test_cancel_member_success(self, agent_team, sample_agent_card, db):
         """Test cancelling a member execution successfully"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card
         )
 
-        result = await agent_team.cancel_member(member_id="member1")
+        result = await agent_team.cancel_member(member_name="member1")
 
         assert result is True
 
@@ -406,34 +407,34 @@ class TestCancelMember:
     async def test_cancel_member_when_busy(self, agent_team, sample_agent_card, db):
         """Test cancelling a busy member"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card
         )
         # Set member to busy
-        await db.update_member_status("member1", MemberStatus.BUSY.value)
+        await db.update_member_status("member1", "team1", MemberStatus.BUSY.value)
 
-        result = await agent_team.cancel_member(member_id="member1")
+        result = await agent_team.cancel_member(member_name="member1")
         assert result is True
 
     @pytest.mark.asyncio
     async def test_cancel_member_when_not_busy(self, agent_team, sample_agent_card, db):
         """Test cancelling a non-busy member returns True (no-op)"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card
         )
         # Set member to ready (not busy)
-        await db.update_member_status("member1", MemberStatus.READY.value)
+        await db.update_member_status("member1", "team1", MemberStatus.READY.value)
 
-        result = await agent_team.cancel_member(member_id="member1")
+        result = await agent_team.cancel_member(member_name="member1")
         assert result is True
 
     @pytest.mark.asyncio
     async def test_cancel_member_not_found(self, agent_team):
         """Test cancelling non-existent member"""
-        result = await agent_team.cancel_member(member_id="nonexistent_member")
+        result = await agent_team.cancel_member(member_name="nonexistent_member")
         assert result is False
 
     @pytest.mark.asyncio
@@ -442,16 +443,16 @@ class TestCancelMember:
         from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card,
             status=MemberStatus.BUSY
         )
 
         # Create member1's task_manager
         member1_task_manager = TeamTaskManager(
-            team_id="test_team",
-            member_id="member1",
+            team_name="test_team",
+            member_name="member1",
             db=db,
             messager=message_bus
         )
@@ -474,7 +475,7 @@ class TestCancelMember:
         assert task2_claimed.assignee == "member1"
 
         # Cancel member
-        result = await agent_team.cancel_member(member_id="member1")
+        result = await agent_team.cancel_member(member_name="member1")
         assert result is True
 
         # Verify claimed tasks are reset to PENDING
@@ -494,8 +495,8 @@ class TestCancelMember:
     async def test_cancel_member_no_claimed_tasks(self, agent_team, sample_agent_card, db):
         """Test cancelling a member with no claimed tasks"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card,
             status=MemberStatus.BUSY
         )
@@ -505,7 +506,7 @@ class TestCancelMember:
         task2 = await agent_team.task_manager.add(title="Task 2", content="Content 2")
 
         # Cancel member
-        result = await agent_team.cancel_member(member_id="member1")
+        result = await agent_team.cancel_member(member_name="member1")
         assert result is True
 
         # Verify tasks remain pending with no assignee
@@ -525,21 +526,21 @@ class TestCleanTeam:
         """Test cleaning up a team successfully"""
         # Create members
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card
         )
         await agent_team.spawn_member(
-            member_id="member2",
-            name="Member Two",
+            member_name="member2",
+            display_name="Member Two",
             agent_card=sample_agent_card
         )
 
         # Shutdown all members
-        await db.update_member_status("member1", MemberStatus.SHUTDOWN_REQUESTED.value)
-        await db.update_member_status("member1", MemberStatus.SHUTDOWN.value)
-        await db.update_member_status("member2", MemberStatus.SHUTDOWN_REQUESTED.value)
-        await db.update_member_status("member2", MemberStatus.SHUTDOWN.value)
+        await db.update_member_status("member1", "test_team", MemberStatus.SHUTDOWN_REQUESTED.value)
+        await db.update_member_status("member1", "test_team", MemberStatus.SHUTDOWN.value)
+        await db.update_member_status("member2", "test_team", MemberStatus.SHUTDOWN_REQUESTED.value)
+        await db.update_member_status("member2", "test_team", MemberStatus.SHUTDOWN.value)
 
         result = await agent_team.clean_team()
         assert result is True
@@ -548,8 +549,8 @@ class TestCleanTeam:
     async def test_clean_team_fails_when_members_not_shutdown(self, agent_team, sample_agent_card, db):
         """Test that clean_team fails when members are not shutdown"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card
         )
         # Member is not shut down (status is BUSY)
@@ -561,18 +562,18 @@ class TestCleanTeam:
     async def test_clean_team_partial_shutdown(self, agent_team, sample_agent_card, db):
         """Test clean_team when only some members are shutdown"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card
         )
         await agent_team.spawn_member(
-            member_id="member2",
-            name="Member Two",
+            member_name="member2",
+            display_name="Member Two",
             agent_card=sample_agent_card
         )
 
         # Only shutdown one member
-        await db.update_member_status("member1", MemberStatus.SHUTDOWN.value)
+        await db.update_member_status("member1", "team1", MemberStatus.SHUTDOWN.value)
 
         result = await agent_team.clean_team()
         assert result is False
@@ -585,8 +586,8 @@ class TestGetMember:
     async def test_get_member_success(self, agent_team, sample_agent_card, db):
         """Test getting a member successfully"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card,
             desc="Test description"
         )
@@ -594,9 +595,9 @@ class TestGetMember:
         member = await agent_team.get_member("member1")
 
         assert member is not None
-        assert member.member_id == "member1"
-        assert member.name == "Member One"
-        assert member.team_id == "test_team"
+        assert member.member_name == "member1"
+        assert member.display_name == "Member One"
+        assert member.team_name == "test_team"
         assert isinstance(member, TeamMember)
 
     @pytest.mark.asyncio
@@ -619,20 +620,20 @@ class TestListMembers:
     async def test_list_members_with_members(self, agent_team, sample_agent_card):
         """Test listing members when they exist"""
         await agent_team.spawn_member(
-            member_id="member1",
-            name="Member One",
+            member_name="member1",
+            display_name="Member One",
             agent_card=sample_agent_card
         )
         await agent_team.spawn_member(
-            member_id="member2",
-            name="Member Two",
+            member_name="member2",
+            display_name="Member Two",
             agent_card=sample_agent_card
         )
 
         members = await agent_team.list_members()
 
         assert len(members) == 2
-        member_ids = [m.member_id for m in members]
+        member_ids = [m.member_name for m in members]
         assert "member1" in member_ids
         assert "member2" in member_ids
         assert all(isinstance(m, TeamMember) for m in members)
@@ -647,25 +648,25 @@ class TestGetTeamInfo:
         team_info = await agent_team.get_team_info()
 
         assert team_info is not None
-        assert team_info.team_id == "test_team"
-        assert team_info.name == "Test Team"
-        assert team_info.leader_member_id == "leader1"
+        assert team_info.team_name == "test_team"
+        assert team_info.display_name == "Test Team"
+        assert team_info.leader_member_name == "leader1"
         assert isinstance(team_info, Team)
 
     @pytest.mark.asyncio
     async def test_get_team_info_with_optional_fields(self, db, message_bus):
         """Test getting team info with optional fields"""
         await db.create_team(
-            team_id="full_team",
-            name="Full Team",
-            leader_member_id="leader1",
+            team_name="full_team",
+            display_name="Full Team",
+            leader_member_name="leader1",
             desc="Full description",
             prompt="Full prompt"
         )
 
         team = TeamBackend(
-            team_id="full_team",
-            member_id="leader1",
+            team_name="full_team",
+            member_name="leader1",
             db=db,
             messager=message_bus,
             is_leader=True
@@ -674,9 +675,9 @@ class TestGetTeamInfo:
         team_info = await team.get_team_info()
 
         assert team_info is not None
-        assert team_info.team_id == "full_team"
-        assert team_info.name == "Full Team"
-        assert team_info.leader_member_id == "leader1"
+        assert team_info.team_name == "full_team"
+        assert team_info.display_name == "Full Team"
+        assert team_info.leader_member_name == "leader1"
         assert team_info.desc == "Full description"
         assert team_info.prompt == "Full prompt"
         assert team_info.created is not None
@@ -685,8 +686,8 @@ class TestGetTeamInfo:
     async def test_get_team_info_not_found(self, db, message_bus):
         """Test getting info for non-existent team"""
         team = TeamBackend(
-            team_id="nonexistent_team",
-            member_id="leader1",
+            team_name="nonexistent_team",
+            member_name="leader1",
             db=db,
             messager=message_bus,
             is_leader=True
@@ -706,7 +707,7 @@ class TestCancelTask:
         # Create a task
         await db.create_task(
             task_id="task1",
-            team_id="test_team",
+            team_name="test_team",
             title="Test Task",
             content="Task content",
             status="pending"
@@ -731,7 +732,7 @@ class TestCancelTask:
         # Create and cancel a task
         await db.create_task(
             task_id="task1",
-            team_id="test_team",
+            team_name="test_team",
             title="Test Task",
             content="Task content",
             status="pending"
@@ -748,25 +749,25 @@ class TestCancelTask:
         # Create a task and claim it
         await db.create_task(
             task_id="task1",
-            team_id="test_team",
+            team_name="test_team",
             title="Test Task",
             content="Task content",
             status="pending"
         )
-        await db.claim_task(task_id="task1", member_id="member1")
+        await db.claim_task(task_id="task1", member_name="member1")
 
         result = await agent_team.cancel_task(task_id="task1")
 
         assert result is True
 
         # Verify notification message was sent via database
-        messages = await db.get_messages(team_id="test_team", to_member="member1")
+        messages = await db.get_messages(team_name="test_team", to_member_name="member1")
         assert len(messages) == 1
         message = messages[0]
         assert "cancelled" in message.content.lower()
         assert "Test Task" in message.content
-        assert message.from_member == "leader1"
-        assert message.to_member == "member1"
+        assert message.from_member_name == "leader1"
+        assert message.to_member_name == "member1"
         assert message.broadcast is False
 
     @pytest.mark.asyncio
@@ -775,7 +776,7 @@ class TestCancelTask:
         # Create an unclaimed task
         await db.create_task(
             task_id="task1",
-            team_id="test_team",
+            team_name="test_team",
             title="Test Task",
             content="Task content",
             status="pending"
@@ -786,7 +787,7 @@ class TestCancelTask:
         assert result is True
 
         # Verify no notification message was sent
-        messages = await db.get_team_messages(team_id="test_team", broadcast=False)
+        messages = await db.get_team_messages(team_name="test_team", broadcast=False)
         cancel_notifications = [m for m in messages if "cancelled" in m["content"].lower()]
         assert len(cancel_notifications) == 0
 
@@ -816,7 +817,7 @@ class TestCancelAllTasks:
         assert task3.status == "cancelled"
 
         # Verify broadcast message was sent
-        messages = await db.get_team_messages(team_id="test_team", broadcast=True)
+        messages = await db.get_team_messages(team_name="test_team", broadcast=True)
         assert len(messages) == 1
         assert "All tasks (3) have been cancelled" in messages[0].content
 
@@ -859,7 +860,7 @@ class TestCancelAllTasks:
         assert count == 0
 
         # Verify no broadcast message was sent
-        messages = await db.get_team_messages(team_id="test_team", broadcast=True)
+        messages = await db.get_team_messages(team_name="test_team", broadcast=True)
         assert len(messages) == 0
 
     @pytest.mark.asyncio

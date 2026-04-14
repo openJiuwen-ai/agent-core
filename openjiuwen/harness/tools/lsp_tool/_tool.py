@@ -17,10 +17,10 @@ from openjiuwen.harness.prompts.sections.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.lsp_tool._formatter import format_result
 from openjiuwen.harness.tools.lsp_tool._schemas import LspOperation, LspToolInput
-from openjiuwen.harness.lsp import LSPServerManager
-from openjiuwen.harness.lsp import MAX_LSP_FILE_SIZE_BYTES
+from openjiuwen.harness.lsp.core.manager import LSPServerManager
+from openjiuwen.harness.lsp.core.utils.constants import MAX_LSP_FILE_SIZE_BYTES
 from openjiuwen.harness.lsp.core.utils.file_uri import path_to_file_uri
-from openjiuwen.harness.lsp import filter_git_ignored_locations
+from openjiuwen.harness.lsp.core.utils.git_ignore import filter_git_ignored_locations
 
 
 class LspTool(Tool):

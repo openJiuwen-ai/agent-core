@@ -87,11 +87,13 @@ class LSPClient:
         self._capabilities = result.get("capabilities", {})
 
         await self._rpc_notification("initialized", {})
-        if self._config.initialization_options:
-            await self._rpc_notification(
-                "workspace/didChangeConfiguration",
-                {"settings": self._config.initialization_options},
-            )
+        # 主动发送配置，避免 pyright 等待配置请求
+        await self._rpc_notification(
+            "workspace/didChangeConfiguration",
+            {"settings": self._config.initialization_options or {}},
+        )
+        # 等待 100ms，让 reader loop 处理完所有配置请求
+        await asyncio.sleep(0.1)
 
         self._is_initialized = True
         return result
@@ -178,16 +180,35 @@ class LSPClient:
                 except json.JSONDecodeError:
                     continue
 
-                self._dispatch(message)
+                await self._dispatch(message)  # type: ignore[arg-type]
 
         except (asyncio.CancelledError, Exception) as exc:
             if isinstance(exc, asyncio.CancelledError):
                 raise
             logger.error("LSP reader loop crashed: %s", exc)
 
-    def _dispatch(self, message: dict) -> None:
+    async def _dispatch(self, message: dict) -> None:
+        """Dispatch an incoming JSON-RPC message to the appropriate handler."""
         msg_id = message.get("id")
+        method = message.get("method")
 
+        # Handle server-initiated requests (e.g., workspace/configuration, window/showMessageRequest)
+        # These have both 'id' and 'method' and are NOT in our pending requests
+        if msg_id is not None and method is not None:
+            msg_id_str = str(msg_id)
+            # Check if this request ID is NOT in our pending requests
+            if msg_id_str not in self._pending:
+                await self._handle_server_request(method, msg_id, message.get("params"))
+                return
+
+        # Handle server-initiated notifications (e.g., window/logMessage, telemetry/event)
+        # These have 'method' but no 'id' — just log them
+        if msg_id is None and method is not None:
+            if method.startswith("window/") or method.startswith("telemetry/"):
+                logger.debug("[_dispatch] server notification: %s", method)
+            return
+
+        # Handle responses to our own requests
         if msg_id is not None:
             msg_id_str = str(msg_id)
             entry = self._pending.pop(msg_id_str, None)
@@ -203,6 +224,26 @@ class LSPClient:
                 )
             else:
                 future.set_result(message.get("result"))
+
+    async def _handle_server_request(self, method: str, msg_id: int | str, params: Any) -> None:
+        """Handle server-initiated requests (e.g., workspace/configuration)."""
+        if method == "workspace/configuration":
+            # Return empty configuration array — we don't provide dynamic per-resource settings
+            response = {"jsonrpc": "2.0", "id": msg_id, "result": []}
+            await self._send_response(response)
+        else:
+            logger.debug("[_handle_server_request] unhandled server request: %s (id=%s)", method, msg_id)
+
+    async def _send_response(self, response: dict) -> None:
+        """Send a JSON-RPC response and wait for flush."""
+        try:
+            body = json.dumps(response).encode("utf-8")
+            header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
+            self._process.stdin.write(header + body)
+            await self._process.stdin.drain()
+            logger.debug("[_send_response] sent and drained for id=%s", response.get("id"))
+        except Exception as e:
+            logger.debug("[_send_response] Failed: %s", e)
 
     async def _rpc_request(self, method: str, params: Any) -> Any:
         """Send a JSON-RPC request and wait for response."""

@@ -26,7 +26,7 @@ DEFAULT_INNER_LOG_CONFIG = {
                 "<cyan>{extra[log_type]}</cyan> | "
                 "<yellow>{extra[trace_id]}</yellow> | "
                 "<blue>{extra[short_path]}:{line}</blue> | "
-                "<level>{message}</level>"
+                "{message}"
             ),
         },
         "app_json": {

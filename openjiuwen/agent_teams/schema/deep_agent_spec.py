@@ -8,21 +8,32 @@ Call ``build()`` on a spec to materialize the corresponding runtime object.
 from __future__ import annotations
 
 import inspect
-from typing import Any, Optional
+from typing import (
+    Any,
+    Optional,
+)
 
 from pydantic import BaseModel
+
 from openjiuwen.core.foundation.llm import (
     Model,
     ModelClientConfig,
     ModelRequestConfig,
 )
-from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
+from openjiuwen.core.foundation.tool import (
+    McpServerConfig,
+    ToolCard,
+)
 from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation.base import OperationMode
-from openjiuwen.core.sys_operation.config import LocalWorkConfig, SandboxGatewayConfig
+from openjiuwen.core.sys_operation.config import (
+    LocalWorkConfig,
+    SandboxGatewayConfig,
+)
 from openjiuwen.core.sys_operation.sys_operation import SysOperationCard
 from openjiuwen.harness.schema.config import (
+    AudioModelConfig,
     DEFAULT_ACR_BASE_URL,
     DEFAULT_AUDIO_HTTP_TIMEOUT,
     DEFAULT_MAX_AUDIO_BYTES,
@@ -30,7 +41,6 @@ from openjiuwen.harness.schema.config import (
     DEFAULT_OPENAI_AUDIO_TRANSCRIPTION_MODEL,
     DEFAULT_OPENAI_BASE_URL,
     DEFAULT_OPENAI_VISION_MODEL,
-    AudioModelConfig,
     SubAgentConfig,
     VisionModelConfig,
 )
@@ -56,15 +66,81 @@ def _ensure_builtin_rails_registered() -> None:
         TaskPlanningRail,
         SkillUseRail,
         SubagentRail,
-        ToolPromptRail,
     )
+    from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 
     _RAIL_TYPE_REGISTRY.update({
         "task_planning": TaskPlanningRail,
         "skill_use": SkillUseRail,
         "subagent": SubagentRail,
-        "tool_prompt": ToolPromptRail,
+        "filesystem": FileSystemRail,
     })
+
+    # Optional rails: only register when importable.
+    _optional = {
+        "context_engineering": (
+            "openjiuwen.harness.rails.context_engineering_rail",
+            "ContextEngineeringRail",
+        ),
+        "token_tracking": (
+            "openjiuwen.harness.cli.rails.token_tracker",
+            "TokenTrackingRail",
+        ),
+        "tool_tracking": (
+            "openjiuwen.harness.cli.rails.tool_tracker",
+            "ToolTrackingRail",
+        ),
+        "ask_user": (
+            "openjiuwen.harness.rails.interrupt.ask_user_rail",
+            "AskUserRail",
+        ),
+        "confirm_interrupt": (
+            "openjiuwen.harness.rails.interrupt.confirm_rail",
+            "ConfirmInterruptRail",
+        ),
+    }
+    import importlib
+    for name, (mod_path, cls_name) in _optional.items():
+        try:
+            mod = importlib.import_module(mod_path)
+            _RAIL_TYPE_REGISTRY[name] = getattr(mod, cls_name)
+        except (ImportError, AttributeError):
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Tool type registry
+# ---------------------------------------------------------------------------
+
+_TOOL_TYPE_REGISTRY: dict[str, type] = {}
+
+
+def register_tool_type(name: str, cls: type) -> None:
+    """Register a tool class so it can be referenced by name in BuiltinToolSpec."""
+    _TOOL_TYPE_REGISTRY[name] = cls
+
+
+def _ensure_builtin_tools_registered() -> None:
+    """Lazily populate the tool registry with built-in tool types."""
+    if _TOOL_TYPE_REGISTRY:
+        return
+    _optional = {
+        "web_search": (
+            "openjiuwen.harness.tools.web_tools",
+            "WebFreeSearchTool",
+        ),
+        "web_fetch": (
+            "openjiuwen.harness.tools.web_tools",
+            "WebFetchWebpageTool",
+        ),
+    }
+    import importlib
+    for name, (mod_path, cls_name) in _optional.items():
+        try:
+            mod = importlib.import_module(mod_path)
+            _TOOL_TYPE_REGISTRY[name] = getattr(mod, cls_name)
+        except (ImportError, AttributeError):
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +253,14 @@ class RailSpec(BaseModel):
     type: str
     params: dict[str, Any] = {}
 
-    def build(self, *, language: str) -> AgentRail:
+    def build(self, *, language: str, workspace: Optional[Workspace] = None) -> AgentRail:
+        """Build a rail instance.
+
+        Args:
+            language: Auto-injected if the constructor accepts it.
+            workspace: Used by ``skill_use`` to resolve default skills_dir
+                from workspace's ``skills/`` node when not explicitly provided.
+        """
         _ensure_builtin_rails_registered()
         cls = _RAIL_TYPE_REGISTRY.get(self.type)
         if cls is None:
@@ -189,6 +272,55 @@ class RailSpec(BaseModel):
         sig = inspect.signature(cls.__init__)
         if "language" in sig.parameters:
             kw.setdefault("language", language)
+        # skill_use: resolve skills_dir from workspace when not explicit.
+        if self.type == "skill_use" and "skills_dir" not in kw:
+            dirs: list[str] = []
+            if workspace:
+                skills_base = workspace.get_node_path("skills")
+                if skills_base:
+                    dirs.append(str(skills_base))
+            # Also scan default CLI skill directories.
+            dirs.extend([
+                "~/.openjiuwen/workspace/skills",
+                "~/.claude/skills",
+            ])
+            kw["skills_dir"] = dirs
+        return cls(**kw)
+
+
+class BuiltinToolSpec(BaseModel):
+    """Declarative tool reference resolved via the tool type registry.
+
+    Mirrors RailSpec: ``type`` selects a registered tool class,
+    ``params`` are forwarded to its constructor.  If the constructor
+    accepts a ``language`` parameter it is auto-injected.
+    """
+
+    type: str
+    params: dict[str, Any] = {}
+
+    def build(self, *, language: str, tool_id: str | None = None) -> Any:
+        """Construct a live Tool instance.
+
+        Args:
+            language: Auto-injected if constructor accepts it.
+            tool_id: Auto-injected if constructor accepts it.
+                Callers can pass e.g. ``f"{member_name}.{type}"``
+                to namespace tools per member.
+        """
+        _ensure_builtin_tools_registered()
+        cls = _TOOL_TYPE_REGISTRY.get(self.type)
+        if cls is None:
+            raise ValueError(
+                f"Unknown tool type '{self.type}'. "
+                f"Registered types: {list(_TOOL_TYPE_REGISTRY)}"
+            )
+        kw = dict(self.params)
+        sig = inspect.signature(cls.__init__)
+        if "language" in sig.parameters:
+            kw.setdefault("language", language)
+        if tool_id and "tool_id" in sig.parameters:
+            kw.setdefault("tool_id", tool_id)
         return cls(**kw)
 
 
@@ -202,7 +334,7 @@ class SubAgentSpec(BaseModel):
 
     agent_card: AgentCard
     system_prompt: str
-    tools: list[ToolCard] = []
+    tools: list[ToolCard | BuiltinToolSpec] = []
     mcps: list[McpServerConfig] = []
     model: Optional[TeamModelConfig] = None
     rails: Optional[list[RailSpec]] = None
@@ -224,12 +356,12 @@ class SubAgentSpec(BaseModel):
             language: Resolved language for rail construction.
         """
         resolved_model = self.model.build() if self.model else None
+        resolved_workspace = self.workspace.build() if self.workspace else None
         resolved_rails = (
-            [r.build(language=language) for r in self.rails]
+            [r.build(language=language, workspace=resolved_workspace) for r in self.rails]
             if self.rails
             else None
         )
-        resolved_workspace = self.workspace.build() if self.workspace else None
 
         resolved_sys_op = None
         if self.sys_operation:
@@ -239,10 +371,20 @@ class SubAgentSpec(BaseModel):
             Runner.resource_mgr.add_sys_operation(card)
             resolved_sys_op = Runner.resource_mgr.get_sys_operation(card.id)
 
+        # Resolve tools: BuiltinToolSpec → Tool instance, ToolCard passes through.
+        sa_prefix = self.agent_card.id or self.agent_card.name
+        resolved_tools: list = []
+        for item in self.tools:
+            if isinstance(item, BuiltinToolSpec):
+                tid = f"{sa_prefix}.{item.type}"
+                resolved_tools.append(item.build(language=language, tool_id=tid))
+            else:
+                resolved_tools.append(item)
+
         return SubAgentConfig(
             agent_card=self.agent_card,
             system_prompt=self.system_prompt,
-            tools=list(self.tools),
+            tools=resolved_tools,
             mcps=list(self.mcps),
             model=resolved_model,
             rails=resolved_rails,
@@ -274,7 +416,7 @@ class DeepAgentSpec(BaseModel):
     model: Optional[TeamModelConfig] = None
     card: Optional[AgentCard] = None
     system_prompt: Optional[str] = None
-    tools: Optional[list[ToolCard]] = None
+    tools: Optional[list[ToolCard | BuiltinToolSpec]] = None
     mcps: Optional[list[McpServerConfig]] = None
     subagents: Optional[list[SubAgentSpec]] = None
     rails: Optional[list[RailSpec]] = None
@@ -290,11 +432,24 @@ class DeepAgentSpec(BaseModel):
     vision_model: Optional[VisionModelSpec] = None
     audio_model: Optional[AudioModelSpec] = None
     enable_task_planning: bool = False
-    restrict_to_work_dir: bool = True
+    restrict_to_sandbox: bool = False
     auto_create_workspace: bool = True
     completion_timeout: float = 600.0
     progressive_tool: Optional[ProgressiveToolSpec] = None
     approval_required_tools: Optional[list[str]] = None
+
+    def _resolve_tools(self, language: str, tool_id_prefix: str | None = None) -> list | None:
+        """Resolve tools list: BuiltinToolSpec → Tool instance, ToolCard passes through."""
+        if not self.tools:
+            return None
+        resolved: list = []
+        for item in self.tools:
+            if isinstance(item, BuiltinToolSpec):
+                tid = f"{tool_id_prefix}.{item.type}" if tool_id_prefix else None
+                resolved.append(item.build(language=language, tool_id=tid))
+            else:
+                resolved.append(item)
+        return resolved or None
 
     def build(self) -> "DeepAgent":
         """Materialize a live DeepAgent from this spec."""
@@ -310,7 +465,7 @@ class DeepAgentSpec(BaseModel):
         workspace = self.workspace.build() if self.workspace else None
 
         rails = (
-            [r.build(language=language) for r in self.rails]
+            [r.build(language=language, workspace=workspace) for r in self.rails]
             if self.rails
             else None
         )
@@ -330,7 +485,7 @@ class DeepAgentSpec(BaseModel):
             model=llm_model,
             card=self.card,
             system_prompt=self.system_prompt,
-            tools=self.tools,
+            tools=self._resolve_tools(language, self.card.id if self.card else None),
             mcps=self.mcps,
             subagents=subagents,
             rails=rails,
@@ -346,7 +501,7 @@ class DeepAgentSpec(BaseModel):
             vision_model_config=vision_config,
             audio_model_config=audio_config,
             enable_task_planning=self.enable_task_planning,
-            restrict_to_work_dir=self.restrict_to_work_dir,
+            restrict_to_work_dir=self.restrict_to_sandbox,
             auto_create_workspace=self.auto_create_workspace,
             completion_timeout=self.completion_timeout,
             **self._progressive_tool_kwargs(),
@@ -366,6 +521,7 @@ class DeepAgentSpec(BaseModel):
 
 __all__ = [
     "AudioModelSpec",
+    "BuiltinToolSpec",
     "DeepAgentSpec",
     "ProgressiveToolSpec",
     "RailSpec",
@@ -375,4 +531,5 @@ __all__ = [
     "VisionModelSpec",
     "WorkspaceSpec",
     "register_rail_type",
+    "register_tool_type",
 ]

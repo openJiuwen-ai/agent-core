@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 from openjiuwen.harness.lsp.core.client import LSPClient, LSPError
 from openjiuwen.harness.lsp.core.types import ScopedLspServerConfig
@@ -33,6 +36,7 @@ class LSPServerInstance:
         self._on_error = on_error
         self._running: bool = False
         self._client: LSPClient | None = None
+        self._stderr_task: asyncio.Task[None] | None = None
 
     @property
     def name(self) -> str:
@@ -61,7 +65,7 @@ class LSPServerInstance:
                 cwd=self._config.workspace_folder,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
             )
 
             self._client = LSPClient(
@@ -70,6 +74,12 @@ class LSPServerInstance:
                 on_exit=lambda code: self._on_error(
                     RuntimeError(f"Server '{self._config.server_id}' exited with code {code}")
                 ) if self._on_error else None,
+            )
+
+            # 消费 stderr 防止 Windows 上缓冲区填满导致 stdout 读取阻塞
+            self._stderr_task = asyncio.create_task(
+                self._consume_stderr_forever(process.stderr),
+                name="lsp-stderr",
             )
 
             await self._client.initialize()
@@ -86,6 +96,14 @@ class LSPServerInstance:
         """Stop the server gracefully."""
         if not self._running:
             return
+
+        if self._stderr_task:
+            self._stderr_task.cancel()
+            try:
+                await self._stderr_task
+            except asyncio.CancelledError:
+                pass
+            self._stderr_task = None
 
         if self._client:
             await self._client.stop()
@@ -117,3 +135,16 @@ class LSPServerInstance:
         if not self._running or not self._client:
             return
         await self._client.send_notification(method, params)
+
+    @staticmethod
+    async def _consume_stderr_forever(stderr: asyncio.StreamReader | None) -> None:
+        """Consume stderr output to prevent buffer overflow on Windows."""
+        if stderr is None:
+            return
+        try:
+            while True:
+                chunk = await stderr.read(4096)
+                if not chunk:
+                    break
+        except OSError as exc:
+            logger.warning("LSPServerInstance: stderr read failed: %s", exc)

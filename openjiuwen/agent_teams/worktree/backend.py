@@ -24,7 +24,7 @@ from openjiuwen.agent_teams.worktree.git import (
     worktree_remove,
 )
 from openjiuwen.agent_teams.worktree.models import WorktreeConfig, WorktreeCreateResult
-from openjiuwen.agent_teams.worktree.slug import worktree_branch_name, worktree_path_for, worktrees_dir
+from openjiuwen.agent_teams.worktree.slug import worktree_branch_name
 
 
 @runtime_checkable
@@ -36,12 +36,21 @@ class WorktreeBackend(Protocol):
     cloud-based isolation (containers, VMs).
     """
 
-    async def create(self, slug: str, repo_root: str) -> WorktreeCreateResult:
+    async def create(
+        self,
+        slug: str,
+        repo_root: str,
+        target_path: str,
+    ) -> WorktreeCreateResult:
         """Create a worktree for the given slug.
 
         Args:
             slug: Validated worktree name.
-            repo_root: Repository root directory.
+            repo_root: Repository root directory (used for git commands).
+            target_path: Absolute filesystem path where the worktree
+                should be created.  The caller (typically
+                ``WorktreeManager``) is responsible for resolving this
+                from the agent workspace.
 
         Returns:
             WorktreeCreateResult with path and metadata.
@@ -85,17 +94,25 @@ class GitBackend:
     def __init__(self, config: WorktreeConfig | None = None):
         self._config = config or WorktreeConfig()
 
-    async def create(self, slug: str, repo_root: str) -> WorktreeCreateResult:
-        """Create or recover a worktree.
+    async def create(
+        self,
+        slug: str,
+        repo_root: str,
+        target_path: str,
+    ) -> WorktreeCreateResult:
+        """Create or recover a worktree at ``target_path``.
 
         Args:
             slug: Validated worktree name.
-            repo_root: Repository root directory.
+            repo_root: Repository root directory (used for git commands).
+            target_path: Absolute filesystem path where the worktree
+                should live.  Resolved by the caller from the DeepAgent
+                workspace, not derived from ``repo_root``.
 
         Returns:
             WorktreeCreateResult with path, branch, and metadata.
         """
-        wt_path = worktree_path_for(repo_root, slug)
+        wt_path = target_path
         wt_branch = worktree_branch_name(slug)
 
         # Phase 1: fast recovery -- worktree already exists
@@ -109,7 +126,7 @@ class GitBackend:
             )
 
         # Phase 2: resolve base branch
-        os.makedirs(worktrees_dir(repo_root), exist_ok=True)
+        os.makedirs(os.path.dirname(wt_path), exist_ok=True)
         base_branch, base_sha = await self._resolve_base(repo_root)
 
         # Phase 3: create worktree

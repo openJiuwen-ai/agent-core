@@ -8,16 +8,30 @@ from pydantic import Field, BaseModel
 
 
 class LocalWorkConfig(BaseModel):
-    """Local working configuration"""
+    """Local working configuration.
+
+    CWD is managed externally via ``openjiuwen.core.sys_operation.cwd``
+    (ContextVar per asyncio Task).  This config holds only the security
+    boundary (sandbox) and command restrictions.
+    """
     shell_allowlist: Optional[List[str]] = Field(
         default=["echo", "rg", "ls", "dir", "cd", "pwd", "python", "python3", "pip", "pip3", "npm", "node", "git",
                  "cat", "type", "mkdir", "md", "rm", "rd", "cp", "copy", "mv", "move", "grep", "find", "curl", "wget",
                  "ps", "df", "ping"],
         description="List of allowed command prefixes. If None, all commands are allowed (warning: insecure).")
 
-    work_dir: Optional[str] = Field(
+    sandbox_root: Optional[List[str]] = Field(
         default=None,
-        description="Local working directory path")
+        description="Security boundary for fs operations.  Paths outside every entry are "
+                    "rejected when restrict_to_sandbox is True.  When None (default), the "
+                    "effective list falls back to [workspace, project_root] read from the "
+                    "per-agent CwdState ContextVar.  Independent of CWD -- CWD can move "
+                    "freely while the sandbox stays fixed.")
+
+    restrict_to_sandbox: bool = Field(
+        default=False,
+        description="When True, fs operations reject paths outside every sandbox_root entry. "
+                    "If sandbox_root is None, falls back to [workspace, project_root] defaults.")
 
     dangerous_patterns: Optional[List[str]] = Field(
         default=None,

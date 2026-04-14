@@ -7,10 +7,17 @@ operating modes, and conflict strategies. These models define the
 per-team lifecycle workspace that is independent of git worktree isolation.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import (
+    datetime,
+    timedelta,
+    timezone,
+)
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    Field,
+)
 
 
 class WorkspaceMode(str, Enum):
@@ -44,6 +51,11 @@ class TeamWorkspaceConfig(BaseModel):
 
     enabled: bool = False
     """Enable shared workspace for the team."""
+
+    root_path: str | None = None
+    """Workspace root directory.  When None, resolved at runtime to
+    ``{team_home(team_name)}/team-workspace/`` — see
+    ``openjiuwen.agent_teams.paths``."""
 
     artifact_dirs: list[str] = Field(
         default=["artifacts/code", "artifacts/docs", "artifacts/reports"],

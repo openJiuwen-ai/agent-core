@@ -22,6 +22,7 @@ from openjiuwen.core.common.security.path_checker import is_sensitive_path
 # Use ContextVar instead of threading.local() to support async environments
 # ContextVar maintains context isolation in async call chains, each coroutine has independent context
 _trace_id_context: contextvars.ContextVar[str] = contextvars.ContextVar("trace_id", default="default_trace_id")
+_member_id_context: contextvars.ContextVar[str] = contextvars.ContextVar("member_id", default="")
 
 
 def set_session_id(trace_id: str = "default_trace_id") -> None:
@@ -60,6 +61,16 @@ def get_session_id() -> Optional[str]:
     except LookupError:
         # If no value in context, return default value
         return "default_trace_id"
+
+
+def set_member_id(member_id: str) -> None:
+    """Set member_id in current context for log correlation in multi-agent scenarios."""
+    _member_id_context.set(member_id)
+
+
+def get_member_id() -> str:
+    """Get member_id from current context. Returns empty string if not set."""
+    return _member_id_context.get()
 
 
 def get_log_max_bytes(max_bytes_config: Any) -> int:

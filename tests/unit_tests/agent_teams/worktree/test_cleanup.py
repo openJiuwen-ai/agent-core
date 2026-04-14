@@ -10,7 +10,16 @@ from unittest.mock import AsyncMock, patch
 
 from openjiuwen.agent_teams.worktree.cleanup import cleanup_stale_worktrees, is_ephemeral_slug
 from openjiuwen.agent_teams.worktree.models import WorktreeConfig
+from openjiuwen.core.sys_operation.cwd import CwdState, _cwd_state, init_cwd
 from tests.test_logger import logger
+
+
+@pytest.fixture(autouse=True)
+def _reset_cwd_state():
+    """Reset CwdState after each test to avoid leaking mock workspace
+    paths into other test files in the same process."""
+    yield
+    _cwd_state.set(CwdState())
 
 
 class TestIsEphemeralSlug:
@@ -48,11 +57,19 @@ class TestCleanupStaleWorktrees:
 
     @pytest.fixture
     def wt_dir(self, tmp_path):
-        """Create a fake worktrees directory with ephemeral entries."""
+        """Create a fake worktrees directory under a fake agent workspace.
+
+        Also seeds CwdState with the workspace path so
+        ``cleanup_stale_worktrees`` can locate ``.worktrees/`` via
+        ``get_workspace()``.
+        """
         repo = tmp_path / "repo"
         repo.mkdir()
-        wt_base = repo / ".agent_teams" / "worktrees"
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        wt_base = workspace / ".worktrees"
         wt_base.mkdir(parents=True)
+        init_cwd(str(repo), workspace=str(workspace))
         return repo, wt_base
 
     @pytest.mark.asyncio

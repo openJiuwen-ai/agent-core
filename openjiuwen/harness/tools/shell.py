@@ -4,6 +4,7 @@
 # DEPRECATED: Use openjiuwen.harness.tools.bash.BashTool instead.
 # This module is kept for backward compatibility only.
 #
+import os
 from pathlib import Path
 from typing import Dict, Any, AsyncIterator, Optional
 
@@ -23,40 +24,29 @@ def _clip_text(value: str, max_chars: int) -> str:
 class BashTool(Tool):
 
     def __init__(self, operation: SysOperation, language: str = "cn",
-                 workspace: Optional[str] = None, agent_id: Optional[str] = None):
+                 workspace: Optional[str] = None, agent_id: Optional[str] = None, **_kwargs):
         super().__init__(build_tool_card("bash", "BashTool", language, agent_id=agent_id))
         self.operation = operation
-        self._workspace: Optional[Path] = Path(workspace).resolve() if workspace else None
-
-    def _get_workspace(self) -> Optional[Path]:
-        if self._workspace:
-            return self._workspace
-        wd_val = self.operation.work_dir
-        if wd_val:
-            return Path(wd_val).resolve()
-        return None
-
-    def _resolve_workdir(self, workdir: str) -> Optional[Path]:
-        """Resolve workdir and enforce sandbox. Returns None if path escapes workspace."""
-        workspace = self._get_workspace()
-        if workspace is None:
-            return Path(workdir).resolve() if workdir else Path.cwd()
-
-        candidate = Path(workdir) if workdir else workspace
-        if not candidate.is_absolute():
-            candidate = workspace / candidate
-        candidate = candidate.resolve()
-        try:
-            candidate.relative_to(workspace)
-        except ValueError:
-            return None
-        return candidate
 
     _VALID_SHELL_TYPES = {"auto", "cmd", "powershell", "bash", "sh"}
 
+    @staticmethod
+    def _resolve_timeout(raw_value: Any, default: int = 300) -> int:
+        """Parse and validate a timeout value."""
+        try:
+            timeout = int(raw_value)
+        except (TypeError, ValueError):
+            timeout = default
+        try:
+            max_timeout = int(os.getenv("BASH_TOOL_MAX_TIMEOUT_SECONDS") or "3600")
+        except ValueError:
+            max_timeout = 3600
+        max_timeout = max(1, max_timeout)
+        return max(1, min(timeout, max_timeout))
+
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         command = (inputs.get("command") or "").strip()
-        timeout = max(1, min(int(inputs.get("timeout", 30)), 300))
+        timeout = self._resolve_timeout(inputs.get("timeout", 300))
         workdir = inputs.get("workdir", "")
         background = bool(inputs.get("background", False))
         max_output_chars = max(200, min(int(inputs.get("max_output_chars", 8000)), 20000))
@@ -67,9 +57,8 @@ class BashTool(Tool):
         if not command:
             return ToolOutput(success=False, error="command cannot be empty")
 
-        resolved_cwd = self._resolve_workdir(workdir)
-        if resolved_cwd is None:
-            return ToolOutput(success=False, error="workdir is outside workspace sandbox")
+        from openjiuwen.core.sys_operation.cwd import get_cwd
+        resolved_cwd = workdir or get_cwd()
 
         if background:
             res = await self.operation.shell().execute_cmd_background(

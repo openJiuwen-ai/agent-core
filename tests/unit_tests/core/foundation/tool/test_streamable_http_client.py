@@ -11,6 +11,7 @@ import httpx
 
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
 from openjiuwen.core.foundation.tool.auth.auth_callback import AuthHeaderAndQueryProvider
+from openjiuwen.core.foundation.tool.mcp.base import extract_mcp_tool_result_content
 from openjiuwen.core.foundation.tool.mcp.client.streamable_http_client import (
     StreamableHttpClient,
 )
@@ -226,3 +227,96 @@ class TestStreamableHttpResourceManagerIntegration(unittest.IsolatedAsyncioTestC
 
             remaining_infos = await self.resource_mgr.get_mcp_tool_infos(server_name="streamable-server")
             self.assertEqual(remaining_infos, [])
+
+    async def test_mcp_tool_drops_missing_optional_arguments(self):
+        mock_tools = [
+            McpToolCard(
+                name="browser_type",
+                server_name="streamable-server",
+                description="Type text",
+                input_params={
+                    "type": "object",
+                    "properties": {
+                        "ref": {"type": "string"},
+                        "text": {"type": "string"},
+                        "submit": {"type": "boolean"},
+                        "slowly": {"type": "boolean"},
+                    },
+                    "required": ["ref", "text"],
+                },
+            )
+        ]
+
+        with (
+            patch.object(StreamableHttpClient, "connect", AsyncMock(return_value=True)),
+            patch.object(StreamableHttpClient, "disconnect", AsyncMock(return_value=True)),
+            patch.object(StreamableHttpClient, "list_tools", AsyncMock(return_value=mock_tools)),
+            patch.object(StreamableHttpClient, "call_tool", AsyncMock(return_value="typed")) as mock_call_tool,
+        ):
+            mcp_server_config = McpServerConfig(
+                server_name="streamable-server",
+                server_path="http://127.0.0.1:8930/mcp",
+                client_type="streamable-http",
+            )
+
+            add_result = await self.resource_mgr.add_mcp_server(mcp_server_config)
+            self.assertTrue(add_result.is_ok())
+
+            tools = await self.resource_mgr.get_mcp_tool(name="browser_type", server_name="streamable-server")
+            result = await tools[0].invoke({"ref": "q", "text": "wireless mouse"})
+
+            self.assertEqual(result, {"result": "typed"})
+            mock_call_tool.assert_awaited_once_with(
+                tool_name="browser_type",
+                arguments={"ref": "q", "text": "wireless mouse"},
+            )
+
+    async def test_mcp_tool_preserves_empty_object_arguments(self):
+        mock_tools = [
+            McpToolCard(
+                name="browser_snapshot",
+                server_name="streamable-server",
+                description="Capture accessibility snapshot",
+                input_params={
+                    "type": "object",
+                    "properties": {
+                        "filename": {"type": "string"},
+                        "depth": {"type": "number"},
+                    },
+                    "additionalProperties": False,
+                },
+            )
+        ]
+
+        with (
+            patch.object(StreamableHttpClient, "connect", AsyncMock(return_value=True)),
+            patch.object(StreamableHttpClient, "disconnect", AsyncMock(return_value=True)),
+            patch.object(StreamableHttpClient, "list_tools", AsyncMock(return_value=mock_tools)),
+            patch.object(StreamableHttpClient, "call_tool", AsyncMock(return_value="snapshotted")) as mock_call_tool,
+        ):
+            mcp_server_config = McpServerConfig(
+                server_name="streamable-server",
+                server_path="http://127.0.0.1:8930/mcp",
+                client_type="streamable-http",
+            )
+
+            add_result = await self.resource_mgr.add_mcp_server(mcp_server_config)
+            self.assertTrue(add_result.is_ok())
+
+            tools = await self.resource_mgr.get_mcp_tool(name="browser_snapshot", server_name="streamable-server")
+            result = await tools[0].invoke({})
+
+            self.assertEqual(result, {"result": "snapshotted"})
+            mock_call_tool.assert_awaited_once_with(
+                tool_name="browser_snapshot",
+                arguments={},
+            )
+
+
+class TestMcpToolResultExtraction(unittest.TestCase):
+    def test_image_content_returns_compact_description(self):
+        tool_result = SimpleNamespace(content=[SimpleNamespace(mimeType="image/png", data="abc123")])
+
+        result = extract_mcp_tool_result_content(tool_result)
+
+        self.assertEqual(result, "[image content: image/png, 6 base64 chars]")

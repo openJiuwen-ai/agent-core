@@ -76,6 +76,8 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
         extra = record["extra"]
         extra.setdefault("log_type", self._log_type_label)
         extra.setdefault("trace_id", get_session_id())
+        from openjiuwen.core.common.logging.utils import get_member_id
+        extra.setdefault("member_id", get_member_id())
         extra.setdefault("event", None)
         extra.setdefault("event_text", "")
         extra.setdefault("rendered_message", record["message"])

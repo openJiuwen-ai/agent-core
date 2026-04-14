@@ -59,17 +59,15 @@ async def message_bus():
 def predefined_members():
     return [
         TeamMemberSpec(
-            member_id="backend-dev",
-            name="Backend Developer",
+            member_name="backend-dev",
+            display_name="Backend Developer",
             persona="Senior backend engineer",
-            domain="backend",
             prompt_hint="Check tasks and start working",
         ),
         TeamMemberSpec(
-            member_id="frontend-dev",
-            name="Frontend Developer",
+            member_name="frontend-dev",
+            display_name="Frontend Developer",
             persona="Senior frontend engineer",
-            domain="frontend",
         ),
     ]
 
@@ -80,8 +78,8 @@ class TestBuildTeamWithPredefinedMembers:
     @pytest_asyncio.fixture
     async def team_with_predefined(self, db, message_bus, predefined_members):
         return TeamBackend(
-            team_id="predefined_team",
-            member_id="leader1",
+            team_name="predefined_team",
+            member_name="leader1",
             is_leader=True,
             db=db,
             messager=message_bus,
@@ -91,15 +89,15 @@ class TestBuildTeamWithPredefinedMembers:
     @pytest.mark.asyncio
     async def test_build_team_registers_predefined_members(self, team_with_predefined, db):
         await team_with_predefined.build_team(
-            name="Test Team",
+            display_name="Test Team",
             desc="A predefined team",
 
-            leader_name="Leader",
+            leader_display_name="Leader",
             leader_desc="PM",
         )
 
         members = await db.get_team_members("predefined_team")
-        member_ids = {m.member_id for m in members}
+        member_ids = {m.member_name for m in members}
         logger.info("Members after build_team: {}", member_ids)
 
         assert "leader1" in member_ids
@@ -110,15 +108,15 @@ class TestBuildTeamWithPredefinedMembers:
     @pytest.mark.asyncio
     async def test_predefined_members_status_is_unstarted(self, team_with_predefined, db):
         await team_with_predefined.build_team(
-            name="Test Team",
+            display_name="Test Team",
             desc="desc",
 
-            leader_name="Leader",
+            leader_display_name="Leader",
             leader_desc="PM",
         )
 
-        backend_dev = await db.get_member("backend-dev")
-        frontend_dev = await db.get_member("frontend-dev")
+        backend_dev = await db.get_member("backend-dev", "predefined_team")
+        frontend_dev = await db.get_member("frontend-dev", "predefined_team")
 
         assert backend_dev.status == MemberStatus.UNSTARTED.value
         assert frontend_dev.status == MemberStatus.UNSTARTED.value
@@ -128,15 +126,15 @@ class TestBuildTeamWithPredefinedMembers:
     @pytest.mark.asyncio
     async def test_predefined_members_preserve_desc_and_prompt(self, team_with_predefined, db):
         await team_with_predefined.build_team(
-            name="Test Team",
+            display_name="Test Team",
             desc="desc",
 
-            leader_name="Leader",
+            leader_display_name="Leader",
             leader_desc="PM",
         )
 
-        backend_dev = await db.get_member("backend-dev")
-        frontend_dev = await db.get_member("frontend-dev")
+        backend_dev = await db.get_member("backend-dev", "predefined_team")
+        frontend_dev = await db.get_member("frontend-dev", "predefined_team")
 
         assert backend_dev.desc == "Senior backend engineer"
         assert backend_dev.prompt == "Check tasks and start working"
@@ -146,14 +144,14 @@ class TestBuildTeamWithPredefinedMembers:
     @pytest.mark.asyncio
     async def test_leader_still_registered_as_busy(self, team_with_predefined, db):
         await team_with_predefined.build_team(
-            name="Test Team",
+            display_name="Test Team",
             desc="desc",
 
-            leader_name="Leader",
+            leader_display_name="Leader",
             leader_desc="PM",
         )
 
-        leader = await db.get_member("leader1")
+        leader = await db.get_member("leader1", "predefined_team")
         assert leader.status == MemberStatus.BUSY.value
         assert leader.execution_status == ExecutionStatus.RUNNING.value
 
@@ -164,8 +162,8 @@ class TestBuildTeamWithoutPredefinedMembers:
     @pytest_asyncio.fixture
     async def team_no_predefined(self, db, message_bus):
         return TeamBackend(
-            team_id="auto_team",
-            member_id="leader1",
+            team_name="auto_team",
+            member_name="leader1",
             is_leader=True,
             db=db,
             messager=message_bus,
@@ -174,16 +172,16 @@ class TestBuildTeamWithoutPredefinedMembers:
     @pytest.mark.asyncio
     async def test_build_team_only_registers_leader(self, team_no_predefined, db):
         await team_no_predefined.build_team(
-            name="Auto Team",
+            display_name="Auto Team",
             desc="desc",
 
-            leader_name="Leader",
+            leader_display_name="Leader",
             leader_desc="PM",
         )
 
         members = await db.get_team_members("auto_team")
         assert len(members) == 1
-        assert members[0].member_id == "leader1"
+        assert members[0].member_name == "leader1"
 
 
 class TestToolExclusion:
@@ -204,7 +202,7 @@ class TestToolExclusion:
         assert "spawn_member" not in tool_names
         assert "build_team" in tool_names
         assert "shutdown_member" in tool_names
-        assert "task_manager" in tool_names
+        assert "create_task" in tool_names
 
     def test_no_exclusion_without_predefined(self):
         agent_team = AsyncMock()
@@ -231,7 +229,6 @@ class TestToolExclusion:
         tool_names = {t.card.name for t in tools}
 
         assert "claim_task" in tool_names
-        assert "complete_task" in tool_names
 
 
 class TestPredefinedTeamPrompt:
@@ -243,7 +240,6 @@ class TestPredefinedTeamPrompt:
         prompt = build_system_prompt(
             role=TeamRole.LEADER,
             persona="PM",
-            domain="management",
             predefined_team=True,
         )
         logger.info("Predefined prompt length: {}", len(prompt))
@@ -257,7 +253,6 @@ class TestPredefinedTeamPrompt:
         prompt = build_system_prompt(
             role=TeamRole.LEADER,
             persona="PM",
-            domain="management",
             predefined_team=False,
         )
 
@@ -269,7 +264,6 @@ class TestPredefinedTeamPrompt:
         prompt = build_system_prompt(
             role=TeamRole.TEAMMATE,
             persona="Dev",
-            domain="backend",
             predefined_team=True,
         )
 

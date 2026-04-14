@@ -122,7 +122,7 @@ async def main():
 
     sysop_card = SysOperationCard(
         mode=OperationMode.LOCAL,
-        work_config=LocalWorkConfig(work_dir=None),
+        work_config=LocalWorkConfig(),
     )
     Runner.resource_mgr.add_sys_operation(sysop_card)
 

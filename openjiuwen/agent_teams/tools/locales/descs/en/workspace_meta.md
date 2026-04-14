@@ -1,0 +1,1 @@
+Metadata operations for the team shared workspace (file lock management and version history queries). Use when multiple members collaborate on shared files — file locks prevent write conflicts.

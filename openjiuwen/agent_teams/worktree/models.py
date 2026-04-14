@@ -29,7 +29,7 @@ class WorktreeConfig(BaseModel):
     """Worktree configuration declared in TeamAgentSpec.
 
     Controls how worktrees are created and managed for team members.
-    Mirrors the settings.json worktree section from Claude Code.
+    Mirrors the settings.json worktree section.
     """
 
     enabled: bool = False
@@ -98,10 +98,10 @@ class WorktreeSession(BaseModel):
     original_head_commit: str | None = None
     """Base commit SHA at creation time. Used for change detection."""
 
-    member_id: str | None = None
+    member_name: str | None = None
     """Team member this worktree belongs to."""
 
-    team_id: str | None = None
+    team_name: str | None = None
     """Team this worktree belongs to."""
 
     hook_based: bool = False
