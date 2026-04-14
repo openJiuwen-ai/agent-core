@@ -27,6 +27,7 @@ from openjiuwen.agent_teams.schema.team import (
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
+    MemberStatusChangedEvent,
     MessageEvent,
     ToolApprovalResultEvent,
 )
@@ -310,6 +311,104 @@ async def test_resume_interrupt_queues_while_agent_running():
 
     assert agent._pending_interrupt_resumes == [interactive_input]
     agent._start_agent.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_member_ready_with_claimed_task_triggers_nudge():
+    """Leader nudges a member returning to READY while still holding a claimed task."""
+    agent = _make_leader()
+    fake_task = MagicMock()
+    fake_task.task_id = "task-1"
+    fake_task.title = "Fix bug"
+    fake_task.content = "Investigate and fix the critical bug"
+
+    agent._task_manager = MagicMock()
+    agent._task_manager.get_tasks_by_assignee = AsyncMock(return_value=[fake_task])
+    agent._message_manager = MagicMock()
+    agent._message_manager.send_message = AsyncMock(return_value="msg-1")
+
+    event = EventMessage.from_event(MemberStatusChangedEvent(
+        team_name="test-team",
+        member_name="dev-1",
+        old_status="busy",
+        new_status="ready",
+    ))
+    await agent._dispatcher._handle_leader_member_event(event)
+
+    agent._task_manager.get_tasks_by_assignee.assert_awaited_once_with(
+        "dev-1", status="claimed",
+    )
+    agent._message_manager.send_message.assert_awaited_once()
+    content, to_member_name = agent._message_manager.send_message.await_args.args
+    assert to_member_name == "dev-1"
+    assert "task-1" in content
+    assert "Fix bug" in content
+
+
+@pytest.mark.asyncio
+async def test_member_error_with_claimed_task_triggers_nudge():
+    """Leader also nudges on transition into ERROR when claimed tasks remain."""
+    agent = _make_leader()
+    fake_task = MagicMock()
+    fake_task.task_id = "task-2"
+    fake_task.title = "Ship feature"
+    fake_task.content = "Wrap up the pending PR"
+
+    agent._task_manager = MagicMock()
+    agent._task_manager.get_tasks_by_assignee = AsyncMock(return_value=[fake_task])
+    agent._message_manager = MagicMock()
+    agent._message_manager.send_message = AsyncMock(return_value="msg-2")
+
+    event = EventMessage.from_event(MemberStatusChangedEvent(
+        team_name="test-team",
+        member_name="dev-1",
+        old_status="busy",
+        new_status="error",
+    ))
+    await agent._dispatcher._handle_leader_member_event(event)
+
+    agent._message_manager.send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_member_ready_without_claimed_task_skips_nudge():
+    """No message is sent when the member has no claimed tasks."""
+    agent = _make_leader()
+    agent._task_manager = MagicMock()
+    agent._task_manager.get_tasks_by_assignee = AsyncMock(return_value=[])
+    agent._message_manager = MagicMock()
+    agent._message_manager.send_message = AsyncMock()
+
+    event = EventMessage.from_event(MemberStatusChangedEvent(
+        team_name="test-team",
+        member_name="dev-1",
+        old_status="busy",
+        new_status="ready",
+    ))
+    await agent._dispatcher._handle_leader_member_event(event)
+
+    agent._message_manager.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_member_status_unchanged_skips_nudge():
+    """Redundant READY → READY transitions should not query tasks nor send messages."""
+    agent = _make_leader()
+    agent._task_manager = MagicMock()
+    agent._task_manager.get_tasks_by_assignee = AsyncMock()
+    agent._message_manager = MagicMock()
+    agent._message_manager.send_message = AsyncMock()
+
+    event = EventMessage.from_event(MemberStatusChangedEvent(
+        team_name="test-team",
+        member_name="dev-1",
+        old_status="ready",
+        new_status="ready",
+    ))
+    await agent._dispatcher._handle_leader_member_event(event)
+
+    agent._task_manager.get_tasks_by_assignee.assert_not_called()
+    agent._message_manager.send_message.assert_not_called()
 
 
 @pytest.mark.asyncio
