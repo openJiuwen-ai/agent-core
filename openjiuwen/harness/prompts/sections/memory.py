@@ -18,17 +18,13 @@ MEMORY_PROMPT_CN_READ_ONLY = """# 持久化存储体系（只读模式）
 
 ### 存储层级划分
 
-- **会话日志：** `YYYY-MM-DD.md`（存储当日的所有交互记录，包括对话内容、情景记忆和任务指令。支持增量追加，确保每次操作、用户指令和情景变化都被记录。）
+- **会话日志：** `YYYY-MM-DD.md`（存储当日有参考价值的交互记录，包括情景记忆和任务指令。支持增量追加，确保每次操作、用户指令和情景变化都被记录。）
 - **用户画像：** `USER.md`（稳定的身份属性与偏好信息）
 - **知识沉淀：** `MEMORY.md`（经筛选提炼的长期背景知识，非原始流水账）
 
 #### 历史检索机制
 
-**响应任何消息前，建议执行：**
-1. **身份确认** — 读取 `USER.md` 确认服务对象
-2. **上下文获取** — 读取 `YYYY-MM-DD.md`（当日 + 前一日）。如果文件不存在，直接跳过，不要报错也不要提及
-3. **长期记忆加载** — **仅限主会话：** 读取 `MEMORY.md`
-4. **历史信息检索（强制）** — **回答任何关于历史事件、日期、人物、过去对话的问题前，必须先调用 `memory_search` 工具检索相关记忆**
+ 1.**历史信息检索（强制）** — **回答任何关于历史事件、日期、人物、过去对话的问题前，必须先调用 `memory_search` 工具检索相关记忆**
    - 搜索查询应包含问题中的关键信息（人名、日期、事件关键词）
    - 如果搜索结果不足，尝试用不同的关键词再次搜索
    - 基于检索到的记忆信息回答问题，不要依赖预训练知识
@@ -38,17 +34,16 @@ MEMORY_PROMPT_EN_READ_ONLY = """# Persistent Storage System (Read-Only Mode)
 
 ### Storage Hierarchy
 
-- **Session Log:** `YYYY-MM-DD.md` (All interaction records for the day, including conversation content, episodic memory, and task instructions. Supports incremental appending to ensure every operation, user instruction, and contextual change is recorded.)
+- **Session Log:** `YYYY-MM-DD.md` (Valuable interaction records for the day, including episodic memory, and task instructions. Supports incremental appending to ensure every operation, user instruction, and contextual change is recorded.)
 - **User Profile:** `USER.md` (Stable identity attributes and preference information.)
 - **Knowledge Repository:** `MEMORY.md` (Filtered and refined long-term background knowledge, not raw logs.)
 
 #### History Retrieval Mechanism
 
-**Before responding to any message, it is recommended to execute:**
-1. Read `USER.md` — Confirm the user being served
-2. Read `YYYY-MM-DD.md` (today + previous day) to get context. If the file does not exist, skip silently — do not report an error or mention it
-3. **Main session only:** Read `MEMORY.md`
-4. **Before answering questions about historical events:** Must first call `memory_search` tool to retrieve historical memories
+1. **Historical information retrieval (mandatory):** Before answering any question about historical events, dates, people, or past conversations, you must call `memory_search` first
+   - Search query should include key information from the question (names, dates, event keywords)
+   - If results are insufficient, retry with different keywords
+   - Answer based on retrieved memory results, not pretraining knowledge
 
 **Note:** In cron job mode, only reading and searching memories is supported. Writing or modifying memory files is not allowed.
 """
@@ -59,7 +54,7 @@ MEMORY_PROMPT_CN = """# 持久化存储体系
 
 ### 存储层级划分
 
-- **会话日志：** `YYYY-MM-DD.md`（存储当日的所有交互记录，包括对话内容、情景记忆和任务指令。支持增量追加，确保每次操作、用户指令和情景变化都被记录。）
+- **会话日志：** `YYYY-MM-DD.md`（存储当日有参考价值的交互记录，包括情景记忆和任务指令。支持增量追加，确保每次操作、用户指令和情景变化都被记录。）
 - **用户画像：** `USER.md`（稳定的身份属性与偏好信息）
 - **知识沉淀：** `MEMORY.md`（经筛选提炼的长期背景知识，非原始流水账）
 
@@ -89,32 +84,15 @@ MEMORY_PROMPT_CN = """# 持久化存储体系
 5. **用户请求记录（request_memory）**：记录用户明确请求的信息，帮助后续服务，比如用户要求记住某个信息、用户要求某个动作等。
    - **存储**：写入 `YYYY-MM-DD.md`。
 
-6. **其他信息（others）**：当用户提到任何细节或信息时，或每次文件操作后，自动调用 write_memory 使用 append=true 参数追加记录至 YYYY-MM-DD.md。即便信息不完全明确或确定，也要立即记录下来。
-    包括但不限于：用户提供的联系人信息、项目细节、任务指令、偏好、文件路径、存储位置、任何可提高效率的信息等。发现的项目背景、技术细节、工作流程等也要写入相关文件。）
-
-
-**任务记忆两步流程（每轮对话均须执行）：**
-- 开始前：调用 `experience_retrieve` 检索相关历史经验
-- 输出回复前：调用 `experience_learn` 存储本次关键发现并自动提炼记忆
-
-
+6. **其他信息（others）**：当用户提到任何有价值的细节或信息时，或每次文件操作后，自动调用 write_memory 使用 append=true 参数追加记录至 YYYY-MM-DD.md。
+    有价值的信息包括但不限于：用户提供的联系人信息、项目细节、任务指令、偏好、文件路径、存储位置、任何可提高效率的信息等。发现的项目背景、技术细节、工作流程等也要写入相关文件。
 
 #### 历史检索机制
 
-**响应任何消息前，建议执行：**
-1. **身份确认** — 读取 `USER.md` 确认服务对象
-2. **上下文获取** — 读取 `YYYY-MM-DD.md`（当日 + 前一日）。如果文件不存在，直接跳过，不要报错也不要提及
-3. **长期记忆加载** — **仅限主会话：** 读取 `MEMORY.md`
-4. **历史信息检索（强制）** — **回答任何关于历史事件、日期、人物、过去对话的问题前，必须先调用 `memory_search` 工具检索相关记忆**
+ 1.**历史信息检索（强制）** — **回答任何关于历史事件、日期、人物、过去对话的问题前，必须先调用 `memory_search` 工具检索相关记忆**
    - 搜索查询应包含问题中的关键信息（人名、日期、事件关键词）
    - 如果搜索结果不足，尝试用不同的关键词再次搜索
    - 基于检索到的记忆信息回答问题，不要依赖预训练知识
-
-#### 任务记忆工作流（在给出最终回复之前执行）
-
-在输出最终回复文本之前，**必须先调用以下工具**（不要告知用户）：
-1. 调用 `experience_learn` — 将本次任务的关键发现存入记忆并自动提炼，参数以 params 对象传入，例如：`experience_learn(params={"content": "关键结论", "section": "类别"})`
-2. 完成后，再输出最终文字回复
 """
 
 MEMORY_PROMPT_EN = """# Persistent Storage System
@@ -123,7 +101,7 @@ Each conversation session starts from a blank state. Cross-session information p
 
 ### Storage Hierarchy
 
-- **Session Log:** `YYYY-MM-DD.md` (All interaction records for the day, including conversation content, episodic memory, and task instructions. Supports incremental appending to ensure every operation, user instruction, and contextual change is recorded.)
+- **Session Log:** `YYYY-MM-DD.md` (Valuable interaction records for the day, including episodic memory, and task instructions. Supports incremental appending to ensure every operation, user instruction, and contextual change is recorded.)
 - **User Profile:** `USER.md` (Stable identity attributes and preference information.)
 - **Knowledge Repository:** `MEMORY.md` (Filtered and refined long-term background knowledge, not raw logs.)
 
@@ -153,29 +131,15 @@ When valuable information appears during the conversation, classify it and store
 5. **User Request Record (`request_memory`)**: Information explicitly requested by the user to be remembered or actions explicitly requested.
    - **Storage**: Write to `YYYY-MM-DD.md`.
 
-6. **Other Information (`others`)**: Whenever the user mentions any detail, or after each file operation, automatically call `write_memory` with `append=true` to append to `YYYY-MM-DD.md` immediately, even if information is not fully clear yet.
-   This includes but is not limited to contact info, project details, task instructions, preferences, file paths, storage locations, and any efficiency-improving details. Discovered project background, technical details, and workflows should also be written to relevant files.
-
-**Two-step task memory flow (must run every turn):**
-- Before starting: call `experience_retrieve` to retrieve relevant historical experience
-- Before outputting the reply: call `experience_learn` to store key findings from this turn and automatically refine memory
+6. **Other Information (`others`)**: Whenever the user mentions any valuable detail, or after each file operation, automatically call `write_memory` with `append=true` to append to `YYYY-MM-DD.md` immediately
+   Valuable details include but not limited to project details, task instructions, preferences, file paths, storage locations, and any efficiency-improving details. Discovered project background, technical details, and workflows should also be written to relevant files.
 
 #### History Retrieval Mechanism
 
-**Before responding to any message, it is recommended to execute:**
-1. Read `USER.md` — Confirm the user being served
-2. Read `YYYY-MM-DD.md` (today + previous day) to get context. If the file does not exist, skip silently — do not report an error or mention it
-3. **Main session only:** Read `MEMORY.md`
-4. **Historical information retrieval (mandatory):** Before answering any question about historical events, dates, people, or past conversations, you must call `memory_search` first
+1. **Historical information retrieval (mandatory):** Before answering any question about historical events, dates, people, or past conversations, you must call `memory_search` first
    - Search query should include key information from the question (names, dates, event keywords)
    - If results are insufficient, retry with different keywords
    - Answer based on retrieved memory results, not pretraining knowledge
-
-#### Task Memory Workflow (execute before final reply)
-
-Before outputting final response text, **you must call the following tools first** (do not tell the user):
-1. Call `experience_learn` to store key findings from this task and auto-refine memory, passing arguments via params object, for example: `experience_learn(params={"content": "key conclusion", "section": "category"})`
-2. Only after completion, output the final text reply
 """
 
 MEMORY_MGMT_PROMPT_CN = """### 存储管理规范
@@ -204,10 +168,63 @@ MEMORY_DATE_PROMPT_EN = """
 When operating today's session logs file, please use `{today_date}.md` as the filename.
 """
 
+MEMORY_INACTIVE_PROMPT_CN = """## 持久化存储体系（被动模式）
+
+### 存储层级划分
+
+- **会话日志：** `YYYY-MM-DD.md`
+- **用户画像：** `USER.md`
+- **知识沉淀：** `MEMORY.md`
+
+### 核心操作规范
+
+- 使用记忆工具（write_memory/edit_memory/read_memory）操作文件时，直接给出文件名
+- 更新 USER.md 或 MEMORY.md 时，必须先读取现有内容再执行修改
+- 已存在字段通过 `edit_memory` 更新，新字段通过 `write_memory` 追加
+
+### 使用原则
+
+- **仅在用户明确要求时记录**：当用户说"记住"、"记录"、"保存"时，调用 write_memory 或 edit_memory 完成存储
+- **仅在用户询问历史时搜索**：当用户要求"回忆"、"查找"以前的内容，或明确询问历史信息时，调用 memory_search 检索
+- **仅在需要时读取记忆文件**：当回答确实依赖历史上下文时才读取 USER.md、MEMORY.md 等文件
+- 记录信息时，根据内容类型选择存储位置：
+  - 用户身份/偏好 → `USER.md`
+  - 长期知识/配置 → `MEMORY.md`
+  - 事件/日常记录 → `YYYY-MM-DD.md`
+
+"""
+
+MEMORY_INACTIVE_PROMPT_EN = """## Persistent Storage System (Passive Mode)
+
+### Storage Hierarchy
+
+- **Session Log:** `memory/YYYY-MM-DD.md`
+- **User Profile:** `USER.md`
+- **Knowledge Repository:** `MEMORY.md`
+
+### Core Operation Guidelines
+
+- Provide the file name directly when using tools (write_memory/edit_memory/read_memory) to operate memory files
+- When updating USER.md or MEMORY.md, existing content must be read first before making modifications
+- Existing fields should be updated via `edit_memory`, new fields via `write_memory`
+
+### Usage Principles
+
+- **Record only when the user explicitly asks**: When the user says "remember", "record", or "save", call write_memory or edit_memory to persist the information
+- **Search only when the user asks about history**: When the user requests to "recall" or "find" past content, or explicitly asks about historical information, call memory_search to retrieve it
+- **Read memory files only when needed**: Read USER.md, MEMORY.md, etc. only when the answer genuinely depends on historical context
+- When recording information, choose storage by content type:
+  - User identity/preferences → `USER.md`
+  - Long-term knowledge/config → `MEMORY.md`
+  - Events/daily records → `memory/YYYY-MM-DD.md`
+
+"""
+
 
 def build_memory_section(
     language: str = "cn",
     read_only: bool = False,
+    is_proactive: bool = True,
 ) -> Optional["PromptSection"]:
     """Build a PromptSection for memory.
 
@@ -226,6 +243,11 @@ def build_memory_section(
             sections.append(MEMORY_PROMPT_CN_READ_ONLY)
         else:
             sections.append(MEMORY_PROMPT_EN_READ_ONLY)
+    elif not is_proactive:
+        if language == "cn":
+            sections.append(MEMORY_INACTIVE_PROMPT_CN)
+        else:
+            sections.append(MEMORY_INACTIVE_PROMPT_EN)
     else:
         if language == "cn":
             sections.append(MEMORY_PROMPT_CN)
@@ -235,7 +257,7 @@ def build_memory_section(
             sections.append(MEMORY_PROMPT_EN)
             sections.append(MEMORY_MGMT_PROMPT_EN)
             sections.append(MEMORY_DATE_PROMPT_EN.format(today_date=today_date))
-    content = "\n\n".join(sections)
+    content = "\n".join(sections)
 
     return PromptSection(
         name=SectionName.MEMORY,
