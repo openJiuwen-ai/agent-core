@@ -632,3 +632,78 @@ async def test_before_invoke_and_on_exception_call_fix_context(tmp_path: Path):
     placeholders2 = [m for m in ctx2.context.added_messages
                      if isinstance(m, ToolMessage) and "[工具执行被中断]" in m.content]
     assert len(placeholders2) == 1
+
+
+# =============================================================================
+# _ensure_json_arguments Tests
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_ensure_json_arguments_with_invalid_json(tmp_path: Path):
+    """_ensure_json_arguments should return '{}' for broken/invalid JSON strings."""
+    cases = [
+        # (input, expected_output)
+        ('{"key": "value"}', '{"key": "value"}'),  # valid JSON
+        ("{}", "{}"),  # empty object
+        ('{"a": 1, "b": 2}', '{"a": 1, "b": 2}'),  # valid
+        ('{"incomplete": ', "{}"),  # truncated JSON
+        ('{bad json}', "{}"),  # not JSON at all
+        ('{"unterminated": "string', "{}"),  # unterminated string
+        ("[1, 2,", "{}"),  # truncated array
+        ("null", "{}"),  # not an object
+        ('{"nested": {"incomplete":', "{}"),  # nested truncated
+        (None, "{}"),  # None input
+        (123, "{}"),  # number input
+        ("", "{}"),  # empty string
+    ]
+
+    for inp, expected in cases:
+        result = ContextEngineeringRail._ensure_json_arguments(inp)
+        assert result == expected, f"input={repr(inp)}: expected {expected}, got {result}"
+
+
+@pytest.mark.asyncio
+async def test_ensure_json_arguments_with_dict_input(tmp_path: Path):
+    """_ensure_json_arguments should convert dict to JSON string."""
+    cases = [
+        # (input dict, expected JSON string)
+        ({}, "{}"),
+        ({"key": "value"}, '{"key": "value"}'),
+        ({"a": 1, "b": [1, 2, 3]}, '{"a": 1, "b": [1, 2, 3]}'),
+    ]
+
+    for inp, expected in cases:
+        result = ContextEngineeringRail._ensure_json_arguments(inp)
+        assert result == expected, f"input={inp}: expected {expected}, got {result}"
+
+
+@pytest.mark.asyncio
+async def test_fix_incomplete_tool_context_with_broken_arguments(tmp_path: Path):
+    """fix_incomplete_tool_context should fix broken tool call arguments."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+    await agent.ensure_initialized()
+
+    tool_call = ToolCall(
+        id="tc1",
+        type="function",
+        name="test_tool",
+        arguments='{"incomplete": '  # broken JSON
+    )
+    ctx = _make_fix_ctx(
+        agent,
+        [AssistantMessage(content="call", tool_calls=[tool_call])]
+    )
+    await ContextEngineeringRail.fix_incomplete_tool_context(ctx)
+
+    added = ctx.context.added_messages
+    assert len(added) == 2
+    # First: original AssistantMessage with fixed arguments
+    assistant_msg = added[0]
+    assert isinstance(assistant_msg, AssistantMessage)
+    assert assistant_msg.tool_calls[0].arguments == "{}"
+    # Second: placeholder ToolMessage
+    placeholder = added[1]
+    assert isinstance(placeholder, ToolMessage)
+    assert placeholder.tool_call_id == "tc1"

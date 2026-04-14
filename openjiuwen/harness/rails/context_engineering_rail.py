@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Tuple, Union, Optional, Dict
+from typing import List, Tuple, Union, Optional, Dict, Any
 
 from pydantic import BaseModel
 
@@ -298,6 +298,10 @@ class ContextEngineeringRail(DeepAgentRail):
             self.system_prompt_builder.remove_section("workspace")
             self.system_prompt_builder.remove_section("context")
 
+        config = getattr(getattr(agent, "react_agent", None), "_config", None)
+        if config is not None:
+            config.context_processors = []
+
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         await self.fix_incomplete_tool_context(ctx)
@@ -354,6 +358,34 @@ class ContextEngineeringRail(DeepAgentRail):
         await self.fix_incomplete_tool_context(ctx)
 
     @staticmethod
+    def _ensure_json_arguments(arguments: Any) -> str:
+        """Ensure tool call arguments are valid JSON string.
+
+        If arguments is a dict, convert to JSON string. If arguments is a string,
+        validate it can be parsed as JSON. If parsing fails, return empty JSON object.
+
+        Args:
+            arguments: The arguments value from tool_call.
+
+        Returns:
+            Valid JSON string (e.g., '{"key": "value"}').
+        """
+        import json
+        if isinstance(arguments, dict):
+            return json.dumps(arguments)
+        if isinstance(arguments, str):
+            try:
+                parsed = json.loads(arguments)
+                if isinstance(parsed, dict):
+                    return arguments
+                logger.warning(f"Illegal Tool call arguments: {arguments}")
+                return "{}"
+            except (json.JSONDecodeError, TypeError):
+                logger.warning(f"Illegal Tool call arguments: {arguments}")
+                return "{}"
+        return "{}"
+
+    @staticmethod
     async def fix_incomplete_tool_context(ctx: AgentCallbackContext) -> None:
         """Validate and fix incomplete context messages before entering ReAct loop.
 
@@ -385,32 +417,35 @@ class ContextEngineeringRail(DeepAgentRail):
                 if not tool_calls:
                     return
                 for tc in tool_calls:
+                    arguments = getattr(tc, "arguments", '{}')
+                    arguments = ContextEngineeringRail._ensure_json_arguments(arguments)
+                    if hasattr(tc, "arguments"):
+                        tc.arguments = arguments
                     tool_id_cache.append({
                         "tool_call_id": getattr(tc, "id", ""),
                         "tool_name": getattr(tc, "name", ""),
                     })
 
-            async def _flush_pending_tool_calls() -> None:
-                """Flush pending tool calls: first drain tool_message_cache, then emit placeholders."""
-                nonlocal tool_id_cache
-                if not tool_id_cache:
-                    return
-                logger.info("Fixed incomplete tool context with placeholder messages")
+            async def _flush_pending_tools() -> None:
+                """Flush pending tool calls: drain tool_message_cache first, then emit placeholders."""
+                nonlocal tool_message_cache
+                for tool_msg in tool_message_cache.values():
+                    await context.add_messages(tool_msg)
+                tool_message_cache = {}
                 for tc in tool_id_cache:
                     tool_call_id = tc["tool_call_id"]
                     tool_name = tc["tool_name"]
-                    if tool_call_id in tool_message_cache:
-                        await context.add_messages(tool_message_cache.pop(tool_call_id))
-                    else:
-                        await context.add_messages(ToolMessage(
-                            content=f"[工具执行被中断] 工具 {tool_name}执行过程中被用户打断，没有执行结果。",
-                            tool_call_id=tool_call_id
-                        ))
-                tool_id_cache = []
+                    await context.add_messages(ToolMessage(
+                        content=f"[工具执行被中断] 工具 {tool_name} 执行过程中被用户打断，没有执行结果。",
+                        tool_call_id=tool_call_id,
+                    ))
+                tool_id_cache.clear()
 
             for msg in popped:
                 if isinstance(msg, AssistantMessage):
-                    await _flush_pending_tool_calls()
+                    if tool_id_cache:
+                        logger.info("Fixed incomplete tool context with placeholder messages")
+                        await _flush_pending_tools()
                     await context.add_messages(msg)
                     await _enqueue_tool_calls(msg)
                 elif isinstance(msg, ToolMessage):
@@ -422,9 +457,13 @@ class ContextEngineeringRail(DeepAgentRail):
                     else:
                         tool_message_cache[msg.tool_call_id] = msg
                 else:
-                    await _flush_pending_tool_calls()
+                    if tool_id_cache:
+                        logger.info("Fixed incomplete tool context with placeholder messages")
+                        await _flush_pending_tools()
                     await context.add_messages(msg)
-            await _flush_pending_tool_calls()
+            if tool_id_cache:
+                logger.info("Fixed incomplete tool context with placeholder messages")
+                await _flush_pending_tools()
         except Exception as e:
             import traceback
             logger.warning("Failed to fix incomplete tool context: %s\n%s", e, traceback.format_exc())
