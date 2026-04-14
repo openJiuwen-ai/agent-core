@@ -170,11 +170,14 @@ class TestClaimConflict:
         )
 
         task = await m1.add(title="Shared Task", content="Work")
-        assert await m1.claim(task.task_id) is True
+        first = await m1.claim(task.task_id)
+        assert first.ok
 
         # Second member tries to claim; must report assignee conflict and fail
         # cleanly instead of raising an "invalid claimed → claimed" transition.
-        assert await m2.claim(task.task_id) is False
+        second = await m2.claim(task.task_id)
+        assert not second.ok
+        assert "already claimed by m1" in second.reason
 
         task_state = await m1.get(task.task_id)
         assert task_state.status == TaskStatus.CLAIMED.value
@@ -566,8 +569,8 @@ class TestUpdateTask:
         task = await task_manager.add(title="Original Title", content="Content")
         assert task.title == "Original Title"
 
-        success = await task_manager.update_task(task.task_id, title="Updated Title")
-        assert success is True
+        result = await task_manager.update_task(task.task_id, title="Updated Title")
+        assert result.ok
 
         updated_task = await task_manager.get(task.task_id)
         assert updated_task.title == "Updated Title"
@@ -579,8 +582,8 @@ class TestUpdateTask:
         task = await task_manager.add(title="Title", content="Original Content")
         assert task.content == "Original Content"
 
-        success = await task_manager.update_task(task.task_id, content="Updated Content")
-        assert success is True
+        result = await task_manager.update_task(task.task_id, content="Updated Content")
+        assert result.ok
 
         updated_task = await task_manager.get(task.task_id)
         assert updated_task.title == "Title"
@@ -591,12 +594,12 @@ class TestUpdateTask:
         """Test updating both task title and content"""
         task = await task_manager.add(title="Original Title", content="Original Content")
 
-        success = await task_manager.update_task(
+        result = await task_manager.update_task(
             task.task_id,
             title="Updated Title",
             content="Updated Content"
         )
-        assert success is True
+        assert result.ok
 
         updated_task = await task_manager.get(task.task_id)
         assert updated_task.title == "Updated Title"
@@ -604,18 +607,19 @@ class TestUpdateTask:
 
     @pytest.mark.asyncio
     async def test_update_task_not_found(self, task_manager):
-        """Test updating non-existent task returns False"""
-        success = await task_manager.update_task("nonexistent-task", title="New Title")
-        assert success is False
+        """Test updating non-existent task surfaces a reason."""
+        result = await task_manager.update_task("nonexistent-task", title="New Title")
+        assert not result.ok
+        assert "not found" in result.reason
 
     @pytest.mark.asyncio
     async def test_update_task_none_parameters(self, task_manager):
         """Test updating task with None parameters (no change)"""
         task = await task_manager.add(title="Title", content="Content")
 
-        # Update with None values - should still return True
-        success = await task_manager.update_task(task.task_id, title=None, content=None)
-        assert success is True
+        # Update with None values - should still succeed
+        result = await task_manager.update_task(task.task_id, title=None, content=None)
+        assert result.ok
 
         # Task should remain unchanged
         updated_task = await task_manager.get(task.task_id)
@@ -786,7 +790,7 @@ class TestResetTask:
         assert task_claimed.assignee == "member1"
 
         result = await task_manager.reset(task.task_id)
-        assert result is True
+        assert result.ok
 
         task_reset = await task_manager.get(task.task_id)
         assert task_reset.status == TaskStatus.PENDING.value
@@ -796,41 +800,45 @@ class TestResetTask:
     async def test_reset_nonexistent_task(self, task_manager):
         """Test resetting a non-existent task"""
         result = await task_manager.reset("nonexistent-task-id")
-        assert result is False
+        assert not result.ok
+        assert "not found" in result.reason
 
     @pytest.mark.asyncio
     async def test_reset_pending_task_fails(self, task_manager):
-        """Test resetting a pending task fails (invalid state transition)"""
+        """Test resetting a pending task fails with a clear reason."""
         task = await task_manager.add(title="Test Task", content="Content")
         assert task.status == TaskStatus.PENDING.value
 
         result = await task_manager.reset(task.task_id)
-        assert result is False
+        assert not result.ok
+        assert "pending" in result.reason
 
         task_after = await task_manager.get(task.task_id)
         assert task_after.status == TaskStatus.PENDING.value
 
     @pytest.mark.asyncio
     async def test_reset_completed_task_fails(self, task_manager):
-        """Test resetting a completed task fails (invalid state transition)"""
+        """Test resetting a completed task fails with a clear reason."""
         task = await task_manager.add(title="Test Task", content="Content")
         await task_manager.claim(task.task_id)
         await task_manager.complete(task.task_id)
 
         result = await task_manager.reset(task.task_id)
-        assert result is False
+        assert not result.ok
+        assert "completed" in result.reason
 
         task_after = await task_manager.get(task.task_id)
         assert task_after.status == TaskStatus.COMPLETED.value
 
     @pytest.mark.asyncio
     async def test_reset_cancelled_task_fails(self, task_manager):
-        """Test resetting a cancelled task fails (invalid state transition)"""
+        """Test resetting a cancelled task fails with a clear reason."""
         task = await task_manager.add(title="Test Task", content="Content")
         await task_manager.cancel(task.task_id)
 
         result = await task_manager.reset(task.task_id)
-        assert result is False
+        assert not result.ok
+        assert "cancelled" in result.reason
 
         task_after = await task_manager.get(task.task_id)
         assert task_after.status == TaskStatus.CANCELLED.value

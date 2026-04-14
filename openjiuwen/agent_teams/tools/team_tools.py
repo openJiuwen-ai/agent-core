@@ -741,9 +741,9 @@ class UpdateTaskTool(TeamTool):
         # Content update (title and/or content)
         if title or content:
             await self._cancel_member_if_claimed(task_id)
-            success = await self.task_manager.update_task(task_id, title=title, content=content)
-            if not success:
-                return ToolOutput(success=False, error="Failed to update task")
+            result = await self.task_manager.update_task(task_id, title=title, content=content)
+            if not result.ok:
+                return ToolOutput(success=False, error=result.reason)
             if title:
                 updated.append("title")
             if content:
@@ -756,22 +756,25 @@ class UpdateTaskTool(TeamTool):
         if assignee:
             if task.assignee and task.assignee != assignee:
                 await self.agent_team.cancel_member(member_name=task.assignee)
-                reset_ok = await self.task_manager.reset(task_id)
-                if not reset_ok:
+                reset_result = await self.task_manager.reset(task_id)
+                if not reset_result.ok:
                     return ToolOutput(
                         success=False,
-                        error=f"Failed to reset task before reassigning from {task.assignee} to {assignee}",
+                        error=(
+                            f"Failed to reset task before reassigning from "
+                            f"{task.assignee} to {assignee}: {reset_result.reason}"
+                        ),
                     )
-            success = await self.task_manager.assign(task_id, assignee)
-            if not success:
-                return ToolOutput(success=False, error=f"Failed to assign task (member not found or invalid status)")
+            assign_result = await self.task_manager.assign(task_id, assignee)
+            if not assign_result.ok:
+                return ToolOutput(success=False, error=assign_result.reason)
             updated.append("assignee")
 
         # Add dependencies (blocked_by edges)
         if add_blocked_by:
-            success = await self.task_manager.add_dependencies(task_id, add_blocked_by)
-            if not success:
-                return ToolOutput(success=False, error="Failed to add dependencies")
+            deps_result = await self.task_manager.add_dependencies(task_id, add_blocked_by)
+            if not deps_result.ok:
+                return ToolOutput(success=False, error=deps_result.reason)
             updated.append("blocked_by")
 
         if not updated:
@@ -823,15 +826,15 @@ class ClaimTaskTool(TeamTool):
             return ToolOutput(success=False, error="Task not found")
 
         if status == "claimed":
-            success = await self.task_manager.claim(task_id=task_id)
-            if not success:
-                return ToolOutput(success=False, error="Failed to claim task")
+            claim_result = await self.task_manager.claim(task_id=task_id)
+            if not claim_result.ok:
+                return ToolOutput(success=False, error=claim_result.reason)
             status_change = {"from": task.status, "to": TaskStatus.CLAIMED.value}
 
         elif status == "completed":
-            success = await self.task_manager.complete(task_id=task_id)
-            if not success:
-                return ToolOutput(success=False, error="Failed to complete task")
+            complete_result = await self.task_manager.complete(task_id=task_id)
+            if not complete_result.ok:
+                return ToolOutput(success=False, error=complete_result.reason)
             status_change = {"from": task.status, "to": TaskStatus.COMPLETED.value}
 
         else:

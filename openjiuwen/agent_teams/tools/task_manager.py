@@ -14,19 +14,21 @@ from typing import (
 
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.status import (
+    is_valid_transition,
     MemberMode,
+    TASK_TRANSITIONS,
     TaskStatus,
 )
-from openjiuwen.agent_teams.schema.task import TaskDetail, TaskListResult, TaskSummary
+from openjiuwen.agent_teams.schema.task import (
+    TaskDetail,
+    TaskListResult,
+    TaskOpResult,
+    TaskSummary,
+)
 from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
     TeamTaskBase,
     TeamTaskDependencyBase,
-)
-from openjiuwen.agent_teams.schema.status import (
-    is_valid_transition,
-    TASK_TRANSITIONS,
-    TaskStatus,
 )
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
@@ -452,7 +454,7 @@ class TeamTaskManager:
         """
         return await self.db.get_task(task_id)
 
-    async def assign(self, task_id: str, assignee: str) -> bool:
+    async def assign(self, task_id: str, assignee: str) -> TaskOpResult:
         """Assign a task to a member and mark it as claimed (Leader only).
 
         Atomically sets the assignee and transitions the task to ``CLAIMED``
@@ -468,25 +470,32 @@ class TeamTaskManager:
             assignee: Member ID to assign.
 
         Returns:
-            True if assigned (or already assigned to the same member),
-            False otherwise.
+            ``TaskOpResult.success()`` on assign (or idempotent re-assign);
+            ``TaskOpResult.fail(reason)`` with the specific failure cause
+            otherwise.
         """
         task = await self.get(task_id)
         if not task:
-            team_logger.error(f"Task {task_id} not found")
-            return False
+            return TaskOpResult.fail(f"Task {task_id} not found")
 
         # Idempotent re-assign: same member, status already claimed → no-op success.
         if task.assignee == assignee and task.status == TaskStatus.CLAIMED.value:
             team_logger.debug(f"Task {task_id} already assigned to {assignee}; no-op")
-            return True
+            return TaskOpResult.success()
+
+        if task.assignee and task.assignee != assignee:
+            return TaskOpResult.fail(
+                f"Task {task_id} is already claimed by {task.assignee}; "
+                f"reset the task before reassigning to {assignee}"
+            )
 
         success = await self.db.assign_task(task_id, assignee)
         if not success:
-            return False
+            return TaskOpResult.fail(
+                f"Database rejected assign for task {task_id} "
+                f"(invalid state transition from {task.status})"
+            )
 
-        # Notify the assigned member via message
-        content = f"Task #{task_id} \"{task.title}\" has been assigned to you."
         await self.messager.publish(
             topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
             message=EventMessage.from_event(TaskClaimedEvent(
@@ -496,9 +505,11 @@ class TeamTaskManager:
             )),
         )
         team_logger.info(f"Task {task_id} assigned to {assignee}, notification sent")
-        return True
+        return TaskOpResult.success()
 
-    async def add_dependencies(self, task_id: str, depends_on_ids: List[str]) -> bool:
+    async def add_dependencies(
+        self, task_id: str, depends_on_ids: List[str]
+    ) -> TaskOpResult:
         """Add dependencies to an existing task and refresh its status.
 
         For each new dependency, adds the dependency edge. Then checks
@@ -510,12 +521,11 @@ class TeamTaskManager:
             depends_on_ids: Task IDs that this task should depend on.
 
         Returns:
-            True if all dependencies added, False on error.
+            ``TaskOpResult`` describing the outcome.
         """
         task = await self.get(task_id)
         if not task:
-            team_logger.error(f"Task {task_id} not found")
-            return False
+            return TaskOpResult.fail(f"Task {task_id} not found")
 
         for dep_id in depends_on_ids:
             await self.db.add_task_dependency(
@@ -533,39 +543,43 @@ class TeamTaskManager:
             await self.db.update_task_status(task_id, TaskStatus.PENDING.value)
             team_logger.info(f"Task {task_id} unblocked (all deps resolved)")
 
-        return True
+        return TaskOpResult.success()
 
-    async def claim(self, task_id: str) -> bool:
+    async def claim(self, task_id: str) -> TaskOpResult:
         """Claim a task for the current member.
 
         Args:
             task_id: Task identifier.
+
+        Returns:
+            ``TaskOpResult`` carrying the specific failure reason on error
+            so the caller (typically a team tool) can pass it through to
+            the LLM instead of dropping it to the log sink.
         """
         member_name = self.member_name
         task = await self.get(task_id)
         if not task:
-            team_logger.error(f"Task {task_id} not found")
-            return False
+            return TaskOpResult.fail(f"Task {task_id} not found")
 
         member = await self.db.get_member(member_name, self.team_name)
         if not member:
-            team_logger.error(f"Member {member_name} not found in team {self.team_name}")
-            return False
+            return TaskOpResult.fail(
+                f"Member {member_name} not found in team {self.team_name}"
+            )
 
         # Idempotent re-claim: if the caller already owns this task, succeed silently.
         if task.assignee == member_name and task.status == TaskStatus.CLAIMED.value:
             team_logger.debug(f"Task {task_id} already claimed by {member_name}; no-op")
-            return True
+            return TaskOpResult.success()
 
         # Claim conflict must be reported before the state-transition check —
         # otherwise a CLAIMED task held by someone else surfaces as the
         # misleading "invalid claimed → claimed transition" error.
         if task.assignee:
-            team_logger.warning(
+            return TaskOpResult.fail(
                 f"Task {task_id} is already claimed by {task.assignee}, "
                 f"{member_name} cannot claim it"
             )
-            return False
 
         # Validate state transition (blocks e.g. COMPLETED/CANCELLED/BLOCKED claims).
         if not is_valid_transition(
@@ -573,78 +587,79 @@ class TeamTaskManager:
             TaskStatus.CLAIMED,
             TASK_TRANSITIONS
         ):
-            team_logger.error(
-                f"Invalid state transition for task {task_id}: "
-                f"{task.status} -> {TaskStatus.CLAIMED.value}"
+            return TaskOpResult.fail(
+                f"Task {task_id} cannot be claimed from status "
+                f"'{task.status}' (only pending tasks are claimable)"
             )
-            return False
 
         # Claim task
         success = await self.db.claim_task(task_id, member_name)
-        if success:
-            team_logger.info(f"Task {task_id} claimed by member {member_name}")
+        if not success:
+            return TaskOpResult.fail(
+                f"Database rejected claim for task {task_id} "
+                f"(likely a concurrent claim race)"
+            )
 
-            # Publish task claimed event
-            try:
-                await self.messager.publish(
-                    topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
-                    message=EventMessage.from_event(TaskClaimedEvent(
-                        team_name=self.team_name,
-                        task_id=task_id,
-                        member_name=member_name
-                    )),
-                )
-                team_logger.debug(f"Task claimed event published: {task_id}")
-            except Exception as e:
-                team_logger.error(f"Failed to publish task claimed event for {task_id}: {e}")
+        team_logger.info(f"Task {task_id} claimed by member {member_name}")
 
-            return True
+        try:
+            await self.messager.publish(
+                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
+                message=EventMessage.from_event(TaskClaimedEvent(
+                    team_name=self.team_name,
+                    task_id=task_id,
+                    member_name=member_name
+                )),
+            )
+            team_logger.debug(f"Task claimed event published: {task_id}")
+        except Exception as e:
+            team_logger.error(f"Failed to publish task claimed event for {task_id}: {e}")
 
-        return False
+        return TaskOpResult.success()
 
-    async def complete(self, task_id: str) -> bool:
-        """Complete a task
+    async def complete(self, task_id: str) -> TaskOpResult:
+        """Complete a task.
 
         Updates task status to 'completed' and unblocks dependent tasks.
         This operation is atomic to prevent race conditions.
 
         Args:
-            task_id: Task identifier
+            task_id: Task identifier.
 
         Returns:
-            True if successful, False otherwise
-
-        Example:
-            success = task_manager.complete(task_id="task123")
+            ``TaskOpResult`` describing the outcome.
         """
         # Get member to check mode
         member = await self.db.get_member(self.member_name, self.team_name)
         if not member:
-            team_logger.error(f"Member {self.member_name} not found in team {self.team_name}")
-            return False
+            return TaskOpResult.fail(
+                f"Member {self.member_name} not found in team {self.team_name}"
+            )
 
         # Check if member is in PLAN_MODE
         if member.mode == MemberMode.PLAN_MODE.value:
-            # Get task to check status
             task = await self.db.get_task(task_id)
             if not task:
-                team_logger.error(f"Task {task_id} not found")
-                return False
+                return TaskOpResult.fail(f"Task {task_id} not found")
 
             # PLAN_MODE members can only complete PLAN_APPROVED tasks
             if task.status != TaskStatus.PLAN_APPROVED.value:
-                team_logger.error(
-                    f"PLAN_MODE member cannot complete task {task_id} with status {task.status}, "
-                    f"only PLAN_APPROVED tasks can be completed"
+                return TaskOpResult.fail(
+                    f"PLAN_MODE member cannot complete task {task_id} in status "
+                    f"'{task.status}'; only plan_approved tasks can be completed"
                 )
-                return False
 
         # Complete task atomically - this handles state validation, dependency resolution,
         # and unblocking dependent tasks in a single transaction to prevent race conditions
         result = await self.db.complete_task(task_id)
         if not result:
-            team_logger.error(f"Failed to complete task {task_id}")
-            return False
+            current = await self.db.get_task(task_id)
+            if current is None:
+                return TaskOpResult.fail(f"Task {task_id} not found")
+            return TaskOpResult.fail(
+                f"Task {task_id} cannot be completed from status "
+                f"'{current.status}' (must be claimed or plan_approved)"
+            )
 
         # Extract completed task info and unblocked tasks
         completed_task = result.get("task")
@@ -683,7 +698,7 @@ class TeamTaskManager:
         if unblocked_tasks:
             team_logger.info(f"Unblocked {len(unblocked_tasks)} tasks after completing {task_id}")
 
-        return True
+        return TaskOpResult.success()
 
     async def cancel(self, task_id: str) -> Optional[TeamTaskBase]:
         """Cancel a task
@@ -805,39 +820,34 @@ class TeamTaskManager:
         task_id: str,
         title: Optional[str] = None,
         content: Optional[str] = None
-    ) -> bool:
-        """Update task content
+    ) -> TaskOpResult:
+        """Update task title / content.
 
-        Updates task title and/or content. Publishes TASK_UPDATED event on success.
+        Publishes ``TASK_UPDATED`` on success. Does not bump the task's
+        ``updated_at`` column — that timestamp tracks status transitions
+        only.
 
         Args:
-            task_id: Task identifier
-            title: Optional new title
-            content: Optional new content
+            task_id: Task identifier.
+            title: Optional new title.
+            content: Optional new content.
 
         Returns:
-            True if successful, False otherwise
-
-        Example:
-            success = task_manager.update_task(
-                task_id="task123",
-                title="Updated title",
-                content="Updated content"
-            )
+            ``TaskOpResult`` describing the outcome.
         """
         task = await self.get(task_id)
         if not task:
-            team_logger.error(f"Task {task_id} not found")
-            return False
+            return TaskOpResult.fail(f"Task {task_id} not found")
 
-        # Update task in database
         success = await self.db.update_task(task_id, title=title, content=content)
         if not success:
-            return False
+            return TaskOpResult.fail(
+                f"Task {task_id} cannot be edited while in status '{task.status}'; "
+                f"content updates are only allowed on pending / blocked tasks"
+            )
 
         team_logger.info(f"Task {task_id} updated")
 
-        # Publish task updated event
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
@@ -850,46 +860,52 @@ class TeamTaskManager:
         except Exception as e:
             team_logger.error(f"Failed to publish task updated event for {task_id}: {e}")
 
-        return True
+        return TaskOpResult.success()
 
-    async def reset(self, task_id: str) -> bool:
-        """Reset a task from CLAIMED to PENDING and clear assignee
+    async def reset(self, task_id: str) -> TaskOpResult:
+        """Reset a claimed task back to PENDING and clear assignee.
 
-        This method resets a claimed task back to pending status and clears
-        assignee field. Useful for re-assigning task to other members.
+        Useful for re-assigning a task to another member.
 
         Args:
-            task_id: Task identifier
+            task_id: Task identifier.
 
         Returns:
-            True if successful, False otherwise
-
-        Example:
-            success = task_manager.reset(task_id="task123")
+            ``TaskOpResult`` describing the outcome.
         """
+        existing = await self.db.get_task(task_id)
+        if not existing:
+            return TaskOpResult.fail(f"Task {task_id} not found")
+
         result = await self.db.reset_task(task_id)
-        if result:
-            team_logger.info(f"Task {task_id} reset successfully")
-            return True
-        return False
+        if not result:
+            return TaskOpResult.fail(
+                f"Task {task_id} cannot be reset from status '{existing.status}'; "
+                f"only claimed tasks can be reset"
+            )
+        team_logger.info(f"Task {task_id} reset successfully")
+        return TaskOpResult.success()
 
-    async def approve_plan(self, task_id: str) -> bool:
-        """Approve a task plan for PLAN_MODE members
+    async def approve_plan(self, task_id: str) -> TaskOpResult:
+        """Approve a task plan for PLAN_MODE members.
 
-        This method transitions a task from CLAIMED to PLAN_APPROVED.
-        Only team leader can call this method.
+        Transitions a task from CLAIMED to PLAN_APPROVED. Leader only.
 
         Args:
-            task_id: Task identifier
+            task_id: Task identifier.
 
         Returns:
-            True if successful, False otherwise
-
-        Example:
-            success = task_manager.approve_plan(task_id="task123")
+            ``TaskOpResult`` describing the outcome.
         """
+        existing = await self.db.get_task(task_id)
+        if not existing:
+            return TaskOpResult.fail(f"Task {task_id} not found")
+
         task = await self.db.approve_plan_task(task_id)
-        if task:
-            team_logger.info(f"Task {task_id} approved successfully")
-            return True
-        return False
+        if not task:
+            return TaskOpResult.fail(
+                f"Task {task_id} cannot be plan-approved from status "
+                f"'{existing.status}'; only claimed tasks can be approved"
+            )
+        team_logger.info(f"Task {task_id} approved successfully")
+        return TaskOpResult.success()
