@@ -80,6 +80,9 @@ class DispatcherHost(Protocol):
     async def cancel_agent(self) -> None:
         ...
 
+    async def shutdown_self(self) -> None:
+        ...
+
     async def pause_polls(self) -> None:
         ...
 
@@ -162,6 +165,20 @@ class EventDispatcher:
         if event_type == TeamEvent.STANDBY:
             team_logger.info("[{}] received TEAM_STANDBY, pausing polls", member_name)
             await host.pause_polls()
+            return
+
+        if event_type == TeamEvent.CLEANED:
+            # Leader's own CLEANED event is filtered out upstream by sender_id;
+            # only teammates land here. The team row (and the member row) has
+            # already been wiped in the database, so the teammate must abandon
+            # its loop or it will spin forever waiting for events on a dead
+            # team. shutdown_self cancels the running round (if any) and
+            # closes the stream so the natural _finalize_round path tears
+            # down the coordination loop and the coroutine exits.
+            team_logger.info(
+                "[{}] received TEAM_CLEANED, shutting down coordination", member_name,
+            )
+            await host.shutdown_self()
             return
 
         if event_type == TeamEvent.TOOL_APPROVAL_RESULT:
@@ -507,7 +524,7 @@ class EventDispatcher:
         if from_poll and host.role == TeamRole.LEADER and not incomplete:
             return
 
-        team_logger.info("[{}] nudge_idle_agent: {} incomplete tasks", member_name, len(incomplete))
+        team_logger.debug("[{}] nudge_idle_agent: {} incomplete tasks", member_name, len(incomplete))
         if host.role == TeamRole.LEADER:
             if not incomplete:
                 lifecycle = host.lifecycle

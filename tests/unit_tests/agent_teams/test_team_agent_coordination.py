@@ -30,6 +30,7 @@ from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     MemberStatusChangedEvent,
     MessageEvent,
+    TeamCleanedEvent,
     ToolApprovalResultEvent,
 )
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
@@ -654,6 +655,37 @@ async def test_stale_pending_teammate_skips_check():
 
     agent._task_manager.list_tasks.assert_not_called()
     agent._start_agent.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_team_cleaned_event_shuts_down_teammate():
+    """A teammate receiving TEAM_CLEANED must call shutdown_self exactly once."""
+    agent = _make_teammate()
+    agent._team_member = None
+    agent.shutdown_self = AsyncMock()
+
+    event = EventMessage.from_event(TeamCleanedEvent(team_name="test-team"))
+    await agent._dispatcher.dispatch(event)
+
+    agent.shutdown_self.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_self_cancels_running_round_and_closes_stream():
+    """shutdown_self cancels the in-flight agent task and unblocks stream()."""
+    agent = _make_teammate()
+    agent._team_member = None
+    agent._stream_queue = asyncio.Queue()
+
+    fake_task = MagicMock()
+    fake_task.done.return_value = False
+    agent._agent_task = fake_task
+
+    await agent.shutdown_self()
+
+    fake_task.cancel.assert_called_once()
+    sentinel = await agent._stream_queue.get()
+    assert sentinel is None
 
 
 @pytest.mark.asyncio

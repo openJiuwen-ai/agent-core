@@ -916,6 +916,30 @@ class TeamAgent(BaseAgent):
             await self._update_execution(ExecutionStatus.CANCELLING)
             self._agent_task.cancel()
 
+    async def shutdown_self(self) -> None:
+        """Force-shutdown self in response to TEAM_CLEANED.
+
+        Called when the leader has dissolved the team and the database
+        team/member rows are gone. Cancels any in-flight round and closes
+        the stream so the natural ``stream() → _finalize_round →
+        _stop_coordination`` path tears down the coordination loop and
+        the coroutine exits. DB status writes are best-effort because the
+        backing rows may already have been cascade-deleted.
+        """
+        member_name = self._member_name() or "?"
+        team_logger.info("[{}] shutdown_self requested", member_name)
+        if self._agent_task and not self._agent_task.done():
+            self._agent_task.cancel()
+        if self._team_member is not None:
+            try:
+                await self._team_member.update_status(MemberStatus.SHUTDOWN)
+            except Exception as e:
+                team_logger.debug(
+                    "[{}] post-clean status update failed (expected): {}",
+                    member_name, e,
+                )
+        self._close_stream()
+
     async def _start_agent(
         self,
         initial_message: Any,
