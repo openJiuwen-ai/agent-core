@@ -429,6 +429,22 @@ def _make_claimed_task(
     return task
 
 
+def _make_pending_task(
+    task_id: str,
+    *,
+    updated_at: int | None,
+    title: str = "Pending work",
+):
+    task = MagicMock()
+    task.task_id = task_id
+    task.title = title
+    task.content = f"Work on {task_id}"
+    task.status = "pending"
+    task.assignee = None
+    task.updated_at = updated_at
+    return task
+
+
 @pytest.mark.asyncio
 async def test_stale_claim_leader_messages_assignee():
     """Leader messages a member whose claimed task has aged past the threshold."""
@@ -544,6 +560,100 @@ async def test_stale_claim_throttle_drops_unrelated_entries():
 
     assert "task-6" not in agent._dispatcher._last_stale_nudge
     assert "task-5" in agent._dispatcher._last_stale_nudge
+
+
+@pytest.mark.asyncio
+async def test_stale_pending_leader_self_nudges_with_hint():
+    """Leader self-prompts about stale pending tasks so its LLM picks targets."""
+    agent = _make_leader()
+    stale = _make_pending_task("p-1", updated_at=0, title="Argue for ACP")
+
+    agent._task_manager = MagicMock()
+    agent._task_manager.list_tasks = AsyncMock(return_value=[stale])
+    agent._is_agent_running = lambda: False
+    agent._start_agent = AsyncMock()
+    agent.steer = AsyncMock()
+
+    await agent._dispatcher._check_stale_pending_tasks()
+
+    agent._task_manager.list_tasks.assert_awaited_once_with(status="pending")
+    agent._start_agent.assert_awaited_once()
+    agent.steer.assert_not_called()
+    content = agent._start_agent.await_args.args[0]
+    assert "p-1" in content
+    assert "send_message" in content
+    assert "claim_task" in content
+    assert "p-1" in agent._dispatcher._last_pending_nudge
+
+
+@pytest.mark.asyncio
+async def test_stale_pending_leader_steers_when_running():
+    """A running leader should still receive the hint via steer."""
+    agent = _make_leader()
+    stale = _make_pending_task("p-2", updated_at=0)
+
+    agent._task_manager = MagicMock()
+    agent._task_manager.list_tasks = AsyncMock(return_value=[stale])
+    agent._is_agent_running = lambda: True
+    agent._start_agent = AsyncMock()
+    agent.steer = AsyncMock()
+
+    await agent._dispatcher._check_stale_pending_tasks()
+
+    agent.steer.assert_awaited_once()
+    agent._start_agent.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stale_pending_fresh_task_skipped():
+    """A pending task whose updated_at is recent should not trigger a nudge."""
+    agent = _make_leader()
+    fresh = _make_pending_task("p-3", updated_at=int(time.time() * 1000))
+
+    agent._task_manager = MagicMock()
+    agent._task_manager.list_tasks = AsyncMock(return_value=[fresh])
+    agent._is_agent_running = lambda: False
+    agent._start_agent = AsyncMock()
+
+    await agent._dispatcher._check_stale_pending_tasks()
+
+    agent._start_agent.assert_not_called()
+    assert "p-3" not in agent._dispatcher._last_pending_nudge
+
+
+@pytest.mark.asyncio
+async def test_stale_pending_throttled_after_first_nudge():
+    """Follow-up polls inside the same window should not re-nudge."""
+    agent = _make_leader()
+    stale = _make_pending_task("p-4", updated_at=0)
+
+    agent._task_manager = MagicMock()
+    agent._task_manager.list_tasks = AsyncMock(return_value=[stale])
+    agent._is_agent_running = lambda: False
+    agent._start_agent = AsyncMock()
+
+    await agent._dispatcher._check_stale_pending_tasks()
+    await agent._dispatcher._check_stale_pending_tasks()
+
+    agent._start_agent.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stale_pending_teammate_skips_check():
+    """Only the leader should self-prompt about pending tasks."""
+    agent = _make_teammate()
+    agent._team_member = None
+    stale = _make_pending_task("p-5", updated_at=0)
+
+    agent._task_manager = MagicMock()
+    agent._task_manager.list_tasks = AsyncMock(return_value=[stale])
+    agent._is_agent_running = lambda: False
+    agent._start_agent = AsyncMock()
+
+    await agent._dispatcher._check_stale_pending_tasks()
+
+    agent._task_manager.list_tasks.assert_not_called()
+    agent._start_agent.assert_not_called()
 
 
 @pytest.mark.asyncio
