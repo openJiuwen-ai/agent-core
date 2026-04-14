@@ -49,6 +49,45 @@ class TestEvolutionPatch:
         assert data["target"] == "body"
 
     @staticmethod
+    def test_to_dict_includes_script_fields():
+        patch = make_patch(
+            target=EvolutionTarget.SCRIPT,
+            section="Scripts",
+            script_filename="gen_chart.py",
+            script_language="python",
+            script_purpose="generate bar chart",
+        )
+        data = patch.to_dict()
+        assert data["target"] == "script"
+        assert data["script_filename"] == "gen_chart.py"
+        assert data["script_language"] == "python"
+        assert data["script_purpose"] == "generate bar chart"
+
+    @staticmethod
+    def test_to_dict_omits_none_script_fields():
+        patch = make_patch()
+        data = patch.to_dict()
+        assert "script_filename" not in data
+        assert "script_language" not in data
+        assert "script_purpose" not in data
+
+    @staticmethod
+    def test_from_dict_with_script_target():
+        patch = EvolutionPatch.from_dict({
+            "section": "Scripts",
+            "action": "append",
+            "content": "print('hello')",
+            "target": "script",
+            "script_filename": "hello.py",
+            "script_language": "python",
+            "script_purpose": "demo",
+        })
+        assert patch.target == EvolutionTarget.SCRIPT
+        assert patch.script_filename == "hello.py"
+        assert patch.script_language == "python"
+        assert patch.script_purpose == "demo"
+
+    @staticmethod
     def test_from_dict_fallback_target():
         patch = EvolutionPatch.from_dict(
             {

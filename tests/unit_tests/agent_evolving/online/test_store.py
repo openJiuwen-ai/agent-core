@@ -252,3 +252,175 @@ class TestEvolutionStoreSysOperationPath:
         target = tmp_path / "x.txt"
         await store._write_file_text(target, "hello")
         assert target.read_text(encoding="utf-8") == "hello"
+
+
+class TestEvolutionStorePersistScript:
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_persist_script_writes_file_and_replaces_content(tmp_path: Path):
+        root = tmp_path / "skills"
+        skill_dir = prepare_skill(root, "skill-a")
+        store = EvolutionStore(str(root))
+
+        record = make_record(
+            "ev_script_1",
+            target=EvolutionTarget.SCRIPT,
+            section="Scripts",
+            content="import matplotlib\nprint('chart')",
+        )
+        record.change.script_language = "python"
+        record.change.script_purpose = "chart generation"
+
+        await store._persist_script(skill_dir, record)
+
+        scripts_dir = skill_dir / "evolution" / "scripts"
+        assert scripts_dir.exists()
+
+        written_files = list(scripts_dir.glob("*.py"))
+        assert len(written_files) == 1
+        assert "import matplotlib" in written_files[0].read_text(encoding="utf-8")
+
+        assert record.change.content.startswith("Script:")
+        assert "python" in record.change.content
+        assert record.change.script_filename is not None
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_persist_script_uses_provided_filename(tmp_path: Path):
+        root = tmp_path / "skills"
+        skill_dir = prepare_skill(root, "skill-a")
+        store = EvolutionStore(str(root))
+
+        record = make_record(
+            "ev_script_2",
+            target=EvolutionTarget.SCRIPT,
+            section="Scripts",
+            content="console.log('hi')",
+        )
+        record.change.script_filename = "hello.js"
+        record.change.script_language = "javascript"
+
+        await store._persist_script(skill_dir, record)
+
+        script_path = skill_dir / "evolution" / "scripts" / "hello.js"
+        assert script_path.exists()
+        assert "console.log" in script_path.read_text(encoding="utf-8")
+
+
+class TestEvolutionStoreAppendScriptRecord:
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_append_script_record_persists_and_renders(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(root, "skill-a", "# Skill A\n\n## Troubleshooting\n- old\n")
+        store = EvolutionStore(str(root))
+
+        record = make_record(
+            "ev_s1",
+            target=EvolutionTarget.SCRIPT,
+            section="Scripts",
+            content="import pandas\ndf = pandas.read_csv('data.csv')",
+        )
+        record.change.script_language = "python"
+        record.change.script_purpose = "data processing"
+
+        await store.append_record("skill-a", record)
+
+        script_file = root / "skill-a" / "evolution" / "scripts"
+        assert script_file.exists()
+        py_files = list(script_file.glob("*.py"))
+        assert len(py_files) == 1
+
+        skill_md = (root / "skill-a" / "SKILL.md").read_text(encoding="utf-8")
+        assert "evolution-index-start" in skill_md
+        assert "Scripts" in skill_md
+
+
+class TestEvolutionStoreRenderMarkdown:
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_render_creates_section_files(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(root, "skill-a")
+        store = EvolutionStore(str(root))
+
+        await store.append_record(
+            "skill-a",
+            make_record("ev_body_1", target=EvolutionTarget.BODY, section="Troubleshooting", content="fix bug"),
+        )
+        await store.append_record(
+            "skill-a",
+            make_record("ev_body_2", target=EvolutionTarget.BODY, section="Examples", content="example case"),
+        )
+
+        evo_dir = root / "skill-a" / "evolution"
+        assert (evo_dir / "troubleshooting.md").exists()
+        assert (evo_dir / "examples.md").exists()
+
+        ts_content = (evo_dir / "troubleshooting.md").read_text(encoding="utf-8")
+        assert "fix bug" in ts_content
+        assert "Auto-generated" in ts_content
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_render_creates_script_index(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(root, "skill-a")
+        store = EvolutionStore(str(root))
+
+        record = make_record(
+            "ev_s1",
+            target=EvolutionTarget.SCRIPT,
+            section="Scripts",
+            content="print('hello')",
+        )
+        record.change.script_language = "python"
+        record.change.script_purpose = "greeting"
+
+        await store.append_record("skill-a", record)
+
+        index_path = root / "skill-a" / "evolution" / "scripts" / "_index.md"
+        assert index_path.exists()
+        index_content = index_path.read_text(encoding="utf-8")
+        assert "Script Index" in index_content
+        assert "python" in index_content
+        assert "greeting" in index_content
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_render_updates_skill_md_index_block(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(root, "skill-a", "# Skill A\n\nSome content\n")
+        store = EvolutionStore(str(root))
+
+        await store.append_record(
+            "skill-a",
+            make_record("ev_1", target=EvolutionTarget.BODY, content="body fix"),
+        )
+
+        skill_md = (root / "skill-a" / "SKILL.md").read_text(encoding="utf-8")
+        assert "<!-- evolution-index-start -->" in skill_md
+        assert "<!-- evolution-index-end -->" in skill_md
+        assert "Evolution Experiences" in skill_md
+        assert "**1**" in skill_md
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_render_replaces_existing_index_block(tmp_path: Path):
+        root = tmp_path / "skills"
+        initial_content = (
+            "# Skill A\n\nContent\n\n"
+            "<!-- evolution-index-start -->\nold index\n<!-- evolution-index-end -->\n"
+        )
+        prepare_skill(root, "skill-a", initial_content)
+        store = EvolutionStore(str(root))
+
+        await store.append_record(
+            "skill-a",
+            make_record("ev_new", target=EvolutionTarget.BODY, content="new fix"),
+        )
+
+        skill_md = (root / "skill-a" / "SKILL.md").read_text(encoding="utf-8")
+        assert "old index" not in skill_md
+        assert "Evolution Experiences" in skill_md
+        assert skill_md.count("evolution-index-start") == 1

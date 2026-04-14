@@ -268,7 +268,7 @@ def test_detect_signals_deduplicates_with_processed_keys(tmp_path, monkeypatch):
 
     assert len(first) == 1
     assert len(second) == 0
-    assert ("tool_failure", "same-excerpt") in rail.processed_signal_keys
+    assert ("tool_failure", "bash", "skill-a", "same-excerpt") in rail.processed_signal_keys
 
 
 def test_detect_signals_clears_processed_keys_when_exceed_limit(tmp_path, monkeypatch):
@@ -388,3 +388,137 @@ async def test_emit_generated_records_and_drain_pending_events(tmp_path):
     assert event.payload["_evolution_data"]["skill_name"] == "skill-a"
     assert len(event.payload["_evolution_data"]["records"]) == 1
     assert rail.drain_pending_approval_events() == []
+
+
+# =============================================================================
+# _infer_primary_skill Tests
+# =============================================================================
+
+
+def test_infer_primary_skill_picks_most_frequent(tmp_path):
+    rail = _make_rail(tmp_path)
+    messages = [
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"arguments": "/skills/skill-a/SKILL.md"},
+            {"arguments": "/skills/skill-b/SKILL.md"},
+        ]},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"arguments": "/skills/skill-a/SKILL.md"},
+        ]},
+    ]
+    result = rail._infer_primary_skill(messages, ["skill-a", "skill-b"])
+    assert result == "skill-a"
+
+
+def test_infer_primary_skill_returns_none_when_no_match(tmp_path):
+    rail = _make_rail(tmp_path)
+    messages = [
+        {"role": "user", "content": "just chatting"},
+    ]
+    result = rail._infer_primary_skill(messages, ["skill-a"])
+    assert result is None
+
+
+def test_infer_primary_skill_from_tool_result_content(tmp_path):
+    rail = _make_rail(tmp_path)
+    messages = [
+        {"role": "tool", "content": "Content of /skills/skill-x/SKILL.md: ..."},
+    ]
+    result = rail._infer_primary_skill(messages, ["skill-x"])
+    assert result == "skill-x"
+
+
+def test_infer_primary_skill_ignores_unknown_skills(tmp_path):
+    rail = _make_rail(tmp_path)
+    messages = [
+        {"role": "tool", "content": "/skills/unknown-skill/SKILL.md"},
+    ]
+    result = rail._infer_primary_skill(messages, ["skill-a"])
+    assert result is None
+
+
+# =============================================================================
+# Zero-signal fallback & unattributed signal tests
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_after_invoke_zero_signals_creates_conversation_review(tmp_path):
+    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+
+    rail._collect_parsed_messages = AsyncMock(return_value=[
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"arguments": "/skills/skill-a/SKILL.md"},
+        ]},
+        {"role": "user", "content": "hello"},
+    ])
+    rail._store.list_skill_names = Mock(return_value=["skill-a"])
+    rail._detect_signals = Mock(return_value=[])
+    rail._infer_primary_skill = Mock(return_value="skill-a")
+    rail._generate_experience_for_skill = AsyncMock(return_value=[])
+    rail._store.append_record = AsyncMock()
+
+    await rail.after_invoke(AgentCallbackContext(agent=None, inputs=None, session=None))
+
+    rail._generate_experience_for_skill.assert_awaited_once()
+    call_args = rail._generate_experience_for_skill.await_args
+    assert call_args.args[0] == "skill-a"
+    signals_passed = call_args.args[1]
+    assert len(signals_passed) == 1
+    assert signals_passed[0].signal_type == "conversation_review"
+
+
+@pytest.mark.asyncio
+async def test_after_invoke_zero_signals_no_primary_skill_returns(tmp_path):
+    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+
+    rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "hi"}])
+    rail._store.list_skill_names = Mock(return_value=["skill-a"])
+    rail._detect_signals = Mock(return_value=[])
+    rail._infer_primary_skill = Mock(return_value=None)
+    rail._generate_experience_for_skill = AsyncMock()
+
+    await rail.after_invoke(AgentCallbackContext(agent=None, inputs=None, session=None))
+
+    rail._generate_experience_for_skill.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_after_invoke_unattributed_signals_get_fallback_skill(tmp_path):
+    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+
+    attributed = _make_signal("skill-a", excerpt="attributed")
+    unattributed = _make_signal(None, excerpt="unattributed")
+
+    rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "hi"}])
+    rail._store.list_skill_names = Mock(return_value=["skill-a"])
+    rail._detect_signals = Mock(return_value=[attributed, unattributed])
+    rail._generate_experience_for_skill = AsyncMock(return_value=[])
+    rail._store.append_record = AsyncMock()
+
+    await rail.after_invoke(AgentCallbackContext(agent=None, inputs=None, session=None))
+
+    assert unattributed.skill_name == "skill-a"
+    rail._generate_experience_for_skill.assert_awaited_once()
+    call_args = rail._generate_experience_for_skill.await_args
+    assert len(call_args.args[1]) == 2
+
+
+@pytest.mark.asyncio
+async def test_after_invoke_multiple_attributed_skills_no_fallback(tmp_path):
+    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+
+    sig_a = _make_signal("skill-a", excerpt="a")
+    sig_b = _make_signal("skill-b", excerpt="b")
+    sig_none = _make_signal(None, excerpt="none")
+
+    rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "hi"}])
+    rail._store.list_skill_names = Mock(return_value=["skill-a", "skill-b"])
+    rail._detect_signals = Mock(return_value=[sig_a, sig_b, sig_none])
+    rail._generate_experience_for_skill = AsyncMock(return_value=[])
+    rail._store.append_record = AsyncMock()
+
+    await rail.after_invoke(AgentCallbackContext(agent=None, inputs=None, session=None))
+
+    assert sig_none.skill_name is None
+    assert rail._generate_experience_for_skill.await_count == 2

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
 
-VALID_SECTIONS = {"Instructions", "Examples", "Troubleshooting"}
+VALID_SECTIONS = {"Instructions", "Examples", "Troubleshooting", "Scripts"}
 
 
 class EvolutionCategory(str, Enum):
@@ -25,6 +25,7 @@ class EvolutionTarget(str, Enum):
 
     DESCRIPTION = "description"
     BODY = "body"
+    SCRIPT = "script"
 
 
 @dataclass
@@ -37,6 +38,11 @@ class EvolutionPatch:
     target: EvolutionTarget = EvolutionTarget.BODY
     skip_reason: Optional[str] = None
     merge_target: Optional[str] = None
+    script_filename: Optional[str] = None
+    script_language: Optional[str] = None
+    script_purpose: Optional[str] = None
+
+    _OPTIONAL_FIELDS = ("skip_reason", "merge_target", "script_filename", "script_language", "script_purpose")
 
     def to_dict(self) -> dict:
         payload = {
@@ -45,10 +51,10 @@ class EvolutionPatch:
             "content": self.content,
             "target": self.target.value,
         }
-        if self.skip_reason:
-            payload["skip_reason"] = self.skip_reason
-        if self.merge_target:
-            payload["merge_target"] = self.merge_target
+        for key in self._OPTIONAL_FIELDS:
+            value = getattr(self, key)
+            if value:
+                payload[key] = value
         return payload
 
     @classmethod
@@ -65,6 +71,9 @@ class EvolutionPatch:
             target=target,
             skip_reason=data.get("skip_reason"),
             merge_target=data.get("merge_target"),
+            script_filename=data.get("script_filename"),
+            script_language=data.get("script_language"),
+            script_purpose=data.get("script_purpose"),
         )
 
 
