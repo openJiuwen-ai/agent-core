@@ -671,6 +671,23 @@ async def test_team_cleaned_event_shuts_down_teammate():
 
 
 @pytest.mark.asyncio
+async def test_team_cleaned_event_ignored_by_leader():
+    """A leader must NEVER shutdown_self from its own CLEANED event.
+
+    A persistent leader has to survive clean_team to accept the next
+    interaction; a temporary leader's teardown is driven by the natural
+    _finalize_round path instead.
+    """
+    agent = _make_leader()
+    agent.shutdown_self = AsyncMock()
+
+    event = EventMessage.from_event(TeamCleanedEvent(team_name="test-team"))
+    await agent._dispatcher.dispatch(event)
+
+    agent.shutdown_self.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_shutdown_self_cancels_running_round_and_closes_stream():
     """shutdown_self cancels the in-flight agent task and unblocks stream()."""
     agent = _make_teammate()

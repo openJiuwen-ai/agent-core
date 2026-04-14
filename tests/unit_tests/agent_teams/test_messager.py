@@ -13,7 +13,7 @@ from openjiuwen.agent_teams.messager import (
     SubscriptionHandle,
 )
 from openjiuwen.agent_teams.messager.inprocess import cleanup_inprocess_bus
-from openjiuwen.agent_teams.schema.events import BaseEventMessage
+from openjiuwen.agent_teams.schema.events import BaseEventMessage, EventMessage
 
 
 class _SampleEvent(BaseEventMessage):
@@ -61,6 +61,27 @@ async def test_inprocess_pubsub_delivers_to_subscriber() -> None:
 
     assert len(received) == 1
     assert received[0] is event
+
+
+@pytest.mark.asyncio
+async def test_inprocess_publish_stamps_sender_id() -> None:
+    """publish must stamp sender_id so subscribers can filter self-events."""
+    received: list[EventMessage] = []
+
+    async def handler(msg: EventMessage) -> None:
+        received.append(msg)
+
+    leader = InProcessMessager(config=MessagerTransportConfig(node_id="leader"))
+    worker = InProcessMessager(config=MessagerTransportConfig(node_id="worker"))
+
+    await worker.subscribe("topic:team", handler)
+
+    msg = EventMessage(event_type="team_cleaned", payload={"team_name": "t"})
+    assert msg.sender_id == ""
+    await leader.publish("topic:team", msg)
+
+    assert len(received) == 1
+    assert received[0].sender_id == "leader"
 
 
 @pytest.mark.asyncio

@@ -168,13 +168,19 @@ class EventDispatcher:
             return
 
         if event_type == TeamEvent.CLEANED:
-            # Leader's own CLEANED event is filtered out upstream by sender_id;
-            # only teammates land here. The team row (and the member row) has
-            # already been wiped in the database, so the teammate must abandon
-            # its loop or it will spin forever waiting for events on a dead
-            # team. shutdown_self cancels the running round (if any) and
-            # closes the stream so the natural _finalize_round path tears
-            # down the coordination loop and the coroutine exits.
+            # Teammates must abandon their loop when the team row (and their
+            # own member row) has been wiped — otherwise they spin forever
+            # waiting for events on a dead team. The leader must NEVER
+            # shutdown_self from its own CLEANED event: persistent leaders
+            # have to survive clean_team to accept the next interaction, and
+            # the teardown for temporary leaders is handled by the natural
+            # _finalize_round path instead. Skip the leader branch as
+            # defense in depth on top of the sender_id self-filter.
+            if host.role == TeamRole.LEADER:
+                team_logger.debug(
+                    "[{}] ignoring TEAM_CLEANED on leader path", member_name,
+                )
+                return
             team_logger.info(
                 "[{}] received TEAM_CLEANED, shutting down coordination", member_name,
             )
