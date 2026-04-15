@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-logger = logging.getLogger(__name__)
-
 from pydantic import TypeAdapter
 
+from openjiuwen.core.common.logging import tool_logger as logger
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.prompts.sections.tools import build_tool_card
@@ -197,7 +195,7 @@ async def call_lsp_tool(
     except Exception as exc:
         logger.debug("Failed to open file for LSP didOpen (ignored): %s", exc)
 
-    params = _build_lsp_params(validated)
+    params = _build_lsp_params(validated, file_path)
 
     try:
         result = await server.send_request(
@@ -324,7 +322,7 @@ def _read_file_content(file_path: str) -> str | None:
         return None
 
 
-def _build_lsp_params(validated: LspToolInput) -> dict[str, Any]:
+def _build_lsp_params(validated: LspToolInput, resolved_file_path: str) -> dict[str, Any]:
     if hasattr(validated, "line") and hasattr(validated, "character"):
         position = {
             "line": validated.line - 1,
@@ -333,7 +331,8 @@ def _build_lsp_params(validated: LspToolInput) -> dict[str, Any]:
     else:
         position = {"line": 0, "character": 0}
 
-    file_uri = path_to_file_uri(validated.file_path)
+    # 使用 resolved 绝对路径生成 URI，避免 pyright 因相对路径 + drive letter 构造出非法路径
+    file_uri = path_to_file_uri(resolved_file_path)
     op = LspOperation(validated.operation) if isinstance(validated.operation, str) else validated.operation
 
     if op == LspOperation.FIND_REFERENCES:

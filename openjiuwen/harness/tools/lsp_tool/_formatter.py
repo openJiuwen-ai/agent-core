@@ -72,14 +72,14 @@ def group_by_file(locations: list[dict[str, Any]]) -> dict[str, list[dict[str, A
 
 
 def format_go_to_definition(result: dict[str, Any] | None) -> str:
-    """Format a single Location as 'Defined in path:line:char'."""
+    """Format a single Location as 'Defined in path:line:char' or 'No definition found.'."""
     if not result:
         return "No definition found."
     return f"Defined in {format_location(result)}"
 
 
 def format_find_references(result: list[dict[str, Any]]) -> str:
-    """Format a list of Locations grouped by file."""
+    """Format a list of Locations grouped by file, each entry as 'path:\n  line:char'."""
     if not result:
         return "No references found."
     groups = group_by_file(result)
@@ -94,7 +94,10 @@ def format_find_references(result: list[dict[str, Any]]) -> str:
 
 
 def format_document_symbol(symbols: list[dict[str, Any]] | dict[str, Any]) -> str:
-    """Format document symbols, supporting both flat and tree forms."""
+    """
+    Format document symbols, supporting both the hierarchical DocumentSymbol
+    tree form and the flat SymbolInformation form.
+    """
     if not symbols:
         return "No symbols found."
     first = symbols[0] if isinstance(symbols, list) else symbols
@@ -131,7 +134,7 @@ def _format_symbol_tree(symbols: list[dict[str, Any]], indent: int) -> str:
 
 
 def format_workspace_symbol(result: list[dict[str, Any]]) -> str:
-    """Format workspace symbol results grouped by file."""
+    """Format workspace symbol results grouped by file, each entry as 'path:\n  line: kind Name'."""
     if not result:
         return "No symbols found."
     groups: dict[str, list[dict[str, Any]]] = {}
