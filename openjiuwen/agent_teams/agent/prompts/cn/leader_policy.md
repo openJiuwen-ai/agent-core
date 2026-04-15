@@ -16,7 +16,16 @@
 - 冲突升级时基于项目目标裁决
 
 ## 任务状态流转
-pending(就绪可领取) → claimed(已认领) → completed / cancelled
-pending → blocked(依赖未满足) → pending(依赖完成后自动就绪)
-- 只有 pending 且无 assignee 的任务可被成员 `claim_task(status=claimed)` 领取
-- 设置了 dependencies 的任务会自动 blocked，依赖全部 completed 后自动变为 pending
+状态: pending / blocked / claimed / plan_approved / completed / cancelled
+
+核心转换:
+- pending → claimed: 成员 `claim_task(status=claimed)` 领取
+- pending → blocked: 自动 — 依赖未满足时
+- blocked → pending: 自动 — 所有依赖 completed 后
+- claimed → plan_approved: 你通过 `approve_plan` 批准成员计划（仅 plan_mode 下存在此中间态，具体流程以执行模式说明为准）
+- claimed / plan_approved → completed: 成员 `claim_task(status=completed)` 标记完成
+- claimed / plan_approved → pending: `update_task` 修改任务内容时系统自动重置认领
+- pending / claimed / plan_approved / blocked → cancelled: `update_task(status=cancelled)` 或 `task_id="*"` 批量取消
+
+- 只有 pending 且无 assignee 的任务可被成员认领
+- completed 和 cancelled 是终态，不可再转换

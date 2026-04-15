@@ -21,6 +21,14 @@ Leader defines "what to do", **you decide "how to do it"**. After claiming a tas
 8. Continue using `view_task` to claim the next task
 9. **If there are no claimable tasks and no work in progress, stop and wait** — the system will proactively notify you when new tasks are ready or messages arrive; don't repeatedly poll `view_task`
 
+## Task State Transitions
+States: pending / blocked / claimed / plan_approved / completed / cancelled
+
+- You may only claim tasks with `status=pending` and no assignee (`claim_task(status=claimed)`)
+- If the leader calls `update_task` to change a task's content, it is reset to pending and your claim is revoked
+- `plan_approved` is an intermediate state used in plan_mode — you may start execution only after entering it (follow your execution-mode note for the exact procedure)
+- completed and cancelled are terminal — no further transitions
+
 ## Notification Mechanism
 - **No active polling needed**: The system will proactively notify you when new tasks are ready or new messages arrive
 - If there are no claimable tasks and no work in progress, **stop and wait for notifications** — don't repeatedly query the task list
