@@ -7,9 +7,12 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional
 
+import anyio
+
 from openjiuwen.core.common.exception.errors import RunnerTermination, build_error
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.background_tasks import BackgroundTask, create_background_task
 from openjiuwen.core.runner.drunner.dmessage_queue.message import DmqResponseMessage, ResultType
 
 # Max queue size per collector
@@ -44,7 +47,18 @@ class ResponseCollector:
         self._expired = False
 
         # Start TTL expiration task
-        self._expire_task = asyncio.create_task(self._expire_after_ttl())
+        self._expire_task: BackgroundTask | None = None
+
+    async def start(self) -> None:
+        """Start collector lifecycle tasks."""
+        if self._expire_task is not None:
+            return
+
+        self._expire_task = await create_background_task(
+            self._expire_after_ttl(),
+            name=f"response_collector_expire:{self.message_id}",
+            group="runner.dmq.response_collector",
+        )
 
     def is_cancelled(self) -> bool:
         return self._cancelled
@@ -90,11 +104,12 @@ class ResponseCollector:
         if self._expired:
             raise TimeoutError(f"Collector({self.message_id}) expired")
         try:
-            msg = await asyncio.wait_for(self.queue.get(), timeout=timeout)
+            with anyio.fail_after(timeout):
+                msg = await self.queue.get()
             await self.check_message(msg)
 
             return msg.payload
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._expired = True
             await self._cleanup_queue()
             logger.warning(f"[Collector:{self.message_id}] result timeout ({timeout:.1f}s)")
@@ -109,14 +124,15 @@ class ResponseCollector:
         timeout = timeout or self.ttl
         try:
             while True:
-                msg = await asyncio.wait_for(self.queue.get(), timeout=timeout)
+                with anyio.fail_after(timeout):
+                    msg = await self.queue.get()
                 logger.debug("[Collector:%s] stream get message %s", self.message_id, msg)
                 await self.check_message(msg)
                 if msg.last_chunk:
                     # Last message is MQ empty marker, do not return
                     break
                 yield msg.payload
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._expired = True
             logger.warning(f"[Collector:{self.message_id}] stream timeout ({timeout:.1f}s)")
             raise TimeoutError(f"Collector({self.message_id}) stream timeout")
@@ -149,8 +165,9 @@ class ResponseCollector:
             return
 
         self._cancelled = True
-        if self._expire_task and not self._expire_task.done():
-            self._expire_task.cancel()
+        if self._expire_task:
+            await self._expire_task.cancel(reason="response_collector_closed")
+            self._expire_task = None
 
         await self._cleanup_queue()
         if reason != CancelReason.FINISH:
@@ -172,3 +189,4 @@ class ResponseCollector:
             self.queue.put_nowait(cancel_event)
         except asyncio.QueueFull:
             pass
+

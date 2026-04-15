@@ -1,6 +1,6 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from typing import Any, Callable, Optional, Tuple, List, Type, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Tuple, List, Type, Union
 from pydantic import BaseModel
 
 from openjiuwen.core.common import BaseCard
@@ -12,7 +12,6 @@ from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.tool import Tool, ToolInfo, ToolCard
 from openjiuwen.core.multi_agent import BaseTeam, TeamCard
-from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
 from openjiuwen.core.runner.resources_manager.base import (
     AgentTeamProvider,
     Error,
@@ -35,6 +34,19 @@ from openjiuwen.core.sys_operation.tool_adapter import SysOperationToolAdapter
 from openjiuwen.core.sys_operation.registry import OperationRegistry
 from openjiuwen.core.workflow.workflow import Workflow
 from openjiuwen.core.workflow import WorkflowCard
+
+if TYPE_CHECKING:
+    from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
+
+
+def _is_remote_agent(provider: Any) -> bool:
+    try:
+        from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
+    except ModuleNotFoundError as exc:
+        if exc.name != "a2a":
+            raise
+        return False
+    return isinstance(provider, RemoteAgent)
 
 
 class ResourceMgr:
@@ -138,7 +150,7 @@ class ResourceMgr:
 
     def add_agent(self,
                   card: AgentCard,
-                  agent: AgentProvider | RemoteAgent,
+                  agent: AgentProvider | "RemoteAgent",
                   *,
                   tag: Optional[Tag | list[Tag]] = None
                   ) -> Result[AgentCard, Exception]:
@@ -1840,7 +1852,7 @@ class ResourceMgr:
                         )
                     )
 
-            if not (resource_type == "agent" and isinstance(provider, RemoteAgent)):
+            if not (resource_type == "agent" and _is_remote_agent(provider)):
                 if not isinstance(provider, Callable):
                     raise build_error(
                         StatusCode.RESOURCE_PROVIDER_INVALID,
@@ -1949,7 +1961,7 @@ class ResourceMgr:
                     f"provider cannot be None, must be a callable function"
                 )
             )
-        if not (resource_type == "agent" and isinstance(provider, RemoteAgent)):
+        if not (resource_type == "agent" and _is_remote_agent(provider)):
             if not isinstance(provider, Callable):
                 raise build_error(
                     StatusCode.RESOURCE_PROVIDER_INVALID,
