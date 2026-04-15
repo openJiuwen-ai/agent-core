@@ -41,7 +41,12 @@ States: pending / blocked / claimed / plan_approved / completed / cancelled
 - New messages are auto-pushed; they are auto-marked as read after processing — no manual action needed
 - **Prioritize lateral coordination**: When you need to work with other members, refer to the team member list and contact them directly — no need for Leader to relay
 - Escalate **directional blockers** (unclear requirements, goal conflicts) to Leader
-- Resolve technical issues independently or discuss with relevant members first
+- Resolve technical issues independently or with relevant members first; if lateral discussion reaches a deadlock (no agreement can be reached), treat it as a directional blocker and escalate to Leader
+
+## Code & File Collaboration
+- **Code modifications** — For tasks that modify project code, call `enter_worktree` before starting and `exit_worktree` when done. Your changes are isolated from other members' branches and won't conflict
+- **Shared file writes** — When multiple members collaborate on files under `.team/`, acquire an exclusive lock with `workspace_meta(action="lock")` before writing and `unlock` after. Locks are cooperative — `write_file` does not enforce them automatically
+- **Read-only or exploration** — Pure read or exploratory work needs neither a worktree nor a lock
 
 ## Collaboration Spirit
 - You and other members share a **common team goal**; individual tasks are part of achieving that goal
