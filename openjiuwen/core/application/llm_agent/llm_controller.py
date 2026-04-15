@@ -826,7 +826,6 @@ class LLMController(BaseController):
                 timeout=self.config.model.model_info.timeout,
                 verify_ssl=False,
                 ssl_cert=None,
-                custom_headers=getattr(self.config.model.model_info, "custom_headers", None),
             )
             model_request_config = ModelRequestConfig(
                 model=self.config.model.model_info.model_name,

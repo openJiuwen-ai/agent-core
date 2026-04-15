@@ -1,7 +1,6 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 from dataclasses import dataclass, field
-from typing import Any, Optional
 
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 
@@ -16,7 +15,6 @@ class BaseModelInfo(BaseModel):
     top_p: float = Field(default=0.1)
     streaming: bool = Field(default=False, alias="stream")
     timeout: int = Field(default=60, gt=0)
-    custom_headers: Optional[dict[str, Any]] = Field(default=None)
     model_config = ConfigDict(extra='allow')
 
     @field_validator('model_name', mode='before')

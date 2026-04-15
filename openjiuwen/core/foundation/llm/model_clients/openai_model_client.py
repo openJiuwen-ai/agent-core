@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import TYPE_CHECKING, List, Optional, AsyncIterator, Union, Any, Mapping
+from typing import TYPE_CHECKING, List, Optional, AsyncIterator, Union, Any
 
 import httpx
 
@@ -22,11 +22,6 @@ from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
-from openjiuwen.core.foundation.llm.headers_helper import (
-    PROTECTED_HEADERS,
-    build_base_headers,
-    merge_request_headers,
-)
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig, ProviderType
 from openjiuwen.core.runner.callback import trigger
@@ -39,26 +34,13 @@ if TYPE_CHECKING:
 class OpenAIModelClient(BaseModelClient):
     """OpenAI API client supporting GPT models and OpenAI-compatible services."""
     __client_name__ = [ProviderType.OpenAI.value, ProviderType.OpenRouter.value]
-    _PROTECTED_HEADERS = PROTECTED_HEADERS
 
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
-        self._base_headers = build_base_headers(
-            custom_headers=model_client_config.custom_headers,
-        )
 
     def _get_client_name(self) -> str:
         """Get client name."""
         return "OpenAI client"
-
-    @classmethod
-    def _build_request_headers(
-            cls,
-            base_headers: Optional[Mapping[str, Any]],
-            request_headers: Optional[Mapping[str, Any]],
-    ) -> dict[str, str]:
-        """Merge request-level headers with prebuilt config-level headers (request wins)."""
-        return merge_request_headers(base_headers, request_headers)
 
     def _build_request_params(
             self,
@@ -173,8 +155,6 @@ class OpenAIModelClient(BaseModelClient):
             AssistantMessage: Model response
         """
         tracer_record_data = kwargs.pop("tracer_record_data", None)
-        request_custom_headers = kwargs.pop("custom_headers", None)
-
         # Build request parameters
         params = self._build_request_params(
             messages=messages,
@@ -187,14 +167,6 @@ class OpenAIModelClient(BaseModelClient):
             stream=False,
             **kwargs
         )
-
-        effective_headers = self._build_request_headers(
-            self._base_headers,
-            request_custom_headers,
-        )
-        if effective_headers:
-            params["extra_headers"] = effective_headers
-
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
@@ -312,8 +284,6 @@ class OpenAIModelClient(BaseModelClient):
             AssistantMessageChunk: Streaming response chunk
         """
         tracer_record_data = kwargs.pop("tracer_record_data", None)
-        request_custom_headers = kwargs.pop("custom_headers", None)
-
         # Build request parameters
         params = self._build_request_params(
             messages=messages,
@@ -326,14 +296,6 @@ class OpenAIModelClient(BaseModelClient):
             stream=True,
             **kwargs
         )
-
-        effective_headers = self._build_request_headers(
-            self._base_headers,
-            request_custom_headers,
-        )
-        if effective_headers:
-            params["extra_headers"] = effective_headers
-
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 

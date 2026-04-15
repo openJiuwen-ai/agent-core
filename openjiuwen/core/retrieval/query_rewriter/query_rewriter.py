@@ -260,7 +260,6 @@ class QueryRewriter:
                 timeout=float(getattr(mi, "timeout", 60)),
                 verify_ssl=verify_ssl,
                 ssl_cert=ssl_cert,
-                custom_headers=getattr(mi, "custom_headers", None),
             ),
             model_config=ModelRequestConfig(
                 model=self.model_config.model_info.model_name,

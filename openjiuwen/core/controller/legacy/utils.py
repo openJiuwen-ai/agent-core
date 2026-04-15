@@ -296,7 +296,6 @@ class ReasonerUtils:
                 timeout=model_config.model_info.timeout,
                 verify_ssl=False,
                 ssl_cert=None,
-                custom_headers=getattr(model_config.model_info, "custom_headers", None),
             )
             model_request_config = ModelRequestConfig(
                 model=model_config.model_info.model_name,

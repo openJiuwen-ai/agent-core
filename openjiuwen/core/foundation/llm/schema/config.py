@@ -35,11 +35,7 @@ class ModelClientConfig(BaseModel):
     max_retries: int = Field(default=3, description="Maximum number of retries")
     verify_ssl: bool = Field(default=True, description="Whether to verify SSL certificates")
     ssl_cert: Optional[str] = Field(default=None, description="Path to SSL certificate file")
-    custom_headers: Optional[dict[str, Any]] = Field(
-        default=None,
-        description="Developer-provided headers merged per LLM call"
-    )
-    model_config = {"extra": "allow"}  # Allow extra fields injected by core/provider (e.g. default headers)
+    model_config = {"extra": "allow"}  # Allow extra fields like user_id for ICBC
 
     @model_validator(mode='after')
     def validate_client_provider(self) -> Self:
