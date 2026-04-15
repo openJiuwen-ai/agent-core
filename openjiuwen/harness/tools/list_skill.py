@@ -96,14 +96,9 @@ class ListSkillTool(Tool):
         """Dump skill objects into serializable dicts."""
         results: List[Dict[str, Any]] = []
         for skill in skills:
-            results.append(
-                {
-                    "name": skill.name,
-                    "description": skill.description,
-                    "directory": str(skill.directory),
-                    "skill_md_path": str(Path(skill.directory) / "SKILL.md"),
-                }
-            )
+            skill_dict = skill.asdict(include_directory=True)
+            skill_dict["skill_md_path"] = str(Path(skill.directory) / "SKILL.md")
+            results.append(skill_dict)
         return results
 
     async def _route_skills(self, query: str) -> List[str]:

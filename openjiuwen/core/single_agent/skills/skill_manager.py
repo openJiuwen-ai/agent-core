@@ -19,6 +19,15 @@ class Skill(BaseModel):
     description: str = None
     directory: Path
 
+    def asdict(self, include_directory: bool = True):
+        skill_dict = {
+            'name': self.name,
+            'description': self.description,
+        }
+        if (include_directory):
+            skill_dict['directory'] = str(self.directory)
+        return skill_dict
+
     def __str__(self):
         return f"Skill: {self.name}\nDescription: {self.description}\nDirectory: {self.directory}"
 

@@ -68,6 +68,7 @@ Built-in tools available to `DeepAgent`. Tools are registered via `ToolCard` ent
 | Tool | Description |
 |---|---|
 | `ListSkillTool` | List available learned skills. |
+| `SkillTool` | Get the relevant skill file for a skill |
 
 ### Session Management
 

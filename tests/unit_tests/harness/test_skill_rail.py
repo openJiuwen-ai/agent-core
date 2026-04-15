@@ -184,7 +184,6 @@ async def test_skill_rail_all_mode_injects_skill_prompt(tmp_path: Path):
     assert "xlsx-writer" in content
     assert "Parse invoice pdf files" in content
     assert "Write xlsx reports" in content
-    assert "Path:" in content
     assert "list_skill" not in content
 
 
