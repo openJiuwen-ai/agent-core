@@ -188,9 +188,10 @@ MEMORY_INACTIVE_PROMPT_CN = """## 持久化存储体系（被动模式）
 
 ### 使用原则
 
-- **仅在用户明确要求时记录**：当用户说"记住"、"记录"、"保存"时，调用 write_memory 或 edit_memory 完成存储
+- **仅在用户明确要求时记录**：当用户说"记住"、"记录"、"保存"或其他相同含义的关键词时，调用 write_memory 或 edit_memory 完成存储
 - **仅在用户询问历史时搜索**：当用户要求"回忆"、"查找"以前的内容，或明确询问历史信息时，调用 memory_search 检索
 - **仅在需要时读取记忆文件**：当回答确实依赖历史上下文时才读取 USER.md、MEMORY.md 等文件
+- 当用户的对话信息中不包括上述关键词和场景时，不要调用任何相关的记忆工具
 - 记录信息时，根据内容类型选择存储位置：
   - 用户身份/偏好 → `USER.md`
   - 长期知识/配置 → `MEMORY.md`
@@ -214,13 +215,14 @@ MEMORY_INACTIVE_PROMPT_EN = """## Persistent Storage System (Passive Mode)
 
 ### Usage Principles
 
-- **Record only when the user explicitly asks**: When the user says "remember", "record", or "save", call write_memory or edit_memory to persist the information
+- **Record only when the user explicitly asks**: When the user says "remember", "record", or "save", or other similar keywords, call write_memory or edit_memory to persist the information
 - **Search only when the user asks about history**: When the user requests to "recall" or "find" past content, or explicitly asks about historical information, call memory_search to retrieve it
 - **Read memory files only when needed**: Read USER.md, MEMORY.md, etc. only when the answer genuinely depends on historical context
+- Do not call any relevant memory tool, if user's conversation content does not contain any keywords or situation mentioned above. 
 - When recording information, choose storage by content type:
   - User identity/preferences → `USER.md`
   - Long-term knowledge/config → `MEMORY.md`
-  - Events/daily records → `memory/YYYY-MM-DD.md`
+  - Events/daily records → `YYYY-MM-DD.md`
 
 """
 
