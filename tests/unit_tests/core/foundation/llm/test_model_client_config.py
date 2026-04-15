@@ -64,3 +64,14 @@ def test_model_client_config_timeout_must_be_positive():
             timeout=0,
         )
     assert error.value.errors()[0]["type"] == "greater_than"
+
+
+def test_model_client_config_accepts_custom_headers():
+    cfg = ModelClientConfig(
+        client_provider=ProviderType.OpenAI,
+        api_key="sk-test",
+        api_base="http://localhost",
+        custom_headers={"X-Custom": "custom"},
+    )
+
+    assert cfg.custom_headers == {"X-Custom": "custom"}

@@ -81,6 +81,7 @@ class LegacyReActAgent(BaseAgent):
                 api_base=self.agent_config.model.model_info.api_base,
                 verify_ssl=False,
                 ssl_cert=None,
+                custom_headers=getattr(self.agent_config.model.model_info, "custom_headers", None),
             )
             model_request_config = ModelRequestConfig(
                 model=self.agent_config.model.model_info.model_name,

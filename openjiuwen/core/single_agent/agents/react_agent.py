@@ -155,6 +155,7 @@ class ReActAgentConfig(BaseModel):
     model_provider: str = Field(default="openai", description="Model provider")
     api_key: str = Field(default="", description="API key")
     api_base: str = Field(default="", description="API base URL")
+    custom_headers: Optional[dict[str, Any]] = Field(default=None, description="Additional headers for LLM requests")
     prompt_template_name: str = Field(
         default="",
         description="Prompt template name"
@@ -326,7 +327,7 @@ class ReActAgentConfig(BaseModel):
             api_key: str,
             api_base: str,
             model_name: str,
-            verify_ssl: bool = False
+            verify_ssl: bool = False,
     ) -> 'ReActAgentConfig':
         """Configure model client for LLM initialization
 
@@ -352,12 +353,30 @@ class ReActAgentConfig(BaseModel):
             client_provider=provider,
             api_key=api_key,
             api_base=api_base,
-            verify_ssl=verify_ssl
+            verify_ssl=verify_ssl,
+            custom_headers=self.custom_headers,
         )
         if self.model_config_obj is None:
             self.model_config_obj = ModelRequestConfig(model_name=model_name)
         else:
             self.model_config_obj.model_name = model_name
+        return self
+
+    def configure_custom_headers(
+            self,
+            custom_headers: Optional[dict[str, Any]] = None,
+    ) -> 'ReActAgentConfig':
+        """Configure additional headers sent with each model request.
+
+        Args:
+            custom_headers: Additional headers sent with each model request
+
+        Returns:
+            self (supports chaining)
+        """
+        self.custom_headers = custom_headers
+        if self.model_client_config is not None:
+            self.model_client_config.custom_headers = custom_headers
         return self
 
     def configure_context_processors(
