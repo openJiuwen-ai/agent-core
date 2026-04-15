@@ -35,12 +35,12 @@ class SSLAuthStrategy(AuthStrategy):
     auth_type = AuthType.SSL
 
     async def authenticate(self, auth_config: ToolAuthConfig, **kwargs) -> ToolAuthResult:
-        ssl_verify, ssl_cert = SslUtils.get_ssl_config(
-            auth_config.config.get("verify_switch_env", "SSL_VERIFY"),
-            auth_config.config.get("ssl_cert_env", "SSL_CERT"),
-            ["false"],
-        )
         try:
+            ssl_verify, ssl_cert = SslUtils.get_ssl_config(
+                auth_config.config.get("verify_switch_env", "SSL_VERIFY"),
+                auth_config.config.get("ssl_cert_env", "SSL_CERT"),
+                ["false"],
+            )
             if ssl_verify:
                 ssl_context = SslUtils.create_strict_ssl_context(ssl_cert)
                 connector = aiohttp.TCPConnector(ssl=ssl_context)
