@@ -9,7 +9,13 @@ from openjiuwen.harness.prompts.sections.tools.base import ToolMetadataProvider
 
 
 def _schema_free_search(lang: str) -> Dict[str, Any]:
-    desc = {"cn": "搜索查询文本。", "en": "Free search query text."}[lang]
+    desc = {
+        "cn": "搜索查询文本。查询最新、当前、今年、实时、近期信息时，必须使用系统提示中的当前年份或日期。",
+        "en": (
+            "Free search query text. For latest/current/this-year/recent information, "
+            "use the current year or date from the system prompt."
+        ),
+    }[lang]
     max_desc = {"cn": "最大结果数（1-20）。", "en": "Maximum number of results (1-20)."}[lang]
     timeout_desc = {"cn": "请求超时时间（秒，5-60）。", "en": "Request timeout in seconds (5-60)."}[lang]
     return {
@@ -74,13 +80,16 @@ class FreeSearchMetadataProvider(ToolMetadataProvider):
                 "免费搜索，返回结果 URL 和摘要。如果前几条结果看起来相关但还不足以直接回答任务，"
                 "应先抓取前 1-3 条中的至少 2 条；如果第一条抓取失败、是动态壳页或内容仍然不完整，"
                 "就继续抓下一条，而不是立刻继续改写搜索词。"
+                "当用户询问最新、当前、今年、实时、近期等信息时，query 必须使用系统提示中的当前年份或日期；"
             ),
             "en": (
                 "Free search. Input a query and return result URLs with snippets. "
                 "If the top results look relevant but do not directly answer the task, "
                 "you must fetch at least 2 of the top 1-3 results first. "
                 "If the first fetch fails, is a dynamic shell page, or is still incomplete, "
-                "continue with the next result instead of searching again immediately."
+                "continue with the next result instead of searching again immediately. "
+                "For latest/current/this-year/recent information, the query must use the current year "
+                "or date from the system prompt."
             ),
         }[language]
 
@@ -94,8 +103,15 @@ class PaidSearchMetadataProvider(ToolMetadataProvider):
 
     def get_description(self, language: str = "cn") -> str:
         return {
-            "cn": "付费搜索，支持 provider=auto|bocha|perplexity|serper|jina。",
-            "en": "Paid search via Bocha/Perplexity/SERPER/JINA. Support provider=auto|bocha|perplexity|serper|jina.",
+            "cn": (
+                "付费搜索，支持 provider=auto|bocha|perplexity|serper|jina。"
+                "当用户询问最新、当前、今年、实时、近期等信息时，query 必须使用系统提示中的当前年份或日期；"
+            ),
+            "en": (
+                "Paid search via Bocha/Perplexity/SERPER/JINA. Support provider=auto|bocha|perplexity|serper|jina. "
+                "For latest/current/this-year/recent information, the query must use the current year "
+                "or date from the system prompt. "
+            ),
         }[language]
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:

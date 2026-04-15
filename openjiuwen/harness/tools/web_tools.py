@@ -84,6 +84,10 @@ _FREE_SEARCH_DEBUG_ENV = "FREE_SEARCH_DEBUG"
 _FREE_SEARCH_DEBUG_DIR_ENV = "FREE_SEARCH_DEBUG_DIR"
 _FREE_SEARCH_DDG_ENABLED_ENV = "FREE_SEARCH_DDG_ENABLED"
 _FREE_SEARCH_BING_ENABLED_ENV = "FREE_SEARCH_BING_ENABLED"
+_FREE_SEARCH_PROXY_URL_ENV = "FREE_SEARCH_PROXY_URL"
+_FREE_SEARCH_DEFAULT_NO_PROXY = (
+    "127.0.0.1,.huawei.com,localhost,local,.local,10.155.97.247,.myhuaweicloud.coms"
+)
 _FETCH_WEBPAGE_DEFAULT_MAX_CHARS = 20000
 _FETCH_WEBPAGE_DEFAULT_TIMEOUT_SECONDS = 45
 _FETCH_WEBPAGE_MAX_TIMEOUT_ENV = "MCP_FETCH_WEBPAGE_MAX_TIMEOUT_SECONDS"
@@ -91,9 +95,49 @@ _FETCH_WEBPAGE_MAX_CHARS_ENV = "MCP_FETCH_WEBPAGE_MAX_CHARS"
 _MOJIBAKE_MARKERS = ("mojibake", "Ã", "Â", "â", "ï¿½")
 
 
+def _get_free_search_proxy_url() -> str:
+    """Return the configured proxy URL used by web search/fetch tools."""
+    return str(os.environ.get(_FREE_SEARCH_PROXY_URL_ENV, "") or "").strip()
+
+
+def _no_proxy_entries() -> list[str]:
+    configured = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or _FREE_SEARCH_DEFAULT_NO_PROXY
+    return [entry.strip().lower() for entry in configured.split(",") if entry.strip()]
+
+
+def _should_bypass_free_search_proxy(url: str) -> bool:
+    proxy_url = _get_free_search_proxy_url()
+    if not proxy_url:
+        return True
+    try:
+        hostname = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    if not hostname:
+        return False
+    for entry in _no_proxy_entries():
+        if entry == "*":
+            return True
+        if entry.startswith(".") and (hostname == entry[1:] or hostname.endswith(entry)):
+            return True
+        if hostname == entry or hostname.endswith(f".{entry}"):
+            return True
+    return False
+
+
+def _apply_free_search_proxy(url: str, kwargs: dict[str, Any]) -> bool:
+    """Apply the configured search proxy to a requests kwargs dict."""
+    proxy_url = _get_free_search_proxy_url()
+    if not proxy_url or _should_bypass_free_search_proxy(url):
+        return False
+    kwargs.setdefault("proxies", {"http": proxy_url, "https": proxy_url})
+    return True
+
+
 def _http_request(method: str, url: str, **kwargs) -> requests.Response:
     """Try normal request first; retry without env proxies on ProxyError."""
     method_up = method.upper()
+    explicit_proxy = _apply_free_search_proxy(url, kwargs)
     try:
         if method_up == "GET":
             return requests.get(url, **kwargs)
@@ -101,6 +145,8 @@ def _http_request(method: str, url: str, **kwargs) -> requests.Response:
             return requests.post(url, **kwargs)
         return requests.request(method_up, url, **kwargs)
     except requests.exceptions.ProxyError:
+        if explicit_proxy:
+            raise
         with requests.Session() as session:
             session.trust_env = False
             return session.request(method_up, url, **kwargs)
