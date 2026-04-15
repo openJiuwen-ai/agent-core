@@ -167,13 +167,13 @@ append：在列表末尾追加新任务：
 insert_after：在指定任务之后插入新任务（目标任务状态须为 in_progress 或 pending）：
     {
         "action": "insert_after",
-        "todo_data": ["uuid-target", [{"id": "uuid-new", "content": "插入的任务", "activeForm": "执行插入的任务", "status": "pending"}]]
+        "todo_data": {"target_id": "uuid-target", "items": [{"id": "uuid-new", "content": "插入的任务", "activeForm": "执行插入的任务", "status": "pending"}]}
     }
 
 insert_before：在指定任务之前插入新任务（目标任务状态须为 pending）：
     {
         "action": "insert_before",
-        "todo_data": ["uuid-target", [{"id": "uuid-new", "content": "插入的任务", "activeForm": "执行插入的任务", "status": "pending"}]]
+        "todo_data": {"target_id": "uuid-target", "items": [{"id": "uuid-new", "content": "插入的任务", "activeForm": "执行插入的任务", "status": "pending"}]}
     }
 
 核心规则：
@@ -226,13 +226,13 @@ append: Add new tasks at the end of the list:
 insert_after: Insert new tasks after the specified task (target must be in_progress or pending):
     {
         "action": "insert_after",
-        "todo_data": ["uuid-target", [{"id": "uuid-new", "content": "Inserted task", "activeForm": "Executing inserted task", "status": "pending"}]]
+        "todo_data": {"target_id": "uuid-target", "items": [{"id": "uuid-new", "content": "Inserted task", "activeForm": "Executing inserted task", "status": "pending"}]}
     }
 
 insert_before: Insert new tasks before the specified task (target must be pending):
     {
         "action": "insert_before",
-        "todo_data": ["uuid-target", [{"id": "uuid-new", "content": "Inserted task", "activeForm": "Executing inserted task", "status": "pending"}]]
+        "todo_data": {"target_id": "uuid-target", "items": [{"id": "uuid-new", "content": "Inserted task", "activeForm": "Executing inserted task", "status": "pending"}]}
     }
 
 Core rules:
@@ -270,7 +270,7 @@ TODO_MODIFY_PARAMS: Dict[str, Dict[str, str]] = {
     "ids": {"cn": "要操作的任务 ID 列表", "en": "List of task IDs to operate on"},
     "ids_item": {"cn": "任务唯一标识符", "en": "Unique task identifier"},
     "todos": {"cn": "根据 action 字段处理的待办事项数组", "en": "Array of todo items to process based on the action field"},
-    "todo_data": {"cn": "用于 insert_after/insert_before 操作的数组", "en": "Array for insert_after/insert_before actions"},
+    "todo_data": {"cn": "用于 insert_after/insert_before 操作的对象", "en": "Object for insert_after/insert_before actions"},
     "todo_data_target_id": {"cn": "目标任务 ID", "en": "Target task ID"},
     "todo_data_items": {"cn": "要插入的待办事项列表", "en": "List of todo objects to insert"},
 }
@@ -346,11 +346,11 @@ def get_todo_modify_input_params(language: str = "cn") -> Dict[str, Any]:
                 },
             },
             "todo_data": {
-                "type": "array",
+                "type": "object",
                 "description": _d("todo_data"),
-                "items": [
-                    {"type": "string", "description": _d("todo_data_target_id")},
-                    {
+                "properties": {
+                    "target_id": {"type": "string", "description": _d("todo_data_target_id")},
+                    "items": {
                         "type": "array",
                         "description": _d("todo_data_items"),
                         "items": {
@@ -359,7 +359,8 @@ def get_todo_modify_input_params(language: str = "cn") -> Dict[str, Any]:
                             "required": ["id", "content", "activeForm", "status"],
                         },
                     },
-                ],
+                },
+                "required": ["target_id", "items"],
             },
         },
         "required": ["action"],

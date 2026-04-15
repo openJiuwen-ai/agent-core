@@ -602,13 +602,15 @@ class TodoModifyTool(TodoTool):
             elif action == "insert_after":
                 todo_data = inputs.get("todo_data")
                 self._validate_todo_data_structure(todo_data)
-                target_id, insert_todos = todo_data
+                target_id = todo_data["target_id"]
+                insert_todos = todo_data["items"]
                 results["message"] = await self._insert_after_todos(target_id, insert_todos, current_todos)
 
             elif action == "insert_before":
                 todo_data = inputs.get("todo_data")
                 self._validate_todo_data_structure(todo_data)
-                target_id, insert_todos = todo_data
+                target_id = todo_data["target_id"]
+                insert_todos = todo_data["items"]
                 results["message"] = await self._insert_before_todos(target_id, insert_todos, current_todos)
 
             else:
@@ -633,35 +635,36 @@ class TodoModifyTool(TodoTool):
         """Stream response handler (not supported for TodoModify tool)"""
         raise build_error(StatusCode.TOOL_STREAM_NOT_SUPPORTED, card=self._card)
 
-    def _validate_todo_data_structure(self, todo_data: List):
-        """Validate structure of todo_data array for insert_after/insert_before actions
+    def _validate_todo_data_structure(self, todo_data: Dict):
+        """Validate structure of todo_data object for insert_after/insert_before actions
 
         Args:
-            todo_data: [target_id, todo_list] array to validate
+            todo_data: {"target_id": str, "items": [todo_list]} object to validate
 
         Raises:
-            ToolError: If todo_data is invalid (incorrect length/type)
+            ToolError: If todo_data is invalid (missing fields or wrong type)
         """
-        if not todo_data or not isinstance(todo_data, list) or len(todo_data) != 2:
+        if not todo_data or not isinstance(todo_data, dict):
             raise build_error(
                 StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                reason="Invalid input for insert action: 'todo_data' must be a 2-element array [target_id, todo_list]"
+                reason="Invalid input for insert action: 'todo_data' must be an object with 'target_id' and 'items'"
             )
 
-        target_id, insert_todos = todo_data
+        target_id = todo_data.get("target_id")
+        insert_todos = todo_data.get("items")
+
         if not target_id or not isinstance(target_id, str):
             raise build_error(
                 StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                reason="Invalid input: todo_data first element must be a non-empty target task ID (string)"
+                reason="Invalid input: todo_data 'target_id' must be a non-empty string"
             )
 
         if not insert_todos or not isinstance(insert_todos, list):
             raise build_error(
                 StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                reason="Invalid input: todo_data second element must be a non-empty list of todo objects"
+                reason="Invalid input: todo_data 'items' must be a non-empty list of todo objects"
             )
 
-        # Validate each todo item in the insert list
         for todo_item in insert_todos:
             self._validate_single_todo_item(todo_item)
 
