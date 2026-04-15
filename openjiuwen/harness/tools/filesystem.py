@@ -10,14 +10,17 @@ import pathlib
 import re
 import shlex
 import sys
+import asyncio
 import shutil
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Dict, Any, AsyncIterator, List, Optional, Tuple
 
 import pdfplumber
 
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.core.sys_operation.cwd import get_cwd
@@ -61,6 +64,42 @@ class _RawTextState:
 # ReadFileTool populates it on successful text reads.
 # EditFileTool consumes it to enforce "must read before edit" and detect external modifications.
 _FILE_READ_REGISTRY: Dict[str, _FileReadState] = {}
+
+_HISTORY_LOCK = asyncio.Lock()
+MAX_HISTORY_PER_FILE: int = 100
+
+
+async def _append_op_history(history_path: str, file_path: str, action: str,
+                              old_content: Optional[str], new_content: str) -> None:
+    """Append a write/edit operation to the per-workspace history JSON file.
+
+    Async-safe: concurrent coroutines share _HISTORY_LOCK so reads and writes
+    to the JSON file are serialised without blocking the event loop.
+    The JSON file is the single source of truth; there is no in-memory cache.
+    """
+    entry = {
+        "action": action,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "old_content": old_content,
+        "new_content": new_content,
+    }
+    try:
+        async with _HISTORY_LOCK:
+            history: Dict[str, list] = {}
+            if os.path.exists(history_path):
+                with open(history_path, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+            entries = history.setdefault(file_path, [])
+            entries.append(entry)
+            if len(entries) > MAX_HISTORY_PER_FILE:
+                history[file_path] = entries[-MAX_HISTORY_PER_FILE:]
+            os.makedirs(os.path.dirname(history_path), exist_ok=True)
+            tmp = history_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(history, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, history_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[_append_op_history] Failed to persist file op history to %s: %s", history_path, exc)
 
 
 class MaxFileReadTokenExceededError(Exception):
@@ -628,6 +667,7 @@ class WriteFileTool(Tool):
         super().__init__(
             build_tool_card("write_file", "WriteFileTool", language, agent_id=agent_id))
         self.operation = operation
+        self._agent_id = agent_id or "default"
 
     @staticmethod
     def _detect_encoding(raw: bytes) -> str:
@@ -735,6 +775,12 @@ class WriteFileTool(Tool):
             except OSError:
                 _FILE_READ_REGISTRY.pop(path, None)
 
+        _history_path = os.path.join(
+            str(pathlib.Path(get_cwd()).expanduser().resolve()),
+            ".agent_history", f"file_ops_{self._agent_id}.json",
+        )
+        await _append_op_history(_history_path, path, "write", old_content, content)
+
         return ToolOutput(
             success=True,
             data={
@@ -776,6 +822,7 @@ class EditFileTool(Tool):
     def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
         super().__init__(build_tool_card("edit_file", "EditFileTool", language, agent_id=agent_id))
         self.operation = operation
+        self._agent_id = agent_id or "default"
 
     # ------------------------------------------------------------------
     # Static helpers
@@ -1135,6 +1182,12 @@ class EditFileTool(Tool):
             )
         except OSError:
             _FILE_READ_REGISTRY.pop(file_path, None)
+
+        _history_path = os.path.join(
+            str(pathlib.Path(get_cwd()).expanduser().resolve()),
+            ".agent_history", f"file_ops_{self._agent_id}.json",
+        )
+        await _append_op_history(_history_path, file_path, "edit", content, new_content)
 
         return ToolOutput(
             success=True,
