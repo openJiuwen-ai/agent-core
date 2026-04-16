@@ -140,8 +140,6 @@ def _extract_todo_message(tool_result: str) -> str:
     This helper extracts the message value for fallback display.
     """
     # Try to find 'message': '...' in the repr
-    import re
-
     match = re.search(
         r"['\"]message['\"]\s*:\s*['\"](.+?)['\"]}\s*$",
         tool_result,

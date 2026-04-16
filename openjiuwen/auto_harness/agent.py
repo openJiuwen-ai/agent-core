@@ -196,6 +196,7 @@ def _build_rails(
     ]
     return rails
 
+
 def _build_subagents(
     config: "AutoHarnessConfig",
     *,
@@ -345,6 +346,7 @@ def _build_skill_rail(
         skills_dir=skills_dir,
         skill_mode="all",
     )
+
 
 def _build_research_tools(
     config: "AutoHarnessConfig",

@@ -29,7 +29,9 @@ def _bootstrap_logging() -> None:
     """
     try:
         import logging
-        import os
+
+        if "pytest" in sys.modules:
+            return
 
         # Suppress ALL SDK logs in CLI mode.
         logging.getLogger("openjiuwen").setLevel(logging.CRITICAL)
@@ -783,7 +785,6 @@ async def _run_gap_analyze(
 ) -> None:
     """Run competitive gap analysis."""
     import os
-    from pathlib import Path
 
     from openjiuwen.auto_harness.schema import (
         AutoHarnessConfig,

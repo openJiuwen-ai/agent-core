@@ -14,9 +14,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -26,7 +25,6 @@ from openjiuwen.auto_harness.schema import (
 )
 from openjiuwen.auto_harness.infra.worktree_manager import (
     WorktreeManager,
-    _slugify,
 )
 
 
@@ -134,7 +132,8 @@ class TestAutoHarnessWorktreeWithLocalRepo:
 
         created_wt = None
 
-        async def fake_git(*args, cwd):
+        async def fake_git(*args, cwd, env=None):
+            del env
             nonlocal created_wt
             if (
                 args[0] == "worktree"
@@ -160,8 +159,7 @@ class TestAutoHarnessWorktreeWithLocalRepo:
             return 0, "ok"
 
         with patch(
-            "openjiuwen.auto_harness"
-            ".workspace._run_git",
+            "openjiuwen.auto_harness.infra.worktree_manager._run_git",
             side_effect=fake_git,
         ):
             wt_path = await mgr.prepare(
@@ -191,7 +189,8 @@ class TestAutoHarnessWorktreeWithoutLocalRepo:
 
         clone_called = False
 
-        async def fake_git(*args, cwd):
+        async def fake_git(*args, cwd, env=None):
+            del env
             nonlocal clone_called
             if args[0] == "clone":
                 clone_called = True
@@ -213,8 +212,7 @@ class TestAutoHarnessWorktreeWithoutLocalRepo:
             return 0, "ok"
 
         with patch(
-            "openjiuwen.auto_harness"
-            ".workspace._run_git",
+            "openjiuwen.auto_harness.infra.worktree_manager._run_git",
             side_effect=fake_git,
         ):
             wt_path = await mgr.prepare("test-clone")
@@ -282,14 +280,14 @@ class TestAutoHarnessDataDirIsolation:
         data_dir = str(tmp_path / "auto_harness")
         cfg = AutoHarnessConfig(data_dir=data_dir)
 
-        assert cfg.memory_dir.startswith(data_dir)
+        assert cfg.resolved_experience_dir.startswith(data_dir)
         assert cfg.runs_dir.startswith(data_dir)
         assert cfg.worktrees_dir.startswith(data_dir)
         assert cfg.cache_repo_dir.startswith(data_dir)
 
         # 所有路径都不包含 worktree 相关内容
         for p in [
-            cfg.memory_dir,
+            cfg.resolved_experience_dir,
             cfg.runs_dir,
         ]:
             assert "worktrees" not in p
@@ -311,7 +309,8 @@ class TestAutoHarnessDataDirIsolation:
 
         wt_created = None
 
-        async def fake_git(*args, cwd):
+        async def fake_git(*args, cwd, env=None):
+            del env
             nonlocal wt_created
             if (
                 args[0] == "worktree"
@@ -329,17 +328,16 @@ class TestAutoHarnessDataDirIsolation:
             return 0, "ok"
 
         with patch(
-            "openjiuwen.auto_harness"
-            ".workspace._run_git",
+            "openjiuwen.auto_harness.infra.worktree_manager._run_git",
             side_effect=fake_git,
         ):
             wt_path = await mgr.prepare("test-iso")
 
-        # memory 和 runs 在 data_dir 下，不在 wt 下
-        assert not (Path(wt_path) / "memory").exists()
+        # experience 和 runs 在 data_dir 下，不在 wt 下
+        assert not (Path(wt_path) / "experience").exists()
         assert not (Path(wt_path) / "runs").exists()
-        assert cfg.memory_dir == str(
-            data_dir / "memory"
+        assert cfg.resolved_experience_dir == str(
+            data_dir / "experience"
         )
         assert cfg.runs_dir == str(data_dir / "runs")
 
@@ -376,7 +374,7 @@ class TestSubcmdRunIntegration:
 
         mock_orch = MagicMock()
         mock_orch.run_session_stream = _fake_stream
-        mock_orch._results = [
+        mock_orch.results = [
             CycleResult(success=True),
         ]
 
@@ -412,9 +410,6 @@ class TestSubcmdRunIntegration:
         """无 --task 时 tasks=None，走 assess→plan。"""
         from unittest.mock import MagicMock
 
-        from openjiuwen.auto_harness.schema import (
-            CycleResult,
-        )
         from openjiuwen.core.session.stream.base import (
             OutputSchema,
         )
@@ -431,7 +426,7 @@ class TestSubcmdRunIntegration:
 
         mock_orch = MagicMock()
         mock_orch.run_session_stream = _fake_stream
-        mock_orch._results = []
+        mock_orch.results = []
 
         with patch(
             "openjiuwen.auto_harness.orchestrator"
@@ -497,9 +492,6 @@ class TestSubcmdRunIntegration:
         """--budget 和 --no-push 覆盖配置。"""
         from unittest.mock import MagicMock
 
-        from openjiuwen.auto_harness.schema import (
-            CycleResult,
-        )
         from openjiuwen.core.session.stream.base import (
             OutputSchema,
         )
@@ -518,7 +510,7 @@ class TestSubcmdRunIntegration:
 
             mock_orch = MagicMock()
             mock_orch.run_session_stream = _fake_stream
-            mock_orch._results = []
+            mock_orch.results = []
             return mock_orch
 
         with patch(
