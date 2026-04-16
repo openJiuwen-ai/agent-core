@@ -27,6 +27,7 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     DEFAULT_BROWSER_TIMEOUT_S,
     DEFAULT_MODEL_NAME,
     build_runtime_settings,
+    load_repo_dotenv,
     parse_command_args,
 )
 from openjiuwen.harness.tools.browser_move.utils.parsing import extract_json_object
@@ -97,6 +98,31 @@ def test_build_runtime_settings_respects_env_overrides() -> None:
         assert settings.guardrails.timeout_s == 45
         assert settings.mcp_cfg.params["args"] == ["-y", "@playwright/mcp@latest", "--headless"]
         assert settings.mcp_cfg.params["timeout_s"] == 45
+
+
+def test_load_repo_dotenv_skips_openjiuwen_cli_env(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        env_path = Path(tmp) / ".env"
+        env_path.write_text(
+            "OPENJIUWEN_API_KEY=bad-key\n"
+            "MODEL_PROVIDER=dashscope\n"
+            "API_KEY=runtime-key\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.delenv("OPENJIUWEN_API_KEY", raising=False)
+        monkeypatch.delenv("MODEL_PROVIDER", raising=False)
+        monkeypatch.delenv("API_KEY", raising=False)
+
+        with patch(
+            "openjiuwen.harness.tools.browser_move.utils.env.resolve_repo_dotenv_path",
+            return_value=env_path,
+        ):
+            assert load_repo_dotenv() is True
+
+        assert os.getenv("OPENJIUWEN_API_KEY") is None
+        assert os.getenv("MODEL_PROVIDER") == "dashscope"
+        assert os.getenv("API_KEY") == "runtime-key"
 
 
 def test_parse_command_args_accepts_json_list() -> None:

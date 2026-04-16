@@ -14,6 +14,7 @@ try:
 except ImportError:  # pragma: no cover
     from playwright_runtime import REPO_ROOT
 
+_BLOCKED_DOTENV_PREFIXES = ("OPENJIUWEN_",)
 SUPPORTED_MODEL_PROVIDERS = frozenset({"openai", "openrouter", "siliconflow", "dashscope"})
 TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 FALSY_ENV_VALUES = frozenset({"0", "false", "no", "off"})
@@ -40,10 +41,21 @@ def load_repo_dotenv(*, override: bool = False) -> bool:
     if not env_path.exists():
         return False
     try:
-        from dotenv import load_dotenv
+        from dotenv import dotenv_values
     except ImportError:
         return False
-    return bool(load_dotenv(dotenv_path=env_path, override=override))
+
+    loaded = False
+    for key, value in dotenv_values(env_path).items():
+        if value is None:
+            continue
+        if any(key.startswith(prefix) for prefix in _BLOCKED_DOTENV_PREFIXES):
+            continue
+        if not override and key in os.environ:
+            continue
+        os.environ[key] = value
+        loaded = True
+    return loaded
 
 
 def parse_command_args(value: str) -> list[str]:
