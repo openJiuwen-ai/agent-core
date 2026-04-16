@@ -383,3 +383,551 @@ def run(
         ctx.exit(1)
     except KeyboardInterrupt:
         pass
+
+
+# -------------------------------------------------------------------
+# auto-harness subcommand group
+# -------------------------------------------------------------------
+
+
+async def _run_auto_harness(
+    opts: CLIOptions,
+    task: str | None,
+    task_file: str | None,
+    dry_run: bool,
+    stage: str | None,
+    no_push: bool,
+    budget: float | None,
+    goal: str | None,
+    competitor: str | None,
+) -> int:
+    """Execute an auto-harness session.
+
+    Returns:
+        Exit code (0 = success).
+    """
+    import json
+    import logging
+    import time
+    from pathlib import Path
+
+    from openjiuwen.auto_harness.schema import (
+        OptimizationTask,
+        is_placeholder_local_repo,
+        load_auto_harness_config,
+    )
+    from openjiuwen.auto_harness.orchestrator import (
+        create_auto_harness_orchestrator,
+    )
+    from openjiuwen.auto_harness.stages.assess import (
+        run_assess_stream,
+    )
+    from openjiuwen.auto_harness.experience.experience_store import (
+        ExperienceStore,
+    )
+    from openjiuwen.auto_harness.infra.ci_gate_runner import (
+        CIGateRunner,
+    )
+    from openjiuwen.auto_harness.infra.github_cli import (
+        ensure_github_cli_ready,
+    )
+    from openjiuwen.core.foundation.llm.model import Model
+    from openjiuwen.core.foundation.llm.schema.config import (
+        ModelClientConfig,
+        ModelRequestConfig,
+    )
+    from openjiuwen.harness.cli.agent.config import (
+        load_config as load_cli_config,
+    )
+
+    if opts.verbose:
+        for name in (
+            "auto_harness",
+            "openjiuwen.auto_harness",
+        ):
+            logging.getLogger(name).setLevel(
+                logging.DEBUG,
+            )
+
+    # data_dir 由 CLI home 决定
+    cli_home = opts.workspace or str(
+        Path.home() / ".openjiuwen"
+    )
+    data_dir = str(Path(cli_home) / "auto_harness")
+    config_path = str(
+        Path(data_dir) / "config.yaml"
+    )
+
+    # 从 YAML 加载配置
+    config = load_auto_harness_config(
+        config_path, workspace_hint=opts.workspace or "",
+    )
+    config.data_dir = data_dir
+    if (
+        config.local_repo
+        and (
+            is_placeholder_local_repo(
+                config.local_repo
+            )
+            or not Path(config.local_repo).exists()
+        )
+    ):
+        click.echo(
+            "忽略无效的 local_repo 配置: "
+            f"{config.local_repo}"
+        )
+        config.local_repo = ""
+    if config.config_bootstrapped:
+        click.echo(
+            "已初始化 auto-harness 配置模板: "
+            f"{config.config_path}"
+        )
+    if not config.local_repo and config.suggested_local_repo:
+        config.local_repo = config.suggested_local_repo
+        click.echo(
+            "检测到本地仓库，临时使用 "
+            f"local_repo={config.local_repo}。"
+            "建议写回 config.yaml。"
+        )
+    elif not config.local_repo:
+        click.echo(
+            "未配置 local_repo，auto-harness 将使用 "
+            "clone 缓存。请编辑 "
+            f"{config.config_path or config_path} "
+            "补充 local_repo。"
+        )
+    if config.local_repo:
+        config.workspace = config.local_repo
+    elif not config.workspace:
+        config.workspace = opts.workspace or ""
+
+    debug_dir = Path(config.runs_dir)
+    debug_dir.mkdir(parents=True, exist_ok=True)
+
+    # 从 CLI 选项构建 Model
+    cli_cfg = load_cli_config(
+        provider=opts.provider,
+        model=opts.model,
+        api_key=opts.api_key,
+        api_base=opts.api_base,
+        workspace=opts.workspace,
+        verbose=opts.verbose,
+    )
+    model = Model(
+        model_client_config=ModelClientConfig(
+            client_provider=cli_cfg.provider,
+            api_key=cli_cfg.api_key,
+            api_base=cli_cfg.api_base,
+            verify_ssl=False,
+        ),
+        model_config=ModelRequestConfig(
+            model=cli_cfg.model,
+            temperature=0.2,
+            top_p=0.9,
+        ),
+    )
+
+    # 将 Model 和 CLI 参数覆盖到已加载的 config 上
+    config.model = model
+    if budget is not None:
+        config.session_budget_secs = budget
+        config.task_timeout_secs = min(
+            config.task_timeout_secs, budget * 0.95,
+        )
+    if no_push:
+        config.git_remote = ""
+    if goal:
+        config.optimization_goal = goal
+    if competitor:
+        config.competitor = competitor
+
+    if stage in (None, "assess", "plan"):
+        ensure_github_cli_ready(click.echo)
+
+    # Load tasks
+    tasks: list[OptimizationTask] = []
+    if task:
+        tasks = [OptimizationTask(topic=task)]
+    elif task_file:
+        raw = json.loads(
+            Path(task_file).read_text(encoding="utf-8"),
+        )
+        if isinstance(raw, dict):
+            raw = [raw]
+        for item in raw:
+            tasks.append(OptimizationTask(
+                topic=item["topic"],
+                description=item.get("description", ""),
+                files=item.get("files", []),
+            ))
+
+    # Stage dispatch
+    if stage == "assess":
+        from rich.console import Console
+        from openjiuwen.harness.cli.ui.renderer import (
+            render_stream,
+        )
+
+        experience_store = ExperienceStore(
+            config.resolved_experience_dir
+        )
+        console = Console()
+        stream = run_assess_stream(
+            config, experience_store
+        )
+        result = await render_stream(stream, console)
+        report = result.text or ""
+        if report:
+            out = debug_dir / "assessment.md"
+            out.write_text(report, encoding="utf-8")
+        return 0
+
+    if stage == "verify":
+        ci = CIGateRunner(
+            workspace=(
+                config.local_repo
+                or config.cache_repo_dir
+            ),
+            config_path=config.ci_gate_config,
+            python_executable=(
+                config.resolve_ci_gate_python_executable()
+            ),
+            install_command=(
+                config.ci_gate_install_command
+            ),
+        )
+        result = await ci.run("all")
+        passed = result.get("passed", False)
+        click.echo(
+            f"CI Gate: {'PASSED' if passed else 'FAILED'}"
+        )
+        if not passed:
+            for err in result.get("errors", [])[:10]:
+                click.echo(f"  {err}", err=True)
+        return 0 if passed else 1
+
+    if stage == "implement":
+        if not tasks:
+            raise click.UsageError(
+                "--stage implement 需要 "
+                "--task 或 --task-file"
+            )
+        from rich.console import Console
+        from openjiuwen.harness.cli.ui.renderer import (
+            render_stream,
+        )
+
+        console = Console()
+        orch = create_auto_harness_orchestrator(config)
+        stream = orch.run_session_stream(tasks=tasks)
+        await render_stream(stream, console)
+        results = orch._results
+        for i, r in enumerate(results):
+            s = "OK" if r.success else "FAIL"
+            click.echo(
+                f"Task {i + 1}: {s}"
+                f" | pr={r.pr_url or 'N/A'}"
+                f" | error={r.error or 'none'}"
+            )
+        return 0
+
+    # Full session or dry-run
+    t0 = time.monotonic()
+
+    if tasks:
+        click.echo(
+            f"使用手动指定的 {len(tasks)} 个任务",
+        )
+    else:
+        click.echo(
+            "未指定手动任务，将执行 "
+            "assess → plan → implement → learnings"
+        )
+
+    if dry_run:
+        task_data = [
+            {
+                "topic": t.topic,
+                "description": t.description,
+                "files": t.files,
+            }
+            for t in tasks
+        ]
+        out_path = debug_dir / "tasks.json"
+        out_path.write_text(
+            json.dumps(
+                task_data, ensure_ascii=False, indent=2,
+            ),
+            encoding="utf-8",
+        )
+        click.echo(json.dumps(
+            task_data, ensure_ascii=False, indent=2,
+        ))
+        click.echo(f"[dry-run] 任务列表 → {out_path}")
+        return 0
+
+    orch = create_auto_harness_orchestrator(config)
+    stream = orch.run_session_stream(tasks=tasks or None)
+    from rich.console import Console
+    from openjiuwen.harness.cli.ui.renderer import (
+        render_stream,
+    )
+
+    console = Console()
+    await render_stream(stream, console)
+    results = orch._results
+    elapsed = time.monotonic() - t0
+    ok = sum(1 for r in results if r.success)
+    click.echo(
+        f"Session 完成: {ok}/{len(results)} 成功, "
+        f"耗时 {elapsed:.1f}s"
+    )
+    return 0
+
+
+async def _run_experience_search(
+    workspace: str, query: str,
+) -> None:
+    """Search the experience store."""
+    import os
+    from pathlib import Path
+
+    from openjiuwen.auto_harness.experience.experience_store import (
+        ExperienceStore,
+    )
+
+    ws = workspace or os.getcwd()
+    store = ExperienceStore(
+        str(Path(ws) / "auto_harness/experience"),
+    )
+    results = await store.search(query, top_k=10)
+    if not results:
+        click.echo("无匹配结果")
+        return
+    for m in results:
+        click.echo(
+            f"[{m.type.value}] {m.topic}: "
+            f"{m.summary or m.outcome}"
+        )
+
+
+async def _run_experience_list(
+    workspace: str,
+    mem_type: str | None,
+    limit: int,
+) -> None:
+    """List recent experience entries."""
+    import os
+    from pathlib import Path
+
+    from openjiuwen.auto_harness.experience.experience_store import (
+        ExperienceStore,
+    )
+
+    ws = workspace or os.getcwd()
+    store = ExperienceStore(
+        str(Path(ws) / "auto_harness/experience"),
+    )
+    entries = await store.list_recent(limit=limit)
+    if mem_type:
+        entries = [
+            e for e in entries
+            if e.type.value == mem_type
+        ]
+    if not entries:
+        click.echo("无记录")
+        return
+    for m in entries:
+        click.echo(
+            f"[{m.type.value}] {m.topic}: "
+            f"{m.summary or m.outcome}"
+        )
+
+
+async def _run_gap_analyze(
+    workspace: str, competitor: str,
+) -> None:
+    """Run competitive gap analysis."""
+    import os
+    from pathlib import Path
+
+    from openjiuwen.auto_harness.schema import (
+        AutoHarnessConfig,
+    )
+    from openjiuwen.auto_harness.stages.assess import (
+        run_gap_analysis,
+    )
+
+    ws = workspace or os.getcwd()
+    config = AutoHarnessConfig(workspace=ws)
+    gaps = await run_gap_analysis(
+        config, competitor=competitor, harness_state="",
+    )
+    if not gaps:
+        click.echo(
+            "Phase 1 占位: 差距分析尚未接入 LLM"
+        )
+        return
+    for g in gaps:
+        click.echo(
+            f"[{g.priority:.1f}] {g.feature}: "
+            f"{g.gap_description}"
+        )
+
+
+# -------------------------------------------------------------------
+# auto-harness Click group + subcommands
+# -------------------------------------------------------------------
+
+
+@cli.group("auto-harness")
+@click.pass_context
+def auto_harness(ctx: click.Context) -> None:
+    """Auto Harness Agent — 自主优化 harness 框架。"""
+    pass
+
+
+@auto_harness.command("run")
+@click.option(
+    "--task", default=None,
+    help="手动指定单个任务描述。",
+)
+@click.option(
+    "--task-file", default=None,
+    help="从 JSON 文件加载任务列表。",
+)
+@click.option(
+    "--dry-run", is_flag=True,
+    help="只执行 assess + plan，不 implement。",
+)
+@click.option(
+    "--stage",
+    type=click.Choice(
+        ["assess", "plan", "implement", "verify"],
+    ),
+    default=None,
+    help="只执行指定阶段。",
+)
+@click.option(
+    "--no-push", is_flag=True,
+    help="不 push / 不创建 MR。",
+)
+@click.option(
+    "--budget", type=float, default=None,
+    help="覆盖 session 预算（秒）。",
+)
+@click.option(
+    "--goal", default=None,
+    help="指定本轮自然语言优化目标，驱动 assess/plan 全流程。",
+)
+@click.option(
+    "--competitor", default=None,
+    help="指定重点对标竞品，驱动 assess/plan 全流程。",
+)
+@click.pass_context
+def auto_harness_run(
+    ctx: click.Context,
+    task: str | None,
+    task_file: str | None,
+    dry_run: bool,
+    stage: str | None,
+    no_push: bool,
+    budget: float | None,
+    goal: str | None,
+    competitor: str | None,
+) -> None:
+    """执行优化周期。"""
+    opts: CLIOptions = ctx.obj["opts"]
+    try:
+        exit_code = asyncio.run(
+            _run_auto_harness(
+                opts, task, task_file,
+                dry_run, stage, no_push, budget,
+                goal,
+                competitor,
+            )
+        )
+        ctx.exit(exit_code)
+    except KeyboardInterrupt:
+        pass
+
+
+@auto_harness.group("experience")
+def auto_harness_experience() -> None:
+    """经验库操作。"""
+    pass
+
+
+@auto_harness_experience.command("search")
+@click.argument("query")
+@click.pass_context
+def experience_search(
+    ctx: click.Context, query: str,
+) -> None:
+    """搜索经验库。"""
+    opts: CLIOptions = ctx.obj["opts"]
+    asyncio.run(
+        _run_experience_search(
+            opts.workspace or "", query
+        ),
+    )
+
+
+@auto_harness_experience.command("list")
+@click.option(
+    "--type", "mem_type", default=None,
+    help="按类型过滤 (optimization/failure/insight)。",
+)
+@click.option(
+    "--limit", default=10, type=int,
+    help="返回条数。",
+)
+@click.pass_context
+def experience_list(
+    ctx: click.Context,
+    mem_type: str | None,
+    limit: int,
+) -> None:
+    """列出经验库记录。"""
+    opts: CLIOptions = ctx.obj["opts"]
+    asyncio.run(
+        _run_experience_list(
+            opts.workspace or "", mem_type, limit,
+        ),
+    )
+
+
+@auto_harness.command("gap-analyze")
+@click.option(
+    "--competitor", required=True,
+    help="竞品名称。",
+)
+@click.pass_context
+def gap_analyze(
+    ctx: click.Context, competitor: str,
+) -> None:
+    """差距分析。"""
+    opts: CLIOptions = ctx.obj["opts"]
+    asyncio.run(
+        _run_gap_analyze(
+            opts.workspace or "", competitor,
+        ),
+    )
+
+
+@auto_harness.command("history")
+@click.option(
+    "--limit", default=20, type=int,
+    help="返回条数。",
+)
+@click.pass_context
+def auto_harness_history(
+    ctx: click.Context, limit: int,
+) -> None:
+    """查看优化历史。"""
+    opts: CLIOptions = ctx.obj["opts"]
+    asyncio.run(
+        _run_experience_list(
+            opts.workspace or "", None, limit
+        ),
+    )
