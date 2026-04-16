@@ -106,56 +106,50 @@ class TestGitOperations:
         assert result["renamed_files"] == ["new.py"]
 
     @pytest.mark.asyncio
-    async def test_commit_stages_only_declared_changed_files(self):
+    async def test_status_porcelain_returns_raw_output(self):
         git = GitOperations(workspace="/tmp/worktree")
 
         git._git = AsyncMock(
-            side_effect=[
-                (0, ""),
-                (0, ""),
-                (0, "[main abc123] auto-harness: tighten scope"),
-                (0, "abc123"),
-            ]
+            return_value=(
+                0,
+                " M openjiuwen/auto_harness/schema.py\n"
+                "?? tests/unit_tests/auto_harness/test_schema.py",
+            )
         )
 
-        result = await git.commit(
-            "auto-harness: tighten scope",
-            files=[
-                "openjiuwen/auto_harness/schema.py",
-                "tests/unit_tests/auto_harness/test_schema.py",
-            ],
-        )
+        result = await git.status_porcelain()
 
-        assert result["success"] is True
-        assert result["staged_files"] == [
-            "openjiuwen/auto_harness/schema.py",
-            "tests/unit_tests/auto_harness/test_schema.py",
-        ]
-        assert result["commit_sha"] == "abc123"
-        assert git._git.await_args_list[0].args == (
-            "add",
-            "--",
-            "openjiuwen/auto_harness/schema.py",
+        assert result == (
+            "M openjiuwen/auto_harness/schema.py\n"
+            "?? tests/unit_tests/auto_harness/test_schema.py"
         )
-        assert git._git.await_args_list[1].args == (
-            "add",
-            "--",
-            "tests/unit_tests/auto_harness/test_schema.py",
-        )
-        assert git._git.await_args_list[2].args == (
-            "commit",
-            "-m",
-            "auto-harness: tighten scope",
+        git._git.assert_awaited_once_with(
+            "status", "--porcelain", "--untracked-files=all"
         )
 
     @pytest.mark.asyncio
-    async def test_commit_requires_files(self):
+    async def test_show_last_commit_stat_returns_compact_summary(self):
         git = GitOperations(workspace="/tmp/worktree")
 
-        result = await git.commit(
-            "auto-harness: tighten scope",
-            [],
+        git._git = AsyncMock(
+            return_value=(
+                0,
+                "commit abc123\n"
+                "Author: auto-harness\n\n"
+                " 1 file changed, 2 insertions(+)",
+            )
         )
 
-        assert result["success"] is False
-        assert result["error_code"] == "empty_files"
+        result = await git.show_last_commit_stat()
+
+        assert result == (
+            "commit abc123\n"
+            "Author: auto-harness\n\n"
+            " 1 file changed, 2 insertions(+)"
+        )
+        git._git.assert_awaited_once_with(
+            "show",
+            "--stat",
+            "--format=fuller",
+            "-1",
+        )

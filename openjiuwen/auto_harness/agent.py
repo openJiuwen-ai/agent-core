@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from openjiuwen.core.single_agent.schema.agent_card import (
     AgentCard,
@@ -31,7 +31,6 @@ if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
     from openjiuwen.auto_harness.schema import (
         AutoHarnessConfig,
-        CommitFacts,
     )
 
 _SKILLS_DIR = str(Path(__file__).parent / "skills")
@@ -65,10 +64,7 @@ def create_auto_harness_agent(
     *,
     workspace_override: Optional[str] = None,
     edit_safety_rail: Optional["AgentRail"] = None,
-    commit_facts_provider: Optional[
-        Callable[[], "CommitFacts"]
-    ] = None,
-    git: Optional[object] = None,
+    skill_names: Optional[List[str]] = None,
     extra_rails: Optional[List["AgentRail"]] = None,
     extra_tools: Optional[
         List[Tool | ToolCard]
@@ -79,6 +75,7 @@ def create_auto_harness_agent(
     Args:
         config: Auto Harness 配置。
         workspace_override: 可选，覆盖 agent 的 workspace 根目录。
+        skill_names: 可选，覆盖默认启用的 skill 列表。
         extra_rails: 额外的 rail 实例。
         extra_tools: 额外的 tool 实例。
 
@@ -90,16 +87,16 @@ def create_auto_harness_agent(
         edit_safety_rail=edit_safety_rail,
     )
     rails.append(_build_skill_rail(
-        ["implement", "verify", "communicate"],
+        skill_names or [
+            "implement",
+            "verify",
+            "communicate",
+        ],
     ))
     if extra_rails:
         rails.extend(extra_rails)
 
-    tools: List[Tool | ToolCard] = _build_tools(
-        config,
-        git=git,
-        commit_facts_provider=commit_facts_provider,
-    )
+    tools: List[Tool | ToolCard] = []
     if extra_tools:
         tools.extend(extra_tools)
 
@@ -109,6 +106,8 @@ def create_auto_harness_agent(
     system_prompt = "\n\n".join(
         s.render(config.language) for s in sections
     )
+
+    workspace = workspace_override or config.workspace
 
     agent = create_deep_agent(
         model=config.model,
@@ -120,9 +119,12 @@ def create_auto_harness_agent(
         ),
         system_prompt=system_prompt,
         tools=tools or None,
-        subagents=_build_subagents(config) or None,
+        subagents=_build_subagents(
+            config,
+            workspace=workspace,
+        ) or None,
         rails=rails or None,
-        workspace=workspace_override or config.workspace,
+        workspace=workspace,
         language=config.language,
         enable_task_planning=True,
         enable_async_subagent=True,
@@ -132,6 +134,19 @@ def create_auto_harness_agent(
         ),
     )
     return agent
+
+
+def create_commit_agent(
+    config: "AutoHarnessConfig",
+    *,
+    workspace_override: Optional[str] = None,
+) -> "DeepAgent":
+    """创建提交阶段专用 agent。"""
+    return create_auto_harness_agent(
+        config,
+        workspace_override=workspace_override,
+        skill_names=["commit", "communicate"],
+    )
 
 
 def _build_rails(
@@ -181,43 +196,15 @@ def _build_rails(
     ]
     return rails
 
-
-def _build_tools(
-    config: "AutoHarnessConfig",
-    *,
-    git: Optional[object] = None,
-    commit_facts_provider: Optional[
-        Callable[[], "CommitFacts"]
-    ] = None,
-) -> List[Tool | ToolCard]:
-    """构建 auto-harness 专用 tools。"""
-    tools: List[Tool | ToolCard] = []
-    if git is not None and commit_facts_provider is not None:
-        tools.extend(_build_commit_tool(
-            git,
-            commit_facts_provider,
-            config.language,
-        ))
-    return tools
-
-
 def _build_subagents(
     config: "AutoHarnessConfig",
+    *,
+    workspace: Optional[str] = None,
 ) -> list[object]:
     """构建 auto-harness 可调用的子代理。"""
-    from openjiuwen.core.single_agent.schema.agent_card import (
-        AgentCard as _AgentCard,
-    )
-    from openjiuwen.harness.prompts.sections.tools.task_tool import (
-        EXPLORE_AGENT_DESC,
-        EXPLORE_AGENT_SYSTEM_PROMPT_CN,
-        EXPLORE_AGENT_SYSTEM_PROMPT_EN,
-    )
-    from openjiuwen.harness.rails.filesystem_rail import (
-        FileSystemRail,
-    )
-    from openjiuwen.harness.schema.config import (
-        SubAgentConfig,
+    from openjiuwen.harness.subagents.explore_agent import (
+        DEFAULT_EXPLORE_AGENT_DESCRIPTION,
+        build_explore_agent_config,
     )
     from openjiuwen.harness.subagents.browser_agent import (
         build_browser_agent_config,
@@ -225,24 +212,19 @@ def _build_subagents(
     resolved_language = resolve_language(
         config.language,
     )
+    subagent_workspace = workspace or config.workspace
     subagents: list[object] = [
-        SubAgentConfig(
-            agent_card=_AgentCard(
+        build_explore_agent_config(
+            card=AgentCard(
                 name="explore_agent",
-                description=EXPLORE_AGENT_DESC.get(
+                description=DEFAULT_EXPLORE_AGENT_DESCRIPTION.get(
                     resolved_language,
-                    EXPLORE_AGENT_DESC["cn"],
+                    DEFAULT_EXPLORE_AGENT_DESCRIPTION["cn"],
                 ),
             ),
-            system_prompt=(
-                EXPLORE_AGENT_SYSTEM_PROMPT_EN
-                if resolved_language == "en"
-                else EXPLORE_AGENT_SYSTEM_PROMPT_CN
-            ),
             model=config.model,
-            workspace=config.workspace,
+            workspace=subagent_workspace,
             language=resolved_language,
-            rails=[FileSystemRail()],
             max_iterations=20,
         ),
     ]
@@ -251,7 +233,7 @@ def _build_subagents(
         subagents.append(
             build_browser_agent_config(
                 config.model,
-                workspace=config.workspace,
+                workspace=subagent_workspace,
                 language=resolved_language,
                 max_iterations=20,
             )
@@ -292,6 +274,20 @@ def _load_prompt(filename: str) -> str:
     """加载 prompt 模板文件内容。"""
     path = _PROMPTS_DIR / filename
     return path.read_text(encoding="utf-8")
+
+
+def _render_prompt(
+    template: str,
+    **values: str,
+) -> str:
+    """Render simple ``{name}`` placeholders without touching JSON braces."""
+    rendered = template
+    for key, value in values.items():
+        rendered = rendered.replace(
+            f"{{{key}}}",
+            value,
+        )
+    return rendered
 
 
 def _build_readonly_rails(
@@ -350,26 +346,6 @@ def _build_skill_rail(
         skill_mode="all",
     )
 
-
-def _build_commit_tool(
-    git: object,
-    commit_facts_provider: Callable[[], "CommitFacts"],
-    language: str,
-) -> List[Tool | ToolCard]:
-    """构建 CommitTool 列表。"""
-    from openjiuwen.auto_harness.tools.commit_tool import (
-        CommitTool,
-    )
-
-    return [
-        CommitTool(
-            git=git,  # type: ignore[arg-type]
-            facts_provider=commit_facts_provider,
-            language=language,
-        ),
-    ]
-
-
 def _build_research_tools(
     config: "AutoHarnessConfig",
 ) -> List[Tool | ToolCard]:
@@ -400,7 +376,10 @@ def create_assess_agent(
         ),
         system_prompt=prompt,
         tools=_build_research_tools(config) or None,
-        subagents=_build_subagents(config) or None,
+        subagents=_build_subagents(
+            config,
+            workspace=config.workspace,
+        ) or None,
         rails=rails or None,
         workspace=config.workspace,
         language=config.language,
@@ -427,7 +406,10 @@ def create_plan_agent(
         ),
         system_prompt=prompt,
         tools=_build_research_tools(config) or None,
-        subagents=_build_subagents(config) or None,
+        subagents=_build_subagents(
+            config,
+            workspace=config.workspace,
+        ) or None,
         rails=rails or None,
         workspace=config.workspace,
         language=config.language,
@@ -453,7 +435,10 @@ def create_eval_agent(
             description="评审代码变更质量",
         ),
         system_prompt=prompt,
-        subagents=_build_subagents(config) or None,
+        subagents=_build_subagents(
+            config,
+            workspace=config.workspace,
+        ) or None,
         rails=rails or None,
         workspace=config.workspace,
         language=config.language,
@@ -467,9 +452,16 @@ def create_eval_agent(
 
 def create_learnings_agent(
     config: "AutoHarnessConfig",
+    *,
+    session_results: str = "",
+    existing_memories: str = "",
 ) -> "DeepAgent":
     """创建 Learnings 反思阶段的 DeepAgent。"""
-    prompt = _load_prompt("learnings.md")
+    prompt = _render_prompt(
+        _load_prompt("learnings.md"),
+        session_results=session_results,
+        existing_memories=existing_memories,
+    )
     rails = _build_readonly_rails(config)
     rails.append(_build_skill_rail(["communicate"]))
     return create_deep_agent(
@@ -481,7 +473,6 @@ def create_learnings_agent(
             ),
         ),
         system_prompt=prompt,
-        tools=_build_memory_tool(config) or None,
         rails=rails or None,
         workspace=config.workspace,
         language=config.language,

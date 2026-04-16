@@ -1,6 +1,6 @@
 ---
 name: implement
-description: 实现阶段主操作手册 — 指导 agent 从改码、验证到生成提交计划并调用 commit_tool
+description: 实现阶段主操作手册 — 指导 agent 完成改码与局部验证，并把提交留给独立 commit phase
 immutable: true
 tools:
   - read_file
@@ -10,7 +10,6 @@ tools:
   - grep_tool
   - bash_tool
   - experience_search
-  - commit_tool
 ---
 
 # Implement Skill
@@ -25,16 +24,16 @@ tools:
 2. 收集上下文：读取目标文件、相关测试、调用点和历史经验
 3. 最小修改：只做完成任务所需的最小代码变更
 4. 局部验证：按 `verify` skill 的等级要求执行必要检查
-5. 检查改动事实：读取系统注入的 commit facts
-6. 生成提交计划：只为允许范围内的文件生成 commit plan
-7. 调用 `commit_tool` 提交
-8. 交还 orchestrator 继续处理 push / PR / experience
+5. 检查改动事实：确认当前 dirty files、旧脏文件和测试上下文
+6. 生成提交计划：只整理本轮真实需要提交的文件，供后续 commit phase 使用
+7. 停止在未提交状态，交还 orchestrator 继续处理独立 commit phase / push / PR / experience
 
 ## 范围约束
 
 - 只修改当前 task 明确涉及的文件
 - 允许补充对应测试文件，但必须出现在 commit facts 提供的候选列表中
 - 允许修改 verify 阶段直接点名的老测试文件，但必须出现在 commit facts 提供的候选列表中
+- 如果任务需要新增或更新文档，只能写入 `docs/en/` 和 `docs/zh/` 下的 Markdown 文件；不要在 `docs/` 根目录或其他子目录新增文档
 - 不做顺手重构
 - 不扩大功能范围
 
@@ -49,17 +48,16 @@ tools:
 
 ## 提交规则
 
-- 提交前必须先读取 commit facts
-- 只提交本轮真实修改且在 `allowed_files` 中的文件
-- 如果包含测试文件，必须在 `rationale` 说明原因
-- 提交只能通过 `commit_tool`
-- `commit_tool` 或 guard 拒绝时，只能收缩范围，不能自行放宽规则
+- 本阶段严禁执行 `git add`、`git commit` 或其他提交动作
+- 只整理提交边界，不实际落库提交
+- 如果包含测试文件，必须确认它们与当前修改直接相关
+- 真正的提交只允许在独立 `commit` phase 中按 `commit` skill 完成
 
 ## 失败处理
 
 - 单个文件修改失败 3 次：停止并报告
 - CI 检查失败：优先修复，不直接提交
-- 提交 guard 连续拒绝 2 次：停止并报告
+- 提交尝试连续失败 2 次：停止并报告
 - 遇到不确定或可能影响公共 API 的情况：停止并求助
 
 ## 代码风格

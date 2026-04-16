@@ -36,32 +36,59 @@ tools:
 规则：
 - subject 不超过 50 字符，使用祈使语气
 - body 说明 **为什么** 而非 **做了什么**
-- 不在这里决定提交边界；边界由 implement skill + commit guard 控制
+- 不在这里决定提交边界；边界由 implement skill + commit skill 控制
 
 ## PR 描述模板
 
+PR / MR 描述遵循 `$git-commit-push` skill 中的 GitCode 模板，不再自定义另一套简化格式。
+
+创建 MR 时 body 使用以下模板，并根据实际情况填写 `/kind` 标签、概述、变更内容、验证结果和 checklist：
+
 ```markdown
-## Summary
+<!--  Thanks for sending a pull request!  Here are some tips for you:
 
-- 变更目的（1-2 句话）
-- 关键设计决策
+1) If this is your first time, please read our contributor guidelines: https://gitcode.com/openJiuwen/community/blob/master/CONTRIBUTING.md
 
-## Changes
+2) If you want to contribute your code but don't know who will review and merge, please add label `openjiuwen-assistant` to the pull request, we will find and do it as soon as possible.
+-->
 
-- 按模块列出主要变更
-- 标注破坏性变更（如有）
+**What type of PR is this?**
+<!--
+选择下面一种标签替换下方 `/kind <label>`，可选标签类型有：
+- /kind bug
+- /kind task
+- /kind feature
+- /kind refactor
+- /kind clean_code
+如PR描述不符合规范，修改PR描述后需要/check-pr重新检查PR规范。
+-->
+/kind <label>
 
-## Test Plan
+## 概述
+<简要描述变更内容和原因>
 
-- [ ] 单测通过
-- [ ] lint 通过
-- [ ] 类型检查通过
-- [ ] 手动验证步骤（如有）
+## 变更内容
+<列出主要改动点>
 
-## Related
+## 验证结果
+<描述测试/验证方式和结果>
 
-- 关联 issue/任务编号
+**Self-checklist**:（**请自检，在[ ]内打上x，我们将检视你的完成情况，否则会导致pr无法合入**）
+
++ - [ ] **设计**：PR对应的方案是否已经经过Maintainer评审，方案检视意见是否均已答复并完成方案修改
++ - [ ] **测试**：PR中的代码是否已有UT/ST测试用例进行充分的覆盖，新增测试用例是否随本PR一并上库或已经上库
++ - [ ] **验证**：PR描述信息中是否已包含对该PR对应的Feature、Refactor、Bugfix的预期目标达成情况的详细验证结果描述
++ - [ ] **接口**：是否涉及对外接口变更，相应变更已得到接口评审组织的通过，API对应的注释信息已经刷新正确
++ - [ ] **文档**：是否涉及官网文档修改，如果涉及请及时提交资料到Doc仓
 ```
+
+Kind 标签选择：
+
+- `bug`：修复 bug
+- `task`：任务类改动
+- `feature`：新功能
+- `refactor`：重构
+- `clean_code`：代码清理
 
 ## Journal 记录
 

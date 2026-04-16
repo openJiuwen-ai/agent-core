@@ -116,6 +116,7 @@ class CycleResult:
     """单个 task 的执行结果。"""
 
     success: bool = False
+    summary: str = ""
     pr_url: str = ""
     error: str = ""
     reverted: bool = False
@@ -158,32 +159,6 @@ class CommitFacts:
         default_factory=list
     )
     diff_stat: str = ""
-
-
-@dataclass
-class CommitPlan:
-    """agent 生成的提交计划。"""
-
-    message: str
-    files: List[str] = field(default_factory=list)
-    rationale: str = ""
-
-
-@dataclass
-class CommitGuardResult:
-    """提交计划的校验结果。"""
-
-    allowed: bool
-    normalized_files: List[str] = field(
-        default_factory=list
-    )
-    blocked_files: List[str] = field(
-        default_factory=list
-    )
-    warnings: List[str] = field(
-        default_factory=list
-    )
-    reason: str = ""
 
 
 @dataclass

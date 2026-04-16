@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Git 操作 — branch / commit / push / PR (GitCode API)。
+"""Git 操作 — branch / push / PR (GitCode API)。
 
 orchestrator 基础设施，不继承 Tool。
 """
@@ -163,45 +163,22 @@ class GitOperations:
         _, out = await self._git(*args)
         return out.strip()
 
-    async def commit(
-        self,
-        message: str,
-        files: List[str],
-    ) -> Dict[str, Any]:
-        """Stage explicit files and create a commit."""
-        selected_files = list(
-            dict.fromkeys(
-                path.strip().replace("\\", "/")
-                for path in files
-                if path and path.strip()
-            )
+    async def status_porcelain(self) -> str:
+        """Return raw git status --porcelain output."""
+        _, out = await self._git(
+            "status", "--porcelain", "--untracked-files=all"
         )
-        if not selected_files:
-            return {
-                "success": False,
-                "output": "No files provided for commit.",
-                "staged_files": [],
-                "error_code": "empty_files",
-            }
+        return out.strip()
 
-        for path in selected_files:
-            await self._git("add", "--", path)
-
-        code, out = await self._git(
-            "commit", "-m", message
+    async def show_last_commit_stat(self) -> str:
+        """Return a compact summary of the latest commit."""
+        _, out = await self._git(
+            "show",
+            "--stat",
+            "--format=fuller",
+            "-1",
         )
-        commit_sha = ""
-        if code == 0:
-            commit_sha = await self.current_head()
-        return {
-            "success": code == 0,
-            "output": out,
-            "staged_files": selected_files,
-            "commit_sha": commit_sha,
-            "error_code": (
-                None if code == 0 else "commit_failed"
-            ),
-        }
+        return out.strip()
 
     async def push(
         self, branch_name: str
