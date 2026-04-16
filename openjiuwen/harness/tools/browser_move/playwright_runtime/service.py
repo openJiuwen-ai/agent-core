@@ -333,22 +333,26 @@ class BrowserService:
         params["env"] = env_map
         self.mcp_cfg.params = params
 
-    async def _ensure_managed_driver_started(self) -> None:
+    async def _ensure_managed_driver_started(self) -> bool:
         if self._driver_mode != "managed":
-            return
+            return False
+        previous_endpoint = self._configured_cdp_endpoint()
         reusable_profile = self._resolve_existing_cdp_profile()
         if reusable_profile is not None:
+            replaced_driver = False
             if self._should_replace_managed_driver(reusable_profile):
                 await self._stop_managed_driver()
+                replaced_driver = True
             self._active_profile = reusable_profile
-            self._inject_cdp_endpoint(str(reusable_profile.cdp_url or "").strip())
-            return
+            endpoint = str(reusable_profile.cdp_url or "").strip()
+            self._inject_cdp_endpoint(endpoint)
+            return replaced_driver or endpoint != previous_endpoint
 
         if self._managed_driver is not None:
             ready = await asyncio.to_thread(self._managed_driver.is_endpoint_ready)
             if ready:
-                return
-            self._managed_driver = None
+                return False
+            await self._stop_managed_driver()
 
         profile = self._profile_store.get_profile(self._profile_name)
         if (
@@ -373,6 +377,7 @@ class BrowserService:
         profile.cdp_url = endpoint
         self._profile_store.upsert_profile(profile, select=True)
         self._managed_driver = driver
+        return True
 
     async def _stop_managed_driver(self) -> None:
         if self._managed_driver is None:
@@ -572,10 +577,11 @@ class BrowserService:
 
     async def ensure_runtime_ready(self) -> None:
         if self.started:
-            await self._ensure_managed_driver_started()
+            browser_rebound = await self._ensure_managed_driver_started()
             configured_endpoint = self._configured_cdp_endpoint()
-            if configured_endpoint != self._registered_cdp_endpoint:
+            if browser_rebound or configured_endpoint != self._registered_cdp_endpoint:
                 await self._refresh_mcp_server_binding()
+                self._browser_agent = None
             return
 
         if shutil.which("npx") is None:

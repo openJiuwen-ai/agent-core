@@ -208,6 +208,42 @@ class TestAuthCallbacks:
     
     @staticmethod
     @pytest.mark.asyncio
+    @patch("openjiuwen.core.foundation.tool.auth.auth_callback.SslUtils")
+    async def test_ssl_auth_handler_exception_handling(mock_ssl_utils):
+        
+        # Mock SslUtils.get_ssl_config to raise an exception
+        original_error = RuntimeError("SSL config error")
+        mock_ssl_utils.get_ssl_config.side_effect = original_error
+        
+        auth_config = ToolAuthConfig(
+            auth_type=AuthType.SSL,
+            config={
+                "verify_switch_env": "RESTFUL_SSL_VERIFY",
+                "ssl_cert_env": "RESTFUL_SSL_CERT"
+            },
+            tool_type="restful_api"
+        )
+        
+        # Verify that AbortError is raised
+        with pytest.raises(BaseError) as excinfo:
+            await SSLAuthStrategy().authenticate(auth_config)
+        
+        # Verify the error message contains the original error message
+        assert "Failed to create SSL connector" in str(excinfo.value)
+        assert "SSL config error" in str(excinfo.value)
+        
+        # Verify the original exception is properly wrapped as cause
+        assert excinfo.value.__cause__ == original_error
+        
+        # Verify SslUtils.get_ssl_config was called with correct parameters
+        mock_ssl_utils.get_ssl_config.assert_called_once_with(
+            "RESTFUL_SSL_VERIFY",
+            "RESTFUL_SSL_CERT",
+            ["false"]
+        )
+    
+    @staticmethod
+    @pytest.mark.asyncio
     async def test_ssl_auth_handler_cert_empty():
         auth_config = ToolAuthConfig(
             auth_type=AuthType.SSL,

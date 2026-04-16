@@ -9,7 +9,10 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+import anyio
+
 from openjiuwen.core.common.logging import runner_logger as logger
+from openjiuwen.core.common.background_tasks import BackgroundTask, create_background_task
 from openjiuwen.core.runner.spawn.protocol import (
     Message,
     MessageType,
@@ -42,7 +45,7 @@ class SpawnedProcessHandle:
     config: SpawnConfig = field(default_factory=SpawnConfig)
     on_unhealthy: Optional[Callable[[], Any]] = field(default=None, repr=False)
     max_health_failures: int = field(default=2, repr=False)
-    _health_check_task: Optional[asyncio.Task] = field(default=None, repr=False)
+    _health_check_task: Optional[BackgroundTask] = field(default=None, repr=False)
     _is_healthy: bool = field(default=True, repr=False)
     _shutdown_requested: bool = field(default=False, repr=False)
     _consecutive_failures: int = field(default=0, repr=False)
@@ -80,10 +83,10 @@ class SpawnedProcessHandle:
         """
         if self.process.stdin is None:
             raise RuntimeError(f"Process {self.process_id} stdin is not available")
-        
+
         if not self.is_alive:
             raise RuntimeError(f"Process {self.process_id} is not running")
-        
+
         await serialize_message_to_stream(message, self.process.stdin)
         logger.debug(
             f"Sent message to process {self.process_id}",
@@ -103,16 +106,16 @@ class SpawnedProcessHandle:
         """
         if self.process.stdout is None:
             raise RuntimeError(f"Process {self.process_id} stdout is not available")
-        
+
         message = await deserialize_message_from_stream(self.process.stdout)
-        
+
         if message is not None:
             logger.debug(
                 f"Received message from process {self.process_id}",
                 message_type=message.type.value,
                 process_id=self.process_id,
             )
-        
+
         return message
 
     async def start_health_check(self, interval: Optional[float] = None) -> None:
@@ -128,19 +131,19 @@ class SpawnedProcessHandle:
                 process_id=self.process_id,
             )
             return
-        
+
         check_interval = interval if interval is not None else self.config.health_check_interval
-        
+
         async def health_check_loop():
             while self.is_alive and not self._shutdown_requested:
                 try:
                     await asyncio.sleep(check_interval)
-                    
+
                     if not self.is_alive or self._shutdown_requested:
                         break
-                    
+
                     await self._perform_health_check()
-                    
+
                 except asyncio.CancelledError:
                     logger.debug(
                         f"Health check cancelled for process {self.process_id}",
@@ -155,8 +158,12 @@ class SpawnedProcessHandle:
                     )
                     self._is_healthy = False
                     self._record_health_failure()
-        
-        self._health_check_task = asyncio.create_task(health_check_loop())
+
+        self._health_check_task = await create_background_task(
+            health_check_loop(),
+            name=f"spawn_health_check:{self.process_id}",
+            group="runner.spawn",
+        )
         logger.info(
             f"Started health check for process {self.process_id}",
             process_id=self.process_id,
@@ -166,11 +173,7 @@ class SpawnedProcessHandle:
     async def stop_health_check(self) -> None:
         """Stop the health check task."""
         if self._health_check_task is not None and not self._health_check_task.done():
-            self._health_check_task.cancel()
-            try:
-                await self._health_check_task
-            except asyncio.CancelledError:
-                pass
+            await self._health_check_task.cancel(reason="spawn_health_check_stopped")
             self._health_check_task = None
             logger.info(
                 f"Stopped health check for process {self.process_id}",
@@ -188,7 +191,7 @@ class SpawnedProcessHandle:
             True if shutdown was graceful, False if force killed
         """
         shutdown_timeout = timeout if timeout is not None else self.config.shutdown_timeout
-        
+
         if not self.is_alive:
             logger.debug(
                 f"Process {self.process_id} already terminated",
@@ -196,11 +199,11 @@ class SpawnedProcessHandle:
                 exit_code=self.exit_code,
             )
             return True
-        
+
         self._shutdown_requested = True
-        
+
         await self.stop_health_check()
-        
+
         try:
             shutdown_message = Message(
                 type=MessageType.SHUTDOWN,
@@ -208,33 +211,29 @@ class SpawnedProcessHandle:
                 message_id=str(uuid.uuid4()),
             )
             await self.send_message(shutdown_message)
-            
+
             try:
-                ack = await asyncio.wait_for(
-                    self._wait_for_shutdown_ack(),
-                    timeout=shutdown_timeout,
-                )
-                
+                with anyio.fail_after(shutdown_timeout):
+                    ack = await self._wait_for_shutdown_ack()
+
                 if ack:
                     logger.info(
                         f"Received shutdown ack from process {self.process_id}",
                         process_id=self.process_id,
                     )
-                    
-                    await asyncio.wait_for(
-                        self.process.wait(),
-                        timeout=2.0,
-                    )
+
+                    with anyio.fail_after(2.0):
+                        await self.process.wait()
                     return True
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning(
                     f"Shutdown timeout for process {self.process_id}, terminating",
                     process_id=self.process_id,
                     timeout=shutdown_timeout,
                 )
-            
+
             return await self._force_terminate()
-            
+
         except Exception as e:
             logger.error(
                 f"Error during shutdown of process {self.process_id}",
@@ -247,10 +246,10 @@ class SpawnedProcessHandle:
         """Force kill the process immediately."""
         if not self.is_alive:
             return
-        
+
         self._shutdown_requested = True
         await self.stop_health_check()
-        
+
         try:
             self.process.kill()
             await self.process.wait()
@@ -280,13 +279,13 @@ class SpawnedProcessHandle:
             self.process.stdin.close()
 
         exit_code = await self.process.wait()
-        
+
         logger.info(
             f"Process {self.process_id} completed",
             process_id=self.process_id,
             exit_code=exit_code,
         )
-        
+
         return exit_code
 
     async def _perform_health_check(self) -> bool:
@@ -302,15 +301,13 @@ class SpawnedProcessHandle:
                 payload={},
                 message_id=str(uuid.uuid4()),
             )
-            
+
             await self.send_message(health_check_msg)
-            
+
             try:
-                response = await asyncio.wait_for(
-                    self._wait_for_health_check_response(health_check_msg.message_id),
-                    timeout=self.config.health_check_timeout,
-                )
-                
+                with anyio.fail_after(self.config.health_check_timeout):
+                    response = await self._wait_for_health_check_response(health_check_msg.message_id)
+
                 if response and response.type == MessageType.HEALTH_CHECK_RESPONSE:
                     self._is_healthy = True
                     self._consecutive_failures = 0
@@ -328,7 +325,7 @@ class SpawnedProcessHandle:
                     self._record_health_failure()
                     return False
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._is_healthy = False
                 logger.warning(
                     f"Health check timeout for process {self.process_id}",
@@ -352,9 +349,9 @@ class SpawnedProcessHandle:
         """Increment consecutive failure count and fire on_unhealthy once."""
         self._consecutive_failures += 1
         if (
-            self._consecutive_failures >= self.max_health_failures
-            and not self._unhealthy_fired
-            and self.on_unhealthy is not None
+                self._consecutive_failures >= self.max_health_failures
+                and not self._unhealthy_fired
+                and self.on_unhealthy is not None
         ):
             self._unhealthy_fired = True
             logger.warning(
@@ -385,16 +382,16 @@ class SpawnedProcessHandle:
             message = await self.receive_message()
             if message is None:
                 return None
-            
+
             if message.type == MessageType.HEALTH_CHECK_RESPONSE:
                 return message
-            
+
             logger.debug(
                 "Received non-health-check message during health check wait",
                 message_type=message.type.value,
                 process_id=self.process_id,
             )
-        
+
         return None
 
     async def _wait_for_shutdown_ack(self) -> bool:
@@ -408,19 +405,19 @@ class SpawnedProcessHandle:
             message = await self.receive_message()
             if message is None:
                 return False
-            
+
             if message.type == MessageType.SHUTDOWN_ACK:
                 return True
-            
+
             if message.type == MessageType.DONE:
                 return True
-            
+
             logger.debug(
                 "Received non-shutdown message during shutdown wait",
                 message_type=message.type.value,
                 process_id=self.process_id,
             )
-        
+
         return False
 
     async def _force_terminate(self) -> bool:
@@ -432,26 +429,27 @@ class SpawnedProcessHandle:
         """
         if not self.is_alive:
             return True
-        
+
         try:
             self.process.terminate()
-            
+
             try:
-                await asyncio.wait_for(self.process.wait(), timeout=3.0)
-            except asyncio.TimeoutError:
+                with anyio.fail_after(3.0):
+                    await self.process.wait()
+            except TimeoutError:
                 logger.warning(
                     f"Process {self.process_id} did not terminate, killing",
                     process_id=self.process_id,
                 )
                 self.process.kill()
                 await self.process.wait()
-            
+
             logger.info(
                 f"Force terminated process {self.process_id}",
                 process_id=self.process_id,
             )
             return False
-            
+
         except ProcessLookupError:
             logger.debug(
                 f"Process {self.process_id} already terminated",
@@ -461,9 +459,9 @@ class SpawnedProcessHandle:
 
 
 async def spawn_process(
-    agent_config: dict[str, Any],
-    inputs: dict[str, Any],
-    config: Optional[SpawnConfig] = None,
+        agent_config: dict[str, Any],
+        inputs: dict[str, Any],
+        config: Optional[SpawnConfig] = None,
 ) -> SpawnedProcessHandle:
     """
     Spawn a new process to run an agent.
@@ -478,15 +476,15 @@ async def spawn_process(
     """
     if config is None:
         config = SpawnConfig()
-    
+
     process_id = str(uuid.uuid4())
-    
+
     cmd = [
         sys.executable,
         "-m",
         "openjiuwen.core.runner.spawn.child_process",
     ]
-    
+
     logger.info(
         f"Spawning process {process_id}",
         process_id=process_id,
@@ -505,13 +503,13 @@ async def spawn_process(
         stderr=asyncio.subprocess.PIPE,
         env=env,
     )
-    
+
     handle = SpawnedProcessHandle(
         process_id=process_id,
         process=process,
         config=config,
     )
-    
+
     init_message = Message(
         type=MessageType.INPUT,
         payload={
@@ -520,13 +518,13 @@ async def spawn_process(
         },
         message_id=str(uuid.uuid4()),
     )
-    
+
     await handle.send_message(init_message)
-    
+
     logger.info(
         f"Successfully spawned process {process_id}",
         process_id=process_id,
         pid=process.pid,
     )
-    
+
     return handle

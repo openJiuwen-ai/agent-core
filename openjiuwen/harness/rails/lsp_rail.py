@@ -112,7 +112,7 @@ class LspRail(DeepAgentRail):
             opts = copy.deepcopy(opts)
             opts.cwd = effective_cwd
 
-        # 初始化 LSP 子系统
+        # Initialize LSP subsystem (synchronously blocking, with 15s timeout)
         try:
             import asyncio
             from openjiuwen.harness.lsp.core.manager import LSPServerManager
@@ -130,8 +130,13 @@ class LspRail(DeepAgentRail):
 
                 try:
                     loop = asyncio.get_running_loop()
-                    asyncio.create_task(_init_with_timeout())
+                    # Block until initialization completes (or timeout)
+                    future = asyncio.run_coroutine_threadsafe(
+                        _init_with_timeout(), loop
+                    )
+                    future.result(timeout=20.0)
                 except RuntimeError:
+                    # No running loop — use asyncio.run
                     asyncio.run(_init_with_timeout())
 
         except Exception as exc:
@@ -204,12 +209,28 @@ class LspRail(DeepAgentRail):
             except Exception as exc:
                 logger.warning("LspRail: failed to remove LspTool: %s", exc)
 
+        # Shutdown LSP subsystem (synchronously blocking, with 10s timeout)
         try:
             import asyncio
             loop = asyncio.get_running_loop()
-            loop.create_task(self._async_shutdown_lsp())
+
+            async def _shutdown_with_timeout():
+                try:
+                    await asyncio.wait_for(self._async_shutdown_lsp(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    logger.warning("LspRail: shutdown timed out after 10s, forcing")
+                except Exception as e:
+                    logger.warning("LspRail: shutdown error: %s", e)
+
+            future = asyncio.run_coroutine_threadsafe(_shutdown_with_timeout(), loop)
+            future.result(timeout=15.0)
         except RuntimeError:
-            logger.warning("LspRail: no running event loop, cannot shutdown LSP")
+            try:
+                asyncio.run(self._async_shutdown_lsp())
+            except Exception as exc:
+                logger.warning("LspRail: failed to shutdown LSP subsystem: %s", exc)
+        except Exception as exc:
+            logger.warning("LspRail: shutdown failed: %s", exc)
 
         self._lsp_tool = None
         self._initialized = False

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import unittest
@@ -115,7 +116,7 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
         agent.switch_mode(self._session, "plan")
         first = await Runner.run_agent(agent, 
             {
-                "query": "帮我规划一个简单的模块开发任务，创建一个动态展示城市信息的网页。"
+                "query": "帮我规划一个简单的模块开发任务，创建一个动态展示城市信息的网页。记得要使用explore agent！"
                          "所有问题你自己决定即可！"
             },
             session=self._session,
@@ -228,6 +229,80 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("enter_plan_mode", third_call_slice)
         state_after_third = agent.load_state(self._session)
         self.assertEqual(state_after_third.plan_mode.mode, "auto")
+
+    @pytest.mark.asyncio
+    @unittest.skip("skip system test")
+    async def test_plan_mode_with_real_model_end_to_end_steer(self) -> None:
+        """真实模型用例：plan 生成过程中补充信息注入 steer，切换auto模式 按照更新后的plan执行。"""
+        self._require_llm_config()
+        trace = ToolTraceRail()
+        runtime_model = self._create_real_model()
+        agent = create_code_agent(
+            model=runtime_model,
+            system_prompt=(
+                "你是一个 AI 编程助手，当用户要求你写代码、创建文件、修改文件时，你**必须**调用相应的工具，**绝对不能**直接在回复中输出代码。"
+                "你必须严格按照plan模式的工作流执行"
+            ),
+            rails=[trace],
+            enable_task_loop=True,
+            max_iterations=24,
+            workspace=self._work_dir,
+            enable_task_planning=True
+        )
+
+        agent.switch_mode(self._session, "plan")
+
+        first_task = asyncio.create_task(
+            Runner.run_agent(
+                agent,
+                {
+                    "query": "帮我规划一个简单的模块开发任务，创建一个动态展示城市信息的网页。"
+                             "所有问题你自己决定即可！"
+                },
+                session=self._session,
+            )
+        )
+
+        await asyncio.sleep(11.0)
+        await agent.steer(
+            "等下，只要展示美国西雅图的信息就可以了",
+            session=self._session,
+        )
+
+        await asyncio.wait_for(first_task, timeout=10000)
+
+        state_after_first = agent.load_state(self._session)
+        plan_path = agent.get_plan_file_path(self._session)
+        self.assertEqual(state_after_first.plan_mode.mode, "plan")
+        self.assertTrue(bool(state_after_first.plan_mode.plan_slug))
+        self.assertIsNotNone(plan_path)
+        assert plan_path is not None
+        self.assertTrue(plan_path.exists())
+
+        final_plan_text = plan_path.read_text(encoding="utf-8")
+        self.assertTrue(bool(final_plan_text.strip()))
+        self.assertTrue(
+            any(keyword in final_plan_text for keyword in ["西雅图", "Seattle"]),
+            msg=f"final plan should be Seattle-related, got: {final_plan_text[:500]}",
+        )
+
+        first_call_count = len(trace.tool_calls)
+
+        agent.switch_mode(self._session, "auto")
+        second = await Runner.run_agent(
+            agent,
+            {
+                "query": "按照计划执行。"
+            },
+            session=self._session,
+        )
+        self.assertEqual(second.get("result_type"), "answer")
+
+        second_call_slice = trace.tool_calls[first_call_count:]
+        self.assertNotIn("enter_plan_mode", second_call_slice)
+        self.assertIn("todo_create", second_call_slice)
+        state_after_second = agent.load_state(self._session)
+        self.assertEqual(state_after_second.plan_mode.mode, "auto")
 
     @pytest.mark.asyncio
     @unittest.skip("skip system test")

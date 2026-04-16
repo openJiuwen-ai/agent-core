@@ -29,6 +29,8 @@ from typing import (
     Set,
 )
 
+import anyio
+
 from openjiuwen.core.runner.callback.chain import CallbackChain
 from openjiuwen.core.runner.callback.decorator import (
     _TRANSFORM_NOOP,
@@ -1162,10 +1164,8 @@ class AsyncCallbackFramework:
 
                     # Execute with timeout if specified
                     if cb_info.timeout:
-                        result = await asyncio.wait_for(
-                            cb(*final_args, **final_kwargs),
-                            timeout=cb_info.timeout
-                        )
+                        with anyio.fail_after(cb_info.timeout):
+                            result = await cb(*final_args, **final_kwargs)
                     else:
                         result = await cb(*final_args, **final_kwargs)
 
@@ -1310,11 +1310,9 @@ class AsyncCallbackFramework:
             List of callback results (may be incomplete if timeout)
         """
         try:
-            return await asyncio.wait_for(
-                self.trigger(event, *args, **kwargs),
-                timeout=timeout
-            )
-        except asyncio.TimeoutError:
+            with anyio.fail_after(timeout):
+                return await self.trigger(event, *args, **kwargs)
+        except TimeoutError:
             if self.enable_logging:
                 self.logger.warning(
                     f"Event '{event}' execution timeout after {timeout}s"

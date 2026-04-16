@@ -25,6 +25,7 @@ from openjiuwen.harness.prompts.sections.skills import (
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools import BashTool, CodeTool, ReadFileTool
 from openjiuwen.harness.tools.list_skill import ListSkillTool
+from openjiuwen.harness.tools import SkillTool
 from openjiuwen.agent_evolving.online.store import EvolutionStore
 
 
@@ -97,6 +98,10 @@ class SkillUseRail(DeepAgentRail):
 
     @property
     def skills_meta(self) -> List[Skill]:
+        """Return all managed skills."""
+        return list(self.skills)
+
+    def get_skills_meta(self) -> List[Skill]:
         """Return all managed skills."""
         return list(self.skills)
 
@@ -238,6 +243,7 @@ class SkillUseRail(DeepAgentRail):
                     ReadFileTool(self.sys_operation, language=lang, agent_id=agent_id),
                     CodeTool(self.sys_operation, language=lang, agent_id=agent_id),
                     BashTool(self.sys_operation, language=lang, agent_id=agent_id),
+                    SkillTool(self.sys_operation, self.get_skills_meta, language=lang, agent_id=agent_id),
                 ]
             )
 
@@ -347,7 +353,7 @@ class SkillUseRail(DeepAgentRail):
                         index=idx,
                         skill_name=skill.name,
                         description=self._get_skill_description(skill),
-                        skill_md_path=str(self._skill_md_path(skill)),
+                        # skill_md_path=str(self._skill_md_path(skill)), # No longer needed with SkillTool
                     )
                 )
             return build_skills_section(
@@ -372,7 +378,7 @@ class SkillUseRail(DeepAgentRail):
                     index=idx,
                     skill_name=skill.name,
                     description=self._get_skill_description(skill),
-                    skill_md_path=str(self._skill_md_path(skill)),
+                    # skill_md_path=str(self._skill_md_path(skill)), # No longer needed with SkillTool
                 )
             )
 

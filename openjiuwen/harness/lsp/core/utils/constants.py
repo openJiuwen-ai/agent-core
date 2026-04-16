@@ -20,3 +20,11 @@ MAX_LSP_FILE_SIZE_BYTES: int = 10 * 1024 * 1024
 
 DEFAULT_GOPLS_TIMEOUT_MS: int = 60_000
 """gopls special startup timeout in milliseconds."""
+
+# Crash recovery
+MAX_CRASH_RECOVERY_ATTEMPTS: int = 3
+"""Maximum number of crash recovery attempts before marking server as ERROR."""
+
+# Request timeout
+DEFAULT_REQUEST_TIMEOUT_MS: int = 15_000
+"""Default timeout for a single LSP request (15 seconds)."""

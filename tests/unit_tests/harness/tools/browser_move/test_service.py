@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import BrowserRunGuardrails
 from openjiuwen.harness.tools.browser_move.playwright_runtime.profiles import BrowserProfile
@@ -465,6 +465,48 @@ def test_ensure_managed_driver_started_replaces_stale_driver() -> None:
 
         assert getattr(service, "_managed_driver") is new_driver
         new_driver.start.assert_called_once()
+
+    _run(_test())
+
+
+def test_ensure_runtime_ready_refreshes_mcp_binding_after_managed_browser_restart() -> None:
+    async def _test():
+        service = _make_service()
+        setattr(service, "started", True)
+        setattr(service, "_driver_mode", "managed")
+        setattr(service, "_registered_cdp_endpoint", "http://127.0.0.1:9333")
+        getattr(service, "_inject_cdp_endpoint")("http://127.0.0.1:9333")
+        setattr(service, "_browser_agent", object())
+
+        stale_driver = MagicMock()
+        stale_driver.is_endpoint_ready.return_value = False
+        setattr(service, "_managed_driver", stale_driver)
+
+        profile = BrowserProfile(
+            name="jiuwenclaw",
+            driver_type="managed",
+            cdp_url="http://127.0.0.1:9333",
+            user_data_dir=str(Path.cwd()),
+            debug_port=9333,
+            host="127.0.0.1",
+        )
+        new_driver = MagicMock()
+        new_driver.start.return_value = "http://127.0.0.1:9333"
+        profile_store = getattr(service, "_profile_store")
+
+        with patch.object(profile_store, "get_profile", return_value=profile), patch.object(
+            profile_store,
+            "upsert_profile",
+            side_effect=lambda browser_profile, select=False: browser_profile,
+        ), patch(
+            "openjiuwen.harness.tools.browser_move.playwright_runtime.service.ManagedBrowserDriver",
+            return_value=new_driver,
+        ), patch.object(service, "_refresh_mcp_server_binding", AsyncMock()) as refresh_binding:
+            await service.ensure_runtime_ready()
+
+        refresh_binding.assert_awaited_once()
+        assert getattr(service, "_managed_driver") is new_driver
+        assert getattr(service, "_browser_agent") is None
 
     _run(_test())
 

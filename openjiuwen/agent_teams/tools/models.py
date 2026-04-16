@@ -57,7 +57,16 @@ class TeamMember(SQLModel, table=True):
 # ============== Dynamic Table Base Classes (abstract) ==============
 
 class TeamTaskBase(SQLModel):
-    """Base class for task tables (one per session)"""
+    """Base class for task tables (one per session).
+
+    ``updated_at`` stores the millisecond wall-clock timestamp of the last
+    status transition (create, claim, assign, reset, approve_plan, cancel,
+    complete, or unblock). Its semantic meaning is bound to the current
+    ``status``: e.g. when status=claimed it represents when the task was
+    claimed; when status=completed it represents the completion time. Pure
+    title/content edits do not bump this column — it tracks the state
+    lifecycle, not arbitrary writes.
+    """
     __abstract__ = True
 
     task_id: str = Field(primary_key=True)
@@ -66,7 +75,7 @@ class TeamTaskBase(SQLModel):
     content: str = Field(nullable=False)
     status: str = Field(nullable=False, index=True)
     assignee: Optional[str] = Field(default=None, nullable=True, index=True)
-    completed_at: Optional[int] = Field(default=None, nullable=True, index=True)
+    updated_at: Optional[int] = Field(default=None, nullable=True, index=True)
 
     def brief(self) -> dict:
         """Return a lightweight summary (id + title + status) for write-op responses."""

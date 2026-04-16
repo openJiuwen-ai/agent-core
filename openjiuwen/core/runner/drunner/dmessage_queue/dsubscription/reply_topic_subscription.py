@@ -45,7 +45,7 @@ class ReplyTopicSubscription():
         if self.subscription:
             await self.mq.unsubscribe(self.topic)
         await self.unregister_collector()
-        logger.info(f"[ReplyTopicSubscription] Stopped")
+        logger.info("[ReplyTopicSubscription] Stopped")
 
     @staticmethod
     def _make_key(sender_id: str, message_id: str, request_id: Optional[str] = None) -> CollectorKey:
@@ -68,7 +68,7 @@ class ReplyTopicSubscription():
                                  ttl: float = None) -> ResponseCollector:
         """注册 collector，用于等待对应返回"""
         if not self.is_active():
-            raise asyncio.CancelledError(f"ReplyTopicSubscription was cancelled")
+            raise asyncio.CancelledError("ReplyTopicSubscription was cancelled")
         if len(self.collectors) >= get_runner_config().distributed_config.max_request_concurrency:
             raise RuntimeError(
                 f"[ReplyTopicSubscription] Too many collectors "
@@ -79,6 +79,7 @@ class ReplyTopicSubscription():
             raise RuntimeError(f"[ReplyTopicSubscription] Collector already exists for {key}")
 
         collector = ResponseCollector(message_id=message_id, receiver_id=remote_id, ttl=ttl)
+        await collector.start()
         self.collectors[key] = collector
         logger.info(f"[ReplyTopicSubscription] register collector for {key}")
         return collector

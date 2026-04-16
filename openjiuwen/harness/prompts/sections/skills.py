@@ -115,12 +115,12 @@ def build_skill_line(
     index: int,
     skill_name: str,
     description: str,
-    skill_md_path: str,
+    skill_md_path: Optional[str] = None,
 ) -> str:
     """Build one rendered skill line."""
     return (
-        f"{index}. {skill_name}: {description}\n"
-        f"   Path: {skill_md_path}"
+        f"{index}. {skill_name}: {description}"
+        + (f"\n   Path: {skill_md_path}" if skill_md_path else "")
     )
 
 

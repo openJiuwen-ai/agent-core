@@ -238,6 +238,23 @@ class TeamAgent(BaseAgent):
         team_logger.debug("[{}] cancel_agent requested", self._member_name() or "?")
         await self._cancel_agent()
 
+    async def destroy_team(self, force: bool = True) -> bool:
+        """Destroy this team's runtime and persisted current-session state."""
+        try:
+            await self.cancel_agent()
+        except Exception as e:
+            team_logger.warning("[{}] cancel_agent during destroy failed: {}", self._member_name() or "?", e)
+
+        try:
+            await self._stop_coordination()
+        except Exception as e:
+            team_logger.warning("[{}] stop coordination during destroy failed: {}", self._member_name() or "?", e)
+
+        if not self._team_backend:
+            return False
+
+        return await self._team_backend.force_clean_team(shutdown_members=force)
+
     async def pause_polls(self) -> None:
         """Pause periodic polling in the coordination loop."""
         if self._coordination_loop:
@@ -736,6 +753,7 @@ class TeamAgent(BaseAgent):
         # set_session_id() so create_cur_session_tables uses the right names.
         if self._team_backend:
             await self._team_backend.db.initialize()
+            await self._team_backend.db.create_cur_session_tables()
 
         # Leader-startup recovery: if the team is already persisted in the
         # DB (e.g. a previous run with the same team_name), decide between
@@ -916,6 +934,30 @@ class TeamAgent(BaseAgent):
             await self._update_execution(ExecutionStatus.CANCELLING)
             self._agent_task.cancel()
 
+    async def shutdown_self(self) -> None:
+        """Force-shutdown self in response to TEAM_CLEANED.
+
+        Called when the leader has dissolved the team and the database
+        team/member rows are gone. Cancels any in-flight round and closes
+        the stream so the natural ``stream() → _finalize_round →
+        _stop_coordination`` path tears down the coordination loop and
+        the coroutine exits. DB status writes are best-effort because the
+        backing rows may already have been cascade-deleted.
+        """
+        member_name = self._member_name() or "?"
+        team_logger.info("[{}] shutdown_self requested", member_name)
+        if self._agent_task and not self._agent_task.done():
+            self._agent_task.cancel()
+        if self._team_member is not None:
+            try:
+                await self._team_member.update_status(MemberStatus.SHUTDOWN)
+            except Exception as e:
+                team_logger.debug(
+                    "[{}] post-clean status update failed (expected): {}",
+                    member_name, e,
+                )
+        self._close_stream()
+
     async def _start_agent(
         self,
         initial_message: Any,
@@ -948,6 +990,10 @@ class TeamAgent(BaseAgent):
         message: Any,
     ) -> None:
         """Execute one DeepAgent stream round via Runner."""
+        # Pull the member back to READY before transitioning to BUSY so a
+        # still-live member that ended its previous round in ERROR can
+        # recover. READY → READY is a no-op at the member layer.
+        await self._update_status(MemberStatus.READY)
         await self._update_status(MemberStatus.BUSY)
         try:
             await self._execute_round(message)

@@ -33,6 +33,12 @@ from openjiuwen.harness.schema.config import (
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.prompts.sections.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
+from openjiuwen.harness.tools.web_tools import is_free_search_enabled
+
+
+def _is_disabled_free_search_tool(tool: Tool | ToolCard) -> bool:
+    card = tool.card if isinstance(tool, Tool) else tool
+    return card.name == "free_search" and not is_free_search_enabled()
 
 
 def _normalize_tools(
@@ -43,6 +49,8 @@ def _normalize_tools(
     tool_instances: List[Tool] = []
 
     for tool in tools or []:
+        if _is_disabled_free_search_tool(tool):
+            continue
         if isinstance(tool, Tool):
             tool_instances.append(tool)
             normalized_cards.append(tool.card)

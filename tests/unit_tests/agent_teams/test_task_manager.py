@@ -142,20 +142,114 @@ class TestAddAsTopPriority:
         assert task3_updated.status == TaskStatus.BLOCKED.value
 
 
+class TestAddFailureReasons:
+    """Verify that failed creates surface a reason instead of a bare None."""
+
+    @pytest.mark.asyncio
+    async def test_add_duplicate_task_id_returns_reason(self, task_manager):
+        """Reusing an existing task_id should report the collision."""
+        first = await task_manager.add(
+            title="Original",
+            content="Content",
+            task_id="dup-1",
+        )
+        assert first.ok
+
+        second = await task_manager.add(
+            title="Conflict",
+            content="Content",
+            task_id="dup-1",
+        )
+        assert not second.ok
+        assert "dup-1" in second.reason
+
+    @pytest.mark.asyncio
+    async def test_add_with_priority_circular_dep_returns_reason(self, task_manager):
+        """Circular dependency rejection should surface a clear reason."""
+        task_a = await task_manager.add(title="A", content="ca", task_id="a")
+        assert task_a.ok
+
+        # Create B depending on A — fine.
+        task_b = await task_manager.add_with_priority(
+            title="B",
+            content="cb",
+            task_id="b",
+            dependencies=["a"],
+        )
+        assert task_b.ok
+
+        # Now try to insert C such that A depends on C and C depends on B,
+        # which would form A → C → B → A. The DB should reject it.
+        result = await task_manager.add_with_priority(
+            title="C",
+            content="cc",
+            task_id="c",
+            dependencies=["b"],
+            dependent_task_ids=["a"],
+        )
+        assert not result.ok
+        assert "c" in result.reason
+
+
+class TestClaimConflict:
+    """Test claim conflict reporting."""
+
+    @pytest.mark.asyncio
+    async def test_claim_by_second_member_reports_conflict_not_transition_error(self, db, message_bus):
+        """A second member claiming a held task should fail with the real reason."""
+        await db.create_team(
+            team_name="conflict_team",
+            display_name="Conflict Team",
+            leader_member_name="leader",
+        )
+        for name in ("m1", "m2"):
+            await db.create_member(
+                member_name=name,
+                team_name="conflict_team",
+                display_name=name,
+                agent_card=AgentCard().model_dump_json(),
+                status="BUSY",
+                mode=MemberMode.BUILD_MODE.value,
+            )
+        m1 = TeamTaskManager(
+            team_name="conflict_team", member_name="m1", db=db, messager=message_bus,
+        )
+        m2 = TeamTaskManager(
+            team_name="conflict_team", member_name="m2", db=db, messager=message_bus,
+        )
+
+        task = await m1.add(title="Shared Task", content="Work")
+        first = await m1.claim(task.task_id)
+        assert first.ok
+
+        # Second member tries to claim; must report assignee conflict and fail
+        # cleanly instead of raising an "invalid claimed → claimed" transition.
+        second = await m2.claim(task.task_id)
+        assert not second.ok
+        assert "already claimed by m1" in second.reason
+
+        task_state = await m1.get(task.task_id)
+        assert task_state.status == TaskStatus.CLAIMED.value
+        assert task_state.assignee == "m1"
+
+
 class TestTaskCompletionWithDependencyResolution:
     """Test task completion and dependency resolution"""
 
     @pytest.mark.asyncio
-    async def test_complete_task_sets_completed_at(self, task_manager):
-        """Test that completing a task sets completed_at"""
+    async def test_complete_task_sets_updated_at(self, task_manager):
+        """Completing a task bumps updated_at so it reflects completion time."""
         task = await task_manager.add(title="Test Task", content="Content")
         assert await task_manager.claim(task.task_id)
-        assert task.completed_at is None
+        claimed = await task_manager.get(task.task_id)
+        claimed_at = claimed.updated_at
+        assert claimed_at is not None
 
         await task_manager.complete(task.task_id)
 
         task_updated = await task_manager.get(task.task_id)
-        assert task_updated.completed_at is not None
+        assert task_updated.updated_at is not None
+        assert task_updated.updated_at >= claimed_at
         assert task_updated.status == TaskStatus.COMPLETED.value
 
     @pytest.mark.asyncio
@@ -524,8 +618,8 @@ class TestUpdateTask:
         task = await task_manager.add(title="Original Title", content="Content")
         assert task.title == "Original Title"
 
-        success = await task_manager.update_task(task.task_id, title="Updated Title")
-        assert success is True
+        result = await task_manager.update_task(task.task_id, title="Updated Title")
+        assert result.ok
 
         updated_task = await task_manager.get(task.task_id)
         assert updated_task.title == "Updated Title"
@@ -537,8 +631,8 @@ class TestUpdateTask:
         task = await task_manager.add(title="Title", content="Original Content")
         assert task.content == "Original Content"
 
-        success = await task_manager.update_task(task.task_id, content="Updated Content")
-        assert success is True
+        result = await task_manager.update_task(task.task_id, content="Updated Content")
+        assert result.ok
 
         updated_task = await task_manager.get(task.task_id)
         assert updated_task.title == "Title"
@@ -549,12 +643,12 @@ class TestUpdateTask:
         """Test updating both task title and content"""
         task = await task_manager.add(title="Original Title", content="Original Content")
 
-        success = await task_manager.update_task(
+        result = await task_manager.update_task(
             task.task_id,
             title="Updated Title",
             content="Updated Content"
         )
-        assert success is True
+        assert result.ok
 
         updated_task = await task_manager.get(task.task_id)
         assert updated_task.title == "Updated Title"
@@ -562,18 +656,19 @@ class TestUpdateTask:
 
     @pytest.mark.asyncio
     async def test_update_task_not_found(self, task_manager):
-        """Test updating non-existent task returns False"""
-        success = await task_manager.update_task("nonexistent-task", title="New Title")
-        assert success is False
+        """Test updating non-existent task surfaces a reason."""
+        result = await task_manager.update_task("nonexistent-task", title="New Title")
+        assert not result.ok
+        assert "not found" in result.reason
 
     @pytest.mark.asyncio
     async def test_update_task_none_parameters(self, task_manager):
         """Test updating task with None parameters (no change)"""
         task = await task_manager.add(title="Title", content="Content")
 
-        # Update with None values - should still return True
-        success = await task_manager.update_task(task.task_id, title=None, content=None)
-        assert success is True
+        # Update with None values - should still succeed
+        result = await task_manager.update_task(task.task_id, title=None, content=None)
+        assert result.ok
 
         # Task should remain unchanged
         updated_task = await task_manager.get(task.task_id)
@@ -744,7 +839,7 @@ class TestResetTask:
         assert task_claimed.assignee == "member1"
 
         result = await task_manager.reset(task.task_id)
-        assert result is True
+        assert result.ok
 
         task_reset = await task_manager.get(task.task_id)
         assert task_reset.status == TaskStatus.PENDING.value
@@ -754,41 +849,45 @@ class TestResetTask:
     async def test_reset_nonexistent_task(self, task_manager):
         """Test resetting a non-existent task"""
         result = await task_manager.reset("nonexistent-task-id")
-        assert result is False
+        assert not result.ok
+        assert "not found" in result.reason
 
     @pytest.mark.asyncio
     async def test_reset_pending_task_fails(self, task_manager):
-        """Test resetting a pending task fails (invalid state transition)"""
+        """Test resetting a pending task fails with a clear reason."""
         task = await task_manager.add(title="Test Task", content="Content")
         assert task.status == TaskStatus.PENDING.value
 
         result = await task_manager.reset(task.task_id)
-        assert result is False
+        assert not result.ok
+        assert "pending" in result.reason
 
         task_after = await task_manager.get(task.task_id)
         assert task_after.status == TaskStatus.PENDING.value
 
     @pytest.mark.asyncio
     async def test_reset_completed_task_fails(self, task_manager):
-        """Test resetting a completed task fails (invalid state transition)"""
+        """Test resetting a completed task fails with a clear reason."""
         task = await task_manager.add(title="Test Task", content="Content")
         await task_manager.claim(task.task_id)
         await task_manager.complete(task.task_id)
 
         result = await task_manager.reset(task.task_id)
-        assert result is False
+        assert not result.ok
+        assert "completed" in result.reason
 
         task_after = await task_manager.get(task.task_id)
         assert task_after.status == TaskStatus.COMPLETED.value
 
     @pytest.mark.asyncio
     async def test_reset_cancelled_task_fails(self, task_manager):
-        """Test resetting a cancelled task fails (invalid state transition)"""
+        """Test resetting a cancelled task fails with a clear reason."""
         task = await task_manager.add(title="Test Task", content="Content")
         await task_manager.cancel(task.task_id)
 
         result = await task_manager.reset(task.task_id)
-        assert result is False
+        assert not result.ok
+        assert "cancelled" in result.reason
 
         task_after = await task_manager.get(task.task_id)
         assert task_after.status == TaskStatus.CANCELLED.value

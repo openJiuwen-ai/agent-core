@@ -24,6 +24,7 @@ from openjiuwen.harness.tools.filesystem import (
 from openjiuwen.harness.tools.list_skill import ListSkillTool
 from openjiuwen.harness.tools.load_tools import LoadToolsTool
 from openjiuwen.harness.tools.search_tools import SearchToolsTool
+from openjiuwen.harness.tools.skill_tool import SkillTool
 from openjiuwen.harness.tools.bash import BashTool
 from openjiuwen.harness.tools.powershell import PowerShellTool
 from openjiuwen.harness.tools.todo import (
@@ -42,6 +43,8 @@ from openjiuwen.harness.tools.web_tools import (
     WebFetchWebpageTool,
     WebFreeSearchTool,
     WebPaidSearchTool,
+    create_web_tools,
+    is_free_search_enabled,
 )
 from openjiuwen.harness.tools.mode_tools import SwitchModeTool
 from openjiuwen.harness.tools.plan_mode_tools import (
@@ -68,7 +71,6 @@ __all__ = [
     "GlobTool",
     "GrepTool",
     "create_cron_tools",
-    "ListSkillTool",
     "SearchToolsTool",
     "LoadToolsTool",
     "ImageOCRTool",
@@ -77,6 +79,7 @@ __all__ = [
     "LoadToolsTool",
     "ReadFileTool",
     "SearchToolsTool",
+    "SkillTool",
     "TodoCreateTool",
     "TodoListTool",
     "TodoModifyTool",
@@ -86,6 +89,8 @@ __all__ = [
     "WebFetchWebpageTool",
     "WebFreeSearchTool",
     "WebPaidSearchTool",
+    "create_web_tools",
+    "is_free_search_enabled",
     "WriteFileTool",
     "LspTool",
     "LspToolMetadataProvider",

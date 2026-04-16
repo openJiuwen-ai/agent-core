@@ -20,7 +20,7 @@ from bs4 import BeautifulSoup
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import tool_logger
-from openjiuwen.core.foundation.tool.base import Tool
+from openjiuwen.core.foundation.tool.base import Tool, ToolCard
 from openjiuwen.harness.prompts.sections.tools import build_tool_card
 
 _USER_AGENT = (
@@ -84,6 +84,10 @@ _FREE_SEARCH_DEBUG_ENV = "FREE_SEARCH_DEBUG"
 _FREE_SEARCH_DEBUG_DIR_ENV = "FREE_SEARCH_DEBUG_DIR"
 _FREE_SEARCH_DDG_ENABLED_ENV = "FREE_SEARCH_DDG_ENABLED"
 _FREE_SEARCH_BING_ENABLED_ENV = "FREE_SEARCH_BING_ENABLED"
+_FREE_SEARCH_PROXY_URL_ENV = "FREE_SEARCH_PROXY_URL"
+_FREE_SEARCH_DEFAULT_NO_PROXY = (
+    "127.0.0.1,.huawei.com,localhost,local,.local,10.155.97.247,.myhuaweicloud.coms"
+)
 _FETCH_WEBPAGE_DEFAULT_MAX_CHARS = 20000
 _FETCH_WEBPAGE_DEFAULT_TIMEOUT_SECONDS = 45
 _FETCH_WEBPAGE_MAX_TIMEOUT_ENV = "MCP_FETCH_WEBPAGE_MAX_TIMEOUT_SECONDS"
@@ -91,9 +95,49 @@ _FETCH_WEBPAGE_MAX_CHARS_ENV = "MCP_FETCH_WEBPAGE_MAX_CHARS"
 _MOJIBAKE_MARKERS = ("mojibake", "Ã", "Â", "â", "ï¿½")
 
 
+def _get_free_search_proxy_url() -> str:
+    """Return the configured proxy URL used by web search/fetch tools."""
+    return str(os.environ.get(_FREE_SEARCH_PROXY_URL_ENV, "") or "").strip()
+
+
+def _no_proxy_entries() -> list[str]:
+    configured = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or _FREE_SEARCH_DEFAULT_NO_PROXY
+    return [entry.strip().lower() for entry in configured.split(",") if entry.strip()]
+
+
+def _should_bypass_free_search_proxy(url: str) -> bool:
+    proxy_url = _get_free_search_proxy_url()
+    if not proxy_url:
+        return True
+    try:
+        hostname = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    if not hostname:
+        return False
+    for entry in _no_proxy_entries():
+        if entry == "*":
+            return True
+        if entry.startswith(".") and (hostname == entry[1:] or hostname.endswith(entry)):
+            return True
+        if hostname == entry or hostname.endswith(f".{entry}"):
+            return True
+    return False
+
+
+def _apply_free_search_proxy(url: str, kwargs: dict[str, Any]) -> bool:
+    """Apply the configured search proxy to a requests kwargs dict."""
+    proxy_url = _get_free_search_proxy_url()
+    if not proxy_url or _should_bypass_free_search_proxy(url):
+        return False
+    kwargs.setdefault("proxies", {"http": proxy_url, "https": proxy_url})
+    return True
+
+
 def _http_request(method: str, url: str, **kwargs) -> requests.Response:
     """Try normal request first; retry without env proxies on ProxyError."""
     method_up = method.upper()
+    explicit_proxy = _apply_free_search_proxy(url, kwargs)
     try:
         if method_up == "GET":
             return requests.get(url, **kwargs)
@@ -101,6 +145,8 @@ def _http_request(method: str, url: str, **kwargs) -> requests.Response:
             return requests.post(url, **kwargs)
         return requests.request(method_up, url, **kwargs)
     except requests.exceptions.ProxyError:
+        if explicit_proxy:
+            raise
         with requests.Session() as session:
             session.trust_env = False
             return session.request(method_up, url, **kwargs)
@@ -331,6 +377,14 @@ def _env_flag(name: str, default: bool = True) -> bool:
     return raw in {"1", "true", "yes", "on", "enabled"}
 
 
+def is_free_search_enabled() -> bool:
+    """Whether at least one free-search backend is enabled."""
+    return (
+        _env_flag(_FREE_SEARCH_DDG_ENABLED_ENV, default=True)
+        or _env_flag(_FREE_SEARCH_BING_ENABLED_ENV, default=True)
+    )
+
+
 def _search_request_headers(query: str) -> dict[str, str]:
     """Return browser-like headers aligned to the query language."""
     headers = dict(_REQUEST_HEADERS)
@@ -501,8 +555,15 @@ def _extract_bing_answer_cards(soup: BeautifulSoup, fallback_url: str) -> list[d
 class WebFreeSearchTool(Tool):
     """Free search via DuckDuckGo. Input query and return ranked URLs with snippets."""
 
-    def __init__(self, language: str = "cn", agent_id: Optional[str] = None):
-        super().__init__(build_tool_card("free_search", "WebFreeSearchTool", language, agent_id=agent_id))
+    def __init__(
+        self,
+        language: str = "cn",
+        agent_id: Optional[str] = None,
+        card: Optional[ToolCard] = None,
+    ):
+        super().__init__(
+            card or build_tool_card("free_search", "WebFreeSearchTool", language, agent_id=agent_id)
+        )
 
     @staticmethod
     def _is_ddg_challenge_page(status_code: int, html: str) -> bool:
@@ -1443,3 +1504,22 @@ class WebFetchWebpageTool(Tool):
         """Stream is not supported for this tool."""
         yield "Stream is not supported for this tool."
         raise build_error(StatusCode.TOOL_STREAM_NOT_SUPPORTED, card=self._card)
+
+
+def create_web_tools(
+    *,
+    language: str = "cn",
+    agent_id: Optional[str] = None,
+    include_free_search: bool = True,
+    include_paid_search: bool = False,
+    include_fetch_webpage: bool = True,
+) -> list[Tool]:
+    """Create web tools, omitting free_search when all free engines are disabled."""
+    tools: list[Tool] = []
+    if include_free_search and is_free_search_enabled():
+        tools.append(WebFreeSearchTool(language=language, agent_id=agent_id))
+    if include_paid_search:
+        tools.append(WebPaidSearchTool(language=language, agent_id=agent_id))
+    if include_fetch_webpage:
+        tools.append(WebFetchWebpageTool(language=language, agent_id=agent_id))
+    return tools

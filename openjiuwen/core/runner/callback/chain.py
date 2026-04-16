@@ -16,6 +16,8 @@ from typing import (
     Optional,
 )
 
+import anyio
+
 from openjiuwen.core.runner.callback.enums import ChainAction
 from openjiuwen.core.runner.callback.models import (
     CallbackInfo,
@@ -114,10 +116,8 @@ class CallbackChain:
 
                     # Execute with timeout if specified
                     if callback_info.timeout:
-                        result = await asyncio.wait_for(
-                            callback(*args, **kwargs),
-                            timeout=callback_info.timeout
-                        )
+                        with anyio.fail_after(callback_info.timeout):
+                            result = await callback(*args, **kwargs)
                     else:
                         result = await callback(*args, **kwargs)
 
@@ -152,7 +152,7 @@ class CallbackChain:
 
                     break  # Success, exit retry loop
 
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logging.error(f"Callback {callback.__name__} timed out")
                     if attempt < callback_info.max_retries:
                         await asyncio.sleep(callback_info.retry_delay)
@@ -162,7 +162,7 @@ class CallbackChain:
                         return ChainResult(
                             ChainAction.ROLLBACK,
                             context=context,
-                            error=asyncio.TimeoutError("Callback timeout")
+                            error=TimeoutError("Callback timeout")
                         )
 
                 except Exception as e:

@@ -3,7 +3,36 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
+
+
+class LspServerState(Enum):
+    """Lifecycle states of a single LSP server instance.
+
+    State transitions::
+
+        STOPPED ──start()──▶ STARTING ──success──▶ RUNNING
+           ^                      │                    │
+           │                      └──timeout/error──▶ ERROR ──┤
+           │                              [crash]             │
+           │                                           start()│ (crash recovery)
+           │                                                  │
+      stop <──────────────────────────────────────────────────┘
+
+    Notes:
+    - ERROR → STARTING only occurs when start() is called again with crash_count
+      below the recovery threshold (MAX_CRASH_RECOVERY_ATTEMPTS).
+    - RUNNING → ERROR is triggered internally when _read_loop detects the
+      subprocess has exited (server crash), not by an explicit transition.
+    - All transitions ultimately lead back to STOPPED via stop().
+    """
+
+    STOPPED = "stopped"
+    STARTING = "starting"
+    RUNNING = "running"
+    STOPPING = "stopping"
+    ERROR = "error"
 
 
 @dataclass
@@ -49,6 +78,12 @@ class LspServerStatus:
     name: str
     """Human-readable server name."""
     running: bool
-    """Whether the server is currently running."""
+    """Whether the server is currently running (kept for backward compatibility)."""
+    state: LspServerState = LspServerState.STOPPED
+    """Current lifecycle state of the server."""
     root: str | None = None
     """Workspace root directory."""
+    crash_count: int = 0
+    """Number of times this server has crashed (for crash-recovery decisions)."""
+    last_error: str | None = None
+    """Last error message if the server is in ERROR state."""

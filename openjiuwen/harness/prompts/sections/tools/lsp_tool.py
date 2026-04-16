@@ -12,34 +12,49 @@ from openjiuwen.harness.prompts.sections.tools.base import (
 # Tool description (bilingual)
 # ---------------------------------------------------------------------------
 LSP_TOOL_DESCRIPTION_EN = (
-    "LSP (Language Server Protocol) tool providing code navigation features for AI agents.\n\n"
-    "Available operations:\n"
-    "- goToDefinition: Jump to symbol definition location\n"
-    "- findReferences: Find all reference locations of a symbol\n"
-    "- documentSymbol: Get all symbols in a document (outline)\n"
-    "- workspaceSymbol: Search symbols across the entire workspace\n"
-    "- goToImplementation: Find concrete implementations of an interface/abstract method\n"
-    "- prepareCallHierarchy: Prepare call hierarchy entry points\n"
-    "- incomingCalls: Find locations that call the current function\n"
-    "- outgoingCalls: Find functions called by the current function\n\n"
-    "Note: The operation field determines which LSP method is used. "
-    "Hover is not supported. Results from gitignored files (node_modules, __pycache__, etc.) "
-    "are automatically filtered out for navigation operations."
+    "Interact with Language Server Protocol (LSP) servers to get code intelligence features.\n\n"
+    "Supported operations:\n"
+    "- goToDefinition: Find where a symbol is defined\n"
+    "- findReferences: Find all references to a symbol\n"
+    "- documentSymbol: Get all symbols (functions, classes, variables) in a document\n"
+    "- workspaceSymbol: Search for symbols across the entire workspace\n"
+    "- goToImplementation: Find implementations of an interface or abstract method\n"
+    "- prepareCallHierarchy: Get call hierarchy item at a position (functions/methods)\n"
+    "- incomingCalls: Find all functions/methods that call the function at a position\n"
+    "- outgoingCalls: Find all functions/methods called by the function at a position\n\n"
+    "Note: Hover (hover information) is not currently supported.\n\n"
+    "All operations require:\n"
+    "- filePath: The file to operate on (absolute or relative to workspace root)\n"
+    "- line: The line number (1-based, as shown in editors)\n"
+    "- character: The character offset (1-based, as shown in editors)\n\n"
+    "workspaceSymbol does not require line or character parameters; query is used instead.\n\n"
+    "Results from gitignored files (node_modules, __pycache__, etc.) are automatically filtered out "
+    "for navigation operations.\n\n"
+    "Large files (exceeding 10MB) are not sent to the LSP server.\n\n"
+    "Note: LSP servers must be configured for the file type. "
+    "If no server is available, an error will be returned."
 )
 
 LSP_TOOL_DESCRIPTION_CN = (
-    "LSP（Language Server Protocol）工具，为 AI Agent 提供代码导航功能。\n\n"
-    "可用操作：\n"
-    "- goToDefinition: 跳转到符号定义位置\n"
-    "- findReferences: 查找符号的所有引用位置\n"
-    "- documentSymbol: 获取文档中的所有符号（大纲）\n"
+    "通过 Language Server Protocol (LSP) 服务器获取代码智能功能（如定义跳转、引用查找等）。\n\n"
+    "支持的操作：\n"
+    "- goToDefinition: 查找符号的定义位置\n"
+    "- findReferences: 查找符号的所有引用\n"
+    "- documentSymbol: 获取文档中的所有符号（函数、类、变量等）\n"
     "- workspaceSymbol: 在整个工作区搜索符号\n"
-    "- goToImplementation: 查找接口/抽象方法的具体实现\n"
-    "- prepareCallHierarchy: 准备调用层次结构入口\n"
-    "- incomingCalls: 查找调用当前函数的所有位置\n"
-    "- outgoingCalls: 查找当前函数调用的所有函数\n\n"
-    "注意：operation 字段决定使用哪个 LSP 方法。不支持 hover。"
-    "导航操作的结果会自动过滤掉位于 gitignored 目录（如 node_modules、__pycache__ 等）中的条目。"
+    "- goToImplementation: 查找接口或抽象方法的具体实现\n"
+    "- prepareCallHierarchy: 获取光标位置的调用层次结构条目\n"
+    "- incomingCalls: 查找所有调用当前函数的函数/方法\n"
+    "- outgoingCalls: 查找当前函数调用的所有函数/方法\n\n"
+    "注意：hover（悬停信息）操作暂不支持。\n\n"
+    "所有操作均需要：\n"
+    "- filePath: 要操作的文件（绝对路径或相对于工作区根目录的路径）\n"
+    "- line: 行号（1-indexed，编辑器中显示的行号）\n"
+    "- character: 列号（1-indexed，编辑器中显示的字符偏移）\n\n"
+    "workspaceSymbol 不需要 line 和 character 参数，而是使用 query 参数进行搜索。\n\n"
+    "导航操作的结果会自动过滤掉位于 gitignored 目录（如 node_modules、__pycache__ 等）中的条目。\n\n"
+    "大文件（超过 10MB）不会被发送到 LSP 服务器。\n\n"
+    "注意：必须为文件类型配置对应的 LSP 服务器。如果没有可用的服务器，将返回错误。"
 )
 
 DESCRIPTION: Dict[str, str] = {
@@ -52,28 +67,30 @@ DESCRIPTION: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 PARAMS: Dict[str, Dict[str, str]] = {
     "operation": {
-        "cn": "LSP 操作类型",
-        "en": "LSP operation type",
+        "cn": "LSP 操作类型，可选值：goToDefinition、findReferences、documentSymbol、workspaceSymbol、"
+              "goToImplementation、prepareCallHierarchy、incomingCalls、outgoingCalls",
+        "en": "LSP operation type. Options: goToDefinition, findReferences, documentSymbol, "
+              "workspaceSymbol, goToImplementation, prepareCallHierarchy, incomingCalls, outgoingCalls",
     },
     "file_path": {
-        "cn": "文件路径（绝对或相对于工作区根目录）",
-        "en": "File path (absolute or relative to workspace root)",
+        "cn": "文件路径（绝对路径或相对于工作区根目录的路径）",
+        "en": "The absolute or relative path to the file",
     },
     "line": {
-        "cn": "行号（1-indexed，LSP 内部使用 0-indexed）",
-        "en": "Line number (1-indexed; LSP internally uses 0-indexed)",
+        "cn": "行号（1-indexed，编辑器中显示的行号）",
+        "en": "The line number (1-based, as shown in editors)",
     },
     "character": {
-        "cn": "列号（1-indexed，LSP 内部使用 0-indexed）",
-        "en": "Column number (1-indexed; LSP internally uses 0-indexed)",
+        "cn": "列号（1-indexed，默认为 1）",
+        "en": "The character offset (1-based, as shown in editors; defaults to 1)",
     },
     "query": {
-        "cn": "搜索查询字符串（仅 workspaceSymbol 使用）",
-        "en": "Search query string (used by workspaceSymbol only)",
+        "cn": "搜索查询字符串；为空时返回所有可用符号（仅 workspaceSymbol 使用）",
+        "en": "Search query string; when empty, returns all available symbols (used by workspaceSymbol only)",
     },
     "include_declaration": {
-        "cn": "findReferences 是否包含声明位置",
-        "en": "Whether findReferences includes the declaration location",
+        "cn": "为 true 时，结果中包含符号的定义位置（默认 true）",
+        "en": "When true, the declaration location itself is included in the results (default: true)",
     },
 }
 

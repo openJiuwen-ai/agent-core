@@ -4,9 +4,12 @@
 import asyncio
 from typing import Dict, List, Optional
 
+import anyio
+
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.background_tasks import BackgroundTask, start_background_task
 from openjiuwen.core.runner.drunner.dmessage_queue.message_serializer import serialize_message, deserialize_message
 from openjiuwen.core.runner.message_queue_base import SubscriptionBase, AsyncMessageHandler, QueueMessage, \
     MessageQueueBase
@@ -21,7 +24,7 @@ class FakeSubscription(SubscriptionBase):
         self.topic = topic
         self._handler: Optional[AsyncMessageHandler] = None
         self._queue = asyncio.Queue(10000)
-        self._task: asyncio.Task | None = None
+        self._task: BackgroundTask | None = None
         self._active = False
 
     def set_message_handler(self, handler: AsyncMessageHandler):
@@ -30,25 +33,26 @@ class FakeSubscription(SubscriptionBase):
     def activate(self):
         if not self._active:
             self._active = True
-            self._task = asyncio.create_task(self._consume_loop())
+            self._task = start_background_task(
+                self._consume_loop(),
+                name=f"fake_mq_consume:{self.topic}",
+                group="runner.fake_mq",
+            )
 
     async def deactivate(self):
         self._active = False
 
         if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+            await self._task.cancel(reason="fake_subscription_deactivated")
             self._task = None  # Clean reference
 
     async def _consume_loop(self):
         try:
             while self._active:
                 try:
-                    raw = await asyncio.wait_for(self._queue.get(), timeout=0.2)
-                except asyncio.TimeoutError:
+                    with anyio.fail_after(0.2):
+                        raw = await self._queue.get()
+                except TimeoutError:
                     continue
 
                 if not self._active:
@@ -114,4 +118,8 @@ class FakeMQ(MessageQueueBase):
             subs = list(self._topics.get(topic, []))
 
         for sub in subs:
-            asyncio.create_task(sub.push(data))
+            start_background_task(
+                sub.push(data),
+                name=f"fake_mq_push:{topic}",
+                group="runner.fake_mq",
+            )

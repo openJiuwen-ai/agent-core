@@ -83,7 +83,13 @@ class TeamMember:
         return ExecutionStatus(member_data.execution_status) if member_data else None
 
     async def update_status(self, new_status: MemberStatus) -> bool:
-        """Update member status with validation
+        """Update member status with validation.
+
+        No-op short-circuit when the new status equals the current one:
+        skip the DB write and the status-changed event, so callers can
+        idempotently re-assert a status (e.g. recovering from ERROR by
+        always pulling back to READY at round entry) without polluting
+        the event stream.
 
         Args:
             new_status: New status
@@ -93,13 +99,15 @@ class TeamMember:
         """
 
         old_status = await self.status()
+        if old_status == new_status:
+            return True
         success = await self.db.update_member_status(self.member_name, self.team_name, new_status.value)
 
         if not success:
             team_logger.error(f"Failed to update member status for {self.member_name}: {new_status.value}")
             return False
 
-        team_logger.info(
+        team_logger.debug(
             f"Member {self.member_name} status: {old_status.value} -> {new_status.value}"
         )
 
@@ -142,7 +150,7 @@ class TeamMember:
             team_logger.error(f"Failed to update member execution status for {self.member_name}: {new_status.value}")
             return False
 
-        team_logger.info(
+        team_logger.debug(
             f"Member {self.member_name} execution status: "
             f"{old_status.value} -> {new_status.value}"
         )

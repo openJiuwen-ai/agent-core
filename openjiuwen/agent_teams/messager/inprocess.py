@@ -119,6 +119,14 @@ class InProcessMessager(Messager):
         pass
 
     async def publish(self, topic_id: str, message: EventMessage) -> None:
+        # Stamp sender_id so subscribers can filter self-published events —
+        # mirrors the pyzmq backend so _filter_self works identically in
+        # inprocess mode. Without this a leader receives its own events
+        # (TeamCleanedEvent in particular) and tears itself down. Tolerant
+        # of messages without a ``sender_id`` field (tests use a subclass
+        # of BaseEventMessage for plain pub-sub smoke checks).
+        if hasattr(message, "sender_id") and not message.sender_id:
+            message = message.model_copy(update={"sender_id": self._agent_id})
         await self._bus.publish(topic_id, message)
 
     async def subscribe(self, topic_id: str, handler: MessagerHandler) -> None:

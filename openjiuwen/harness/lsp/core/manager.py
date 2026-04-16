@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.harness.lsp.core.instance import LSPServerInstance
-from openjiuwen.harness.lsp.core.types import LspServerStatus, ScopedLspServerConfig
+from openjiuwen.harness.lsp.core.types import LspServerState, LspServerStatus, ScopedLspServerConfig
 from openjiuwen.harness.lsp.core.utils.file_uri import path_to_file_uri
 
 logger = logging.getLogger(__name__)
@@ -122,13 +122,22 @@ class LSPServerManager:
 
     async def stop_all(self) -> None:
         """Cancel all pending spawn tasks and stop all running server instances."""
-        for task in self._spawning.values():
+        spawning_tasks = list(self._spawning.values())
+        for task in spawning_tasks:
             task.cancel()
+
+        if spawning_tasks:
+            gathered = asyncio.gather(*spawning_tasks, return_exceptions=True)
+            try:
+                await asyncio.wait_for(gathered, timeout=5.0)
+            except asyncio.TimeoutError:
+                pass
+
         self._spawning.clear()
-        await asyncio.gather(
-            *[inst.stop() for inst in self._instances.values()],
-            return_exceptions=True,
-        )
+
+        if self._instances:
+            stops = [inst.stop() for inst in list(self._instances.values())]
+            await asyncio.gather(*stops, return_exceptions=True)
         self._instances.clear()
 
     @classmethod
@@ -166,8 +175,9 @@ class LSPServerManager:
         1. Match file extension to server_id list
         2. Dynamically find the file's root via find_root
         3. Check cache (ServerInstanceKey):
-           - Running -> return directly
+           - Running & healthy -> return directly
            - Starting -> await result
+           - ERROR with remaining crash attempts -> restart
            - Not started -> _start_server waits for full startup, then return
         """
         from openjiuwen.harness.lsp.servers.registry import BUILTIN_SERVERS
@@ -197,14 +207,23 @@ class LSPServerManager:
                 if key in self._instances:
                     instance = self._instances[key]
                     if instance.running:
-                        return instance
-                    if key in self._spawning:
+                        if await instance.is_healthy():
+                            return instance
+                        # running=True but zombie (crashed) — fall through to restart
+                        logger.info(
+                            "[LSPServerManager] zombie instance for %s, restarting",
+                            key,
+                        )
+                        self._instances.pop(key, None)
+                    elif instance.state == LspServerState.ERROR:
+                        # Crash recovery: if attempts remain, restart; else give up
+                        self._instances.pop(key, None)
+                    elif key in self._spawning:
                         await self._spawning[key]
-                    if key in self._instances and self._instances[key].running:
-                        return self._instances[key]
-                    return instance
+                        if key in self._instances and self._instances[key].running:
+                            return self._instances[key]
 
-                # _start_server 会等待服务器完全启动后再返回
+                # _start_server waits for full startup (LSP handshake complete) before returning
                 instance = await self._start_server(key, config, root)
                 if instance and instance.running:
                     return instance
@@ -257,7 +276,7 @@ class LSPServerManager:
         task = asyncio.create_task(start_and_cache())
         self._spawning[key] = task
 
-        # 等待服务器完全启动（LSP 握手完成）再返回
+        # Wait for the server to fully start (LSP handshake complete) before returning
         try:
             await asyncio.wait_for(task, timeout=active_config.startup_timeout / 1000)
         except asyncio.TimeoutError:
@@ -267,9 +286,12 @@ class LSPServerManager:
                 RuntimeError(f"Server start timeout after {active_config.startup_timeout}ms"),
             )
             self._spawning.pop(key, None)
+            self._instances.pop(key, None)  # Clean up failed entry to prevent zombie cache
             return None
         except Exception as exc:
             self._log_server_error(active_config.server_id, exc)
+            self._instances.pop(key, None)  # Clean up failed entry
+            return None
 
         return instance if instance.running else None
 
@@ -333,7 +355,10 @@ class LSPServerManager:
                 server_id=inst.config.server_id,
                 name=inst.config.server_id,
                 running=inst.running,
+                state=inst.state,
                 root=inst.config.workspace_folder,
+                crash_count=inst.crash_count,
+                last_error=str(inst.last_error) if inst.last_error else None,
             )
             for inst in self._instances.values()
         ]

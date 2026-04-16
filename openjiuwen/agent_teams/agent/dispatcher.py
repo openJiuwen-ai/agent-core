@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import time
 from typing import (
     Protocol,
     runtime_checkable,
@@ -16,6 +17,7 @@ from openjiuwen.agent_teams.agent.coordinator import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.schema.events import MessageEvent, TeamEvent
+from openjiuwen.agent_teams.schema.status import MemberStatus, TaskStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
 
@@ -78,6 +80,9 @@ class DispatcherHost(Protocol):
     async def cancel_agent(self) -> None:
         ...
 
+    async def shutdown_self(self) -> None:
+        ...
+
     async def pause_polls(self) -> None:
         ...
 
@@ -120,8 +125,19 @@ class EventDispatcher:
         }
     )
 
+    _STALE_CLAIM_SECONDS = 2 * 60.0
+    _STALE_PENDING_SECONDS = 2 * 60.0
+
     def __init__(self, host: DispatcherHost) -> None:
         self._host = host
+        # task_id -> wall-clock seconds when we last fired a stale-claim
+        # nudge. Used only to throttle follow-up nudges; the ``is this
+        # task stale?`` decision itself reads ``task.updated_at`` from the
+        # database so we never lose state across process restarts.
+        self._last_stale_nudge: dict[str, float] = {}
+        # Same idea, but for stale PENDING tasks the leader observes —
+        # throttles the leader's self-prompt about long-unclaimed work.
+        self._last_pending_nudge: dict[str, float] = {}
 
     async def dispatch(self, event: CoordinationEvent) -> None:
         """Entry point called by CoordinatorLoop on every wake-up.
@@ -149,6 +165,26 @@ class EventDispatcher:
         if event_type == TeamEvent.STANDBY:
             team_logger.info("[{}] received TEAM_STANDBY, pausing polls", member_name)
             await host.pause_polls()
+            return
+
+        if event_type == TeamEvent.CLEANED:
+            # Teammates must abandon their loop when the team row (and their
+            # own member row) has been wiped — otherwise they spin forever
+            # waiting for events on a dead team. The leader must NEVER
+            # shutdown_self from its own CLEANED event: persistent leaders
+            # have to survive clean_team to accept the next interaction, and
+            # the teardown for temporary leaders is handled by the natural
+            # _finalize_round path instead. Skip the leader branch as
+            # defense in depth on top of the sender_id self-filter.
+            if host.role == TeamRole.LEADER:
+                team_logger.debug(
+                    "[{}] ignoring TEAM_CLEANED on leader path", member_name,
+                )
+                return
+            team_logger.info(
+                "[{}] received TEAM_CLEANED, shutting down coordination", member_name,
+            )
+            await host.shutdown_self()
             return
 
         if event_type == TeamEvent.TOOL_APPROVAL_RESULT:
@@ -201,8 +237,11 @@ class EventDispatcher:
         if event.event_type == InnerEventType.POLL_TASK:
             member_name = host.member_name
             team_logger.debug("poll task: member_name={}, agent_running={}", member_name, host.is_agent_running())
-            if member_name and not host.is_agent_running() and host.task_manager:
-                await self._nudge_idle_agent(member_name)
+            if member_name and host.task_manager:
+                await self._check_stale_claimed_tasks()
+                await self._check_stale_pending_tasks()
+                if not host.is_agent_running():
+                    await self._nudge_idle_agent(member_name, from_poll=True)
             return
 
         if event.event_type == InnerEventType.POLL_MAILBOX:
@@ -276,9 +315,14 @@ class EventDispatcher:
             restart_count = payload.get("restart_count", 1)
             text = f"[成员事件] 成员 {target_id} 已重启 (第{restart_count}次)"
         elif event_type == TeamEvent.MEMBER_STATUS_CHANGED:
+            old_status = payload.get("old_status")
+            new_status = payload.get("new_status")
             text = (
                 f"[成员事件] 成员 {target_id} 状态变更: "
-                f"{payload.get('old_status')} → {payload.get('new_status')}"
+                f"{old_status} → {new_status}"
+            )
+            await self._nudge_idle_member_with_claimed_tasks(
+                target_id, old_status, new_status,
             )
         elif event_type == TeamEvent.MEMBER_EXECUTION_CHANGED:
             text = (
@@ -292,7 +336,53 @@ class EventDispatcher:
         else:
             return
 
-        team_logger.info(text)
+        team_logger.debug(text)
+
+    _IDLE_NUDGE_STATUSES = frozenset(
+        {MemberStatus.READY.value, MemberStatus.ERROR.value}
+    )
+
+    async def _nudge_idle_member_with_claimed_tasks(
+        self,
+        target_id: str,
+        old_status: str | None,
+        new_status: str | None,
+    ) -> None:
+        """Remind a member to resume claimed work on transition to READY/ERROR.
+
+        Triggered by the leader when a member's status flips to ``ready`` or
+        ``error``. If that member still holds tasks in ``claimed`` state, the
+        leader sends a direct message listing them so the member picks the
+        work back up on its next wake — instead of idling with live claims.
+        """
+        if not target_id:
+            return
+        if new_status not in self._IDLE_NUDGE_STATUSES:
+            return
+        if new_status == old_status:
+            return
+        task_manager = self._host.task_manager
+        message_manager = self._host.message_manager
+        if task_manager is None or message_manager is None:
+            return
+
+        claimed = await task_manager.get_tasks_by_assignee(
+            target_id, status=TaskStatus.CLAIMED.value,
+        )
+        if not claimed:
+            return
+
+        lines = [
+            f"检测到你已认领但尚未完成的任务（共 {len(claimed)} 个），请继续推进："
+        ]
+        for task in claimed:
+            lines.append(f"- [{task.task_id}] {task.title}: {task.content}")
+        content = "\n".join(lines)
+        await message_manager.send_message(content, target_id)
+        team_logger.info(
+            "[leader] nudged {} about {} claimed task(s) after status → {}",
+            target_id, len(claimed), new_status,
+        )
 
     # ------------------------------------------------------------------
     # Message handling
@@ -319,7 +409,7 @@ class EventDispatcher:
                 "auto_confirm": payload.auto_confirm,
             },
         )
-        team_logger.info(
+        team_logger.debug(
             "[{}] received tool approval result for tool_call_id={}, approved={}",
             member_name,
             payload.tool_call_id,
@@ -355,7 +445,7 @@ class EventDispatcher:
                     )
                     return
                 text = self._format_message(msg)
-                team_logger.info("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
+                team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
                 if not host.is_agent_running():
                     await host.start_agent(text)
@@ -417,18 +507,30 @@ class EventDispatcher:
     # Task nudging
     # ------------------------------------------------------------------
 
-    async def _nudge_idle_agent(self, member_name: str) -> None:
+    async def _nudge_idle_agent(self, member_name: str, from_poll: bool = False) -> None:
         """Feed task context to an idle agent.
 
         Leader: reviews full task board to decide whether to re-plan or conclude.
         Teammate: reviews claimable tasks to pick one, plus all tasks for coordination context.
+
+        Args:
+            member_name: The calling member's own name.
+            from_poll: True when the nudge originates from a routine
+                POLL_TASK tick. In that case an idle leader with no
+                incomplete tasks (covers all-done / no-tasks / empty-team)
+                returns silently — real task-completion prompts arrive
+                via the TASK_EVENTS path so polling should not
+                re-trigger them.
         """
         host = self._host
         all_tasks = await host.task_manager.list_tasks()
         _terminal = {"completed", "cancelled"}
         incomplete = [t for t in all_tasks if t.status not in _terminal]
 
-        team_logger.info("[{}] nudge_idle_agent: {} incomplete tasks", member_name, len(incomplete))
+        if from_poll and host.role == TeamRole.LEADER and not incomplete:
+            return
+
+        team_logger.debug("[{}] nudge_idle_agent: {} incomplete tasks", member_name, len(incomplete))
         if host.role == TeamRole.LEADER:
             if not incomplete:
                 lifecycle = host.lifecycle
@@ -465,3 +567,152 @@ class EventDispatcher:
             lines.append(f"- [{task.task_id}] [{task.status}] {task.title}: {task.content}{assignee}")
 
         await host.start_agent("\n".join(lines))
+
+    async def _check_stale_claimed_tasks(self) -> None:
+        """Find claimed tasks that have been running past the stale threshold.
+
+        Measures how long a task has been in CLAIMED state by reading the
+        database ``updated_at`` column (bumped on every status transition,
+        so for a claimed task it is the claim timestamp). When the
+        elapsed time exceeds ``_STALE_CLAIM_SECONDS`` the assignee is
+        nudged via the local agent loop (self) or a direct message
+        (leader → other member). A per-task throttle prevents follow-up
+        polls from re-nudging inside the same stale window.
+        """
+        host = self._host
+        task_manager = host.task_manager
+        if task_manager is None:
+            return
+
+        claimed = await task_manager.list_tasks(status=TaskStatus.CLAIMED.value)
+        own_name = host.member_name
+        is_leader = host.role == TeamRole.LEADER
+        relevant = [
+            t for t in claimed
+            if t.assignee and (t.assignee == own_name or is_leader)
+        ]
+
+        current_ids = {t.task_id for t in relevant}
+        for tid in [k for k in self._last_stale_nudge if k not in current_ids]:
+            self._last_stale_nudge.pop(tid, None)
+
+        if not relevant:
+            return
+
+        now = time.time()
+        threshold_ms = self._STALE_CLAIM_SECONDS * 1000
+        for task in relevant:
+            if task.updated_at is None:
+                continue
+            elapsed_ms = now * 1000 - task.updated_at
+            if elapsed_ms < threshold_ms:
+                continue
+            last_nudge = self._last_stale_nudge.get(task.task_id, 0.0)
+            if now - last_nudge < self._STALE_CLAIM_SECONDS:
+                continue
+            self._last_stale_nudge[task.task_id] = now
+            await self._nudge_stale_claim(task)
+
+    async def _nudge_stale_claim(self, task) -> None:
+        """Dispatch a stale-claim nudge to self or to the assigned member."""
+        host = self._host
+        assignee = task.assignee
+        if assignee and assignee == host.member_name:
+            await self._self_nudge_stale_claim(task)
+        elif host.role == TeamRole.LEADER and assignee:
+            await self._leader_nudge_stale_claim(task)
+
+    @staticmethod
+    def _format_stale_claim_nudge(task) -> str:
+        return (
+            f"[催促] 你已认领的任务 [{task.task_id}] {task.title} "
+            f"已超过 60 秒仍未完成，请继续推进：{task.content}"
+        )
+
+    async def _self_nudge_stale_claim(self, task) -> None:
+        """Feed a nudge input into the local agent loop."""
+        host = self._host
+        content = self._format_stale_claim_nudge(task)
+        if host.is_agent_running():
+            await host.steer(content)
+        else:
+            await host.start_agent(content)
+        team_logger.info(
+            "[{}] self-nudged stale claimed task {}", host.member_name, task.task_id,
+        )
+
+    async def _leader_nudge_stale_claim(self, task) -> None:
+        """Send a direct reminder to the member holding a stale claim."""
+        host = self._host
+        if host.message_manager is None:
+            return
+        content = self._format_stale_claim_nudge(task)
+        await host.message_manager.send_message(content, task.assignee)
+        team_logger.info(
+            "[leader] nudged {} about stale claimed task {}",
+            task.assignee, task.task_id,
+        )
+
+    async def _check_stale_pending_tasks(self) -> None:
+        """Leader-only: self-prompt about pending tasks that nobody claimed.
+
+        Scans pending tasks via ``task.updated_at`` (bumped on every status
+        transition). When a task has been pending past
+        ``_STALE_PENDING_SECONDS``, the leader feeds itself an input
+        listing those tasks plus a hint to pick the right teammate and
+        ping them via ``send_message``. The model decides who to notify
+        based on each task's content and the team roster — the dispatcher
+        does not try to do the matching itself. A per-task throttle
+        prevents follow-up polls from re-prompting inside the same
+        stale window.
+        """
+        host = self._host
+        if host.role != TeamRole.LEADER:
+            return
+        task_manager = host.task_manager
+        if task_manager is None:
+            return
+
+        pending = await task_manager.list_tasks(status=TaskStatus.PENDING.value)
+        now = time.time()
+        threshold_ms = self._STALE_PENDING_SECONDS * 1000
+        stale_ids = {
+            t.task_id for t in pending
+            if t.updated_at is not None and (now * 1000 - t.updated_at) >= threshold_ms
+        }
+
+        # GC throttle entries for tasks no longer pending/stale.
+        for tid in [k for k in self._last_pending_nudge if k not in stale_ids]:
+            self._last_pending_nudge.pop(tid, None)
+
+        fresh: list = []
+        for task in pending:
+            if task.task_id not in stale_ids:
+                continue
+            last = self._last_pending_nudge.get(task.task_id, 0.0)
+            if now - last < self._STALE_PENDING_SECONDS:
+                continue
+            fresh.append(task)
+
+        if not fresh:
+            return
+
+        for task in fresh:
+            self._last_pending_nudge[task.task_id] = now
+
+        lines = [
+            "[催促建议] 以下任务已长时间处于 pending 状态未被认领，"
+            "请评估每个任务最适合哪位成员，并通过 send_message 工具点名"
+            "对方让其使用 claim_task 认领："
+        ]
+        for task in fresh:
+            lines.append(f"- [{task.task_id}] {task.title}: {task.content}")
+        content = "\n".join(lines)
+
+        if host.is_agent_running():
+            await host.steer(content)
+        else:
+            await host.start_agent(content)
+        team_logger.info(
+            "[leader] self-prompted about {} stale pending task(s)", len(fresh),
+        )

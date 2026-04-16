@@ -140,6 +140,8 @@ def _ensure_openjiuwen_client_patch() -> None:
         normalized = _normalize_client_type(getattr(config, "client_type", ""))
         if normalized == "streamable-http":
             client = BrowserMoveStreamableHttpClient(config)
+        elif normalized == "stdio":
+            client = BrowserMoveStdioClient(config)
         else:
             client = original_create_client(config)
         _client_registry[config.server_id] = client

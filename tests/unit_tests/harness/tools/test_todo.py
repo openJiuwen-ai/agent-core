@@ -469,7 +469,7 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
         }]
         inputs = {
             "action": "insert_after",
-            "todo_data": [self.test_todo_ids[0], insert_data]  # Insert after Task 1
+            "todo_data": {"target_id": self.test_todo_ids[0], "items": insert_data}
         }
 
         # Execute call
@@ -494,7 +494,7 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
         }]
         inputs = {
             "action": "insert_before",
-            "todo_data": [self.test_todo_ids[1], insert_data]  # Insert before Task 2
+            "todo_data": {"target_id": self.test_todo_ids[1], "items": insert_data}
         }
 
         # Execute call

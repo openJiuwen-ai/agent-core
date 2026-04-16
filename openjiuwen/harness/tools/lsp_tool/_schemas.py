@@ -25,70 +25,82 @@ class GoToDefinitionInput(BaseModel):
     """Input for goToDefinition operation."""
 
     operation: Literal["goToDefinition"] = "goToDefinition"
-    file_path: str = Field(..., description="Absolute or relative file path")
-    line: int = Field(ge=1, description="Line number (1-indexed)")
-    character: int = Field(ge=1, description="Column number (1-indexed)")
+    file_path: str = Field(..., description="The absolute or relative path to the file")
+    line: int = Field(ge=1, description="The line number (1-based, as shown in editors)")
+    character: int = Field(default=1, ge=1,
+                           description="The character offset (1-based, as shown in editors; defaults to 1)")
 
 
 class FindReferencesInput(BaseModel):
     """Input for findReferences operation."""
 
     operation: Literal["findReferences"] = "findReferences"
-    file_path: str = Field(..., description="Absolute or relative file path")
-    line: int = Field(ge=1, description="Line number (1-indexed)")
-    character: int = Field(ge=1, description="Column number (1-indexed)")
-    include_declaration: bool = Field(default=True, description="Include the declaration location")
+    file_path: str = Field(..., description="The absolute or relative path to the file")
+    line: int = Field(ge=1, description="The line number (1-based, as shown in editors)")
+    character: int = Field(default=1, ge=1,
+                           description="The character offset (1-based, as shown in editors; defaults to 1)")
+    include_declaration: bool = Field(default=True,
+                                      description="When true, the declaration location itself "
+                                                  "is included in the results (default: true)")
 
 
 class DocumentSymbolInput(BaseModel):
     """Input for documentSymbol operation."""
 
     operation: Literal["documentSymbol"] = "documentSymbol"
-    file_path: str = Field(..., description="Absolute or relative file path")
+    file_path: str = Field(..., description="The absolute or relative path to the file")
 
 
 class WorkspaceSymbolInput(BaseModel):
     """Input for workspaceSymbol operation."""
 
     operation: Literal["workspaceSymbol"] = "workspaceSymbol"
-    file_path: str = Field(default="", description="Absolute or relative file path (optional for workspace symbol)")
-    query: str = Field(default="", description="Search query string")
+    file_path: str = Field(default="",
+                           description="The absolute or relative path to the file "
+                                       "(optional; ignored for workspaceSymbol)")
+    query: str = Field(default="",
+                       description="Search query string; when empty, returns all available symbols "
+                                   "(used by workspaceSymbol only)")
 
 
 class GoToImplementationInput(BaseModel):
     """Input for goToImplementation operation."""
 
     operation: Literal["goToImplementation"] = "goToImplementation"
-    file_path: str = Field(..., description="Absolute or relative file path")
-    line: int = Field(ge=1, description="Line number (1-indexed)")
-    character: int = Field(ge=1, description="Column number (1-indexed)")
+    file_path: str = Field(..., description="The absolute or relative path to the file")
+    line: int = Field(ge=1, description="The line number (1-based, as shown in editors)")
+    character: int = Field(default=1, ge=1,
+                           description="The character offset (1-based, as shown in editors; defaults to 1)")
 
 
 class PrepareCallHierarchyInput(BaseModel):
     """Input for prepareCallHierarchy operation."""
 
     operation: Literal["prepareCallHierarchy"] = "prepareCallHierarchy"
-    file_path: str = Field(..., description="Absolute or relative file path")
-    line: int = Field(ge=1, description="Line number (1-indexed)")
-    character: int = Field(ge=1, description="Column number (1-indexed)")
+    file_path: str = Field(..., description="The absolute or relative path to the file")
+    line: int = Field(ge=1, description="The line number (1-based, as shown in editors)")
+    character: int = Field(default=1, ge=1,
+                           description="The character offset (1-based, as shown in editors; defaults to 1)")
 
 
 class IncomingCallsInput(BaseModel):
     """Input for incomingCalls operation."""
 
     operation: Literal["incomingCalls"] = "incomingCalls"
-    file_path: str = Field(..., description="Absolute or relative file path")
-    line: int = Field(ge=1, description="Line number (1-indexed)")
-    character: int = Field(ge=1, description="Column number (1-indexed)")
+    file_path: str = Field(..., description="The absolute or relative path to the file")
+    line: int = Field(ge=1, description="The line number (1-based, as shown in editors)")
+    character: int = Field(default=1, ge=1,
+                           description="The character offset (1-based, as shown in editors; defaults to 1)")
 
 
 class OutgoingCallsInput(BaseModel):
     """Input for outgoingCalls operation."""
 
     operation: Literal["outgoingCalls"] = "outgoingCalls"
-    file_path: str = Field(..., description="Absolute or relative file path")
-    line: int = Field(ge=1, description="Line number (1-indexed)")
-    character: int = Field(ge=1, description="Column number (1-indexed)")
+    file_path: str = Field(..., description="The absolute or relative path to the file")
+    line: int = Field(ge=1, description="The line number (1-based, as shown in editors)")
+    character: int = Field(default=1, ge=1,
+                           description="The character offset (1-based, as shown in editors; defaults to 1)")
 
 
 LspToolInput = Annotated[

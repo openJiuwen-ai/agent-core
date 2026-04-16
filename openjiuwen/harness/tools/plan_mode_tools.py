@@ -113,10 +113,12 @@ def get_or_create_plan_slug(workspace_root: str) -> str:
 _ENTER_PLAN_EXISTS_MSG = {
     "en": (
         "Plan file already exists at: {plan_path}\n"
+        "You can read it and make incremental edits. "
         "Continue the 5-phase Plan workflow in your instructions, initial understanding-design-review-final plan-end."
     ),
     "cn": (
         "计划文件已存在，路径：{plan_path}\n"
+        "你可以阅读计划文件然后做增量修改。"
         "请按照提示词中的Plan工作流继续制定计划，初始理解-方案设计-审查-撰写计划-结束规划。\n"
     ),
 }

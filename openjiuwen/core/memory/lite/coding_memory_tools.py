@@ -118,6 +118,7 @@ async def init_memory_manager_async(
             settings=settings,
             embedding_config=embedding_config,
             sys_operation=sys_operation,
+            node_name="coding_memory",
         )
         coding_memory_manager = await MemoryIndexManager.get(params)
 

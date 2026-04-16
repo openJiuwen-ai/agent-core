@@ -66,6 +66,7 @@ from openjiuwen.harness.task_loop.task_loop_controller import (
 )
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
 from openjiuwen.harness.tools.session_tools import SessionToolkit
+from openjiuwen.harness.tools.web_tools import is_free_search_enabled
 
 if TYPE_CHECKING:
     from openjiuwen.core.controller.modules.event_queue import (
@@ -139,6 +140,7 @@ class DeepAgent(BaseAgent):
     def configure(self, config: DeepAgentConfig) -> "DeepAgent":
         """Apply configuration and rebuild the internal ReActAgent."""
 
+        self._filter_disabled_tools(config)
         if self._deep_config is None:
             self._initial_configure(config)
         else:
@@ -146,6 +148,66 @@ class DeepAgent(BaseAgent):
 
         self._initialized = False
         return self
+
+    @staticmethod
+    def _filter_disabled_tools(config: DeepAgentConfig) -> None:
+        if config.tools is None or is_free_search_enabled():
+            return
+        config.tools = [
+            card for card in config.tools
+            if not (isinstance(card, ToolCard) and card.name == "free_search")
+        ]
+
+    def _unregister_tool_resource(self, card: ToolCard) -> None:
+        if card.name != "free_search":
+            return
+        if not getattr(card, "id", None):
+            return
+        if Runner.resource_mgr.get_tool(card.id) is None:
+            return
+        tags = Runner.resource_mgr.get_resource_tag(card.id) or []
+        if self.card.id in tags and len(tags) > 1:
+            result = Runner.resource_mgr.remove_resource_tag(
+                card.id,
+                self.card.id,
+                skip_if_tag_not_exists=True,
+            )
+            if result.is_err():
+                logger.warning(
+                    "[DeepAgent] Failed to remove tool tag during hot reload: %s",
+                    result.msg(),
+                )
+            return
+        if self.card.id in tags or not tags:
+            result = Runner.resource_mgr.remove_tool(card.id)
+            if result.is_err():
+                logger.warning(
+                    "[DeepAgent] Failed to unregister tool during hot reload: %s",
+                    result.msg(),
+                )
+
+    def _ensure_builtin_tool_resource(self, card: ToolCard, config: DeepAgentConfig) -> None:
+        if card.name != "free_search":
+            return
+        existing_tool = Runner.resource_mgr.get_tool(card.id)
+        if existing_tool is not None:
+            tag_result = Runner.resource_mgr.add_resource_tag(card.id, self.card.id)
+            if tag_result.is_err():
+                logger.warning(
+                    "[DeepAgent] Failed to tag existing free_search during hot reload: %s",
+                    tag_result.msg(),
+                )
+            return
+
+        from openjiuwen.harness.tools.web_tools import WebFreeSearchTool
+
+        tool = WebFreeSearchTool(language=resolve_language(config.language), card=card)
+        result = Runner.resource_mgr.add_tool(tool, tag=self.card.id)
+        if result.is_err():
+            logger.warning(
+                "[DeepAgent] Failed to register free_search during hot reload: %s",
+                result.msg(),
+            )
 
     def _initial_configure(self, config: DeepAgentConfig) -> None:
         """First-time setup: persist config, create the inner ReActAgent, and queue rails."""
@@ -255,16 +317,21 @@ class DeepAgent(BaseAgent):
         MCP server registrations and other ability types are not affected.
         """
         new_by_name = {card.name: card for card in (config.tools or [])}
+        previous_by_name = {
+            card.name: card for card in (previous_tools or []) if isinstance(card, ToolCard)
+        }
 
         # Only remove tools that were previously managed by config.tools.
         # Rail-registered tools such as task_tool must survive hot reload.
-        managed_tool_names = {
-            card.name for card in (previous_tools or []) if isinstance(card, ToolCard)
-        }
+        managed_tool_names = set(previous_by_name)
         if not managed_tool_names:
             managed_tool_names = set(new_by_name)
         stale = [name for name in managed_tool_names if name not in new_by_name]
         if stale:
+            for name in stale:
+                card = previous_by_name.get(name)
+                if card is not None:
+                    self._unregister_tool_resource(card)
             self.ability_manager.remove(stale)
 
         # Add or replace tools whose id has changed (or are new).
@@ -272,10 +339,13 @@ class DeepAgent(BaseAgent):
             existing = self.ability_manager.get(name)
             existing_tool = existing if isinstance(existing, ToolCard) else None
             if existing_tool is not None and existing_tool.id == card.id:
-                continue  # Same id — no update needed.
+                self._ensure_builtin_tool_resource(card, config)
+                continue  # Same id - no update needed.
             if existing_tool is not None:
+                self._unregister_tool_resource(existing_tool)
                 self.ability_manager.remove(name)
             self.ability_manager.add(card)
+            self._ensure_builtin_tool_resource(card, config)
 
     def _hot_reload_system_prompt(self, config: DeepAgentConfig) -> None:
         """Rebuild the SystemPromptBuilder and update both agents during hot-reconfigure.
