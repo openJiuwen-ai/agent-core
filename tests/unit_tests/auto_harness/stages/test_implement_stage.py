@@ -169,6 +169,13 @@ class _FakeGit:
     async def show_last_commit_stat(self):
         return self._last_commit_stat
 
+    async def discard_worktree_changes(self):
+        return True
+
+    async def diff_against(self, revision: str):
+        del revision
+        return "diff --git a/a.py b/a.py"
+
     def mark_commit(
         self,
         sha: str,

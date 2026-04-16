@@ -16,6 +16,7 @@ from openjiuwen.core.session.stream.base import (
     OutputSchema,
 )
 from openjiuwen.harness.cli.cli import (
+    AutoHarnessRunRequest,
     _run_auto_harness,
 )
 
@@ -61,7 +62,7 @@ class TestAutoHarnessCli:
 
             mock_orch = MagicMock()
             mock_orch.run_session_stream = _fake_stream
-            mock_orch._results = []
+            mock_orch.results = []
             return mock_orch
 
         async def _fake_render(stream, _console):
@@ -94,14 +95,9 @@ class TestAutoHarnessCli:
         ):
             exit_code = await _run_auto_harness(
                 opts=opts,
-                task=None,
-                task_file=None,
-                dry_run=False,
-                stage=None,
-                no_push=False,
-                budget=None,
-                goal="分析差距 claude-code",
-                competitor=None,
+                request=AutoHarnessRunRequest(
+                    goal="分析差距 claude-code"
+                ),
             )
 
         assert exit_code == 0
@@ -150,7 +146,7 @@ class TestAutoHarnessCli:
 
             mock_orch = MagicMock()
             mock_orch.run_session_stream = _fake_stream
-            mock_orch._results = []
+            mock_orch.results = []
             return mock_orch
 
         async def _fake_render(stream, _console):
@@ -183,14 +179,9 @@ class TestAutoHarnessCli:
         ):
             exit_code = await _run_auto_harness(
                 opts=opts,
-                task=None,
-                task_file=None,
-                dry_run=False,
-                stage=None,
-                no_push=False,
-                budget=None,
-                goal="分析差距 claude-code",
-                competitor=None,
+                request=AutoHarnessRunRequest(
+                    goal="分析差距 claude-code"
+                ),
             )
 
         assert exit_code == 0
@@ -255,14 +246,10 @@ class TestAutoHarnessCli:
         ):
             exit_code = await _run_auto_harness(
                 opts=opts,
-                task=None,
-                task_file=None,
-                dry_run=False,
-                stage="assess",
-                no_push=False,
-                budget=None,
-                goal=None,
-                competitor="claude-code",
+                request=AutoHarnessRunRequest(
+                    stage="assess",
+                    competitor="claude-code",
+                ),
             )
 
         assert exit_code == 0

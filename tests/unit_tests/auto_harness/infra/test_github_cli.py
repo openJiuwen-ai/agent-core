@@ -42,7 +42,7 @@ def test_github_cli_missing_installs_and_prompts_login():
 
     def _fake_run(cmd, **_kwargs):
         run_calls.append(cmd)
-        if cmd[:3] == ["gh", "auth", "status"]:
+        if cmd[1:3] == ["auth", "status"]:
             return SimpleNamespace(
                 returncode=1, stderr="not logged in", stdout="",
             )
@@ -66,7 +66,7 @@ def test_github_cli_missing_installs_and_prompts_login():
     assert status.installed_now is True
     assert status.authenticated is False
     assert run_calls[0] == ["brew", "install", "gh"]
-    assert run_calls[1] == ["gh", "auth", "status"]
+    assert run_calls[1] == ["/usr/local/bin/gh", "auth", "status"]
     assert "建议先执行 `gh auth login --web`" in "\n".join(
         messages
     )

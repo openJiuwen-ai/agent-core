@@ -104,8 +104,12 @@ class ExperienceStore:
                     data = json.loads(line)
                     data["type"] = ExperienceType(data["type"])
                     experiences.append(Experience(**data))
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "Skipping malformed experience line: %s",
+                        line[:120],
+                    )
                 except (
-                    json.JSONDecodeError,
                     KeyError,
                     TypeError,
                     ValueError,

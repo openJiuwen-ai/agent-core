@@ -300,9 +300,6 @@ async def _subcmd_run(
     from openjiuwen.auto_harness.infra.github_cli import (
         ensure_github_cli_ready,
     )
-    from openjiuwen.harness.cli.ui.renderer import (
-        render_stream,
-    )
 
     # Parse flags
     task: Optional[str] = None
@@ -469,7 +466,7 @@ async def _subcmd_run(
     orch = create_auto_harness_orchestrator(config)
     stream = orch.run_session_stream(tasks=tasks)
     await render_stream(stream, console)
-    results = orch._results
+    results = orch.results
     elapsed = _time.monotonic() - t0
     ok = sum(1 for r in results if r.success)
     console.print(
