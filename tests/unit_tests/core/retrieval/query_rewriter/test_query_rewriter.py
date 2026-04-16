@@ -103,6 +103,31 @@ async def _append_one_turn(
     await context.add_messages(AssistantMessage(content=assistant_content))
 
 
+class TestQueryRewriterModelConfigPropagation:
+    """Tests for ModelClientConfig propagation during QueryRewriter initialization."""
+
+    def test_init_passes_only_custom_headers(self, session_context):
+        cfg = ModelConfig(
+            model_provider="OpenAI",
+            model_info=BaseModelInfo(
+                api_key="test-key",
+                api_base="https://test.api",
+                model_name="gpt-4",
+                temperature=0.0,
+                top_p=0.1,
+                timeout=60,
+                verify_ssl=False,
+                custom_headers={"X-Tenant": "tenant-a"},
+            ),
+        )
+
+        with patch(_qr_model_patch_target()) as mock_model:
+            QueryRewriter(cfg=cfg, ctx=session_context, compress_range=5)
+
+        model_client_config = mock_model.call_args.kwargs["model_client_config"]
+        assert model_client_config.custom_headers == {"X-Tenant": "tenant-a"}
+
+
 # =============================================================================
 # Module-level function tests (from query_rewriter_full_test, kept as reference)
 # =============================================================================

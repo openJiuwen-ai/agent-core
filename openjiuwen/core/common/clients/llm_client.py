@@ -7,6 +7,7 @@ from openjiuwen.core.common.clients.connector_pool import get_connector_pool_man
 from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.common.clients.client_registry import get_client_registry
 from openjiuwen.core.common.clients.connector_pool import ConnectorPool, ConnectorPoolConfig
+from openjiuwen.core.common.utils.header_utils import sanitize_headers
 
 
 class HttpXConnectorPoolConfig(ConnectorPoolConfig):
@@ -188,13 +189,17 @@ async def create_async_openai_client(config: Union["ModelClientConfig", Dict[str
         need_async=True
     )
 
-    return AsyncOpenAI(
+    openai_kwargs = dict(
         api_key=config.api_key,
         base_url=config.api_base,
         http_client=httpx_client,
         timeout=config.timeout,
-        max_retries=config.max_retries
+        max_retries=config.max_retries,
     )
+    if custom_headers := sanitize_headers(getattr(config, "custom_headers", None)):
+        openai_kwargs["default_headers"] = custom_headers
+
+    return AsyncOpenAI(**openai_kwargs)
 
 
 @get_client_registry().register_client("openai")
@@ -244,10 +249,14 @@ async def create_openai_client(config: Union["ModelClientConfig", Dict[str, Any]
         need_async=False
     )
 
-    return OpenAI(
+    openai_kwargs = dict(
         api_key=config.api_key,
         base_url=config.api_base,
         http_client=httpx_client,
         timeout=config.timeout,
-        max_retries=config.max_retries
+        max_retries=config.max_retries,
     )
+    if custom_headers := sanitize_headers(getattr(config, "custom_headers", None)):
+        openai_kwargs["default_headers"] = custom_headers
+
+    return OpenAI(**openai_kwargs)
