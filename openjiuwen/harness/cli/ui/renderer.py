@@ -15,6 +15,7 @@ Supports eight chunk types:
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
@@ -28,7 +29,9 @@ from openjiuwen.harness.cli.ui.tool_display import (
     get_display_name,
 )
 from openjiuwen.harness.cli.ui.todo_render import (
+    apply_todo_modify_args,
     parse_todo_result,
+    parse_todo_tool_args,
     render_todo_list,
 )
 
@@ -51,6 +54,7 @@ CHUNK_MESSAGE = "message"
 CHUNK_TOOL_CALL = "tool_call"
 CHUNK_TOOL_RESULT = "tool_result"
 CHUNK_TODO_UPDATED = "todo.updated"
+CHUNK_CONTROLLER_OUTPUT = "controller_output"
 
 
 @dataclass
@@ -96,6 +100,36 @@ def _extract_content(chunk: Any) -> str:
         return payload
     # InteractionOutput or other objects
     return str(payload)
+
+
+def _extract_controller_output_error(payload: Any) -> str:
+    """Extract a readable controller task-failure message."""
+    if isinstance(payload, dict):
+        payload_type = str(payload.get("type", "")).lower()
+        if "task_failed" in payload_type:
+            data = payload.get("data", [])
+            texts: list[str] = []
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        text = str(item.get("text", "")).strip()
+                        if text:
+                            texts.append(text)
+            if texts:
+                return "\n".join(texts)
+        return ""
+
+    raw = str(payload)
+    if "task_failed" not in raw.lower():
+        return ""
+
+    matches = re.findall(r'text="(.*?)"', raw)
+    if matches:
+        return "\n".join(
+            m.encode("utf-8").decode("unicode_escape")
+            for m in matches
+        )
+    return raw
 
 
 def _extract_todo_message(tool_result: str) -> str:
@@ -147,8 +181,10 @@ def _render_tool_call(
 
 
 def _render_tool_result(
-    payload: dict, console: Console
-) -> None:
+    payload: dict,
+    console: Console,
+    todo_items: Optional[list[dict[str, Any]]] = None,
+) -> Optional[list[dict[str, Any]]]:
     """Render a tool result in Claude Code style.
 
     Example::
@@ -166,14 +202,27 @@ def _render_tool_result(
             for line in render_todo_list(items):
                 console.print(line)
             console.print()  # blank line after
-            return
+            return items
+        if (
+            tool_name == "todo_modify"
+            and todo_items
+        ):
+            items = apply_todo_modify_args(
+                todo_items,
+                parse_todo_tool_args(tool_args),
+            )
+            if items:
+                for line in render_todo_list(items):
+                    console.print(line)
+                console.print()
+                return items
         # Fallback: show raw message if parsing failed
         # Extract 'message' value from Python dict repr
         msg = _extract_todo_message(tool_result)
         if msg:
             console.print(f"[dim]  ⎿  {msg}[/dim]")
             console.print()
-            return
+            return todo_items
 
     summary = format_tool_result(
         tool_name, tool_result, tool_args
@@ -188,6 +237,7 @@ def _render_tool_result(
             console.print(f"[dim]{preview}[/dim]")
 
     console.print()  # blank line after tool result
+    return todo_items
 
 
 async def render_stream(
@@ -219,10 +269,19 @@ async def render_stream(
     has_llm_output = False
     in_llm_output = False
     pending_interactions: list[PendingInteraction] = []
+    todo_items: Optional[list[dict[str, Any]]] = None
+    visible_chunk_seen = False
+    seen_chunk_types: set[str] = set()
 
     async for chunk in stream:
         chunk_count += 1
         chunk_type = getattr(chunk, "type", "")
+        if chunk_type:
+            seen_chunk_types.add(chunk_type)
+
+        if chunk_type != CHUNK_LLM_OUTPUT and in_llm_output:
+            _write_terminal("\n")
+            in_llm_output = False
 
         if chunk_type == CHUNK_LLM_OUTPUT:
             text = _extract_content(chunk)
@@ -235,6 +294,7 @@ async def render_stream(
                 has_llm_output = True
                 result_parts.append(text)
                 _write_terminal(text)
+                visible_chunk_seen = True
 
         elif chunk_type == CHUNK_ANSWER:
             # The answer chunk duplicates llm_output content.
@@ -244,6 +304,7 @@ async def render_stream(
                 if text:
                     result_parts.append(text)
                     _write_terminal(text)
+                    visible_chunk_seen = True
 
         elif chunk_type == CHUNK_LLM_REASONING:
             # Reasoning is hidden by default; only shown with
@@ -259,18 +320,16 @@ async def render_stream(
             text = _extract_content(chunk)
             if text:
                 console.print(f"[dim]  \u2699 {text}[/dim]")
+                visible_chunk_seen = True
 
         elif chunk_type == CHUNK_TOOL_CALL:
-            # End any in-progress LLM output
-            if in_llm_output:
-                _write_terminal("\n")
-                in_llm_output = False
             payload = (
                 chunk.payload
                 if isinstance(chunk.payload, dict)
                 else {}
             )
             _render_tool_call(payload, console)
+            visible_chunk_seen = True
 
         elif chunk_type == CHUNK_TOOL_RESULT:
             payload = (
@@ -278,7 +337,12 @@ async def render_stream(
                 if isinstance(chunk.payload, dict)
                 else {}
             )
-            _render_tool_result(payload, console)
+            todo_items = _render_tool_result(
+                payload,
+                console,
+                todo_items=todo_items,
+            )
+            visible_chunk_seen = True
 
         elif chunk_type == CHUNK_TODO_UPDATED:
             payload = (
@@ -290,8 +354,18 @@ async def render_stream(
                 str(payload.get("items", "[]"))
             )
             if items:
+                todo_items = items
                 for line in render_todo_list(items):
                     console.print(line)
+                visible_chunk_seen = True
+
+        elif chunk_type == CHUNK_CONTROLLER_OUTPUT:
+            error_text = _extract_controller_output_error(
+                chunk.payload
+            )
+            if error_text:
+                console.print(f"[red]✗ {error_text}[/red]")
+                visible_chunk_seen = True
 
         elif chunk_type == CHUNK_INTERACTION:
             payload = chunk.payload
@@ -310,11 +384,12 @@ async def render_stream(
                     request=value,
                 )
             )
+            visible_chunk_seen = True
 
         # Silently skip unknown types (controller_output, etc.)
 
     # Ensure trailing newline after streaming output
-    if result_parts:
+    if in_llm_output:
         _write_terminal("\n")
 
     # Integrity warnings
@@ -323,6 +398,12 @@ async def render_stream(
         console.print(
             "[dim]\u26a0 No output received. "
             "Check your API configuration.[/dim]"
+        )
+    elif not visible_chunk_seen and not pending_interactions:
+        chunk_types = ", ".join(sorted(seen_chunk_types)) or "unknown"
+        console.print(
+            "[dim]\u26a0 No visible output received. "
+            f"Chunk types: {chunk_types}[/dim]"
         )
 
     return RenderResult(
