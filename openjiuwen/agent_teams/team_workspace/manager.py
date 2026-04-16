@@ -15,6 +15,7 @@ Two operating modes:
 
 import asyncio
 import os
+import subprocess
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -31,6 +32,13 @@ from openjiuwen.agent_teams.team_workspace.models import (
 )
 from openjiuwen.agent_teams.worktree.git import _run_git, rev_parse
 from openjiuwen.core.common.logging import team_logger
+
+try:
+    import winerror
+except ImportError:  # pragma: no cover - unavailable outside Windows
+    ERROR_PRIVILEGE_NOT_HELD = 1314
+else:
+    ERROR_PRIVILEGE_NOT_HELD = winerror.ERROR_PRIVILEGE_NOT_HELD
 
 
 class TeamWorkspaceManager:
@@ -129,6 +137,42 @@ class TeamWorkspaceManager:
 
     # ── Workspace / worktree mount ─────────────────────────────
 
+    def _mount_directory(self, target_path: str, link_path: str) -> None:
+        """Create a directory link, falling back to junctions on Windows.
+
+        Windows requires elevated privileges or Developer Mode for directory
+        symlinks. When that privilege is unavailable, fall back to a junction
+        so team workspace mounts still work for normal users.
+
+        Args:
+            target_path: Existing directory to expose.
+            link_path: Link path to create.
+        """
+        try:
+            os.symlink(target_path, link_path, target_is_directory=True)
+        except OSError as exc:
+            if os.name != "nt" or getattr(exc, "winerror", None) != ERROR_PRIVILEGE_NOT_HELD:
+                raise
+            self._create_windows_junction(target_path, link_path)
+            team_logger.info(
+                "Symlink privilege unavailable on Windows; mounted %s via junction at %s",
+                target_path,
+                link_path,
+            )
+
+    @staticmethod
+    def _create_windows_junction(target_path: str, link_path: str) -> None:
+        """Create a directory junction using mklink /J on Windows."""
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", link_path, target_path],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            error_output = result.stderr.strip() or result.stdout.strip()
+            raise OSError(f"Failed to create junction {link_path} -> {target_path}: {error_output}")
+
     def mount_into_workspace(self, workspace_root: str) -> None:
         """Create .team/{team_name} symlink in an agent workspace.
 
@@ -142,7 +186,7 @@ class TeamWorkspaceManager:
         os.makedirs(team_dir, exist_ok=True)
         link_path = os.path.join(team_dir, self.team_name)
         if not os.path.exists(link_path):
-            os.symlink(self.workspace_path, link_path, target_is_directory=True)
+            self._mount_directory(self.workspace_path, link_path)
             team_logger.debug(
                 "Mounted team workspace %s into %s",
                 self.team_name,
@@ -160,7 +204,7 @@ class TeamWorkspaceManager:
         """
         link_path = os.path.join(worktree_path, ".team")
         if not os.path.exists(link_path):
-            os.symlink(self.workspace_path, link_path, target_is_directory=True)
+            self._mount_directory(self.workspace_path, link_path)
 
         gitignore_path = os.path.join(worktree_path, ".gitignore")
         entries_to_add = [".agent/", ".team/"]
