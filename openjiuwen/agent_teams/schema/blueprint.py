@@ -170,8 +170,8 @@ class TeamAgentSpec(BaseModel):
         messager_config = self.transport.build() if self.transport else None
         db_config = self.storage.build() if self.storage else _DatabaseConfig()
         if db_config.db_type == "sqlite" and not db_config.connection_string:
-            from openjiuwen.agent_teams.paths import team_home
-            db_config.connection_string = str(team_home(self.team_name) / "team.db")
+            from openjiuwen.agent_teams.paths import get_agent_teams_home
+            db_config.connection_string = str(get_agent_teams_home() / "team.db")
 
         leader_card_id = f"{self.team_name}_{self.leader.member_name}"
         leader_card = leader_agent.card or AgentCard(
