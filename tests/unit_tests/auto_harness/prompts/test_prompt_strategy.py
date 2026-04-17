@@ -6,7 +6,11 @@ from pathlib import Path
 
 
 _PROMPTS_DIR = (
-    Path(__file__).resolve().parents[3]
+    next(
+        p
+        for p in Path(__file__).resolve().parents
+        if (p / "openjiuwen").is_dir()
+    )
     / "openjiuwen"
     / "auto_harness"
     / "prompts"
