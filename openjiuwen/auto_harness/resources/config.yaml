@@ -8,6 +8,17 @@
 # 配置后使用 git worktree 加速，不配则自动 clone 到 data_dir/repo/
 # local_repo: "/home/user/code/agent-core"
 
+# 可选：远端仓库 URL。默认保持 Phase 1 兼容。
+# repo_url: "https://gitcode.com/openJiuwen/agent-core.git"
+
+# 可选：自定义 skills 目录，会与框架内置 skills 合并。
+# skills_dirs:
+#   - "/path/to/my-skills"
+
+# 可选：覆盖不可编辑文件；留空时使用框架内置默认值。
+# immutable_files:
+#   - "openjiuwen/auto_harness/prompts/identity.md"
+
 # 可选：经验库目录
 # experience_dir: "/home/user/.openjiuwen/auto_harness/experience"
 
@@ -38,3 +49,15 @@ ci_gate:
 fix_loop:
   phase1_max_retries: 10        # Phase 1 最大重试次数
   phase2_max_retries: 9         # Phase 2 最大重试次数
+
+agent:
+  implement: 30                 # implement agent max_iterations
+  assess: 30                    # assess agent max_iterations
+  plan: 15                      # plan agent max_iterations
+  select_pipeline: 10           # pipeline selector max_iterations
+  eval: 10                      # evaluator max_iterations
+  learnings: 5                  # learnings agent max_iterations
+
+extensions:
+  stage_registrars: []          # module:callable，签名 (StageRegistry) -> None
+  pipeline_registrars: []       # module:callable，签名 (PipelineRegistry, StageRegistry) -> None

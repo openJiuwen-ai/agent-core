@@ -17,9 +17,13 @@ import re
 import uuid
 from typing import Any, List
 
+from openjiuwen.auto_harness.pipelines import (
+    normalize_pipeline_name,
+)
 from openjiuwen.auto_harness.schema import (
     Gap,
     OptimizationTask,
+    PipelineSelectionArtifact,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,6 +70,9 @@ def parse_tasks(raw: str) -> List[OptimizationTask]:
                 expected_effect=item.get(
                     "expected_effect", "",
                 ),
+                pipeline_name=normalize_pipeline_name(
+                    str(item.get("pipeline_name", ""))
+                ),
             ))
     return tasks
 
@@ -103,6 +110,68 @@ def parse_learnings(raw: str) -> List[dict]:
         item for item in items
         if isinstance(item, dict) and "topic" in item
     ]
+
+
+def parse_pipeline_selection(
+    raw: str,
+) -> PipelineSelectionArtifact | None:
+    """Parse a selector agent JSON response."""
+    match = re.search(
+        r"```json\s*(.*?)\s*```", raw, re.DOTALL
+    )
+    json_str: str
+    if match:
+        json_str = match.group(1)
+    else:
+        obj_match = re.search(r"\{.*}", raw, re.DOTALL)
+        if not obj_match:
+            return None
+        json_str = obj_match.group(0)
+
+    try:
+        item = json.loads(json_str)
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse pipeline selection JSON")
+        return None
+    if not isinstance(item, dict):
+        return None
+    pipeline_name = normalize_pipeline_name(
+        str(item.get("pipeline_name", "")).strip()
+    )
+    if not pipeline_name:
+        return None
+    alternatives = item.get("alternatives", [])
+    if not isinstance(alternatives, list):
+        alternatives = []
+    required_inputs = item.get(
+        "required_inputs", []
+    )
+    if not isinstance(required_inputs, list):
+        required_inputs = []
+    try:
+        confidence = float(
+            item.get("confidence", 0.0)
+        )
+    except (TypeError, ValueError):
+        confidence = 0.0
+    return PipelineSelectionArtifact(
+        pipeline_name=pipeline_name,
+        reason=str(item.get("reason", "")),
+        alternatives=[
+            normalize_pipeline_name(str(v))
+            for v in alternatives
+        ],
+        confidence=confidence,
+        risk_level=str(
+            item.get("risk_level", "")
+        ),
+        required_inputs=[
+            str(v) for v in required_inputs
+        ],
+        fallback_pipeline=normalize_pipeline_name(
+            str(item.get("fallback_pipeline", ""))
+        ),
+    )
 
 
 def extract_text(chunk: Any) -> str:

@@ -42,7 +42,7 @@ class TestAssessFallback(
     ):
         """agent 失败时回退到纯 Python 版本。"""
         from openjiuwen.auto_harness.stages.assess import (
-            run_assess,
+            _run_assess_with_fallback,
         )
 
         with tempfile.TemporaryDirectory() as d:
@@ -50,7 +50,7 @@ class TestAssessFallback(
                 data_dir=d, workspace=d,
             )
             experience_store = _FakeExperienceStore()
-            report = await run_assess(
+            report = await _run_assess_with_fallback(
                 cfg, experience_store
             )
             assert "评估报告" in report
@@ -66,7 +66,7 @@ class TestAssessFallback(
     ):
         """fallback 包含经验记录。"""
         from openjiuwen.auto_harness.stages.assess import (
-            run_assess,
+            _run_assess_with_fallback,
         )
 
         with tempfile.TemporaryDirectory() as d:
@@ -83,7 +83,7 @@ class TestAssessFallback(
             experience_store = _FakeExperienceStore(
                 experiences
             )
-            report = await run_assess(
+            report = await _run_assess_with_fallback(
                 cfg, experience_store
             )
             assert "lint-fix" in report
@@ -117,7 +117,7 @@ class TestAssessWithAgent(
         assert "使用 staged files 运行 make check" in query
 
     @patch(
-        "openjiuwen.auto_harness.agent"
+        "openjiuwen.auto_harness.agents"
         ".create_assess_agent",
         autospec=False,
     )
@@ -126,7 +126,7 @@ class TestAssessWithAgent(
     ):
         """正常 agent 调用返回报告。"""
         from openjiuwen.auto_harness.stages.assess import (
-            run_assess,
+            _run_assess_with_fallback,
         )
 
         with tempfile.TemporaryDirectory() as d:
@@ -152,13 +152,13 @@ class TestAssessWithAgent(
             mock_create.return_value = mock_agent
 
             experience_store = _FakeExperienceStore()
-            report = await run_assess(
+            report = await _run_assess_with_fallback(
                 cfg, experience_store
             )
             assert "评估报告" in report
 
     @patch(
-        "openjiuwen.auto_harness.agent"
+        "openjiuwen.auto_harness.agents"
         ".create_assess_agent",
         autospec=False,
     )
@@ -167,7 +167,7 @@ class TestAssessWithAgent(
     ):
         """agent 返回过短时回退。"""
         from openjiuwen.auto_harness.stages.assess import (
-            run_assess,
+            _run_assess_with_fallback,
         )
 
         with tempfile.TemporaryDirectory() as d:
@@ -188,7 +188,7 @@ class TestAssessWithAgent(
             mock_create.return_value = mock_agent
 
             experience_store = _FakeExperienceStore()
-            report = await run_assess(
+            report = await _run_assess_with_fallback(
                 cfg, experience_store
             )
             # 应该走 fallback
@@ -199,7 +199,7 @@ class TestAssessStream(IsolatedAsyncioTestCase):
     """测试流式评估。"""
 
     @patch(
-        "openjiuwen.auto_harness.agent"
+        "openjiuwen.auto_harness.agents"
         ".create_assess_agent",
         autospec=False,
     )

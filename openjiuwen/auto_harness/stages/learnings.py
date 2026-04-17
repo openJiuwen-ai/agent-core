@@ -16,11 +16,19 @@ from openjiuwen.auto_harness.infra.parsers import (
     extract_text,
     parse_learnings as _parse_learnings_raw,
 )
+from openjiuwen.auto_harness.stages.base import (
+    SessionStage,
+)
+from openjiuwen.auto_harness.contexts import (
+    SessionContext,
+)
 from openjiuwen.auto_harness.schema import (
     AutoHarnessConfig,
     CycleResult,
     Experience,
     ExperienceType,
+    SessionResultsArtifact,
+    StageResult,
 )
 
 if TYPE_CHECKING:
@@ -29,6 +37,41 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+
+class LearningsStage(SessionStage):
+    """Record learnings after a session completes."""
+
+    name = "learnings"
+    description = "Record learnings after a session."
+    consumes = ["session_results"]
+    produces = ["session_results"]
+
+    async def stream(
+        self,
+        ctx: SessionContext,
+    ) -> AsyncIterator[Any]:
+        results_artifact = ctx.get_artifact(
+            "session_results"
+        )
+        results = getattr(
+            results_artifact,
+            "results",
+            list(ctx.orchestrator.results),
+        )
+        async for chunk in run_learnings(
+            ctx.orchestrator.config,
+            results,
+            ctx.orchestrator.experience_store,
+        ):
+            yield chunk
+        yield StageResult(
+            artifacts={
+                "session_results": SessionResultsArtifact(
+                    results=list(results)
+                )
+            }
+        )
 
 
 async def run_learnings(
@@ -49,7 +92,7 @@ async def run_learnings(
     if not results:
         return
 
-    from openjiuwen.auto_harness.agent import (
+    from openjiuwen.auto_harness.agents import (
         create_learnings_agent,
     )
 

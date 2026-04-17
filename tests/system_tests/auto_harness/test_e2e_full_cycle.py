@@ -190,7 +190,7 @@ class TestAutoHarnessE2EFullCycle(
         config = self._make_config()
 
         # 创建真实 DeepAgent
-        from openjiuwen.auto_harness.agent import (
+        from openjiuwen.auto_harness.agents import (
             create_auto_harness_agent,
         )
         agent = create_auto_harness_agent(config)
@@ -223,7 +223,9 @@ class TestAutoHarnessE2EFullCycle(
             ),
         )
 
-        results = await orch.run_session(tasks=[task])
+        async for _ in orch.run_session_stream(tasks=[task]):
+            pass
+        results = orch.results
 
         self.assertEqual(len(results), 1)
         result = results[0]

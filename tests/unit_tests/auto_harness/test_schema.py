@@ -125,7 +125,8 @@ class TestAutoHarnessConfig:
 
     def test_immutable_files_default(self):
         cfg = AutoHarnessConfig()
-        assert len(cfg.immutable_files) >= 1
+        assert cfg.immutable_files == []
+        assert len(cfg.resolve_immutable_files()) >= 1
 
     def test_independent_defaults(self):
         c1 = AutoHarnessConfig()
@@ -163,6 +164,40 @@ class TestAutoHarnessConfig:
         assert cfg.cache_repo_dir == (
             "/tmp/ah/repo/agent-core"
         )
+
+    def test_cache_repo_dir_uses_upstream_repo(self):
+        cfg = AutoHarnessConfig(
+            data_dir="/tmp/ah",
+            upstream_repo="custom-repo",
+        )
+        assert cfg.cache_repo_dir == (
+            "/tmp/ah/repo/custom-repo"
+        )
+
+    def test_resolve_repo_name_from_repo_url(self):
+        cfg = AutoHarnessConfig(
+            upstream_repo="",
+            repo_url="https://example.com/team/demo.git",
+        )
+        assert cfg.resolve_repo_name() == "demo"
+
+    def test_build_project_profile_uses_default_immutable_files(
+        self,
+    ):
+        cfg = AutoHarnessConfig()
+        profile = cfg.build_project_profile()
+        assert len(profile.immutable_files) >= 1
+
+    def test_build_project_profile_prefers_explicit_immutable_files(
+        self,
+    ):
+        cfg = AutoHarnessConfig(
+            immutable_files=["custom/file.py"]
+        )
+        profile = cfg.build_project_profile()
+        assert profile.immutable_files == [
+            "custom/file.py"
+        ]
 
     def test_resolve_gitcode_token_direct(self):
         cfg = AutoHarnessConfig(
@@ -258,6 +293,35 @@ class TestLoadFromDict:
         assert cfg.cost_limit_usd == 5.0
         assert cfg.task_timeout_secs == 300
         assert cfg.max_tasks_per_session == 2
+
+    def test_extensions_section(self):
+        data = {
+            "extensions": {
+                "stage_registrars": [
+                    "pkg.stage:register"
+                ],
+                "pipeline_registrars": [
+                    "pkg.pipeline:register"
+                ],
+            }
+        }
+        cfg = AutoHarnessConfig.load_from_dict(data)
+        assert cfg.stage_registrars == [
+            "pkg.stage:register"
+        ]
+        assert cfg.pipeline_registrars == [
+            "pkg.pipeline:register"
+        ]
+
+    def test_top_level_immutable_files(self):
+        data = {
+            "immutable_files": [
+                "a.py",
+                "b.py",
+            ]
+        }
+        cfg = AutoHarnessConfig.load_from_dict(data)
+        assert cfg.immutable_files == ["a.py", "b.py"]
 
     def test_top_level_fields(self):
         data = {

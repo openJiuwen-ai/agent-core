@@ -14,6 +14,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from openjiuwen.auto_harness.pipelines import (
+    META_EVOLVE_PIPELINE,
+)
 from openjiuwen.core.foundation.llm.model import Model
 
 logger = logging.getLogger(__name__)
@@ -24,6 +27,15 @@ _DEFAULT_REPO_URL = (
 _CONFIG_TEMPLATE = (
     Path(__file__).parent / "resources" / "config.yaml"
 )
+
+
+def _default_immutable_files() -> list[str]:
+    """Return built-in immutable files for the bundled Phase 1 pipeline."""
+    return [
+        "openjiuwen/auto_harness/prompts/identity.md",
+        "openjiuwen/auto_harness/resources/ci_gate.yaml",
+        "openjiuwen/harness/rails/security_rail.py",
+    ]
 
 
 class TaskStatus(str, Enum):
@@ -76,6 +88,7 @@ class OptimizationTask:
     files: List[str] = field(default_factory=list)
     issue_ref: Optional[str] = None
     expected_effect: str = ""
+    pipeline_name: str = ""
     status: TaskStatus = TaskStatus.PENDING
 
 
@@ -124,6 +137,93 @@ class CycleResult:
 
 
 @dataclass
+class AssessmentArtifact:
+    """Assess 阶段的结构化产物。"""
+
+    report: str = ""
+
+
+@dataclass
+class TaskPlanArtifact:
+    """Plan 阶段的结构化产物。"""
+
+    tasks: List["OptimizationTask"] = field(
+        default_factory=list
+    )
+    raw_plan: str = ""
+
+
+@dataclass
+class PipelineSelectionArtifact:
+    """select_pipeline 阶段的结构化产物。"""
+
+    pipeline_name: str = META_EVOLVE_PIPELINE
+    reason: str = ""
+    alternatives: List[str] = field(
+        default_factory=list
+    )
+    confidence: float = 0.0
+    risk_level: str = ""
+    required_inputs: List[str] = field(
+        default_factory=list
+    )
+    fallback_pipeline: str = ""
+
+
+@dataclass
+class SessionResultsArtifact:
+    """Session 聚合结果。"""
+
+    results: List[CycleResult] = field(
+        default_factory=list
+    )
+
+
+@dataclass
+class CodeChangeArtifact:
+    """Implement 阶段输出。"""
+
+    related: List[Experience] = field(
+        default_factory=list
+    )
+    edited_files: List[str] = field(
+        default_factory=list
+    )
+
+
+@dataclass
+class VerifyReportArtifact:
+    """Verify 阶段输出。"""
+
+    ci_result: Dict[str, Any] = field(
+        default_factory=dict
+    )
+    fix_errors: str = ""
+    reverted: bool = False
+    error: str = ""
+
+
+@dataclass
+class CommitArtifact:
+    """Commit 阶段输出。"""
+
+    facts: "CommitFacts | None" = None
+    status_text: str = ""
+    last_commit_stat: str = ""
+    branch_name: str = ""
+    committed: bool = False
+    error: str = ""
+
+
+@dataclass
+class PullRequestArtifact:
+    """Publish 阶段输出。"""
+
+    pr_url: str = ""
+    summary: str = ""
+
+
+@dataclass
 class CommitFacts:
     """提交阶段的事实快照。"""
 
@@ -162,6 +262,96 @@ class CommitFacts:
 
 
 @dataclass
+class ProjectProfile:
+    """项目画像，承载 repo-specific 默认值。"""
+
+    name: str = "agent-core"
+    repo_url: str = _DEFAULT_REPO_URL
+    repo_slug: str = "openJiuwen/agent-core"
+    platform: str = "gitcode"
+    immutable_files: List[str] = field(
+        default_factory=lambda: [
+            "openjiuwen/auto_harness/prompts/identity.md",
+            "openjiuwen/auto_harness/resources/ci_gate.yaml",
+            "openjiuwen/harness/rails/security_rail.py",
+        ]
+    )
+    high_impact_prefixes: List[str] = field(
+        default_factory=lambda: [
+            "openjiuwen/core/",
+        ]
+    )
+    default_base_branch: str = "develop"
+    default_ci_profile: str = "default"
+
+
+@dataclass
+class AutoHarnessPaths:
+    """运行所需的路径派生结果。"""
+
+    data_dir: str = ""
+    experience_dir: str = ""
+    worktrees_dir: str = ""
+    runs_dir: str = ""
+    cache_repo_dir: str = ""
+
+
+@dataclass
+class AutoHarnessRuntimeState:
+    """运行时状态。"""
+
+    current_workspace: str = ""
+    selected_pipeline: str = ""
+    config_bootstrapped: bool = False
+    suggested_local_repo: str = ""
+
+
+@dataclass
+class StageResult:
+    """统一 stage 执行结果。"""
+
+    status: str = "success"
+    artifacts: Dict[str, Any] = field(
+        default_factory=dict
+    )
+    messages: List[str] = field(
+        default_factory=list
+    )
+    metrics: Dict[str, Any] = field(
+        default_factory=dict
+    )
+    error: str = ""
+
+
+@dataclass
+class StageSpec:
+    """Stage 的声明式元数据。"""
+
+    name: str
+    stage_cls: type[Any]
+    scope: str = "session"
+    consumes: List[str] = field(
+        default_factory=list
+    )
+    produces: List[str] = field(
+        default_factory=list
+    )
+    description: str = ""
+
+
+@dataclass
+class PipelineSpec:
+    """Pipeline 的声明式模板。"""
+
+    name: str
+    pipeline_cls: type[Any]
+    description: str = ""
+    expected_outputs: List[str] = field(
+        default_factory=list
+    )
+
+
+@dataclass
 class AutoHarnessConfig:
     """Auto Harness Agent 配置。
 
@@ -179,6 +369,15 @@ class AutoHarnessConfig:
     data_dir: str = ""
     local_repo: str = ""
     repo_url: str = _DEFAULT_REPO_URL
+    skills_dirs: List[str] = field(
+        default_factory=list
+    )
+    stage_registrars: List[str] = field(
+        default_factory=list
+    )
+    pipeline_registrars: List[str] = field(
+        default_factory=list
+    )
 
     # ---- 语言 ----
     language: str = "cn"
@@ -217,16 +416,24 @@ class AutoHarnessConfig:
 
     # ---- 安全 ----
     immutable_files: List[str] = field(
-        default_factory=lambda: [
-            "openjiuwen/auto_harness/prompts/identity.md",
-            "openjiuwen/auto_harness/resources/ci_gate.yaml",
-            "openjiuwen/harness/rails/security_rail.py",
-        ]
+        default_factory=list
     )
     high_impact_prefixes: List[str] = field(
         default_factory=lambda: [
             "openjiuwen/core/",
         ]
+    )
+    agent_iterations: Dict[str, int] = field(
+        default_factory=lambda: {
+            "implement": 30,
+            "assess": 30,
+            "plan": 15,
+            "select_pipeline": 10,
+            "eval": 10,
+            "learnings": 5,
+            "explore_subagent": 20,
+            "browser_subagent": 20,
+        }
     )
 
     # ---- 兼容旧字段 ----
@@ -263,11 +470,23 @@ class AutoHarnessConfig:
     @property
     def cache_repo_dir(self) -> str:
         """Clone 缓存目录，从 data_dir 派生。"""
+        repo_name = self.resolve_repo_name()
         if self.data_dir:
             return str(
-                Path(self.data_dir) / "repo" / "agent-core"
+                Path(self.data_dir) / "repo" / repo_name
             )
-        return ".auto_harness/repo/agent-core"
+        return f".auto_harness/repo/{repo_name}"
+
+    def resolve_repo_name(self) -> str:
+        """Resolve the repository directory name used for local cache paths."""
+        for candidate in (
+            self.upstream_repo,
+            Path(self.repo_url.rstrip("/")).stem,
+        ):
+            name = str(candidate).strip()
+            if name:
+                return name.removesuffix(".git")
+        return "repository"
 
     def resolve_gitcode_token(self) -> str:
         """解析 GitCode token。
@@ -311,6 +530,49 @@ class AutoHarnessConfig:
 
         return sys.executable
 
+    def resolve_agent_iterations(
+        self,
+        stage_name: str,
+        default: int,
+    ) -> int:
+        """Resolve max_iterations for an agent stage."""
+        try:
+            return int(
+                self.agent_iterations.get(
+                    stage_name, default
+                )
+            )
+        except (TypeError, ValueError):
+            return default
+
+    def resolve_immutable_files(self) -> List[str]:
+        """Return configured immutable files or built-in defaults."""
+        if self.immutable_files:
+            return list(self.immutable_files)
+        return _default_immutable_files()
+
+    def build_project_profile(self) -> ProjectProfile:
+        """Build the repo-specific project profile."""
+        return ProjectProfile(
+            repo_url=self.repo_url,
+            immutable_files=self.resolve_immutable_files(),
+            high_impact_prefixes=list(
+                self.high_impact_prefixes
+            ),
+            default_base_branch=self.git_base_branch
+            or "develop",
+        )
+
+    def build_paths(self) -> AutoHarnessPaths:
+        """Build derived runtime paths."""
+        return AutoHarnessPaths(
+            data_dir=self.data_dir,
+            experience_dir=self.resolved_experience_dir,
+            worktrees_dir=self.worktrees_dir,
+            runs_dir=self.runs_dir,
+            cache_repo_dir=self.cache_repo_dir,
+        )
+
     @staticmethod
     def load_from_dict(
         data: Dict[str, Any],
@@ -332,6 +594,30 @@ class AutoHarnessConfig:
             cfg.local_repo = str(data["local_repo"])
         if "repo_url" in data:
             cfg.repo_url = str(data["repo_url"])
+        if "skills_dirs" in data and isinstance(
+            data["skills_dirs"], list
+        ):
+            cfg.skills_dirs = [
+                str(v) for v in data["skills_dirs"]
+            ]
+        if "stage_registrars" in data and isinstance(
+            data["stage_registrars"], list
+        ):
+            cfg.stage_registrars = [
+                str(v) for v in data["stage_registrars"]
+            ]
+        if "pipeline_registrars" in data and isinstance(
+            data["pipeline_registrars"], list
+        ):
+            cfg.pipeline_registrars = [
+                str(v) for v in data["pipeline_registrars"]
+            ]
+        if "immutable_files" in data and isinstance(
+            data["immutable_files"], list
+        ):
+            cfg.immutable_files = [
+                str(v) for v in data["immutable_files"]
+            ]
         if "language" in data:
             cfg.language = str(data["language"])
         # 兼容旧字段
@@ -429,6 +715,33 @@ class AutoHarnessConfig:
                 cfg.fix_phase2_max_retries = int(
                     fl["phase2_max_retries"]
                 )
+
+        agent_cfg = data.get("agent", {})
+        if isinstance(agent_cfg, dict):
+            for key, value in agent_cfg.items():
+                try:
+                    cfg.agent_iterations[str(key)] = int(
+                        value
+                    )
+                except (TypeError, ValueError):
+                    continue
+
+        extensions = data.get("extensions", {})
+        if isinstance(extensions, dict):
+            if "stage_registrars" in extensions and isinstance(
+                extensions["stage_registrars"], list
+            ):
+                cfg.stage_registrars = [
+                    str(v)
+                    for v in extensions["stage_registrars"]
+                ]
+            if "pipeline_registrars" in extensions and isinstance(
+                extensions["pipeline_registrars"], list
+            ):
+                cfg.pipeline_registrars = [
+                    str(v)
+                    for v in extensions["pipeline_registrars"]
+                ]
 
         return cfg
 

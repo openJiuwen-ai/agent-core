@@ -1,43 +1,18 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Auto Harness 编排器 — 会话级任务调度。
-
-瘦身后只负责：
-- session 生命周期管理
-- budget 检查
-- 阶段调度（委托给 stages/）
-"""
+"""Auto Harness orchestrator."""
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    AsyncIterator,
-    List,
-    Optional,
-)
+from typing import TYPE_CHECKING, Any, AsyncIterator, List, Optional
 
-from openjiuwen.auto_harness.infra.parsers import (
-    extract_text,
-    parse_tasks,
+from openjiuwen.auto_harness.artifacts import (
+    ArtifactStore,
 )
-from openjiuwen.auto_harness.schema import (
-    AutoHarnessConfig,
-    CycleResult,
-    Experience,
-    ExperienceType,
-    OptimizationTask,
-    TaskStatus,
-)
-from openjiuwen.auto_harness.infra.session_budget import (
-    SessionBudgetController,
-)
-from openjiuwen.auto_harness.infra.fix_loop import (
-    FixLoopController,
+from openjiuwen.auto_harness.contexts import (
+    SessionContext,
 )
 from openjiuwen.auto_harness.experience.experience_store import (
     ExperienceStore,
@@ -45,24 +20,33 @@ from openjiuwen.auto_harness.experience.experience_store import (
 from openjiuwen.auto_harness.infra.ci_gate_runner import (
     CIGateRunner,
 )
+from openjiuwen.auto_harness.infra.fix_loop import (
+    FixLoopController,
+)
 from openjiuwen.auto_harness.infra.git_operations import (
     GitOperations,
+)
+from openjiuwen.auto_harness.infra.session_budget import (
+    SessionBudgetController,
 )
 from openjiuwen.auto_harness.infra.worktree_manager import (
     WorktreeManager,
 )
-from openjiuwen.auto_harness.stages.assess import (
-    run_assess,
-    run_assess_stream,
+from openjiuwen.auto_harness.pipelines import (
+    META_EVOLVE_PIPELINE,
+    normalize_pipeline_name,
 )
-from openjiuwen.auto_harness.stages.plan import (
-    run_plan_stream,
+from openjiuwen.auto_harness.registry import (
+    build_pipeline_registry,
+    build_stage_registry,
 )
-from openjiuwen.auto_harness.stages.implement import (
-    run_in_worktree_stream,
-)
-from openjiuwen.auto_harness.stages.learnings import (
-    run_learnings,
+from openjiuwen.auto_harness.schema import (
+    AutoHarnessConfig,
+    AutoHarnessRuntimeState,
+    CycleResult,
+    OptimizationTask,
+    PipelineSelectionArtifact,
+    ProjectProfile,
 )
 from openjiuwen.core.session.stream.base import (
     OutputSchema,
@@ -87,14 +71,7 @@ def _write_debug_artifact(
 
 
 class AutoHarnessOrchestrator:
-    """会话级编排器，驱动 assess → plan → execute 循环。
-
-    每个 task 在独立的 git worktree 中执行，完成后清理。
-
-    Args:
-        config: Auto Harness 配置。
-        agent: 可选的 DeepAgent 实例。
-    """
+    """Session controller and top-level pipeline dispatcher."""
 
     def __init__(
         self,
@@ -104,6 +81,21 @@ class AutoHarnessOrchestrator:
         self.config = config
         self.agent = agent
         self._results: List[CycleResult] = []
+        self.paths = config.build_paths()
+        self.runtime = AutoHarnessRuntimeState(
+            current_workspace=config.workspace,
+            config_bootstrapped=config.config_bootstrapped,
+            suggested_local_repo=config.suggested_local_repo,
+        )
+        self.project_profile: ProjectProfile = (
+            config.build_project_profile()
+        )
+        self.artifacts = ArtifactStore()
+        self.stage_registry = build_stage_registry(config)
+        self.pipeline_registry = build_pipeline_registry(
+            config,
+            stage_registry=self.stage_registry,
+        )
         self.experience_store = ExperienceStore(
             config.resolved_experience_dir
         )
@@ -148,320 +140,161 @@ class AutoHarnessOrchestrator:
             ),
         )
         self._last_cycle_result = CycleResult()
+        self.task_contexts: dict[str, SessionContext] = {}
 
     @staticmethod
     def _msg(text: str) -> OutputSchema:
-        """构造 message 类型的 OutputSchema。"""
+        """Construct a message OutputSchema."""
         return OutputSchema(
-            type="message", index=0,
+            type="message",
+            index=0,
             payload={"content": text},
         )
 
     @property
     def results(self) -> list[CycleResult]:
-        """Return latest session cycle results."""
+        """Return the latest session results."""
         return list(self._results)
 
-    # ----------------------------------------------------------
-    # public API
-    # ----------------------------------------------------------
+    @property
+    def last_cycle_result(self) -> CycleResult:
+        """Return the latest task cycle result."""
+        return self._last_cycle_result
 
-    async def run_session(
-        self,
-        tasks: Optional[List[OptimizationTask]] = None,
-    ) -> List[CycleResult]:
-        """非流式执行（兼容接口）。"""
-        async for _ in self.run_session_stream(tasks):
-            pass
-        return self._results
+    def record_cycle_result(
+        self, result: CycleResult
+    ) -> None:
+        """Persist one task cycle result on the orchestrator."""
+        self._last_cycle_result = result
+        self._results.append(result)
+
+    def message_output(self, text: str) -> OutputSchema:
+        """Construct a message OutputSchema."""
+        return self._msg(text)
 
     async def run_session_stream(
         self,
         tasks: Optional[List[OptimizationTask]] = None,
     ) -> AsyncIterator[Any]:
-        """流式执行，yield OutputSchema chunks。"""
+        """Stream session execution as OutputSchema chunks."""
         self._results = []
+        self._last_cycle_result = CycleResult()
+        self.artifacts = ArtifactStore()
         self.budget.start()
         yield self._msg("会话启动")
         logger.info("Session started")
 
-        if tasks is None:
-            async for item in (
-                self._run_assess_and_plan_stream()
-            ):
-                if isinstance(item, list):
-                    tasks = item
-                else:
-                    yield item
-            if not tasks:
-                return
-
-        capped = tasks[
-            : self.config.max_tasks_per_session
-        ]
-
-        for task in capped:
-            if self.budget.should_stop:
-                logger.warning(
-                    "Budget exhausted, "
-                    "skipping remaining"
-                )
-                break
-            if not self.budget.check_task_budget():
-                logger.warning(
-                    "Insufficient budget "
-                    "for next task"
-                )
-                break
-
-            async for chunk in (
-                self._run_task_isolated_stream(task)
-            ):
-                yield chunk
-
-        # Phase D: Learnings
-        yield self._msg(
-            "[Phase D] 反思与经验记录..."
+        if tasks is not None:
+            self.artifacts.put(
+                "input_tasks",
+                list(tasks),
+            )
+        selected_pipeline = self._select_session_pipeline(
+            tasks
         )
-        async for chunk in run_learnings(
-            self.config,
-            self._results,
-            self.experience_store,
+        self.runtime.selected_pipeline = (
+            selected_pipeline.pipeline_name
+        )
+        self.artifacts.put(
+            "pipeline_selection",
+            selected_pipeline,
+        )
+        yield self._msg(
+            "Session pipeline: "
+            f"{selected_pipeline.pipeline_name}"
+        )
+        async for chunk in self._run_pipeline_stream(
+            selected_pipeline.pipeline_name,
         ):
             yield chunk
 
         logger.info(
-            "Session finished: %d/%d tasks executed",
+            "Session finished: %d tasks executed",
             len(self._results),
-            len(capped),
         )
 
-    async def _run_assess_and_plan_stream(
+    def _select_session_pipeline(
         self,
+        tasks: Optional[List[OptimizationTask]] = None,
+    ) -> PipelineSelectionArtifact:
+        """Choose the session pipeline before any concrete pipeline runs."""
+        available = self.pipeline_registry.names()
+        if not available:
+            raise ValueError(
+                "No pipelines registered for auto-harness session"
+            )
+
+        explicit = sorted(
+            {
+                normalize_pipeline_name(task.pipeline_name)
+                for task in (tasks or [])
+                if task.pipeline_name
+            }
+        )
+        if len(explicit) > 1:
+            raise ValueError(
+                "Conflicting task pipeline_name values in one session: "
+                + ", ".join(explicit)
+            )
+        if explicit:
+            selected = explicit[0]
+            reason = "tasks requested explicit pipeline"
+        elif len(available) == 1:
+            selected = available[0]
+            reason = "single registered pipeline"
+        elif META_EVOLVE_PIPELINE in available:
+            selected = META_EVOLVE_PIPELINE
+            reason = "default session pipeline"
+        else:
+            selected = available[0]
+            reason = "fallback to first registered pipeline"
+
+        if selected not in available:
+            fallback = (
+                META_EVOLVE_PIPELINE
+                if META_EVOLVE_PIPELINE in available
+                else available[0]
+            )
+            return PipelineSelectionArtifact(
+                pipeline_name=fallback,
+                reason=(
+                    "requested session pipeline unsupported, "
+                    f"fallback to {fallback}"
+                ),
+                confidence=0.0,
+                fallback_pipeline=fallback,
+            )
+
+        alternatives = [
+            name for name in available if name != selected
+        ]
+        return PipelineSelectionArtifact(
+            pipeline_name=selected,
+            reason=reason,
+            alternatives=alternatives,
+            confidence=1.0,
+            fallback_pipeline=selected,
+        )
+
+    async def _run_pipeline_stream(
+        self,
+        pipeline_name: str,
     ) -> AsyncIterator[Any]:
-        """Run phases A1/A2 against a fresh remote snapshot."""
-        original_workspace = self.config.workspace
-        assess_wt = await self.worktree_mgr.prepare_readonly_snapshot(
-            label="assess",
+        """Execute a registered top-level pipeline."""
+        spec = self.pipeline_registry.require(
+            pipeline_name
         )
-        self.config.workspace = assess_wt
-        try:
-            yield self._msg(
-                "[Phase A1] 评估当前状态..."
-            )
-            assessment = ""
-            async for chunk in run_assess_stream(
-                self.config, self.experience_store,
-            ):
-                yield chunk
-                assessment += extract_text(chunk)
-
-            if not assessment:
-                assessment = await run_assess(
-                    self.config,
-                    self.experience_store,
-                )
-            if assessment.strip():
-                _write_debug_artifact(
-                    self.config.runs_dir,
-                    "latest_assessment.md",
-                    assessment,
-                )
-
-            logger.info(
-                "Assessment complete (%d chars)",
-                len(assessment),
-            )
-
-            yield self._msg(
-                "[Phase A2] 制定优化计划..."
-            )
-            plan_text = ""
-            async for chunk in run_plan_stream(
-                self.config,
-                assessment,
-                self.experience_store,
-            ):
-                yield chunk
-                plan_text += extract_text(chunk)
-            if plan_text.strip():
-                plan_path = _write_debug_artifact(
-                    self.config.runs_dir,
-                    "latest_plan.md",
-                    plan_text,
-                )
-                yield self._msg(
-                    f"规划原始输出已保存: {plan_path}"
-                )
-            tasks = parse_tasks(plan_text)
-
-            if not tasks:
-                yield self._msg(
-                    "规划阶段未生成任务，session 结束"
-                )
-                logger.info(
-                    "No tasks generated, session ends"
-                )
-                return
-
-            yield tasks
-        finally:
-            self.config.workspace = original_workspace
-            await self.worktree_mgr.cleanup(assess_wt)
-
-    # ----------------------------------------------------------
-    # task isolation
-    # ----------------------------------------------------------
-
-    async def _run_task_isolated_stream(
-        self, task: OptimizationTask,
-    ) -> AsyncIterator[Any]:
-        """在超时保护下执行单个任务。"""
-        task.status = TaskStatus.RUNNING
-        logger.info("Task started: %s", task.topic)
-
-        result: CycleResult
-        try:
-            queue: asyncio.Queue[Any] = (
-                asyncio.Queue()
-            )
-            sentinel = object()
-
-            async def _producer() -> CycleResult:
-                try:
-                    async for chunk in (
-                        self._run_cycle_stream(task)
-                    ):
-                        await queue.put(chunk)
-                    return self._last_cycle_result
-                finally:
-                    await queue.put(sentinel)
-
-            producer_task = asyncio.create_task(
-                asyncio.wait_for(
-                    _producer(),
-                    timeout=(
-                        self.config.task_timeout_secs
-                    ),
-                )
-            )
-
-            while True:
-                item = await queue.get()
-                if item is sentinel:
-                    break
-                yield item
-
-            result = await producer_task
-
-        except asyncio.TimeoutError:
-            task.status = TaskStatus.TIMEOUT
-            logger.error(
-                "Task timed out: %s", task.topic,
-            )
-            await self.experience_store.record(Experience(
-                type=ExperienceType.FAILURE,
-                topic=task.topic,
-                summary="task timeout",
-                outcome="timeout",
-            ))
-            result = CycleResult(
-                error="timeout",
-                error_log="Task exceeded timeout",
-            )
-        except Exception as exc:
-            task.status = TaskStatus.FAILED
-            logger.exception(
-                "Task failed: %s", task.topic,
-            )
-            await self.experience_store.record(Experience(
-                type=ExperienceType.FAILURE,
-                topic=task.topic,
-                summary=str(exc)[:200],
-                outcome="exception",
-            ))
-            result = CycleResult(
-                error=str(exc)[:200],
-                error_log=str(exc),
-            )
-
-        self._results.append(result)
-
-    # ----------------------------------------------------------
-    # cycle execution
-    # ----------------------------------------------------------
-
-    async def _run_cycle_stream(
-        self, task: OptimizationTask,
-    ) -> AsyncIterator[Any]:
-        """单个 task 的完整执行循环。"""
-        from openjiuwen.auto_harness.agent import (
-            create_auto_harness_agent,
-            create_commit_agent,
-        )
-        from openjiuwen.auto_harness.rails.edit_safety_rail import (
-            EditSafetyRail,
-        )
-
-        related = await self.experience_store.search(
-            task.topic,
-        )
-        wt_path = await self.worktree_mgr.prepare(
-            task.topic,
-        )
-        self.git.set_workspace(wt_path)
-        self.ci_gate.set_workspace(wt_path)
-        edit_safety_rail = EditSafetyRail()
-        edit_safety_rail.reset()
-        preexisting_dirty_files = await self.git.list_dirty_files()
-        task_agent = create_auto_harness_agent(
-            self.config,
-            workspace_override=wt_path,
-            edit_safety_rail=edit_safety_rail,
-        )
-        commit_agent = create_commit_agent(
-            self.config,
-            workspace_override=wt_path,
-        )
-
-        yield self._msg(
-            f"任务准备就绪: {task.topic}"
-        )
-
-        result_holder: List[CycleResult] = []
-        try:
-            async for chunk in (
-                run_in_worktree_stream(
-                    self.config,
-                    task,
-                    related,
-                    agent=task_agent,
-                    commit_agent=commit_agent,
-                    git=self.git,
-                    ci_gate=self.ci_gate,
-                    fix_loop=self.fix_loop,
-                    experience_store=self.experience_store,
-                    edit_safety_rail=edit_safety_rail,
-                    preexisting_dirty_files=preexisting_dirty_files,
-                    msg_factory=self._msg,
-                    result_holder=result_holder,
-                )
-            ):
-                yield chunk
-        finally:
-            await self.worktree_mgr.cleanup(wt_path)
-
-        self._last_cycle_result = (
-            result_holder[0]
-            if result_holder
-            else CycleResult()
-        )
+        pipeline = spec.pipeline_cls()
+        ctx = SessionContext(orchestrator=self)
+        async for chunk in pipeline.stream(ctx):
+            yield chunk
 
 
 def create_auto_harness_orchestrator(
     config: AutoHarnessConfig,
 ) -> AutoHarnessOrchestrator:
-    """创建 orchestrator 实例。"""
+    """Create an orchestrator instance."""
     return AutoHarnessOrchestrator(
-        config, agent=None,
+        config,
+        agent=None,
     )

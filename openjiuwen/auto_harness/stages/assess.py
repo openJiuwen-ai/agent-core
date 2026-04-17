@@ -20,12 +20,21 @@ from typing import (
 )
 
 from openjiuwen.auto_harness.infra.parsers import (
+    extract_text,
     parse_gaps,
 )
+from openjiuwen.auto_harness.stages.base import (
+    SessionStage,
+)
+from openjiuwen.auto_harness.contexts import (
+    SessionContext,
+)
 from openjiuwen.auto_harness.schema import (
+    AssessmentArtifact,
     AutoHarnessConfig,
     Experience,
     Gap,
+    StageResult,
 )
 
 if TYPE_CHECKING:
@@ -36,26 +45,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _write_debug_artifact(
+    runs_dir: str,
+    filename: str,
+    content: str,
+) -> str:
+    path = Path(runs_dir) / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return str(path)
+
+
 # ----------------------------------------------------------
 # public API
 # ----------------------------------------------------------
 
 
-async def run_assess(
+async def _run_assess_with_fallback(
     config: AutoHarnessConfig,
     experience_store: "ExperienceStore",
 ) -> str:
-    """生成结构化评估报告。
-
-    优先用 DeepAgent，失败时回退到纯 Python 版本。
-
-    Args:
-        config: Auto Harness 配置。
-        experience_store: ExperienceStore 实例。
-
-    Returns:
-        Markdown 格式的评估报告。
-    """
+    """Generate the assess report with fallback behavior."""
     try:
         return await _assess_with_agent(
             config, experience_store
@@ -83,7 +93,7 @@ async def run_assess_stream(
     Yields:
         OutputSchema chunks from DeepAgent.
     """
-    from openjiuwen.auto_harness.agent import (
+    from openjiuwen.auto_harness.agents import (
         create_assess_agent,
     )
 
@@ -120,6 +130,47 @@ async def run_gap_analysis(
             exc_info=True,
         )
         return []
+
+
+class AssessStage(SessionStage):
+    """Assess the repository state for the current session."""
+
+    name = "assess"
+    description = "Assess current repository state."
+    produces = ["assessment"]
+
+    async def stream(
+        self,
+        ctx: SessionContext,
+    ) -> AsyncIterator[Any]:
+        assessment = ""
+        yield ctx.message("[Phase A1] 评估当前状态...")
+        async for chunk in run_assess_stream(
+            ctx.orchestrator.config,
+            ctx.orchestrator.experience_store,
+        ):
+            text = extract_text(chunk)
+            if text:
+                assessment += text
+            yield chunk
+        if not assessment:
+            assessment = await _run_assess_with_fallback(
+                ctx.orchestrator.config,
+                ctx.orchestrator.experience_store,
+            )
+        artifacts = {}
+        if assessment.strip():
+            _write_debug_artifact(
+                ctx.orchestrator.config.runs_dir,
+                "latest_assessment.md",
+                assessment,
+            )
+            artifacts["assessment"] = AssessmentArtifact(
+                report=assessment
+            )
+        yield StageResult(
+            artifacts=artifacts,
+        )
 
 
 # ----------------------------------------------------------
@@ -278,7 +329,7 @@ async def _assess_with_agent(
     experience_store: Any,
 ) -> str:
     """调用 DeepAgent 生成报告（流式收集）。"""
-    from openjiuwen.auto_harness.agent import (
+    from openjiuwen.auto_harness.agents import (
         create_assess_agent,
     )
 
@@ -356,7 +407,7 @@ async def _analyze_gaps_with_agent(
     harness_state: str,
 ) -> List[Gap]:
     """调用 DeepAgent 执行差距分析（流式收集）。"""
-    from openjiuwen.auto_harness.agent import (
+    from openjiuwen.auto_harness.agents import (
         create_assess_agent,
     )
 
