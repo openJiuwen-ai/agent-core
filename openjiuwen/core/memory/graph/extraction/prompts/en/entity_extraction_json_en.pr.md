@@ -2,7 +2,7 @@
 Your task is to identify, resolve and classify the speakers and other important entities in a JSON file.
 `#user#`# Context{{source_description}}
 <JSON>
-{{content}}
+{{context}}
 </JSON>
 
 <entity_types>

@@ -141,8 +141,8 @@ class GraphMemory:
         self._search_strategies: dict[str, tuple[SearchConfig, SearchConfig, SearchConfig]] = dict(
             default=(
                 SearchConfig(rank_config=WeightedRankConfig()),
-                SearchConfig(min_score=0.1),
-                SearchConfig(min_score=0.1),
+                SearchConfig(min_score=0.02),
+                SearchConfig(min_score=0.025),
             )
         )
         self._last_gc: float = time.time()
@@ -215,8 +215,8 @@ class GraphMemory:
 
             self._search_strategies[name] = (
                 search_entity or SearchConfig(rank_config=WeightedRankConfig()),
-                search_relation or SearchConfig(min_score=0.1),
-                search_episode or SearchConfig(min_score=0.1),
+                search_relation or SearchConfig(min_score=0.02),
+                search_episode or SearchConfig(min_score=0.025),
             )
 
     def ensure_thread_lock(self, user_id: str):

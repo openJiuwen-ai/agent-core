@@ -43,6 +43,7 @@ class EpisodeRetrievalStrategy(RetrievalStrategy):
     same_kind: bool = Field(default=False)
     exclude_future_results: bool = Field(default=True)
     rank_config: BaseRankConfig = Field(default=RRFRankConfig())
+    min_score: float = Field(default=0.025)
 
 
 class AddMemStrategy(BaseModel):
@@ -70,7 +71,7 @@ class AddMemStrategy(BaseModel):
             min_score=0.1,
         )
     )
-    recall_relation: RetrievalStrategy = Field(default=RetrievalStrategy(rank_config=RRFRankConfig(), min_score=0.05))
+    recall_relation: RetrievalStrategy = Field(default=RetrievalStrategy(rank_config=RRFRankConfig(), min_score=0.02))
     summary_target: int = Field(
         default=250, description="Target word/character count for entity summaries", ge=10, le=2000
     )

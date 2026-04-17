@@ -2,7 +2,7 @@
 Your task is to identify, resolve and classify the speakers and other important entities in a document.
 `#user#`# Context{{source_description}}
 <document>
-{{content}}
+{{context}}
 </document>
 
 <entity_types>
