@@ -241,3 +241,152 @@ def parse_todo_result(
         if cleaned.endswith(suffix):
             cleaned = cleaned[: -len(suffix)]
     return _parse_todo_text(cleaned)
+
+
+def parse_todo_tool_args(
+    tool_args: Any,
+) -> Dict[str, Any]:
+    """Parse raw tool args into a dict."""
+    if isinstance(tool_args, dict):
+        return tool_args
+    if isinstance(tool_args, str):
+        try:
+            data = json.loads(tool_args)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def apply_todo_modify_args(
+    items: List[Dict[str, Any]],
+    tool_args: Any,
+) -> Optional[List[Dict[str, Any]]]:
+    """Apply a ``todo_modify`` call to rendered todo items.
+
+    This lets the CLI refresh the visible todo checklist even when the
+    tool result only contains a summary like ``Successfully updated``.
+    """
+    args = parse_todo_tool_args(tool_args)
+    action = args.get("action")
+    if not action:
+        return None
+
+    current_items = [
+        dict(item) for item in items
+    ]
+
+    if action == "update":
+        updates = args.get("todos")
+        if not isinstance(updates, list):
+            return None
+        item_map = {
+            item.get("id"): item
+            for item in current_items
+            if item.get("id")
+        }
+        if not item_map:
+            return None
+        for update in updates:
+            if not isinstance(update, dict):
+                continue
+            todo_id = update.get("id")
+            if todo_id not in item_map:
+                continue
+            item = item_map[todo_id]
+            item.update(update)
+            _sync_display_content(item)
+        return current_items
+
+    if action == "delete":
+        ids = args.get("ids")
+        if not isinstance(ids, list):
+            return None
+        delete_ids = set(ids)
+        return [
+            item
+            for item in current_items
+            if item.get("id") not in delete_ids
+        ]
+
+    if action == "cancel":
+        ids = args.get("ids")
+        if not isinstance(ids, list):
+            return None
+        cancel_ids = set(ids)
+        for item in current_items:
+            if item.get("id") in cancel_ids:
+                item["status"] = "cancelled"
+                _sync_display_content(item)
+        return current_items
+
+    if action == "append":
+        todos = args.get("todos")
+        if not isinstance(todos, list):
+            return None
+        current_items.extend(
+            _normalize_todo_item(todo)
+            for todo in todos
+            if isinstance(todo, dict)
+        )
+        return current_items
+
+    if action in ("insert_after", "insert_before"):
+        todo_data = args.get("todo_data")
+        if (
+            not isinstance(todo_data, list)
+            or len(todo_data) != 2
+        ):
+            return None
+        target_id, insert_todos = todo_data
+        if not isinstance(target_id, str) or not isinstance(insert_todos, list):
+            return None
+        target_index = next(
+            (
+                idx
+                for idx, item in enumerate(current_items)
+                if item.get("id") == target_id
+            ),
+            -1,
+        )
+        if target_index < 0:
+            return None
+        new_items = [
+            _normalize_todo_item(todo)
+            for todo in insert_todos
+            if isinstance(todo, dict)
+        ]
+        insert_index = (
+            target_index + 1
+            if action == "insert_after"
+            else target_index
+        )
+        return (
+            current_items[:insert_index]
+            + new_items
+            + current_items[insert_index:]
+        )
+
+    return None
+
+
+def _normalize_todo_item(
+    item: Dict[str, Any],
+) -> Dict[str, Any]:
+    normalized = dict(item)
+    _sync_display_content(normalized)
+    return normalized
+
+
+def _sync_display_content(
+    item: Dict[str, Any],
+) -> None:
+    """Keep the rendered ``content`` aligned with todo status."""
+    status = item.get("status", "pending")
+    content = item.get("content", "")
+    active_form = item.get("activeForm", "")
+    if status == "in_progress" and active_form:
+        item["content"] = active_form
+    elif content:
+        item["content"] = content
