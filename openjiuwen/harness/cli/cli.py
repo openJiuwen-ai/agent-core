@@ -390,16 +390,39 @@ def run(
 # -------------------------------------------------------------------
 
 
+@dataclass
+class AutoHarnessRunRequest:
+    """Named request payload for auto-harness run parameters."""
+
+    task: str | None = None
+    task_file: str | None = None
+    dry_run: bool = False
+    stage: str | None = None
+    no_push: bool = False
+    budget: float | None = None
+    goal: str | None = None
+    competitor: str | None = None
+
+    @classmethod
+    def from_kwargs(
+        cls, kwargs: dict[str, Any]
+    ) -> "AutoHarnessRunRequest":
+        """Build request from click callback kwargs."""
+        return cls(
+            task=kwargs.get("task"),
+            task_file=kwargs.get("task_file"),
+            dry_run=bool(kwargs.get("dry_run", False)),
+            stage=kwargs.get("stage"),
+            no_push=bool(kwargs.get("no_push", False)),
+            budget=kwargs.get("budget"),
+            goal=kwargs.get("goal"),
+            competitor=kwargs.get("competitor"),
+        )
+
+
 async def _run_auto_harness(
     opts: CLIOptions,
-    task: str | None,
-    task_file: str | None,
-    dry_run: bool,
-    stage: str | None,
-    no_push: bool,
-    budget: float | None,
-    goal: str | None,
-    competitor: str | None,
+    request: AutoHarnessRunRequest,
 ) -> int:
     """Execute an auto-harness session.
 
@@ -529,28 +552,28 @@ async def _run_auto_harness(
 
     # 将 Model 和 CLI 参数覆盖到已加载的 config 上
     config.model = model
-    if budget is not None:
-        config.session_budget_secs = budget
+    if request.budget is not None:
+        config.session_budget_secs = request.budget
         config.task_timeout_secs = min(
-            config.task_timeout_secs, budget * 0.95,
+            config.task_timeout_secs, request.budget * 0.95,
         )
-    if no_push:
+    if request.no_push:
         config.git_remote = ""
-    if goal:
-        config.optimization_goal = goal
-    if competitor:
-        config.competitor = competitor
+    if request.goal:
+        config.optimization_goal = request.goal
+    if request.competitor:
+        config.competitor = request.competitor
 
-    if stage in (None, "assess", "plan"):
+    if request.stage in (None, "assess", "plan"):
         ensure_github_cli_ready(click.echo)
 
     # Load tasks
     tasks: list[OptimizationTask] = []
-    if task:
-        tasks = [OptimizationTask(topic=task)]
-    elif task_file:
+    if request.task:
+        tasks = [OptimizationTask(topic=request.task)]
+    elif request.task_file:
         raw = json.loads(
-            Path(task_file).read_text(encoding="utf-8"),
+            Path(request.task_file).read_text(encoding="utf-8"),
         )
         if isinstance(raw, dict):
             raw = [raw]
@@ -562,7 +585,7 @@ async def _run_auto_harness(
             ))
 
     # Stage dispatch
-    if stage == "assess":
+    if request.stage == "assess":
         from rich.console import Console
         from openjiuwen.harness.cli.ui.renderer import (
             render_stream,
@@ -582,7 +605,7 @@ async def _run_auto_harness(
             out.write_text(report, encoding="utf-8")
         return 0
 
-    if stage == "verify":
+    if request.stage == "verify":
         ci = CIGateRunner(
             workspace=(
                 config.local_repo
@@ -606,7 +629,7 @@ async def _run_auto_harness(
                 click.echo(f"  {err}", err=True)
         return 0 if passed else 1
 
-    if stage == "implement":
+    if request.stage == "implement":
         if not tasks:
             raise click.UsageError(
                 "--stage implement 需要 "
@@ -621,7 +644,7 @@ async def _run_auto_harness(
         orch = create_auto_harness_orchestrator(config)
         stream = orch.run_session_stream(tasks=tasks)
         await render_stream(stream, console)
-        results = orch._results
+        results = orch.results
         for i, r in enumerate(results):
             s = "OK" if r.success else "FAIL"
             click.echo(
@@ -646,7 +669,7 @@ async def _run_auto_harness(
             "assess → plan → implement → learnings"
         )
 
-    if dry_run:
+    if request.dry_run:
         task_data = [
             {
                 "topic": t.topic,
@@ -677,7 +700,7 @@ async def _run_auto_harness(
 
     console = Console()
     await render_stream(stream, console)
-    results = orch._results
+    results = orch.results
     elapsed = time.monotonic() - t0
     ok = sum(1 for r in results if r.success)
     click.echo(
@@ -838,25 +861,14 @@ def auto_harness(ctx: click.Context) -> None:
 @click.pass_context
 def auto_harness_run(
     ctx: click.Context,
-    task: str | None,
-    task_file: str | None,
-    dry_run: bool,
-    stage: str | None,
-    no_push: bool,
-    budget: float | None,
-    goal: str | None,
-    competitor: str | None,
+    **kwargs: Any,
 ) -> None:
     """执行优化周期。"""
     opts: CLIOptions = ctx.obj["opts"]
     try:
+        request = AutoHarnessRunRequest.from_kwargs(kwargs)
         exit_code = asyncio.run(
-            _run_auto_harness(
-                opts, task, task_file,
-                dry_run, stage, no_push, budget,
-                goal,
-                competitor,
-            )
+            _run_auto_harness(opts, request)
         )
         ctx.exit(exit_code)
     except KeyboardInterrupt:

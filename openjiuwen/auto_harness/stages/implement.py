@@ -138,18 +138,18 @@ def _derive_allowed_files(
             continue
         allowed.add(path)
 
-    allowed.update(
-        path for path in facts.derived_test_files
-        if path in edited_set
-        and is_derived_test_file(
+    for path in facts.derived_test_files:
+        if path not in edited_set:
+            continue
+        if is_derived_test_file(
             facts.task_declared_files,
             path,
-        )
-    )
-    allowed.update(
-        path for path in facts.legacy_related_test_files
-        if path in edited_set
-    )
+        ):
+            allowed.add(path)
+
+    for path in facts.legacy_related_test_files:
+        if path in edited_set:
+            allowed.add(path)
 
     if not facts.task_declared_files:
         allowed = {
@@ -352,12 +352,12 @@ async def _collect_commit_facts(
         ci_result,
         fix_errors,
     )
-    derived_test_files = [
-        path
-        for path in edited_files
-        if path in status["dirty_files"]
-           and is_derived_test_file(task.files, path)
-    ]
+    derived_test_files: list[str] = []
+    for path in edited_files:
+        if path not in status["dirty_files"]:
+            continue
+        if is_derived_test_file(task.files, path):
+            derived_test_files.append(path)
     legacy_related_test_files = derive_legacy_related_test_files(
         edited_files,
         verify_related_files,
@@ -515,7 +515,7 @@ async def run_in_worktree_stream(
 
         if not fix_ok:
             yield msg_factory("修复失败，回滚变更")
-            await git._git("checkout", ".")
+            await git.discard_worktree_changes()
             task.status = TaskStatus.REVERTED
             await experience_store.record(Experience(
                 type=ExperienceType.FAILURE,
@@ -740,7 +740,7 @@ def _start_fix_loop(
         )
 
         eval_agent = create_eval_agent(config)
-        _, diff = await git._git("diff", "HEAD~1")
+        diff = await git.diff_against("HEAD~1")
         ci_result = await ci_gate.run("all")
         query = (
             f"任务描述: {task.description}\n\n"

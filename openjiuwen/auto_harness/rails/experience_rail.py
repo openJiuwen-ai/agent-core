@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Set
 
 from openjiuwen.core.runner.runner import Runner
@@ -16,6 +17,8 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.auto_harness.tools.experience_search_tool import (
     ExperienceSearchTool,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def build_experience_section(
@@ -72,16 +75,18 @@ class AutoHarnessExperienceRail(DeepAgentRail):
 
     def uninit(self, agent) -> None:
         if hasattr(agent, "ability_manager"):
+            ability_mgr = agent.ability_manager
             for tool_name in list(self._owned_tool_names):
-                try:
-                    agent.ability_manager.remove(tool_name)
-                except Exception:
-                    pass
+                ability_mgr.remove(tool_name)
         for tool_id in list(self._owned_tool_ids):
-            try:
-                Runner.resource_mgr.remove_tool(tool_id)
-            except Exception:
-                pass
+            if Runner.resource_mgr.get_tool(tool_id) is None:
+                continue
+            result = Runner.resource_mgr.remove_tool(tool_id)
+            if hasattr(result, "is_err") and result.is_err():
+                logger.warning(
+                    "Failed to remove experience tool: %s",
+                    tool_id,
+                )
         self._owned_tool_ids.clear()
         self._owned_tool_names.clear()
         if self.system_prompt_builder is not None:

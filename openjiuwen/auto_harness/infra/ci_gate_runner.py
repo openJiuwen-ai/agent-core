@@ -100,6 +100,10 @@ class CIGateRunner:
             or "python"
         )
 
+    def set_workspace(self, workspace: str) -> None:
+        """Update command workspace."""
+        self._workspace = workspace
+
     def _command_env(self) -> dict[str, str]:
         """Build shell env that points tools at the chosen Python env."""
         env = {**os.environ, "CI": "1"}
@@ -151,15 +155,13 @@ class CIGateRunner:
         if "test" not in parts[1:]:
             return cmd
         target_index = parts.index("test")
-        assignments = parts[target_index + 1 :]
+        assignments = parts[target_index + 1:]
         if any("=" not in item for item in assignments):
             return cmd
-        env_map = {
-            key: value
-            for key, value in (
-                item.split("=", 1) for item in assignments
-            )
-        }
+        env_map: dict[str, str] = {}
+        for item in assignments:
+            key, value = item.split("=", 1)
+            env_map[key] = value
         testflags = env_map.get("TESTFLAGS", "").strip()
         return (
             f"{python_executable} -m pytest {testflags}"

@@ -65,17 +65,23 @@ def is_derived_test_file(
 
     for path in source_files:
         normalized = path.strip().replace("\\", "/")
-        if (
-            not normalized
-            or not normalized.endswith(".py")
-            or normalized.startswith("tests/")
-            or PurePosixPath(normalized).name == "__init__.py"
-        ):
+        if not _is_non_test_source_file(normalized):
             continue
         stem = PurePosixPath(normalized).stem
         if candidate_name == f"test_{stem}.py":
             return True
     return False
+
+
+def _is_non_test_source_file(path: str) -> bool:
+    """Return whether *path* is a normal source file."""
+    if not path:
+        return False
+    if not path.endswith(".py"):
+        return False
+    if path.startswith("tests/"):
+        return False
+    return PurePosixPath(path).name != "__init__.py"
 
 
 def extract_verify_related_files(

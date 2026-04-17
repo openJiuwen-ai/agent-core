@@ -100,7 +100,7 @@ class TestAutoHarnessRepl:
 
             mock_orch = MagicMock()
             mock_orch.run_session_stream = _fake_stream
-            mock_orch._results = []
+            mock_orch.results = []
             return mock_orch
 
         with patch(
@@ -170,7 +170,7 @@ class TestAutoHarnessRepl:
 
             mock_orch = MagicMock()
             mock_orch.run_session_stream = _fake_stream
-            mock_orch._results = []
+            mock_orch.results = []
             return mock_orch
 
         with patch(

@@ -68,6 +68,10 @@ class GitOperations:
             token=self._token,
         )
 
+    def set_workspace(self, workspace: str) -> None:
+        """Update git command workspace."""
+        self._workspace = workspace
+
     async def _git(
         self, *args: str
     ) -> tuple[int, str]:
@@ -179,6 +183,16 @@ class GitOperations:
             "-1",
         )
         return out.strip()
+
+    async def discard_worktree_changes(self) -> bool:
+        """Discard current worktree changes via ``git checkout .``."""
+        code, _ = await self._git("checkout", ".")
+        return code == 0
+
+    async def diff_against(self, revision: str) -> str:
+        """Return ``git diff <revision>`` output."""
+        _, out = await self._git("diff", revision)
+        return out
 
     async def push(
         self, branch_name: str

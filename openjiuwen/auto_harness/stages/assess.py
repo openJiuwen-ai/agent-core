@@ -173,13 +173,15 @@ async def _run_git_lines(
         return []
     if proc.returncode != 0:
         return []
-    return [
-        line.strip()
-        for line in stdout.decode(
-            "utf-8", errors="replace"
-        ).splitlines()
-        if line.strip()
-    ]
+    lines: list[str] = []
+    decoded = stdout.decode(
+        "utf-8", errors="replace"
+    )
+    for line in decoded.splitlines():
+        stripped = line.strip()
+        if stripped:
+            lines.append(stripped)
+    return lines
 
 
 def _format_python_check_strategy(

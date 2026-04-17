@@ -149,12 +149,18 @@ class AutoHarnessOrchestrator:
         )
         self._last_cycle_result = CycleResult()
 
-    def _msg(self, text: str) -> OutputSchema:
+    @staticmethod
+    def _msg(text: str) -> OutputSchema:
         """构造 message 类型的 OutputSchema。"""
         return OutputSchema(
             type="message", index=0,
             payload={"content": text},
         )
+
+    @property
+    def results(self) -> list[CycleResult]:
+        """Return latest session cycle results."""
+        return list(self._results)
 
     # ----------------------------------------------------------
     # public API
@@ -403,8 +409,8 @@ class AutoHarnessOrchestrator:
         wt_path = await self.worktree_mgr.prepare(
             task.topic,
         )
-        self.git._workspace = wt_path
-        self.ci_gate._workspace = wt_path
+        self.git.set_workspace(wt_path)
+        self.ci_gate.set_workspace(wt_path)
         edit_safety_rail = EditSafetyRail()
         edit_safety_rail.reset()
         preexisting_dirty_files = await self.git.list_dirty_files()

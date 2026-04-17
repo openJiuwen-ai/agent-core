@@ -59,7 +59,7 @@ def ensure_github_cli_ready(
 
         emit(f"已安装 `gh`: {gh_path}")
 
-    authenticated = _is_gh_authenticated()
+    authenticated = _is_gh_authenticated(gh_path)
     if authenticated:
         emit("检测到 `gh` 已登录。")
     else:
@@ -81,11 +81,11 @@ def ensure_github_cli_ready(
     )
 
 
-def _is_gh_authenticated() -> bool:
+def _is_gh_authenticated(gh_path: str) -> bool:
     """Return whether ``gh`` currently has usable auth configured."""
     try:
         result = subprocess.run(
-            ["gh", "auth", "status"],
+            [gh_path, "auth", "status"],
             capture_output=True,
             text=True,
             timeout=15,

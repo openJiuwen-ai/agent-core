@@ -543,10 +543,7 @@ def _detect_local_repo(workspace_hint: str) -> str:
 
     seen: set[str] = set()
     for candidate in candidates:
-        try:
-            resolved = candidate.resolve()
-        except Exception:
-            continue
+        resolved = Path(os.path.abspath(candidate))
         key = str(resolved)
         if key in seen:
             continue
