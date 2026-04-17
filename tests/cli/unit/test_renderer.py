@@ -162,6 +162,48 @@ class TestRenderStream:
         assert "No output" in output or "no output" in output.lower()
 
     @pytest.mark.asyncio
+    async def test_invisible_stream_reports_chunk_types(self) -> None:
+        """Unknown non-rendered chunks should produce a diagnostic warning."""
+        chunks = [
+            FakeChunk(
+                "workflow_final",
+                0,
+                {"content": "internal only"},
+            ),
+        ]
+        buf = io.StringIO()
+        console = Console(file=buf)
+        result = await render_stream(
+            _async_iter(chunks), console
+        )
+        assert result.text == ""
+        output = buf.getvalue()
+        assert "No visible output received" in output
+        assert "workflow_final" in output
+
+    @pytest.mark.asyncio
+    async def test_controller_task_failed_rendered(self) -> None:
+        """controller_output task_failed should be surfaced to the user."""
+        chunks = [
+            FakeChunk(
+                "controller_output",
+                0,
+                (
+                    "type=<EventType.TASK_FAILED: 'task_failed'> "
+                    'data=[TextDataFrame(type=\'text\', text="model call failed: 401")]'
+                ),
+            ),
+        ]
+        buf = io.StringIO()
+        console = Console(file=buf)
+        result = await render_stream(
+            _async_iter(chunks), console
+        )
+        assert result.text == ""
+        output = buf.getvalue()
+        assert "model call failed: 401" in output
+
+    @pytest.mark.asyncio
     async def test_message_chunk_rendered(self) -> None:
         """message chunks are rendered with gear icon."""
         chunks = [
@@ -172,6 +214,31 @@ class TestRenderStream:
         await render_stream(_async_iter(chunks), console)
         output = buf.getvalue()
         assert "Reading file" in output
+
+    @pytest.mark.asyncio
+    async def test_message_chunk_starts_on_new_line_after_llm_output(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """message chunks should not be appended to streamed text."""
+        chunks = [
+            FakeChunk(
+                "llm_output", 0, {"content": "Line without newline"}
+            ),
+            FakeChunk("message", 1, {"content": "CI 门禁检查"}),
+        ]
+        terminal: list[str] = []
+        monkeypatch.setattr(
+            "openjiuwen.harness.cli.ui.renderer._write_terminal",
+            terminal.append,
+        )
+        buf = io.StringIO()
+        console = Console(file=buf, force_terminal=False)
+
+        await render_stream(_async_iter(chunks), console)
+
+        assert terminal == ["\033[92m● \033[0m", "Line without newline", "\n"]
+        output = buf.getvalue()
+        assert "CI 门禁检查" in output
 
     @pytest.mark.asyncio
     async def test_interaction_callback(self) -> None:
@@ -257,6 +324,57 @@ class TestRenderStream:
         await render_stream(_async_iter(chunks), console)
         output = buf.getvalue()
         assert "◐" in output or "Task A" in output
+
+    @pytest.mark.asyncio
+    async def test_todo_modify_rerenders_cached_todos(self) -> None:
+        """todo_modify refreshes the visible todo list from cached state."""
+        create_raw_dict = {
+            "message": (
+                "Successfully created 2 task(s):\n"
+                "  [>] task_id: a , content: Task A\n"
+                "  [ ] task_id: b , content: Task B"
+            )
+        }
+        modify_raw_dict = {
+            "message": "Successfully updated 1 task(s)"
+        }
+        chunks = [
+            FakeChunk(
+                "tool_result",
+                0,
+                {
+                    "tool_name": "todo_create",
+                    "tool_args": {},
+                    "tool_result": str(create_raw_dict),
+                },
+            ),
+            FakeChunk(
+                "tool_result",
+                1,
+                {
+                    "tool_name": "todo_modify",
+                    "tool_args": {
+                        "action": "append",
+                        "todos": [
+                            {
+                                "id": "c",
+                                "content": "Task C",
+                                "activeForm": "Task C",
+                                "status": "pending",
+                            }
+                        ],
+                    },
+                    "tool_result": str(modify_raw_dict),
+                },
+            ),
+        ]
+        buf = io.StringIO()
+        console = Console(file=buf)
+        await render_stream(_async_iter(chunks), console)
+        output = buf.getvalue()
+        assert "Task A" in output
+        assert "Task B" in output
+        assert "Task C" in output
 
     @pytest.mark.asyncio
     async def test_green_bullet_on_llm_output(self) -> None:
