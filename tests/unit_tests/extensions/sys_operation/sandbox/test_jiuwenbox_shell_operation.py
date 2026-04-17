@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 from __future__ import annotations
 
 import os
@@ -16,7 +18,7 @@ from openjiuwen.core.sys_operation.config import ContainerScope, PreDeployLaunch
 from openjiuwen.core.sys_operation.result import ExecuteCmdStreamResult
 
 
-LONG_RUNNING_COMMAND = ["/usr/bin/python3", "-c", "import time; time.sleep(3600)"]
+LONG_RUNNING_COMMAND = ["/usr/bin/python3", "-c", "import time; time.sleep(36000)"]
 
 
 def _normalize_endpoint(endpoint: str) -> str:

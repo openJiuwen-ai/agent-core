@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 from __future__ import annotations
 
 import os
@@ -435,6 +437,10 @@ async def test_fs_upload_download(sys_op, tmp_path):
     upload_res = await sys_op.fs().upload_file(local_path=str(local_src), target_path=upload_target)
     assert upload_res.code == StatusCode.SUCCESS.code
 
+    duplicate_upload = await sys_op.fs().upload_file(local_path=str(local_src), target_path=upload_target)
+    assert duplicate_upload.code == StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code
+    assert f"File already exists: {upload_target}" in duplicate_upload.message
+
     download_target = tmp_path / "downloaded_file.txt"
     download_res = await sys_op.fs().download_file(source_path=upload_target, local_path=str(download_target))
     assert download_res.code == StatusCode.SUCCESS.code
@@ -471,6 +477,18 @@ async def test_fs_upload_download(sys_op, tmp_path):
     )
     assert empty_download_res.code == StatusCode.SUCCESS.code
     assert empty_download_target.read_text(encoding="utf-8") == ""
+
+    existing_dir_target = f"{SANDBOX_BASE_PATH}/upload_dir_{uuid.uuid4().hex[:8]}"
+    mkdir_res = await sys_op.shell().execute_cmd(f"mkdir -p {existing_dir_target}")
+    assert mkdir_res.code == StatusCode.SUCCESS.code
+    assert mkdir_res.data.exit_code == 0
+
+    dir_upload_res = await sys_op.fs().upload_file(
+        local_path=str(local_src),
+        target_path=existing_dir_target,
+    )
+    assert dir_upload_res.code == StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code
+    assert f"File already exists: {existing_dir_target}" in dir_upload_res.message
 
     large_local_src = tmp_path / "large_upload_test.txt"
     large_content = "x" * (1024 * 1024)
@@ -510,6 +528,25 @@ async def test_fs_upload_download(sys_op, tmp_path):
 
     assert download_target_0.read_text(encoding="utf-8") == large_content
     assert download_target_neg1.read_text(encoding="utf-8") == large_content
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.environ.get("RUN_JIUWENBOX_TEST") != "1", reason="Requires running Jiuwenbox sandbox")
+async def test_fs_upload_read_only_path_returns_server_error_detail(sys_op, tmp_path):
+    local_src = tmp_path / "readonly_upload.txt"
+    local_src.write_text("should be rejected", encoding="utf-8")
+
+    target_path = f"/etc/jiuwenbox-denied-{uuid.uuid4().hex[:8]}.txt"
+    result = await sys_op.fs().upload_file(
+        local_path=str(local_src),
+        target_path=target_path,
+        overwrite=True,
+    )
+
+    assert result.code == StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code
+    assert "HTTP 409 Conflict" in result.message
+    assert "Failed to upload file" in result.message
+    assert target_path in result.message
 
 
 @pytest.mark.asyncio
