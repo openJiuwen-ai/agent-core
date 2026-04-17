@@ -308,9 +308,19 @@ class TeamAgent(BaseAgent):
     # Team-specific configuration
     # ------------------------------------------------------------------
 
-    def _resolve_agent_spec(self, spec: TeamAgentSpec, role: TeamRole):
-        """Return the DeepAgentSpec for the given role, falling back to leader."""
-        return spec.agents.get(role.value) or spec.agents["leader"]
+    def _resolve_agent_spec(
+        self, spec: TeamAgentSpec, role: TeamRole, member_name: Optional[str] = None
+    ):
+        """Return the DeepAgentSpec for the given member/role, falling back appropriately.
+
+        Lookup order:
+        1. agents[member_name] if member_name exists in agents dict (custom per-member spec)
+        2. agents[role.value] ("teammate" for teammates)
+        3. agents["leader"] as final fallback
+        """
+        if member_name and member_name in spec.agents:
+            return spec.agents[member_name]
+        return spec.agents.get(role.value) or spec.agents.get("teammate") or spec.agents["leader"]
 
     def _setup_infra(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> None:
         """Phase 1: set spec/context, create messager, workspace manager, register team tools."""
@@ -382,7 +392,8 @@ class TeamAgent(BaseAgent):
         ctx: TeamRuntimeContext,
     ) -> None:
         """Phase 2: build prompt, create DeepAgent, set up coordination."""
-        agent_spec = self._resolve_agent_spec(spec, ctx.role)
+        # Lookup agent spec by member_name first, then role fallback chain
+        agent_spec = self._resolve_agent_spec(spec, ctx.role, ctx.member_name)
         resolved_language = _resolve_language(agent_spec.language)
         self._role_policy = role_policy(ctx.role, language=resolved_language)
         member_name = ctx.member_name
@@ -491,7 +502,7 @@ class TeamAgent(BaseAgent):
         # Platform customizer: inject additional rails & tools (e.g. Claw adapter).
         if spec.agent_customizer and self._deep_agent:
             try:
-                spec.agent_customizer(self._deep_agent)
+                spec.agent_customizer(self._deep_agent, member_name, ctx.role.value)
             except Exception as exc:
                 team_logger.warning(
                     "[{}] agent_customizer failed: {}", self._member_name() or "?", exc
