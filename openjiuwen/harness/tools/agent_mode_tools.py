@@ -1,9 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Plan mode tools: EnterPlanModeTool and ExitPlanModeTool.
+"""Agent mode tools for switching runtime mode and managing plan files.
 
-These tools are registered by PlanModeRail and manage the lifecycle of the
-plan file created during planning sessions.
+These tools are registered by AgentModeRail and cover mode switching plus the
+lifecycle of the plan file created during planning sessions.
 """
 from __future__ import annotations
 
@@ -11,9 +11,9 @@ import secrets
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
-from openjiuwen.core.foundation.tool import Input, Tool, Output
-from openjiuwen.core.session.agent import Session
+from openjiuwen.core.foundation.tool import Input, Output, Tool
 from openjiuwen.harness.prompts.sections.tools import build_tool_card
+from openjiuwen.harness.schema.agent_mode import AgentMode
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -161,9 +161,85 @@ _EXIT_PLAN_WITH_CONTENT_PREFIX = {
 }
 
 
+_SWITCH_MODE_INVALID_MSG = {
+    "en": "Invalid mode '{mode}'. Supported modes: auto, plan.",
+    "cn": "无效模式 '{mode}'。支持模式：auto、plan。",
+}
+
+_SWITCH_MODE_TO_AUTO_MSG = {
+    "en": "Switched mode to auto.",
+    "cn": "已切换为 auto 模式。",
+}
+
+_SWITCH_MODE_TO_PLAN_MSG = {
+    "en": (
+        "Switched mode to plan.\n"
+        "Next step: call enter_plan_mode to continue the plan workflow."
+    ),
+    "cn": (
+        "已切换为 plan 模式。\n"
+        "下一步：调用 enter_plan_mode 继续 Plan 工作流。"
+    ),
+}
+
+
 def _plan_mode_tool_language(language: str) -> str:
     """Normalize tool result language to a supported code."""
     return language if language == "en" else "cn"
+
+
+class SwitchModeInput:
+    """Input schema for ``switch_mode`` tool."""
+
+    def __init__(self, mode: str = "") -> None:
+        self.mode = mode
+
+    @classmethod
+    def model_validate(cls, inputs: Any) -> "SwitchModeInput":
+        if isinstance(inputs, dict):
+            return cls(mode=str(inputs.get("mode", "")))
+        return cls(mode=str(getattr(inputs, "mode", "")))
+
+
+class SwitchModeTool(Tool):
+    """Switch session runtime mode between auto and plan.
+
+    Behavior:
+    - ``plan``: switch to plan mode and ensure a plan file exists.
+    - ``auto``: switch back to auto mode.
+    """
+
+    def __init__(self, agent_ref: "DeepAgent", language: str = "cn") -> None:
+        super().__init__(
+            build_tool_card(
+                name="switch_mode",
+                tool_id="switch_mode",
+                language=language,
+            )
+        )
+        self._agent_ref = agent_ref
+        self._language = language
+
+    async def invoke(self, inputs: Input, **kwargs: Any) -> str:
+        parsed = SwitchModeInput.model_validate(inputs or {})
+        raw_mode = (parsed.mode or "").strip().lower()
+        lang = "en" if self._language == "en" else "cn"
+
+        if raw_mode not in (AgentMode.AUTO.value, AgentMode.PLAN.value):
+            return _SWITCH_MODE_INVALID_MSG[lang].format(mode=raw_mode)
+
+        session = kwargs.get("session")
+        agent = self._agent_ref
+
+        if raw_mode == AgentMode.PLAN.value:
+            agent.switch_mode(session, AgentMode.PLAN.value)
+            return _SWITCH_MODE_TO_PLAN_MSG[lang]
+
+        agent.switch_mode(session, AgentMode.AUTO.value)
+        return _SWITCH_MODE_TO_AUTO_MSG[lang]
+
+    async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
+        pass
 
 
 class EnterPlanModeTool(Tool):
@@ -285,6 +361,7 @@ class ExitPlanModeTool(Tool):
 
 
 __all__ = [
+    "SwitchModeTool",
     "EnterPlanModeTool",
     "ExitPlanModeTool",
     "generate_word_slug",

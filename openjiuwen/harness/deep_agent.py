@@ -1171,7 +1171,7 @@ class DeepAgent(BaseAgent):
             Resolved ``Path`` to the plan Markdown file, or ``None`` if
             no slug has been set or the workspace is unavailable.
         """
-        from openjiuwen.harness.tools.plan_mode_tools import resolve_plan_file_path
+        from openjiuwen.harness.tools.agent_mode_tools import resolve_plan_file_path
 
         state = self.load_state(session)
         slug = state.plan_mode.plan_slug

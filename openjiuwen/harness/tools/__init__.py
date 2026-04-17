@@ -46,8 +46,8 @@ from openjiuwen.harness.tools.web_tools import (
     create_web_tools,
     is_free_search_enabled,
 )
-from openjiuwen.harness.tools.mode_tools import SwitchModeTool
-from openjiuwen.harness.tools.plan_mode_tools import (
+from openjiuwen.harness.tools.agent_mode_tools import (
+    SwitchModeTool,
     EnterPlanModeTool,
     ExitPlanModeTool,
     generate_word_slug,

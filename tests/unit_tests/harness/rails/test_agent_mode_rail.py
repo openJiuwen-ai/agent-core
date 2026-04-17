@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import Mock, patch
 
-from openjiuwen.harness.rails.plan_mode_rail import PlanModeRail
+from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
 from openjiuwen.harness.schema.state import DeepAgentState
 
 
@@ -55,13 +55,13 @@ def _make_ctx(tool_name: str, *, mode: str = "plan", tool_args=None, tools=None)
         extra={},
     )
 
-    rail = PlanModeRail()
+    rail = AgentModeRail()
     rail._agent = agent
     rail.system_prompt_builder = _PromptBuilder()
     return rail, ctx, agent
 
 
-class TestPlanModeRail(IsolatedAsyncioTestCase):
+class TestAgentModeRail(IsolatedAsyncioTestCase):
     async def test_before_tool_call_passes_through_when_not_plan_mode(self) -> None:
         rail, ctx, _ = _make_ctx("some_random_tool", mode="auto")
 
@@ -124,7 +124,7 @@ class TestPlanModeRail(IsolatedAsyncioTestCase):
         tools = [_ToolInfo("todo_create"), _ToolInfo("sessions_spawn"), _ToolInfo("read_file")]
         rail, ctx, _ = _make_ctx("noop", mode="plan", tools=tools)
 
-        with patch("openjiuwen.harness.rails.plan_mode_rail.build_plan_mode_section", return_value="MODE_SECTION"):
+        with patch("openjiuwen.harness.rails.agent_mode_rail.build_plan_mode_section", return_value="MODE_SECTION"):
             await rail.before_model_call(ctx)
 
         visible_tool_names = [t.name for t in ctx.inputs.tools]

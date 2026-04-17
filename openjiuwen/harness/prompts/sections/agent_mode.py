@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Plan mode system prompt section for DeepAgent.
+"""Agent mode system prompt section for DeepAgent.
 
 Provides bilingual MODE_INSTRUCTIONS injected into the system prompt while
 the agent operates in plan mode.

@@ -17,7 +17,7 @@ from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.subagents.plan_agent import build_plan_agent_config
 from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRail
-from openjiuwen.harness.rails.plan_mode_rail import PlanModeRail
+from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
 from openjiuwen.harness.workspace.workspace import Workspace
@@ -220,7 +220,7 @@ def create_code_agent(
         rails,
         [
             (FileSystemRail, FileSystemRail),
-            (PlanModeRail, PlanModeRail),
+            (AgentModeRail, AgentModeRail),
             (AskUserRail, AskUserRail),
         ],
     )

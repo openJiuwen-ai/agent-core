@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""PlanModeRail — three-layer defense for plan mode enforcement.
+"""AgentModeRail — three-layer defense for plan mode enforcement.
 
 Responsibilities:
 1. Register ``enter_plan_mode`` / ``exit_plan_mode`` tools on init.
@@ -28,11 +28,10 @@ from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
 from openjiuwen.harness.prompts.sections import SectionName
-from openjiuwen.harness.prompts.sections.plan_mode import build_plan_mode_section
+from openjiuwen.harness.prompts.sections.agent_mode import build_plan_mode_section
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.config import SubAgentConfig
-from openjiuwen.harness.tools.mode_tools import SwitchModeTool
-from openjiuwen.harness.tools.plan_mode_tools import EnterPlanModeTool, ExitPlanModeTool
+from openjiuwen.harness.tools.agent_mode_tools import SwitchModeTool, EnterPlanModeTool, ExitPlanModeTool
 from openjiuwen.harness.tools.task_tool import create_task_tool
 
 if TYPE_CHECKING:
@@ -64,7 +63,7 @@ DEFAULT_PLAN_MODE_ALLOWED_TOOLS: tuple[str, ...] = (
 )
 
 
-class PlanModeRail(DeepAgentRail):
+class AgentModeRail(DeepAgentRail):
     """Rail that enforces read-only plan mode constraints.
 
     Always registered; activates conditionally based on
@@ -114,7 +113,7 @@ class PlanModeRail(DeepAgentRail):
             Runner.resource_mgr.add_tool(tool)
             agent.ability_manager.add(tool.card)
 
-        logger.info("[PlanModeRail] Registered enter/exit plan mode tools")
+        logger.info("[AgentModeRail] Registered enter/exit plan mode tools")
 
     def uninit(self, agent: "DeepAgent") -> None:
         """Unregister all tools owned by this rail.
@@ -128,7 +127,7 @@ class PlanModeRail(DeepAgentRail):
                 Runner.resource_mgr.remove_tool(tool.card.id)
             except Exception as exc:
                 logger.warning(
-                    f"[PlanModeRail] Failed to remove tool '{tool.name}': {exc}"
+                    f"[AgentModeRail] Failed to remove tool '{tool.name}': {exc}"
                 )
         self._tools = []
 
@@ -317,7 +316,7 @@ class PlanModeRail(DeepAgentRail):
             return
         existing = self._is_task_tool_registered()
         if existing:
-            logger.info("[PlanModeRail] task tool already registered, skip register")
+            logger.info("[AgentModeRail] task tool already registered, skip register")
             return
         if not agent.deep_config.subagents:
             return
@@ -336,7 +335,7 @@ class PlanModeRail(DeepAgentRail):
         for tool in self._task_tools:
             agent.ability_manager.add(tool.card)
         self._owns_task_tool = True
-        logger.info("[PlanModeRail] Registered task_tool for plan mode")
+        logger.info("[AgentModeRail] Registered task_tool for plan mode")
 
     def _unregister_task_tool(self, agent: "DeepAgent") -> None:
         """Unregister only the task_tool that this rail owns.
@@ -345,16 +344,16 @@ class PlanModeRail(DeepAgentRail):
             agent: Parent DeepAgent.
         """
         if not self._owns_task_tool or not self._task_tools:
-            logger.info("[PlanModeRail] no task tool registered, skip unregister")
+            logger.info("[AgentModeRail] no task tool registered, skip unregister")
             return
         for tool in self._task_tools:
             try:
                 agent.ability_manager.remove(tool.card.name)
                 Runner.resource_mgr.remove_tool(tool.card.id)
-                logger.info("[PlanModeRail] Unregistered plan-mode task_tool")
+                logger.info("[AgentModeRail] Unregistered plan-mode task_tool")
             except Exception as exc:
                 logger.warning(
-                    f"[PlanModeRail] Failed to unregister task_tool '{tool.name}': {exc}"
+                    f"[AgentModeRail] Failed to unregister task_tool '{tool.name}': {exc}"
                 )
         self._task_tools = None
         self._owns_task_tool = False
@@ -467,4 +466,4 @@ class PlanModeRail(DeepAgentRail):
         return ""
 
 
-__all__ = ["PlanModeRail"]
+__all__ = ["AgentModeRail"]

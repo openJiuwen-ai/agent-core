@@ -18,7 +18,7 @@ from openjiuwen.harness.rails.subagent_rail import SubagentRail
 from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
 from openjiuwen.harness.rails.session_rail import SessionRail
 from openjiuwen.harness.rails.memory_rail import MemoryRail
-from openjiuwen.harness.rails.plan_mode_rail import PlanModeRail
+from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
 
 __all__ = [
     "DeepAgentRail",
@@ -36,5 +36,5 @@ __all__ = [
     "SecurityRail",
     "MemoryRail",
     "LspRail",
-    "PlanModeRail",
+    "AgentModeRail",
 ]
