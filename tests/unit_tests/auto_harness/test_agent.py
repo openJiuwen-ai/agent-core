@@ -4,19 +4,27 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from openjiuwen.auto_harness.agent import (
+import pytest
+
+from openjiuwen.auto_harness.agents import (
     create_assess_agent,
     create_auto_harness_agent,
     create_commit_agent,
     create_learnings_agent,
+    create_plan_agent,
+    create_select_pipeline_agent,
 )
 from openjiuwen.auto_harness.rails.context_rail import (
     AutoHarnessContextRail,
 )
 from openjiuwen.auto_harness.schema import (
     AutoHarnessConfig,
+)
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
 )
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.cli.rails.tool_tracker import (
@@ -46,7 +54,7 @@ def test_create_auto_harness_agent_includes_tool_tracker():
         return object()
 
     with patch(
-        "openjiuwen.auto_harness.agent.create_deep_agent",
+        "openjiuwen.auto_harness.agents.factory.create_deep_agent",
         side_effect=_fake_create_deep_agent,
     ):
         create_auto_harness_agent(
@@ -72,25 +80,16 @@ def test_create_auto_harness_agent_includes_tool_tracker():
     ]
     assert len(skill_rails) == 1
     assert any(
-        path.endswith("/implement")
+        Path(path).name == "skills"
         for path in skill_rails[0].skills_dir
     )
-    assert any(
-        path.endswith("/verify")
-        for path in skill_rails[0].skills_dir
-    )
-    assert any(
-        path.endswith("/communicate")
-        for path in skill_rails[0].skills_dir
-    )
-    assert not any(
-        path.endswith("/commit")
-        for path in skill_rails[0].skills_dir
-    )
-    assert not any(
-        path.endswith("/evolve")
-        for path in skill_rails[0].skills_dir
-    )
+    assert set(skill_rails[0].enabled_skills) == {
+        "implement",
+        "verify",
+        "communicate",
+    }
+    assert "commit" not in skill_rails[0].enabled_skills
+    assert "evolve" not in skill_rails[0].enabled_skills
     assert captured["enable_async_subagent"] is True
     subagents = captured["subagents"]
     assert any(
@@ -123,7 +122,7 @@ def test_create_auto_harness_agent_honors_workspace_override():
         return object()
 
     with patch(
-        "openjiuwen.auto_harness.agent.create_deep_agent",
+        "openjiuwen.auto_harness.agents.factory.create_deep_agent",
         side_effect=_fake_create_deep_agent,
     ):
         create_auto_harness_agent(
@@ -152,7 +151,7 @@ def test_create_commit_agent_only_exposes_commit_skills():
         return object()
 
     with patch(
-        "openjiuwen.auto_harness.agent.create_deep_agent",
+        "openjiuwen.auto_harness.agents.factory.create_deep_agent",
         side_effect=_fake_create_deep_agent,
     ):
         create_commit_agent(
@@ -169,17 +168,46 @@ def test_create_commit_agent_only_exposes_commit_skills():
     ]
     assert len(skill_rails) == 1
     assert any(
-        path.endswith("/commit")
+        Path(path).name == "skills"
         for path in skill_rails[0].skills_dir
     )
-    assert any(
-        path.endswith("/communicate")
-        for path in skill_rails[0].skills_dir
+    assert set(skill_rails[0].enabled_skills) == {
+        "commit",
+        "communicate",
+    }
+    assert "implement" not in skill_rails[0].enabled_skills
+
+
+@pytest.mark.asyncio
+async def test_create_commit_agent_loads_commit_skill(tmp_path: Path):
+    """提交阶段 agent 应实际加载到 commit/communicate skills。"""
+    agent = create_commit_agent(
+        AutoHarnessConfig(
+            model=MagicMock(),
+            workspace=str(tmp_path),
+        ),
+        workspace_override=str(tmp_path / "task-1"),
     )
-    assert not any(
-        path.endswith("/implement")
-        for path in skill_rails[0].skills_dir
+
+    await agent.ensure_initialized()
+
+    skill_rails = [
+        rail for rail in agent._registered_rails
+        if isinstance(rail, SkillUseRail)
+    ]
+    assert len(skill_rails) == 1
+
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=None,
+        session=None,
     )
+    await skill_rails[0].before_invoke(ctx)
+
+    assert {skill.name for skill in skill_rails[0].skills} == {
+        "commit",
+        "communicate",
+    }
 
 
 def test_create_assess_agent_includes_tool_tracker():
@@ -191,7 +219,7 @@ def test_create_assess_agent_includes_tool_tracker():
         return object()
 
     with patch(
-        "openjiuwen.auto_harness.agent.create_deep_agent",
+        "openjiuwen.auto_harness.agents.factory.create_deep_agent",
         side_effect=_fake_create_deep_agent,
     ):
         create_assess_agent(
@@ -238,7 +266,7 @@ def test_create_assess_agent_includes_web_research_tools():
         return object()
 
     with patch(
-        "openjiuwen.auto_harness.agent.create_deep_agent",
+        "openjiuwen.auto_harness.agents.factory.create_deep_agent",
         side_effect=_fake_create_deep_agent,
     ):
         create_assess_agent(
@@ -265,7 +293,7 @@ def test_create_learnings_agent_formats_prompt_without_tools():
         return object()
 
     with patch(
-        "openjiuwen.auto_harness.agent.create_deep_agent",
+        "openjiuwen.auto_harness.agents.factory.create_deep_agent",
         side_effect=_fake_create_deep_agent,
     ):
         create_learnings_agent(
@@ -279,3 +307,59 @@ def test_create_learnings_agent_formats_prompt_without_tools():
     assert "{existing_memories}" not in captured["system_prompt"]
     assert "task-1" in captured["system_prompt"]
     assert "topic: summary" in captured["system_prompt"]
+
+
+def test_create_plan_agent_uses_plan_skill():
+    """规划阶段应挂载 plan skill，而不是 assess skill。"""
+    captured = {}
+
+    def _fake_create_deep_agent(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    with patch(
+        "openjiuwen.auto_harness.agents.factory.create_deep_agent",
+        side_effect=_fake_create_deep_agent,
+    ):
+        create_plan_agent(
+            AutoHarnessConfig(model=MagicMock()),
+        )
+
+    skill_rails = [
+        rail for rail in captured["rails"]
+        if isinstance(rail, SkillUseRail)
+    ]
+    assert len(skill_rails) == 1
+    assert any(
+        Path(path).name == "skills"
+        for path in skill_rails[0].skills_dir
+    )
+    assert "plan" in skill_rails[0].enabled_skills
+
+
+def test_create_select_pipeline_agent_uses_selector_skill():
+    """selector agent 应挂载 select_pipeline skill。"""
+    captured = {}
+
+    def _fake_create_deep_agent(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    with patch(
+        "openjiuwen.auto_harness.agents.factory.create_deep_agent",
+        side_effect=_fake_create_deep_agent,
+    ):
+        create_select_pipeline_agent(
+            AutoHarnessConfig(model=MagicMock()),
+        )
+
+    skill_rails = [
+        rail for rail in captured["rails"]
+        if isinstance(rail, SkillUseRail)
+    ]
+    assert len(skill_rails) == 1
+    assert any(
+        Path(path).name == "skills"
+        for path in skill_rails[0].skills_dir
+    )
+    assert "select_pipeline" in skill_rails[0].enabled_skills

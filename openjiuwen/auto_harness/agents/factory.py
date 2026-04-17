@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Auto Harness Agent 工厂函数。"""
+"""Auto Harness agent factories."""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
 
+from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.single_agent.schema.agent_card import (
     AgentCard,
 )
-from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.sys_operation import (
     LocalWorkConfig,
     OperationMode,
@@ -25,28 +25,24 @@ from openjiuwen.auto_harness.prompts.sections import (
 )
 
 if TYPE_CHECKING:
+    from openjiuwen.auto_harness.schema import (
+        AutoHarnessConfig,
+    )
     from openjiuwen.core.single_agent.rail.base import (
         AgentRail,
     )
     from openjiuwen.harness.deep_agent import DeepAgent
-    from openjiuwen.auto_harness.schema import (
-        AutoHarnessConfig,
-    )
 
-_SKILLS_DIR = str(Path(__file__).parent / "skills")
+_PACKAGE_DIR = Path(__file__).resolve().parent.parent
+_SKILLS_DIR = str(_PACKAGE_DIR / "skills")
+_PROMPTS_DIR = _PACKAGE_DIR / "prompts"
 logger = logging.getLogger(__name__)
 
 
 def _build_trusted_local_sys_operation(
     agent_name: str,
 ) -> SysOperation:
-    """Build a permissive local SysOperation for trusted auto-harness runs.
-
-    Auto-harness operates on user-owned local worktrees and needs to run the
-    repository's native verification commands. Disable the shell allowlist and
-    worktree path restriction here, while keeping the lower-level dangerous
-    command checks in ``LocalShellOperation`` active.
-    """
+    """Build a permissive local SysOperation for trusted auto-harness runs."""
     return SysOperation(
         SysOperationCard(
             id=f"{agent_name}_trusted_local",
@@ -66,33 +62,24 @@ def create_auto_harness_agent(
     edit_safety_rail: Optional["AgentRail"] = None,
     skill_names: Optional[List[str]] = None,
     extra_rails: Optional[List["AgentRail"]] = None,
-    extra_tools: Optional[
-        List[Tool | ToolCard]
-    ] = None,
+    extra_tools: Optional[List[Tool | ToolCard]] = None,
 ) -> "DeepAgent":
-    """创建 Auto Harness Agent 实例（实现 agent）。
-
-    Args:
-        config: Auto Harness 配置。
-        workspace_override: 可选，覆盖 agent 的 workspace 根目录。
-        skill_names: 可选，覆盖默认启用的 skill 列表。
-        extra_rails: 额外的 rail 实例。
-        extra_tools: 额外的 tool 实例。
-
-    Returns:
-        配置好的 DeepAgent 实例。
-    """
+    """Create the main task implementation agent."""
     rails = _build_rails(
         config,
         edit_safety_rail=edit_safety_rail,
     )
-    rails.append(_build_skill_rail(
-        skill_names or [
-            "implement",
-            "verify",
-            "communicate",
-        ],
-    ))
+    rails.append(
+        _build_skill_rail(
+            config,
+            skill_names
+            or [
+                "implement",
+                "verify",
+                "communicate",
+            ],
+        )
+    )
     if extra_rails:
         rails.extend(extra_rails)
 
@@ -106,16 +93,12 @@ def create_auto_harness_agent(
     system_prompt = "\n\n".join(
         s.render(config.language) for s in sections
     )
-
     workspace = workspace_override or config.workspace
-
-    agent = create_deep_agent(
+    return create_deep_agent(
         model=config.model,
         card=AgentCard(
             name="auto-harness",
-            description=(
-                "自主优化 harness 框架的编码 agent"
-            ),
+            description="自主优化 harness 框架的编码 agent",
         ),
         system_prompt=system_prompt,
         tools=tools or None,
@@ -128,12 +111,13 @@ def create_auto_harness_agent(
         language=config.language,
         enable_task_planning=True,
         enable_async_subagent=True,
-        max_iterations=30,
+        max_iterations=config.resolve_agent_iterations(
+            "implement", 30
+        ),
         sys_operation=_build_trusted_local_sys_operation(
             "auto-harness"
         ),
     )
-    return agent
 
 
 def create_commit_agent(
@@ -141,7 +125,7 @@ def create_commit_agent(
     *,
     workspace_override: Optional[str] = None,
 ) -> "DeepAgent":
-    """创建提交阶段专用 agent。"""
+    """Create the dedicated commit-stage agent."""
     return create_auto_harness_agent(
         config,
         workspace_override=workspace_override,
@@ -154,9 +138,18 @@ def _build_rails(
     *,
     edit_safety_rail: Optional["AgentRail"] = None,
 ) -> list["AgentRail"]:
-    """构建 auto-harness 专用 rails。"""
+    """Build the standard rails for writable task stages."""
     from openjiuwen.auto_harness.rails.context_rail import (
         AutoHarnessContextRail,
+    )
+    from openjiuwen.auto_harness.rails.edit_safety_rail import (
+        EditSafetyRail,
+    )
+    from openjiuwen.auto_harness.rails.experience_rail import (
+        AutoHarnessExperienceRail,
+    )
+    from openjiuwen.auto_harness.rails.security_rail import (
+        SecurityRail,
     )
     from openjiuwen.harness.cli.rails.tool_tracker import (
         ToolTrackingRail,
@@ -167,17 +160,8 @@ def _build_rails(
     from openjiuwen.harness.rails.lsp_rail import (
         LspRail,
     )
-    from openjiuwen.auto_harness.rails.security_rail import (
-        SecurityRail,
-    )
-    from openjiuwen.auto_harness.rails.experience_rail import (
-        AutoHarnessExperienceRail,
-    )
-    from openjiuwen.auto_harness.rails.edit_safety_rail import (
-        EditSafetyRail,
-    )
 
-    rails: list["AgentRail"] = [
+    return [
         ToolTrackingRail(),
         FileSystemRail(),
         AutoHarnessContextRail(preset=True),
@@ -188,13 +172,10 @@ def _build_rails(
         ),
         SecurityRail(
             immutable_files=config.immutable_files,
-            high_impact_prefixes=(
-                config.high_impact_prefixes
-            ),
+            high_impact_prefixes=config.high_impact_prefixes,
         ),
         edit_safety_rail or EditSafetyRail(),
     ]
-    return rails
 
 
 def _build_subagents(
@@ -202,17 +183,16 @@ def _build_subagents(
     *,
     workspace: Optional[str] = None,
 ) -> list[object]:
-    """构建 auto-harness 可调用的子代理。"""
+    """Build the reusable subagents exposed to auto-harness."""
+    from openjiuwen.harness.subagents.browser_agent import (
+        build_browser_agent_config,
+    )
     from openjiuwen.harness.subagents.explore_agent import (
         DEFAULT_EXPLORE_AGENT_DESCRIPTION,
         build_explore_agent_config,
     )
-    from openjiuwen.harness.subagents.browser_agent import (
-        build_browser_agent_config,
-    )
-    resolved_language = resolve_language(
-        config.language,
-    )
+
+    resolved_language = resolve_language(config.language)
     subagent_workspace = workspace or config.workspace
     subagents: list[object] = [
         build_explore_agent_config(
@@ -226,17 +206,20 @@ def _build_subagents(
             model=config.model,
             workspace=subagent_workspace,
             language=resolved_language,
-            max_iterations=20,
+            max_iterations=config.resolve_agent_iterations(
+                "explore_subagent", 20
+            ),
         ),
     ]
-
     try:
         subagents.append(
             build_browser_agent_config(
                 config.model,
                 workspace=subagent_workspace,
                 language=resolved_language,
-                max_iterations=20,
+                max_iterations=config.resolve_agent_iterations(
+                    "browser_subagent", 20
+                ),
             )
         )
     except Exception:  # noqa: BLE001
@@ -250,38 +233,28 @@ def _build_subagents(
 def _load_ci_gate_rules(
     config: "AutoHarnessConfig",
 ) -> str:
-    """加载 CI 门控规则。"""
+    """Load CI gate rules text for prompt construction."""
     if config.ci_gate_config:
         path = Path(config.ci_gate_config)
     else:
-        path = (
-            Path(__file__).parent
-            / "resources"
-            / "ci_gate.yaml"
-        )
+        path = _PACKAGE_DIR / "resources" / "ci_gate.yaml"
     if path.exists():
         return path.read_text(encoding="utf-8")
     return ""
 
 
-# ----------------------------------------------------------
-# 各阶段 Agent 工厂函数
-# ----------------------------------------------------------
-
-_PROMPTS_DIR = Path(__file__).parent / "prompts"
-
-
 def _load_prompt(filename: str) -> str:
-    """加载 prompt 模板文件内容。"""
-    path = _PROMPTS_DIR / filename
-    return path.read_text(encoding="utf-8")
+    """Load a prompt template from the package prompt directory."""
+    return (_PROMPTS_DIR / filename).read_text(
+        encoding="utf-8"
+    )
 
 
 def _render_prompt(
     template: str,
     **values: str,
 ) -> str:
-    """Render simple ``{name}`` placeholders without touching JSON braces."""
+    """Render simple placeholders without touching JSON braces."""
     rendered = template
     for key, value in values.items():
         rendered = rendered.replace(
@@ -294,9 +267,12 @@ def _render_prompt(
 def _build_readonly_rails(
     config: "AutoHarnessConfig",
 ) -> list["AgentRail"]:
-    """构建只读 rails（无 EditCheckRail）。"""
+    """Build readonly rails for assess/plan/eval style stages."""
     from openjiuwen.auto_harness.rails.context_rail import (
         AutoHarnessContextRail,
+    )
+    from openjiuwen.auto_harness.rails.experience_rail import (
+        AutoHarnessExperienceRail,
     )
     from openjiuwen.harness.cli.rails.tool_tracker import (
         ToolTrackingRail,
@@ -306,9 +282,6 @@ def _build_readonly_rails(
     )
     from openjiuwen.harness.rails.lsp_rail import (
         LspRail,
-    )
-    from openjiuwen.auto_harness.rails.experience_rail import (
-        AutoHarnessExperienceRail,
     )
 
     return [
@@ -324,34 +297,44 @@ def _build_readonly_rails(
 
 
 def _build_skill_rail(
+    config: "AutoHarnessConfig",
     skill_names: List[str],
 ) -> "AgentRail":
-    """构建指向包内 skills/ 目录的 SkillUseRail。
-
-    Args:
-        skill_names: 要启用的 skill 名称列表。
-
-    Returns:
-        配置好的 SkillUseRail 实例。
-    """
+    """Build a skill rail from package-local and configured skill roots."""
     from openjiuwen.harness.rails.skill_use_rail import (
         SkillUseRail,
     )
 
-    skills_dir = [
-        str(Path(_SKILLS_DIR) / s)
-        for s in skill_names
-    ]
+    roots = [_SKILLS_DIR, *config.skills_dirs]
+    skills_dir: list[str] = []
+    enabled_skills: list[str] = []
+    for root in roots:
+        root_path = Path(root)
+        if not root_path.is_dir():
+            continue
+        if not any(
+            (root_path / skill_name).is_dir()
+            for skill_name in skill_names
+        ):
+            continue
+        skills_dir.append(str(root_path))
+    for skill_name in skill_names:
+        for root in skills_dir:
+            if (Path(root) / skill_name).is_dir():
+                enabled_skills.append(skill_name)
+                break
     return SkillUseRail(
         skills_dir=skills_dir,
         skill_mode="all",
+        enabled_skills=enabled_skills,
     )
 
 
 def _build_research_tools(
     config: "AutoHarnessConfig",
 ) -> List[Tool | ToolCard]:
-    """Build readonly research tools for assess/plan phases."""
+    """Build readonly research tools for assess and plan stages."""
+    del config
     from openjiuwen.harness.tools import (
         WebFetchWebpageTool,
         WebFreeSearchTool,
@@ -366,10 +349,10 @@ def _build_research_tools(
 def create_assess_agent(
     config: "AutoHarnessConfig",
 ) -> "DeepAgent":
-    """创建 Assessment 阶段的 DeepAgent。"""
+    """Create the assessment-stage agent."""
     prompt = _load_prompt("assess.md")
     rails = _build_readonly_rails(config)
-    rails.append(_build_skill_rail(["assess"]))
+    rails.append(_build_skill_rail(config, ["assess"]))
     return create_deep_agent(
         model=config.model,
         card=AgentCard(
@@ -386,7 +369,9 @@ def create_assess_agent(
         workspace=config.workspace,
         language=config.language,
         enable_async_subagent=True,
-        max_iterations=30,
+        max_iterations=config.resolve_agent_iterations(
+            "assess", 30
+        ),
         sys_operation=_build_trusted_local_sys_operation(
             "auto-harness-assess"
         ),
@@ -396,10 +381,10 @@ def create_assess_agent(
 def create_plan_agent(
     config: "AutoHarnessConfig",
 ) -> "DeepAgent":
-    """创建 Planning 阶段的 DeepAgent。"""
+    """Create the planning-stage agent."""
     prompt = _load_prompt("plan.md")
     rails = _build_readonly_rails(config)
-    rails.append(_build_skill_rail(["assess"]))
+    rails.append(_build_skill_rail(config, ["plan"]))
     return create_deep_agent(
         model=config.model,
         card=AgentCard(
@@ -416,7 +401,9 @@ def create_plan_agent(
         workspace=config.workspace,
         language=config.language,
         enable_async_subagent=True,
-        max_iterations=15,
+        max_iterations=config.resolve_agent_iterations(
+            "plan", 15
+        ),
         sys_operation=_build_trusted_local_sys_operation(
             "auto-harness-plan"
         ),
@@ -426,10 +413,10 @@ def create_plan_agent(
 def create_eval_agent(
     config: "AutoHarnessConfig",
 ) -> "DeepAgent":
-    """创建 Evaluator 阶段的 DeepAgent。"""
+    """Create the evaluator agent used by the verify fix loop."""
     prompt = _load_prompt("evaluate.md")
     rails = _build_readonly_rails(config)
-    rails.append(_build_skill_rail(["verify"]))
+    rails.append(_build_skill_rail(config, ["verify"]))
     return create_deep_agent(
         model=config.model,
         card=AgentCard(
@@ -445,9 +432,45 @@ def create_eval_agent(
         workspace=config.workspace,
         language=config.language,
         enable_async_subagent=True,
-        max_iterations=10,
+        max_iterations=config.resolve_agent_iterations(
+            "eval", 10
+        ),
         sys_operation=_build_trusted_local_sys_operation(
             "auto-harness-eval"
+        ),
+    )
+
+
+def create_select_pipeline_agent(
+    config: "AutoHarnessConfig",
+) -> "DeepAgent":
+    """Create the pipeline-selection agent."""
+    prompt = _load_prompt("select_pipeline.md")
+    rails = _build_readonly_rails(config)
+    rails.append(
+        _build_skill_rail(config, ["select_pipeline"])
+    )
+    return create_deep_agent(
+        model=config.model,
+        card=AgentCard(
+            name="auto-harness-select-pipeline",
+            description="选择最合适的优化流水线",
+        ),
+        system_prompt=prompt,
+        tools=_build_research_tools(config) or None,
+        subagents=_build_subagents(
+            config,
+            workspace=config.workspace,
+        ) or None,
+        rails=rails or None,
+        workspace=config.workspace,
+        language=config.language,
+        enable_async_subagent=True,
+        max_iterations=config.resolve_agent_iterations(
+            "select_pipeline", 10
+        ),
+        sys_operation=_build_trusted_local_sys_operation(
+            "auto-harness-select-pipeline"
         ),
     )
 
@@ -458,27 +481,27 @@ def create_learnings_agent(
     session_results: str = "",
     existing_memories: str = "",
 ) -> "DeepAgent":
-    """创建 Learnings 反思阶段的 DeepAgent。"""
+    """Create the session learnings agent."""
     prompt = _render_prompt(
         _load_prompt("learnings.md"),
         session_results=session_results,
         existing_memories=existing_memories,
     )
     rails = _build_readonly_rails(config)
-    rails.append(_build_skill_rail(["communicate"]))
+    rails.append(_build_skill_rail(config, ["communicate"]))
     return create_deep_agent(
         model=config.model,
         card=AgentCard(
             name="auto-harness-learnings",
-            description=(
-                "反思 session 结果并提取经验"
-            ),
+            description="反思 session 结果并提取经验",
         ),
         system_prompt=prompt,
         rails=rails or None,
         workspace=config.workspace,
         language=config.language,
-        max_iterations=5,
+        max_iterations=config.resolve_agent_iterations(
+            "learnings", 5
+        ),
         sys_operation=_build_trusted_local_sys_operation(
             "auto-harness-learnings"
         ),
