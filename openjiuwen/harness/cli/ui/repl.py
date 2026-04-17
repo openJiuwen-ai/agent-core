@@ -487,6 +487,10 @@ async def _subcmd_run(
             f" | pr={r.pr_url or 'N/A'}"
             f" | error={r.error or 'none'}"
         )
+        if r.summary:
+            console.print(
+                f"    summary={r.summary}"
+            )
 
 
 async def _subcmd_memory(

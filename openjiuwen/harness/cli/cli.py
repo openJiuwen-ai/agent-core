@@ -629,6 +629,8 @@ async def _run_auto_harness(
                 f" | pr={r.pr_url or 'N/A'}"
                 f" | error={r.error or 'none'}"
             )
+            if r.summary:
+                click.echo(f"  summary={r.summary}")
         return 0
 
     # Full session or dry-run
@@ -682,6 +684,15 @@ async def _run_auto_harness(
         f"Session 完成: {ok}/{len(results)} 成功, "
         f"耗时 {elapsed:.1f}s"
     )
+    for i, r in enumerate(results):
+        s = "OK" if r.success else "FAIL"
+        click.echo(
+            f"Task {i + 1}: {s}"
+            f" | pr={r.pr_url or 'N/A'}"
+            f" | error={r.error or 'none'}"
+        )
+        if r.summary:
+            click.echo(f"  summary={r.summary}")
     return 0
 
 
