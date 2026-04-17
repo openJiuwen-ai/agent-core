@@ -191,6 +191,7 @@ class MemoryIndexManager:
         self._file_stability_tracker: Dict[str, float] = {}
         self.embedding_config = None
         self.sys_operation: Optional["SysOperation"] = None
+        self.llm: Optional[Any] = None
 
     @classmethod
     async def get(
@@ -931,8 +932,6 @@ class MemoryIndexManager:
             return await self._search_vector_fallback(query_vec, limit)
 
         try:
-            import math
-
             query_blob = vector_to_blob(query_vec)
 
             source_filter, source_params = self._build_source_filter()

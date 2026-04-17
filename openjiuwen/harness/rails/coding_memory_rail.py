@@ -28,7 +28,7 @@ from openjiuwen.core.memory.lite.coding_memory_tools import (
     get_decorated_tools,
     init_memory_manager_async,
 )
-from openjiuwen.core.memory.lite.frontmatter import parse_frontmatter
+from openjiuwen.core.memory.lite.frontmatter import parse_frontmatter, _extract_body
 from openjiuwen.core.memory.lite.manager import MemoryIndexManager
 
 
@@ -209,25 +209,35 @@ class CodingMemoryRail(DeepAgentRail):
     
     async def _init_coding_memory_manager(self, ctx: AgentCallbackContext) -> None:
         """初始化 Coding Memory Index Manager.
-        
+
         参考 MemoryRail 的 _init_memory_manager 实现。
-        
+
         Args:
             ctx: Agent callback context.
         """
         agent_id = "default"
-        
+
         try:
             if hasattr(ctx.agent, "card") and ctx.agent.card:
                 agent_id = getattr(ctx.agent.card, "id", "default")
-            
+
+            # 获取 LLM 实例
+            llm = None
+            get_llm_func = getattr(ctx.agent, "_get_llm", None)
+            if get_llm_func is not None:
+                try:
+                    llm = get_llm_func()
+                except ValueError:
+                    llm = None
+
             manager = await init_memory_manager_async(
                 workspace=self.workspace,
                 agent_id=agent_id,
                 embedding_config=self._embedding_config,
                 sys_operation=self.sys_operation,
+                llm=llm,
             )
-            
+
             if manager:
                 self._manager = manager
                 self._manager_initialized = True
@@ -237,7 +247,7 @@ class CodingMemoryRail(DeepAgentRail):
                 )
             else:
                 logger.warning("[CodingMemoryRail] Coding memory manager initialization failed")
-        
+
         except Exception as e:
             logger.error(f"[CodingMemoryRail] Failed to initialize coding memory manager: {e}")
     
@@ -311,37 +321,40 @@ class CodingMemoryRail(DeepAgentRail):
     
     async def _auto_recall(self, query: str) -> tuple[Optional[str], int]:
         """自动召回相关记忆.
-        
+
+        只注入 body（不含 frontmatter），避免浪费 token。
+        标题附加时间标注辅助模型判断记忆时效性。
+
         Args:
             query: 用户查询文本
-            
+
         Returns:
             (召回内容, 总记忆数)
         """
         if not self._manager:
             return None, 0
-        
+
         # 执行混合检索（opts 参数方式）
         opts = {
             "max_results": self.MAX_RECALL_RESULTS,
         }
         results = await self._manager.search(query, opts=opts)
-        
+
         # 统计总记忆数
         total = await self._count_memory_files(self._coding_memory_dir)
-        
+
         if not results:
             return None, total
-        
+
         # 组装召回内容
         parts = []
         total_bytes = 0
-        
+
         for r in results:
             # 跳过 MEMORY.md 本身
             if r.get("path") == "MEMORY.md":
                 continue
-            
+
             # 读取文件内容
             r_path = r.get("path", "")
             content = await self._read_file_safe(
@@ -349,28 +362,43 @@ class CodingMemoryRail(DeepAgentRail):
             )
             if not content:
                 continue
-            
-            content_bytes = len(content.encode("utf-8"))
-            
+
+            # 提取 body（不含 frontmatter），避免注入时重复浪费 token
+            fm = parse_frontmatter(content)
+            body = _extract_body(content)
+            if not body:
+                continue
+
+            body_bytes = len(body.encode("utf-8"))
+
             # 检查大小限制
-            if total_bytes + content_bytes > self.MAX_RECALL_TOTAL_BYTES:
+            if total_bytes + body_bytes > self.MAX_RECALL_TOTAL_BYTES:
                 remaining = self.MAX_RECALL_TOTAL_BYTES - total_bytes
                 if remaining > 200:  # 至少保留 200 字节才截断
-                    content = content[:remaining] + "\n\n... (truncated)"
-                    fm = parse_frontmatter(content)
+                    body = body[:remaining] + "\n\n... (truncated)"
                     title = fm.get("name", r_path) if fm else r_path
-                    parts.append(f"### {title} [{r_path}]\n\n{content}")
+                    date_tag = ""
+                    if fm:
+                        updated = fm.get("updated_at") or fm.get("created_at") or ""
+                        if updated:
+                            date_tag = f" (updated: {updated})"
+                    parts.append(f"### {title} [{r_path}]{date_tag}\n\n{body}")
                 break
-            
+
             # 正常添加
-            fm = parse_frontmatter(content)
             title = fm.get("name", r_path) if fm else r_path
-            parts.append(f"### {title} [{r_path}]\n\n{content}")
-            total_bytes += content_bytes
-        
+            date_tag = ""
+            if fm:
+                updated = fm.get("updated_at") or fm.get("created_at") or ""
+                if updated:
+                    date_tag = f" (updated: {updated})"
+
+            parts.append(f"### {title} [{r_path}]{date_tag}\n\n{body}")
+            total_bytes += body_bytes
+
         if not parts:
             return None, total
-        
+
         return "\n\n---\n\n".join(parts), total
     
     async def _read_memory_index(self) -> str:
