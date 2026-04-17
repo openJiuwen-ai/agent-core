@@ -64,6 +64,7 @@ Retrieval strategy for episodes when adding memory (e.g. for history context).
 * **same_kind** (bool, optional): Restrict to same episode type. Default: False.
 * **exclude_future_results** (bool, optional): Exclude episodes after reference time. Default: True.
 * **rank_config** (BaseRankConfig, optional): Ranking config. Default: RRFRankConfig().
+* **min_score** (float, optional): Minimum score threshold. Default: 0.025 (overrides the **min_score** default 0.3 from [BaseStrategy](#class-basestrategy)).
 
 ---
 
@@ -83,7 +84,7 @@ Strategy for adding graph memory: language options for extraction/dedupe, recall
 * **skip_uuid_dedupe** (bool, optional): Skip uuid4 de-duplication. Default: False.
 * **recall_episode** (EpisodeRetrievalStrategy, optional): Strategy for recalling past episodes. Default: EpisodeRetrievalStrategy().
 * **recall_entity** (RetrievalStrategy, optional): Strategy for recalling entities. Default: WeightedRankConfig(dense_name=0.7, dense_content=0.1, sparse_content=0.2), min_score=0.1.
-* **recall_relation** (RetrievalStrategy, optional): Strategy for recalling relations. Default: RRFRankConfig(), min_score=0.05.
+* **recall_relation** (RetrievalStrategy, optional): Strategy for recalling relations. Default: RRFRankConfig(), min_score=0.02.
 * **summary_target** (int, optional): Target word/character count for entity summaries (10–2000). Default: 250.
 * **merge_entities** (bool, optional): Whether to perform entity merging. Default: True.
 * **merge_relations** (bool, optional): Whether to perform relation merging. Default: True.

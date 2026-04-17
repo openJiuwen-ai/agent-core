@@ -669,14 +669,14 @@ class MilvusGraphStore(GraphStore):
             [query_embedding],
             "name_embedding",
             self.dense_search_params,
-            limit=k * 2,
+            limit=min(k * 3, 20),
             expr=expr,
         )
         dense_req_content = AnnSearchRequest(
             [query_embedding],
             "content_embedding",
             self.dense_search_params,
-            limit=k * 2,
+            limit=min(k * 3, 20),
             expr=expr,
         )
         full_text_search_params = self.full_text_search_params.copy()
@@ -684,7 +684,7 @@ class MilvusGraphStore(GraphStore):
             [query],
             "content_bm25",
             full_text_search_params,
-            limit=k * 2,
+            limit=min(k * 3, 20),
             expr=expr,
         )
         return [dense_req_name, dense_req_content, sparse_req_content]

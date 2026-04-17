@@ -64,7 +64,7 @@ class TestWeChatArticleParser:
                 return response
 
         with patch(
-            "openjiuwen.core.retrieval.indexing.processor.parser.wechat_article_parser.httpx.AsyncClient",
+            "openjiuwen.core.retrieval.indexing.processor.parser.web_page_parser.httpx.AsyncClient",
             FakeAsyncClient,
         ):
             parser = WeChatArticleParser()

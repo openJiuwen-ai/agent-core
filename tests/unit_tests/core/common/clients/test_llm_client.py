@@ -430,6 +430,63 @@ class TestCreateOpenAIClients:
         call_args = mock_httpx.call_args
         assert call_args[1]['config']['proxy'] is None
 
+    @pytest.mark.asyncio
+    async def test_create_async_openai_client_forwards_sanitized_custom_headers(
+            self, mock_create_httpx_client, mock_openai, mock_url_utils
+    ):
+        """Test async factory forwards sanitized custom headers only."""
+        config_obj = ModelClientConfig(
+            api_key="test-api-key",
+            api_base="https://api.openai.com/v1",
+            timeout=30,
+            max_retries=3,
+            verify_ssl=False,
+            client_provider="openai",
+            custom_headers={
+                "x-default": "custom-override",
+                "x-tenant": "tenant-a",
+                "X-Request-Num": 7,
+                "Authorization": "Bearer blocked",
+                "Content-Length": "blocked",
+                "X-Blank": "   ",
+            },
+        )
+
+        await create_async_openai_client(config_obj)
+
+        call_kwargs = mock_openai['AsyncOpenAI'].call_args.kwargs
+        assert call_kwargs["default_headers"] == {
+            "x-default": "custom-override",
+            "x-tenant": "tenant-a",
+            "X-Request-Num": "7",
+        }
+
+    @pytest.mark.asyncio
+    async def test_create_sync_openai_client_forwards_sanitized_custom_headers(
+            self, mock_create_httpx_client, mock_openai, mock_url_utils
+    ):
+        """Test sync factory forwards sanitized custom headers only."""
+        config_obj = ModelClientConfig(
+            api_key="test-api-key",
+            api_base="https://api.openai.com/v1",
+            timeout=30,
+            max_retries=3,
+            verify_ssl=False,
+            client_provider="openai",
+            custom_headers={
+                "X-Default": "sync-override",
+                "X-Trace-Id": "trace-001",
+            },
+        )
+
+        await create_openai_client(config_obj)
+
+        call_kwargs = mock_openai['OpenAI'].call_args.kwargs
+        assert call_kwargs["default_headers"] == {
+            "X-Default": "sync-override",
+            "X-Trace-Id": "trace-001",
+        }
+
     def test_registration_with_client_registry(self):
         """Test that OpenAI client factories are properly registered."""
         # Check if factories are registered

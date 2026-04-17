@@ -21,16 +21,12 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.common.document import Document
 from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
-from openjiuwen.core.retrieval.indexing.processor.parser.wechat_article_parser import (
-    _is_wechat_article_url,
-)
 
 # http(s) URL pattern
 HTTP_URL_PATTERN = re.compile(r"^https?://\S+", re.IGNORECASE)
 
 DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 DEFAULT_TIMEOUT = 30.0
 
@@ -48,10 +44,17 @@ MAIN_CONTENT_SELECTORS = [
     ".main-content",
 ]
 
+# Recognized WeChat article URL pattern
+WECHAT_MP_URL_PATTERN = re.compile(
+    r"^https?://(?:mp\.weixin\.qq\.com|.*?\.weixin\.qq\.com)/s\b.*",
+    re.IGNORECASE,
+)
+
 
 def _parse_html(html: str) -> BeautifulSoup:
     try:
         import lxml  # noqa: F401
+
         return BeautifulSoup(html, "lxml")
     except ImportError:
         return BeautifulSoup(html, "html.parser")
@@ -102,111 +105,8 @@ def _get_text_from_soup(soup: Optional[BeautifulSoup]) -> str:
     return text.strip()
 
 
-async def parse_web_page_url(
-    url: str,
-    doc_id: str = "",
-    *,
-    timeout: float = DEFAULT_TIMEOUT,
-    user_agent: str = DEFAULT_USER_AGENT,
-    verify: bool | str | ssl.SSLContext = True,
-    client: Optional[httpx.AsyncClient] = None,
-) -> List[Document]:
-    """
-    Fetch a web page URL and parse it into one or more Document objects.
-
-    Args:
-        url: Web page URL (http or https).
-        doc_id: Optional document ID; defaults to URL or generated UUID.
-        timeout: Request timeout in seconds (used only when ``client`` is not provided).
-        user_agent: HTTP User-Agent header.
-        verify: SSL verification for the httpx client: ``True`` (default CA bundle),
-            ``False`` to disable (e.g. corporate TLS inspection), a path to a CA bundle, or a custom
-            ``ssl.SSLContext`` — same semantics as :class:`httpx.AsyncClient`.
-        client: Optional shared :class:`httpx.AsyncClient`; if omitted, a client is created with
-            ``verify``, ``timeout``, and ``User-Agent`` and closed after the request.
-
-    Returns:
-        List of Document instances (typically one).
-
-    Raises:
-        build_error(StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR): On invalid URL or fetch/parse failure.
-    """
-    url = (url or "").strip()
-    if not url or not HTTP_URL_PATTERN.match(url):
-        raise build_error(
-            StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR,
-            error_msg=f"Not a valid HTTP URL: {url!r}",
-        )
-    if _is_wechat_article_url(url):
-        raise build_error(
-            StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR,
-            error_msg="Use WeChatArticleParser for WeChat URLs",
-        )
-
-    request_headers = {"User-Agent": user_agent}
-
-    async def _do_get(c: httpx.AsyncClient, *, headers_for_request: Optional[dict] = None) -> str:
-        response = await c.get(url, headers=headers_for_request)
-        response.raise_for_status()
-        return response.text
-
-    try:
-        if client is not None:
-            html = await _do_get(client, headers_for_request=request_headers)
-        else:
-            async with httpx.AsyncClient(
-                verify=verify,
-                timeout=httpx.Timeout(timeout),
-                headers=request_headers,
-            ) as http_client:
-                html = await _do_get(http_client, headers_for_request=None)
-    except httpx.HTTPStatusError as e:
-        status = e.response.status_code if e.response is not None else "?"
-        raise build_error(
-            StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR,
-            error_msg=f"Web page request failed: {status} for {url}",
-            cause=e,
-        ) from e
-    except httpx.RequestError as e:
-        raise build_error(
-            StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR,
-            error_msg=f"Web page fetch failed for {url}: {e}",
-            cause=e,
-        ) from e
-    except Exception as e:
-        raise build_error(
-            StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR,
-            error_msg=f"Web page fetch failed for {url}: {e}",
-            cause=e,
-        ) from e
-
-    soup = _parse_html(html)
-    title = _extract_title(soup)
-    content_node = _find_main_content(soup)
-    if not content_node:
-        raise build_error(
-            StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR,
-            error_msg=f"Could not find main content in page: {url}",
-        )
-    text = _get_text_from_soup(content_node)
-    if not text or len(text) < 50:
-        raise build_error(
-            StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR,
-            error_msg=f"Article content too short or empty after parsing: {url}",
-        )
-
-    effective_id = doc_id or url or str(uuid.uuid4())
-    doc = Document(
-        id_=effective_id,
-        text=text,
-        metadata={
-            "source_url": url,
-            "title": title or "(无标题)",
-            "source_type": "web_page",
-        },
-    )
-    logger.info("Parsed web page: url=%s title=%s", url, title or "(无标题)")
-    return [doc]
+def _is_wechat_article_url(url: str) -> bool:
+    return bool(url and WECHAT_MP_URL_PATTERN.match(url.strip()))
 
 
 class WebPageParser(Parser):
@@ -227,12 +127,191 @@ class WebPageParser(Parser):
         self.user_agent = user_agent
         self.verify = verify
 
+    @staticmethod
+    def _validate_url(url: str):
+        """
+        Checks if the input url is valid. If not, it raises an exception
+        Raises:
+            build_error(StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR): On invalid URL or fetch/parse failure.
+        """
+        url = (url or "").strip()
+        if not url or not HTTP_URL_PATTERN.match(url):
+            raise build_error(
+                StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR,
+                error_msg=f"Not a valid HTTP URL: {url!r}",
+            )
+        if _is_wechat_article_url(url):
+            raise build_error(
+                StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR,
+                error_msg="Use WeChatArticleParser for WeChat URLs",
+            )
+
+    @staticmethod
+    async def _do_get(url: str, c: httpx.AsyncClient, *, headers_for_request: Optional[dict] = None) -> str:
+        response = await c.get(url, headers=headers_for_request)
+        response.raise_for_status()
+        return response.text
+
+    @classmethod
+    async def _download_html(
+        cls,
+        url: str,
+        timeout: float = DEFAULT_TIMEOUT,
+        user_agent: str = DEFAULT_USER_AGENT,
+        verify: bool | str | ssl.SSLContext = True,
+        client: Optional[httpx.AsyncClient] = None,
+    ):
+        """
+        Downloads the HTML content from a web page URL.
+
+        Args:
+            url: Web page URL (http or https).
+            timeout: Request timeout in seconds (used only when ``client`` is not provided).
+            user_agent: HTTP User-Agent header.
+            verify: SSL verification for the httpx client: ``True`` (default CA bundle),
+                ``False`` to disable (e.g. corporate TLS inspection), a path to a CA bundle, or a custom
+                ``ssl.SSLContext`` — same semantics as :class:`httpx.AsyncClient`.
+            client: Optional shared :class:`httpx.AsyncClient`; if omitted, a client is created with
+                ``verify``, ``timeout``, and ``User-Agent`` and closed after the request.
+
+        Returns:
+            HTML content string
+
+        Raises:
+            build_error(StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR): On invalid URL or fetch/parse failure.
+        """
+        request_headers = {"User-Agent": user_agent}
+
+        try:
+            if client is not None:
+                return await cls._do_get(url, client, headers_for_request=request_headers)
+            else:
+                async with httpx.AsyncClient(
+                    verify=verify,
+                    timeout=httpx.Timeout(timeout),
+                    headers=request_headers,
+                ) as http_client:
+                    return await cls._do_get(url, http_client, headers_for_request=None)
+
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code if e.response is not None else "?"
+            raise build_error(
+                StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR,
+                error_msg=f"Web page request failed: {status} for {url}",
+                cause=e,
+            ) from e
+        except httpx.RequestError as e:
+            raise build_error(
+                StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR,
+                error_msg=f"Web page fetch failed for {url}: {e}",
+                cause=e,
+            ) from e
+        except Exception as e:
+            raise build_error(
+                StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR,
+                error_msg=f"Web page fetch failed for {url}: {e}",
+                cause=e,
+            ) from e
+
+    @classmethod
+    async def _parse_html(
+        cls,
+        html: str,
+        doc_id: str = "",
+        source: Optional[str] = None,
+    ) -> List[Document]:
+        """
+        Fetch a web page URL and parse it into one or more Document objects.
+
+        Args:
+            html: Web page content string
+            doc_id: Optional document ID; defaults to URL or generated UUID.
+            source: HTML source (URL or file path).
+
+        Returns:
+            List of Document instances (typically one).
+
+        Raises:
+            build_error(StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR): On invalid URL or fetch/parse failure.
+        """
+        soup = _parse_html(html)
+        title = _extract_title(soup)
+        content_node = _find_main_content(soup)
+        if not content_node:
+            raise build_error(
+                StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR,
+                error_msg=f"Could not find main content in HTML (source={source})",
+            )
+        text = _get_text_from_soup(content_node)
+        if not text or len(text) < 50:
+            raise build_error(
+                StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR,
+                error_msg=f"Article content too short or empty after parsing html (source={source})",
+            )
+
+        return [
+            Document(
+                id_=doc_id,
+                text=text,
+                metadata={
+                    "title": title or "(无标题)",
+                    "source_type": "web_page",
+                },
+            )
+        ]
+
+    @classmethod
+    async def parse_url(
+        cls,
+        url: str,
+        doc_id: str = "",
+        *,
+        timeout: float = DEFAULT_TIMEOUT,
+        user_agent: str = DEFAULT_USER_AGENT,
+        verify: bool | str | ssl.SSLContext = True,
+        client: Optional[httpx.AsyncClient] = None,
+    ) -> List[Document]:
+        """
+        Fetch a web page URL and parse it into one or more Document objects.
+
+        Args:
+            url: Web page URL (http or https).
+            doc_id: Optional document ID; defaults to URL or generated UUID.
+            timeout: Request timeout in seconds (used only when ``client`` is not provided).
+            user_agent: HTTP User-Agent header.
+            verify: SSL verification for the httpx client: ``True`` (default CA bundle),
+                ``False`` to disable (e.g. corporate TLS inspection), a path to a CA bundle, or a custom
+                ``ssl.SSLContext`` — same semantics as :class:`httpx.AsyncClient`.
+            client: Optional shared :class:`httpx.AsyncClient`; if omitted, a client is created with
+                ``verify``, ``timeout``, and ``User-Agent`` and closed after the request.
+
+        Returns:
+            List of Document instances (typically one).
+
+        Raises:
+            build_error(StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR): On invalid URL or fetch/parse failure.
+        """
+
+        cls._validate_url(url)
+        html = await cls._download_html(url, timeout=timeout, user_agent=user_agent, verify=verify, client=client)
+        effective_id = doc_id or url or str(uuid.uuid4())
+        docs = await cls._parse_html(html, effective_id)
+        for doc in docs:
+            doc.metadata["source_url"] = url
+            logger.info(
+                "Parsed web page: url=%s title=%s",
+                url,
+                doc.metadata.get("title") or "(无标题)",
+            )
+
+        return docs
+
     async def parse(self, doc: str, doc_id: str = "", **kwargs) -> List[Document]:
         timeout = kwargs.get("timeout", self.timeout)
         user_agent = kwargs.get("user_agent", self.user_agent)
         verify = kwargs.get("verify", self.verify)
         client = kwargs.get("client")
-        return await parse_web_page_url(
+        return await self.parse_url(
             doc,
             doc_id=doc_id or doc,
             timeout=timeout,
@@ -246,3 +325,6 @@ class WebPageParser(Parser):
         if not doc or not HTTP_URL_PATTERN.match(doc.strip()):
             return False
         return not _is_wechat_article_url(doc)
+
+
+parse_web_page_url = WebPageParser.parse_url

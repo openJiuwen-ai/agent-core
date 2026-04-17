@@ -21,11 +21,8 @@ HTTP_URL_PATTERN = re.compile(r"^https?://\S+", re.IGNORECASE)
 
 def _default_routes() -> List[Tuple[Union[re.Pattern, Callable[[str], bool]], Parser]]:
     """Default (pattern_or_callable, parser): WeChat first, then generic web."""
-    from openjiuwen.core.retrieval.indexing.processor.parser.wechat_article_parser import (
-        WECHAT_MP_URL_PATTERN,
-        WeChatArticleParser,
-    )
-    from openjiuwen.core.retrieval.indexing.processor.parser.web_page_parser import WebPageParser
+    from openjiuwen.core.retrieval.indexing.processor.parser.wechat_article_parser import WeChatArticleParser
+    from openjiuwen.core.retrieval.indexing.processor.parser.web_page_parser import WebPageParser, WECHAT_MP_URL_PATTERN
 
     return [
         (WECHAT_MP_URL_PATTERN, WeChatArticleParser()),

@@ -64,6 +64,7 @@ class openjiuwen.core.memory.config.graph.EpisodeRetrievalStrategy(RetrievalStra
 * **same_kind**（bool，可选）：是否限制为同类型情节。默认值：False。
 * **exclude_future_results**（bool，可选）：是否排除参考时间之后的情节。默认值：True。
 * **rank_config**（BaseRankConfig，可选）：排序配置。默认值：RRFRankConfig()。
+* **min_score**（float，可选）：最低分数阈值。默认值：0.025（覆盖 [BaseStrategy](#class-basestrategy) 中 **min_score** 的默认值 0.3）。
 
 ---
 
@@ -83,7 +84,7 @@ class openjiuwen.core.memory.config.graph.AddMemStrategy(BaseModel)
 * **skip_uuid_dedupe**（bool，可选）：是否跳过 uuid4 去重。默认值：False。
 * **recall_episode**（EpisodeRetrievalStrategy，可选）：历史情节召回策略。默认值：EpisodeRetrievalStrategy()。
 * **recall_entity**（RetrievalStrategy，可选）：实体召回策略。默认值：WeightedRankConfig(dense_name=0.7, dense_content=0.1, sparse_content=0.2)，min_score=0.1。
-* **recall_relation**（RetrievalStrategy，可选）：关系召回策略。默认值：RRFRankConfig()，min_score=0.05。
+* **recall_relation**（RetrievalStrategy，可选）：关系召回策略。默认值：RRFRankConfig()，min_score=0.02。
 * **summary_target**（int，可选）：实体摘要目标字数（10–2000）。默认值：250。
 * **merge_entities**（bool，可选）：是否进行实体合并。默认值：True。
 * **merge_relations**（bool，可选）：是否进行关系合并。默认值：True。

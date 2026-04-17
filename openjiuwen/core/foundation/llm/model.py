@@ -396,6 +396,7 @@ def init_model(
         timeout: float = 60.0,
         max_retries: int = 3,
         verify_ssl: bool = False,
+        custom_headers: Optional[dict[str, str]] = None,
 ) -> Model:
     """Convenience factory to create a Model instance.
 
@@ -410,6 +411,7 @@ def init_model(
         timeout: Request timeout in seconds.
         max_retries: Maximum number of retries.
         verify_ssl: Whether to verify SSL certificates.
+        custom_headers: Additional headers sent with each model request.
 
     Returns:
         Configured Model instance.
@@ -421,6 +423,7 @@ def init_model(
         timeout=timeout,
         max_retries=max_retries,
         verify_ssl=verify_ssl,
+        custom_headers=custom_headers,
     )
     request_config = ModelRequestConfig(
         model=model_name,
