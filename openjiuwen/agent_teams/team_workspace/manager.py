@@ -163,11 +163,13 @@ class TeamWorkspaceManager:
     @staticmethod
     def _create_windows_junction(target_path: str, link_path: str) -> None:
         """Create a directory junction using mklink /J on Windows."""
+        cmd_path = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe")
         result = subprocess.run(
-            ["cmd", "/c", "mklink", "/J", link_path, target_path],
+            [cmd_path, "/c", "mklink", "/J", link_path, target_path],
             capture_output=True,
             text=True,
             check=False,
+            shell=False,
         )
         if result.returncode != 0:
             error_output = result.stderr.strip() or result.stdout.strip()
