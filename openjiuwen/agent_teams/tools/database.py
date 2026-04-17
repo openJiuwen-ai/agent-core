@@ -49,6 +49,7 @@ from openjiuwen.agent_teams.schema.status import (
 )
 from openjiuwen.agent_teams.spawn.context import get_session_id
 from openjiuwen.agent_teams.tools.models import (
+    _clear_session_model_cache,
     _get_message_model,
     _get_message_read_status_model,
     _get_task_dependency_model,
@@ -272,6 +273,11 @@ class TeamDatabase:
         # This ensures we have the table objects to remove
         for model in (task_model, dep_model, message_model, read_status_model):
             SQLModel.metadata.remove(model.__table__)
+
+        # Clear model cache so the next create_cur_session_tables() for the
+        # same session_id builds fresh models with new __table__ objects
+        # properly registered in metadata.
+        _clear_session_model_cache(session_id)
 
         team_logger.info(f"Dropped dynamic tables for session {session_id}")
 

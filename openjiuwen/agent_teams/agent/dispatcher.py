@@ -17,7 +17,7 @@ from openjiuwen.agent_teams.agent.coordinator import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.schema.events import MessageEvent, TeamEvent
-from openjiuwen.agent_teams.schema.status import MemberStatus, TaskStatus
+from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
 
@@ -125,8 +125,8 @@ class EventDispatcher:
         }
     )
 
-    _STALE_CLAIM_SECONDS = 2 * 60.0
-    _STALE_PENDING_SECONDS = 2 * 60.0
+    _STALE_CLAIM_SECONDS = 10 * 60.0
+    _STALE_PENDING_SECONDS = 10 * 60.0
 
     def __init__(self, host: DispatcherHost) -> None:
         self._host = host
@@ -321,9 +321,6 @@ class EventDispatcher:
                 f"[成员事件] 成员 {target_id} 状态变更: "
                 f"{old_status} → {new_status}"
             )
-            await self._nudge_idle_member_with_claimed_tasks(
-                target_id, old_status, new_status,
-            )
         elif event_type == TeamEvent.MEMBER_EXECUTION_CHANGED:
             text = (
                 f"[成员事件] 成员 {target_id} 执行状态变更: "
@@ -337,52 +334,6 @@ class EventDispatcher:
             return
 
         team_logger.debug(text)
-
-    _IDLE_NUDGE_STATUSES = frozenset(
-        {MemberStatus.READY.value, MemberStatus.ERROR.value}
-    )
-
-    async def _nudge_idle_member_with_claimed_tasks(
-        self,
-        target_id: str,
-        old_status: str | None,
-        new_status: str | None,
-    ) -> None:
-        """Remind a member to resume claimed work on transition to READY/ERROR.
-
-        Triggered by the leader when a member's status flips to ``ready`` or
-        ``error``. If that member still holds tasks in ``claimed`` state, the
-        leader sends a direct message listing them so the member picks the
-        work back up on its next wake — instead of idling with live claims.
-        """
-        if not target_id:
-            return
-        if new_status not in self._IDLE_NUDGE_STATUSES:
-            return
-        if new_status == old_status:
-            return
-        task_manager = self._host.task_manager
-        message_manager = self._host.message_manager
-        if task_manager is None or message_manager is None:
-            return
-
-        claimed = await task_manager.get_tasks_by_assignee(
-            target_id, status=TaskStatus.CLAIMED.value,
-        )
-        if not claimed:
-            return
-
-        lines = [
-            f"检测到你已认领但尚未完成的任务（共 {len(claimed)} 个），请继续推进："
-        ]
-        for task in claimed:
-            lines.append(f"- [{task.task_id}] {task.title}: {task.content}")
-        content = "\n".join(lines)
-        await message_manager.send_message(content, target_id)
-        team_logger.info(
-            "[leader] nudged {} about {} claimed task(s) after status → {}",
-            target_id, len(claimed), new_status,
-        )
 
     # ------------------------------------------------------------------
     # Message handling
@@ -626,7 +577,7 @@ class EventDispatcher:
     def _format_stale_claim_nudge(task) -> str:
         return (
             f"[催促] 你已认领的任务 [{task.task_id}] {task.title} "
-            f"已超过 60 秒仍未完成，请继续推进：{task.content}"
+            f"已超过 10 mins 仍未完成，请继续推进：{task.content}"
         )
 
     async def _self_nudge_stale_claim(self, task) -> None:
