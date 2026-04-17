@@ -391,15 +391,10 @@ class AutoHarnessOrchestrator:
         """单个 task 的完整执行循环。"""
         from openjiuwen.auto_harness.agent import (
             create_auto_harness_agent,
+            create_commit_agent,
         )
         from openjiuwen.auto_harness.rails.edit_safety_rail import (
             EditSafetyRail,
-        )
-        from openjiuwen.auto_harness.schema import (
-            CommitFacts,
-        )
-        from openjiuwen.auto_harness.tools.commit_tool import (
-            CommitTool,
         )
 
         related = await self.experience_store.search(
@@ -413,17 +408,14 @@ class AutoHarnessOrchestrator:
         edit_safety_rail = EditSafetyRail()
         edit_safety_rail.reset()
         preexisting_dirty_files = await self.git.list_dirty_files()
-        commit_facts_ref = [CommitFacts()]
-        commit_tool = CommitTool(
-            git=self.git,
-            facts_provider=lambda: commit_facts_ref[0],
-            language=self.config.language,
-        )
         task_agent = create_auto_harness_agent(
             self.config,
             workspace_override=wt_path,
             edit_safety_rail=edit_safety_rail,
-            extra_tools=[commit_tool],
+        )
+        commit_agent = create_commit_agent(
+            self.config,
+            workspace_override=wt_path,
         )
 
         yield self._msg(
@@ -438,14 +430,13 @@ class AutoHarnessOrchestrator:
                     task,
                     related,
                     agent=task_agent,
+                    commit_agent=commit_agent,
                     git=self.git,
                     ci_gate=self.ci_gate,
                     fix_loop=self.fix_loop,
                     experience_store=self.experience_store,
                     edit_safety_rail=edit_safety_rail,
                     preexisting_dirty_files=preexisting_dirty_files,
-                    commit_facts_ref=commit_facts_ref,
-                    commit_tool=commit_tool,
                     msg_factory=self._msg,
                     result_holder=result_holder,
                 )

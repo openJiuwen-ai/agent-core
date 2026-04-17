@@ -99,6 +99,7 @@ class TestCycleResult:
     def test_defaults(self):
         cr = CycleResult()
         assert cr.success is False
+        assert cr.summary == ""
         assert cr.pr_url == ""
         assert cr.reverted is False
 

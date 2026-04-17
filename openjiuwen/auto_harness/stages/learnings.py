@@ -53,8 +53,6 @@ async def run_learnings(
         create_learnings_agent,
     )
 
-    agent = create_learnings_agent(config)
-
     results_text = "\n".join(
         f"- {r.pr_url or r.error or 'completed'} "
         f"(success={r.success}, "
@@ -68,6 +66,12 @@ async def run_learnings(
         f"{m.summary}"
         for m in recent
     ) or "无"
+
+    agent = create_learnings_agent(
+        config,
+        session_results=results_text,
+        existing_memories=existing_text,
+    )
 
     query = (
         f"本次 session 结果:\n{results_text}\n\n"

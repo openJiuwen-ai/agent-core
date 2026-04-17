@@ -12,7 +12,6 @@ from openjiuwen.auto_harness.rails.edit_safety_rail import (
 )
 from openjiuwen.auto_harness.schema import (
     AutoHarnessConfig,
-    CommitFacts,
     CycleResult,
     Experience,
     OptimizationTask,
@@ -21,9 +20,6 @@ from openjiuwen.auto_harness.stages.implement import (
     _iter_ci_gate_messages,
     _start_fix_loop,
     run_in_worktree_stream,
-)
-from openjiuwen.auto_harness.tools.commit_tool import (
-    CommitTool,
 )
 from openjiuwen.core.session.stream.base import (
     OutputSchema,
@@ -141,13 +137,16 @@ class _FakeGit:
                 "pr_url": "https://gitcode.com/openJiuwen/agent-core/pulls/123",
             }
         )
-        self.commit_calls: list[tuple[str, list[str]]] = []
         self._status = {
             "dirty_files": list(dirty_files or []),
             "tracked_modified_files": list(dirty_files or []),
             "untracked_files": [],
             "renamed_files": [],
         }
+        self._status_porcelain = "\n".join(
+            f" M {path}" for path in (dirty_files or [])
+        )
+        self._last_commit_stat = ""
 
     async def _git(self, *args):
         return 0, "ok"
@@ -164,27 +163,45 @@ class _FakeGit:
     async def diff_stat(self, paths=None):
         return " 2 files changed, 4 insertions(+)"
 
-    async def commit(self, message, files):
-        self.commit_calls.append((message, list(files)))
-        self._head = "commit456"
-        return {
-            "success": True,
-            "commit_sha": self._head,
-            "staged_files": list(files),
+    async def status_porcelain(self):
+        return self._status_porcelain
+
+    async def show_last_commit_stat(self):
+        return self._last_commit_stat
+
+    def mark_commit(
+        self,
+        sha: str,
+        stat: str,
+    ) -> None:
+        self._head = sha
+        self._last_commit_stat = stat
+        self._status = {
+            "dirty_files": [],
+            "tracked_modified_files": [],
+            "untracked_files": [],
+            "renamed_files": [],
         }
+        self._status_porcelain = ""
 
 
 class _FakeCommitAgent:
     def __init__(
         self,
-        commit_tool: CommitTool | None = None,
-        commit_files: list[str] | None = None,
-        rationale: str = "Update source and tests.",
+        git: _FakeGit,
+        *,
+        succeed_on_attempt: int | None = 1,
+        commit_stat: str = (
+            "commit commit456\n"
+            "Author: auto-harness\n\n"
+            " task summary\n"
+        ),
     ):
-        self._commit_tool = commit_tool
-        self._commit_files = commit_files or []
-        self._rationale = rationale
+        self._git = git
+        self._succeed_on_attempt = succeed_on_attempt
+        self._commit_stat = commit_stat
         self.prompts: list[str] = []
+        self.commit_attempts = 0
 
     async def stream(self, payload):
         self.prompts.append(payload["query"])
@@ -192,12 +209,12 @@ class _FakeCommitAgent:
             yield _msg("agent applied change")
             return
 
-        if self._commit_tool is not None:
-            await self._commit_tool.invoke({
-                "message": "fix(auto-harness): apply task",
-                "files": self._commit_files,
-                "rationale": self._rationale,
-            })
+        self.commit_attempts += 1
+        if self._succeed_on_attempt == self.commit_attempts:
+            self._git.mark_commit(
+                f"commit{self.commit_attempts}",
+                self._commit_stat,
+            )
         yield _msg("agent attempted commit")
 
 
@@ -257,15 +274,9 @@ class TestImplementStageHelpers(
             for item in items
         ]
         assert "[修复循环] 第 1 次重跑 CI" in texts
-        assert (
-            "[修复循环] CI 结果: lint=FAIL"
-            in texts
-        )
+        assert "[修复循环] CI 结果: lint=FAIL" in texts
         assert "[修复循环] 第 1 次修复" in texts
-        assert (
-            "[修复循环] 修复目标:\n"
-            "E501 line too long"
-        ) in texts
+        assert "[修复循环] 修复目标:\nE501 line too long" in texts
         assert "[修复循环] 修复耗尽" in texts
 
     async def test_start_fix_loop_omits_warning_summary_in_fix_target(
@@ -316,18 +327,7 @@ class TestImplementStageHelpers(
                 "tests/unit_tests/auto_harness/test_schema.py",
             ],
         )
-        commit_facts_ref = [CommitFacts()]
-        commit_tool = CommitTool(
-            git=git,
-            facts_provider=lambda: commit_facts_ref[0],
-        )
-        agent = _FakeCommitAgent(
-            commit_tool=commit_tool,
-            commit_files=[
-                "openjiuwen/auto_harness/schema.py",
-                "tests/unit_tests/auto_harness/test_schema.py",
-            ],
-        )
+        agent = _FakeCommitAgent(git)
         edit_safety_rail = EditSafetyRail()
         edit_safety_rail._edited_files = {
             "openjiuwen/auto_harness/schema.py",
@@ -353,41 +353,34 @@ class TestImplementStageHelpers(
             experience_store=experience_store,
             edit_safety_rail=edit_safety_rail,
             preexisting_dirty_files=[],
-            commit_facts_ref=commit_facts_ref,
-            commit_tool=commit_tool,
             msg_factory=_msg,
             result_holder=result_holder,
         ):
             items.append(item)
 
-        texts = [
-            item.payload["content"] for item in items
-        ]
-        assert "[4/5] 收集提交事实" in texts
-        assert "[5/5] 生成提交计划并提交" in texts
+        texts = [item.payload["content"] for item in items]
+        assert "[4/5] 检查提交范围" in texts
+        assert "[5/5] 提交变更" in texts
         assert "任务完成（本地提交）" in texts
-        assert git.commit_calls == [(
-            "fix(auto-harness): apply task",
-            [
-                "openjiuwen/auto_harness/schema.py",
-                "tests/unit_tests/auto_harness/test_schema.py",
-            ],
-        )]
-        assert commit_facts_ref[0].allowed_files == [
-            "openjiuwen/auto_harness/schema.py",
-            "tests/unit_tests/auto_harness/test_schema.py",
-        ]
+        assert any(
+            text.startswith("任务总结: ")
+            for text in texts
+        )
         git.push.assert_not_awaited()
         git.create_pr.assert_not_awaited()
         experience_store.record.assert_awaited_once()
-        recorded = (
-            experience_store.record.await_args.args[0]
-        )
-        assert recorded.type.value == "optimization"
-        assert recorded.pr_url == ""
         assert task.status.value == "success"
         assert result_holder == [
-            CycleResult(success=True, pr_url="")
+            CycleResult(
+                success=True,
+                summary=(
+                    "add tiny comment: 已完成；CI=lint=PASS；"
+                    "变更文件=openjiuwen/auto_harness/schema.py, "
+                    "tests/unit_tests/auto_harness/test_schema.py；"
+                    "交付=本地提交"
+                ),
+                pr_url="",
+            )
         ]
 
     async def test_run_in_worktree_stream_pushes_and_creates_pr_after_commit(
@@ -412,19 +405,7 @@ class TestImplementStageHelpers(
                 "tests/unit_tests/auto_harness/test_existing_schema.py",
             ],
         )
-        commit_facts_ref = [CommitFacts()]
-        commit_tool = CommitTool(
-            git=git,
-            facts_provider=lambda: commit_facts_ref[0],
-        )
-        agent = _FakeCommitAgent(
-            commit_tool=commit_tool,
-            commit_files=[
-                "openjiuwen/auto_harness/schema.py",
-                "tests/unit_tests/auto_harness/test_existing_schema.py",
-            ],
-            rationale="Adapt verify-related legacy test.",
-        )
+        agent = _FakeCommitAgent(git)
         edit_safety_rail = EditSafetyRail()
         edit_safety_rail._edited_files = {
             "openjiuwen/auto_harness/schema.py",
@@ -459,24 +440,14 @@ class TestImplementStageHelpers(
             experience_store=experience_store,
             edit_safety_rail=edit_safety_rail,
             preexisting_dirty_files=[],
-            commit_facts_ref=commit_facts_ref,
-            commit_tool=commit_tool,
             msg_factory=_msg,
             result_holder=result_holder,
         ):
             items.append(item)
 
-        texts = [
-            item.payload["content"] for item in items
-        ]
+        texts = [item.payload["content"] for item in items]
         assert "[后置] 创建 PR" in texts
-        assert (
-            "任务完成: https://gitcode.com/openJiuwen/agent-core/pulls/123"
-            in texts
-        )
-        assert commit_facts_ref[0].legacy_related_test_files == [
-            "tests/unit_tests/auto_harness/test_existing_schema.py"
-        ]
+        assert "PR 已创建: https://gitcode.com/openJiuwen/agent-core/pulls/123" in texts
         git.push.assert_awaited_once_with(
             branch_name="auto-harness/clarify-schema-test"
         )
@@ -484,11 +455,17 @@ class TestImplementStageHelpers(
         assert result_holder == [
             CycleResult(
                 success=True,
+                summary=(
+                    "clarify schema test: 已完成；CI=lint=PASS；"
+                    "变更文件=openjiuwen/auto_harness/schema.py, "
+                    "tests/unit_tests/auto_harness/test_existing_schema.py；"
+                    "交付=https://gitcode.com/openJiuwen/agent-core/pulls/123"
+                ),
                 pr_url="https://gitcode.com/openJiuwen/agent-core/pulls/123",
             )
         ]
 
-    async def test_run_in_worktree_stream_stops_when_commit_guard_rejects_twice(
+    async def test_run_in_worktree_stream_fails_when_agent_never_commits(
         self,
     ):
         config = AutoHarnessConfig(
@@ -510,18 +487,9 @@ class TestImplementStageHelpers(
                 "docs/tmp.md",
             ],
         )
-        commit_facts_ref = [CommitFacts()]
-        commit_tool = CommitTool(
-            git=git,
-            facts_provider=lambda: commit_facts_ref[0],
-        )
         agent = _FakeCommitAgent(
-            commit_tool=commit_tool,
-            commit_files=[
-                "openjiuwen/auto_harness/schema.py",
-                "docs/tmp.md",
-            ],
-            rationale="Attempt to commit unrelated file.",
+            git,
+            succeed_on_attempt=None,
         )
         edit_safety_rail = EditSafetyRail()
         edit_safety_rail._edited_files = {
@@ -543,35 +511,38 @@ class TestImplementStageHelpers(
             experience_store=experience_store,
             edit_safety_rail=edit_safety_rail,
             preexisting_dirty_files=[],
-            commit_facts_ref=commit_facts_ref,
-            commit_tool=commit_tool,
             msg_factory=_msg,
             result_holder=result_holder,
         ):
             items.append(item)
 
-        texts = [
-            item.payload["content"] for item in items
-        ]
+        texts = [item.payload["content"] for item in items]
         assert any(
-            "提交失败，重试一次" in text
+            "首次提交未成功" in text
             for text in texts
         )
         assert any(
-            "提交失败: Commit plan includes files outside allowed scope: docs/tmp.md"
+            "提交失败: Agent did not create a git commit during commit phase."
             in text
+            for text in texts
+        )
+        assert any(
+            "当前 git status --porcelain:" in text
             for text in texts
         )
         git.push.assert_not_awaited()
         git.create_pr.assert_not_awaited()
-        recorded = (
-            experience_store.record.await_args.args[0]
-        )
+        recorded = experience_store.record.await_args.args[0]
         assert recorded.type.value == "failure"
         assert task.status.value == "failed"
         assert result_holder == [
             CycleResult(
                 success=False,
-                error="Commit plan includes files outside allowed scope: docs/tmp.md",
+                error=(
+                    "Agent did not create a git commit during commit phase.\n"
+                    "当前 git status --porcelain:\n"
+                    " M openjiuwen/auto_harness/schema.py\n"
+                    " M docs/tmp.md"
+                ),
             )
         ]

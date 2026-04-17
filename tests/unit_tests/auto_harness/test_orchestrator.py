@@ -376,6 +376,7 @@ class TestOrchestratorCycle(IsolatedAsyncioTestCase):
                 config, task, related, **kwargs,
             ):
                 assert kwargs["agent"] is fake_agent
+                assert kwargs["commit_agent"] is fake_commit_agent
                 result_holder = kwargs["result_holder"]
                 result_holder.append(CycleResult(
                     success=True,
@@ -387,13 +388,17 @@ class TestOrchestratorCycle(IsolatedAsyncioTestCase):
                 )
 
             fake_agent = object()
+            fake_commit_agent = object()
             with patch(
                 f"{_ORCH_MOD}.run_in_worktree_stream",
                 new=_fake_wt,
             ), patch(
                 "openjiuwen.auto_harness.agent.create_auto_harness_agent",
                 return_value=fake_agent,
-            ) as mock_create_agent:
+            ) as mock_create_agent, patch(
+                "openjiuwen.auto_harness.agent.create_commit_agent",
+                return_value=fake_commit_agent,
+            ) as mock_create_commit_agent:
                 task = OptimizationTask(
                     topic="test task",
                 )
@@ -409,7 +414,10 @@ class TestOrchestratorCycle(IsolatedAsyncioTestCase):
                 f"{d}/worktrees/wt1"
             )
             assert "edit_safety_rail" in kwargs
-            assert len(kwargs["extra_tools"]) == 1
+            _, commit_kwargs = mock_create_commit_agent.call_args
+            assert commit_kwargs["workspace_override"] == (
+                f"{d}/worktrees/wt1"
+            )
             orch.worktree_mgr.cleanup\
                 .assert_awaited_once()
 
@@ -478,12 +486,17 @@ class TestOrchestratorCycle(IsolatedAsyncioTestCase):
             )
 
             created_agents = [object(), object()]
+            created_commit_agents = [object(), object()]
             seen_agents = []
+            seen_commit_agents = []
 
             async def _fake_wt(
                 config, task, related, **kwargs,
             ):
                 seen_agents.append(kwargs["agent"])
+                seen_commit_agents.append(
+                    kwargs["commit_agent"]
+                )
                 kwargs["result_holder"].append(
                     CycleResult(success=True)
                 )
@@ -498,7 +511,10 @@ class TestOrchestratorCycle(IsolatedAsyncioTestCase):
             ), patch(
                 "openjiuwen.auto_harness.agent.create_auto_harness_agent",
                 side_effect=created_agents,
-            ) as mock_create_agent:
+            ) as mock_create_agent, patch(
+                "openjiuwen.auto_harness.agent.create_commit_agent",
+                side_effect=created_commit_agents,
+            ) as mock_create_commit_agent:
                 await _collect(
                     orch._run_cycle_stream(
                         OptimizationTask(topic="t1")
@@ -511,11 +527,20 @@ class TestOrchestratorCycle(IsolatedAsyncioTestCase):
                 )
 
             assert seen_agents == created_agents
+            assert seen_commit_agents == created_commit_agents
             workspaces = [
                 call.kwargs["workspace_override"]
                 for call in mock_create_agent.call_args_list
             ]
             assert workspaces == [
+                f"{d}/worktrees/wt1",
+                f"{d}/worktrees/wt2",
+            ]
+            commit_workspaces = [
+                call.kwargs["workspace_override"]
+                for call in mock_create_commit_agent.call_args_list
+            ]
+            assert commit_workspaces == [
                 f"{d}/worktrees/wt1",
                 f"{d}/worktrees/wt2",
             ]
@@ -674,6 +699,36 @@ class TestOrchestratorStream(IsolatedAsyncioTestCase):
         assert (
             chunks[0].payload["content"] == "hello"
         )
+
+    async def test_implement_stream_prompt_forbids_git_commit(
+        self,
+    ):
+        """实现阶段 prompt 应明确禁止提前提交。"""
+        from openjiuwen.auto_harness.stages.implement import (
+            run_implement_stream,
+        )
+
+        captured = {}
+
+        class _FakeAgent:
+            async def stream(self, inputs):
+                captured.update(inputs)
+                if False:
+                    yield None
+
+        await _collect(
+            run_implement_stream(
+                _FakeAgent(),
+                OptimizationTask(
+                    topic="test",
+                    files=["openjiuwen/auto_harness/schema.py"],
+                ),
+                [],
+            ),
+        )
+        prompt = captured["query"]
+        assert "严禁执行 git add、git commit" in prompt
+        assert "提交只允许在后续独立 commit phase 中进行" in prompt
 
 
 class TestParseTasks(IsolatedAsyncioTestCase):

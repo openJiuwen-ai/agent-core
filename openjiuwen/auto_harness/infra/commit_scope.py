@@ -11,6 +11,19 @@ from pathlib import PurePosixPath
 _TEST_FILE_RE = re.compile(
     r"(tests/(?:unit_tests|system_tests)/[^\s:'\"]+\.py)"
 )
+_DOC_DIRS = ("docs/en/", "docs/zh/")
+
+
+def is_documentation_file(path: str) -> bool:
+    """Return whether path points to a markdown file under docs/."""
+    normalized = path.strip().replace("\\", "/")
+    return normalized.startswith("docs/") and normalized.endswith(".md")
+
+
+def is_allowed_documentation_file(path: str) -> bool:
+    """Return whether a documentation file follows the bilingual docs layout."""
+    normalized = path.strip().replace("\\", "/")
+    return any(normalized.startswith(prefix) for prefix in _DOC_DIRS)
 
 
 def derive_test_files(
