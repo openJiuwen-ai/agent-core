@@ -17,7 +17,7 @@ from openjiuwen.agent_teams.agent.coordinator import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.schema.events import MessageEvent, TeamEvent
-from openjiuwen.agent_teams.schema.status import TaskStatus
+from openjiuwen.agent_teams.schema.status import MemberStatus, TaskStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
 
@@ -68,6 +68,9 @@ class DispatcherHost(Protocol):
     def is_agent_running(self) -> bool:
         ...
 
+    def has_in_flight_round(self) -> bool:
+        ...
+
     def has_pending_interrupt(self) -> bool:
         ...
 
@@ -90,6 +93,9 @@ class DispatcherHost(Protocol):
         ...
 
     async def steer(self, content: str) -> None:
+        ...
+
+    async def deliver_input(self, content: str, *, use_steer: bool = True) -> None:
         ...
 
     async def resume_interrupt(self, user_input) -> None:
@@ -205,7 +211,10 @@ class EventDispatcher:
             await self._process_unread_messages(member_name)
             return
 
-        if event_type in self._TASK_EVENTS and not host.is_agent_running() and host.task_manager:
+        if event_type in self._TASK_EVENTS and not host.has_in_flight_round() and host.task_manager:
+            # Gate on the task-level check, not ``is_agent_running``: nudging
+            # during the pre-stream or finalize window would call
+            # ``_start_agent`` and overwrite the still-live ``_agent_task``.
             await host.resume_polls()
             team_logger.debug("task trigger detected, nudging idle agent: member_name={}", member_name)
             await self._nudge_idle_agent(member_name)
@@ -226,12 +235,8 @@ class EventDispatcher:
                 await self._send_user_direct_message(target, body)
                 return
 
-            if host.is_agent_running():
-                team_logger.info("user_input → follow_up (agent running)")
-                await host.steer(content)
-            else:
-                team_logger.info("user_input → start_agent (agent idle)")
-                await host.start_agent(content)
+            team_logger.info("user_input → deliver_input")
+            await host.deliver_input(content)
             return
 
         if event.event_type == InnerEventType.POLL_TASK:
@@ -240,8 +245,8 @@ class EventDispatcher:
             if member_name and host.task_manager:
                 await self._check_stale_claimed_tasks()
                 await self._check_stale_pending_tasks()
-                if not host.is_agent_running():
-                    await self._nudge_idle_agent(member_name, from_poll=True)
+                # if not host.is_agent_running():
+                #     await self._nudge_idle_agent(member_name, from_poll=True)
             return
 
         if event.event_type == InnerEventType.POLL_MAILBOX:
@@ -321,6 +326,9 @@ class EventDispatcher:
                 f"[成员事件] 成员 {target_id} 状态变更: "
                 f"{old_status} → {new_status}"
             )
+            await self._nudge_idle_member_with_stale_claims(
+                target_id, old_status, new_status,
+            )
         elif event_type == TeamEvent.MEMBER_EXECUTION_CHANGED:
             text = (
                 f"[成员事件] 成员 {target_id} 执行状态变更: "
@@ -334,6 +342,70 @@ class EventDispatcher:
             return
 
         team_logger.debug(text)
+
+    _IDLE_NUDGE_STATUSES = frozenset(
+        {MemberStatus.READY.value, MemberStatus.ERROR.value}
+    )
+
+    async def _nudge_idle_member_with_stale_claims(
+        self,
+        target_id: str,
+        old_status: str | None,
+        new_status: str | None,
+    ) -> None:
+        """Remind a member about long-claimed work on transition to READY/ERROR.
+
+        Only tasks whose claim has aged past ``_STALE_CLAIM_SECONDS`` are
+        included, and each task is throttled via ``_last_stale_nudge`` —
+        shared with the POLL_TASK path — so successive status flips or a
+        concurrent poll tick cannot re-nudge within one stale window.
+        """
+        if not target_id:
+            return
+        if new_status not in self._IDLE_NUDGE_STATUSES:
+            return
+        if new_status == old_status:
+            return
+        task_manager = self._host.task_manager
+        message_manager = self._host.message_manager
+        if task_manager is None or message_manager is None:
+            return
+
+        claimed = await task_manager.get_tasks_by_assignee(
+            target_id, status=TaskStatus.CLAIMED.value,
+        )
+        if not claimed:
+            return
+
+        now = time.time()
+        threshold_ms = self._STALE_CLAIM_SECONDS * 1000
+        stale = []
+        for task in claimed:
+            if task.updated_at is None:
+                continue
+            if now * 1000 - task.updated_at < threshold_ms:
+                continue
+            last_nudge = self._last_stale_nudge.get(task.task_id, 0.0)
+            if now - last_nudge < self._STALE_CLAIM_SECONDS:
+                continue
+            stale.append(task)
+
+        if not stale:
+            return
+
+        for task in stale:
+            self._last_stale_nudge[task.task_id] = now
+
+        lines = [
+            f"检测到你已认领且超过 10 分钟未完成的任务（共 {len(stale)} 个），请继续推进："
+        ]
+        for task in stale:
+            lines.append(f"- [{task.task_id}] {task.title}: {task.content}")
+        await message_manager.send_message("\n".join(lines), target_id)
+        team_logger.info(
+            "[leader] nudged {} about {} stale claimed task(s) after status → {}",
+            target_id, len(stale), new_status,
+        )
 
     # ------------------------------------------------------------------
     # Message handling
@@ -398,12 +470,7 @@ class EventDispatcher:
                 text = self._format_message(msg)
                 team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
-                if not host.is_agent_running():
-                    await host.start_agent(text)
-                elif use_steer:
-                    await host.steer(text)
-                else:
-                    await host.follow_up(text)
+                await host.deliver_input(text, use_steer=use_steer)
                 await host.message_manager.mark_message_read(msg.message_id, member_name)
 
     async def _ack_user_bound_message(self, event: CoordinationEvent) -> None:
@@ -497,7 +564,7 @@ class EventDispatcher:
                         "等待所有成员状态转为 shutdown 后，"
                         "调用 clean_team 解散团队。"
                     )
-                await host.start_agent(prompt)
+                await host.deliver_input(prompt)
                 return
             lines = [
                 "当前任务看板如下，请审查：\n"
@@ -517,7 +584,7 @@ class EventDispatcher:
             assignee = f" → {task.assignee}" if task.assignee else " (待领取)"
             lines.append(f"- [{task.task_id}] [{task.status}] {task.title}: {task.content}{assignee}")
 
-        await host.start_agent("\n".join(lines))
+        await host.deliver_input("\n".join(lines))
 
     async def _check_stale_claimed_tasks(self) -> None:
         """Find claimed tasks that have been running past the stale threshold.
@@ -584,10 +651,7 @@ class EventDispatcher:
         """Feed a nudge input into the local agent loop."""
         host = self._host
         content = self._format_stale_claim_nudge(task)
-        if host.is_agent_running():
-            await host.steer(content)
-        else:
-            await host.start_agent(content)
+        await host.deliver_input(content)
         team_logger.info(
             "[{}] self-nudged stale claimed task {}", host.member_name, task.task_id,
         )
@@ -660,10 +724,7 @@ class EventDispatcher:
             lines.append(f"- [{task.task_id}] {task.title}: {task.content}")
         content = "\n".join(lines)
 
-        if host.is_agent_running():
-            await host.steer(content)
-        else:
-            await host.start_agent(content)
+        await host.deliver_input(content)
         team_logger.info(
             "[leader] self-prompted about {} stale pending task(s)", len(fresh),
         )

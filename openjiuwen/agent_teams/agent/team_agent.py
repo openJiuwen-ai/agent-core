@@ -87,12 +87,26 @@ class TeamAgent(BaseAgent):
         self._team_member: Optional[TeamMember] = None
         self._stream_queue: Optional[asyncio.Queue] = None
         self._agent_task: Optional[asyncio.Task] = None
+        # True only while the ``async for`` over ``Runner.run_agent_streaming``
+        # is actively pumping chunks — the exact window where
+        # ``steer``/``follow_up`` are guaranteed to reach the task loop.
+        # ``_agent_task`` alone is too loose: it stays live through pre-stream
+        # status writes (READY→BUSY→STARTING→RUNNING) and the post-stream
+        # finalize tail, neither of which can accept steer events.
+        self._streaming_active: bool = False
         self._dispatcher = None
         self._teammate_port_counter: int = 0
         self._spawned_handles: dict[str, SpawnedProcessHandle] = {}
         self._member_port_map: dict[str, int] = {}
         self._first_iter_gate: Optional["FirstIterationGate"] = None
         self._pending_interrupt_resumes: list[InteractiveInput] = []
+        # Inputs queued during a pre-stream / finalize-tail window —
+        # drained in the ``_run_one_round`` finally so delivery is never
+        # lost to the two races where neither ``steer`` (no controller yet /
+        # already torn down) nor ``_start_agent`` (would overwrite the live
+        # ``_agent_task``) is safe. Public callers should go through
+        # ``deliver_input`` rather than reaching for these paths directly.
+        self._pending_inputs: list[Any] = []
         self._event_listeners: list = []
         self._model_allocator: Optional["ModelAllocator"] = None
         self._workspace_manager: Optional["TeamWorkspaceManager"] = None
@@ -218,6 +232,45 @@ class TeamAgent(BaseAgent):
         """Whether the agent is in an active round."""
         return self._is_agent_running()
 
+    def has_in_flight_round(self) -> bool:
+        """Whether ``_agent_task`` is scheduled and not yet finalized.
+
+        Looser than ``is_agent_running`` — returns True across the pre-stream
+        status writes, the streaming window, and the finalize tail. Use this
+        to decide whether ``_start_agent`` would be safe (it is not while a
+        round is still in flight). For "can I steer right now?" use
+        ``is_agent_running``.
+        """
+        return self._has_in_flight_round()
+
+    async def deliver_input(self, content: Any, *, use_steer: bool = True) -> None:
+        """Guarantee that ``content`` reaches the DeepAgent.
+
+        Chooses the right path for the current state:
+        - Streaming active → ``steer`` (or ``follow_up`` when ``use_steer``
+          is False) so the content lands in the live task loop.
+        - No round in flight → start a fresh round with ``content`` as the
+          initial message.
+        - Transition window (pre-stream or finalize tail) → append to
+          ``_pending_inputs``; the ``_run_one_round`` finally drains the
+          queue by launching the next round, so delivery is never dropped.
+        """
+        if self._streaming_active:
+            if use_steer:
+                await self.steer(content)
+            else:
+                await self.follow_up(content)
+            return
+        if self._has_in_flight_round():
+            preview = content if isinstance(content, str) else type(content).__name__
+            team_logger.info(
+                "[{}] queueing input for next round (transition window): {:.60}",
+                self._member_name() or "?", str(preview),
+            )
+            self._pending_inputs.append(content)
+            return
+        await self._start_agent(content)
+
     def has_pending_interrupt(self) -> bool:
         """Whether the current session still has an unresolved tool interrupt."""
         session = self._deep_agent.loop_session if self._deep_agent else None
@@ -278,7 +331,12 @@ class TeamAgent(BaseAgent):
         if not self._is_valid_interrupt_resume(user_input):
             team_logger.info("[{}] dropping stale interrupt resume input", self._member_name() or "?")
             return
-        if self._is_agent_running():
+        # Use the task-level check here: if a round is still in flight — even
+        # in the pre-stream or finalize tail — queue the resume so the finally
+        # block in ``_run_one_round`` can drain it via
+        # ``_dequeue_valid_interrupt_resume``. A new ``_start_agent`` right
+        # now would overwrite the live ``_agent_task`` reference and orphan it.
+        if self._has_in_flight_round():
             team_logger.info("[{}] queueing interrupt resume until current round completes", self._member_name() or "?")
             self._pending_interrupt_resumes.append(user_input)
             return
@@ -943,7 +1001,18 @@ class TeamAgent(BaseAgent):
         self._subscribed_topics.clear()
 
     def _is_agent_running(self) -> bool:
-        """Check if the DeepAgent is currently in an active round."""
+        """Return True only while ``Runner.run_agent_streaming`` is pumping.
+
+        Tight window check: matches exactly the span where ``steer`` and
+        ``follow_up`` are guaranteed to reach the outer task loop through
+        ``DeepAgent._loop_controller``. Pre-stream status writes and the
+        post-stream finalize tail deliberately return False — outside the
+        streaming window those calls would either no-op or race.
+        """
+        return self._streaming_active
+
+    def _has_in_flight_round(self) -> bool:
+        """Return True while ``_agent_task`` is scheduled but not yet finalized."""
         return self._agent_task is not None and not self._agent_task.done()
 
     async def _cancel_agent(self) -> None:
@@ -1041,6 +1110,22 @@ class TeamAgent(BaseAgent):
             next_resume = self._dequeue_valid_interrupt_resume()
             if next_resume is not None and self._stream_queue is not None:
                 await self._start_agent(next_resume)
+            elif self._pending_inputs and self._stream_queue is not None:
+                # Drain the entire queue into one round. Combining avoids
+                # an O(N) chain of round-restarts when several inputs land
+                # in the same transition window; anything arriving after
+                # the new round begins streaming goes directly through
+                # ``steer`` and never re-enters the queue, so it converges.
+                drained = self._pending_inputs
+                self._pending_inputs = []
+                if len(drained) == 1:
+                    combined = drained[0]
+                else:
+                    combined = "\n\n---\n\n".join(
+                        item if isinstance(item, str) else str(item)
+                        for item in drained
+                    )
+                await self._start_agent(combined)
             else:
                 await self._wake_mailbox_if_interrupt_cleared()
                 if self._team_member and await self._team_member.status() == MemberStatus.SHUTDOWN_REQUESTED:
@@ -1060,11 +1145,15 @@ class TeamAgent(BaseAgent):
         await self._update_execution(ExecutionStatus.RUNNING)
         try:
             inputs = {"query": message}
-            async for chunk in Runner.run_agent_streaming(
-                self._deep_agent, inputs, session=self._session_id
-            ):
-                if self._stream_queue is not None:
-                    await self._stream_queue.put(chunk)
+            self._streaming_active = True
+            try:
+                async for chunk in Runner.run_agent_streaming(
+                    self._deep_agent, inputs, session=self._session_id
+                ):
+                    if self._stream_queue is not None:
+                        await self._stream_queue.put(chunk)
+            finally:
+                self._streaming_active = False
             await self._update_execution(ExecutionStatus.COMPLETING)
             await self._update_execution(ExecutionStatus.COMPLETED)
         except asyncio.CancelledError:
