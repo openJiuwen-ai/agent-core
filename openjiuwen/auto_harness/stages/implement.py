@@ -22,9 +22,6 @@ from openjiuwen.auto_harness.schema import (
 from openjiuwen.auto_harness.stages.base import (
     TaskStage,
 )
-from openjiuwen.auto_harness.stages.verify import (
-    _format_ci_status_for_evaluator,
-)
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import (
@@ -32,6 +29,58 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+
+def _summarize_text(
+    text: str,
+    *,
+    max_lines: int = 6,
+    max_chars: int = 400,
+) -> str:
+    if not text:
+        return ""
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+    summary = "\n".join(lines[:max_lines]).strip()
+    if len(summary) > max_chars:
+        return f"{summary[: max_chars - 3].rstrip()}..."
+    if len(lines) > max_lines:
+        return f"{summary}\n..."
+    return summary
+
+
+def _format_ci_status_for_evaluator(
+    ci_result: dict[str, Any],
+) -> str:
+    """Build the evaluator-facing CI summary.
+
+    Keep this helper in implement.py for backwards-compatible imports
+    used by older tests and downstream callers.
+    """
+    gates = ci_result.get("gates", [])
+    if not gates:
+        errors = _summarize_text(
+            ci_result.get("errors", "")
+        ) or "未执行任何门禁"
+        return f"结论: blocking failure\n详情: {errors}"
+    lines = [
+        "结论: pass"
+        if ci_result.get("passed")
+        else "结论: blocking failure"
+    ]
+    for gate in gates:
+        status = "PASS" if gate.get("passed") else "FAIL"
+        detail = _summarize_text(
+            gate.get("output", "")
+        )
+        line = f"- {gate.get('name', 'unknown')}: {status}"
+        if detail and not gate.get("passed"):
+            line = f"{line} | {detail}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 async def run_implement_stream(
