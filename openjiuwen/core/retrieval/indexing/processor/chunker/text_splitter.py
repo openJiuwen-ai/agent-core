@@ -11,9 +11,16 @@ from openjiuwen.core.retrieval.indexing.processor.splitter.splitter import Sente
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizerBase
 
+# Defaults for sentence / token chunking and for character-based CharSplitter.
 DEFAULT_CHUNK_SIZE = 200
 DEFAULT_CHAR_CHUNK_SIZE = 200
 DEFAULT_CHAR_CHUNK_OVERLAP = 40
+
+# Fallback for Hugging Face encode(..., truncation=True, max_length=...) when the tokenizer
+# does not report model_max_length (or reports inf). 131072 tokens is a common "128K context"
+# headline figure; we use half so one encode() stays within practical ingestion limits—room
+# for prompts, special tokens, and pipelines where chunks must still fit a downstream LLM.
+DEFAULT_SAFE_ENCODE_MAX_LENGTH = 65536
 
 
 class TextSplitter(metaclass=ABCMeta):
@@ -29,6 +36,7 @@ class CharSplitter(TextSplitter):
 
     def __init__(self, chunk_size: int | None = None, chunk_overlap: int | None = None) -> None:
         super().__init__()
+        # None -> use module defaults above
         size = chunk_size or DEFAULT_CHAR_CHUNK_SIZE
         overlap = chunk_overlap if chunk_overlap is not None else DEFAULT_CHAR_CHUNK_OVERLAP
         # Limit range to avoid step becoming 0 or negative
@@ -81,56 +89,96 @@ class IndexSentenceSplitter(TextSplitter):
                 If None, set to the maximum sequence length of the embedding model.
             chunk_overlap (int | None, optional): Window size for passage overlap. Defaults to None.
                 If None, set to `chunk_size // 5`.
-            splitter_config (dict, optional): Other arguments to SentenceSplitter. Defaults to None.
-            language: Language code, defaults to "auto" (auto-detect)
+            splitter_config (dict, optional): Reserved for future splitter options. Defaults to None.
+            language: pysbd language: "auto" infers zh vs en from text; other values pass through to Segmenter.
         """
         super().__init__()
         self._tokenizer = tokenizer
 
+        # Reserved for future splitter options; normalize non-dict (e.g. None) to a default dict.
         if not isinstance(splitter_config, dict):
-            splitter_config = {}
+            splitter_config = {
+                "paragraph_separator": "\n",
+            }
 
-        _, max_token_length = self._resolve_tokenizer(self._tokenizer)
+        # encode + optional decode; decode is passed to SentenceSplitter for long-sentence sub-splitting.
+        tokenizer_fn, tokenizer_dec, max_token_length = self._resolve_tokenizer(self._tokenizer)
         chunk_size = self._resolve_chunk_size(chunk_size, max_token_length)
 
         self._splitter = SentenceSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap or chunk_size // 5,
-            tokenizer=tokenizer,
+            tokenizer=tokenizer_fn,
+            tokenizer_dec=tokenizer_dec,
             lan=language,
-            **splitter_config,
         )
 
     @staticmethod
     def _resolve_tokenizer(
         tokenizer: Union["PreTrainedTokenizerBase", Any],
-    ) -> Tuple[Callable[[str], list], int | None]:
+    ) -> Tuple[Callable[[str], list], Callable[[list], str] | None, int | None]:
         """
-        Return a tokenizer callable and its max token length (if known).
-        Falls back to tiktoken when the embedding model has no tokenizer.
+        Return (encode_callable, decode_callable, max_token_length).
+        Decode is used to sub-split long segments so no content is lost (no truncation).
         """
-        # Prefer tokenizer.tokenize / tokenizer.encode when available
-        if tokenizer is not None:
-            if hasattr(tokenizer, "tokenize"):
-                return tokenizer.tokenize, IndexSentenceSplitter._max_length(tokenizer)
-            if hasattr(tokenizer, "encode"):
-                return tokenizer.encode, IndexSentenceSplitter._max_length(tokenizer)
-            if callable(tokenizer):
-                return tokenizer, IndexSentenceSplitter._max_length(tokenizer)
+        max_token_length = IndexSentenceSplitter._max_length(tokenizer)
+        # Cap for HF encode(max_length=...) on very long strings; avoids unbounded allocation.
+        fallback_cap = DEFAULT_SAFE_ENCODE_MAX_LENGTH
+        safe_max = max_token_length if max_token_length and max_token_length != float("inf") else fallback_cap
 
-        # Fallback: tiktoken (pulls encoding data from HuggingFace if needed)
+        if tokenizer is not None:
+            # Prefer full tokenizer with encode+decode so windows can be decoded after slicing ids.
+            if hasattr(tokenizer, "encode") and hasattr(tokenizer, "decode"):
+
+                def safe_encode(text: str) -> list:
+                    if not (text and text.strip()):
+                        return []
+                    try:
+                        return tokenizer.encode(
+                            text,
+                            truncation=True,
+                            max_length=safe_max,
+                            add_special_tokens=False,
+                        )
+                    except Exception:
+                        return tokenizer.encode(text)
+
+                def safe_decode(ids: list) -> str:
+                    if not ids:
+                        return ""
+                    try:
+                        return tokenizer.decode(ids, skip_special_tokens=False)
+                    except Exception:
+                        return ""
+
+                return safe_encode, safe_decode, max_token_length
+            # tokenize() only — no round-trip decode for sub-splitting long sentences.
+            if hasattr(tokenizer, "tokenize"):
+                return tokenizer.tokenize, None, max_token_length
+            # Custom encode callable without decode wrapper.
+            if callable(tokenizer):
+                return tokenizer, None, max_token_length
+
+        # No tokenizer: lazy-import tiktoken (avoids import cost when a real tokenizer is always passed).
         try:
             import tiktoken
 
             encoding = tiktoken.get_encoding("cl100k_base")
-            return encoding.encode, getattr(encoding, "max_token_value", None)
-        except Exception as exc:  # pragma: no cover - unexpected failure
+            dec = getattr(encoding, "decode", None)
+            return (
+                encoding.encode,
+                dec,
+                getattr(encoding, "max_token_value", None),
+            )
+        except Exception as exc:  # pragma: no cover
             logger.warning("Failed to load tiktoken fallback tokenizer: %s", exc)
-            return lambda text: text.split(), None
+            # Last resort: word-split proxy; no decode for long-sentence sub-splitting.
+            return lambda text: text.split(), None, None
 
     @staticmethod
     def _max_length(tokenizer: Any) -> int | None:
         """Try to infer a reasonable maximum token length from a tokenizer."""
+        # Common Hugging Face and similar tokenizer attributes, in typical precedence order.
         for attr in (
             "model_max_length",
             "max_len_single_sentence",
@@ -155,8 +203,10 @@ class IndexSentenceSplitter(TextSplitter):
         """
         Decide chunk_size based on caller input and tokenizer limits.
         """
+        # Caller omitted chunk_size — align with embedding/model sequence cap when known.
         if chunk_size is None and max_token_length:
             return max_token_length
+        # Both set — do not exceed tokenizer-reported maximum.
         if chunk_size is not None and max_token_length:
             return min(chunk_size, max_token_length)
         return chunk_size or DEFAULT_CHUNK_SIZE
