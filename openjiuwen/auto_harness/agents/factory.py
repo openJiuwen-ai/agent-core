@@ -114,6 +114,7 @@ def create_auto_harness_agent(
         max_iterations=config.resolve_agent_iterations(
             "implement", 30
         ),
+        auto_create_workspace=False,
         sys_operation=_build_trusted_local_sys_operation(
             "auto-harness"
         ),
@@ -372,6 +373,7 @@ def create_assess_agent(
         max_iterations=config.resolve_agent_iterations(
             "assess", 30
         ),
+        auto_create_workspace=False,
         sys_operation=_build_trusted_local_sys_operation(
             "auto-harness-assess"
         ),
@@ -404,6 +406,7 @@ def create_plan_agent(
         max_iterations=config.resolve_agent_iterations(
             "plan", 15
         ),
+        auto_create_workspace=False,
         sys_operation=_build_trusted_local_sys_operation(
             "auto-harness-plan"
         ),
@@ -435,6 +438,7 @@ def create_eval_agent(
         max_iterations=config.resolve_agent_iterations(
             "eval", 10
         ),
+        auto_create_workspace=False,
         sys_operation=_build_trusted_local_sys_operation(
             "auto-harness-eval"
         ),
@@ -469,6 +473,7 @@ def create_select_pipeline_agent(
         max_iterations=config.resolve_agent_iterations(
             "select_pipeline", 10
         ),
+        auto_create_workspace=False,
         sys_operation=_build_trusted_local_sys_operation(
             "auto-harness-select-pipeline"
         ),
@@ -502,6 +507,7 @@ def create_learnings_agent(
         max_iterations=config.resolve_agent_iterations(
             "learnings", 5
         ),
+        auto_create_workspace=False,
         sys_operation=_build_trusted_local_sys_operation(
             "auto-harness-learnings"
         ),
