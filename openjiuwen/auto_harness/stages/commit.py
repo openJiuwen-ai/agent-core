@@ -29,6 +29,7 @@ from openjiuwen.auto_harness.contexts import (
 )
 from openjiuwen.auto_harness.schema import (
     CommitArtifact,
+    CommitFacts,
     CycleResult,
     Experience,
     ExperienceType,
@@ -44,11 +45,7 @@ if TYPE_CHECKING:
         EditSafetyRail,
     )
     from openjiuwen.auto_harness.schema import (
-        CommitFacts,
         OptimizationTask,
-    )
-    from openjiuwen.harness.deep_agent import (
-        DeepAgent,
     )
 
 

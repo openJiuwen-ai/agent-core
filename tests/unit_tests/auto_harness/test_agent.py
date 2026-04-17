@@ -23,6 +23,11 @@ from openjiuwen.auto_harness.rails.context_rail import (
 from openjiuwen.auto_harness.schema import (
     AutoHarnessConfig,
 )
+from openjiuwen.core.foundation.llm import (
+    Model,
+    ModelClientConfig,
+    ModelRequestConfig,
+)
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
 )
@@ -43,6 +48,19 @@ from openjiuwen.harness.tools import (
     WebFetchWebpageTool,
     WebFreeSearchTool,
 )
+
+
+def _create_dummy_model() -> Model:
+    """Create a concrete model object for DeepAgent init tests."""
+    return Model(
+        model_client_config=ModelClientConfig(
+            client_provider="OpenAI",
+            api_key="test-key",
+            api_base="http://test-base",
+            verify_ssl=False,
+        ),
+        model_config=ModelRequestConfig(model="test-model"),
+    )
 
 
 def test_create_auto_harness_agent_includes_tool_tracker():
@@ -180,19 +198,17 @@ def test_create_commit_agent_only_exposes_commit_skills():
 
 @pytest.mark.asyncio
 async def test_create_commit_agent_loads_commit_skill(tmp_path: Path):
-    """提交阶段 agent 应实际加载到 commit/communicate skills。"""
+    """提交阶段 agent 的 SkillUseRail 应实际加载 commit/communicate skills。"""
     agent = create_commit_agent(
         AutoHarnessConfig(
-            model=MagicMock(),
+            model=_create_dummy_model(),
             workspace=str(tmp_path),
         ),
         workspace_override=str(tmp_path / "task-1"),
     )
 
-    await agent.ensure_initialized()
-
     skill_rails = [
-        rail for rail in agent._registered_rails
+        rail for rail in agent._pending_rails
         if isinstance(rail, SkillUseRail)
     ]
     assert len(skill_rails) == 1
