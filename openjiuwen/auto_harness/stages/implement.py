@@ -152,14 +152,13 @@ def _derive_allowed_files(
             allowed.add(path)
 
     if not facts.task_declared_files:
-        allowed = {
-            path
-            for path in edited_set
-            if (
-                not is_documentation_file(path)
-                or is_allowed_documentation_file(path)
-            )
-        }
+        allowed = set()
+        for path in edited_set:
+            if not is_documentation_file(path):
+                allowed.add(path)
+                continue
+            if is_allowed_documentation_file(path):
+                allowed.add(path)
 
     return sorted(allowed)
 
