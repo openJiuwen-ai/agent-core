@@ -1,0 +1,40 @@
+# Auto-Harness 配置文件
+#
+# 放置位置由宿主 CLI 决定：
+#   openjiuwen CLI → ~/.openjiuwen/auto_harness/config.yaml
+#   jiuwenclaw     → ~/.jiuwenclaw/auto_harness/config.yaml
+
+# 可选：本地 agent-core 仓库路径
+# 配置后使用 git worktree 加速，不配则自动 clone 到 data_dir/repo/
+# local_repo: "/home/user/code/agent-core"
+
+# 可选：经验库目录
+# experience_dir: "/home/user/.openjiuwen/auto_harness/experience"
+
+git:
+  remote: ""                    # fork remote name（如 "k00591264"）
+  base_branch: "develop"        # PR 目标分支
+  user_name: ""                 # git commit 用户名
+  user_email: ""                # git commit 邮箱
+  fork_owner: ""                # fork 所有者（如 "SnapeK"）
+  upstream_owner: "openJiuwen"  # 上游仓库所有者
+  upstream_repo: "agent-core"   # 上游仓库名称
+
+gitcode:
+  username: ""                                 # GitCode 登录用户名；为空时回退到 git.fork_owner
+  access_token_env: "GITCODE_ACCESS_TOKEN"  # 从此环境变量读取 token
+
+budget:
+  session_secs: 3600            # 会话总预算（秒）
+  cost_limit_usd: 10.0          # 费用上限（美元）
+  task_timeout_secs: 1200       # 单任务超时（秒）
+  max_tasks_per_session: 3      # 每会话最大任务数
+
+ci_gate:
+  config_path: ""               # CI 门控配置路径，空则用仓库内默认
+  python_executable: ""         # 固定 CI gate 使用的 Python；为空时回退到 .venv 或当前解释器
+  install_command: ""           # 可选环境预热命令；外部虚拟环境通常用 uv sync --active --group dev --extra cli
+
+fix_loop:
+  phase1_max_retries: 10        # Phase 1 最大重试次数
+  phase2_max_retries: 9         # Phase 2 最大重试次数
