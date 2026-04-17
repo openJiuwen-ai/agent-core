@@ -2758,7 +2758,7 @@ wheels = [
 [[package]]
 name = "openjiuwen"
 version = "0.1.10"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk" },
     { name = "aiofiles" },
