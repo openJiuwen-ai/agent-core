@@ -1119,8 +1119,9 @@ class ReActAgent(BaseAgent):
             self,
             session: Optional[Session]
     ) -> ModelContext:
+        # Always create token_counter for token statistics, regardless of context_processors
+        from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
         if self._config.context_processors:
-            from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
             context = await self.context_engine.create_context(
                 session=session,
                 processors=self._config.context_processors,
@@ -1128,7 +1129,8 @@ class ReActAgent(BaseAgent):
             )
         else:
             context = await self.context_engine.create_context(
-                session=session
+                session=session,
+                token_counter=TiktokenCounter()
             )
         context_reloader = context.reloader_tool()
         if self._config.context_engine_config.enable_reload:

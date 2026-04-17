@@ -62,6 +62,8 @@ class SessionModelContext(ModelContext):
             workspace.root_path if workspace else "",
             session_id
         )
+        self._raw_total_tokens = 0
+        self._single_messages_token = 0
         self._reloader_tool_card = ToolCard(
             id=f"reload_{session_id}_{context_id}",
             name="reload_original_context_messages",
@@ -113,6 +115,11 @@ class SessionModelContext(ModelContext):
         kwargs.setdefault("sys_operation", self._sys_operation)
         self._validate_and_init_messages(messages)
         messages_to_add = messages if isinstance(messages, list) else [messages]
+        
+        if self._token_counter:
+            for msg in messages_to_add:
+                self._raw_total_tokens += self._token_counter.count_messages([msg])
+        
         for processor in self._processors:
             try:
                 if await processor.trigger_add_messages(self, messages_to_add, **kwargs):
@@ -134,6 +141,12 @@ class SessionModelContext(ModelContext):
             )
 
         popped_messages = self._message_buffer.pop_back(size, with_history)
+        
+        if self._token_counter:
+            for msg in popped_messages:
+                msg_tokens = self._token_counter.count_messages([msg])
+                self._raw_total_tokens = max(0, self._raw_total_tokens - msg_tokens)
+        
         return popped_messages
 
     def get_messages(self, size: Optional[int] = None, with_history: bool = True) -> List[BaseMessage]:
@@ -255,6 +268,8 @@ class SessionModelContext(ModelContext):
         messages = self.get_messages()
         stat = ContextStats()
         self._stat_messages(stat, messages)
+        stat.raw_total_tokens = self._raw_total_tokens
+        stat.single_messages_token = self._single_messages_token
         return stat
 
     def _stat_context_window(self, context_window: ContextWindow) -> ContextStats:
@@ -264,6 +279,7 @@ class SessionModelContext(ModelContext):
         self._stat_messages(stat, messages)
         self._stat_tools(stat, tools)
         stat.total_dialogues = len(ContextUtils.find_all_dialogue_round(messages))
+        stat.raw_total_tokens = self._raw_total_tokens
         return stat
 
     def _stat_tools(self, stat: ContextStats, tools: List[ToolInfo]):
@@ -300,6 +316,11 @@ class SessionModelContext(ModelContext):
             stat.assistant_message_tokens +
             stat.user_message_tokens +
             stat.system_message_tokens +
+            stat.tool_message_tokens
+        )
+        self._single_messages_token = (
+            stat.assistant_message_tokens +
+            stat.user_message_tokens +
             stat.tool_message_tokens
         )
         stat.total_dialogues = len(ContextUtils.find_all_dialogue_round(messages))
