@@ -54,14 +54,14 @@ class PowerShellTool(Tool):
     """PowerShell command executor with truncation, permissions, and security checks."""
 
     def __init__(
-        self,
-        operation: SysOperation,
-        language: str = "cn",
-        permission_mode: str = "auto",
-        deny_patterns: list[str] | None = None,
-        allow_patterns: list[str] | None = None,
-        agent_id: Optional[str] = None,
-        **_kwargs: Any,
+            self,
+            operation: SysOperation,
+            language: str = "cn",
+            permission_mode: str = "auto",
+            deny_patterns: list[str] | None = None,
+            allow_patterns: list[str] | None = None,
+            agent_id: Optional[str] = None,
+            **_kwargs: Any,
     ) -> None:
         super().__init__(build_tool_card("powershell", "PowerShellTool", language, agent_id=agent_id))
         self._operation = operation
@@ -72,11 +72,25 @@ class PowerShellTool(Tool):
         )
 
     @staticmethod
+    def _resolve_timeout(raw_value: Any, default: int = 300) -> int:
+        """Parse and validate a timeout value."""
+        try:
+            timeout = int(raw_value)
+        except (TypeError, ValueError):
+            timeout = default
+        try:
+            max_timeout = int(os.getenv("POWER_SHELL_TOOL_MAX_TIMEOUT_SECONDS") or "3600")
+        except ValueError:
+            max_timeout = 3600
+        max_timeout = max(1, max_timeout)
+        return max(1, min(timeout, max_timeout))
+
+    @staticmethod
     def _parse_inputs(inputs: Dict[str, Any]) -> _PowerShellInputs:
         """Parse and clamp tool inputs."""
         return _PowerShellInputs(
             command=(inputs.get("command") or "").strip(),
-            timeout=max(1, min(int(inputs.get("timeout", 30)), 300)),
+            timeout=PowerShellTool._resolve_timeout(inputs.get("timeout", 300)),
             workdir=inputs.get("workdir", ""),
             background=bool(inputs.get("background", False)),
             max_output_chars=max(200, min(int(inputs.get("max_output_chars", 8000)), 20000)),
@@ -181,10 +195,10 @@ class PowerShellTool(Tool):
         final_exit_code = -1
 
         async for chunk in self._operation.shell().execute_cmd_stream(
-            p.command,
-            cwd=resolved_cwd,
-            timeout=p.timeout,
-            shell_type="powershell",
+                p.command,
+                cwd=resolved_cwd,
+                timeout=p.timeout,
+                shell_type="powershell",
         ):
             if chunk.code != StatusCode.SUCCESS.code:
                 yield ToolOutput(success=False, error=chunk.message)
