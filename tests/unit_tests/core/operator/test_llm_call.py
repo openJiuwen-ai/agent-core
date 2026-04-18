@@ -3,7 +3,7 @@
 
 """Unit tests for openjiuwen.core.operator.llm_call module."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -14,19 +14,9 @@ class TestLLMCallOperator:
     """Tests for LLMCallOperator class."""
 
     @pytest.fixture
-    def mock_llm(self):
-        """Create a mock LLM model."""
-        llm = MagicMock()
-        llm.invoke = AsyncMock(return_value=MagicMock(content="response"))
-        llm.stream = MagicMock(return_value=AsyncMock())
-        return llm
-
-    @pytest.fixture
-    def operator(self, mock_llm):
+    def operator(self):
         """Create a LLMCallOperator instance."""
         return LLMCallOperator(
-            model_name="gpt-4",
-            llm=mock_llm,
             system_prompt="You are a helpful assistant.",
             user_prompt="Answer: {{query}}",
             freeze_user_prompt=False,
@@ -41,20 +31,16 @@ class TestLLMCallOperator:
     def test_operator_id_custom():
         """Test custom operator_id."""
         op = LLMCallOperator(
-            model_name="gpt-4",
-            llm=MagicMock(),
             system_prompt="sys",
             user_prompt="{{query}}",
-            llm_call_id="custom_id",
+            operator_id="custom_id",
         )
         assert op.operator_id == "custom_id"
 
     @staticmethod
-    def test_get_tunables_both_prompts(mock_llm):
+    def test_get_tunables_both_prompts():
         """Test get_tunables returns both prompts when not frozen."""
         op = LLMCallOperator(
-            model_name="gpt-4",
-            llm=mock_llm,
             system_prompt="sys",
             user_prompt="{{query}}",
             freeze_user_prompt=False,
@@ -66,11 +52,9 @@ class TestLLMCallOperator:
         assert tunables["user_prompt"].kind == "prompt"
 
     @staticmethod
-    def test_get_tunables_frozen_system_prompt(mock_llm):
+    def test_get_tunables_frozen_system_prompt():
         """Test get_tunables excludes frozen system prompt."""
         op = LLMCallOperator(
-            model_name="gpt-4",
-            llm=mock_llm,
             system_prompt="sys",
             user_prompt="{{query}}",
             freeze_system_prompt=True,
@@ -81,11 +65,9 @@ class TestLLMCallOperator:
         assert "user_prompt" in tunables
 
     @staticmethod
-    def test_get_tunables_frozen_user_prompt(mock_llm):
+    def test_get_tunables_frozen_user_prompt():
         """Test get_tunables excludes frozen user prompt."""
         op = LLMCallOperator(
-            model_name="gpt-4",
-            llm=mock_llm,
             system_prompt="sys",
             user_prompt="{{query}}",
             freeze_user_prompt=True,
@@ -95,11 +77,9 @@ class TestLLMCallOperator:
         assert "user_prompt" not in tunables
 
     @staticmethod
-    def test_get_tunables_both_frozen(mock_llm):
+    def test_get_tunables_both_frozen():
         """Test get_tunables returns empty dict when both frozen."""
         op = LLMCallOperator(
-            model_name="gpt-4",
-            llm=mock_llm,
             system_prompt="sys",
             user_prompt="{{query}}",
             freeze_system_prompt=True,
@@ -112,41 +92,37 @@ class TestLLMCallOperator:
     def test_set_parameter_system_prompt(operator):
         """Test set_parameter for system_prompt."""
         operator.set_parameter("system_prompt", "New system prompt")
-        assert operator.get_system_prompt().content == "New system prompt"
+        assert operator.get_state()["system_prompt"] == "New system prompt"
 
     @staticmethod
     def test_set_parameter_user_prompt(operator):
         """Test set_parameter for user_prompt."""
         operator.set_parameter("user_prompt", "New: {{query}}")
-        assert operator.get_user_prompt().content == "New: {{query}}"
+        assert operator.get_state()["user_prompt"] == "New: {{query}}"
 
     @staticmethod
-    def test_set_parameter_frozen_system_prompt(mock_llm):
+    def test_set_parameter_frozen_system_prompt():
         """Test set_parameter ignores frozen system prompt."""
         op = LLMCallOperator(
-            model_name="gpt-4",
-            llm=mock_llm,
             system_prompt="original",
             user_prompt="{{query}}",
             freeze_system_prompt=True,
         )
-        original = op.get_system_prompt().content
+        original = op.get_state()["system_prompt"]
         op.set_parameter("system_prompt", "New prompt")
-        assert op.get_system_prompt().content == original
+        assert op.get_state()["system_prompt"] == original
 
     @staticmethod
-    def test_set_parameter_frozen_user_prompt(mock_llm):
+    def test_set_parameter_frozen_user_prompt():
         """Test set_parameter ignores frozen user prompt."""
         op = LLMCallOperator(
-            model_name="gpt-4",
-            llm=mock_llm,
             system_prompt="sys",
             user_prompt="original {{query}}",
             freeze_user_prompt=True,
         )
-        original = op.get_user_prompt().content
+        original = op.get_state()["user_prompt"]
         op.set_parameter("user_prompt", "New: {{query}}")
-        assert op.get_user_prompt().content == original
+        assert op.get_state()["user_prompt"] == original
 
     @staticmethod
     def test_get_state(operator):
@@ -166,81 +142,40 @@ class TestLLMCallOperator:
                 "user_prompt": "Loaded: {{query}}",
             }
         )
-        assert operator.get_system_prompt().content == "Loaded system"
-        assert operator.get_user_prompt().content == "Loaded: {{query}}"
+        assert operator.get_state()["system_prompt"] == "Loaded system"
+        assert operator.get_state()["user_prompt"] == "Loaded: {{query}}"
+
+    @staticmethod
+    def test_load_state_triggers_callback():
+        """Test load_state triggers on_parameter_updated callback."""
+        callback = MagicMock()
+        op = LLMCallOperator(
+            system_prompt="original system",
+            user_prompt="original {{query}}",
+            on_parameter_updated=callback,
+        )
+        op.load_state(
+            {
+                "system_prompt": "Loaded system",
+                "user_prompt": "Loaded: {{query}}",
+            }
+        )
+        # Callback should be triggered for both parameters
+        assert callback.call_count == 2
+        callback.assert_any_call("system_prompt", "Loaded system")
+        callback.assert_any_call("user_prompt", "Loaded: {{query}}")
 
     @staticmethod
     def test_load_state_partial(operator):
         """Test load_state with partial state."""
         operator.load_state({"system_prompt": "Partial load"})
         # user_prompt should remain unchanged
-        assert operator.get_user_prompt().content == "Answer: {{query}}"
+        assert operator.get_state()["user_prompt"] == "Answer: {{query}}"
 
     @staticmethod
-    @pytest.mark.asyncio
-    async def test_invoke_basic(mock_llm, operator):
-        """Test basic invoke functionality."""
-        mock_response = MagicMock()
-        mock_response.content = "Hello!"
-        mock_llm.invoke = AsyncMock(return_value=mock_response)
-
-        mock_session = MagicMock()
-        mock_session.set_current_operator_id = MagicMock()
-
-        result = await operator.invoke(
-            inputs={"query": "test query"},
-            session=mock_session,
-        )
-
-        mock_llm.invoke.assert_called_once()
-        mock_session.set_current_operator_id.assert_any_call("llm_call")
-        mock_session.set_current_operator_id.assert_any_call(None)
-        assert result.content == "Hello!"
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_invoke_with_history(mock_llm, operator):
-        """Test invoke with conversation history."""
-        mock_response = MagicMock()
-        mock_response.content = "response"
-        mock_llm.invoke = AsyncMock(return_value=mock_response)
-
-        history = [MagicMock()]
-        await operator.invoke(
-            inputs={"query": "new question"},
-            session=MagicMock(),
-            history=history,
-        )
-
-        call_kwargs = mock_llm.invoke.call_args.kwargs
-        messages = call_kwargs["messages"]
-        # Should contain history
-        assert len(messages) >= 3  # system + history + user
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_invoke_with_tools(mock_llm, operator):
-        """Test invoke with tool definitions."""
-        mock_response = MagicMock()
-        mock_response.content = "response"
-        mock_llm.invoke = AsyncMock(return_value=mock_response)
-
-        tools = [{"name": "get_weather", "description": "Get weather"}]
-        await operator.invoke(
-            inputs={"query": "test"},
-            session=MagicMock(),
-            tools=tools,
-        )
-
-        call_kwargs = mock_llm.invoke.call_args.kwargs
-        assert call_kwargs["tools"] == tools
-
-    @staticmethod
-    def test_get_freeze_system_prompt(mock_llm):
+    def test_get_freeze_system_prompt():
         """Test get_freeze_system_prompt getter."""
         op = LLMCallOperator(
-            model_name="gpt-4",
-            llm=mock_llm,
             system_prompt="sys",
             user_prompt="{{query}}",
             freeze_system_prompt=True,
@@ -248,11 +183,9 @@ class TestLLMCallOperator:
         assert op.get_freeze_system_prompt() is True
 
     @staticmethod
-    def test_get_freeze_user_prompt(mock_llm):
+    def test_get_freeze_user_prompt():
         """Test get_freeze_user_prompt getter."""
         op = LLMCallOperator(
-            model_name="gpt-4",
-            llm=mock_llm,
             system_prompt="sys",
             user_prompt="{{query}}",
             freeze_user_prompt=True,
@@ -272,88 +205,13 @@ class TestLLMCallOperator:
         assert operator.get_freeze_user_prompt() is True
 
     @staticmethod
-    def test_on_parameter_updated_callback(mock_llm):
+    def test_on_parameter_updated_callback():
         """Test on_parameter_updated callback is invoked."""
         callback = MagicMock()
         op = LLMCallOperator(
-            model_name="gpt-4",
-            llm=mock_llm,
             system_prompt="sys",
             user_prompt="{{query}}",
             on_parameter_updated=callback,
         )
         op.set_parameter("system_prompt", "New prompt")
         callback.assert_called_once_with("system_prompt", "New prompt")
-
-    @staticmethod
-    def test_update_system_prompt(operator):
-        """Test update_system_prompt method."""
-        operator.update_system_prompt("Updated system prompt")
-        assert operator.get_system_prompt().content == "Updated system prompt"
-
-    @staticmethod
-    def test_update_user_prompt(operator):
-        """Test update_user_prompt method."""
-        operator.update_user_prompt("Updated: {{query}}")
-        assert operator.get_user_prompt().content == "Updated: {{query}}"
-
-
-class TestLLMCallOperatorStream:
-    """Tests for streaming functionality."""
-
-    @staticmethod
-    @pytest.fixture
-    def mock_llm_stream():
-        """Create mock LLM with streaming support."""
-        llm = MagicMock()
-
-        async def mock_stream(*args, **kwargs):
-            chunks = [MagicMock(content="Hel"), MagicMock(content="lo!")]
-            for chunk in chunks:
-                yield chunk
-
-        llm.stream = mock_stream
-        return llm
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_stream_basic(mock_llm_stream):
-        """Test basic streaming functionality."""
-        op = LLMCallOperator(
-            model_name="test",
-            llm=mock_llm_stream,
-            system_prompt="sys",
-            user_prompt="{{query}}",
-            freeze_user_prompt=False,
-        )
-        mock_session = MagicMock()
-        mock_session.set_current_operator_id = MagicMock()
-
-        chunks = []
-        async for chunk in op.stream(
-            inputs={"query": "hi"},
-            session=mock_session,
-        ):
-            chunks.append(chunk)
-
-        assert len(chunks) == 2
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_stream_context_cleanup(mock_llm_stream):
-        """Test that operator context is cleaned up after streaming."""
-        op = LLMCallOperator(
-            model_name="test",
-            llm=mock_llm_stream,
-            system_prompt="sys",
-            user_prompt="{{query}}",
-            freeze_user_prompt=False,
-        )
-        mock_session = MagicMock()
-        mock_session.set_current_operator_id = MagicMock()
-
-        async for _ in op.stream(inputs={"query": "hi"}, session=mock_session):
-            pass
-
-        # Context should be cleared at the end
-        mock_session.set_current_operator_id.assert_any_call(None)

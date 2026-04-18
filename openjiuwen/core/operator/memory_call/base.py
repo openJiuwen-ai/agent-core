@@ -1,50 +1,45 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """
-Memory invocation operator with enabled/retries tunables.
+Memory parameter handle for self-evolution.
 
-MemoryCallOperator integrates memory read/write/retrieval into the Operator system for:
-- Tracing via session.tracer()
-- Checkpoint via get_state/load_state
-- Tunable enabled/retries parameters
+MemoryCallOperator manages memory-related parameters for the evolution framework.
+It does NOT execute memory operations.
+
+Future extensions:
+- get_tunables() for retrieval strategy (top_k, query rewrite), write strategy
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, AsyncIterator, Optional, Callable, Awaitable
+from typing import Any, Dict, Optional, Callable
 
 from openjiuwen.core.operator.base import Operator, TunableSpec
-from openjiuwen.core.session.agent import Session
 
 
 class MemoryCallOperator(Operator):
-    """Memory invocation operator with enabled/retries tunables.
+    """Memory parameter handle for self-evolution.
 
-    Current responsibilities:
-    - Set operator_id on session before execution for tracing
-    - Provide get_state/load_state for checkpoint
+    Manages enabled and max_retries parameters.
 
-    Future extensions:
-    - get_tunables() for retrieval strategy (top_k, query rewrite), write strategy
+    Single entry points for parameter updates:
+    - set_parameter(): evolution updates
+    - load_state(): checkpoint recovery
     """
 
     def __init__(
         self,
-        memory: Any = None,
-        memory_call_id: str = "memory_call",
-        *,
-        memory_invoke: Optional[Callable[[Dict[str, Any]], Awaitable[Any]]] = None,
+        operator_id: str = "memory_call",
+        on_parameter_updated: Optional[Callable[[str, Any], None]] = None,
     ):
-        """Initialize memory call operator.
+        """Initialize memory parameter handle.
 
         Args:
-            memory: Memory instance for execution
-            memory_call_id: Unique operator identifier
-            memory_invoke: Custom invoke callback (for non-standard interfaces like LongTermMemory.search_user_mem)
+            operator_id: Unique operator identifier
+            on_parameter_updated: Callback when parameters change
         """
-        self._memory = memory
-        self._memory_call_id = memory_call_id
-        self._memory_invoke = memory_invoke
+        self._operator_id = operator_id
+        self._on_parameter_updated = on_parameter_updated
         self._enabled: bool = True
         self._max_retries: int = 0
 
@@ -55,7 +50,7 @@ class MemoryCallOperator(Operator):
         Returns:
             Operator ID string
         """
-        return self._memory_call_id
+        return self._operator_id
 
     def get_tunables(self) -> Dict[str, TunableSpec]:
         """Get tunable parameters.
@@ -81,15 +76,21 @@ class MemoryCallOperator(Operator):
     def set_parameter(self, target: str, value: Any) -> None:
         """Set tunable parameter value.
 
+        Triggers on_parameter_updated callback if set.
+
         Args:
             target: Parameter name (enabled or max_retries)
             value: New value to set
         """
         if target == "enabled":
             self._enabled = bool(value)
-        if target == "max_retries":
+            if self._on_parameter_updated is not None:
+                self._on_parameter_updated("enabled", self._enabled)
+        elif target == "max_retries":
             v = int(value)
             self._max_retries = max(0, min(5, v))
+            if self._on_parameter_updated is not None:
+                self._on_parameter_updated("max_retries", self._max_retries)
 
     def get_state(self) -> Dict[str, Any]:
         """Get current state for checkpoint.
@@ -102,77 +103,16 @@ class MemoryCallOperator(Operator):
     def load_state(self, state: Dict[str, Any]) -> None:
         """Restore state from checkpoint.
 
+        Triggers on_parameter_updated callback if set.
+
         Args:
             state: State dict with enabled and/or max_retries
         """
         if "enabled" in state:
             self._enabled = bool(state["enabled"])
+            if self._on_parameter_updated is not None:
+                self._on_parameter_updated("enabled", self._enabled)
         if "max_retries" in state:
             self._max_retries = max(0, min(5, int(state["max_retries"])))
-
-    async def invoke(self, inputs: Dict[str, Any], session: Session, **kwargs: Any) -> Any:
-        """Execute memory invocation.
-
-        Supports two modes:
-        1. memory_invoke(inputs) callback (for non-standard interfaces)
-        2. memory.invoke(inputs, **kwargs) (traditional mode)
-
-        Args:
-            inputs: Input dict for memory operation
-            session: Session for tracing
-            **kwargs: Additional parameters
-
-        Returns:
-            Memory operation result
-
-        Raises:
-            RuntimeError: if operator is disabled or no memory configured
-        """
-        if not self._enabled:
-            raise RuntimeError(f"MemoryCallOperator disabled: {self._memory_call_id}")
-        self._set_operator_context(session, self._memory_call_id)
-        try:
-            # Support two modes:
-            # 1) memory_invoke(inputs) callback (for non-standard interfaces like LongTermMemory.search_user_mem)
-            # 2) memory.invoke(inputs, **kwargs) (traditional mode)
-            last_err: Exception | None = None
-            for attempt in range(self._max_retries + 1):
-                try:
-                    if self._memory_invoke is not None:
-                        return await self._memory_invoke(inputs)
-                    if self._memory is None:
-                        raise RuntimeError("MemoryCallOperator has no memory/memory_invoke configured")
-                    return await self._memory.invoke(inputs, **kwargs)
-                except Exception as e:
-                    last_err = e
-                    if attempt >= self._max_retries:
-                        raise
-            if last_err is not None:
-                raise last_err
-            raise RuntimeError("memory invoke failed without exception")
-        finally:
-            self._set_operator_context(session, None)
-
-    async def stream(self, inputs: Dict[str, Any], session: Session, **kwargs: Any) -> AsyncIterator[Any]:
-        """Stream memory invocation (if supported).
-
-        Args:
-            inputs: Input dict for memory operation
-            session: Session for tracing
-            **kwargs: Additional parameters
-
-        Yields:
-            Stream chunks
-
-        Raises:
-            NotImplementedError: if memory does not support streaming
-        """
-        if not hasattr(self._memory, "stream"):
-            raise NotImplementedError("memory stream not implemented")
-        self._set_operator_context(session, self._memory_call_id)
-        try:
-            async for chunk in self._memory.stream(inputs, **kwargs):
-                yield chunk
-        finally:
-            self._set_operator_context(session, None)
-
+            if self._on_parameter_updated is not None:
+                self._on_parameter_updated("max_retries", self._max_retries)

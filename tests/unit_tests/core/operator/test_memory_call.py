@@ -3,7 +3,7 @@
 
 """Unit tests for openjiuwen.core.operator.memory_call module."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -14,16 +14,9 @@ class TestMemoryCallOperator:
     """Tests for MemoryCallOperator class."""
 
     @pytest.fixture
-    def mock_memory(self):
-        """Create a mock memory instance."""
-        memory = MagicMock()
-        memory.invoke = AsyncMock(return_value={"retrieved": "data"})
-        return memory
-
-    @pytest.fixture
-    def operator(self, mock_memory):
+    def operator(self):
         """Create a MemoryCallOperator instance."""
-        return MemoryCallOperator(memory=mock_memory)
+        return MemoryCallOperator()
 
     @staticmethod
     def test_operator_id_default(operator):
@@ -33,7 +26,7 @@ class TestMemoryCallOperator:
     @staticmethod
     def test_operator_id_custom():
         """Test custom operator_id."""
-        op = MemoryCallOperator(memory=MagicMock(), memory_call_id="custom_memory")
+        op = MemoryCallOperator(operator_id="custom_memory")
         assert op.operator_id == "custom_memory"
 
     @staticmethod
@@ -86,7 +79,7 @@ class TestMemoryCallOperator:
     @staticmethod
     def test_get_state_with_custom_values():
         """Test get_state with custom values."""
-        op = MemoryCallOperator(memory=MagicMock())
+        op = MemoryCallOperator()
         op.load_state({"enabled": False, "max_retries": 3})
         state = op.get_state()
         assert state["enabled"] is False
@@ -111,220 +104,46 @@ class TestMemoryCallOperator:
     @staticmethod
     def test_load_state_clamped_retries():
         """Test load_state clamps max_retries to 0-5."""
-        op = MemoryCallOperator(memory=MagicMock())
+        op = MemoryCallOperator()
         op.load_state({"max_retries": 10})
         assert op.get_state()["max_retries"] == 5
         op.load_state({"max_retries": -1})
         assert op.get_state()["max_retries"] == 0
 
 
-class TestMemoryCallOperatorInvoke:
-    """Tests for MemoryCallOperator invoke functionality."""
-
-    @pytest.fixture
-    def mock_memory(self):
-        """Create a mock memory instance."""
-        memory = MagicMock()
-        memory.invoke = AsyncMock(return_value={"retrieved": "data"})
-        return memory
-
-    @pytest.fixture
-    def mock_session(self):
-        """Create a mock session."""
-        session = MagicMock()
-        session.set_current_operator_id = MagicMock()
-        return session
+class TestMemoryCallOperatorCallbacks:
+    """Tests for callback functionality."""
 
     @staticmethod
-    @pytest.mark.asyncio
-    async def test_invoke_basic(mock_memory, mock_session):
-        """Test basic invoke functionality."""
-        op = MemoryCallOperator(memory=mock_memory)
-        result = await op.invoke(
-            inputs={"query": "test query"},
-            session=mock_session,
-        )
-        mock_memory.invoke.assert_called_once()
-        assert result == {"retrieved": "data"}
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_invoke_with_kwargs(mock_memory, mock_session):
-        """Test invoke passes kwargs to memory."""
-        op = MemoryCallOperator(memory=mock_memory)
-        await op.invoke(
-            inputs={},
-            session=mock_session,
-            extra_param="value",
-        )
-        mock_memory.invoke.assert_called_once()
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_invoke_disabled_operator(mock_session):
-        """Test invoke raises error when operator is disabled."""
-        op = MemoryCallOperator(memory=MagicMock())
+    def test_set_parameter_triggers_callback():
+        """Test set_parameter triggers on_parameter_updated callback."""
+        callback = MagicMock()
+        op = MemoryCallOperator(on_parameter_updated=callback)
         op.set_parameter("enabled", False)
-        with pytest.raises(RuntimeError, match="disabled"):
-            await op.invoke(inputs={}, session=mock_session)
+        callback.assert_called_once_with("enabled", False)
 
     @staticmethod
-    @pytest.mark.asyncio
-    async def test_invoke_no_memory_configured(mock_session):
-        """Test invoke raises error when no memory is configured."""
-        op = MemoryCallOperator()
-        with pytest.raises(RuntimeError, match="no memory"):
-            await op.invoke(inputs={}, session=mock_session)
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_invoke_with_retries_success_first(mock_memory, mock_session):
-        """Test invoke retries and succeeds on first attempt."""
-        op = MemoryCallOperator(memory=mock_memory)
+    def test_set_parameter_max_retries_triggers_callback():
+        """Test set_parameter for max_retries triggers callback."""
+        callback = MagicMock()
+        op = MemoryCallOperator(on_parameter_updated=callback)
         op.set_parameter("max_retries", 3)
-        await op.invoke(inputs={}, session=mock_session)
-        mock_memory.invoke.assert_called_once()
+        callback.assert_called_once_with("max_retries", 3)
 
     @staticmethod
-    @pytest.mark.asyncio
-    async def test_invoke_with_retries_failure(mock_memory, mock_session):
-        """Test invoke retries and then raises on failure."""
-        mock_memory.invoke = AsyncMock(side_effect=ValueError("error"))
-        op = MemoryCallOperator(memory=mock_memory)
-        op.set_parameter("max_retries", 2)
-        with pytest.raises(ValueError):
-            await op.invoke(inputs={}, session=mock_session)
-        # Should be called 3 times (initial + 2 retries)
-        assert mock_memory.invoke.call_count == 3
-
-
-class TestMemoryCallOperatorCustomInvoke:
-    """Tests for MemoryCallOperator with custom memory_invoke."""
-
-    @pytest.fixture
-    def mock_session(self):
-        """Create a mock session."""
-        session = MagicMock()
-        session.set_current_operator_id = MagicMock()
-        return session
+    def test_load_state_triggers_callback():
+        """Test load_state triggers on_parameter_updated callback."""
+        callback = MagicMock()
+        op = MemoryCallOperator(on_parameter_updated=callback)
+        op.load_state({"enabled": False, "max_retries": 2})
+        # Callback should be triggered for both parameters
+        assert callback.call_count == 2
+        callback.assert_any_call("enabled", False)
+        callback.assert_any_call("max_retries", 2)
 
     @staticmethod
-    @pytest.mark.asyncio
-    async def test_invoke_with_custom_callback(mock_session):
-        """Test invoke uses custom memory_invoke callback."""
-        callback = AsyncMock(return_value={"custom": "result"})
-
-        op = MemoryCallOperator(memory_invoke=callback)
-        result = await op.invoke(inputs={}, session=mock_session)
-
-        callback.assert_called_once()
-        assert result == {"custom": "result"}
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_invoke_callback_takes_precedence(mock_session):
-        """Test memory_invoke callback takes precedence over memory.invoke."""
-        callback = AsyncMock(return_value={"callback": "result"})
-        mock_memory = MagicMock()
-        mock_memory.invoke = AsyncMock(return_value={"memory": "result"})
-
-        op = MemoryCallOperator(memory=mock_memory, memory_invoke=callback)
-        result = await op.invoke(inputs={}, session=mock_session)
-
-        callback.assert_called_once()
-        mock_memory.invoke.assert_not_called()
-        assert result == {"callback": "result"}
-
-
-class TestMemoryCallOperatorStream:
-    """Tests for MemoryCallOperator streaming functionality."""
-
-    @pytest.fixture
-    def mock_streaming_memory(self):
-        """Create a mock memory with streaming support."""
-        memory = MagicMock()
-
-        async def mock_stream(*args, **kwargs):
-            yield "chunk1"
-            yield "chunk2"
-
-        memory.stream = mock_stream
-        return memory
-
-    @pytest.fixture
-    def mock_session(self):
-        """Create a mock session."""
-        session = MagicMock()
-        session.set_current_operator_id = MagicMock()
-        return session
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_stream_basic(mock_streaming_memory, mock_session):
-        """Test basic streaming functionality."""
-        op = MemoryCallOperator(memory=mock_streaming_memory)
-        chunks = []
-        async for chunk in op.stream(inputs={}, session=mock_session):
-            chunks.append(chunk)
-        assert len(chunks) == 2
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_stream_not_implemented(mock_session):
-        """Test stream raises NotImplementedError for non-streaming memory."""
-        memory = MagicMock()
-        del memory.stream  # Remove stream method
-        op = MemoryCallOperator(memory=memory)
-        with pytest.raises(NotImplementedError):
-            async for _ in op.stream(inputs={}, session=mock_session):  # noqa: F841
-                pass
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_stream_context_cleanup(mock_streaming_memory, mock_session):
-        """Test operator context is cleaned up after streaming."""
-        op = MemoryCallOperator(memory=mock_streaming_memory)
-        async for _ in op.stream(inputs={}, session=mock_session):
-            pass
-        # Context should be cleared
-        mock_session.set_current_operator_id.assert_any_call(None)
-
-
-class TestMemoryCallOperatorEdgeCases:
-    """Tests for edge cases in MemoryCallOperator."""
-
-    @pytest.fixture
-    def mock_session(self):
-        """Create a mock session."""
-        session = MagicMock()
-        session.set_current_operator_id = MagicMock()
-        return session
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_set_parameter_unknown_target():
+    def test_set_parameter_unknown_target():
         """Test set_parameter ignores unknown targets."""
-        op = MemoryCallOperator(memory=MagicMock())
+        op = MemoryCallOperator()
         # Should not raise
         op.set_parameter("unknown", "value")
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_invoke_with_disabled_memory_invoke_mode(mock_session):
-        """Test invoke in memory_invoke mode when operator is disabled."""
-        callback = AsyncMock(return_value={})
-        op = MemoryCallOperator(memory_invoke=callback)
-        op.set_parameter("enabled", False)
-        with pytest.raises(RuntimeError, match="disabled"):
-            await op.invoke(inputs={}, session=mock_session)
-        callback.assert_not_called()
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_invoke_empty_inputs(mock_session):
-        """Test invoke with empty inputs dict."""
-        memory = MagicMock()
-        memory.invoke = AsyncMock(return_value={})
-        op = MemoryCallOperator(memory=memory)
-        await op.invoke(inputs={}, session=mock_session)
-        memory.invoke.assert_called_once()

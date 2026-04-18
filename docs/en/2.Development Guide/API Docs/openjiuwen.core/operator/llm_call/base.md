@@ -1,176 +1,101 @@
 # openjiuwen.core.operator.llm_call.base
 
-## class openjiuwen.core.operator.llm_call.base.LLMCall
+`openjiuwen.core.operator.llm_call.base` provides the **LLM prompt parameter handle** `LLMCallOperator` for self-evolution of LLM prompts. It manages `system_prompt` and `user_prompt` parameters, supports freeze markers to control tunability, and pushes parameter changes to the consumer via the `on_parameter_updated` callback.
 
-```python
-LLMCall(model_name: str, llm: Model, system_prompt: str | List[BaseMessage] | List[Dict], user_prompt: str | List[BaseMessage] | List[Dict], freeze_system_prompt: bool = False, freeze_user_prompt: bool = True, llm_call_id: str = "llm_call")
+---
+
+## class openjiuwen.core.operator.llm_call.base.LLMCallOperator
+
+LLM prompt parameter handle; tunable parameters are `system_prompt` and `user_prompt` (controlled by freeze markers). Changes are pushed to the consumer via the `on_parameter_updated` callback.
+
+```text
+class LLMCallOperator(
+    system_prompt: str | List[Dict],
+    user_prompt: str | List[Dict],
+    freeze_system_prompt: bool = False,
+    freeze_user_prompt: bool = True,
+    operator_id: str = "llm_call",
+    *,
+    on_parameter_updated: Optional[Callable[[str, Any], None]] = None,
+)
 ```
-
-`LLMCall` encapsulates the configuration and execution logic for a single LLM call, supporting system/user prompt templates, history message injection, and tool calls. When called, it fills the templates based on `inputs` and assembles the `[system, history, user]` message sequence before forwarding to the underlying `Model`.
 
 **Parameters**:
 
-* **model_name** (str): Model name, passed when calling `llm.invoke` / `llm.stream`.
-* **llm** (Model): LLM instance for executing invoke and stream.
-* **system_prompt** (str | List[BaseMessage] | List[Dict]): System prompt, supports string template or message list. Strings support `{{key}}` placeholders.
-* **user_prompt** (str | List[BaseMessage] | List[Dict], optional): User prompt, same as above. Default: `"{{query}}"`.
-* **freeze_system_prompt** (bool, optional): When `True`, prevents `update_system_prompt` from modifying. Default: `False`.
-* **freeze_user_prompt** (bool, optional): When `True`, prevents `update_user_prompt` from modifying. Default: `True`.
-* **llm_call_id** (str, optional): Identifier for this call, used for optimizer_callback, etc. Default: `"llm_call"`.
+* **system_prompt** (str | List[Dict]): System prompt, supports string template or message list. Strings support `{{key}}` placeholders.
+* **user_prompt** (str | List[Dict]): User prompt template (supports `{{query}}` placeholders).
+* **freeze_system_prompt** (bool, optional): When `True`, `system_prompt` is not tunable. Default: `False`.
+* **freeze_user_prompt** (bool, optional): When `True`, `user_prompt` is not tunable. Default: `True`.
+* **operator_id** (str, optional): Unique operator identifier. Default: `"llm_call"`.
+* **on_parameter_updated** (Callable, optional): Callback when parameters change, signature `(target: str, value: Any) -> None`. Default: `None`.
 
-### async invoke
+### operator_id -> str
 
-```python
-async invoke(inputs: Dict[str, Any], session: Session, history: Optional[List[BaseMessage]] = None, tools: Optional[List[ToolInfo]] = None) -> BaseMessage
-```
+Return the unique operator identifier.
 
-Fill the prompt templates based on `inputs` and call the LLM, returning the model's reply message. If `optimizer_callback` is set, it will be executed after the call completes.
+### get_tunables() -> Dict[str, TunableSpec]
+
+Return tunable parameter specs. Only includes unfrozen parameters (`system_prompt` and/or `user_prompt`). Parameter kind is `"prompt"`.
+
+### set_parameter(target: str, value: Any) -> None
+
+Set a tunable parameter value (evolution update). Only updates unfrozen parameters, then triggers the `on_parameter_updated` callback.
 
 **Parameters**:
 
-* **inputs** (Dict[str, Any]): Variables for filling system/user templates, e.g., `{"query": "user question"}`.
-* **session** (Session): Session object for optimizer_callback, etc.
-* **history** (List[BaseMessage], optional): History message list, inserted between system and user. Default: `None`.
-* **tools** (List[ToolInfo], optional): List of callable tools. Default: `None`.
+* **target** (str): Parameter name (`system_prompt` or `user_prompt`).
+* **value** (Any): New prompt content (str or list).
+
+### get_state() -> Dict[str, Any]
+
+Get current prompt state for checkpointing.
 
 **Returns**:
 
-**BaseMessage** (usually AssistantMessage), the complete message returned by the model.
+**Dict[str, Any]**, dictionary containing `system_prompt` and `user_prompt`.
 
-**Example**:
+### load_state(state: Dict[str, Any]) -> None
 
-```python
->>> import os
->>> import asyncio
->>> from unittest.mock import MagicMock
->>> from openjiuwen.core.operator.llm_call import LLMCall
->>> from openjiuwen.core.foundation.llm import Model, ModelRequestConfig, ModelClientConfig
->>>
->>> API_BASE = os.getenv("API_BASE", "your api base")
->>> API_KEY = os.getenv("API_KEY", "your api key")
->>> MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
->>> MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "OpenAI")
->>>
->>> async def main():
-...     model_config = ModelRequestConfig(model=MODEL_NAME)
-...     model_client_config = ModelClientConfig(
-...         client_provider=MODEL_PROVIDER,
-...         api_base=API_BASE,
-...         api_key=API_KEY,
-...     )
-...     llm = Model(model_client_config, model_config)
-...     llm_call = LLMCall(
-...         model_name=MODEL_NAME,
-...         llm=llm,
-...         system_prompt="You are an assistant.",
-...         user_prompt="{{query}}",
-...     )
-...     session = MagicMock()
-...     result = await llm_call.invoke(
-...         inputs={"query": "Hello"},
-...         session=session,
-...     )
-...     return result.content
->>>
->>> asyncio.run(main())
-'Hello! How can I help you?'
-```
-
-### async stream
-
-```python
-async stream(inputs: Dict[str, Any], session: Session, history: Optional[List[BaseMessage]] = None, tools: Optional[List[ToolInfo]] = None) -> AsyncIterator
-```
-
-Stream call to LLM, yielding message chunks one by one. If `optimizer_callback` is set, it will be executed after streaming ends, based on the complete concatenated content.
+Restore prompt state from checkpoint. Does NOT check freeze markers (checkpoint recovery must restore full state). Updates fields one by one and triggers callbacks.
 
 **Parameters**:
 
-* **inputs** (Dict[str, Any]): Variables for filling templates.
-* **session** (Session): Session object.
-* **history** (List[BaseMessage], optional): History message list. Default: `None`.
-* **tools** (List[ToolInfo], optional): List of callable tools. Default: `None`.
+* **state** (Dict[str, Any]): State dictionary containing `system_prompt` and/or `user_prompt`.
 
-**Returns**:
+### set_freeze_system_prompt(switch: bool) -> None
 
-**AsyncIterator**, an asynchronous iterator that yields `AssistantMessageChunk` chunks.
+Set the system prompt freeze state.
 
-### get_optimizer_callback
+**Parameters**:
 
-```python
-get_optimizer_callback() -> Optional[Callable]
-```
+* **switch** (bool): `True` to freeze (not tunable), `False` to enable tuning.
 
-Return the currently set optimizer callback function.
+### set_freeze_user_prompt(switch: bool) -> None
 
-### set_optimizer_callback
+Set the user prompt freeze state.
 
-```python
-set_optimizer_callback(callback: Optional[Callable]) -> None
-```
+**Parameters**:
 
-Set or clear the optimizer callback. The callback signature is `async (llm_call_id, inputs, response, session)`, called after invoke/stream completes.
+* **switch** (bool): `True` to freeze (not tunable), `False` to enable tuning.
 
-### get_system_prompt
-
-```python
-get_system_prompt() -> PromptTemplate
-```
-
-Return the current system prompt template.
-
-### get_user_prompt
-
-```python
-get_user_prompt() -> PromptTemplate
-```
-
-Return the current user prompt template.
-
-### update_system_prompt
-
-```python
-update_system_prompt(system_prompt: str | List[BaseMessage] | List[Dict]) -> None
-```
-
-Update the system prompt. If `freeze_system_prompt` is `True`, it will not take effect.
-
-### update_user_prompt
-
-```python
-update_user_prompt(user_prompt: str | List[BaseMessage] | List[Dict]) -> None
-```
-
-Update the user prompt. If `freeze_user_prompt` is `True`, it will not take effect.
-
-### set_freeze_system_prompt
-
-```python
-set_freeze_system_prompt(switch: bool) -> None
-```
-
-Set whether to freeze the system prompt.
-
-### set_freeze_user_prompt
-
-```python
-set_freeze_user_prompt(switch: bool) -> None
-```
-
-Set whether to freeze the user prompt.
-
-### get_freeze_system_prompt
-
-```python
-get_freeze_system_prompt() -> bool
-```
+### get_freeze_system_prompt() -> bool
 
 Return whether the system prompt is frozen.
 
-### get_freeze_user_prompt
+**Returns**:
 
-```python
-get_freeze_user_prompt() -> bool
-```
+**bool**, `True` means frozen (not tunable).
+
+### get_freeze_user_prompt() -> bool
 
 Return whether the user prompt is frozen.
+
+**Returns**:
+
+**bool**, `True` means frozen (not tunable).
+
+---
+
+## Alias
+
+`LLMCall` is a backward-compatible alias for `LLMCallOperator`.
