@@ -20,6 +20,9 @@ class UsageMetadata(BaseModel):
     output_tokens: int = 0
     total_tokens: int = 0
     cache_tokens: int = 0
+    input_cost: float = 0.
+    output_cost: float = 0.
+    total_cost: float = 0.
 
 
 class BaseMessage(BaseModel):

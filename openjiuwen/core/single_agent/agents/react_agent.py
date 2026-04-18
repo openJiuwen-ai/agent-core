@@ -775,6 +775,12 @@ class ReActAgent(BaseAgent):
                 reasoning_content=accumulated_chunk.reasoning_content,
             )
         ctx.inputs.response = ai_message
+        if ai_message.usage_metadata:
+            await session.write_stream(OutputSchema(
+                type="llm_usage",
+                index=0,
+                payload={"usage_metadata": ai_message.usage_metadata.model_dump(), "result_type": "answer"},
+            ))
         return ai_message
 
     @staticmethod
