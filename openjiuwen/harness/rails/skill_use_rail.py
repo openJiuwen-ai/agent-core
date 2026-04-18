@@ -26,7 +26,7 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools import BashTool, CodeTool, ReadFileTool
 from openjiuwen.harness.tools.list_skill import ListSkillTool
 from openjiuwen.harness.tools import SkillTool
-from openjiuwen.agent_evolving.online.store import EvolutionStore
+from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 
 
 class SkillUseRail(DeepAgentRail):

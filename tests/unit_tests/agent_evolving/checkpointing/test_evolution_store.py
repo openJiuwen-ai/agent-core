@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 # pylint: disable=protected-access
-"""Tests for online evolution store."""
+"""Tests for checkpointing evolution store (EvolutionStore)."""
 
 from __future__ import annotations
 
@@ -11,12 +11,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.agent_evolving.online.schema import (
+from openjiuwen.agent_evolving.checkpointing import EvolutionStore
+from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionPatch,
     EvolutionRecord,
     EvolutionTarget,
 )
-from openjiuwen.agent_evolving.online.store import EvolutionStore
 
 
 def make_record(

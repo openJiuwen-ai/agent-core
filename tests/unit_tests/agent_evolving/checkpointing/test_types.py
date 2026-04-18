@@ -1,14 +1,16 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Tests for online evolution schema models."""
+"""Tests for checkpointing types (EvolutionPatch, EvolutionRecord, EvolutionLog)."""
 
 from __future__ import annotations
 
-from openjiuwen.agent_evolving.online.schema import (
-    EvolutionCategory,
+from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionLog,
     EvolutionPatch,
     EvolutionRecord,
+)
+from openjiuwen.agent_evolving.signal.base import (
+    EvolutionCategory,
     EvolutionSignal,
     EvolutionTarget,
 )
@@ -161,3 +163,37 @@ class TestEvolutionSignal:
         data = signal.to_dict()
         assert data["evolution_type"] == "skill_experience"
         assert data["tool_name"] == "bash"
+
+    @staticmethod
+    def test_to_dict_omits_context_when_none():
+        """Online signals have no context; key must be absent from serialized dict."""
+        signal = EvolutionSignal(
+            signal_type="execution_failure",
+            evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
+            section="Troubleshooting",
+            excerpt="timeout",
+        )
+        assert "context" not in signal.to_dict()
+
+    @staticmethod
+    def test_to_dict_includes_context_when_present():
+        """Offline signals carry evaluation evidence; context must survive serialization."""
+        ctx = {
+            "question": "How to deploy?",
+            "label": "use kubectl",
+            "answer": "wrong answer",
+            "reason": "missed kubectl",
+            "score": 0.0,
+        }
+        signal = EvolutionSignal(
+            signal_type="low_score",
+            evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
+            section="Troubleshooting",
+            excerpt="score=0.00",
+            skill_name="skill-a",
+            context=ctx,
+        )
+        data = signal.to_dict()
+        assert "context" in data
+        assert data["context"]["question"] == "How to deploy?"
+        assert data["context"]["score"] == 0.0

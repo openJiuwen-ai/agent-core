@@ -3,7 +3,7 @@
 # pylint: disable=protected-access
 """End-to-end system tests for the online skill evolution pipeline.
 
-Exercises the full chain: SignalDetector → SkillEvolver → EvolutionStore
+Exercises the full chain: SignalDetector → SkillExperienceOptimizer → EvolutionStore
 without requiring a live LLM (uses a mock LLM that returns deterministic JSON).
 """
 
@@ -16,13 +16,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.agent_evolving.online.evolver import SkillEvolver
-from openjiuwen.agent_evolving.online.schema import (
+from openjiuwen.agent_evolving.checkpointing import EvolutionStore
+from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionContext,
     EvolutionTarget,
 )
+from openjiuwen.agent_evolving.optimizer.skill_call import SkillExperienceOptimizer
 from openjiuwen.agent_evolving.signal import SignalDetector
-from openjiuwen.agent_evolving.online.store import EvolutionStore
 
 
 def _prepare_skill(root: Path, name: str, content: str) -> Path:
@@ -166,7 +166,7 @@ class TestOnlineEvolutionE2E:
         llm.invoke = AsyncMock(
             return_value=SimpleNamespace(content=_build_mock_llm_response_with_script())
         )
-        evolver = SkillEvolver(llm=llm, model="mock-model", language="en")
+        optimizer = SkillExperienceOptimizer(llm=llm, model="mock-model", language="en")
 
         store = EvolutionStore(str(tmp_path / "skills"))
 
@@ -179,7 +179,7 @@ class TestOnlineEvolutionE2E:
             existing_body_records=[],
         )
 
-        records = await evolver.generate_skill_experience(ctx)
+        records = await optimizer.generate_records(ctx)
 
         assert len(records) == 2
         text_records = [r for r in records if r.change.target != EvolutionTarget.SCRIPT]
@@ -271,7 +271,7 @@ class TestOnlineEvolutionE2E:
     @staticmethod
     @pytest.mark.asyncio
     async def test_retry_on_malformed_llm_output(tmp_path: Path):
-        """Verify that the evolver retries and recovers when the first LLM
+        """Verify that the optimizer retries and recovers when the first LLM
         response is malformed JSON."""
 
         skill_name = "retry-skill"
@@ -288,7 +288,7 @@ class TestOnlineEvolutionE2E:
             }])),
         ])
 
-        evolver = SkillEvolver(llm=llm, model="mock", language="cn")
+        optimizer = SkillExperienceOptimizer(llm=llm, model="mock", language="cn")
         detector = SignalDetector()
         signals = detector.detect([
             {"role": "tool", "name": "bash", "content": "Error: command timeout"},
@@ -303,7 +303,7 @@ class TestOnlineEvolutionE2E:
             existing_body_records=[],
         )
 
-        records = await evolver.generate_skill_experience(ctx)
+        records = await optimizer.generate_records(ctx)
 
         assert llm.invoke.await_count == 2
         assert len(records) == 1
@@ -329,7 +329,7 @@ class TestOnlineEvolutionE2E:
             "content": "### New Finding\n- Always check permissions first",
         }])))
 
-        evolver = SkillEvolver(llm=llm, model="mock", language="en")
+        optimizer = SkillExperienceOptimizer(llm=llm, model="mock", language="en")
         store = EvolutionStore(str(tmp_path / "skills"))
 
         signals = SignalDetector().detect([
@@ -345,7 +345,7 @@ class TestOnlineEvolutionE2E:
             existing_body_records=[],
         )
 
-        records = await evolver.generate_skill_experience(ctx)
+        records = await optimizer.generate_records(ctx)
         for record in records:
             await store.append_record(skill_name, record)
 
@@ -383,7 +383,7 @@ class TestOnlineEvolutionE2E:
             "content": "### Initial finding\n- v1 content",
         }])))
 
-        evolver = SkillEvolver(llm=llm, model="mock", language="en")
+        optimizer = SkillExperienceOptimizer(llm=llm, model="mock", language="en")
         signals = SignalDetector().detect([
             {"role": "tool", "name": "bash", "content": "Error: timeout"},
         ])
@@ -395,7 +395,7 @@ class TestOnlineEvolutionE2E:
             existing_desc_records=[],
             existing_body_records=[],
         )
-        records_v1 = await evolver.generate_skill_experience(ctx)
+        records_v1 = await optimizer.generate_records(ctx)
         for r in records_v1:
             await store.append_record(skill_name, r)
         old_id = records_v1[0].id
@@ -418,7 +418,7 @@ class TestOnlineEvolutionE2E:
             existing_desc_records=[],
             existing_body_records=existing_body,
         )
-        records_v2 = await evolver.generate_skill_experience(ctx2)
+        records_v2 = await optimizer.generate_records(ctx2)
         for r in records_v2:
             await store.append_record(skill_name, r)
 

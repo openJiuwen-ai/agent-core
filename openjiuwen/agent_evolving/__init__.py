@@ -11,6 +11,7 @@ Includes:
 - Trajectory, TrajectoryStep: Execution trace types
 - SingleDimUpdater, MultiDimUpdater: Update generation
 - Checkpointing: State persistence
+- Signal: Evolution signal detection and conversion
 """
 
 # constants
@@ -43,6 +44,7 @@ from openjiuwen.agent_evolving.optimizer import (
     TextualParameter,
     InstructionOptimizer,
 )
+from openjiuwen.agent_evolving.optimizer.skill_call import SkillExperienceOptimizer
 
 # trainer
 from openjiuwen.agent_evolving.trainer import Trainer, Progress, Callbacks
@@ -58,6 +60,18 @@ from openjiuwen.agent_evolving.trajectory import (
 
 # updater
 from openjiuwen.agent_evolving.updater import Updater, SingleDimUpdater, MultiDimUpdater
+
+# signal
+from openjiuwen.agent_evolving.signal import (
+    ConversationSignalDetector,
+    SignalDetector,
+    EvolutionSignal,
+    EvolutionCategory,
+    EvolutionTarget,
+    make_signal_fingerprint,
+    from_evaluated_case,
+    from_evaluated_cases,
+)
 
 _CONSTANTS = [
     "TuneConstant",
@@ -89,6 +103,7 @@ _OPTIMIZER = [
     "BaseOptimizer",
     "TextualParameter",
     "InstructionOptimizer",
+    "SkillExperienceOptimizer",
 ]
 
 _TRAINER = [
@@ -111,6 +126,17 @@ _UPDATER = [
     "MultiDimUpdater",
 ]
 
+_SIGNAL = [
+    "ConversationSignalDetector",
+    "SignalDetector",
+    "EvolutionSignal",
+    "EvolutionCategory",
+    "EvolutionTarget",
+    "make_signal_fingerprint",
+    "from_evaluated_case",
+    "from_evaluated_cases",
+]
+
 __all__ = (
     _CONSTANTS
     + _CHECKPOINTING
@@ -120,4 +146,5 @@ __all__ = (
     + _TRAINER
     + _TRAJECTORY
     + _UPDATER
+    + _SIGNAL
 )

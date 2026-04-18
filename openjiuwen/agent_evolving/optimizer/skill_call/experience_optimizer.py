@@ -1,21 +1,105 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""LLM-based experience generation for online skill evolution."""
+"""Online Skill experience optimizer."""
 
 from __future__ import annotations
 
 import json
 import re
-from typing import Any, List, Optional, Dict
+from typing import Any, Dict, List, Optional
 
-from openjiuwen.agent_evolving.online.schema import (
+from openjiuwen.agent_evolving.checkpointing.types import (
     VALID_SECTIONS,
+    EvolutionContext,
     EvolutionPatch,
     EvolutionRecord,
-    EvolutionContext,
     EvolutionTarget,
 )
+from openjiuwen.agent_evolving.optimizer.base import BaseOptimizer
+from openjiuwen.agent_evolving.signal.base import EvolutionSignal
+from openjiuwen.agent_evolving.trajectory.types import Updates
 from openjiuwen.core.common.logging import logger
+
+# Initial score mapping by signal type
+INITIAL_SCORE_BY_SIGNAL = {
+    "execution_failure": 0.65,
+    "user_correction": 0.70,
+    "script_artifact": 0.60,
+    "conversation_review": 0.50,
+}
+
+NEW_SKILL_PROPOSAL_PROMPT_CN = """\
+你是一个 Skill 设计专家。根据对话历史，判断是否值得创建一个新的 Skill 来封装这个工作流。
+
+## 对话历史
+{conversation_snippet}
+
+## 现有 Skill 列表
+{existing_skill_names}
+
+## 判断标准
+1. 对话包含复杂的多步骤工作流
+2. 工作流具有通用性和可复用性
+3. 现有 Skill 无法覆盖此场景
+4. 工作流涉及特定工具组合或特定领域知识
+
+## 输出格式
+如果值得创建新 Skill，输出：
+```json
+{{
+  "should_create": true,
+  "name": "建议的 Skill 名称（英文，短横线连接）",
+  "description": "一句话描述 Skill 用途",
+  "body": "完整的 Skill 内容（Instructions、Examples 等）",
+  "reason": "为什么值得创建这个 Skill"
+}}
+```
+
+如果不值得创建，输出：
+```json
+{{"should_create": false}}
+```
+
+只输出 JSON，不要其他内容。"""
+
+NEW_SKILL_PROPOSAL_PROMPT_EN = """\
+You are a Skill design expert. Based on the conversation history, determine whether it's worth creating a new Skill to encapsulate this workflow.
+
+## Conversation History
+{conversation_snippet}
+
+## Existing Skill Names
+{existing_skill_names}
+
+## Criteria
+1. The conversation contains a complex multi-step workflow
+2. The workflow has generality and reusability
+3. Existing Skills cannot cover this scenario
+4. The workflow involves specific tool combinations or domain knowledge
+
+## Output Format
+If a new Skill is worth creating, output:
+```json
+{{
+  "should_create": true,
+  "name": "Suggested Skill name (English, kebab-case)",
+  "description": "One-sentence description of Skill purpose",
+  "body": "Complete Skill content (Instructions, Examples, etc.)",
+  "reason": "Why this Skill is worth creating"
+}}
+```
+
+If not worth creating, output:
+```json
+{{"should_create": false}}
+```
+
+Output only JSON, no other content."""
+
+NEW_SKILL_PROPOSAL_PROMPT: Dict[str, str] = {
+    "cn": NEW_SKILL_PROPOSAL_PROMPT_CN,
+    "en": NEW_SKILL_PROPOSAL_PROMPT_EN,
+}
 
 SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
 你是一个 Skill 优化专家。根据对话中发现的问题信号和对话历史，为 Skill 生成演进经验。
@@ -227,7 +311,7 @@ SKILL_EXPERIENCE_GENERATE_PROMPT: Dict[str, str] = {
 }
 
 
-def build_conversation_snippet(
+def _build_conversation_snippet(
     messages: List[dict],
     max_messages: int = 30,
     content_preview_chars: int = 300,
@@ -256,7 +340,6 @@ def build_conversation_snippet(
     for i, message in enumerate(recent):
         role = message.get("role", "unknown")
         text = _extract_text(message).strip() or ("(无文本)" if language == "cn" else "(No text)")
-        # Recency bias: last 5 messages get 2x budget to preserve recent context
         budget = content_preview_chars * 2 if i >= len(recent) - 5 else content_preview_chars
         if len(text) > budget:
             orig_len = len(text)
@@ -285,12 +368,7 @@ _SECTION_PREVIEW_CHARS = 200
 
 
 def _summarize_skill_content(raw: str, max_chars: int = _SKILL_CONTENT_MAX_CHARS) -> str:
-    """Condense a large SKILL.md for the evolution LLM.
-
-    Strategy: keep frontmatter + first section in full, then for each remaining
-    section include the heading plus a short preview of its opening text.
-    This gives the LLM both structure and semantic context without full content.
-    """
+    """Condense a large SKILL.md for the evolution LLM."""
     if len(raw) <= max_chars:
         return raw
 
@@ -356,10 +434,7 @@ def _try_parse(text: str) -> Optional[Any]:
 
 
 def _extract_json(raw: str) -> Optional[Any]:
-    """Best-effort JSON extraction from LLM output.
-
-    Applies progressive strategies: direct parse → common fix → regex extract.
-    """
+    """Best-effort JSON extraction from LLM output."""
     raw = raw.strip()
     if not raw:
         return None
@@ -391,11 +466,7 @@ _CONTEXT_MAX_CHARS = 500
 
 
 def _build_context(signals: list, max_chars: int = _CONTEXT_MAX_CHARS) -> str:
-    """Build a concise context string from signals, capped to max_chars.
-
-    Each signal gets an equal share of the budget to avoid one verbose
-    signal monopolizing the context field.
-    """
+    """Build a concise context string from signals, capped to max_chars."""
     if not signals:
         return ""
     per_signal = max(80, max_chars // len(signals))
@@ -409,108 +480,78 @@ def _build_context(signals: list, max_chars: int = _CONTEXT_MAX_CHARS) -> str:
 
 
 def _looks_truncated(text: str) -> bool:
-    """Heuristic check: does the LLM output look like it was cut off mid-way?
-
-    Checks bracket balance — if there are more openers than closers,
-    the output was likely truncated by max_tokens or a timeout.
-    """
+    """Heuristic check: does the LLM output look like it was cut off mid-way?"""
     opens = text.count("{") + text.count("[")
     closes = text.count("}") + text.count("]")
     return opens > closes + 1
 
 
-class SkillEvolver:
-    """Pure logic layer: generate skill experience with LLM."""
-
-    def __init__(self, llm: Any, model: str, language: str = "cn") -> None:
-        self._llm = llm
-        self._model = model
-        self._language = language
-
-    async def generate_skill_experience(
-        self,
-        ctx: EvolutionContext,
-    ) -> List[EvolutionRecord]:
-        """Generate and parse evolution records from LLM output."""
-        if not ctx.signals:
-            return []
-
-        conversation_snippet = build_conversation_snippet(ctx.messages, language=self._language)
-        signals_json = json.dumps(
-            [signal.to_dict() for signal in ctx.signals],
-            ensure_ascii=False,
-            indent=2,
+def _build_existing_summary(records: List[EvolutionRecord], label: str = "") -> str:
+    if not records:
+        return ""
+    lines: List[str] = []
+    for record in records:
+        prefix = f"[{label}] " if label else ""
+        lines.append(
+            f"- {prefix}[{record.id}] [{record.change.section}] {record.change.content}"
         )
-        desc_summary = self._build_existing_summary(
-            ctx.existing_desc_records,
-            label="description",
-        )
-        body_summary = self._build_existing_summary(
-            ctx.existing_body_records,
-            label="body",
-        )
-        skill_content = _summarize_skill_content(ctx.skill_content)
-        prompt = SKILL_EXPERIENCE_GENERATE_PROMPT[self._language].format(
-            skill_content=skill_content,
-            signals_json=signals_json,
-            conversation_snippet=(conversation_snippet or "").strip(),
-            existing_desc_summary=desc_summary or f"({'无已有记录' if self._language == 'cn' else 'No existing records'})",
-            existing_body_summary=body_summary or f"({'无已有记录' if self._language == 'cn' else 'No existing records'})",
+    return "\n".join(lines)
+
+
+def _parse_single_patch(data: dict) -> Optional[EvolutionPatch]:
+    action = data.get("action", "append")
+    if action == "skip":
+        return EvolutionPatch(
+            section="",
+            action="skip",
+            content="",
+            skip_reason=data.get("skip_reason", "unknown"),
         )
 
-        logger.info("[SkillEvolver] calling LLM (skill=%s)", ctx.skill_name)
-        try:
-            response = await self._llm.invoke(
-                model=self._model,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = response.content if hasattr(response, "content") else str(response)
-        except Exception as exc:
-            logger.error("[SkillEvolver] LLM call failed: %s", exc)
-            return []
+    section = data.get("section", "Troubleshooting")
+    if section not in VALID_SECTIONS:
+        section = "Troubleshooting"
 
-        patches = self._parse_llm_response(raw)
-        if patches is None:
-            patches = await self._retry_parse(raw, original_prompt=prompt)
-        source = ctx.signals[0].signal_type
-        merged_context = _build_context(ctx.signals)
-        text_records: List[EvolutionRecord] = []
-        script_records: List[EvolutionRecord] = []
+    raw_target = data.get("target", "body")
+    try:
+        target = EvolutionTarget(raw_target)
+    except ValueError:
+        target = EvolutionTarget.BODY
 
-        for patch in patches:
-            if patch.action == "skip":
-                logger.info(
-                    "[SkillEvolver] LLM decided to skip (reason=%s)",
-                    patch.skip_reason or "unknown",
-                )
-                continue
-            if not patch.content.strip():
-                logger.info("[SkillEvolver] LLM returned empty content, skipping")
-                continue
-            is_script = patch.target == EvolutionTarget.SCRIPT
-            if is_script and len(script_records) >= 1:
-                continue
-            if not is_script and len(text_records) >= 2:
-                continue
-            record = EvolutionRecord.make(
-                source=source,
-                context=merged_context,
-                change=patch,
-            )
-            if is_script:
-                script_records.append(record)
-            else:
-                text_records.append(record)
-            logger.info(
-                "[SkillEvolver] generated record %s -> [%s] target=%s merge_target=%s",
-                record.id,
-                patch.section,
-                patch.target.value,
-                patch.merge_target,
-            )
-        return text_records + script_records
+    merge_target = data.get("merge_target")
+    if merge_target in ("null", None):
+        merge_target = None
 
-    _JSON_FIX_PROMPT = """\
+    return EvolutionPatch(
+        section=section,
+        action="append",
+        content=data.get("content", ""),
+        target=target,
+        merge_target=merge_target,
+        script_filename=data.get("script_filename"),
+        script_language=data.get("script_language"),
+        script_purpose=data.get("script_purpose"),
+    )
+
+
+def _parse_llm_response(raw: str) -> Optional[List[EvolutionPatch]]:
+    """Parse response JSON into EvolutionPatch list. Returns None on parse failure."""
+    data = _extract_json(raw)
+    if data is None:
+        return None
+
+    items = data if isinstance(data, list) else [data]
+    patches: List[EvolutionPatch] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        patch = _parse_single_patch(item)
+        if patch is not None:
+            patches.append(patch)
+    return patches
+
+
+_JSON_FIX_PROMPT = """\
 你上次的输出不是合法 JSON，请修复并重新输出。
 只输出修复后的 JSON 数组，不要任何解释文字。
 
@@ -521,7 +562,7 @@ class SkillEvolver:
     "skip_reason": "irrelevant | duplicate | low_priority（仅 skip 时填写，否则为 null）",
     "target": "description | body | script",
     "section": "Instructions | Examples | Troubleshooting | Scripts",
-    "content": "Markdown 内容（注意 JSON 转义：换行用 \\\\n，引号用 \\\\\"）",
+    "content": "Markdown 内容（注意 JSON 转义：换行用 \\\\n，引号用 \\\\"）",
     "merge_target": "ev_xxxxxxxx 或 null",
     "script_filename": "文件名或 null",
     "script_language": "语言标识或 null",
@@ -532,20 +573,157 @@ class SkillEvolver:
 ## 原始输出（请从中提取并修复）
 {broken_output}"""
 
-    async def _retry_parse(
-        self, broken_raw: str, original_prompt: str,
-    ) -> List[EvolutionPatch]:
+
+class SkillExperienceOptimizer(BaseOptimizer):
+    """Online Skill experience optimizer.
+
+    Signals arrive from SkillEvolutionRail; context is None (online path),
+    so _get_bad_signals() retains all signals. _backward() groups signals
+    by skill_name and generates EvolutionRecord(s).
+    """
+
+    domain = "skill_experience"
+
+    def __init__(self, llm: Any, model: str, language: str = "cn") -> None:
+        super().__init__()
+        self._llm = llm
+        self._model = model
+        self._language = language
+
+    @staticmethod
+    def default_targets() -> List[str]:
+        return ["experiences"]
+
+    async def _backward(self, signals: List[EvolutionSignal]) -> None:
+        """Generate experience records for each bound SkillCallOperator."""
+        for op_id, op in self._operators.items():
+            skill_name = op_id.removeprefix("skill_call_")
+            skill_signals = [
+                s for s in self._bad_signals
+                if s.skill_name == skill_name or not s.skill_name
+            ]
+            if not skill_signals:
+                continue
+            state = op.get_state()
+            ctx = EvolutionContext(
+                skill_name=skill_name,
+                signals=skill_signals,
+                skill_content=state.get("skill_content", ""),
+                messages=state.get("messages", []),
+                existing_desc_records=state.get("desc_records", []),
+                existing_body_records=state.get("body_records", []),
+            )
+            records = await self.generate_records(ctx)
+            if not records:
+                logger.info(
+                    "[SkillExperienceOptimizer] no records generated for skill=%s", skill_name
+                )
+                continue
+            existing: List = self._parameters[op_id].get_gradient("experiences") or []
+            self._parameters[op_id].set_gradient("experiences", existing + records)
+            logger.info(
+                "[SkillExperienceOptimizer] generated %d record(s) for skill=%s",
+                len(records), skill_name,
+            )
+
+    def _step(self) -> Updates:
+        updates: Updates = {}
+        for op_id, param in self._parameters.items():
+            records: List = param.get_gradient("experiences") or []
+            if records:
+                updates[(op_id, "experiences")] = records
+        return updates
+
+    async def generate_records(self, ctx: EvolutionContext) -> List[EvolutionRecord]:
+        """Generate and parse evolution records from LLM output."""
+        if not ctx.signals:
+            return []
+
+        conversation_snippet = _build_conversation_snippet(ctx.messages, language=self._language)
+        signals_json = json.dumps(
+            [signal.to_dict() for signal in ctx.signals],
+            ensure_ascii=False,
+            indent=2,
+        )
+        desc_summary = _build_existing_summary(ctx.existing_desc_records, label="description")
+        body_summary = _build_existing_summary(ctx.existing_body_records, label="body")
+        skill_content = _summarize_skill_content(ctx.skill_content)
+        prompt = SKILL_EXPERIENCE_GENERATE_PROMPT[self._language].format(
+            skill_content=skill_content,
+            signals_json=signals_json,
+            conversation_snippet=(conversation_snippet or "").strip(),
+            existing_desc_summary=desc_summary or f"({'无已有记录' if self._language == 'cn' else 'No existing records'})",
+            existing_body_summary=body_summary or f"({'无已有记录' if self._language == 'cn' else 'No existing records'})",
+        )
+
+        logger.info("[SkillExperienceOptimizer] calling LLM (skill=%s)", ctx.skill_name)
+        try:
+            response = await self._llm.invoke(
+                model=self._model,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = response.content if hasattr(response, "content") else str(response)
+        except Exception as exc:
+            logger.error("[SkillExperienceOptimizer] LLM call failed: %s", exc)
+            return []
+
+        patches = _parse_llm_response(raw)
+        if patches is None:
+            patches = await self.retry_parse(raw, original_prompt=prompt)
+        source = ctx.signals[0].signal_type
+        merged_context = _build_context(ctx.signals)
+        text_records: List[EvolutionRecord] = []
+        script_records: List[EvolutionRecord] = []
+
+        for patch in patches:
+            if patch.action == "skip":
+                logger.info(
+                    "[SkillExperienceOptimizer] LLM decided to skip (reason=%s)",
+                    patch.skip_reason or "unknown",
+                )
+                continue
+            if not patch.content.strip():
+                logger.info("[SkillExperienceOptimizer] LLM returned empty content, skipping")
+                continue
+            is_script = patch.target == EvolutionTarget.SCRIPT
+            if is_script and len(script_records) >= 1:
+                continue
+            if not is_script and len(text_records) >= 2:
+                continue
+            initial_score = INITIAL_SCORE_BY_SIGNAL.get(source, 0.6)
+            record = EvolutionRecord.make(
+                source=source,
+                context=merged_context,
+                change=patch,
+                score=initial_score,
+            )
+            if is_script:
+                script_records.append(record)
+            else:
+                text_records.append(record)
+            logger.info(
+                "[SkillExperienceOptimizer] generated record %s -> [%s] target=%s merge_target=%s",
+                record.id,
+                patch.section,
+                patch.target.value,
+                patch.merge_target,
+            )
+        return text_records + script_records
+
+    async def retry_parse(self, broken_raw: str, original_prompt: str) -> List[EvolutionPatch]:
         """One-shot retry: fix JSON if malformed, or regenerate if truncated."""
         truncated = _looks_truncated(broken_raw)
         if truncated:
-            logger.warning("[SkillEvolver] output appears truncated, retrying full regeneration")
+            logger.warning(
+                "[SkillExperienceOptimizer] output appears truncated, retrying full regeneration"
+            )
             retry_prompt = original_prompt
         else:
             logger.warning(
-                "[SkillEvolver] JSON malformed, requesting fix (preview: %s)",
+                "[SkillExperienceOptimizer] JSON malformed, requesting fix (preview: %s)",
                 broken_raw[:200],
             )
-            retry_prompt = self._JSON_FIX_PROMPT.format(broken_output=broken_raw)
+            retry_prompt = _JSON_FIX_PROMPT.format(broken_output=broken_raw)
 
         try:
             response = await self._llm.invoke(
@@ -554,15 +732,15 @@ class SkillEvolver:
             )
             retry_raw = response.content if hasattr(response, "content") else str(response)
         except Exception as exc:
-            logger.error("[SkillEvolver] retry LLM call failed: %s", exc)
+            logger.error("[SkillExperienceOptimizer] retry LLM call failed: %s", exc)
             return []
 
-        patches = self._parse_llm_response(retry_raw)
+        patches = _parse_llm_response(retry_raw)
         if patches is None:
             strategy = "regeneration" if truncated else "fix"
-            logger.warning("[SkillEvolver] retry (%s) also failed, giving up", strategy)
+            logger.warning("[SkillExperienceOptimizer] retry (%s) also failed, giving up", strategy)
             return []
-        logger.info("[SkillEvolver] retry succeeded, got %d patches", len(patches))
+        logger.info("[SkillExperienceOptimizer] retry succeeded, got %d patches", len(patches))
         return patches
 
     def update_llm(self, llm: Any, model: str) -> None:
@@ -570,70 +748,58 @@ class SkillEvolver:
         self._llm = llm
         self._model = model
 
-    @staticmethod
-    def _build_existing_summary(
-        records: List[EvolutionRecord],
-        label: str = "",
-    ) -> str:
-        if not records:
-            return ""
-        lines: List[str] = []
-        for record in records:
-            prefix = f"[{label}] " if label else ""
-            lines.append(
-                f"- {prefix}[{record.id}] [{record.change.section}] {record.change.content}"
-            )
-        return "\n".join(lines)
+    async def generate_new_skill_proposal(
+        self,
+        messages: List[dict],
+        existing_skill_names: List[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Generate a new skill proposal based on conversation history.
 
-    @staticmethod
-    def _parse_llm_response(raw: str) -> Optional[List[EvolutionPatch]]:
-        """Parse response JSON into EvolutionPatch list. Returns None on parse failure."""
-        data = _extract_json(raw)
-        if data is None:
+        Args:
+            messages: Conversation messages
+            existing_skill_names: List of existing skill names
+
+        Returns:
+            Proposal dict with name, description, body, reason if should_create=True,
+            None otherwise
+        """
+        conversation_snippet = _build_conversation_snippet(messages, language=self._language)
+        prompt = NEW_SKILL_PROPOSAL_PROMPT[self._language].format(
+            conversation_snippet=conversation_snippet,
+            existing_skill_names=", ".join(existing_skill_names) if existing_skill_names else "(none)",
+        )
+
+        logger.info("[SkillExperienceOptimizer] generating new skill proposal")
+        try:
+            response = await self._llm.invoke(
+                model=self._model,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = response.content if hasattr(response, "content") else str(response)
+        except Exception as exc:
+            logger.error("[SkillExperienceOptimizer] new skill proposal LLM call failed: %s", exc)
             return None
 
-        items = data if isinstance(data, list) else [data]
-        patches: List[EvolutionPatch] = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            patch = SkillEvolver._parse_single_patch(item)
-            if patch is not None:
-                patches.append(patch)
-        return patches
+        data = _extract_json(raw)
+        if data is None:
+            logger.warning("[SkillExperienceOptimizer] failed to parse new skill proposal response")
+            return None
 
-    @staticmethod
-    def _parse_single_patch(data: dict) -> Optional[EvolutionPatch]:
-        action = data.get("action", "append")
-        if action == "skip":
-            return EvolutionPatch(
-                section="",
-                action="skip",
-                content="",
-                skip_reason=data.get("skip_reason", "unknown"),
-            )
+        if not data.get("should_create"):
+            logger.info("[SkillExperienceOptimizer] LLM decided not to create new skill")
+            return None
 
-        section = data.get("section", "Troubleshooting")
-        if section not in VALID_SECTIONS:
-            section = "Troubleshooting"
+        required_fields = ["name", "description", "body", "reason"]
+        for field in required_fields:
+            if field not in data:
+                logger.warning(
+                    "[SkillExperienceOptimizer] new skill proposal missing field: %s",
+                    field,
+                )
+                return None
 
-        raw_target = data.get("target", "body")
-        try:
-            target = EvolutionTarget(raw_target)
-        except ValueError:
-            target = EvolutionTarget.BODY
-
-        merge_target = data.get("merge_target")
-        if merge_target in ("null", None):
-            merge_target = None
-
-        return EvolutionPatch(
-            section=section,
-            action="append",
-            content=data.get("content", ""),
-            target=target,
-            merge_target=merge_target,
-            script_filename=data.get("script_filename"),
-            script_language=data.get("script_language"),
-            script_purpose=data.get("script_purpose"),
+        logger.info(
+            "[SkillExperienceOptimizer] generated new skill proposal: %s",
+            data["name"],
         )
+        return data

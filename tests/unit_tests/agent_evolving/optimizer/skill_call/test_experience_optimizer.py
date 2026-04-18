@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 # pylint: disable=protected-access
-"""Tests for online skill evolver."""
+"""Tests for SkillExperienceOptimizer (skill_call)."""
 
 from __future__ import annotations
 
@@ -10,9 +10,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.agent_evolving.online.evolver import (
-    SkillEvolver,
-    build_conversation_snippet,
+from openjiuwen.agent_evolving.checkpointing.types import (
+    EvolutionContext,
+    EvolutionPatch,
+    EvolutionRecord,
+)
+from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
+    SkillExperienceOptimizer,
+    _build_conversation_snippet,
     _build_context,
     _extract_json,
     _fix_json_text,
@@ -20,12 +25,11 @@ from openjiuwen.agent_evolving.online.evolver import (
     _preview_section,
     _split_into_sections,
     _summarize_skill_content,
+    _parse_llm_response,
+    _parse_single_patch,
 )
-from openjiuwen.agent_evolving.online.schema import (
+from openjiuwen.agent_evolving.signal.base import (
     EvolutionCategory,
-    EvolutionContext,
-    EvolutionPatch,
-    EvolutionRecord,
     EvolutionSignal,
     EvolutionTarget,
 )
@@ -69,7 +73,7 @@ class TestConversationSnippet:
                 "tool_calls": [{"name": "read_file"}, {"name": "bash"}],
             },
         ]
-        snippet = build_conversation_snippet(messages, language="cn")
+        snippet = _build_conversation_snippet(messages, language="cn")
         assert "[user] line1\nline2" in snippet
         assert "(tool_calls: read_file, bash)" in snippet
         assert "无文本" in snippet
@@ -77,18 +81,17 @@ class TestConversationSnippet:
     @staticmethod
     def test_build_conversation_snippet_limits_messages():
         messages = [{"role": "user", "content": f"m{i}"} for i in range(5)]
-        snippet = build_conversation_snippet(messages, max_messages=2, language="en")
+        snippet = _build_conversation_snippet(messages, max_messages=2, language="en")
         assert "[user] m0" not in snippet
         assert "[user] m3" in snippet
         assert "[user] m4" in snippet
 
 
-class TestSkillEvolverGenerate:
+class TestSkillExperienceOptimizerGenerate:
     @staticmethod
     @pytest.mark.asyncio
     async def test_generate_returns_empty_when_no_signals():
-        llm = MagicMock()
-        evolver = SkillEvolver(llm=llm, model="dummy", language="cn")
+        optimizer = SkillExperienceOptimizer(llm=MagicMock(), model="dummy", language="cn")
         ctx = EvolutionContext(
             skill_name="skill-a",
             signals=[],
@@ -97,7 +100,7 @@ class TestSkillEvolverGenerate:
             existing_desc_records=[],
             existing_body_records=[],
         )
-        result = await evolver.generate_skill_experience(ctx)
+        result = await optimizer.generate_records(ctx)
         assert result == []
 
     @staticmethod
@@ -105,7 +108,7 @@ class TestSkillEvolverGenerate:
     async def test_generate_returns_empty_on_llm_exception():
         llm = MagicMock()
         llm.invoke = AsyncMock(side_effect=RuntimeError("network failed"))
-        evolver = SkillEvolver(llm=llm, model="dummy", language="cn")
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
         ctx = EvolutionContext(
             skill_name="skill-a",
             signals=[make_signal()],
@@ -114,7 +117,7 @@ class TestSkillEvolverGenerate:
             existing_desc_records=[],
             existing_body_records=[],
         )
-        assert await evolver.generate_skill_experience(ctx) == []
+        assert await optimizer.generate_records(ctx) == []
 
     @staticmethod
     @pytest.mark.asyncio
@@ -133,7 +136,7 @@ class TestSkillEvolverGenerate:
 """
             )
         )
-        evolver = SkillEvolver(llm=llm, model="dummy", language="en")
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="en")
         ctx = EvolutionContext(
             skill_name="skill-a",
             signals=[make_signal("s1"), make_signal("s2")],
@@ -142,20 +145,20 @@ class TestSkillEvolverGenerate:
             existing_desc_records=[make_record("ev_d1", "desc old")],
             existing_body_records=[make_record("ev_b1", "body old")],
         )
-        records = await evolver.generate_skill_experience(ctx)
+        records = await optimizer.generate_records(ctx)
         assert len(records) == 2
         assert records[0].change.content == "A"
         assert records[1].change.content == "B"
 
     @staticmethod
     def test_update_llm_updates_runtime_references():
-        evolver = SkillEvolver(llm="old", model="m1", language="cn")
-        evolver.update_llm(llm="new", model="m2")
-        assert evolver._llm == "new"
-        assert evolver._model == "m2"
+        optimizer = SkillExperienceOptimizer(llm="old", model="m1", language="cn")
+        optimizer.update_llm(llm="new", model="m2")
+        assert optimizer._llm == "new"
+        assert optimizer._model == "m2"
 
 
-class TestSkillEvolverParsing:
+class TestParsing:
     @staticmethod
     def test_parse_llm_response_supports_json_codeblock_and_fallback():
         codeblock = """```json
@@ -163,7 +166,7 @@ class TestSkillEvolverParsing:
   {"action":"append","target":"body","section":"Troubleshooting","content":"A","merge_target":"null"}
 ]
 ```"""
-        patches = SkillEvolver._parse_llm_response(codeblock)
+        patches = _parse_llm_response(codeblock)
         assert len(patches) == 1
         assert patches[0].merge_target is None
 
@@ -172,24 +175,24 @@ class TestSkillEvolverParsing:
             "{\"action\":\"append\",\"target\":\"invalid\","
             "\"section\":\"NotExist\",\"content\":\"X\"} suffix"
         )
-        patches2 = SkillEvolver._parse_llm_response(mixed)
+        patches2 = _parse_llm_response(mixed)
         assert len(patches2) == 1
         assert patches2[0].section == "Troubleshooting"
         assert patches2[0].target == EvolutionTarget.BODY
 
     @staticmethod
     def test_parse_llm_response_invalid_returns_none():
-        assert SkillEvolver._parse_llm_response("not json at all") is None
+        assert _parse_llm_response("not json at all") is None
 
     @staticmethod
     def test_parse_single_patch_skip():
-        patch = SkillEvolver._parse_single_patch({"action": "skip", "skip_reason": "irrelevant"})
+        patch = _parse_single_patch({"action": "skip", "skip_reason": "irrelevant"})
         assert patch.action == "skip"
         assert patch.skip_reason == "irrelevant"
 
     @staticmethod
     def test_parse_single_patch_with_script_fields():
-        patch = SkillEvolver._parse_single_patch({
+        patch = _parse_single_patch({
             "action": "append",
             "target": "script",
             "section": "Scripts",
@@ -206,7 +209,7 @@ class TestSkillEvolverParsing:
     @staticmethod
     def test_parse_llm_response_with_trailing_comma():
         raw = '[{"action":"append","target":"body","section":"Troubleshooting","content":"fix",},]'
-        patches = SkillEvolver._parse_llm_response(raw)
+        patches = _parse_llm_response(raw)
         assert patches is not None
         assert len(patches) == 1
 
@@ -216,7 +219,7 @@ class TestSkillEvolverParsing:
   // this is a comment
   {"action":"append","target":"body","section":"Troubleshooting","content":"fix"}
 ]"""
-        patches = SkillEvolver._parse_llm_response(raw)
+        patches = _parse_llm_response(raw)
         assert patches is not None
         assert len(patches) == 1
 
@@ -356,14 +359,14 @@ class TestConversationSnippetTruncation:
     @staticmethod
     def test_long_content_gets_truncated():
         messages = [{"role": "user", "content": "x" * 1000}]
-        snippet = build_conversation_snippet(messages, content_preview_chars=50, language="en")
+        snippet = _build_conversation_snippet(messages, content_preview_chars=50, language="en")
         assert "truncated" in snippet
         assert len(snippet) < 1000
 
     @staticmethod
     def test_recency_bias_last_messages_get_more_budget():
         messages = [{"role": "user", "content": "x" * 400} for _ in range(10)]
-        snippet = build_conversation_snippet(
+        snippet = _build_conversation_snippet(
             messages, content_preview_chars=200, language="cn",
         )
         lines = snippet.strip().split("\n")
@@ -372,7 +375,7 @@ class TestConversationSnippetTruncation:
         assert len(last_line) > len(first_line)
 
 
-class TestSkillEvolverRetryParse:
+class TestRetryParse:
     @staticmethod
     @pytest.mark.asyncio
     async def test_retry_on_malformed_json_sends_fix_prompt():
@@ -382,9 +385,8 @@ class TestSkillEvolverRetryParse:
                 content='[{"action":"append","target":"body","section":"Troubleshooting","content":"fixed"}]'
             )
         )
-        evolver = SkillEvolver(llm=llm, model="dummy", language="cn")
-        # balanced braces so _looks_truncated returns False → fix path
-        patches = await evolver._retry_parse(
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
+        patches = await optimizer.retry_parse(
             broken_raw='[{"action":"append" invalid json}]',
             original_prompt="original prompt here",
         )
@@ -403,9 +405,9 @@ class TestSkillEvolverRetryParse:
                 content='[{"action":"skip","skip_reason":"irrelevant"}]'
             )
         )
-        evolver = SkillEvolver(llm=llm, model="dummy", language="cn")
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
         truncated_raw = '[{"action":"append","target":"body","section":"Troubleshooting","content":"partial'
-        patches = await evolver._retry_parse(
+        patches = await optimizer.retry_parse(
             broken_raw=truncated_raw,
             original_prompt="THE ORIGINAL PROMPT",
         )
@@ -419,8 +421,8 @@ class TestSkillEvolverRetryParse:
     async def test_retry_returns_empty_on_double_failure():
         llm = MagicMock()
         llm.invoke = AsyncMock(return_value=SimpleNamespace(content="still broken"))
-        evolver = SkillEvolver(llm=llm, model="dummy", language="cn")
-        patches = await evolver._retry_parse("bad", original_prompt="p")
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
+        patches = await optimizer.retry_parse("bad", original_prompt="p")
         assert patches == []
 
     @staticmethod
@@ -428,12 +430,12 @@ class TestSkillEvolverRetryParse:
     async def test_retry_returns_empty_on_llm_exception():
         llm = MagicMock()
         llm.invoke = AsyncMock(side_effect=RuntimeError("network"))
-        evolver = SkillEvolver(llm=llm, model="dummy", language="cn")
-        patches = await evolver._retry_parse("bad", original_prompt="p")
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
+        patches = await optimizer.retry_parse("bad", original_prompt="p")
         assert patches == []
 
 
-class TestSkillEvolverScriptLimit:
+class TestScriptLimit:
     @staticmethod
     @pytest.mark.asyncio
     async def test_text_and_script_limits_independent():
@@ -449,7 +451,7 @@ class TestSkillEvolverScriptLimit:
 ]"""
             )
         )
-        evolver = SkillEvolver(llm=llm, model="dummy", language="en")
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="en")
         ctx = EvolutionContext(
             skill_name="skill-a",
             signals=[make_signal()],
@@ -458,7 +460,7 @@ class TestSkillEvolverScriptLimit:
             existing_desc_records=[],
             existing_body_records=[],
         )
-        records = await evolver.generate_skill_experience(ctx)
+        records = await optimizer.generate_records(ctx)
         text_recs = [r for r in records if r.change.target != EvolutionTarget.SCRIPT]
         script_recs = [r for r in records if r.change.target == EvolutionTarget.SCRIPT]
         assert len(text_recs) == 2

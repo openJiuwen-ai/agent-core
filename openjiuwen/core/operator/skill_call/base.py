@@ -113,6 +113,19 @@ class SkillCallOperator(Operator):
         self._staged_records.clear()
         return snapshot
 
+    @property
+    def staged_records(self) -> List[Any]:
+        """Get a copy of current staged records pending approval."""
+        return list(self._staged_records)
+
+    def prepend_staged_records(self, records: List[Any]) -> None:
+        """Prepend records to the front of the staging queue.
+
+        Used when re-enqueuing a snapshot after approval failure for retry.
+        The records are inserted at the front, preserving any newly staged records.
+        """
+        self._staged_records[:] = list(records) + self._staged_records
+
     async def refresh_state(self, store: "EvolutionStore") -> None:
         """Load skill content + existing records from store into _cached_state."""
         from openjiuwen.agent_evolving.checkpointing.types import EvolutionTarget

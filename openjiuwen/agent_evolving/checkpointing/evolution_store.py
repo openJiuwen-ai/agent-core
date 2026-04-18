@@ -8,21 +8,28 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from openjiuwen.agent_evolving.online.schema import (
+from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionPatch,
     EvolutionRecord,
     EvolutionLog,
     EvolutionTarget,
+    UsageStats,
 )
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.sys_operation import SysOperation
 
 _EVOLUTION_FILENAME = "evolutions.json"
+_TOTAL_WARNING_THRESHOLD = 30
+_MAX_INJECT_DESC = 5
+_INDEX_TOP_N = 3
 _LANG_TO_EXT = {
-    "python": "py", "javascript": "js", "typescript": "ts",
-    "shell": "sh", "bash": "sh",
+    "python": "py",
+    "javascript": "js",
+    "typescript": "ts",
+    "shell": "sh",
+    "bash": "sh",
 }
 _EVOLUTION_INDEX_PATTERN = re.compile(
     r"<!-- evolution-index-start -->.*?<!-- evolution-index-end -->",
@@ -32,8 +39,6 @@ _EVOLUTION_INDEX_PATTERN = re.compile(
 
 class EvolutionStore:
     """Store and load evolution records for skill directories."""
-
-    # ── Initialization ────────────────────────────────────────────────
 
     def __init__(self, skills_base_dir: Union[str, List[str]]) -> None:
         self._base_dirs: List[Path] = self._normalize_base_dirs(skills_base_dir)
@@ -83,8 +88,6 @@ class EvolutionStore:
             return []
         normalized = text.replace(",", ";")
         return [item.strip() for item in normalized.split(";") if item.strip()]
-
-    # ── Skill discovery / read ────────────────────────────────────────
 
     def list_skill_names(self) -> List[str]:
         """List all skill names under configured base directories."""
@@ -156,7 +159,11 @@ class EvolutionStore:
         try:
             if self.sys_operation is not None:
                 result = await self.sys_operation.fs().write_file(
-                    str(path), content=content, mode="text", encoding="utf-8",
+                    str(path),
+                    content=content,
+                    mode="text",
+                    encoding="utf-8",
+                    prepend_newline=False
                 )
                 if getattr(result, "code", 0) != 0:
                     logger.warning("[EvolutionStore] failed to write %s: %s", path, result.message)
@@ -164,8 +171,6 @@ class EvolutionStore:
                 path.write_text(content, encoding="utf-8")
         except Exception as exc:
             logger.error("[EvolutionStore] write %s failed: %s", path, exc)
-
-    # ── Evolution log CRUD ────────────────────────────────────────────
 
     async def load_evolution_log(
         self,
@@ -179,20 +184,12 @@ class EvolutionStore:
                 skill_id=evo_log.skill_id,
                 version=evo_log.version,
                 updated_at=evo_log.updated_at,
-                entries=[
-                    record for record in evo_log.entries
-                    if record.change.target == target
-                ],
+                entries=[record for record in evo_log.entries if record.change.target == target],
             )
         return evo_log
 
     async def append_record(self, name: str, record: EvolutionRecord) -> None:
-        """Append or merge one evolution record to evolutions.json.
-
-        For script records, the source code is persisted as a standalone file
-        under ``evolution/scripts/`` and replaced with a file-path reference
-        in the JSON entry to avoid bloating ``evolutions.json``.
-        """
+        """Append or merge one evolution record to evolutions.json."""
         skill_dir = self._resolve_skill_dir(name, create=True)
         if skill_dir is None:
             return
@@ -229,6 +226,14 @@ class EvolutionStore:
             record.change.target.value,
         )
 
+        total = len(evo_log.entries)
+        if total >= _TOTAL_WARNING_THRESHOLD:
+            logger.warning(
+                "[EvolutionStore] skill '%s' has %d experiences, consider /evolve_simplify",
+                name,
+                total,
+            )
+
         await self.render_evolution_markdown(name)
 
     async def _load_full_evolution_log(self, name: str) -> EvolutionLog:
@@ -262,16 +267,12 @@ class EvolutionStore:
         evo_path = target_dir / _EVOLUTION_FILENAME
         await self._write_file_text(evo_path, json.dumps(evo_log.to_dict(), ensure_ascii=False, indent=2))
 
-    # ── Pending record queries ────────────────────────────────────────
-
     async def get_pending_records(
         self,
         name: str,
         target: Optional[EvolutionTarget] = None,
     ) -> List[EvolutionRecord]:
         return (await self.load_evolution_log(name, target)).pending_entries
-
-    # ── Solidify / apply ──────────────────────────────────────────────
 
     async def solidify(self, name: str) -> int:
         """Inject pending body records into SKILL.md and mark as applied."""
@@ -280,11 +281,7 @@ class EvolutionStore:
             return 0
 
         evo_log = await self._load_full_evolution_log(name)
-        pending = [
-            record
-            for record in evo_log.pending_entries
-            if record.change.target == EvolutionTarget.BODY
-        ]
+        pending = [record for record in evo_log.pending_entries if record.change.target == EvolutionTarget.BODY]
         if not pending:
             return 0
 
@@ -318,8 +315,6 @@ class EvolutionStore:
             return content[:insert_pos] + addition + content[insert_pos:]
         return content.rstrip() + f"\n\n## {section}\n{patch.content}\n"
 
-    # ── Script persistence ─────────────────────────────────────────────
-
     async def _persist_script(self, skill_dir: Path, record: EvolutionRecord) -> None:
         """Write script source code to a standalone file; replace content with a reference."""
         scripts_dir = skill_dir / "evolution" / "scripts"
@@ -340,16 +335,8 @@ class EvolutionStore:
             f"Purpose: {record.change.script_purpose or ''}"
         )
 
-    # ── Markdown rendering (P1 portability) ─────────────────────────────
-
     async def render_evolution_markdown(self, name: str) -> None:
-        """Render all evolution entries to human-readable Markdown files.
-
-        Produces:
-        - ``evolution/{section}.md`` for each non-script section
-        - ``evolution/scripts/_index.md`` with a table of persisted scripts
-        - An index block appended/replaced inside SKILL.md
-        """
+        """Render all evolution entries to human-readable Markdown files."""
         skill_dir = self._resolve_skill_dir(name)
         if skill_dir is None:
             return
@@ -400,13 +387,15 @@ class EvolutionStore:
             if len(parts) > 1 and parts[1].strip():
                 lines.append(parts[1].rstrip())
             applied_tag = " | applied" if record.applied else ""
-            lines.extend([
-                "",
-                f"*Source: {record.source} | {record.timestamp}{applied_tag}*",
-                "",
-                "---",
-                "",
-            ])
+            lines.extend(
+                [
+                    "",
+                    f"*Source: {record.source} | {record.timestamp}{applied_tag}*",
+                    "",
+                    "---",
+                    "",
+                ]
+            )
 
         filename = section.lower().replace(" ", "_") + ".md"
         await self._write_file_text(evo_dir / filename, "\n".join(lines))
@@ -462,32 +451,48 @@ class EvolutionStore:
             f"{v} {k}" for k, v in [("body", body_count), ("description", desc_count), ("script", script_count)] if v
         )
 
+        # Top N high-score experiences
+        scored = sorted(
+            [e for e in entries if e.score >= 0.5],
+            key=lambda e: e.score,
+            reverse=True,
+        )
+        top = scored[:_INDEX_TOP_N]
+        top_n_lines: List[str] = []
+        if top:
+            top_n_lines.append("### Top Experiences")
+            top_n_lines.append("")
+            for record in top:
+                content_preview = record.change.content.split("\n")[0][:80]
+                top_n_lines.append(f"- [{record.id}] (score={record.score:.2f}) {content_preview}")
+            top_n_lines.append("")
+
         table_lines: List[str] = []
         for section, cnt in sorted(section_counts.items()):
             filename = section.lower().replace(" ", "_") + ".md"
-            table_lines.append(
-                f"| {section} | {cnt} | [→ evolution/{filename}](evolution/{filename}) |"
-            )
+            table_lines.append(f"| {section} | {cnt} | [→ evolution/{filename}](evolution/{filename}) |")
         if script_count:
             table_lines.append(
-                f"| Scripts | {script_count} | "
-                f"[→ evolution/scripts/_index.md](evolution/scripts/_index.md) |"
+                f"| Scripts | {script_count} | [→ evolution/scripts/_index.md](evolution/scripts/_index.md) |"
             )
 
         now = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
-        index_block = "\n".join([
-            "<!-- evolution-index-start -->",
-            "## Evolution Experiences",
-            "",
-            f"This skill has accumulated **{total}** evolution experiences ({parts}).",
-            "",
-            "| Type | Count | Details |",
-            "|------|-------|---------|",
-            *table_lines,
-            "",
-            f"*Last updated: {now}*",
-            "<!-- evolution-index-end -->",
-        ])
+        index_block = "\n".join(
+            [
+                "<!-- evolution-index-start -->",
+                "## Evolution Experiences",
+                "",
+                f"This skill has accumulated **{total}** evolution experiences ({parts}).",
+                "",
+                *top_n_lines,
+                "| Type | Count | Details |",
+                "|------|-------|---------|",
+                *table_lines,
+                "",
+                f"*Last updated: {now}*",
+                "<!-- evolution-index-end -->",
+            ]
+        )
 
         content = await self._read_file_text(skill_md_path)
         if _EVOLUTION_INDEX_PATTERN.search(content):
@@ -497,13 +502,12 @@ class EvolutionStore:
 
         await self._write_file_text(skill_md_path, content)
 
-    # ── Formatting / display ──────────────────────────────────────────
-
-    async def format_desc_experience_text(self, name: str) -> str:
+    async def format_desc_experience_text(self, name: str, max_items: int = _MAX_INJECT_DESC) -> str:
         pending = await self.get_pending_records(name, EvolutionTarget.DESCRIPTION)
         if not pending:
             return ""
-        return "\n".join(f"- {record.change.content}" for record in pending)
+        pending.sort(key=lambda r: r.score, reverse=True)
+        return "\n".join(f"- {record.change.content}" for record in pending[:max_items])
 
     async def format_all_desc_experiences(self, names: List[str]) -> Dict[str, str]:
         result: Dict[str, str] = {}
@@ -539,24 +543,317 @@ class EvolutionStore:
                 f"（description: {len(desc_pending)}, body: {len(body_pending)}）"
             )
             for record in all_pending:
-                target_tag = (
-                    "description"
-                    if record.change.target == EvolutionTarget.DESCRIPTION
-                    else "body"
-                )
+                target_tag = "description" if record.change.target == EvolutionTarget.DESCRIPTION else "body"
                 content = record.change.content
                 title = content.split("\n")[0] if "\n" in content else content[:50]
                 lines.append(f"   - [{target_tag}] **{title}**: ")
                 if "\n" in content:
                     body_lines = content.split("\n")[1:]
                     if body_lines:
-                        summary = " ".join(
-                            line.strip().lstrip("- ")
-                            for line in body_lines
-                            if line.strip()
-                        )
+                        summary = " ".join(line.strip().lstrip("- ") for line in body_lines if line.strip())
                         lines.append(f"    {summary[:100].replace('**', '')}")
             lines.append("")
         if not lines:
             return "当前所有 Skill 暂无演进信息。"
         return "\n".join(lines)
+
+    async def update_record_scores(
+        self,
+        name: str,
+        updates: Dict[str, Dict[str, Any]],
+    ) -> int:
+        """Batch update score and usage_stats for records.
+
+        Args:
+            name: Skill name
+            updates: Dict mapping record_id to {"score": float, "usage_stats": dict}
+
+        Returns:
+            Number of records updated
+        """
+        if not updates:
+            return 0
+
+        evo_log = await self._load_full_evolution_log(name)
+        updated_count = 0
+
+        for record in evo_log.entries:
+            if record.id in updates:
+                update_data = updates[record.id]
+                if "score" in update_data:
+                    record.score = update_data["score"]
+                if "usage_stats" in update_data:
+                    stats_data = update_data["usage_stats"]
+                    if isinstance(stats_data, dict):
+                        record.usage_stats = UsageStats.from_dict(stats_data)
+                    elif isinstance(stats_data, UsageStats):
+                        record.usage_stats = stats_data
+                updated_count += 1
+
+        if updated_count > 0:
+            evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
+            await self._save_evolution_log(name, evo_log)
+            logger.info(
+                "[EvolutionStore] updated %d record score(s) for skill=%s",
+                updated_count,
+                name,
+            )
+
+        return updated_count
+
+    async def get_records_by_score(
+        self,
+        name: str,
+        min_score: Optional[float] = None,
+    ) -> List[EvolutionRecord]:
+        """Return records sorted by score (descending).
+
+        Args:
+            name: Skill name
+            min_score: Optional minimum score filter
+
+        Returns:
+            List of records sorted by score descending
+        """
+        evo_log = await self._load_full_evolution_log(name)
+        records = evo_log.entries
+        if min_score is not None:
+            records = [r for r in records if r.score >= min_score]
+        return sorted(records, key=lambda r: r.score, reverse=True)
+
+    async def delete_records(self, name: str, record_ids: List[str]) -> int:
+        """Delete specified records from evolution log.
+
+        Args:
+            name: Skill name
+            record_ids: List of record IDs to delete
+
+        Returns:
+            Number of records deleted
+        """
+        if not record_ids:
+            return 0
+
+        evo_log = await self._load_full_evolution_log(name)
+        ids_set = set(record_ids)
+        original_count = len(evo_log.entries)
+        evo_log.entries = [r for r in evo_log.entries if r.id not in ids_set]
+        deleted_count = original_count - len(evo_log.entries)
+
+        if deleted_count > 0:
+            evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
+            await self._save_evolution_log(name, evo_log)
+            await self.render_evolution_markdown(name)
+            logger.info(
+                "[EvolutionStore] deleted %d record(s) for skill=%s",
+                deleted_count,
+                name,
+            )
+
+        return deleted_count
+
+    async def merge_records(
+        self,
+        name: str,
+        primary_id: str,
+        remove_ids: List[str],
+        new_content: str,
+        new_score: Optional[float] = None,
+    ) -> Optional[EvolutionRecord]:
+        """Merge multiple records into one.
+
+        Args:
+            name: Skill name
+            primary_id: ID of the primary record to keep
+            remove_ids: IDs of records to merge and remove
+            new_content: New merged content
+            new_score: Optional new score (defaults to max of merged records)
+
+        Returns:
+            The updated primary record, or None if not found
+        """
+        evo_log = await self._load_full_evolution_log(name)
+        primary_record = None
+        records_to_remove = []
+        all_scores = []
+
+        for record in evo_log.entries:
+            if record.id == primary_id:
+                primary_record = record
+            elif record.id in remove_ids:
+                records_to_remove.append(record)
+                all_scores.append(record.score)
+
+        if primary_record is None:
+            logger.warning(
+                "[EvolutionStore] merge_records: primary record %s not found",
+                primary_id,
+            )
+            return None
+
+        all_scores.append(primary_record.score)
+        final_score = new_score if new_score is not None else max(all_scores)
+
+        primary_record.change.content = new_content
+        primary_record.score = final_score
+        primary_record.timestamp = datetime.now(tz=timezone.utc).isoformat()
+
+        for record in records_to_remove:
+            evo_log.entries.remove(record)
+
+        evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
+        await self._save_evolution_log(name, evo_log)
+        await self.render_evolution_markdown(name)
+
+        logger.info(
+            "[EvolutionStore] merged %d record(s) into %s for skill=%s",
+            len(records_to_remove),
+            primary_id,
+            name,
+        )
+        return primary_record
+
+    async def update_record_content(
+        self,
+        name: str,
+        record_id: str,
+        new_content: str,
+        new_score: Optional[float] = None,
+    ) -> Optional[EvolutionRecord]:
+        """Update content and optionally score of a single record.
+
+        Args:
+            name: Skill name
+            record_id: ID of record to update
+            new_content: New content
+            new_score: Optional new score
+
+        Returns:
+            The updated record, or None if not found
+        """
+        evo_log = await self._load_full_evolution_log(name)
+        target_record = None
+
+        for record in evo_log.entries:
+            if record.id == record_id:
+                target_record = record
+                break
+
+        if target_record is None:
+            logger.warning(
+                "[EvolutionStore] update_record_content: record %s not found",
+                record_id,
+            )
+            return None
+
+        target_record.change.content = new_content
+        if new_score is not None:
+            target_record.score = new_score
+        target_record.timestamp = datetime.now(tz=timezone.utc).isoformat()
+
+        evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
+        await self._save_evolution_log(name, evo_log)
+        await self.render_evolution_markdown(name)
+
+        logger.info(
+            "[EvolutionStore] updated record %s for skill=%s",
+            record_id,
+            name,
+        )
+        return target_record
+
+    async def create_skill(
+        self,
+        name: str,
+        description: str,
+        body: str,
+    ) -> Optional[Path]:
+        """Create a new skill directory with SKILL.md and empty evolutions.json.
+
+        Args:
+            name: Skill name (directory name)
+            description: Skill description for YAML front-matter
+            body: Skill body content (instructions, examples, etc.)
+
+        Returns:
+            Path to the created skill directory, or None on failure
+        """
+        # Validate skill name to prevent path traversal
+        if not name or not re.match(r"^[a-zA-Z0-9_-]+$", name):
+            logger.error("[EvolutionStore] create_skill: invalid name %r", name)
+            return None
+        if ".." in name or "/" in name or "\\" in name:
+            logger.error("[EvolutionStore] create_skill: path traversal attempt in name %r", name)
+            return None
+
+        skill_dir = self._resolve_skill_dir(name, create=True)
+        if skill_dir is None:
+            logger.error("[EvolutionStore] create_skill: cannot resolve skill dir for %s", name)
+            return None
+
+        # Refuse to overwrite an existing skill to prevent data loss.
+        if skill_dir.exists():
+            logger.error(
+                "[EvolutionStore] create_skill: skill '%s' already exists at %s; "
+                "use update operations instead of create",
+                name,
+                skill_dir,
+            )
+            return None
+
+        skill_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create SKILL.md with YAML front-matter
+        skill_md_content = f"""---
+name: {name}
+description: {description}
+---
+
+# {name}
+
+{body}
+"""
+        skill_md_path = skill_dir / "SKILL.md"
+        await self._write_file_text(skill_md_path, skill_md_content)
+
+        # Create empty evolutions.json
+        empty_log = EvolutionLog.empty(skill_id=name)
+        await self._save_evolution_log(name, empty_log, skill_dir=skill_dir)
+
+        # Create evolution/ subdirectory
+        evo_dir = skill_dir / "evolution"
+        evo_dir.mkdir(parents=True, exist_ok=True)
+
+        logger.info(
+            "[EvolutionStore] created new skill '%s' at %s",
+            name,
+            skill_dir,
+        )
+        return skill_dir
+
+    async def list_skill_names_with_descriptions(self) -> List[Tuple[str, str]]:
+        """List all skills with their descriptions.
+
+        Returns:
+            List of (skill_name, description) tuples
+        """
+        result: List[Tuple[str, str]] = []
+        for name in self.list_skill_names():
+            content = await self.read_skill_content(name)
+            description = self._extract_description_from_skill_md(content)
+            result.append((name, description))
+        return result
+
+    @staticmethod
+    def _extract_description_from_skill_md(content: str) -> str:
+        """Extract description from SKILL.md YAML front-matter."""
+        if not content.startswith("---"):
+            return ""
+        parts = content.split("---", 2)
+        if len(parts) < 3:
+            return ""
+        front_matter = parts[1]
+        for line in front_matter.strip().split("\n"):
+            if line.startswith("description:"):
+                return line.split(":", 1)[1].strip().strip('"').strip("'")
+        return ""
