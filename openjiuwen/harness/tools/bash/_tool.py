@@ -97,7 +97,7 @@ class BashTool(Tool):
     # ── invoke ────────────────────────────────────────────────
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs: Any) -> ToolOutput:
-        from openjiuwen.core.sys_operation.cwd import get_cwd
+        from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
 
         p = self._parse_inputs(inputs)
 
@@ -109,7 +109,9 @@ class BashTool(Tool):
             if guard is not None:
                 return guard
 
-        resolved_cwd = p.workdir or get_cwd()
+        current_cwd = get_cwd()
+        workspace_cwd = get_workspace()
+        resolved_cwd = p.workdir or workspace_cwd or current_cwd
 
         if p.workdir and not os.path.isdir(resolved_cwd):
             return ToolOutput(success=False, error=f"workdir does not exist: {resolved_cwd}")
@@ -166,7 +168,7 @@ class BashTool(Tool):
     # ── stream ────────────────────────────────────────────────
 
     async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[ToolOutput]:
-        from openjiuwen.core.sys_operation.cwd import get_cwd
+        from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
 
         p = self._parse_inputs(inputs)
 
@@ -174,7 +176,9 @@ class BashTool(Tool):
             yield ToolOutput(success=False, error="command cannot be empty")
             return
 
-        resolved_cwd = p.workdir or get_cwd()
+        current_cwd = get_cwd()
+        workspace_cwd = get_workspace()
+        resolved_cwd = p.workdir or workspace_cwd or current_cwd
 
         if os.getenv("OPENJIUWEN_BASH_STRICT") == "1":
             guard = self._guard(p)

@@ -84,14 +84,16 @@ class PowerShellTool(Tool):
         )
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs: Any) -> ToolOutput:
-        from openjiuwen.core.sys_operation.cwd import get_cwd
+        from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
 
         p = self._parse_inputs(inputs)
 
         if not p.command:
             return ToolOutput(success=False, error="command cannot be empty")
 
-        resolved_cwd = p.workdir or get_cwd()
+        current_cwd = get_cwd()
+        workspace_cwd = get_workspace()
+        resolved_cwd = p.workdir or workspace_cwd or current_cwd
 
         if os.getenv("OPENJIUWEN_BASH_STRICT") == "1":
             guard = self._guard(p)
@@ -150,7 +152,7 @@ class PowerShellTool(Tool):
         )
 
     async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[ToolOutput]:
-        from openjiuwen.core.sys_operation.cwd import get_cwd
+        from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
 
         p = self._parse_inputs(inputs)
 
@@ -158,7 +160,9 @@ class PowerShellTool(Tool):
             yield ToolOutput(success=False, error="command cannot be empty")
             return
 
-        resolved_cwd = p.workdir or get_cwd()
+        current_cwd = get_cwd()
+        workspace_cwd = get_workspace()
+        resolved_cwd = p.workdir or workspace_cwd or current_cwd
 
         if os.getenv("OPENJIUWEN_BASH_STRICT") == "1":
             guard = self._guard(p)

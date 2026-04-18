@@ -4,6 +4,7 @@
 # pylint: disable=protected-access
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 from unittest.mock import AsyncMock, call, patch
 
@@ -738,13 +739,19 @@ def test_create_deep_agent_auto_add_skill_rail() -> None:
     agent = create_deep_agent(
         model=_create_dummy_model(),
         skills=skills,
+        workspace=Workspace(root_path="./team_member_workspace"),
     )
 
     pending_rails = agent._pending_rails
     assert len(pending_rails) > 0
 
-    rail_types = [type(rail).__name__ for rail in [r for r in pending_rails if r is not None]]
+    non_null_rails = [rail for rail in pending_rails if rail is not None]
+    rail_types = [type(rail).__name__ for rail in non_null_rails]
     assert "SkillUseRail" in rail_types
+
+    skill_rail = next(rail for rail in non_null_rails if type(rail).__name__ == "SkillUseRail")
+    assert Path(skill_rail.skills_dir) == Path("team_member_workspace") / "skills"
+    assert set(skill_rail.enabled_skills) == set(skills)
 
 
 def test_create_deep_agent_no_duplicate_task_planning_rail() -> None:

@@ -580,8 +580,9 @@ class DeepAgent(BaseAgent):
         if self._deep_config and self._deep_config.workspace:
             from openjiuwen.core.sys_operation.cwd import init_cwd
 
+            init_root = self._deep_config.workspace.root_path or os.getcwd()
             init_cwd(
-                self._deep_config.workspace.root_path or os.getcwd(),
+                init_root,
                 workspace=self._deep_config.workspace.root_path,
             )
 

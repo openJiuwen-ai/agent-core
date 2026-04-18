@@ -302,8 +302,12 @@ def create_deep_agent(
 
     def _make_skill_rail() -> SkillUseRail:
         skills_base = workspace_obj.get_node_path("skills")
-        skills_dir = [str(skills_base / s) for s in (skills or [])] if skills_base else []
-        return SkillUseRail(skills_dir=skills_dir, skill_mode="all")
+        skills_dir = str(skills_base) if skills_base else []
+        return SkillUseRail(
+            skills_dir=skills_dir,
+            skill_mode="all",
+            enabled_skills=skills,
+        )
 
     default_rails = [
         (SecurityRail, True, lambda: SecurityRail()),

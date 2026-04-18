@@ -29,6 +29,8 @@ from openjiuwen.agent_teams.messager import (
     Messager,
 )
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
+from openjiuwen.agent_teams.schema.deep_agent_spec import SysOperationSpec
+from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberStatus,
@@ -433,10 +435,16 @@ class TeamAgent(BaseAgent):
         # ``system_prompt`` is intentionally left untouched so DeepAgent's
         # default identity section stays in place; team-specific content
         # is injected later by ``TeamRail`` as discrete PromptSections.
+        sys_operation_spec = agent_spec.sys_operation or SysOperationSpec(
+            id=f"{self.card.id}.sys_operation",
+            mode=OperationMode.LOCAL,
+            work_config=LocalWorkConfig(shell_allowlist=None),
+        )
         build_spec = agent_spec.model_copy(update={
             "card": self.card,
             "model": model_config,
             "workspace": ws_spec,
+            "sys_operation": sys_operation_spec,
             "tools": merged_tools,
             "enable_task_loop": True,
         })
@@ -1001,6 +1009,14 @@ class TeamAgent(BaseAgent):
         message: Any,
     ) -> None:
         """Execute one DeepAgent stream round via Runner."""
+        if self._deep_agent and self._deep_agent.deep_config and self._deep_agent.deep_config.workspace:
+            from openjiuwen.core.sys_operation.cwd import init_cwd
+
+            init_root = self._deep_agent.deep_config.workspace.root_path
+            init_cwd(
+                init_root,
+                workspace=init_root,
+            )
         # Pull the member back to READY before transitioning to BUSY so a
         # still-live member that ended its previous round in ERROR can
         # recover. READY → READY is a no-op at the member layer.
