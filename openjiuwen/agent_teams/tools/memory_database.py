@@ -186,6 +186,26 @@ class InMemoryTeamDatabase:
             self._messages.clear()
             self._read_status.clear()
 
+    async def cleanup_all_runtime_state(self) -> tuple[list[str], list[str]]:
+        """Clear all in-memory team runtime state.
+
+        Mirrors ``TeamDatabase.cleanup_all_runtime_state()`` so callers can
+        invoke the same API without caring about the storage backend.
+        """
+        async with self._lock:
+            had_dynamic_state = any((self._tasks, self._task_deps, self._messages, self._read_status))
+            had_static_state = any((self._teams, self._members))
+            self._tasks.clear()
+            self._task_deps.clear()
+            self._messages.clear()
+            self._read_status.clear()
+            self._teams.clear()
+            self._members.clear()
+
+        deleted_tables = ["memory_dynamic_state"] if had_dynamic_state else []
+        cleared_tables = ["team_info", "team_member"] if had_static_state else []
+        return deleted_tables, cleared_tables
+
     async def close(self) -> None:
         self._initialized = False
 

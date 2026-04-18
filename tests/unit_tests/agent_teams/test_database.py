@@ -7,6 +7,7 @@ import asyncio
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import inspect
 
 from openjiuwen.agent_teams.spawn.context import (
     reset_session_id,
@@ -2313,6 +2314,151 @@ class TestSessionTables:
         try:
             await database.initialize()
             await database.drop_cur_session_tables()
+        finally:
+            await database.close()
+            reset_session_id(token)
+
+
+class TestRuntimeCleanup:
+    """Test storage-level runtime cleanup helpers."""
+
+    @pytest.mark.asyncio
+    async def test_cleanup_all_runtime_state_clears_dynamic_tables_and_static_rows(self, tmp_path):
+        """Cleanup should remove all session tables and clear team/member rows."""
+        db_path = tmp_path / "runtime_cleanup.db"
+        config = DatabaseConfig(
+            db_type=DatabaseType.SQLITE,
+            connection_string=str(db_path),
+        )
+        database = TeamDatabase(config)
+        token = set_session_id("cleanup_session_a")
+        try:
+            await database.initialize()
+            await database.create_team(
+                "cleanup_team",
+                "Cleanup Team",
+                "leader1",
+            )
+            agent_card = AgentCard(name="CleanupAgent").model_dump_json()
+            await database.create_member(
+                member_name="member1",
+                team_name="cleanup_team",
+                display_name="Member One",
+                agent_card=agent_card,
+                status="ready",
+            )
+            await database.create_task(
+                "task_a",
+                "cleanup_team",
+                "Task A",
+                "Content A",
+                "pending",
+            )
+
+            reset_session_id(token)
+            token = set_session_id("cleanup_session_b")
+            await database.create_cur_session_tables()
+            await database.create_task(
+                "task_b",
+                "cleanup_team",
+                "Task B",
+                "Content B",
+                "pending",
+            )
+
+            deleted_tables, cleared_tables = await database.cleanup_all_runtime_state()
+
+            assert "team_task_cleanup_session_a" in deleted_tables
+            assert "team_task_cleanup_session_b" in deleted_tables
+            assert "team_task_dependency_cleanup_session_a" in deleted_tables
+            assert "team_task_dependency_cleanup_session_b" in deleted_tables
+            assert "team_message_cleanup_session_a" in deleted_tables
+            assert "team_message_cleanup_session_b" in deleted_tables
+            assert "message_read_status_cleanup_session_a" in deleted_tables
+            assert "message_read_status_cleanup_session_b" in deleted_tables
+            assert cleared_tables == ["team_info", "team_member"]
+
+            async with database.engine.begin() as conn:
+                table_names = await conn.run_sync(
+                    lambda sync_conn: inspect(sync_conn).get_table_names()
+                )
+                team_count = (
+                    await conn.exec_driver_sql("SELECT COUNT(*) FROM team_info")
+                ).scalar_one()
+                member_count = (
+                    await conn.exec_driver_sql("SELECT COUNT(*) FROM team_member")
+                ).scalar_one()
+
+            assert sorted(table_names) == ["team_info", "team_member"]
+            assert team_count == 0
+            assert member_count == 0
+        finally:
+            await database.close()
+            reset_session_id(token)
+
+    @pytest.mark.asyncio
+    async def test_force_delete_team_session_cleans_only_current_session(self, tmp_path):
+        """Force delete should keep non-current session tables intact."""
+        db_path = tmp_path / "force_cleanup.db"
+        config = DatabaseConfig(
+            db_type=DatabaseType.SQLITE,
+            connection_string=str(db_path),
+        )
+        database = TeamDatabase(config)
+        token = set_session_id("force_cleanup_a")
+        try:
+            await database.initialize()
+            await database.create_team(
+                "cleanup_team",
+                "Cleanup Team",
+                "leader1",
+            )
+            await database.create_task(
+                "task_a",
+                "cleanup_team",
+                "Task A",
+                "Content A",
+                "pending",
+            )
+
+            reset_session_id(token)
+            token = set_session_id("force_cleanup_b")
+            await database.create_cur_session_tables()
+            await database.create_task(
+                "task_b",
+                "cleanup_team",
+                "Task B",
+                "Content B",
+                "pending",
+            )
+
+            assert await database.force_delete_team_session("cleanup_team") is True
+
+            async with database.engine.begin() as conn:
+                table_names = sorted(
+                    await conn.run_sync(
+                        lambda sync_conn: inspect(sync_conn).get_table_names()
+                    )
+                )
+                team_count = (
+                    await conn.exec_driver_sql("SELECT COUNT(*) FROM team_info")
+                ).scalar_one()
+                member_count = (
+                    await conn.exec_driver_sql("SELECT COUNT(*) FROM team_member")
+                ).scalar_one()
+
+            assert "team_info" in table_names
+            assert "team_member" in table_names
+            assert "team_task_force_cleanup_b" not in table_names
+            assert "team_task_dependency_force_cleanup_b" not in table_names
+            assert "team_message_force_cleanup_b" not in table_names
+            assert "message_read_status_force_cleanup_b" not in table_names
+            assert "team_task_force_cleanup_a" in table_names
+            assert "team_task_dependency_force_cleanup_a" in table_names
+            assert "team_message_force_cleanup_a" in table_names
+            assert "message_read_status_force_cleanup_a" in table_names
+            assert team_count == 0
+            assert member_count == 0
         finally:
             await database.close()
             reset_session_id(token)

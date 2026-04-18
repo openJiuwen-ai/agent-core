@@ -16,6 +16,17 @@ from sqlmodel.main import SQLModelMetaclass
 
 from openjiuwen.agent_teams.spawn.context import get_session_id
 
+TEAM_DYNAMIC_TABLE_PREFIXES = (
+    "team_task_dependency_",
+    "team_task_",
+    "team_message_",
+    "message_read_status_",
+)
+TEAM_STATIC_TABLES_TO_CLEAR = (
+    "team_info",
+    "team_member",
+)
+
 
 # ----------------- Static Table Models -----------------
 

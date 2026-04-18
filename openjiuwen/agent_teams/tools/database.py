@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from sqlalchemy import (
     event,
     func,
+    inspect,
     select,
     update,
 )
@@ -54,7 +55,9 @@ from openjiuwen.agent_teams.tools.models import (
     _get_task_model,
     Team,
     TeamMember,
+    TEAM_DYNAMIC_TABLE_PREFIXES,
     TeamMessageBase,
+    TEAM_STATIC_TABLES_TO_CLEAR,
     TeamTaskBase,
     TeamTaskDependencyBase,
 )
@@ -271,6 +274,58 @@ class TeamDatabase:
             SQLModel.metadata.remove(model.__table__)
 
         team_logger.info(f"Dropped dynamic tables for session {session_id}")
+
+    @staticmethod
+    def _get_table_names(sync_conn) -> list[str]:
+        """Return all table names currently present in the database."""
+        return list(inspect(sync_conn).get_table_names())
+
+    @staticmethod
+    def _drop_table(sync_conn, table_name: str) -> None:
+        """Drop one table with raw SQL to avoid reflection-order issues."""
+        quoted_name = table_name.replace('"', '""')
+        sync_conn.exec_driver_sql(f'DROP TABLE IF EXISTS "{quoted_name}"')
+
+    @staticmethod
+    def _clear_table(sync_conn, table_name: str) -> None:
+        """Delete all rows from one reflected table."""
+        quoted_name = table_name.replace('"', '""')
+        sync_conn.exec_driver_sql(f'DELETE FROM "{quoted_name}"')
+
+    async def cleanup_all_runtime_state(self) -> tuple[list[str], list[str]]:
+        """Delete all dynamic team tables and clear static team tables.
+
+        This cleanup is storage-level and does not depend on an active
+        agent instance or the current session context. It is intended for
+        fallback cleanup during destroy and for restart-time recovery.
+        """
+        await self._ensure_initialized()
+        if self.engine is None:
+            return [], []
+
+        deleted_tables: list[str] = []
+        cleared_tables: list[str] = []
+        async with self.engine.begin() as conn:
+            table_names = await conn.run_sync(self._get_table_names)
+
+            for table_name in table_names:
+                if not table_name.startswith(TEAM_DYNAMIC_TABLE_PREFIXES):
+                    continue
+                await conn.run_sync(self._drop_table, table_name)
+                deleted_tables.append(table_name)
+
+            for table_name in TEAM_STATIC_TABLES_TO_CLEAR:
+                if table_name not in table_names:
+                    continue
+                await conn.run_sync(self._clear_table, table_name)
+                cleared_tables.append(table_name)
+
+        team_logger.info(
+            "Cleaned team runtime state: deleted dynamic tables={}, cleared static tables={}",
+            deleted_tables,
+            cleared_tables,
+        )
+        return deleted_tables, cleared_tables
 
     async def close(self) -> None:
         """Close the database engine and release all connections."""
