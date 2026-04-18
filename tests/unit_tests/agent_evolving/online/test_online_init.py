@@ -16,7 +16,6 @@ def test_online_module_exports():
         "EvolutionCategory",
         "EvolutionContext",
         "EvolutionTarget",
-        "SignalDetector",
         "SkillEvolver",
         "EvolutionStore",
     }

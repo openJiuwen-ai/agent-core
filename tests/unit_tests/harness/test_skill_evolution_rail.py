@@ -17,7 +17,7 @@ from openjiuwen.agent_evolving.online.schema import (
     EvolutionSignal,
     EvolutionTarget,
 )
-from openjiuwen.agent_evolving.online.signal_detector import SignalDetector
+from openjiuwen.agent_evolving.signal import SignalDetector
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
 from openjiuwen.harness.rails.skill_evolution_rail import (
     SkillEvolutionRail,

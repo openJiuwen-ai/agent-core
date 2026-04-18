@@ -17,7 +17,7 @@ from openjiuwen.agent_evolving.online.schema import (
     EvolutionContext,
     EvolutionTarget,
 )
-from openjiuwen.agent_evolving.online.signal_detector import SignalDetector, make_signal_fingerprint
+from openjiuwen.agent_evolving.signal import SignalDetector, make_signal_fingerprint
 from openjiuwen.agent_evolving.online.store import EvolutionStore
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session.stream import OutputSchema

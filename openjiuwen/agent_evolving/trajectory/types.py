@@ -39,6 +39,8 @@ class ToolCallDetail:
     call_result: Any = None
     tool_description: Optional[str] = None
     tool_schema: Optional[Dict[str, Any]] = None
+    tool_call_id: Optional[str] = None
+    """Tool call ID for script artifact tracking. Defaults to None."""
 
 
 StepDetail = Union[LLMCallDetail, ToolCallDetail]

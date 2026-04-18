@@ -196,7 +196,7 @@ class Trainer:
                 trajectories, evaluated = [], []
                 progress.current_epoch_score = 0.0
 
-            updated = self._updater.update(trajectories, evaluated, config=kwargs)
+            updated = asyncio.run(self._updater.update(trajectories, evaluated, config=kwargs))
 
             if isinstance(updated, list):
                 val_score, val_evaluated = self._select_best_candidate_on_val(

@@ -1,14 +1,24 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Rules-based signal extraction from conversation messages."""
+"""ConversationSignalDetector converts Trajectory or messages to evolution signals."""
 
 from __future__ import annotations
 
 import json
 import re
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Union
 
-from openjiuwen.agent_evolving.online.schema import EvolutionSignal, EvolutionCategory
+from openjiuwen.core.common.logging import logger
+from openjiuwen.agent_evolving.signal.base import (
+    EvolutionCategory,
+    EvolutionSignal,
+    make_signal_fingerprint,
+)
+from openjiuwen.agent_evolving.trajectory.types import (
+    LLMCallDetail,
+    Trajectory,
+    ToolCallDetail,
+)
 
 
 def _get_field(obj: object, key: str, default: object = "") -> object:
@@ -26,19 +36,6 @@ def _extract_around_match(
     start = max(0, match.start() - before)
     end = min(len(content), match.end() + after)
     return content[start:end]
-
-
-def make_signal_fingerprint(signal: EvolutionSignal) -> Tuple[str, str, str, str]:
-    """Build a dedup fingerprint for an evolution signal.
-
-    Shared by SignalDetector and SkillEvolutionRail to keep fingerprints consistent.
-    """
-    return (
-        signal.signal_type,
-        signal.tool_name or "",
-        signal.skill_name or "",
-        signal.excerpt[:200],
-    )
 
 
 _FAILURE_KEYWORDS = re.compile(
@@ -74,10 +71,9 @@ _CORRECTION_PATTERNS = [
 ]
 _CORRECTION_PATTERN = re.compile("|".join(_CORRECTION_PATTERNS), re.IGNORECASE)
 _SKILL_MD_PATTERN = re.compile(r"[/\\]+([^/\\]+)[/\\]+SKILL\.md", re.IGNORECASE)
-_TOOL_SCHEMA_PATTERN = re.compile(r"\{'content': '---\\nname: [^\\n]+\\ndescription:")
+_TOOL_SCHEMA_PATTERN = re.compile(r"\{'content': '---\\nname: [^\n]+\\ndescription:")
 
 # Tools whose output is fetched content (web pages, files, search results).
-# Failure keywords in their output are from the content itself, not execution errors.
 _DATA_FETCH_TOOLS = frozenset({
     "mcp_fetch_webpage", "fetch_webpage", "web_fetch",
     "search", "web_search", "google_search", "bing_search",
@@ -88,9 +84,7 @@ _DATA_FETCH_TOOLS = frozenset({
 
 # Tools that execute inline code or shell commands.
 _CODE_EXEC_TOOLS = frozenset({
-    # jiuwenclaw native
     "code", "bash",
-    # common aliases across frameworks
     "execute_python_code", "run_python", "exec_code",
     "execute_code", "python_exec", "run_code",
 })
@@ -102,18 +96,104 @@ _EXEC_CONTENT_KEYS = (
 )
 
 
-class SignalDetector:
-    """Extract and deduplicate evolution signals from messages."""
+class ConversationSignalDetector:
+    """Extract evolution signals from Trajectory or message list.
+
+    Migrated from online.SignalDetector, now accepts both Trajectory and List[dict].
+    Unified interface for online and offline evolution paths.
+    """
 
     def __init__(self, existing_skills: Optional[Set[str]] = None) -> None:
+        """Initialize detector with optional existing skills set.
+
+        Args:
+            existing_skills: Set of skill names for skill_name resolution.
+        """
         self._existing_skills = existing_skills or set()
 
-    def detect(self, messages: List[dict]) -> List[EvolutionSignal]:
-        """Scan messages and return deduplicated signals."""
+    def detect(
+        self, trajectory_or_messages: Union[Trajectory, List[dict]]
+    ) -> List[EvolutionSignal]:
+        """Detect evolution signals from Trajectory or messages.
+
+        Main entry: accepts Trajectory or List[dict], returns deduplicated EvolutionSignal list.
+
+        Args:
+            trajectory_or_messages: Execution trajectory or message list.
+
+        Returns:
+            List of deduplicated EvolutionSignal.
+        """
+        if isinstance(trajectory_or_messages, Trajectory):
+            messages = self._convert_trajectory_to_messages(trajectory_or_messages)
+        else:
+            messages = trajectory_or_messages
+        return self._detect_from_messages(messages)
+
+    @staticmethod
+    def _convert_trajectory_to_messages(trajectory: Trajectory) -> List[dict]:
+        """Convert Trajectory.steps to message list format.
+
+        The message format matches what SignalDetector.detect() expects:
+        - LLM steps: messages from LLMCallDetail, including tool_calls
+        - Tool steps: tool result from ToolCallDetail.call_result
+
+        Args:
+            trajectory: Trajectory object to convert.
+
+        Returns:
+            List of message dicts compatible with signal detection logic.
+        """
+        messages: List[dict] = []
+        tool_call_id_to_name: Dict[str, str] = {}
+
+        for step in trajectory.steps:
+            if step.kind == "llm" and isinstance(step.detail, LLMCallDetail):
+                for msg in step.detail.messages:
+                    messages.append(msg)
+                    tool_calls = msg.get("tool_calls", [])
+                    if tool_calls:
+                        for tc in tool_calls:
+                            tc_id = tc.get("id", "")
+                            tc_name = tc.get("name", "")
+                            if tc_id and tc_name:
+                                tool_call_id_to_name[tc_id] = tc_name
+
+            elif step.kind == "tool" and isinstance(step.detail, ToolCallDetail):
+                tool_name = step.detail.tool_name
+                tool_call_id = (
+                    step.detail.tool_call_id
+                    or step.meta.get("tool_call_id", "")
+                )
+
+                if not tool_name and tool_call_id:
+                    tool_name = tool_call_id_to_name.get(tool_call_id, "")
+
+                result_content = ""
+                if step.detail.call_result is not None:
+                    result_content = str(step.detail.call_result)
+
+                tool_msg = {
+                    "role": "tool",
+                    "content": result_content,
+                }
+                if tool_call_id:
+                    tool_msg["tool_call_id"] = tool_call_id
+                if tool_name:
+                    tool_msg["name"] = tool_name
+
+                messages.append(tool_msg)
+
+        return messages
+
+    def _detect_from_messages(self, messages: List[dict]) -> List[EvolutionSignal]:
+        """Scan messages and return deduplicated signals.
+
+        Original SignalDetector.detect() logic, moved here for unified handling.
+        """
         signals: List[EvolutionSignal] = []
         skill_read_history: List[Tuple[int, str]] = []
         pending_scripts: Dict[str, str] = {}
-        # tool-result messages may lack 'name'; this mapping recovers it
         tool_call_id_to_name: Dict[str, str] = {}
 
         for msg_idx, msg in enumerate(messages):
@@ -196,10 +276,7 @@ class SignalDetector:
 
     @staticmethod
     def _classify_type(skill_name: Optional[str]) -> EvolutionCategory:
-        """Classify evolution signal type.
-
-        NOTE: current version maps all signals to skill experience.
-        """
+        """Classify evolution signal type."""
         _ = skill_name
         return EvolutionCategory.SKILL_EXPERIENCE
 
@@ -218,14 +295,24 @@ class SignalDetector:
         """Return skill name if any tool call reads a SKILL.md, else None."""
         for tool_call in tool_calls:
             name = str(_get_field(tool_call, "name")).lower()
-            if "file" not in name and "read" not in name:
-                continue
             arguments = str(_get_field(tool_call, "arguments"))
-            matched = _SKILL_MD_PATTERN.search(arguments)
-            if matched:
-                skill = matched.group(1)
-                if not self._existing_skills or skill in self._existing_skills:
-                    return skill
+            skill_name: Optional[str] = None
+
+            # Path 1: Detect file read tools that access SKILL.md
+            if "file" in name or "read" in name:
+                matched = _SKILL_MD_PATTERN.search(arguments)
+                if matched:
+                    skill_name = matched.group(1)
+            elif name == "skill_tool":
+                try:
+                    args_dict = json.loads(arguments) if isinstance(arguments, str) else arguments
+                    if isinstance(args_dict, dict):
+                        skill_name = args_dict.get("skill_name")
+                except (json.JSONDecodeError, TypeError) as exc:
+                    logger.debug("[ConversationSignalDetector] failed to parse skill_tool arguments: %s", exc)
+
+            if skill_name and (not self._existing_skills or skill_name in self._existing_skills):
+                return skill_name
         return None
 
     @staticmethod
@@ -257,3 +344,14 @@ class SignalDetector:
             seen.add(key)
             deduped.append(signal)
         return deduped
+
+
+# Alias for backward compatibility
+SignalDetector = ConversationSignalDetector
+
+
+__all__ = [
+    "ConversationSignalDetector",
+    "SignalDetector",  # backward compatibility alias
+    "make_signal_fingerprint",
+]

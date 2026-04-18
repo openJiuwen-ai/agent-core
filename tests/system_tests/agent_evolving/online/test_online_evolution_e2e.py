@@ -21,7 +21,7 @@ from openjiuwen.agent_evolving.online.schema import (
     EvolutionContext,
     EvolutionTarget,
 )
-from openjiuwen.agent_evolving.online.signal_detector import SignalDetector
+from openjiuwen.agent_evolving.signal import SignalDetector
 from openjiuwen.agent_evolving.online.store import EvolutionStore
 
 
