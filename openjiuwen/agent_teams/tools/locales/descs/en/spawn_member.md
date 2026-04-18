@@ -8,3 +8,25 @@ Create a new team member with domain expertise. Used to split tasks by domain an
 | **prompt** | First startup instruction: define initial priorities, constraints, or coordination needs without repeating the generic workflow |
 
 You must call build_team before calling spawn_member. Call order: build_team → create_task → spawn_member → send_message. spawn_member only creates the member record (status: UNSTARTED); on the first send_message call, the system automatically starts all unstarted members. Call shutdown_member after the member completes work. If member_name already exists, creation will fail — use a non-conflicting name. Use desc to define the member's long-term professional role; use prompt to specify the first instruction the member receives at startup. Do not write prompt as generic startup filler such as "start working" or "check the task list"; specify what this member should prioritize when it starts.
+
+## Naming Examples
+
+- Good: `backend-dev-1`, `frontend-lead`, `test-engineer`, `db-architect` — semantic kebab-case, reflects domain
+- Bad: `xx1`, `mem-a`, `worker`, `a` — no semantics, can't be used for task routing
+
+## desc / prompt Examples
+
+**desc** (long-term role) — specify domain, priorities, and boundaries:
+
+    Senior backend engineer, focused on Python/FastAPI microservices and
+    relational database design.
+    Preferred tasks: API design, database schema, backend service
+    implementation, auth system.
+    Not responsible for: frontend UI components, ops/deployment, mobile.
+
+**prompt** (first-startup instruction) — specify what to focus on right
+after startup, avoiding generic filler:
+
+    After startup, call view_task first to survey the board. Claim tasks
+    prefixed with "backend-". Use snake_case for API field names when
+    unspecified; follow 3NF for database schemas.

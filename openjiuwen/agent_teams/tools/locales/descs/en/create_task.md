@@ -24,6 +24,14 @@ All tasks start as `pending` (or `blocked` if they have unresolved dependencies)
 - Single owner: each task should be one independently deliverable outcome
 - Use depends_on / depended_by to build the dependency DAG
 
+## Granularity Examples
+
+Using "user authentication" as an example:
+
+- **Too fine**: splitting into "Design User table", "Implement POST /login", "Implement JWT signing", "Write unit tests" — each is a step not a deliverable outcome; acceptance becomes action-based
+- **Right-sized**: one task "Implement user login (signup + login + session)" with goal, acceptance criteria (API covers signup/login/refresh), constraints (bcrypt + JWT). Single owner delivers; accepted via API behavior
+- **Too coarse**: one task "Build the entire user module" — scope too wide; parallel execution forces re-splitting later; single owner is costly, acceptance vague
+
 ## Required Workflow
 
 1. **Before creating**: you MUST call `view_task` first to inspect the current task board — prevents duplicates, surfaces missing dependencies, and reveals reusable task IDs
