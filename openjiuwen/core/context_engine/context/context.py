@@ -29,7 +29,6 @@ feel free to call reload_original_context_messages:
 
 Storage types: "in_memory" (session cache).
 """
-_SESSION_MEMORY_CONTEXT_RUNTIME_ATTR = "_session_memory_runtime_state"
 _CONTEXT_MESSAGE_ID_KEY = "context_message_id"
 
 
@@ -400,7 +399,6 @@ class SessionModelContext(ModelContext):
         return {
             "messages": self._message_buffer.get_back(),
             "offload_messages": self._offload_message_buffer.get_all(),
-            "session_memory_runtime": getattr(self, _SESSION_MEMORY_CONTEXT_RUNTIME_ATTR, {}),
         }
 
     def load_state(self, state: Dict[str, Any]):
@@ -414,5 +412,3 @@ class SessionModelContext(ModelContext):
             for _, msg_list in offload_messages.items():
                 self._validate_and_init_messages(msg_list)
             self._offload_message_buffer = OffloadMessageBuffer(offload_messages)
-        session_memory_runtime = state.get(self._context_id, {}).get("session_memory_runtime", {})
-        setattr(self, _SESSION_MEMORY_CONTEXT_RUNTIME_ATTR, session_memory_runtime or {})

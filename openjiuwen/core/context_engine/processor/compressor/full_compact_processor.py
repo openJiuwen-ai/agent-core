@@ -369,7 +369,7 @@ class FullCompactProcessor(ContextProcessor):
                 messages_to_keep=messages_to_keep,
                 summary_message=summary_message,
                 boundary_message=boundary,
-                builder_names=["plan", "skills", "task_status", "plan_mode"],
+                builder_names=["plan", "plan_mode", "skills", "task_status"],
             )
         )
         return new_context_messages
@@ -387,6 +387,8 @@ class FullCompactProcessor(ContextProcessor):
             return None, None
 
         session_memory_runtime = self._load_session_memory_runtime(context)
+        if session_memory_runtime.get("is_extracting"):
+            logger.info("[FullCompact] session_memory extraction in progress, using latest committed notes")
         session_memory_text = self._load_session_memory_text(context, session_memory_runtime)
         if not session_memory_text:
             logger.info("[FullCompact] session_memory unavailable: empty notes content or unresolved path")
@@ -614,6 +616,26 @@ class FullCompactProcessor(ContextProcessor):
         session = getattr(context, "_session_ref", None)
         if session is not None and hasattr(session, "get_state"):
             state = session.get_state("__session_memory__") or {}
+            session_id = ""
+            if hasattr(session, "get_session_id"):
+                try:
+                    session_id = session.get_session_id()
+                except Exception:
+                    session_id = ""
+            logger.info(
+                "[FullCompact] load_session_memory_runtime session_obj=%s session_id=%s state=%s",
+                hex(id(session)),
+                session_id,
+                state if not isinstance(state, dict) else {
+                    "memory_path": state.get("memory_path"),
+                    "initialized": state.get("initialized"),
+                    "is_extracting": state.get("is_extracting"),
+                    "tokens_at_last_update": state.get("tokens_at_last_update"),
+                    "tool_calls_at_last_update": state.get("tool_calls_at_last_update"),
+                    "last_summarized_message_count": state.get("last_summarized_message_count"),
+                    "notes_upto_message_id": state.get("notes_upto_message_id"),
+                },
+            )
             if isinstance(state, dict) and state:
                 return dict(state)
         return {}
