@@ -11,8 +11,15 @@
 
 ## 命名示例
 
-- 好：`backend-dev-1`、`frontend-lead`、`test-engineer`、`db-architect` — 语义化 kebab-case，反映领域
+- 好：`backend-dev-1`、`frontend-lead`、`test-engineer`、`db-architect`、`devops-1`、`qa-lead` — 语义化 kebab-case，反映领域
 - 差：`xx1`、`mem-a`、`worker`、`a` — 无语义，无法用于任务匹配
+
+**推荐语法**：小写字母、数字、连字符（`-`）组成 kebab-case；首字符必须是字母；长度 3–32 字符。member_name 会作为消息路由和文件路径的一部分，避免空格、下划线首字符、大写或其他特殊字符。
+
+**防冲突建议**：
+- 同领域多成员：加数字后缀 — `backend-dev-1`、`backend-dev-2`
+- 同领域不同角色/资历：用角色词区分 — `backend-lead` vs `backend-dev-1`；`frontend-senior` vs `frontend-junior`
+- 跨领域避免通用词（`worker`、`helper`）— 它们无法从 name 反推专长，任务路由完全依赖 desc
 
 ## desc / prompt 范例
 

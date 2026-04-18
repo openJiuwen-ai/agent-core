@@ -11,8 +11,15 @@ You must call build_team before calling spawn_member. Call order: build_team →
 
 ## Naming Examples
 
-- Good: `backend-dev-1`, `frontend-lead`, `test-engineer`, `db-architect` — semantic kebab-case, reflects domain
+- Good: `backend-dev-1`, `frontend-lead`, `test-engineer`, `db-architect`, `devops-1`, `qa-lead` — semantic kebab-case, reflects domain
 - Bad: `xx1`, `mem-a`, `worker`, `a` — no semantics, can't be used for task routing
+
+**Recommended syntax**: lowercase letters, digits, and hyphens (`-`) in kebab-case; first character must be a letter; length 3–32. Since `member_name` feeds into message routing and file paths, avoid spaces, leading underscores, uppercase letters, and other special characters.
+
+**Avoiding collisions**:
+- Multiple members in one domain: add a numeric suffix — `backend-dev-1`, `backend-dev-2`
+- Different roles/seniority within a domain: use a role token — `backend-lead` vs `backend-dev-1`; `frontend-senior` vs `frontend-junior`
+- Across domains, avoid generic words (`worker`, `helper`) — they give no hint of expertise, so task routing has to rely entirely on `desc`
 
 ## desc / prompt Examples
 
