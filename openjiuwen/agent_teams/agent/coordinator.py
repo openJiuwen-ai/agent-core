@@ -12,6 +12,7 @@ behavior via team tools. The loop manages:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from enum import Enum
 from typing import (
     Any,
@@ -134,6 +135,11 @@ class CoordinatorLoop:
             return
         team_logger.info("CoordinatorLoop[{}] stopping", self._role.value)
         self._running = False
+        # Reset pause flag before touching the poll tasks so partial failures
+        # below still leave the state machine consistent: a subsequent start()
+        # must not inherit a stale ``_polls_paused = True`` from a prior
+        # pause_polls().
+        self._polls_paused = False
 
         # Cancel polling timers
         for task in (self._mailbox_poll_task, self._task_poll_task):
@@ -161,6 +167,8 @@ class CoordinatorLoop:
                     asyncio.CancelledError,
             ):
                 self._loop_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._loop_task
             self._loop_task = None
 
     async def pause_polls(self) -> None:
