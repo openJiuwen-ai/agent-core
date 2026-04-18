@@ -1123,3 +1123,36 @@ class TestMarkMessageReadTool:
 
     def test_placeholder(self):
         pass
+
+
+class TestTranslator:
+    """Test the i18n translator closure returned by make_translator()."""
+
+    def test_desc_from_markdown_is_returned(self):
+        """When a <lang>/<tool>.md exists, it is used for _desc."""
+        translate = make_translator("cn")
+
+        desc = translate("build_team")
+        assert "build_team" in desc or "组建" in desc
+
+    def test_param_keys_return_strings_dict_entries(self):
+        """Non-_desc keys are resolved from the in-module STRINGS dict."""
+        translate = make_translator("cn")
+
+        value = translate("send_message", "summary")
+        assert value == "5-10 词摘要，用于消息预览和日志"
+
+    def test_missing_desc_raises_file_not_found(self):
+        """Unknown tool: no markdown and no STRINGS entry → FileNotFoundError.
+
+        Protects against silent KeyError if a descs/<lang>/<tool>.md
+        is deleted or mis-named.
+        """
+        translate = make_translator("cn")
+
+        with pytest.raises(FileNotFoundError) as excinfo:
+            translate("nonexistent_tool_for_translator_test")
+
+        msg = str(excinfo.value)
+        assert "nonexistent_tool_for_translator_test" in msg
+        assert "cn" in msg

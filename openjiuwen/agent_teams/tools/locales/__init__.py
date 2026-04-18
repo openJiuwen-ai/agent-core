@@ -56,6 +56,13 @@ def make_translator(lang: str = "cn") -> Translator:
             tmpl = _load_desc(tool, lang)
             if tmpl is not None:
                 return tmpl.format(kwargs).content if kwargs else tmpl.content
+            dict_key = f"{tool}._desc"
+            if dict_key not in strings:
+                raise FileNotFoundError(
+                    f"Missing description for tool '{tool}' in language '{lang}': "
+                    f"expected Markdown at {_DESCS_DIR / lang / f'{tool}.md'} "
+                    f"or STRINGS['{dict_key}']"
+                )
         raw = strings[f"{tool}.{key}"]
         return raw.format_map(kwargs) if kwargs else raw
 

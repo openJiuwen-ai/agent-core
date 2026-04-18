@@ -230,6 +230,35 @@ class TestToolExclusion:
 
         assert "claim_task" in tool_names
 
+    def test_leader_has_approval_tools(self):
+        """Leader must get approve_plan and approve_tool — required for plan review."""
+        agent_team = AsyncMock()
+        agent_team.is_leader = True
+
+        tools = create_team_tools(
+            role="leader",
+            agent_team=agent_team,
+        )
+        tool_names = {t.card.name for t in tools}
+        logger.info("Leader tools: {}", tool_names)
+
+        assert "approve_plan" in tool_names
+        assert "approve_tool" in tool_names
+
+    def test_teammate_does_not_have_approval_tools(self):
+        """approve_plan / approve_tool are leader-only."""
+        agent_team = AsyncMock()
+        agent_team.is_leader = False
+
+        tools = create_team_tools(
+            role="teammate",
+            agent_team=agent_team,
+        )
+        tool_names = {t.card.name for t in tools}
+
+        assert "approve_plan" not in tool_names
+        assert "approve_tool" not in tool_names
+
 
 class TestPredefinedTeamPrompt:
     """Test system prompt includes predefined team override."""

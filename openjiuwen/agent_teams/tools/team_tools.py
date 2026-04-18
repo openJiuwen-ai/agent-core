@@ -90,8 +90,8 @@ LEADER_ONLY_TOOLS: Set[str] = {
     "clean_team",              # Clean up a team
     "spawn_member",            # Create a new team member
     "shutdown_member",         # Shutdown a team member
-    # "approve_plan",            # Approve or reject a member's plan
-    # "approve_tool",            # Approve or reject a teammate tool call
+    "approve_plan",            # Approve or reject a member's plan
+    "approve_tool",            # Approve or reject a teammate tool call
     "create_task",             # Create tasks (batch / with deps)
     "update_task",             # Update task content / cancel tasks
     "list_members",            # List all members
