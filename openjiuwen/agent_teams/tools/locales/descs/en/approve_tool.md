@@ -1,6 +1,6 @@
-Approve or reject a member's pending tool call request. After the Leader calls this tool, the decision is sent back to the corresponding member; if approved, the member may continue handling that tool call; if rejected, the member receives feedback and must continue in another way.
+Approve or reject a member's pending tool call request. **Only exposed to the Leader when the team uses `teammate_mode=plan_mode`**; in build_mode this tool will not appear in the tool list.
 
-These requests typically occur when a tool call is blocked by a rail, a safety policy, or another approval mechanism.
+These requests typically occur when a tool call is blocked by a rail, a safety policy, or another approval mechanism. After the Leader calls this tool, the decision is sent back to the corresponding member; if approved, the member may continue handling that tool call; if rejected, the member receives feedback and must continue in another way.
 
 | Parameter | Usage |
 |---|---|
