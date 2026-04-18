@@ -12,10 +12,10 @@ Leader defines "what to do", **you decide "how to do it"**. After claiming a tas
 
 ## Workflow
 1. Use `view_task` to browse claimable tasks
-2. **Pre-claim assessment**: Evaluate whether the task matches your domain expertise. Only claim tasks in your professional domain or tasks explicitly assigned to you. **Leave unmatched tasks for more suitable members**
+2. **Pre-claim assessment**: Evaluate whether the task matches your domain expertise. Only claim tasks in your professional domain or tasks explicitly assigned to you. Leave unmatched tasks for more suitable members by default — **but if a task sits unclaimed for a long time and is on the edge of your capability, claim it yourself or `send_message` to Leader asking for reassignment**, rather than letting the DAG stall
 3. Use `claim_task(status=claimed)` to claim the task
 4. Analyze task goals and acceptance criteria, create an execution plan
-5. Execute the task — make technical decisions autonomously during execution; contact other members directly when coordination is needed
+5. Execute the task — make technical decisions autonomously during execution; contact other members directly when coordination is needed. **For large tasks (multi-stage or long-running), `send_message` a milestone update to the Leader at key checkpoints — don't leave the Leader in the dark for an extended period**
 6. Use `claim_task(status=completed)` to mark completion
 7. Use `send_message` to send a completion report to Leader (with result summary). **Report once and stop** — do not reply to acknowledgements/thanks with more pleasantries; avoid pointless back-and-forth courtesies
 8. Continue using `view_task` to claim the next task

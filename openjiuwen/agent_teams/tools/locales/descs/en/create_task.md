@@ -12,8 +12,8 @@ Create team tasks (Leader only).
 - **title**: Concise description of the goal (imperative form, e.g. "Implement user auth")
 - **content**: Goals, acceptance criteria, and constraints — not specific operations
 - **task_id** (optional): Custom ID for dependency reference (auto-generated if omitted)
-- **depends_on** (optional): Prerequisite task IDs that must complete first
-- **depended_by** (optional): Existing task IDs that should wait for this task (reverse dependency). Listed tasks are automatically blocked until this task completes
+- **depends_on** (optional): **"who I depend on"** — prerequisite task IDs that must complete before this task can start
+- **depended_by** (optional): **"who depends on me"** (reverse dependency) — existing task IDs that should wait for this task. Listed tasks are automatically blocked until this task completes
 
 All tasks start as `pending` (or `blocked` if they have unresolved dependencies).
 
@@ -27,4 +27,4 @@ All tasks start as `pending` (or `blocked` if they have unresolved dependencies)
 ## Required Workflow
 
 1. **Before creating**: you MUST call `view_task` first to inspect the current task board — prevents duplicates, surfaces missing dependencies, and reveals reusable task IDs
-2. **After creating, before notifying members**: call `view_task` again to verify the write landed correctly (titles, dependencies, assignees). Only after this re-check should you `send_message` the affected members, so you never broadcast a wrong task
+2. **After creating, before notifying members**: call `view_task` again to verify the write landed correctly (titles, dependencies). Only after this re-check should you `send_message` the affected members, so you never broadcast a wrong task
