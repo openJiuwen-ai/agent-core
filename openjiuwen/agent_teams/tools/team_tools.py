@@ -967,6 +967,7 @@ def create_team_tools(
     *,
     role: str,
     agent_team: TeamBackend,
+    teammate_mode: str = "build_mode",
     on_teammate_created: Optional[Callable[[str], Awaitable[None]]] = None,
     model_config_allocator: Optional[Callable[[], Optional[str]]] = None,
     exclude_tools: Optional[Set[str]] = None,
@@ -977,6 +978,11 @@ def create_team_tools(
     Args:
         role: "leader" or "teammate".
         agent_team: AgentTeam instance providing task/message/db/messager.
+        teammate_mode: Execution mode for teammates — "build_mode" or
+            "plan_mode". Leader's approval tools (approve_plan / approve_tool)
+            are only wired when teammate_mode == "plan_mode", since that's the
+            only mode where teammates submit plans and tool calls can be held
+            for leader sign-off.
         on_teammate_created: Callback invoked when a teammate is created.
         model_config_allocator: Callback that returns the next model config JSON.
         exclude_tools: Tool names to exclude from the allowed set.
@@ -1010,6 +1016,11 @@ def create_team_tools(
     }
 
     allowed = LEADER_TOOLS if role == "leader" else MEMBER_TOOLS
+    # approve_plan / approve_tool only make sense in plan_mode — teammates
+    # submit plans and intercepted tool calls go to the leader for sign-off.
+    # build_mode has no such workflow, so keep the leader's toolset clean.
+    if role == "leader" and teammate_mode != "plan_mode":
+        allowed = allowed - {"approve_plan", "approve_tool"}
     if exclude_tools:
         allowed = allowed - exclude_tools
     tools = [

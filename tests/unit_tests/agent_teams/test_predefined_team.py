@@ -230,34 +230,53 @@ class TestToolExclusion:
 
         assert "claim_task" in tool_names
 
-    def test_leader_has_approval_tools(self):
-        """Leader must get approve_plan and approve_tool — required for plan review."""
+    def test_leader_has_approval_tools_in_plan_mode(self):
+        """Leader must get approve_plan and approve_tool in plan_mode — required for plan review."""
         agent_team = AsyncMock()
         agent_team.is_leader = True
 
         tools = create_team_tools(
             role="leader",
             agent_team=agent_team,
+            teammate_mode="plan_mode",
         )
         tool_names = {t.card.name for t in tools}
-        logger.info("Leader tools: {}", tool_names)
+        logger.info("Leader tools (plan_mode): {}", tool_names)
 
         assert "approve_plan" in tool_names
         assert "approve_tool" in tool_names
 
-    def test_teammate_does_not_have_approval_tools(self):
-        """approve_plan / approve_tool are leader-only."""
+    def test_leader_no_approval_tools_in_build_mode(self):
+        """build_mode has no plan workflow — approval tools must be excluded from the leader."""
         agent_team = AsyncMock()
-        agent_team.is_leader = False
+        agent_team.is_leader = True
 
         tools = create_team_tools(
-            role="teammate",
+            role="leader",
             agent_team=agent_team,
+            teammate_mode="build_mode",
         )
         tool_names = {t.card.name for t in tools}
+        logger.info("Leader tools (build_mode): {}", tool_names)
 
         assert "approve_plan" not in tool_names
         assert "approve_tool" not in tool_names
+
+    def test_teammate_does_not_have_approval_tools(self):
+        """approve_plan / approve_tool are leader-only, regardless of mode."""
+        agent_team = AsyncMock()
+        agent_team.is_leader = False
+
+        for mode in ("build_mode", "plan_mode"):
+            tools = create_team_tools(
+                role="teammate",
+                agent_team=agent_team,
+                teammate_mode=mode,
+            )
+            tool_names = {t.card.name for t in tools}
+
+            assert "approve_plan" not in tool_names, f"teammate got approve_plan in {mode}"
+            assert "approve_tool" not in tool_names, f"teammate got approve_tool in {mode}"
 
 
 class TestPredefinedTeamPrompt:

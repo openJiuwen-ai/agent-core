@@ -648,6 +648,7 @@ class TeamAgent(BaseAgent):
         team_tools = create_team_tools(
             role=ctx.role.value,
             agent_team=agent_team,
+            teammate_mode=spec.teammate_mode,
             on_teammate_created=self._on_teammate_created,
             model_config_allocator=self._model_allocator.allocate if self._model_allocator else None,
             exclude_tools=exclude,
