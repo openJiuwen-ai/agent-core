@@ -1334,3 +1334,62 @@ async def test_create_skill_succeeds_for_new_skill(tmp_path):
     content = (result / "SKILL.md").read_text()
     assert "brand_new_skill" in content
     assert "A fresh skill" in content
+
+
+# =============================================================================
+# generate_and_emit_experience (Public API) Tests
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_generate_and_emit_experience_returns_true_when_records_staged(tmp_path):
+    """Public API should return True and emit approval events when records are staged."""
+    rail = _make_rail(tmp_path, auto_save=False)
+    signals = [_make_signal("skill-a")]
+    messages = [{"role": "user", "content": "test"}]
+
+    # Mock optimizer to stage records
+    record = _make_record("skill-a")
+    rail._generate_experience_via_optimizer = AsyncMock(return_value=True)
+    rail._emit_generated_records = AsyncMock()
+
+    result = await rail.generate_and_emit_experience("skill-a", signals, messages)
+
+    assert result is True
+    rail._generate_experience_via_optimizer.assert_awaited_once_with(
+        "skill-a", signals, messages
+    )
+    rail._emit_generated_records.assert_awaited_once_with(None, "skill-a")
+
+
+@pytest.mark.asyncio
+async def test_generate_and_emit_experience_returns_false_when_no_records(tmp_path):
+    """Public API should return False when optimizer stages no records."""
+    rail = _make_rail(tmp_path, auto_save=False)
+    signals = [_make_signal("skill-a")]
+    messages = [{"role": "user", "content": "test"}]
+
+    # Mock optimizer to return no records
+    rail._generate_experience_via_optimizer = AsyncMock(return_value=False)
+    rail._emit_generated_records = AsyncMock()
+
+    result = await rail.generate_and_emit_experience("skill-a", signals, messages)
+
+    assert result is False
+    rail._generate_experience_via_optimizer.assert_awaited_once_with(
+        "skill-a", signals, messages
+    )
+    rail._emit_generated_records.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_generate_and_emit_experience_with_empty_inputs(tmp_path):
+    """Public API should handle empty signals and messages."""
+    rail = _make_rail(tmp_path, auto_save=False)
+
+    rail._generate_experience_via_optimizer = AsyncMock(return_value=False)
+
+    result = await rail.generate_and_emit_experience("skill-a", [], [])
+
+    assert result is False
+    rail._generate_experience_via_optimizer.assert_awaited_once_with("skill-a", [], [])

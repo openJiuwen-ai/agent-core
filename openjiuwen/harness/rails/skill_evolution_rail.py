@@ -357,6 +357,33 @@ class SkillEvolutionRail(EvolutionRail):
         self._pending_approval_events.clear()
         return events
 
+    async def generate_and_emit_experience(
+        self,
+        skill_name: str,
+        signals: List[EvolutionSignal],
+        messages: List[dict],
+    ) -> bool:
+        """Generate experience records and emit approval events for a skill.
+
+        Public entry point for host-driven (manual /evolve) evolution.
+        Combines record staging and approval event emission into a single call.
+
+        Args:
+            skill_name: Name of the skill to evolve.
+            signals: Detected evolution signals attributed to the skill.
+            messages: Parsed conversation messages for context.
+
+        Returns:
+            True if at least one experience record was staged and emitted.
+        """
+        has_records = await self._generate_experience_via_optimizer(
+            skill_name, signals, messages
+        )
+        if not has_records:
+            return False
+        await self._emit_generated_records(None, skill_name)
+        return True
+
     async def _emit_generated_records(
         self,
         ctx: AgentCallbackContext,
