@@ -10,6 +10,7 @@ import json
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.context_engine import ModelContext, ContextWindow
+from openjiuwen.core.context_engine.context.session_memory_manager import group_completed_api_rounds
 from openjiuwen.core.context_engine.schema.messages import create_offload_message
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.sys_operation import SysOperation
@@ -17,7 +18,7 @@ from openjiuwen.core.sys_operation import SysOperation
 
 _PROCESSOR_TYPE_ATTR: str = "__processor_type"
 _OFFLOAD_MESSAGE_HANDLE: str = "[[OFFLOAD: handle={handle}, type={type}]]"
-_OFFLOAD_MESSAGE_HANDLE_WITH_PATH: str = "[[OFFLOAD: handle={handle}, type={type}, path={path}]]"
+_OFFLOAD_MESSAGE_HANDLE_WITH_PATH: str = "[[OFFLOAD: type={type}, path={path}]]"
 
 
 class MetaContextProcessor(type):
@@ -258,7 +259,7 @@ class ContextProcessor(metaclass=MetaContextProcessor):
     ) -> Optional[BaseMessage]:
         if offload_path:
             content = content + _OFFLOAD_MESSAGE_HANDLE_WITH_PATH.format(
-                handle=offload_handle, type="filesystem", path=offload_path
+                type="filesystem", path=offload_path
             )
         else:
             content = content + _OFFLOAD_MESSAGE_HANDLE.format(
@@ -307,3 +308,13 @@ class ContextProcessor(metaclass=MetaContextProcessor):
             return False
         await sys_operation.fs().write_file(file_path, content_json)
         return True
+
+    @staticmethod
+    def _api_round(messages: List[BaseMessage]) -> bool:
+        if not messages:
+            return False
+        completed_rounds = group_completed_api_rounds(messages)
+        if not completed_rounds:
+            return False
+        last_end = completed_rounds[-1][1]
+        return last_end == len(messages)

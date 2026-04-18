@@ -5,13 +5,27 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
-
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ModelContext
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.context.session_memory_manager import (
+    find_last_completed_api_round_end,
+    find_message_index_by_context_message_id,
+    group_completed_api_rounds,
+    invalidate_session_memory_anchor,
+)
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
+from openjiuwen.core.context_engine.processor.compressor.util import (
+    FullCompactStateReinjector,
+    build_plan_mode_reinjected_content,
+    build_task_status_reinjected_content,
+    build_skill_reinjected_content,
+)
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     BaseMessage,
@@ -22,7 +36,6 @@ from openjiuwen.core.foundation.llm import (
     ToolMessage,
     UserMessage,
 )
-from openjiuwen.core.foundation.tool import ToolInfo
 
 NO_TOOLS_PREAMBLE = """CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 
@@ -144,31 +157,25 @@ Please provide your summary based on the conversation so far,
 following this structure and ensuring precision and thoroughness in your response.
 """
     + "\n\nREMINDER: Do NOT call any tools. "
-      "Respond with plain text only — an <analysis> block followed by a <summary> block. "
-      "Tool calls will be rejected and you will fail the task."
+    "Respond with plain text only — an <analysis> block followed by a <summary> block. "
+    "Tool calls will be rejected and you will fail the task."
 )
 
 
 class FullCompactProcessorConfig(BaseModel):
-    trigger_total_tokens: int = Field(default=230000, gt=0)
-    compression_call_max_tokens: int = Field(default=250000, gt=0)
+    trigger_total_tokens: int = Field(default=180000, gt=0)
+    compression_call_max_tokens: int = Field(default=200000, gt=0)
     messages_to_keep: int = Field(default=10, ge=0)
     keep_tool_message_pairs: bool = Field(default=True)
     state_snapshot_max_chars: int = Field(default=4000, gt=0)
-    reinject_recent_tool_calls: int = Field(default=8, ge=0)
-    reinject_file_tool_names: List[str] = Field(
-        default=["read_file", "write_file", "edit_file", "glob", "grep"]
-    )
-    reinject_tool_result_hint_names: List[str] = Field(
-        default=["read_file", "write_file", "edit_file", "glob", "grep"]
-    )
+    reinject_recent_skills: int = Field(default=3, ge=0)
+    reinject_file_tool_names: List[str] = Field(default=["read_file", "write_file", "edit_file", "glob", "grep"])
+    reinject_tool_result_hint_names: List[str] = Field(default=["read_file", "write_file", "edit_file", "glob", "grep"])
     model: ModelRequestConfig | None = Field(default=None)
     model_client: ModelClientConfig | None = Field(default=None)
     marker: str = Field(default="[FULL_COMPACT_BOUNDARY]")
     state_marker: str = Field(default="[FULL_COMPACT_STATE]")
-    synthetic_user_marker: str = Field(
-        default="[earlier conversation truncated for compaction retry]"
-    )
+    synthetic_user_marker: str = Field(default="[earlier conversation truncated for compaction retry]")
     summary_intro: str = Field(
         default=(
             "This session is being continued from a previous conversation that "
@@ -177,11 +184,54 @@ class FullCompactProcessorConfig(BaseModel):
         )
     )
     recent_messages_notice: str = Field(default="Recent messages are preserved verbatim.")
+    session_memory_enabled: bool = Field(default=True)
+    session_memory_marker: str = Field(default="[SESSION_MEMORY_BOUNDARY]")
+    session_memory_intro: str = Field(
+        default=(
+            "Earlier conversation has been replaced with the session memory file. "
+            "Use it as the canonical summary of prior work."
+        )
+    )
 
 
 @ContextEngine.register_processor()
 class FullCompactProcessor(ContextProcessor):
     """Fallback compactor aligned with Claude Code's full compact flow."""
+
+    def __init__(self, config: FullCompactProcessorConfig):
+        super().__init__(config)
+        self._trigger_total_tokens = config.trigger_total_tokens
+        self._compression_call_max_tokens = config.compression_call_max_tokens
+        self._messages_to_keep = config.messages_to_keep
+        self._keep_tool_message_pairs = config.keep_tool_message_pairs
+        self._state_snapshot_max_chars = config.state_snapshot_max_chars
+        self._marker = config.marker
+        self._state_marker = config.state_marker
+        self._synthetic_user_marker = config.synthetic_user_marker
+        self._summary_intro = config.summary_intro
+        self._recent_messages_notice = config.recent_messages_notice
+        self._session_memory_enabled = config.session_memory_enabled
+        self._session_memory_marker = config.session_memory_marker
+        self._session_memory_intro = config.session_memory_intro
+        self._state_reinjector = FullCompactStateReinjector()
+        self._state_reinjector.register_builder(
+            name="skills",
+            label="SKILLS",
+            builder=build_skill_reinjected_content,
+        )
+        self._state_reinjector.register_builder(
+            name="task_status",
+            label="TASK_STATUS",
+            builder=build_task_status_reinjected_content,
+        )
+        self._state_reinjector.register_builder(
+            name="plan_mode",
+            label="PLAN_MODE",
+            builder=build_plan_mode_reinjected_content,
+        )
+        self._model: Model | None = None
+        if config.model is not None and config.model_client is not None:
+            self._model = Model(config.model_client, config.model)
 
     @property
     def config(self) -> FullCompactProcessorConfig:
@@ -193,9 +243,17 @@ class FullCompactProcessor(ContextProcessor):
         messages_to_add: List[BaseMessage],
         **kwargs: Any,
     ) -> bool:
-        combined_messages = context.get_messages() + list(messages_to_add)
-        total_tokens = self._count_message_tokens(combined_messages, context)
-        return total_tokens > self.config.trigger_total_tokens
+        candidate_messages = context.get_messages() + list(messages_to_add or [])
+        if not self._api_round(candidate_messages):
+            return False
+        candidate_tokens = self._count_context_window_tokens(
+            system_messages=[],
+            context_messages=candidate_messages,
+            tools=[],
+            context=context,
+        )
+        triggered = candidate_tokens > self._trigger_total_tokens
+        return triggered
 
     async def on_add_messages(
         self,
@@ -203,18 +261,58 @@ class FullCompactProcessor(ContextProcessor):
         messages_to_add: List[BaseMessage],
         **kwargs: Any,
     ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
-        all_messages = context.get_messages() + list(messages_to_add)
-
-        if not all_messages:
+        all_messages = context.get_messages() + list(messages_to_add or [])
+        event, new_context_messages, session_memory_message = await self._build_replacement_messages(
+            context,
+            all_messages,
+        )
+        if new_context_messages is None:
             return None, messages_to_add
+        context.set_messages(new_context_messages)
+        if session_memory_message is None:
+            self._invalidate_session_memory_anchor(context)
+        return event, []
 
-        boundary_index = self._find_last_boundary_index(all_messages)
-        prefix = all_messages[:boundary_index] if boundary_index > 0 else []
-        active_messages = (
-            all_messages[boundary_index + 1:] if boundary_index >= 0 else all_messages
+    async def _build_replacement_messages(
+        self,
+        context: ModelContext,
+        all_messages: List[BaseMessage],
+    ) -> Tuple[ContextEvent | None, Optional[List[BaseMessage]], Optional[UserMessage]]:
+        boundary_index = self._find_last_compaction_boundary_index(all_messages)
+        prefix, active_messages = self._split_messages_at_compaction_boundary(
+            all_messages,
+            boundary_index=boundary_index,
         )
         if not active_messages:
-            return None, messages_to_add
+            logger.info("[FullCompact] replacement skipped: no active messages after boundary")
+            return None, None, None
+
+        session_memory_messages, session_memory_message = await self._build_session_memory_messages(
+            context=context,
+            prefix=prefix,
+            active_messages=active_messages,
+            has_compaction_boundary=boundary_index >= 0,
+        )
+        if session_memory_messages is not None:
+            session_memory_tokens = self._count_context_window_tokens(
+                system_messages=[],
+                context_messages=session_memory_messages,
+                tools=[],
+                context=context,
+            )
+            if session_memory_tokens <= self._trigger_total_tokens:
+                logger.info("[FullCompact] using session_memory replacement")
+                return (
+                    ContextEvent(
+                        event_type=self.processor_type(),
+                        messages_to_modify=list(range(len(all_messages))),
+                    ),
+                    session_memory_messages,
+                    session_memory_message,
+                )
+            logger.info("[FullCompact] session_memory candidate rejected: token budget exceeded")
+        else:
+            logger.info("[FullCompact] session_memory candidate unavailable, fallback to full_compact")
 
         new_context_messages = await self._build_full_compact_messages(
             context=context,
@@ -222,15 +320,20 @@ class FullCompactProcessor(ContextProcessor):
             active_messages=active_messages,
         )
         if new_context_messages is None:
-            return None, messages_to_add
-
-        context.set_messages(new_context_messages)
-        start_idx = max(boundary_index + 1, 0)
-        end_idx = len(all_messages) - 1
-        return ContextEvent(
-            event_type=self.processor_type(),
-            messages_to_modify=list(range(start_idx, end_idx + 1)),
-        ), []
+            logger.warning("[FullCompact] full_compact candidate build failed")
+            return None, None, None
+        logger.info(
+            "[FullCompact] using full_compact replacement output_messages=%s",
+            len(new_context_messages),
+        )
+        return (
+            ContextEvent(
+                event_type=self.processor_type(),
+                messages_to_modify=list(range(len(all_messages))),
+            ),
+            new_context_messages,
+            None,
+        )
 
     async def _build_full_compact_messages(
         self,
@@ -239,9 +342,8 @@ class FullCompactProcessor(ContextProcessor):
         prefix: List[BaseMessage],
         active_messages: List[BaseMessage],
     ) -> Optional[List[BaseMessage]]:
-        compact_source = self._prepare_messages_for_prompt(
-            self._strip_media_messages(active_messages)
-        )
+
+        compact_source = self._prepare_messages_for_prompt(self._strip_media_messages(active_messages))
         if not compact_source:
             return None
 
@@ -251,13 +353,12 @@ class FullCompactProcessor(ContextProcessor):
 
         summary = await self._generate_summary(compact_input, context)
         if not summary:
+            logger.warning("[FullCompact] full_compact summary generation returned empty content")
             return None
 
         messages_to_keep = self._select_messages_to_keep(active_messages)
-        summary_message = UserMessage(
-            content=self._build_summary_message(summary, bool(messages_to_keep))
-        )
-        boundary = SystemMessage(content=f"{self.config.marker}\nConversation compacted")
+        summary_message = UserMessage(content=self._build_summary_message(summary, bool(messages_to_keep)))
+        boundary = SystemMessage(content=f"{self._marker}\nConversation compacted")
 
         new_context_messages = prefix + [boundary, summary_message]
         new_context_messages.extend(messages_to_keep)
@@ -268,28 +369,100 @@ class FullCompactProcessor(ContextProcessor):
                 messages_to_keep=messages_to_keep,
                 summary_message=summary_message,
                 boundary_message=boundary,
+                builder_names=["plan", "skills", "task_status", "plan_mode"],
             )
         )
         return new_context_messages
+
+    async def _build_session_memory_messages(
+        self,
+        *,
+        context: ModelContext,
+        prefix: List[BaseMessage],
+        active_messages: List[BaseMessage],
+        has_compaction_boundary: bool,
+    ) -> Tuple[Optional[List[BaseMessage]], Optional[UserMessage]]:
+        if not self._session_memory_enabled:
+            logger.info("[FullCompact] session_memory disabled")
+            return None, None
+
+        session_memory_runtime = self._load_session_memory_runtime(context)
+        session_memory_text = self._load_session_memory_text(context, session_memory_runtime)
+        if not session_memory_text:
+            logger.info("[FullCompact] session_memory unavailable: empty notes content or unresolved path")
+            return None, None
+
+        preserved_messages = self._select_messages_after_session_memory(
+            active_messages=active_messages,
+            session_memory_runtime=session_memory_runtime,
+            has_compaction_boundary=has_compaction_boundary,
+        )
+        if preserved_messages is None:
+            logger.info(
+                "[FullCompact] session_memory skipped: no valid active anchor has_boundary=%s active=%s notes_upto=%s",
+                has_compaction_boundary,
+                len(active_messages),
+                session_memory_runtime.get("notes_upto_message_id"),
+            )
+            return None, None
+
+        boundary = SystemMessage(
+            content=f"{self._session_memory_marker}\nEarlier conversation replaced with session memory"
+        )
+        session_memory_message = UserMessage(
+            content=self._build_session_memory_message(session_memory_text, bool(preserved_messages))
+        )
+        candidate_messages = prefix + [boundary, session_memory_message]
+        candidate_messages.extend(preserved_messages)
+        candidate_messages.extend(
+            self.build_reinjected_state_messages(
+                context=context,
+                source_messages=active_messages,
+                messages_to_keep=preserved_messages,
+                summary_message=session_memory_message,
+                boundary_message=boundary,
+                builder_names=["plan"],
+            )
+        )
+        return candidate_messages, session_memory_message
+
+    def _split_messages_at_compaction_boundary(
+        self,
+        messages: List[BaseMessage],
+        boundary_index: Optional[int] = None,
+    ) -> Tuple[List[BaseMessage], List[BaseMessage]]:
+        if boundary_index is None:
+            boundary_index = self._find_last_compaction_boundary_index(messages)
+        prefix = messages[:boundary_index] if boundary_index > 0 else []
+        active_messages = messages[boundary_index + 1:] if boundary_index >= 0 else list(messages)
+        return prefix, active_messages
 
     async def _generate_summary(
         self,
         messages: List[BaseMessage],
         context: ModelContext,
     ) -> str:
-        if self.config.model is None or self.config.model_client is None:
+        if self._model is None:
             return self._build_fallback_summary(messages)
 
-        model = Model(self.config.model_client, self.config.model)
         prompt_messages = [
             SystemMessage(content=BASE_COMPACT_PROMPT),
             UserMessage(content=self._serialize_messages(messages)),
         ]
-        response = await model.invoke(messages=prompt_messages, tools=None)
-        content = (response.content or "").strip()
-        if not content:
+        try:
+            response = await self._model.invoke(messages=prompt_messages, tools=None)
+            content = (response.content or "").strip()
+            if not content:
+                logger.warning("[FullCompact] LLM returned empty summary, falling back")
+                return self._build_fallback_summary(messages)
+            return self._format_summary(content)
+        except Exception as exc:
+            logger.warning(
+                "[FullCompact] LLM summary generation failed: %s, falling back",
+                exc,
+                exc_info=True,
+            )
             return self._build_fallback_summary(messages)
-        return self._format_summary(content)
 
     def _truncate_for_prompt_budget(
         self,
@@ -299,13 +472,13 @@ class FullCompactProcessor(ContextProcessor):
         groups = self._group_messages_by_api_round(messages)
         while groups:
             candidate = [msg for group in groups for msg in group]
-            if self._count_prompt_tokens(candidate, context) <= self.config.compression_call_max_tokens:
+            if self._count_prompt_tokens(candidate, context) <= self._compression_call_max_tokens:
                 return candidate
             if len(groups) == 1:
                 return self._truncate_messages_from_head(candidate, context)
             groups = groups[1:]
             if groups and isinstance(groups[0][0], AssistantMessage):
-                groups = [[UserMessage(content=self.config.synthetic_user_marker)]] + groups
+                groups[0] = [UserMessage(content=self._synthetic_user_marker), *groups[0]]
         return self._build_minimal_compact_input(messages)
 
     def _truncate_messages_from_head(
@@ -314,33 +487,21 @@ class FullCompactProcessor(ContextProcessor):
         context: ModelContext,
     ) -> List[BaseMessage]:
         candidate = list(messages)
-        if candidate and self._is_synthetic_marker_message(candidate[0]):
-            candidate = candidate[1:]
         while candidate:
-            if self._count_prompt_tokens(candidate, context) <= self.config.compression_call_max_tokens:
+            if self._count_prompt_tokens(candidate, context) <= self._compression_call_max_tokens:
                 return candidate
-            candidate = candidate[1:]
+            if self._is_synthetic_marker_message(candidate[0]):
+                if len(candidate) == 1:
+                    return self._build_minimal_compact_input(messages)
+                candidate = candidate[2:]
+            else:
+                candidate = candidate[1:]
             if candidate and isinstance(candidate[0], AssistantMessage):
-                candidate = [UserMessage(content=self.config.synthetic_user_marker)] + candidate
+                candidate = [UserMessage(content=self._synthetic_user_marker), *candidate]
         return self._build_minimal_compact_input(messages)
 
     def _group_messages_by_api_round(self, messages: List[BaseMessage]) -> List[List[BaseMessage]]:
-        groups: List[List[BaseMessage]] = []
-        current_non_user_group: List[BaseMessage] = []
-
-        for message in messages:
-            if isinstance(message, UserMessage):
-                if current_non_user_group:
-                    groups.append(current_non_user_group)
-                    current_non_user_group = []
-                groups.append([message])
-                continue
-            current_non_user_group.append(message)
-
-        if current_non_user_group:
-            groups.append(current_non_user_group)
-
-        return groups
+        return [list(messages[start:end]) for start, end in group_completed_api_rounds(messages)]
 
     def _build_minimal_compact_input(self, messages: List[BaseMessage]) -> List[BaseMessage]:
         if not messages:
@@ -348,16 +509,16 @@ class FullCompactProcessor(ContextProcessor):
 
         tail: List[BaseMessage] = [messages[-1]]
         if isinstance(tail[0], AssistantMessage):
-            return [UserMessage(content=self.config.synthetic_user_marker), tail[0]]
+            return [UserMessage(content=self._synthetic_user_marker), tail[0]]
         return tail
 
     def _select_messages_to_keep(self, messages: List[BaseMessage]) -> List[BaseMessage]:
-        keep_recent = self.config.messages_to_keep
+        keep_recent = self._messages_to_keep
         if keep_recent <= 0 or not messages:
             return []
 
         start_index = max(len(messages) - keep_recent, 0)
-        if self.config.keep_tool_message_pairs:
+        if self._keep_tool_message_pairs:
             start_index = self._adjust_start_index_for_tool_pairs(messages, start_index)
         return list(messages[start_index:])
 
@@ -409,63 +570,113 @@ class FullCompactProcessor(ContextProcessor):
 
     @staticmethod
     def _strip_media_messages(messages: List[BaseMessage]) -> List[BaseMessage]:
-        stripped: List[BaseMessage] = []
-        for msg in messages:
-            content = getattr(msg, "content", "")
-            if not isinstance(content, list):
-                stripped.append(msg)
-                continue
-
-            changed = False
-            new_content: List[Any] = []
-            for block in content:
-                if isinstance(block, dict):
-                    block_type = block.get("type")
-                    if block_type == "image":
-                        new_content.append("[image]")
-                        changed = True
-                        continue
-                    if block_type == "document":
-                        new_content.append("[document]")
-                        changed = True
-                        continue
-                    if block_type == "tool_result":
-                        nested = block.get("content")
-                        if isinstance(nested, list):
-                            nested_changed = False
-                            nested_content: List[Any] = []
-                            for nested_block in nested:
-                                if isinstance(nested_block, dict) and nested_block.get("type") == "image":
-                                    nested_content.append({"type": "text", "text": "[image]"})
-                                    nested_changed = True
-                                elif isinstance(nested_block, dict) and nested_block.get("type") == "document":
-                                    nested_content.append({"type": "text", "text": "[document]"})
-                                    nested_changed = True
-                                else:
-                                    nested_content.append(nested_block)
-                            if nested_changed:
-                                copied_block = dict(block)
-                                copied_block["content"] = nested_content
-                                new_content.append(copied_block)
-                                changed = True
-                                continue
-                new_content.append(block)
-
-            stripped.append(msg.model_copy(update={"content": new_content}) if changed else msg)
-        return stripped
+        # Media-heavy message preprocessing is pending; current behavior passes them through unchanged.
+        return messages
 
     def _prepare_messages_for_prompt(self, messages: List[BaseMessage]) -> List[BaseMessage]:
         result: List[BaseMessage] = []
         for msg in messages:
-            if self._is_boundary_message(msg) or self._is_state_message(msg):
+            if (
+                self._is_boundary_message(msg)
+                or self._is_state_message(msg)
+                or self._is_session_memory_boundary_message(msg)
+            ):
                 continue
             result.append(msg)
         return result
 
-    def _build_summary_message(self, summary: str, has_preserved_messages: bool) -> str:
-        parts = [self.config.summary_intro, "", summary]
+    def _build_session_memory_message(self, session_memory_text: str, has_preserved_messages: bool) -> str:
+        parts = [self._session_memory_intro, "", session_memory_text.strip()]
         if has_preserved_messages:
-            parts.extend(["", self.config.recent_messages_notice])
+            parts.extend(["", self._recent_messages_notice])
+        return "\n".join(parts)
+
+    def _load_session_memory_text(
+        self,
+        context: ModelContext,
+        session_memory_runtime: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        session_memory_path = self._resolve_session_memory_path(
+            context,
+            session_memory_runtime=session_memory_runtime,
+        )
+        if session_memory_path is None:
+            return ""
+        try:
+            content = session_memory_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            return ""
+        if content:
+            return content
+        return ""
+
+    def _load_session_memory_runtime(self, context: ModelContext) -> Dict[str, Any]:
+        session = getattr(context, "_session_ref", None)
+        if session is not None and hasattr(session, "get_state"):
+            state = session.get_state("__session_memory__") or {}
+            if isinstance(state, dict) and state:
+                return dict(state)
+        return {}
+
+    def _resolve_session_memory_path(
+        self,
+        context: ModelContext,
+        session_memory_runtime: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Path]:
+        runtime = session_memory_runtime or self._load_session_memory_runtime(context)
+        memory_path = runtime.get("memory_path")
+        if not memory_path:
+            return None
+        try:
+            return Path(memory_path)
+        except Exception:
+            return None
+
+    def _select_messages_after_session_memory(
+        self,
+        *,
+        active_messages: List[BaseMessage],
+        session_memory_runtime: Dict[str, Any],
+        has_compaction_boundary: bool,
+    ) -> Optional[List[BaseMessage]]:
+        notes_upto_message_id = session_memory_runtime.get("notes_upto_message_id")
+        summarized_message_index = find_message_index_by_context_message_id(
+            active_messages,
+            notes_upto_message_id,
+        )
+        if summarized_message_index >= 0:
+            if self._is_session_memory_summary_message(active_messages[summarized_message_index]):
+                return list(active_messages[summarized_message_index + 1:])
+            completed_end = find_last_completed_api_round_end(active_messages[: summarized_message_index + 1])
+            if completed_end <= 0:
+                return None
+            return list(active_messages[completed_end:])
+
+        if has_compaction_boundary:
+            logger.info(
+                "[FullCompact] session_memory context-id anchor missing "
+                "in active segment after boundary notes_upto=%s active=%s",
+                notes_upto_message_id,
+                len(active_messages),
+            )
+            return None
+
+        logger.info(
+            "[FullCompact] session_memory no valid context-id anchor before first boundary notes_upto=%s active=%s",
+            notes_upto_message_id,
+            len(active_messages),
+        )
+        return None
+
+    @staticmethod
+    def _invalidate_session_memory_anchor(context: ModelContext) -> None:
+        session = getattr(context, "_session_ref", None)
+        invalidate_session_memory_anchor(session)
+
+    def _build_summary_message(self, summary: str, has_preserved_messages: bool) -> str:
+        parts = [self._summary_intro, "", summary]
+        if has_preserved_messages:
+            parts.extend(["", self._recent_messages_notice])
         return "\n".join(parts)
 
     def build_reinjected_state_messages(
@@ -476,351 +687,39 @@ class FullCompactProcessor(ContextProcessor):
         messages_to_keep: List[BaseMessage],
         summary_message: UserMessage,
         boundary_message: SystemMessage,
+        builder_names: Optional[List[str]] = None,
     ) -> List[BaseMessage]:
-        """Build post-compact state anchors by parsing recoverable text patterns.
-
-        This mirrors Claude Code's post-compact restoration at a lighter weight:
-        instead of querying external runtime stores, it recovers plan/skill/file
-        anchors directly from the message text that already exists in context.
-        """
         _ = context, summary_message, boundary_message
-
         candidate_messages = self._prepare_messages_for_prompt(source_messages)
         if not candidate_messages:
             return []
 
+        active_builder_names = set(builder_names) if builder_names is not None else None
         state_messages: List[BaseMessage] = []
-        plan_anchor = self._extract_plan_anchor(candidate_messages)
-        if plan_anchor:
-            state_messages.append(self._make_state_message("PLAN", plan_anchor))
-
-        skill_anchor = self._extract_skill_anchor(candidate_messages)
-        if skill_anchor:
-            state_messages.append(self._make_state_message("SKILLS", skill_anchor))
-
-        file_anchor = self._extract_file_anchor(candidate_messages, messages_to_keep)
-        if file_anchor:
-            state_messages.append(self._make_state_message("FILES", file_anchor))
-
+        for builder_spec in self._state_reinjector.iter_builders():
+            if active_builder_names is not None and builder_spec.name not in active_builder_names:
+                continue
+            content = builder_spec.builder(
+                self,
+                context=context,
+                messages=candidate_messages,
+                messages_to_keep=messages_to_keep,
+            )
+            if isinstance(content, list):
+                state_messages.extend(content)
+                continue
+            if content:
+                state_messages.append(self._make_state_message(builder_spec.label, content))
         return state_messages
 
-    def _extract_plan_anchor(self, messages: List[BaseMessage]) -> str:
-        progress_markers = (
-            "以下是当前任务规划中所有任务的内容和状态",
-            "The following is the content and status of all tasks in the current task plan",
-        )
-        task_line_pattern = re.compile(
-            r"id:\s*(?P<id>[^|\n]+)\|status:\s*(?P<status>[^|\n]+)\|content:\s*(?P<content>[^\n]+)"
-        )
-        in_progress_markers = (
-            "正在执行的任务为",
-            "The task currently being executed is",
-        )
-
-        for message in reversed(messages):
-            text = self._message_to_text(message)
-            if not any(marker in text for marker in progress_markers):
-                continue
-
-            task_lines = [
-                "- id="
-                f"{match.group('id').strip()} "
-                "status="
-                f"{match.group('status').strip()} "
-                "content="
-                f"{match.group('content').strip()}"
-                for match in task_line_pattern.finditer(text)
-            ]
-            if not task_lines:
-                continue
-
-            in_progress = ""
-            lines = [line.strip() for line in text.splitlines()]
-            for index, line in enumerate(lines):
-                if any(marker in line for marker in in_progress_markers):
-                    for follow in lines[index + 1:]:
-                        if follow:
-                            in_progress = follow
-                            break
-                    break
-
-            content = ["Recovered task plan snapshot:", *task_lines]
-            if in_progress:
-                content.extend(["", f"Current in-progress task: {in_progress}"])
-            return "\n".join(content)
-        return ""
-
-    def _extract_skill_anchor(self, messages: List[BaseMessage]) -> str:
-        skill_reads: List[str] = []
-        seen_entries: set[str] = set()
-
-        for message in reversed(messages):
-            if not isinstance(message, AssistantMessage):
-                continue
-            tool_calls = getattr(message, "tool_calls", None) or []
-            for tool_call in reversed(tool_calls):
-                tool_name = getattr(tool_call, "name", "") or ""
-                if tool_name != "read_file":
-                    continue
-
-                arguments_text = getattr(tool_call, "arguments", "") or ""
-                parsed_arguments = self._parse_tool_arguments(arguments_text)
-                file_path = self._extract_argument_value(
-                    parsed_arguments, arguments_text, ("file_path",)
-                )
-                if not self._is_skill_file_path(file_path):
-                    continue
-
-                tool_call_id = getattr(tool_call, "id", None)
-                result_text = self._find_tool_result_text(messages, tool_call_id)
-                skill_text = self._extract_skill_file_content(result_text)
-                skill_name = self._extract_skill_name_from_path(file_path)
-
-                entry_parts = [f"path={file_path}"]
-                if skill_name:
-                    entry_parts.insert(0, f"skill={skill_name}")
-                header = " | ".join(entry_parts)
-                entry = header
-                if skill_text:
-                    entry = f"{header}\n{skill_text}"
-
-                if entry in seen_entries:
-                    continue
-                seen_entries.add(entry)
-                skill_reads.append(entry)
-                if len(skill_reads) >= self.config.reinject_recent_tool_calls:
-                    break
-            if len(skill_reads) >= self.config.reinject_recent_tool_calls:
-                break
-
-        if skill_reads:
-            skill_reads.reverse()
-            return "Recovered skill file context:\n" + "\n\n".join(
-                f"- {entry}" for entry in skill_reads
-            )
-        return ""
-
-    @staticmethod
-    def _is_skill_file_path(file_path: str) -> bool:
-        if not file_path:
-            return False
-        normalized = file_path.replace("\\", "/").lower()
-        return normalized.endswith("/skill.md") or normalized.endswith("skill.md")
-
-    @staticmethod
-    def _extract_skill_name_from_path(file_path: str) -> str:
-        if not file_path:
-            return ""
-        normalized = file_path.replace("\\", "/").rstrip("/")
-        parts = normalized.split("/")
-        if len(parts) >= 2 and parts[-1].lower() == "skill.md":
-            return parts[-2]
-        return ""
-
-    def _extract_skill_file_content(self, result_text: str) -> str:
-        if not result_text:
-            return ""
-
-        content_match = re.search(
-            r'"content"\s*:\s*"(?P<content>(?:[^"\\]|\\.)*)"',
-            result_text,
-            re.DOTALL,
-        )
-        content = ""
-        if content_match:
-            raw_content = content_match.group("content")
-            try:
-                content = json.loads(f'"{raw_content}"')
-            except Exception:
-                content = raw_content.replace('\\"', '"').replace("\\n", "\n")
-        else:
-            content = result_text
-
-        content = content.strip()
-        if not content:
-            return ""
-        return self._truncate_state_text(content)
-
-    def _extract_file_anchor(
-        self,
-        messages: List[BaseMessage],
-        messages_to_keep: List[BaseMessage],
-    ) -> str:
-        keep_ids = {
-            getattr(msg, "tool_call_id", None)
-            for msg in messages_to_keep
-            if isinstance(msg, ToolMessage)
-        }
-        recent_entries: List[str] = []
-        allowed_tool_names = set(self.config.reinject_file_tool_names)
-        for index in range(len(messages) - 1, -1, -1):
-            message = messages[index]
-            if not isinstance(message, AssistantMessage):
-                continue
-
-            tool_calls = getattr(message, "tool_calls", None) or []
-            for tool_call in reversed(tool_calls):
-                tool_name = getattr(tool_call, "name", "") or ""
-                tool_call_id = getattr(tool_call, "id", None)
-                if tool_call_id and tool_call_id in keep_ids:
-                    continue
-                if tool_name not in allowed_tool_names:
-                    continue
-
-                arguments_text = getattr(tool_call, "arguments", "") or ""
-                detail = self._describe_tool_call(tool_name, arguments_text)
-                result_text = self._find_tool_result_text(messages, tool_call_id)
-                result_hint = self._extract_tool_result_hint(tool_name, result_text)
-                line = detail
-                if result_hint:
-                    line = f"{line} | {result_hint}"
-                if line not in recent_entries:
-                    recent_entries.append(line)
-                if len(recent_entries) >= self.config.reinject_recent_tool_calls:
-                    break
-            if len(recent_entries) >= self.config.reinject_recent_tool_calls:
-                break
-
-        if not recent_entries:
-            return ""
-
-        recent_entries.reverse()
-        return "Recovered recent file/tool context:\n" + "\n".join(
-            f"- {entry}" for entry in recent_entries
-        )
-
     def _make_state_message(self, label: str, content: str) -> UserMessage:
-        compact_content = self._truncate_state_text(content)
-        return UserMessage(
-            content=f"{self.config.state_marker}\n[{label}]\n{compact_content}"
-        )
+        compact_content = self.truncate_state_text(content)
+        return UserMessage(content=f"{self._state_marker}\n[{label}]\n{compact_content}")
 
-    def _truncate_state_text(self, text: str) -> str:
-        if len(text) <= self.config.state_snapshot_max_chars:
+    def truncate_state_text(self, text: str) -> str:
+        if len(text) <= self._state_snapshot_max_chars:
             return text
-        return self._build_head_tail_truncated_text(
-            text, self.config.state_snapshot_max_chars
-        )
-
-    def _describe_tool_call(self, tool_name: str, arguments_text: str) -> str:
-        parsed_arguments = self._parse_tool_arguments(arguments_text)
-        if tool_name == "read_file":
-            file_path = self._extract_argument_value(
-                parsed_arguments, arguments_text, ("file_path",)
-            )
-            return f"read_file path={file_path or '[unknown]'}"
-        if tool_name == "write_file":
-            file_path = self._extract_argument_value(
-                parsed_arguments, arguments_text, ("file_path",)
-            )
-            return f"write_file path={file_path or '[unknown]'}"
-        if tool_name == "edit_file":
-            file_path = self._extract_argument_value(
-                parsed_arguments, arguments_text, ("file_path",)
-            )
-            return f"edit_file path={file_path or '[unknown]'}"
-        if tool_name == "glob":
-            pattern = self._extract_argument_value(
-                parsed_arguments, arguments_text, ("pattern",)
-            )
-            path = self._extract_argument_value(
-                parsed_arguments, arguments_text, ("path",)
-            )
-            return f"glob pattern={pattern or '[unknown]'} path={path or '.'}"
-        if tool_name == "grep":
-            pattern = self._extract_argument_value(
-                parsed_arguments, arguments_text, ("pattern",)
-            )
-            path = self._extract_argument_value(
-                parsed_arguments, arguments_text, ("path", "file_path")
-            )
-            return f"grep pattern={pattern or '[unknown]'} path={path or '[unknown]'}"
-        return f"{tool_name} args={arguments_text}"
-
-    @staticmethod
-    def _parse_tool_arguments(arguments_text: str) -> Dict[str, Any]:
-        if not arguments_text:
-            return {}
-        try:
-            parsed = json.loads(arguments_text)
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            return {}
-
-    @staticmethod
-    def _extract_argument_value(
-        parsed_arguments: Dict[str, Any],
-        arguments_text: str,
-        keys: Tuple[str, ...],
-    ) -> str:
-        for key in keys:
-            value = parsed_arguments.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        for key in keys:
-            match = re.search(rf'"{re.escape(key)}"\s*:\s*"([^"]+)"', arguments_text)
-            if match:
-                return match.group(1).strip()
-        return ""
-
-    @staticmethod
-    def _find_tool_result_text(
-        messages: List[BaseMessage],
-        tool_call_id: Optional[str],
-    ) -> str:
-        if not tool_call_id:
-            return ""
-        for message in reversed(messages):
-            if (
-                isinstance(message, ToolMessage)
-                and getattr(message, "tool_call_id", None) == tool_call_id
-            ):
-                return FullCompactProcessor._message_to_text(message)
-        return ""
-
-    def _extract_tool_result_hint(self, tool_name: str, result_text: str) -> str:
-        if not result_text:
-            return ""
-        allowed_tool_names = set(
-            self.config.reinject_tool_result_hint_names
-        )
-        if tool_name not in allowed_tool_names:
-            return ""
-        if tool_name == "read_file":
-            file_path_match = re.search(r'"file_path"\s*:\s*"([^"]+)"', result_text)
-            line_count_match = re.search(r'"line_count"\s*:\s*(\d+)', result_text)
-            parts = []
-            if file_path_match:
-                parts.append(f"result_path={file_path_match.group(1)}")
-            if line_count_match:
-                parts.append(f"lines={line_count_match.group(1)}")
-            return " ".join(parts)
-        if tool_name == "glob":
-            count_match = re.search(r'"count"\s*:\s*(\d+)', result_text)
-            if count_match:
-                return f"matches={count_match.group(1)}"
-        if tool_name == "grep":
-            count_match = re.search(r'"count"\s*:\s*(\d+)', result_text)
-            if count_match:
-                return f"hits={count_match.group(1)}"
-        if tool_name == "edit_file":
-            replacements_match = re.search(r'"replacements"\s*:\s*(\d+)', result_text)
-            if replacements_match:
-                return f"replacements={replacements_match.group(1)}"
-        if tool_name == "write_file":
-            bytes_match = re.search(r'"bytes_written"\s*:\s*(\d+)', result_text)
-            if bytes_match:
-                return f"bytes_written={bytes_match.group(1)}"
-        return ""
-
-    def _starts_new_api_round(self, current: List[BaseMessage]) -> bool:
-        if not current:
-            return False
-        return any(isinstance(msg, (AssistantMessage, ToolMessage)) for msg in current)
-
-    @staticmethod
-    def _ends_api_round(message: BaseMessage) -> bool:
-        return isinstance(message, AssistantMessage) and not (getattr(message, "tool_calls", None) or [])
+        return self._build_head_tail_truncated_text(text, self._state_snapshot_max_chars)
 
     def _count_prompt_tokens(self, messages: List[BaseMessage], context: ModelContext) -> int:
         prompt_messages = [
@@ -832,36 +731,22 @@ class FullCompactProcessor(ContextProcessor):
             try:
                 return token_counter.count_messages(prompt_messages)
             except Exception:
-                return sum(
-                    self._estimate_message_tokens(message)
-                    for message in prompt_messages
-                )
-        return sum(
-            self._estimate_message_tokens(message)
-            for message in prompt_messages
-        )
+                return sum(self._estimate_message_tokens(message) for message in prompt_messages)
+        return sum(self._estimate_message_tokens(message) for message in prompt_messages)
 
-    def _count_message_tokens(
-        self,
-        messages: List[BaseMessage],
-        context: ModelContext,
-    ) -> int:
-        token_counter = context.token_counter()
-        if token_counter is not None:
-            try:
-                return token_counter.count_messages(messages)
-            except Exception:
-                return sum(
-                    self._estimate_message_tokens(message)
-                    for message in messages
-                )
-        return sum(self._estimate_message_tokens(message) for message in messages)
+    @staticmethod
+    def _count_tool_calls(messages: List[BaseMessage]) -> int:
+        total = 0
+        for message in messages:
+            if isinstance(message, AssistantMessage):
+                total += len(getattr(message, "tool_calls", None) or [])
+        return total
 
     def _count_context_window_tokens(
         self,
         system_messages: List[BaseMessage],
         context_messages: List[BaseMessage],
-        tools: List[ToolInfo],
+        tools: List[Any],
         context: ModelContext,
     ) -> int:
         token_counter = context.token_counter()
@@ -870,12 +755,10 @@ class FullCompactProcessor(ContextProcessor):
         if token_counter is not None:
             try:
                 total += token_counter.count_messages(all_messages)
-                total += token_counter.count_tools(list(tools or []))
                 return total
             except Exception:
                 total = 0
         total += sum(self._estimate_message_tokens(message) for message in all_messages)
-        total += sum(self._estimate_tool_tokens(tool) for tool in (tools or []))
         return total
 
     def _build_fallback_summary(self, messages: List[BaseMessage]) -> str:
@@ -894,10 +777,7 @@ class FullCompactProcessor(ContextProcessor):
 
     @staticmethod
     def _serialize_messages(messages: List[BaseMessage]) -> str:
-        return "\n".join(
-            f"role={msg.role}, content={FullCompactProcessor._message_to_text(msg)}"
-            for msg in messages
-        )
+        return "\n".join(f"role={msg.role}, content={FullCompactProcessor._message_to_text(msg)}" for msg in messages)
 
     @staticmethod
     def _message_to_text(message: BaseMessage) -> str:
@@ -911,18 +791,11 @@ class FullCompactProcessor(ContextProcessor):
 
     @staticmethod
     def _estimate_message_tokens(message: BaseMessage) -> int:
-        return max(len(FullCompactProcessor._message_to_text(message)) // 3, 1)
+        return ContextUtils.estimate_message_tokens(message)
 
-    @staticmethod
-    def _estimate_tool_tokens(tool: ToolInfo) -> int:
-        try:
-            return max(len(json.dumps(tool.model_dump(), ensure_ascii=False)) // 3, 1)
-        except Exception:
-            return max(len(str(tool)) // 3, 1)
-
-    def _find_last_boundary_index(self, messages: List[BaseMessage]) -> int:
+    def _find_last_compaction_boundary_index(self, messages: List[BaseMessage]) -> int:
         for idx in range(len(messages) - 1, -1, -1):
-            if self._is_boundary_message(messages[idx]):
+            if self._is_boundary_message(messages[idx]) or self._is_session_memory_boundary_message(messages[idx]):
                 return idx
         return -1
 
@@ -930,18 +803,32 @@ class FullCompactProcessor(ContextProcessor):
         return (
             isinstance(message, SystemMessage)
             and isinstance(message.content, str)
-            and message.content.startswith(self.config.marker)
+            and message.content.startswith(self._marker)
         )
 
     def _is_state_message(self, message: BaseMessage) -> bool:
         return (
+            isinstance(message, UserMessage)
+            and isinstance(message.content, str)
+            and message.content.startswith(self._state_marker)
+        )
+
+    def _is_session_memory_boundary_message(self, message: BaseMessage) -> bool:
+        return (
             isinstance(message, SystemMessage)
             and isinstance(message.content, str)
-            and message.content.startswith(self.config.state_marker)
+            and message.content.startswith(self._session_memory_marker)
+        )
+
+    def _is_session_memory_summary_message(self, message: BaseMessage) -> bool:
+        return (
+            isinstance(message, UserMessage)
+            and isinstance(message.content, str)
+            and message.content.startswith(self._session_memory_intro)
         )
 
     def _is_synthetic_marker_message(self, message: BaseMessage) -> bool:
-        return isinstance(message, UserMessage) and message.content == self.config.synthetic_user_marker
+        return isinstance(message, UserMessage) and message.content == self._synthetic_user_marker
 
     @staticmethod
     def _build_head_tail_truncated_text(text: str, kept_chars: int) -> str:

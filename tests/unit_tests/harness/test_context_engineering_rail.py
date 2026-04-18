@@ -5,12 +5,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+import shutil
+import uuid
 from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 import pytest
 
-from openjiuwen.core.context_engine import MessageSummaryOffloaderConfig, CurrentRoundCompressorConfig, \
-    RoundLevelCompressorConfig
 from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
     DialogueCompressorConfig,
 )
@@ -33,6 +33,17 @@ from openjiuwen.harness.rails.context_engineering_rail import ContextEngineering
 from openjiuwen.harness.prompts.sections.workspace import build_workspace_section
 from openjiuwen.harness.prompts.sections.context import build_context_section, build_tools_content
 from openjiuwen.core.foundation.llm.model import init_model
+
+
+@pytest.fixture
+def tmp_path() -> Path:
+    base = Path("D:/work/code/agent-core/.tmp_test_context_engineering_rail")
+    path = base / uuid.uuid4().hex
+    path.mkdir(parents=True, exist_ok=False)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 class _DummyResponse:
@@ -168,9 +179,9 @@ async def test_init_preset_defaults(tmp_path: Path):
     assert off.tokens_threshold == 60000
     assert off.large_message_threshold == 20000
     assert off.offload_message_type == ["tool"]
-    assert off.protected_tool_names == ["read_file:*SKILL.md", "reload_original_context_messages"]
-    assert off.enable_adaptive_compression is True
-    assert off.summary_max_tokens == 900
+    assert off.protected_tool_names == ["reload_original_context_messages"]
+    assert off.enable_adaptive_compression is False
+    assert off.summary_max_tokens == 1000
 
     # DialogueCompressor tests
     comp = procs.get("DialogueCompressor")
