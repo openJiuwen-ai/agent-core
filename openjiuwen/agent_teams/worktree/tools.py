@@ -111,7 +111,7 @@ class EnterWorktreeTool(TeamTool):
 
         set_cwd(session.worktree_path)
         set_original_cwd(session.worktree_path)
-        # project_root stays unchanged (mirrors Claude Code behavior)
+        # project_root stays unchanged
 
         return ToolOutput(
             success=True,

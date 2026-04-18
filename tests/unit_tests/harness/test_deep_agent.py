@@ -750,7 +750,8 @@ def test_create_deep_agent_auto_add_skill_rail() -> None:
     assert "SkillUseRail" in rail_types
 
     skill_rail = next(rail for rail in non_null_rails if type(rail).__name__ == "SkillUseRail")
-    assert Path(skill_rail.skills_dir) == Path("team_member_workspace") / "skills"
+    assert isinstance(skill_rail.skills_dir, list)
+    assert Path(skill_rail.skills_dir[0]) == Path("team_member_workspace") / "skills"
     assert set(skill_rail.enabled_skills) == set(skills)
 
 

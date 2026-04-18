@@ -301,10 +301,19 @@ def create_deep_agent(
         return any(issubclass(t, rail_cls) for t in user_provided_rail_types)
 
     def _make_skill_rail() -> SkillUseRail:
+        skills_dirs: list[str] = []
         skills_base = workspace_obj.get_node_path("skills")
-        skills_dir = str(skills_base) if skills_base else []
+        if skills_base:
+            skills_dirs.append(str(skills_base))
+        # Aggregate skills from each team workspace mounted under
+        # ``.team/{team_id}``; the team mount is a symlink to the shared
+        # workspace root, so the team-shared skills live at
+        # ``{target}/skills``. Paths are added even when they do not yet
+        # exist — SkillUseRail skips missing directories at refresh time.
+        for _team_id, target_path in workspace_obj.list_team_links():
+            skills_dirs.append(str(Path(target_path) / "skills"))
         return SkillUseRail(
-            skills_dir=skills_dir,
+            skills_dir=skills_dirs,
             skill_mode="all",
             enabled_skills=skills,
         )

@@ -122,6 +122,11 @@ class TeamWorkspaceManager:
         for d in self.config.artifact_dirs:
             os.makedirs(os.path.join(self.workspace_path, d), exist_ok=True)
 
+        # Shared skills directory; each member agent's SkillUseRail picks
+        # this up via the ``.team/{team_name}`` mount so team-authored
+        # skills are visible everywhere.
+        os.makedirs(os.path.join(self.workspace_path, "skills"), exist_ok=True)
+
         # Leader in DISTRIBUTED: set up remote if provided
         if self.mode == WorkspaceMode.DISTRIBUTED and remote_url and self._leader_id == self._node_id:
             existing_remote = await _run_git(

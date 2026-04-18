@@ -481,6 +481,13 @@ class TeamAgent(BaseAgent):
         if ws_spec and ws_spec.root_path and self._team_backend:
             self._team_backend.register_cleanup_path(ws_spec.root_path)
 
+        # Pre-mount the team shared workspace into the agent workspace
+        # BEFORE building the DeepAgent, so the factory's SkillUseRail
+        # can aggregate ``.team/{team_name}/skills`` via
+        # ``Workspace.list_team_links``.
+        if self._workspace_manager and ws_spec and ws_spec.root_path:
+            self._workspace_manager.mount_into_workspace(ws_spec.root_path)
+
         # Resolve model: member_model (allocated by leader) takes priority.
         model_config = ctx.member_model or agent_spec.model
 
@@ -538,16 +545,14 @@ class TeamAgent(BaseAgent):
         self._first_iter_gate = FirstIterationGate()
         self._deep_agent.add_rail(self._first_iter_gate)
 
-        # Mount team workspace and add transparent version-control rail.
+        # Register the transparent version-control rail. The ``.team/``
+        # symlink is mounted earlier (pre-build) so SkillUseRail can
+        # discover team-shared skills.
         if self._workspace_manager:
             from openjiuwen.agent_teams.team_workspace.rails import TeamWorkspaceRail
             self._deep_agent.add_rail(
                 TeamWorkspaceRail(self._workspace_manager, member_name or ""),
             )
-            # Mount .team/ symlink into the agent's workspace directory.
-            agent_ws_root = self._deep_agent.deep_config.workspace.root_path
-            if agent_ws_root:
-                self._workspace_manager.mount_into_workspace(agent_ws_root)
 
         is_coordinated_teammate = ctx.role == TeamRole.TEAMMATE and ctx.team_spec
         if is_coordinated_teammate and self._team_backend and self._messager:
