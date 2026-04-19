@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import traceback
 from typing import (
     Any,
     Dict,
@@ -1108,6 +1109,31 @@ class TeamAgent(BaseAgent):
         team_logger.info("[{}] start_agent: {:.120}", self._member_name() or "?", str(preview))
         self._agent_task = asyncio.create_task(
             self._run_one_round(initial_message),
+        )
+        # Nothing awaits ``_agent_task``: an exception raised in the
+        # pre-try head of ``_run_one_round`` (init_cwd, early status
+        # writes) would otherwise only surface as asyncio's GC-time
+        # "Task exception was never retrieved" on the root logger,
+        # invisible to team_logger. Promote it so the crash is visible.
+        self._agent_task.add_done_callback(self._log_agent_task_exception)
+
+    def _log_agent_task_exception(self, task: asyncio.Task) -> None:
+        """Surface silent crashes of the background agent round task.
+
+        done_callback fires outside any ``except`` block, so
+        ``traceback.format_exc()`` is empty. Format the traceback from
+        the exception's own ``__traceback__`` and pass it via the
+        ``stacktrace`` kwarg, which ``exception()`` honors verbatim.
+        """
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        team_logger.exception(
+            "[{}] _run_one_round task crashed silently",
+            self._member_name() or "?",
+            stacktrace="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
         )
 
     async def _update_status(self, status: MemberStatus) -> None:
