@@ -1,0 +1,43 @@
+# CI Gate Rules — Auto Harness Agent
+# IMMUTABLE: This file is protected by ImmutableFileRail
+
+immutable_files:
+  - auto_harness/prompts/identity.md
+  - auto_harness/resources/ci_gate.yaml
+  - auto_harness/agent.py
+  - auto_harness/orchestrator.py
+  - auto_harness/infra/fix_loop.py
+  - openjiuwen/harness/rails/security_rail.py
+
+high_impact:
+  - "openjiuwen/core/**"
+
+requires_human_approval:
+  - pyproject.toml
+  - openjiuwen/harness/__init__.py
+  - openjiuwen/harness/factory.py
+  - openjiuwen/core/__init__.py
+
+ci_gates:
+  - name: lint
+    command: "make check COMMITS=1"
+    required: true
+  - name: type-check
+    command: "make type-check COMMITS=1"
+    required: true
+
+fix_loop:
+  phase1_max_retries: 10
+  phase1_timeout_per_attempt: 600
+  phase2_max_retries: 9
+  revert_on_exhaustion: true
+
+session_budget:
+  wall_clock_secs: 3600
+  cost_limit_usd: 10.0
+  task_timeout_secs: 1200
+
+task_constraints:
+  max_tasks_per_session: 3
+  max_files_per_task: 3
+  self_driven_slots: 1

@@ -9,7 +9,7 @@ import pytest_asyncio
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
-from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
+from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.core.memory.lite import coding_memory_tools
 from openjiuwen.core.memory.lite.coding_memory_tools import (
     coding_memory_read,

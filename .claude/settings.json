@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(make *)",
+      "Bash(uv *)",
+      "Bash(python -m pytest *)",
+      "Bash(python -m mypy *)",
+      "Bash(git *)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./config/secrets.json)",
+      "Read(./**/secrets/**)"
+    ]
+  },
+  "env": {
+    "PYTHONPATH": "."
+  },
+  "language": "chinese",
+  "includeGitInstructions": true
+}

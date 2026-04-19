@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Tests for Trainer class - training orchestration and edge cases."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -16,7 +16,7 @@ def create_mock_updater():
     """Create mock updater with default behaviors."""
     updater = MagicMock(spec=Updater)
     updater.bind.return_value = 1
-    updater.update.return_value = {}
+    updater.update = AsyncMock(return_value={})
     updater.get_state.return_value = {}
     updater.load_state = MagicMock()
     return updater

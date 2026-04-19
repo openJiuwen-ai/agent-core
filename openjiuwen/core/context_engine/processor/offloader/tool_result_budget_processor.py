@@ -15,6 +15,7 @@ from openjiuwen.core.context_engine.processor.base import ContextEvent
 from openjiuwen.core.context_engine.processor.offloader.message_offloader import (
     MessageOffloader,
 )
+from openjiuwen.core.context_engine.schema.messages import OffloadToolMessage
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage
 
 PERSISTED_OUTPUT_TAG = "<persisted-output>"
@@ -24,9 +25,9 @@ PERSISTED_OUTPUT_CLOSING_TAG = "</persisted-output>"
 class ToolResultBudgetProcessorConfig(BaseModel):
     """Per-round budget control for large tool results."""
 
-    tokens_threshold: int = Field(default=200000, gt=0)
-    large_message_threshold: int = Field(default=50000, gt=0)
-    trim_size: int = Field(default=2000, gt=0)
+    tokens_threshold: int = Field(default=50000, gt=0)
+    large_message_threshold: int = Field(default=10000, gt=0)
+    trim_size: int = Field(default=3000, gt=0)
     tool_name_allowlist: list[str] | None = Field(default=None)
     offload_message_type: list[Literal["tool"]] = Field(default=["tool"])
     messages_threshold: int | None = Field(default=None, gt=0)
@@ -56,6 +57,9 @@ class ToolResultBudgetProcessor(MessageOffloader):
         messages_to_add: List[BaseMessage],
         **kwargs: Any,
     ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
+
+        self.sys_operation = kwargs.get("sys_operation")
+
         context_messages = context.get_messages() + messages_to_add
         context_size = len(context)
         updated_messages = list(context_messages)
@@ -132,12 +136,9 @@ class ToolResultBudgetProcessor(MessageOffloader):
 
     @staticmethod
     def _estimate_size(content: Any) -> int:
-        if isinstance(content, str):
-            return max(len(content) // 3, 1)
-        try:
-            return max(len(json.dumps(content, ensure_ascii=False)) // 3, 1)
-        except TypeError:
-            return max(len(str(content)) // 3, 1)
+        from openjiuwen.core.context_engine.context.context_utils import ContextUtils as _ContextUtils
+
+        return _ContextUtils.estimate_tokens(content)
 
     async def _shrink_round_to_budget(
         self,
@@ -184,11 +185,11 @@ class ToolResultBudgetProcessor(MessageOffloader):
     ) -> bool:
         if not isinstance(message, ToolMessage):
             return False
+        if self._is_already_offloaded(message):
+            return False
         if not isinstance(getattr(message, "content", None), str):
             return False
         if self._is_allowlisted_tool_message(message, context_messages):
-            return False
-        if self._is_already_offloaded(message):
             return False
         return self._message_size(message, context) > self.config.large_message_threshold
 
@@ -205,8 +206,7 @@ class ToolResultBudgetProcessor(MessageOffloader):
 
     @staticmethod
     def _is_already_offloaded(message: ToolMessage) -> bool:
-        content = getattr(message, "content", "")
-        return isinstance(content, str) and content.startswith(PERSISTED_OUTPUT_TAG)
+        return isinstance(message, OffloadToolMessage)
 
     async def _offload_tool_message(
         self,
@@ -221,8 +221,7 @@ class ToolResultBudgetProcessor(MessageOffloader):
             preview=preview,
             has_more=has_more,
         )
-        # 获取 sys_operation 从 context (如果可用)
-        sys_operation = getattr(context, "_sys_operation", None)
+
         offload_message = await self.offload_messages(
             role="tool",
             content=persisted_content,
@@ -230,7 +229,8 @@ class ToolResultBudgetProcessor(MessageOffloader):
             context=context,
             tool_call_id=message.tool_call_id,
             name=message.name,
-            sys_operation=sys_operation,
+            metadata=dict(getattr(message, "metadata", {}) or {}),
+            sys_operation=self.sys_operation,
         )
         if offload_message is not None:
             actual_handle = getattr(offload_message, "offload_handle", "unknown")
@@ -255,7 +255,7 @@ class ToolResultBudgetProcessor(MessageOffloader):
         suffix = "\n...\n" if has_more else "\n"
         return (
             f"{PERSISTED_OUTPUT_TAG}\n"
-            f"Output too large ({original_size} bytes). Full output saved to: {offload_handle}\n\n"
+            f"Output too large ({original_size} bytes)."
             f"Preview (first {len(preview)} chars):\n"
             f"{preview}{suffix}"
             f"{PERSISTED_OUTPUT_CLOSING_TAG}"

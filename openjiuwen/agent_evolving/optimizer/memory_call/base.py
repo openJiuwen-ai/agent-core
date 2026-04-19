@@ -11,6 +11,7 @@ from openjiuwen.agent_evolving.optimizer.base import BaseOptimizer
 
 if TYPE_CHECKING:
     from openjiuwen.core.operator.base import Operator
+    from openjiuwen.agent_evolving.signal.base import EvolutionSignal
 
 
 class MemoryOptimizerBase(BaseOptimizer):
@@ -26,3 +27,7 @@ class MemoryOptimizerBase(BaseOptimizer):
     def filter_operators(self, operators: Dict[str, "Operator"], targets: List[str]) -> Dict[str, "Operator"]:
         """Filter Operators exposing memory tunables; logs warning for missing targets."""
         return super().filter_operators(operators, targets)
+
+    async def _backward(self, signals: List["EvolutionSignal"]) -> None:
+        """Subclasses implement memory-specific backward logic."""
+        pass

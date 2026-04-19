@@ -6,7 +6,7 @@ unifies filtering and logging semantics. Subclasses implement _backward / _updat
 """
 
 import os
-from typing import List
+from typing import List, TYPE_CHECKING
 
 from openjiuwen.agent_evolving.optimizer.tool_call.utils.customized_pipline import customized_pipeline
 from openjiuwen.agent_evolving.optimizer.tool_call.utils.customized_reviewer import ToolDescriptionReviewer
@@ -14,6 +14,9 @@ from openjiuwen.agent_evolving.optimizer.tool_call.utils.default_configs import 
 from openjiuwen.agent_evolving.optimizer.tool_call.utils.schema_extractor import extract_schema
 from openjiuwen.agent_evolving.optimizer.base import BaseOptimizer
 from openjiuwen.core.common.logging import logger
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_evolving.signal.base import EvolutionSignal
 
 
 class ToolOptimizerBase(BaseOptimizer):
@@ -97,3 +100,7 @@ class ToolOptimizerBase(BaseOptimizer):
         updates = {}
         for operator in self.operators.items():
             return
+
+    async def _backward(self, signals: List["EvolutionSignal"]) -> None:
+        """Subclasses implement tool-specific backward logic."""
+        pass

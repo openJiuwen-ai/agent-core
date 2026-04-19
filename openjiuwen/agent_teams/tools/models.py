@@ -16,6 +16,17 @@ from sqlmodel.main import SQLModelMetaclass
 
 from openjiuwen.agent_teams.spawn.context import get_session_id
 
+TEAM_DYNAMIC_TABLE_PREFIXES = (
+    "team_task_dependency_",
+    "team_task_",
+    "team_message_",
+    "message_read_status_",
+)
+TEAM_STATIC_TABLES_TO_CLEAR = (
+    "team_info",
+    "team_member",
+)
+
 
 # ----------------- Static Table Models -----------------
 
@@ -212,3 +223,11 @@ def _get_message_read_status_model() -> type[MessageReadStatusBase]:
         _message_read_status_models[session_id] = cast(type[MessageReadStatusBase], model_cls)
 
     return _message_read_status_models[session_id]
+
+
+def _clear_session_model_cache(session_id: str) -> None:
+    """Clear cached dynamic models for a session so they are rebuilt on next access."""
+    _task_models.pop(session_id, None)
+    _task_dependency_models.pop(session_id, None)
+    _message_models.pop(session_id, None)
+    _message_read_status_models.pop(session_id, None)

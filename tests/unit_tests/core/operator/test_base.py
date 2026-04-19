@@ -60,12 +60,6 @@ class TestOperator:
         assert getattr(Operator.operator_id, "__isabstractmethod__", False)
 
     @staticmethod
-    def test_invoke_is_abstract():
-        """Test that invoke is an abstract method."""
-        assert hasattr(Operator, "invoke")
-        assert inspect.iscoroutinefunction(Operator.invoke)
-
-    @staticmethod
     def test_get_tunables_is_abstract():
         """Test that get_tunables is an abstract method."""
         assert hasattr(Operator, "get_tunables")
@@ -90,15 +84,14 @@ class TestOperator:
         assert inspect.isfunction(Operator.load_state)
 
     @staticmethod
-    @pytest.mark.asyncio
-    async def test_stream_not_implemented_by_default():
-        """Test that stream raises NotImplementedError by default."""
-        assert hasattr(Operator, "stream")
-        assert inspect.iscoroutinefunction(Operator.stream)
+    def test_operator_is_not_executable():
+        """Test that Operator no longer has invoke/stream methods.
 
-        operator = _ConcreteOperator()
-        with pytest.raises(NotImplementedError, match="stream not implemented"):
-            await operator.stream(inputs={}, session=MagicMock())
+        Per design v1.1, Operator is a parameter handle for self-evolution,
+        not an executable unit. Execution is handled by the consumer.
+        """
+        assert not hasattr(Operator, "invoke")
+        assert not hasattr(Operator, "stream")
 
 
 class _ConcreteOperator(Operator):
@@ -119,6 +112,3 @@ class _ConcreteOperator(Operator):
 
     def load_state(self, state):
         pass
-
-    async def invoke(self, inputs, session, **kwargs):
-        return "result"

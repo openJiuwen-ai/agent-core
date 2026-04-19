@@ -85,6 +85,7 @@ class ContextEngine:
         full_context_id = f"{session_id}_{context_id}"
         if full_context_id in self._context_pool:
             context = self._context_pool.get(full_context_id)
+            setattr(context, "_session_ref", session)
             self._load_state_from_session(context, session, history_messages)
             return context
 
@@ -103,6 +104,7 @@ class ContextEngine:
             workspace=self._workspace,
             sys_operation=self._sys_operation,
         )
+        setattr(context, "_session_ref", session)
         self._load_state_from_session(context, session, history_messages)
         self._context_pool[full_context_id] = context
         return context

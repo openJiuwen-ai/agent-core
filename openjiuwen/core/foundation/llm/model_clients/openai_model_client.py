@@ -577,12 +577,18 @@ class OpenAIModelClient(BaseModelClient):
             if prompt_tokens_details:
                 cache_tokens = getattr(prompt_tokens_details, 'cached_tokens', 0) or 0
 
+            # Extract cost information if available
+            input_cost, output_cost, total_cost = self._extract_cost_info(response.usage)
+
             usage_metadata = UsageMetadata(
                 model_name=self.model_config.model_name,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
                 cache_tokens=cache_tokens,
+                input_cost=input_cost,
+                output_cost=output_cost,
+                total_cost=total_cost,
             )
 
         # Get content
@@ -676,11 +682,17 @@ class OpenAIModelClient(BaseModelClient):
         # Build usage_metadata (usually only in the last chunk)
         usage_metadata = None
         if hasattr(chunk, 'usage') and chunk.usage:
+            # Extract cost information if available
+            input_cost, output_cost, total_cost = self._extract_cost_info(chunk.usage)
+
             usage_metadata = UsageMetadata(
                 model_name=self.model_config.model_name,
                 input_tokens=chunk.usage.prompt_tokens if hasattr(chunk.usage, 'prompt_tokens') else 0,
                 output_tokens=chunk.usage.completion_tokens if hasattr(chunk.usage, 'completion_tokens') else 0,
                 total_tokens=chunk.usage.total_tokens if hasattr(chunk.usage, 'total_tokens') else 0,
+                input_cost=input_cost,
+                output_cost=output_cost,
+                total_cost=total_cost,
             )
 
         return AssistantMessageChunk(

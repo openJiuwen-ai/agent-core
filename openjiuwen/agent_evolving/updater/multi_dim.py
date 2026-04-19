@@ -54,7 +54,7 @@ class MultiDimUpdater:
         return False
 
     @abstractmethod
-    def update(
+    async def update(
         self,
         trajectories: List["Trajectory"],
         evaluated_cases: List[Any],

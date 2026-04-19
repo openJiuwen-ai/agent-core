@@ -1,5 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import uuid
 from typing import List, Optional, Tuple, Dict, Any
 
 from openjiuwen.core.common.logging import logger
@@ -28,6 +29,7 @@ feel free to call reload_original_context_messages:
 
 Storage types: "in_memory" (session cache).
 """
+_CONTEXT_MESSAGE_ID_KEY = "context_message_id"
 
 
 class SessionModelContext(ModelContext):
@@ -45,6 +47,7 @@ class SessionModelContext(ModelContext):
     ):
         self._message_id = 0
         self._validate_and_init_messages(history_messages)
+        history_messages = self._ensure_context_message_ids(history_messages or [])
         self._context_id = context_id
         self._session_id = session_id
         self._message_buffer = ContextMessageBuffer(history_messages or [], config.max_context_message_num)
@@ -62,6 +65,8 @@ class SessionModelContext(ModelContext):
             workspace.root_path if workspace else "",
             session_id
         )
+        self._raw_total_tokens = 0
+        self._single_messages_token = 0
         self._reloader_tool_card = ToolCard(
             id=f"reload_{session_id}_{context_id}",
             name="reload_original_context_messages",
@@ -103,6 +108,9 @@ class SessionModelContext(ModelContext):
             return self._workspace.root_path
         return ""
 
+    def get_session_ref(self):
+        return getattr(self, "_session_ref", None)
+
     @_fw.emit_after(ContextEvents.CONTEXT_UPDATED, result_key="messages")
     async def add_messages(
             self,
@@ -113,6 +121,11 @@ class SessionModelContext(ModelContext):
         kwargs.setdefault("sys_operation", self._sys_operation)
         self._validate_and_init_messages(messages)
         messages_to_add = messages if isinstance(messages, list) else [messages]
+        messages_to_add = self._ensure_context_message_ids(messages_to_add)
+        if self._token_counter:
+            for msg in messages_to_add:
+                self._raw_total_tokens += self._token_counter.count_messages([msg])
+
         for processor in self._processors:
             try:
                 if await processor.trigger_add_messages(self, messages_to_add, **kwargs):
@@ -134,6 +147,12 @@ class SessionModelContext(ModelContext):
             )
 
         popped_messages = self._message_buffer.pop_back(size, with_history)
+
+        if self._token_counter:
+            for msg in popped_messages:
+                msg_tokens = self._token_counter.count_messages([msg])
+                self._raw_total_tokens = max(0, self._raw_total_tokens - msg_tokens)
+
         return popped_messages
 
     def get_messages(self, size: Optional[int] = None, with_history: bool = True) -> List[BaseMessage]:
@@ -148,6 +167,7 @@ class SessionModelContext(ModelContext):
 
     def set_messages(self, messages: List[BaseMessage], with_history: bool = True):
         self._validate_and_init_messages(messages)
+        messages = self._ensure_context_message_ids(messages)
         self._message_buffer.set_messages(messages, with_history)
 
     @_fw.emit_before(ContextEvents.CONTEXT_CLEARED, pass_args=False)
@@ -255,6 +275,8 @@ class SessionModelContext(ModelContext):
         messages = self.get_messages()
         stat = ContextStats()
         self._stat_messages(stat, messages)
+        stat.raw_total_tokens = self._raw_total_tokens
+        stat.single_messages_token = self._single_messages_token
         return stat
 
     def _stat_context_window(self, context_window: ContextWindow) -> ContextStats:
@@ -264,6 +286,7 @@ class SessionModelContext(ModelContext):
         self._stat_messages(stat, messages)
         self._stat_tools(stat, tools)
         stat.total_dialogues = len(ContextUtils.find_all_dialogue_round(messages))
+        stat.raw_total_tokens = self._raw_total_tokens
         return stat
 
     def _stat_tools(self, stat: ContextStats, tools: List[ToolInfo]):
@@ -302,6 +325,11 @@ class SessionModelContext(ModelContext):
             stat.system_message_tokens +
             stat.tool_message_tokens
         )
+        self._single_messages_token = (
+            stat.assistant_message_tokens +
+            stat.user_message_tokens +
+            stat.tool_message_tokens
+        )
         stat.total_dialogues = len(ContextUtils.find_all_dialogue_round(messages))
 
     @staticmethod
@@ -320,6 +348,17 @@ class SessionModelContext(ModelContext):
             StatusCode.CONTEXT_MESSAGE_INVALID,
                 error_msg="messages should be a BaseMessage or a list of BaseMessage"
         )
+
+    @staticmethod
+    def _ensure_context_message_ids(messages: List[BaseMessage]) -> List[BaseMessage]:
+        for msg in messages:
+            metadata = getattr(msg, "metadata", None)
+            if not isinstance(metadata, dict):
+                metadata = {}
+                setattr(msg, "metadata", metadata)
+            if not metadata.get(_CONTEXT_MESSAGE_ID_KEY):
+                metadata[_CONTEXT_MESSAGE_ID_KEY] = uuid.uuid4().hex
+        return messages
 
     @staticmethod
     def _validate_and_fix_context_window(context_window: ContextWindow):
@@ -359,12 +398,13 @@ class SessionModelContext(ModelContext):
     def save_state(self) -> Dict[str, Any]:
         return {
             "messages": self._message_buffer.get_back(),
-            "offload_messages": self._offload_message_buffer.get_all()
+            "offload_messages": self._offload_message_buffer.get_all(),
         }
 
     def load_state(self, state: Dict[str, Any]):
         messages = state.get(self._context_id, {}).get("messages", [])
         self._validate_and_init_messages(messages)
+        messages = self._ensure_context_message_ids(messages)
         self._message_buffer.rebulid(messages)
         offload_messages = state.get(self._context_id, {}).get("offload_messages")
         self._offload_message_buffer = OffloadMessageBuffer()

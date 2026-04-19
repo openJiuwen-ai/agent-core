@@ -580,8 +580,9 @@ class DeepAgent(BaseAgent):
         if self._deep_config and self._deep_config.workspace:
             from openjiuwen.core.sys_operation.cwd import init_cwd
 
+            init_root = self._deep_config.workspace.root_path or os.getcwd()
             init_cwd(
-                self._deep_config.workspace.root_path or os.getcwd(),
+                init_root,
                 workspace=self._deep_config.workspace.root_path,
             )
 
@@ -1171,7 +1172,7 @@ class DeepAgent(BaseAgent):
             Resolved ``Path`` to the plan Markdown file, or ``None`` if
             no slug has been set or the workspace is unavailable.
         """
-        from openjiuwen.harness.tools.plan_mode_tools import resolve_plan_file_path
+        from openjiuwen.harness.tools.agent_mode_tools import resolve_plan_file_path
 
         state = self.load_state(session)
         slug = state.plan_mode.plan_slug

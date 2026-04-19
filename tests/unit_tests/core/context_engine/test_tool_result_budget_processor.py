@@ -19,6 +19,7 @@ from openjiuwen.core.context_engine.processor.offloader.tool_result_budget_proce
     ToolResultBudgetProcessorConfig,
     PERSISTED_OUTPUT_TAG,
 )
+from openjiuwen.core.context_engine.schema.messages import OffloadToolMessage
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     ToolCall,
@@ -115,11 +116,14 @@ class TestToolResultBudgetProcessorFilesystemOffload:
             session=None,
             history_messages=[],
             processors=[
-                ("ToolResultBudgetProcessor", ToolResultBudgetProcessorConfig(
-                    tokens_threshold=100,  # Very low threshold to trigger offload
-                    large_message_threshold=50,
-                    trim_size=20,
-                ))
+                (
+                    "ToolResultBudgetProcessor",
+                    ToolResultBudgetProcessorConfig(
+                        tokens_threshold=100,  # Very low threshold to trigger offload
+                        large_message_threshold=50,
+                        trim_size=20,
+                    ),
+                )
             ],
         )
 
@@ -137,11 +141,8 @@ class TestToolResultBudgetProcessorFilesystemOffload:
         # The tool message should be offloaded
         tool_msg = result[2]
         assert tool_msg.content.startswith(PERSISTED_OUTPUT_TAG)
-        # Should contain filesystem offload marker
-        assert "[[OFFLOAD:" in tool_msg.content
-        assert "type=filesystem" in tool_msg.content or "type=in_memory" in tool_msg.content
 
-        # Check that offload_handle exists
+        # Check that offload_handle and offload_type attributes exist
         offload_handle = getattr(tool_msg, "offload_handle", None)
         assert offload_handle
         assert getattr(tool_msg, "offload_type", None) == "filesystem"
@@ -167,11 +168,14 @@ class TestToolResultBudgetProcessorFilesystemOffload:
             session=create_mock_session(session_id),
             history_messages=[],
             processors=[
-                ("ToolResultBudgetProcessor", ToolResultBudgetProcessorConfig(
-                    tokens_threshold=100,
-                    large_message_threshold=50,
-                    trim_size=20,
-                ))
+                (
+                    "ToolResultBudgetProcessor",
+                    ToolResultBudgetProcessorConfig(
+                        tokens_threshold=100,
+                        large_message_threshold=50,
+                        trim_size=20,
+                    ),
+                )
             ],
         )
 
@@ -218,11 +222,14 @@ class TestToolResultBudgetProcessorFilesystemOffload:
             session=create_mock_session("no_workspace_session"),
             history_messages=[],
             processors=[
-                ("ToolResultBudgetProcessor", ToolResultBudgetProcessorConfig(
-                    tokens_threshold=100,
-                    large_message_threshold=50,
-                    trim_size=20,
-                ))
+                (
+                    "ToolResultBudgetProcessor",
+                    ToolResultBudgetProcessorConfig(
+                        tokens_threshold=100,
+                        large_message_threshold=50,
+                        trim_size=20,
+                    ),
+                )
             ],
         )
 
@@ -244,7 +251,7 @@ class TestToolResultBudgetProcessorFilesystemOffload:
 
         # Offload should still happen even without workspace
         assert tool_msg.content.startswith(PERSISTED_OUTPUT_TAG)
-        assert "[[OFFLOAD:" in tool_msg.content
+        assert getattr(tool_msg, "offload_handle", None)
 
     @pytest.mark.asyncio
     async def test_offload_fallback_to_memory_when_sys_operation_none(self):
@@ -261,11 +268,14 @@ class TestToolResultBudgetProcessorFilesystemOffload:
             session=session,
             history_messages=[],
             processors=[
-                ("ToolResultBudgetProcessor", ToolResultBudgetProcessorConfig(
-                    tokens_threshold=100,
-                    large_message_threshold=50,
-                    trim_size=20,
-                ))
+                (
+                    "ToolResultBudgetProcessor",
+                    ToolResultBudgetProcessorConfig(
+                        tokens_threshold=100,
+                        large_message_threshold=50,
+                        trim_size=20,
+                    ),
+                )
             ],
         )
 
@@ -284,8 +294,6 @@ class TestToolResultBudgetProcessorFilesystemOffload:
 
         # Verify offload happened with in_memory type
         assert tool_msg.content.startswith(PERSISTED_OUTPUT_TAG)
-        assert "[[OFFLOAD:" in tool_msg.content
-        assert "type=in_memory" in tool_msg.content
         assert getattr(tool_msg, "offload_type", None) == "in_memory"
 
     @pytest.mark.asyncio
@@ -305,11 +313,14 @@ class TestToolResultBudgetProcessorFilesystemOffload:
             session=create_mock_session("preserve_test"),
             history_messages=[],
             processors=[
-                ("ToolResultBudgetProcessor", ToolResultBudgetProcessorConfig(
-                    tokens_threshold=100,
-                    large_message_threshold=50,
-                    trim_size=20,
-                ))
+                (
+                    "ToolResultBudgetProcessor",
+                    ToolResultBudgetProcessorConfig(
+                        tokens_threshold=100,
+                        large_message_threshold=50,
+                        trim_size=20,
+                    ),
+                )
             ],
         )
 
@@ -351,11 +362,14 @@ class TestToolResultBudgetProcessorFilesystemOffload:
             session=create_mock_session("multi_round"),
             history_messages=[],
             processors=[
-                ("ToolResultBudgetProcessor", ToolResultBudgetProcessorConfig(
-                    tokens_threshold=150,
-                    large_message_threshold=50,
-                    trim_size=20,
-                ))
+                (
+                    "ToolResultBudgetProcessor",
+                    ToolResultBudgetProcessorConfig(
+                        tokens_threshold=150,
+                        large_message_threshold=50,
+                        trim_size=20,
+                    ),
+                )
             ],
         )
 
@@ -386,9 +400,9 @@ class TestToolResultBudgetProcessorConfig:
     def test_default_config_values(self):
         """Test that default config values are correct."""
         config = ToolResultBudgetProcessorConfig()
-        assert config.tokens_threshold == 200000
-        assert config.large_message_threshold == 50000
-        assert config.trim_size == 2000
+        assert config.tokens_threshold == 50000
+        assert config.large_message_threshold == 10000
+        assert config.trim_size == 3000
         assert config.tool_name_allowlist is None
         assert config.offload_message_type == ["tool"]
 
@@ -477,11 +491,14 @@ class TestToolResultBudgetProcessorBasic:
 
     @pytest.mark.asyncio
     async def test_is_already_offloaded(self):
-        """Test detection of already offloaded messages."""
+        """Test detection of already offloaded messages via OffloadToolMessage type."""
         processor = ToolResultBudgetProcessor(ToolResultBudgetProcessorConfig())
 
-        already_offloaded = ToolMessage(
-            content=f"{PERSISTED_OUTPUT_TAG}\nOutput too large...", tool_call_id="tc-x"
+        already_offloaded = OffloadToolMessage(
+            content=f"{PERSISTED_OUTPUT_TAG}\nOutput too large...",
+            tool_call_id="tc-x",
+            offload_handle="fake-handle",
+            offload_type="filesystem",
         )
         assert processor._is_already_offloaded(already_offloaded) is True
 
@@ -498,10 +515,10 @@ class TestToolResultBudgetProcessorRealFilesystem:
         from openjiuwen.core.sys_operation import SysOperation, OperationMode
         from openjiuwen.core.sys_operation import SysOperationCard
         from openjiuwen.core.sys_operation.config import LocalWorkConfig
-        
+
         workspace_root = str(tmp_path / "workspace")
         workspace = MockWorkspace(root_path=workspace_root)
-        
+
         # 创建真实 SysOperation
         card = SysOperationCard(
             id="test_real_sys_op",
@@ -509,7 +526,7 @@ class TestToolResultBudgetProcessorRealFilesystem:
             work_config=LocalWorkConfig(),
         )
         real_sys_op = SysOperation(card=card)
-        
+
         # 创建 context engine
         engine = ContextEngine(
             ContextEngineConfig(default_window_message_num=100),
@@ -522,14 +539,17 @@ class TestToolResultBudgetProcessorRealFilesystem:
             session=create_mock_session(session_id),
             history_messages=[],
             processors=[
-                ("ToolResultBudgetProcessor", ToolResultBudgetProcessorConfig(
-                    tokens_threshold=100,  # Very low threshold to trigger offload
-                    large_message_threshold=50,
-                    trim_size=20,
-                ))
+                (
+                    "ToolResultBudgetProcessor",
+                    ToolResultBudgetProcessorConfig(
+                        tokens_threshold=100,  # Very low threshold to trigger offload
+                        large_message_threshold=50,
+                        trim_size=20,
+                    ),
+                )
             ],
         )
-        
+
         # Create a large tool result that exceeds threshold
         large_content = "x" * 500
         msgs = [
@@ -539,22 +559,21 @@ class TestToolResultBudgetProcessorRealFilesystem:
             AssistantMessage(content="Found results in the file."),
         ]
         await context.add_messages(msgs)
-        
+
         result = context.get_messages()
         tool_msg = result[2]
-        
+
         # Verify offload happened
         assert tool_msg.content.startswith(PERSISTED_OUTPUT_TAG)
         offload_handle = getattr(tool_msg, "offload_handle", None)
         assert offload_handle
-        
+
         # Verify file was actually created
         offload_file = os.path.join(
-            workspace_root, "context", f"{session_id}_context",
-            "offload", f"{offload_handle}.json"
+            workspace_root, "context", f"{session_id}_context", "offload", f"{offload_handle}.json"
         )
         assert os.path.exists(offload_file), f"Offload file not found: {offload_file}"
-        
+
         # Verify file content
         with open(offload_file, encoding="utf-8") as f:
             payload = json.load(f)
@@ -595,11 +614,14 @@ class TestToolResultBudgetProcessorReload:
             session=create_mock_session(session_id),
             history_messages=[],
             processors=[
-                ("ToolResultBudgetProcessor", ToolResultBudgetProcessorConfig(
-                    tokens_threshold=100,
-                    large_message_threshold=50,
-                    trim_size=20,
-                ))
+                (
+                    "ToolResultBudgetProcessor",
+                    ToolResultBudgetProcessorConfig(
+                        tokens_threshold=100,
+                        large_message_threshold=50,
+                        trim_size=20,
+                    ),
+                )
             ],
         )
 
@@ -645,11 +667,14 @@ class TestToolResultBudgetProcessorReload:
             session=create_mock_session(session_id),
             history_messages=[],
             processors=[
-                ("ToolResultBudgetProcessor", ToolResultBudgetProcessorConfig(
-                    tokens_threshold=100,
-                    large_message_threshold=50,
-                    trim_size=20,
-                ))
+                (
+                    "ToolResultBudgetProcessor",
+                    ToolResultBudgetProcessorConfig(
+                        tokens_threshold=100,
+                        large_message_threshold=50,
+                        trim_size=20,
+                    ),
+                )
             ],
         )
 
@@ -698,17 +723,19 @@ class TestToolResultBudgetProcessorReload:
         mock_read_result = MagicMock()
         mock_read_result.code = 0
         mock_read_result.data = MagicMock()
-        mock_read_result.data.content = json.dumps({
-            "offload_handle": "mock_handle_123",
-            "messages": [
-                {
-                    "role": "tool",
-                    "content": original_content,
-                    "tool_call_id": "tc-mock",
-                    "name": "grep",
-                }
-            ]
-        })
+        mock_read_result.data.content = json.dumps(
+            {
+                "offload_handle": "mock_handle_123",
+                "messages": [
+                    {
+                        "role": "tool",
+                        "content": original_content,
+                        "tool_call_id": "tc-mock",
+                        "name": "grep",
+                    }
+                ],
+            }
+        )
         mock_fs.read_file = AsyncMock(return_value=mock_read_result)
 
         engine = ContextEngine(
@@ -722,18 +749,20 @@ class TestToolResultBudgetProcessorReload:
             session=create_mock_session(session_id),
             history_messages=[],
             processors=[
-                ("ToolResultBudgetProcessor", ToolResultBudgetProcessorConfig(
-                    tokens_threshold=100,
-                    large_message_threshold=50,
-                    trim_size=20,
-                ))
+                (
+                    "ToolResultBudgetProcessor",
+                    ToolResultBudgetProcessorConfig(
+                        tokens_threshold=100,
+                        large_message_threshold=50,
+                        trim_size=20,
+                    ),
+                )
             ],
         )
 
         # Reload using buffer directly
         reloaded_messages = await context._offload_message_buffer.reload(
-            offload_handle="mock_handle_123",
-            offload_type="filesystem"
+            offload_handle="mock_handle_123", offload_type="filesystem"
         )
 
         # Verify reload result from mock
@@ -755,15 +784,12 @@ class TestToolResultBudgetProcessorReload:
             context_id="test_ctx",
             session=create_mock_session("nonexistent_session"),
             history_messages=[],
-            processors=[
-                ("ToolResultBudgetProcessor", ToolResultBudgetProcessorConfig())
-            ],
+            processors=[("ToolResultBudgetProcessor", ToolResultBudgetProcessorConfig())],
         )
 
         # Reload nonexistent handle
         reloaded_messages = await context._offload_message_buffer.reload(
-            offload_handle="nonexistent_handle_xyz",
-            offload_type="in_memory"
+            offload_handle="nonexistent_handle_xyz", offload_type="in_memory"
         )
 
         # Should return empty list
@@ -783,18 +809,20 @@ class TestToolResultBudgetProcessorReload:
             session=create_mock_session(session_id),
             history_messages=[],
             processors=[
-                ("ToolResultBudgetProcessor", ToolResultBudgetProcessorConfig(
-                    tokens_threshold=100,
-                    large_message_threshold=50,
-                    trim_size=20,
-                ))
+                (
+                    "ToolResultBudgetProcessor",
+                    ToolResultBudgetProcessorConfig(
+                        tokens_threshold=100,
+                        large_message_threshold=50,
+                        trim_size=20,
+                    ),
+                )
             ],
         )
 
         # filesystem reload without sys_operation should return empty
         reloaded_messages = await context._offload_message_buffer.reload(
-            offload_handle="some_file_path.json",
-            offload_type="filesystem"
+            offload_handle="some_file_path.json", offload_type="filesystem"
         )
 
         assert reloaded_messages == []

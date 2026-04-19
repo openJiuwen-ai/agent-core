@@ -3,29 +3,29 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Tuple, Union, Optional, Dict, Any
+from typing import List, Tuple, Union, Dict, Any
 
 from pydantic import BaseModel
 
-from openjiuwen.core.context_engine import MessageSummaryOffloaderConfig, CurrentRoundCompressorConfig, \
-    RoundLevelCompressorConfig
-from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import ROUND_LEVEL_FALLBACK_MARKER
-from openjiuwen.core.context_engine.processor.offloader.message_summary_offloader import TRUNCATED_MARKER
-from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.context_engine import (
+    MessageSummaryOffloaderConfig, DialogueCompressorConfig,
+    CurrentRoundCompressorConfig, FullCompactProcessorConfig, MicroCompactProcessorConfig,
+    ToolResultBudgetProcessorConfig,
+)
+from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
+    RoundLevelCompressorConfig,
+)
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
-from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig
-from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
-    DialogueCompressorConfig
-)
-from openjiuwen.core.context_engine.processor.offloader.message_offloader import (
-    MessageOffloaderConfig
-)
+from openjiuwen.core.foundation.llm import ModelRequestConfig
 from openjiuwen.harness.prompts.sections.workspace import build_workspace_section as _build_workspace
-from openjiuwen.harness.prompts.sections.context import (
-    build_context_section as _build_context,
-    build_tools_content,
-    build_tools_section,
+from openjiuwen.harness.prompts.sections.context import build_context_section as _build_context, \
+    build_tools_section
+from openjiuwen.core.context_engine.context.session_memory_manager import SessionMemoryConfig, SessionMemoryManager
+from openjiuwen.harness.schema.state import (
+    DeepAgentState,
+    _SESSION_RUNTIME_ATTR,
+    _SESSION_STATE_KEY,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,7 @@ class ContextEngineeringRail(DeepAgentRail):
                 None,
             ] = None,
             preset: bool = True,
+            session_memory: SessionMemoryConfig | Dict[str, Any] | None = None,
     ):
         """Initialize ContextEngineeringRail.
 
@@ -81,6 +82,16 @@ class ContextEngineeringRail(DeepAgentRail):
                 self._user_processors = [processors]
             else:
                 self._user_processors = list(processors)
+
+        self._session_memory_enabled = session_memory is not None
+        self._session_memory_config: SessionMemoryConfig | None = None
+        self._session_memory_mgr: SessionMemoryManager | None = None
+        if isinstance(session_memory, dict):
+            self._session_memory_config = SessionMemoryConfig(**session_memory)
+        elif session_memory is not None:
+            self._session_memory_config = session_memory
+        if self._session_memory_config is not None:
+            self._session_memory_mgr = SessionMemoryManager(self._session_memory_config)
 
     @staticmethod
     def _merge_config_with_overrides(
@@ -166,9 +177,8 @@ class ContextEngineeringRail(DeepAgentRail):
 
         return result
 
-
-    @staticmethod
     def _build_preset_processors(
+            self,
             model_config=None,
             model_client_config=None,
     ) -> List[Tuple[str, BaseModel]]:
@@ -186,82 +196,82 @@ class ContextEngineeringRail(DeepAgentRail):
             model_cfg = ModelRequestConfig.model_copy(model_config)
         else:
             model_cfg = None
-
-        presets: List[Tuple[str, BaseModel]] = [
-            (
-                "MessageSummaryOffloader",
-                MessageSummaryOffloaderConfig(
-                    messages_threshold=None,
-                    tokens_threshold=60000,
-                    large_message_threshold=20000,
-                    offload_message_type=["tool"],
-                    protected_tool_names=["read_file:*SKILL.md", "reload_original_context_messages"],
-                    messages_to_keep=None,
-                    keep_last_round=False,
-                    model=model_cfg,
-                    model_client=model_client_config,
-                    customized_summary_prompt=None,
-                    enable_adaptive_compression=True,
-                    summary_max_tokens=900,
-                    enable_precise_step=False,
-                    step_summary_max_context_messages=8,
-                    content_max_chars_for_compression=200000,
+        if self._session_memory_enabled:
+            presets: List[Tuple[str, BaseModel]] = [
+                (
+                    "ToolResultBudgetProcessor",
+                    ToolResultBudgetProcessorConfig(
+                    ),
                 ),
-            ),
-            (
-                "DialogueCompressor",
-                DialogueCompressorConfig(
-                    messages_threshold=None,
-                    tokens_threshold=100000,
-                    messages_to_keep=10,
-                    keep_last_round=False,
-                    compression_target_tokens=1800,
-                    offload_writeback_enabled=True,
-                    model=model_cfg,
-                    model_client=model_client_config,
+                (
+                    "MicroCompactProcessor",
+                    MicroCompactProcessorConfig(
+                    ),
                 ),
-            ),
-            (
-                "CurrentRoundCompressor",
-                CurrentRoundCompressorConfig(
-                    tokens_threshold=100000,
-                    messages_to_keep=6,
-                    min_selected_tokens_for_compression=20000,
-                    compression_target_tokens=4000,
-                    summary_merge_target_tokens=4000,
-                    accumulated_summary_token_limit=20000,
-                    summary_merge_min_blocks=3,
-                    prior_context_window_size=10,
-                    offload_writeback_enabled=True,
-                    model=model_cfg,
-                    model_client=model_client_config,
+                (
+                "FullCompactProcessor",
+                FullCompactProcessorConfig(
+                    model=model_config,
+                    model_client=model_client_config
                 ),
-            ),
-            (
-                "RoundLevelCompressor",
-                RoundLevelCompressorConfig(
-                    rounds_threshold=2,
-                    tokens_threshold=230000,
-                    trigger_total_tokens=230000,
-                    target_total_tokens=160000,
-                    compression_call_max_tokens=250000,
-                    keep_last_round=True,
-                    keep_recent_messages=6,
-                    messages_to_keep=6,
-                    first_pass_target_tokens=30000,
-                    second_pass_target_tokens=20000,
-                    third_pass_target_tokens=10000,
-                    truncate_head_ratio=0.2,
-                    truncated_marker=TRUNCATED_MARKER,
-                    compression_marker=ROUND_LEVEL_FALLBACK_MARKER,
-                    offload_writeback_enabled=True,
-                    model=model_cfg,
-                    model_client=model_client_config,
                 )
-            ),
-        ]
+            ]
+        else:
+            presets: List[Tuple[str, BaseModel]] = [
+                (
+                    "MessageSummaryOffloader",
+                    MessageSummaryOffloaderConfig(
+                        messages_threshold=None,
+                        tokens_threshold=60000,
+                        large_message_threshold=20000,
+                        offload_message_type=["tool"],
+                        model=model_cfg,
+                        model_client=model_client_config,
+                    ),
+                ),
+                (
+                    "DialogueCompressor",
+                    DialogueCompressorConfig(
+                        messages_threshold=None,
+                        tokens_threshold=100000,
+                        messages_to_keep=10,
+                        keep_last_round=False,
+                        compression_target_tokens=1800,
+                        offload_writeback_enabled=False,
+                        model=model_cfg,
+                        model_client=model_client_config,
+                    ),
+                ),
+                (
+                    "CurrentRoundCompressor",
+                    CurrentRoundCompressorConfig(
+                        tokens_threshold=100000,
+                        messages_to_keep=6,
+                        min_selected_tokens_for_compression=20000,
+                        compression_target_tokens=4000,
+                        summary_merge_target_tokens=4000,
+                        accumulated_summary_token_limit=20000,
+                        summary_merge_min_blocks=3,
+                        prior_context_window_size=10,
+                        offload_writeback_enabled=False,
+                        model=model_cfg,
+                        model_client=model_client_config,
+                    ),
+                ),
+                (
+                    "RoundLevelCompressor",
+                    RoundLevelCompressorConfig(
+                        rounds_threshold=2,
+                        tokens_threshold=230000,
+                        trigger_total_tokens=230000,
+                        target_total_tokens=160000,
+                        compression_call_max_tokens=250000,
+                        model=model_cfg,
+                        model_client=model_client_config,
+                    )
+                ),
+            ]
         return presets
-
 
     def init(self, agent) -> None:
         """Inject / merge processors into agent.react_agent._config.context_processors."""
@@ -271,6 +281,13 @@ class ContextEngineeringRail(DeepAgentRail):
 
         model_config = getattr(config, "model_config_obj", None)
         model_client_config = getattr(config, "model_client_config", None)
+
+        if self._session_memory_config is not None and self._session_memory_mgr is not None:
+            if self._session_memory_config.model is None:
+                self._session_memory_config.model = model_config
+            if self._session_memory_config.model_client is None:
+                self._session_memory_config.model_client = model_client_config
+            self._session_memory_mgr.bind_model_defaults(model_config, model_client_config)
 
         if self._preset:
             all_processors = self._merge_processors(
@@ -287,7 +304,6 @@ class ContextEngineeringRail(DeepAgentRail):
                 model_client_config=model_client_config,
             )
 
-
         config.context_processors = all_processors
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
         self._ability_manager = getattr(agent, "ability_manager", None)
@@ -297,20 +313,19 @@ class ContextEngineeringRail(DeepAgentRail):
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section("workspace")
             self.system_prompt_builder.remove_section("context")
+        if self._session_memory_mgr is not None:
+            self._session_memory_mgr.shutdown()
 
         config = getattr(getattr(agent, "react_agent", None), "_config", None)
         if config is not None:
             config.context_processors = []
 
-
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         await self.fix_incomplete_tool_context(ctx)
 
-    async def after_invoke(self, ctx: AgentCallbackContext) -> None:
-        pass
-
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject workspace directory structure and context files into messages before model call."""
+        self._refresh_task_state_runtime(ctx)
         if self.system_prompt_builder is None:
             return
         workspace = self.workspace
@@ -348,6 +363,15 @@ class ContextEngineeringRail(DeepAgentRail):
         else:
             self.system_prompt_builder.remove_section("context")
 
+    async def after_model_call(self, ctx: AgentCallbackContext) -> None:
+        self._refresh_task_state_runtime(ctx)
+        if self._session_memory_mgr is not None:
+            self._session_memory_mgr.update_inherited_system_prompt(ctx)
+        await self._maybe_schedule_session_memory_update(ctx)
+
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        self._refresh_task_state_runtime(ctx)
+
     async def on_model_exception(self, ctx: AgentCallbackContext) -> None:
         """Attempt to fix incomplete tool context when LLM call fails.
 
@@ -355,7 +379,47 @@ class ContextEngineeringRail(DeepAgentRail):
         validates and repairs any incomplete tool_call/ToolMessage pairs
         before requesting a retry.
         """
+        self._refresh_task_state_runtime(ctx)
         await self.fix_incomplete_tool_context(ctx)
+
+    async def _maybe_schedule_session_memory_update(self, ctx: AgentCallbackContext) -> None:
+        if not self._session_memory_enabled or self._session_memory_mgr is None:
+            return
+        await self._session_memory_mgr.maybe_schedule_update(
+            ctx,
+            workspace=self.workspace,
+        )
+
+    @staticmethod
+    def _refresh_task_state_runtime(ctx: AgentCallbackContext) -> None:
+        session = ctx.session
+        if session is None:
+            return
+        session_id = session.get_session_id()
+        runtime_state = getattr(session, _SESSION_RUNTIME_ATTR, None)
+        if isinstance(runtime_state, DeepAgentState):
+            serialized = runtime_state.to_session_dict()
+        else:
+            persisted_state = session.get_state(_SESSION_STATE_KEY)
+            if isinstance(persisted_state, dict):
+                serialized = persisted_state
+            else:
+                serialized = {}
+        if not serialized:
+            return
+        stop_condition_state = serialized.get("stop_condition_state")
+        if isinstance(stop_condition_state, dict):
+            iteration = int(stop_condition_state.get("iteration", 0) or 0)
+        else:
+            iteration = int(serialized.get("iteration", 0) or 0)
+        session.update_state(
+            {
+                "task_state": serialized,
+                "iteration": iteration,
+                "pending_follow_ups": serialized.get("pending_follow_ups", []),
+                "plan_mode": serialized.get("plan_mode"),
+            }
+        )
 
     @staticmethod
     def _ensure_json_arguments(arguments: Any) -> str:

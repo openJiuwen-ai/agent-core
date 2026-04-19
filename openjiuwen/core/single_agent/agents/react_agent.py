@@ -775,6 +775,12 @@ class ReActAgent(BaseAgent):
                 reasoning_content=accumulated_chunk.reasoning_content,
             )
         ctx.inputs.response = ai_message
+        if ai_message.usage_metadata:
+            await session.write_stream(OutputSchema(
+                type="llm_usage",
+                index=0,
+                payload={"usage_metadata": ai_message.usage_metadata.model_dump(), "result_type": "answer"},
+            ))
         return ai_message
 
     @staticmethod
@@ -1119,8 +1125,9 @@ class ReActAgent(BaseAgent):
             self,
             session: Optional[Session]
     ) -> ModelContext:
+        # Always create token_counter for token statistics, regardless of context_processors
+        from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
         if self._config.context_processors:
-            from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
             context = await self.context_engine.create_context(
                 session=session,
                 processors=self._config.context_processors,
@@ -1128,7 +1135,8 @@ class ReActAgent(BaseAgent):
             )
         else:
             context = await self.context_engine.create_context(
-                session=session
+                session=session,
+                token_counter=TiktokenCounter()
             )
         context_reloader = context.reloader_tool()
         if self._config.context_engine_config.enable_reload:

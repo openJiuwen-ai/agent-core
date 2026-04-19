@@ -202,3 +202,68 @@ class ContextUtils:
             return function_name
         name = getattr(tool_call, "name", None)
         return name if isinstance(name, str) and name else None
+
+    @staticmethod
+    def resolve_tool_call_from_message(
+        message: BaseMessage,
+        context_messages: List[BaseMessage],
+    ) -> Optional[Any]:
+        """Look up the tool_call object that corresponds to a tool message by traversing context backwards.
+
+        Args:
+            message: ToolMessage to look up.
+            context_messages: Context message list.
+
+        Returns:
+            The matching tool_call object, or None if not found.
+        """
+        from openjiuwen.core.foundation.llm import ToolMessage, AssistantMessage
+
+        if not isinstance(message, ToolMessage):
+            return None
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if not tool_call_id:
+            return None
+        for context_message in reversed(context_messages):
+            if not isinstance(context_message, AssistantMessage):
+                continue
+            tool_calls = getattr(context_message, "tool_calls", None) or []
+            for tool_call in tool_calls:
+                if ContextUtils.tool_call_matches_id(tool_call, tool_call_id):
+                    return tool_call
+        return None
+
+    @staticmethod
+    def resolve_tool_name_from_message(
+        message: BaseMessage,
+        context_messages: List[BaseMessage],
+    ) -> Optional[str]:
+        """Look up the tool name that corresponds to a tool message by traversing context backwards.
+
+        Args:
+            message: ToolMessage to look up.
+            context_messages: Context message list.
+
+        Returns:
+            Tool name string, or None if not found.
+        """
+        tool_call = ContextUtils.resolve_tool_call_from_message(message, context_messages)
+        if not tool_call:
+            return None
+        return ContextUtils.extract_tool_name(tool_call)
+
+    @staticmethod
+    def estimate_tokens(content: Any) -> int:
+        """估计内容的 token 数，使用字符数 // 3 的粗略估算。"""
+        if isinstance(content, str):
+            return max(len(content) // 3, 1)
+        try:
+            return max(len(json.dumps(content, ensure_ascii=False)) // 3, 1)
+        except (TypeError, ValueError):
+            return max(len(str(content)) // 3, 1)
+
+    @staticmethod
+    def estimate_message_tokens(message: BaseMessage) -> int:
+        """估计单条消息的 token 数。"""
+        content = getattr(message, "content", "")
+        return ContextUtils.estimate_tokens(content)

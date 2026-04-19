@@ -323,6 +323,7 @@ async def test_member_ready_with_claimed_task_triggers_nudge():
     fake_task.task_id = "task-1"
     fake_task.title = "Fix bug"
     fake_task.content = "Investigate and fix the critical bug"
+    fake_task.updated_at = 0  # stale → triggers nudge path
 
     agent._task_manager = MagicMock()
     agent._task_manager.get_tasks_by_assignee = AsyncMock(return_value=[fake_task])
@@ -355,6 +356,7 @@ async def test_member_error_with_claimed_task_triggers_nudge():
     fake_task.task_id = "task-2"
     fake_task.title = "Ship feature"
     fake_task.content = "Wrap up the pending PR"
+    fake_task.updated_at = 0  # stale → triggers nudge path
 
     agent._task_manager = MagicMock()
     agent._task_manager.get_tasks_by_assignee = AsyncMock(return_value=[fake_task])
@@ -533,7 +535,9 @@ async def test_stale_claim_self_nudge_steers_when_running():
 
     agent._task_manager = MagicMock()
     agent._task_manager.list_tasks = AsyncMock(return_value=[own_task])
-    agent._is_agent_running = lambda: True
+    # deliver_input dispatches on the ``_streaming_active`` flag, not on
+    # ``_is_agent_running()`` — set the flag directly so steer is chosen.
+    agent._streaming_active = True
     agent._start_agent = AsyncMock()
     agent.steer = AsyncMock()
 
@@ -595,7 +599,9 @@ async def test_stale_pending_leader_steers_when_running():
 
     agent._task_manager = MagicMock()
     agent._task_manager.list_tasks = AsyncMock(return_value=[stale])
-    agent._is_agent_running = lambda: True
+    # deliver_input dispatches on the ``_streaming_active`` flag, not on
+    # ``_is_agent_running()`` — set the flag directly so steer is chosen.
+    agent._streaming_active = True
     agent._start_agent = AsyncMock()
     agent.steer = AsyncMock()
 

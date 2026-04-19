@@ -29,6 +29,8 @@ from openjiuwen.agent_teams.messager import (
     Messager,
 )
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
+from openjiuwen.agent_teams.schema.deep_agent_spec import SysOperationSpec
+from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberStatus,
@@ -85,12 +87,26 @@ class TeamAgent(BaseAgent):
         self._team_member: Optional[TeamMember] = None
         self._stream_queue: Optional[asyncio.Queue] = None
         self._agent_task: Optional[asyncio.Task] = None
+        # True only while the ``async for`` over ``Runner.run_agent_streaming``
+        # is actively pumping chunks — the exact window where
+        # ``steer``/``follow_up`` are guaranteed to reach the task loop.
+        # ``_agent_task`` alone is too loose: it stays live through pre-stream
+        # status writes (READY→BUSY→STARTING→RUNNING) and the post-stream
+        # finalize tail, neither of which can accept steer events.
+        self._streaming_active: bool = False
         self._dispatcher = None
         self._teammate_port_counter: int = 0
         self._spawned_handles: dict[str, SpawnedProcessHandle] = {}
         self._member_port_map: dict[str, int] = {}
         self._first_iter_gate: Optional["FirstIterationGate"] = None
         self._pending_interrupt_resumes: list[InteractiveInput] = []
+        # Inputs queued during a pre-stream / finalize-tail window —
+        # drained in the ``_run_one_round`` finally so delivery is never
+        # lost to the two races where neither ``steer`` (no controller yet /
+        # already torn down) nor ``_start_agent`` (would overwrite the live
+        # ``_agent_task``) is safe. Public callers should go through
+        # ``deliver_input`` rather than reaching for these paths directly.
+        self._pending_inputs: list[Any] = []
         self._event_listeners: list = []
         self._model_allocator: Optional["ModelAllocator"] = None
         self._workspace_manager: Optional["TeamWorkspaceManager"] = None
@@ -216,6 +232,45 @@ class TeamAgent(BaseAgent):
         """Whether the agent is in an active round."""
         return self._is_agent_running()
 
+    def has_in_flight_round(self) -> bool:
+        """Whether ``_agent_task`` is scheduled and not yet finalized.
+
+        Looser than ``is_agent_running`` — returns True across the pre-stream
+        status writes, the streaming window, and the finalize tail. Use this
+        to decide whether ``_start_agent`` would be safe (it is not while a
+        round is still in flight). For "can I steer right now?" use
+        ``is_agent_running``.
+        """
+        return self._has_in_flight_round()
+
+    async def deliver_input(self, content: Any, *, use_steer: bool = True) -> None:
+        """Guarantee that ``content`` reaches the DeepAgent.
+
+        Chooses the right path for the current state:
+        - Streaming active → ``steer`` (or ``follow_up`` when ``use_steer``
+          is False) so the content lands in the live task loop.
+        - No round in flight → start a fresh round with ``content`` as the
+          initial message.
+        - Transition window (pre-stream or finalize tail) → append to
+          ``_pending_inputs``; the ``_run_one_round`` finally drains the
+          queue by launching the next round, so delivery is never dropped.
+        """
+        if self._streaming_active:
+            if use_steer:
+                await self.steer(content)
+            else:
+                await self.follow_up(content)
+            return
+        if self._has_in_flight_round():
+            preview = content if isinstance(content, str) else type(content).__name__
+            team_logger.info(
+                "[{}] queueing input for next round (transition window): {:.60}",
+                self._member_name() or "?", str(preview),
+            )
+            self._pending_inputs.append(content)
+            return
+        await self._start_agent(content)
+
     def has_pending_interrupt(self) -> bool:
         """Whether the current session still has an unresolved tool interrupt."""
         session = self._deep_agent.loop_session if self._deep_agent else None
@@ -276,7 +331,12 @@ class TeamAgent(BaseAgent):
         if not self._is_valid_interrupt_resume(user_input):
             team_logger.info("[{}] dropping stale interrupt resume input", self._member_name() or "?")
             return
-        if self._is_agent_running():
+        # Use the task-level check here: if a round is still in flight — even
+        # in the pre-stream or finalize tail — queue the resume so the finally
+        # block in ``_run_one_round`` can drain it via
+        # ``_dequeue_valid_interrupt_resume``. A new ``_start_agent`` right
+        # now would overwrite the live ``_agent_task`` reference and orphan it.
+        if self._has_in_flight_round():
             team_logger.info("[{}] queueing interrupt resume until current round completes", self._member_name() or "?")
             self._pending_interrupt_resumes.append(user_input)
             return
@@ -308,9 +368,19 @@ class TeamAgent(BaseAgent):
     # Team-specific configuration
     # ------------------------------------------------------------------
 
-    def _resolve_agent_spec(self, spec: TeamAgentSpec, role: TeamRole):
-        """Return the DeepAgentSpec for the given role, falling back to leader."""
-        return spec.agents.get(role.value) or spec.agents["leader"]
+    def _resolve_agent_spec(
+        self, spec: TeamAgentSpec, role: TeamRole, member_name: Optional[str] = None
+    ):
+        """Return the DeepAgentSpec for the given member/role, falling back appropriately.
+
+        Lookup order:
+        1. agents[member_name] if member_name exists in agents dict (custom per-member spec)
+        2. agents[role.value] ("teammate" for teammates)
+        3. agents["leader"] as final fallback
+        """
+        if member_name and member_name in spec.agents:
+            return spec.agents[member_name]
+        return spec.agents.get(role.value) or spec.agents.get("teammate") or spec.agents["leader"]
 
     def _setup_infra(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> None:
         """Phase 1: set spec/context, create messager, workspace manager, register team tools."""
@@ -382,7 +452,8 @@ class TeamAgent(BaseAgent):
         ctx: TeamRuntimeContext,
     ) -> None:
         """Phase 2: build prompt, create DeepAgent, set up coordination."""
-        agent_spec = self._resolve_agent_spec(spec, ctx.role)
+        # Lookup agent spec by member_name first, then role fallback chain
+        agent_spec = self._resolve_agent_spec(spec, ctx.role, ctx.member_name)
         resolved_language = _resolve_language(agent_spec.language)
         self._role_policy = role_policy(ctx.role, language=resolved_language)
         member_name = ctx.member_name
@@ -410,6 +481,13 @@ class TeamAgent(BaseAgent):
         if ws_spec and ws_spec.root_path and self._team_backend:
             self._team_backend.register_cleanup_path(ws_spec.root_path)
 
+        # Pre-mount the team shared workspace into the agent workspace
+        # BEFORE building the DeepAgent, so the factory's SkillUseRail
+        # can aggregate ``.team/{team_name}/skills`` via
+        # ``Workspace.list_team_links``.
+        if self._workspace_manager and ws_spec and ws_spec.root_path:
+            self._workspace_manager.mount_into_workspace(ws_spec.root_path)
+
         # Resolve model: member_model (allocated by leader) takes priority.
         model_config = ctx.member_model or agent_spec.model
 
@@ -422,10 +500,16 @@ class TeamAgent(BaseAgent):
         # ``system_prompt`` is intentionally left untouched so DeepAgent's
         # default identity section stays in place; team-specific content
         # is injected later by ``TeamRail`` as discrete PromptSections.
+        sys_operation_spec = agent_spec.sys_operation or SysOperationSpec(
+            id=f"{self.card.id}.sys_operation",
+            mode=OperationMode.LOCAL,
+            work_config=LocalWorkConfig(shell_allowlist=None),
+        )
         build_spec = agent_spec.model_copy(update={
             "card": self.card,
             "model": model_config,
             "workspace": ws_spec,
+            "sys_operation": sys_operation_spec,
             "tools": merged_tools,
             "enable_task_loop": True,
         })
@@ -461,16 +545,14 @@ class TeamAgent(BaseAgent):
         self._first_iter_gate = FirstIterationGate()
         self._deep_agent.add_rail(self._first_iter_gate)
 
-        # Mount team workspace and add transparent version-control rail.
+        # Register the transparent version-control rail. The ``.team/``
+        # symlink is mounted earlier (pre-build) so SkillUseRail can
+        # discover team-shared skills.
         if self._workspace_manager:
             from openjiuwen.agent_teams.team_workspace.rails import TeamWorkspaceRail
             self._deep_agent.add_rail(
                 TeamWorkspaceRail(self._workspace_manager, member_name or ""),
             )
-            # Mount .team/ symlink into the agent's workspace directory.
-            agent_ws_root = self._deep_agent.deep_config.workspace.root_path
-            if agent_ws_root:
-                self._workspace_manager.mount_into_workspace(agent_ws_root)
 
         is_coordinated_teammate = ctx.role == TeamRole.TEAMMATE and ctx.team_spec
         if is_coordinated_teammate and self._team_backend and self._messager:
@@ -491,7 +573,7 @@ class TeamAgent(BaseAgent):
         # Platform customizer: inject additional rails & tools (e.g. Claw adapter).
         if spec.agent_customizer and self._deep_agent:
             try:
-                spec.agent_customizer(self._deep_agent)
+                spec.agent_customizer(self._deep_agent, member_name, ctx.role.value)
             except Exception as exc:
                 team_logger.warning(
                     "[{}] agent_customizer failed: {}", self._member_name() or "?", exc
@@ -571,6 +653,7 @@ class TeamAgent(BaseAgent):
         team_tools = create_team_tools(
             role=ctx.role.value,
             agent_team=agent_team,
+            teammate_mode=spec.teammate_mode,
             on_teammate_created=self._on_teammate_created,
             model_config_allocator=self._model_allocator.allocate if self._model_allocator else None,
             exclude_tools=exclude,
@@ -924,7 +1007,18 @@ class TeamAgent(BaseAgent):
         self._subscribed_topics.clear()
 
     def _is_agent_running(self) -> bool:
-        """Check if the DeepAgent is currently in an active round."""
+        """Return True only while ``Runner.run_agent_streaming`` is pumping.
+
+        Tight window check: matches exactly the span where ``steer`` and
+        ``follow_up`` are guaranteed to reach the outer task loop through
+        ``DeepAgent._loop_controller``. Pre-stream status writes and the
+        post-stream finalize tail deliberately return False — outside the
+        streaming window those calls would either no-op or race.
+        """
+        return self._streaming_active
+
+    def _has_in_flight_round(self) -> bool:
+        """Return True while ``_agent_task`` is scheduled but not yet finalized."""
         return self._agent_task is not None and not self._agent_task.done()
 
     async def _cancel_agent(self) -> None:
@@ -990,6 +1084,14 @@ class TeamAgent(BaseAgent):
         message: Any,
     ) -> None:
         """Execute one DeepAgent stream round via Runner."""
+        if self._deep_agent and self._deep_agent.deep_config and self._deep_agent.deep_config.workspace:
+            from openjiuwen.core.sys_operation.cwd import init_cwd
+
+            init_root = self._deep_agent.deep_config.workspace.root_path
+            init_cwd(
+                init_root,
+                workspace=init_root,
+            )
         # Pull the member back to READY before transitioning to BUSY so a
         # still-live member that ended its previous round in ERROR can
         # recover. READY → READY is a no-op at the member layer.
@@ -1014,6 +1116,22 @@ class TeamAgent(BaseAgent):
             next_resume = self._dequeue_valid_interrupt_resume()
             if next_resume is not None and self._stream_queue is not None:
                 await self._start_agent(next_resume)
+            elif self._pending_inputs and self._stream_queue is not None:
+                # Drain the entire queue into one round. Combining avoids
+                # an O(N) chain of round-restarts when several inputs land
+                # in the same transition window; anything arriving after
+                # the new round begins streaming goes directly through
+                # ``steer`` and never re-enters the queue, so it converges.
+                drained = self._pending_inputs
+                self._pending_inputs = []
+                if len(drained) == 1:
+                    combined = drained[0]
+                else:
+                    combined = "\n\n---\n\n".join(
+                        item if isinstance(item, str) else str(item)
+                        for item in drained
+                    )
+                await self._start_agent(combined)
             else:
                 await self._wake_mailbox_if_interrupt_cleared()
                 if self._team_member and await self._team_member.status() == MemberStatus.SHUTDOWN_REQUESTED:
@@ -1033,11 +1151,15 @@ class TeamAgent(BaseAgent):
         await self._update_execution(ExecutionStatus.RUNNING)
         try:
             inputs = {"query": message}
-            async for chunk in Runner.run_agent_streaming(
-                self._deep_agent, inputs, session=self._session_id
-            ):
-                if self._stream_queue is not None:
-                    await self._stream_queue.put(chunk)
+            self._streaming_active = True
+            try:
+                async for chunk in Runner.run_agent_streaming(
+                    self._deep_agent, inputs, session=self._session_id
+                ):
+                    if self._stream_queue is not None:
+                        await self._stream_queue.put(chunk)
+            finally:
+                self._streaming_active = False
             await self._update_execution(ExecutionStatus.COMPLETING)
             await self._update_execution(ExecutionStatus.COMPLETED)
         except asyncio.CancelledError:

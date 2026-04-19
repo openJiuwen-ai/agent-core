@@ -1,0 +1,10 @@
+# CI Gate Rules — E2E 测试专用（轻量级）
+# 只跑 ruff check 和 format，不跑全量 make test
+
+ci_gates:
+  - name: lint
+    command: "ruff check ."
+    required: true
+  - name: format
+    command: "ruff format --check ."
+    required: true

@@ -87,7 +87,7 @@ from openjiuwen.harness.prompts.sections.tools.web_tools import (
     PaidSearchMetadataProvider,
     FetchWebpageMetadataProvider,
 )
-from openjiuwen.harness.prompts.sections.tools.plan_mode import (
+from openjiuwen.harness.prompts.sections.tools.agent_mode import (
     SwitchModeMetadataProvider,
     EnterPlanModeMetadataProvider,
     ExitPlanModeMetadataProvider,

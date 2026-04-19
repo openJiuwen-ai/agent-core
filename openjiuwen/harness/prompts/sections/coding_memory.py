@@ -61,11 +61,21 @@ feedback 和 project 类型的内容结构：规则/事实 → **原因：** →
 - 写入前先查看上方"已加载的相关记忆"中是否已有可更新的条目，避免重复
 - 系统自动索引，无需手动维护
 
+## 写入冲突处理
+
+写入时系统会自动检测与已有记忆的语义冲突：
+
+- `conflict_detected: true` + `conflicting_files: ["file.md"]` 表示与其他记忆有语义冲突
+- 冲突时文件仍会写入（追加模式）或创建（创建模式），但返回冲突信息
+- **解决步骤**：
+  1. 用 `coding_memory_read` 读取冲突文件内容
+  2. 用 `coding_memory_edit` 修改冲突内容（或删除过时记忆）
+
 ## 访问记忆
 
 - 记忆可能相关时，或用户提及之前的工作时，主动检索
 - 用户要求回忆时**必须**访问
-- 记忆可能过时——引用记忆中的文件/函数/标志前，先验证它们是否仍然存在
+- 记忆标题标注了 updated 日期，日期较早或引用文件/函数时先验证；当前用户指令始终优先于记忆
 - 用户要求忽略记忆时，当作无记忆处理
 """
 
@@ -112,10 +122,20 @@ feedback/project content structure: rule/fact → **Why:** → **How to apply:**
 - Before writing, check the "Loaded relevant memories" section above for existing entries to update
 - Auto-indexed, no manual maintenance needed
 
+## Write Conflict Resolution
+
+The system automatically detects semantic conflicts with existing memories:
+
+- `conflict_detected: true` + `conflicting_files: ["file.md"]` means semantic conflict with existing memories
+- When conflict is detected, the file will still be written (append mode) or created (create mode), but conflict info is returned
+- **Resolution steps**:
+  1. Use `coding_memory_read` to review the conflicting file
+  2. Use `coding_memory_edit` to update the conflicting content (or remove outdated memories)
+
 ## Accessing memories
 - Proactively search when relevant or user references prior work
 - **Must** access when user asks to recall
-- Verify stale memories (files/functions may no longer exist)
+- Titles show updated date — verify old ones before acting; user instructions always override memories
 - If user says ignore memories, proceed as if none exist
 """
 

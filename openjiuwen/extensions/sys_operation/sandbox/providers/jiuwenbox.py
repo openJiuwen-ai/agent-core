@@ -1,11 +1,14 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import shlex
-from pathlib import Path
+import threading
+from pathlib import Path, PurePosixPath
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import httpx
@@ -53,7 +56,7 @@ from openjiuwen.core.sys_operation.sandbox.sandbox_registry import SandboxRegist
 
 
 STDERR_MARKER = "__OJW_STDERR__:"
-DEFAULT_SANDBOX_COMMAND = ["/usr/bin/python3", "-c", "import time; time.sleep(3600)"]
+DEFAULT_SANDBOX_COMMAND = ["/usr/bin/python3", "-c", "import time; time.sleep(36000)"]
 
 
 def _build_fs_error_result(execution: str, error_msg: str, result_cls: Any, data: Any = None):
@@ -187,13 +190,56 @@ def _endpoint_value(endpoint: SandboxEndpoint, config: Optional[SandboxGatewayCo
     return getattr(launcher_config, attr, None)
 
 
+def _response_error_detail(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        return response.text.strip()
+
+    if isinstance(payload, dict):
+        for key in ("error", "detail", "message"):
+            value = payload.get(key)
+            if value:
+                return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        return json.dumps(payload, ensure_ascii=False)
+
+    if payload:
+        return payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+    return response.text.strip()
+
+
+def _raise_for_status(response: httpx.Response) -> None:
+    if response.is_success:
+        return
+
+    detail = _response_error_detail(response)
+    message = (
+        f"HTTP {response.status_code} {response.reason_phrase}"
+        f" for {response.request.method} {response.request.url}"
+    )
+    if detail:
+        message = f"{message}: {detail}"
+    raise httpx.HTTPStatusError(message, request=response.request, response=response)
+
+
 class _JiuwenBoxClient:
     def __init__(self, base_url: str, timeout_seconds: float = 30.0) -> None:
         self._client = httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout_seconds)
 
-    def create_sandbox(self) -> str:
-        response = self._client.post("/api/v1/sandboxes", json={"command": DEFAULT_SANDBOX_COMMAND})
-        response.raise_for_status()
+    def create_sandbox(
+        self,
+        *,
+        policy: dict[str, Any] | None = None,
+        policy_mode: str | None = None,
+    ) -> str:
+        body: dict[str, Any] = {"command": DEFAULT_SANDBOX_COMMAND}
+        if policy is not None:
+            body["policy"] = policy
+        if policy_mode is not None:
+            body["policy_mode"] = policy_mode
+
+        response = self._client.post("/api/v1/sandboxes", json=body)
+        _raise_for_status(response)
         return response.json()["id"]
 
     def exec(
@@ -219,7 +265,7 @@ class _JiuwenBoxClient:
             json=body,
             timeout=max(timeout or 30, 30),
         )
-        response.raise_for_status()
+        _raise_for_status(response)
         return dict(response.json())
 
     def upload_bytes(self, sandbox_id: str, sandbox_path: str, content: bytes) -> None:
@@ -228,14 +274,36 @@ class _JiuwenBoxClient:
             params={"sandbox_path": sandbox_path},
             files={"file": (Path(sandbox_path).name or "upload.bin", content)},
         )
-        response.raise_for_status()
+        _raise_for_status(response)
+
+    def append_bytes(self, sandbox_id: str, sandbox_path: str, content: bytes) -> None:
+        encoded_content = base64.b64encode(content).decode("ascii")
+        result = self.exec(
+            sandbox_id,
+            [
+                "/usr/bin/bash",
+                "-lc",
+                (
+                    "set -euo pipefail; "
+                    'target="$1"; '
+                    'parent=$(/usr/bin/dirname -- "$target"); '
+                    '/usr/bin/mkdir -p -- "$parent"; '
+                    '/usr/bin/base64 -d >> "$target"'
+                ),
+                "jiuwenbox-append",
+                sandbox_path,
+            ],
+            stdin=encoded_content,
+        )
+        if int(result.get("exit_code") or 0) != 0:
+            raise RuntimeError(result.get("stderr") or result.get("stdout") or "append file failed")
 
     def download_bytes(self, sandbox_id: str, sandbox_path: str) -> bytes:
         response = self._client.get(
             f"/api/v1/sandboxes/{sandbox_id}/download",
             params={"sandbox_path": sandbox_path},
         )
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.content
 
     def list_files(
@@ -257,7 +325,7 @@ class _JiuwenBoxClient:
         if max_depth is not None:
             params["max_depth"] = max_depth
         response = self._client.get(f"/api/v1/sandboxes/{sandbox_id}/files", params=params)
-        response.raise_for_status()
+        _raise_for_status(response)
         return list(response.json().get("items", []))
 
     def search_files(
@@ -271,11 +339,32 @@ class _JiuwenBoxClient:
         for item in exclude_patterns or []:
             params.append(("exclude_patterns", item))
         response = self._client.get(f"/api/v1/sandboxes/{sandbox_id}/search", params=params)
-        response.raise_for_status()
+        _raise_for_status(response)
         return list(response.json().get("items", []))
+
+    def path_exists(self, sandbox_id: str, sandbox_path: str) -> bool:
+        path = PurePosixPath(sandbox_path)
+        parent = path.parent.as_posix()
+        try:
+            items = self.list_files(
+                sandbox_id,
+                parent,
+                recursive=False,
+                max_depth=None,
+                include_files=True,
+                include_dirs=True,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return False
+            raise
+        return any(item.get("path") == sandbox_path for item in items)
 
 
 class _JiuwenBoxProviderMixin:
+    _shared_lock = threading.Lock()
+    _shared_sandbox_ids: Dict[str, str] = {}
+
     _client: Optional[_JiuwenBoxClient]
     _sandbox_id: Optional[str]
     _timeout_seconds: int
@@ -297,13 +386,100 @@ class _JiuwenBoxProviderMixin:
             self._client = _JiuwenBoxClient(base_url=base_url, timeout_seconds=self._timeout_seconds)
         return self._client
 
+    def _launcher_extra_params(self, *, create: bool = False) -> dict[str, Any]:
+        launcher_config = getattr(self.config, "launcher_config", None) if self.config is not None else None
+        if launcher_config is None:
+            return {}
+
+        extra_params = getattr(launcher_config, "extra_params", None)
+        if isinstance(extra_params, dict):
+            return extra_params
+
+        if not create:
+            return {}
+
+        extra_params = {}
+        setattr(launcher_config, "extra_params", extra_params)
+        return extra_params
+
+    def _sandbox_create_options_from_launcher_extra_params(self) -> dict[str, Any]:
+        extra_params = self._launcher_extra_params()
+        options: dict[str, Any] = {}
+
+        policy = extra_params.get("policy")
+        if isinstance(policy, dict):
+            options["policy"] = policy
+        elif hasattr(policy, "model_dump"):
+            options["policy"] = policy.model_dump(mode="json")
+
+        policy_mode = extra_params.get("policy_mode")
+        if hasattr(policy_mode, "value"):
+            policy_mode = policy_mode.value
+        if isinstance(policy_mode, str) and policy_mode:
+            options["policy_mode"] = policy_mode
+
+        return options
+
+    def _shared_scope_key(self) -> str:
+        base_url = _endpoint_value(self.endpoint, self.config, "base_url")
+        if not base_url:
+            raise ValueError("jiuwenbox provider requires endpoint.base_url")
+        # Use base_url as the cross-process sharing key. In practice, different
+        # operation providers (fs/shell/code) may get rebuilt with different
+        # isolation metadata, but they still need to target the same remote sandbox.
+        key = str(base_url).rstrip("/")
+        create_options = self._sandbox_create_options_from_launcher_extra_params()
+        if not create_options:
+            return key
+        options_key = json.dumps(create_options, sort_keys=True, separators=(",", ":"))
+        return f"{key}|{options_key}"
+
+    def _sandbox_id_from_launcher_extra_params(self) -> Optional[str]:
+        extra_params = self._launcher_extra_params()
+        value = extra_params.get("sandbox_id")
+        return value if isinstance(value, str) and value else None
+
+    @classmethod
+    def clear_shared_sandbox(cls, base_url: str) -> None:
+        shared_key = base_url.rstrip("/")
+        with cls._shared_lock:
+            keys_to_delete = [
+                key for key in cls._shared_sandbox_ids
+                if key.startswith(shared_key)
+            ]
+            for key in keys_to_delete:
+                cls._shared_sandbox_ids.pop(key, None)
+
     def _get_sandbox_id(self) -> str:
         env_sandbox_id = os.environ.get("JIUWENBOX_SANDBOX_ID")
         if env_sandbox_id:
             self._sandbox_id = env_sandbox_id
         if self._sandbox_id is None:
-            self._sandbox_id = self._get_client().create_sandbox()
+            endpoint_sandbox_id = getattr(self.endpoint, "sandbox_id", None)
+            if isinstance(endpoint_sandbox_id, str) and endpoint_sandbox_id:
+                self._sandbox_id = endpoint_sandbox_id
+        if self._sandbox_id is None:
+            self._sandbox_id = self._sandbox_id_from_launcher_extra_params()
+        if self._sandbox_id is None:
+            shared_key = self._shared_scope_key()
+            with self._shared_lock:
+                self._sandbox_id = self._shared_sandbox_ids.get(shared_key)
+                if self._sandbox_id is None:
+                    self._sandbox_id = self._get_client().create_sandbox(
+                        **self._sandbox_create_options_from_launcher_extra_params(),
+                    )
+                self._shared_sandbox_ids[shared_key] = self._sandbox_id
+                self._launcher_extra_params(create=True)["sandbox_id"] = self._sandbox_id
+        else:
+            shared_key = self._shared_scope_key()
+            with self._shared_lock:
+                self._shared_sandbox_ids[shared_key] = self._sandbox_id
+                self._launcher_extra_params(create=True)["sandbox_id"] = self._sandbox_id
         return self._sandbox_id
+
+
+def clear_jiuwenbox_shared_sandbox(base_url: str) -> None:
+    _JiuwenBoxProviderMixin.clear_shared_sandbox(base_url)
 
 
 def _item_from_payload(item: dict[str, Any]) -> FileSystemItem:
@@ -362,16 +538,9 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
                     text += "\n"
                 raw = text.encode("utf-8")
             if append:
-                try:
-                    raw = await asyncio.to_thread(
-                        self._get_client().download_bytes,
-                        self._get_sandbox_id(),
-                        path,
-                    ) + raw
-                except httpx.HTTPStatusError as exc:
-                    if exc.response.status_code != 404:
-                        raise
-            await asyncio.to_thread(self._get_client().upload_bytes, self._get_sandbox_id(), path, raw)
+                await asyncio.to_thread(self._get_client().append_bytes, self._get_sandbox_id(), path, raw)
+            else:
+                await asyncio.to_thread(self._get_client().upload_bytes, self._get_sandbox_id(), path, raw)
             return WriteFileResult(
                 code=StatusCode.SUCCESS.code,
                 message=StatusCode.SUCCESS.errmsg,
@@ -472,7 +641,8 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
             yield _build_fs_error_result("read_file_stream", validation_error, ReadFileStreamResult)
             return
 
-        result = await self.read_file(path, mode=mode, head=head, tail=tail, line_range=line_range, encoding=encoding)
+        result = await self.read_file(path, mode=mode, head=head,
+                                      tail=tail, line_range=line_range, encoding=encoding)
         if result.code != StatusCode.SUCCESS.code:
             yield ReadFileStreamResult(code=result.code, message=result.message, data=None)
             return
@@ -553,12 +723,13 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
     ) -> UploadFileResult:
         try:
             if not overwrite:
-                try:
-                    await asyncio.to_thread(self._get_client().download_bytes, self._get_sandbox_id(), target_path)
+                exists = await asyncio.to_thread(
+                    self._get_client().path_exists,
+                    self._get_sandbox_id(),
+                    target_path,
+                )
+                if exists:
                     raise FileExistsError(f"File already exists: {target_path}")
-                except httpx.HTTPStatusError as exc:
-                    if exc.response.status_code != 404:
-                        raise
             raw = Path(local_path).read_bytes()
             await asyncio.to_thread(self._get_client().upload_bytes, self._get_sandbox_id(), target_path, raw)
             return UploadFileResult(

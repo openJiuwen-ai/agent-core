@@ -1,4 +1,4 @@
-"""Coding Memory 单元测试 - 基础功能测试."""
+"""Unit tests for Coding Memory — basic functionality."""
 
 import os
 import tempfile

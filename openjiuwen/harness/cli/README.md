@@ -194,6 +194,79 @@ openjiuwen run -f stream-json "分析这个项目" >> build.jsonl
 1. **用户级**: `~/.openjiuwen/OPENJIUWEN.md` — 全局偏好
 2. **项目级**: `{project_root}/OPENJIUWEN.md` — 项目规范（优先级更高）
 
+## Auto-Harness
+
+CLI 内置了 `auto-harness` 能力，既可以通过命令行子命令使用，也可以在交互式 REPL 中直接输入 `/auto-harness <自然语言目标>`。
+
+在终端输入：
+
+```bash
+openjiuwen
+```
+
+auto-harness 的配置和运行目录在：
+
+```text
+~/.openjiuwen/workspace/auto_harness/
+```
+
+### 交互式示例
+
+在交互式模式里，可以直接这样输入：
+
+```text
+/auto-harness 调研当前和 Claude Code 在批量修复 lint/type error 上的能力差距
+/auto-harness 调研当前和 Claude Code 在自动生成修复计划上的能力差距
+/auto-harness 调研当前和 Claude Code 在 PR 级别自动修改上的能力差距
+/auto-harness 调研当前和 Claude Code 在工作区隔离执行上的能力差距
+/auto-harness 调研当前和 Claude Code 在子任务调度上的能力差距
+/auto-harness 调研当前和 Claude Code 在 agent 协作编排上的能力差距
+/auto-harness 调研当前和 Claude Code 在失败恢复上的能力差距
+/auto-harness 调研当前和 Claude Code 在 fix loop 自动修复上的能力差距
+```
+
+### 本地配置示例（脱敏）
+
+下面这份示例按本地实际 `config.yaml` 结构整理，并做了脱敏处理：
+
+```yaml
+local_repo: "/home/<user>/code/gitcode/agent-core"
+
+git:
+  remote: "autoharness"
+  base_branch: "develop"
+  user_name: "auto-harness"
+  user_email: "auto-harness@<masked-domain>"
+  fork_owner: "auto-harness"
+  upstream_owner: "openJiuwen"
+  upstream_repo: "agent-core"
+
+gitcode:
+  username: "auto-harness"
+  access_token: "<redacted>"
+
+budget:
+  session_secs: 3600
+  cost_limit_usd: 10.0
+  task_timeout_secs: 1200
+  max_tasks_per_session: 3
+
+ci_gate:
+  config_path: ""
+  python_executable: "/home/<user>/code/openJiuwen/test-agentcore/python11venv/bin/python3.11"
+  install_command: "uv sync --active --group dev --extra cli"
+
+fix_loop:
+  phase1_max_retries: 10
+  phase2_max_retries: 9
+```
+
+如果你不想把 token 放进配置文件，推荐改成环境变量：
+
+```bash
+export GITCODE_ACCESS_TOKEN=xxxx
+```
+
 ## 能力全景
 
 CLI Agent 集成了丰富的工具、Rail 插件和子 Agent，开箱即用。

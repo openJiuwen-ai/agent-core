@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from openjiuwen.harness.cli.ui.todo_render import (
+    apply_todo_modify_args,
     parse_todo_result,
+    parse_todo_tool_args,
     render_todo_item,
     render_todo_list,
     render_todo_summary,
@@ -200,3 +202,72 @@ class TestParseTodoResult:
         items = parse_todo_result(result)
         # Modify results don't contain structured items
         assert items is None
+
+
+class TestApplyTodoModifyArgs:
+    """Tests for replaying todo_modify args in the CLI."""
+
+    def test_parse_todo_tool_args_from_json(self) -> None:
+        """JSON tool args are parsed into a dict."""
+        args = parse_todo_tool_args('{"action":"delete","ids":["a"]}')
+        assert args["action"] == "delete"
+        assert args["ids"] == ["a"]
+
+    def test_update_rewrites_cached_items(self) -> None:
+        """update mutates the cached todo list."""
+        items = [
+            {"id": "a", "content": "Task A", "status": "in_progress"},
+            {"id": "b", "content": "Task B", "status": "pending"},
+        ]
+        args = {
+            "action": "update",
+            "todos": [
+                {"id": "a", "status": "completed"},
+                {"id": "b", "status": "in_progress", "activeForm": "Doing Task B"},
+            ],
+        }
+        updated = apply_todo_modify_args(items, args)
+        assert updated is not None
+        assert updated[0]["status"] == "completed"
+        assert updated[1]["status"] == "in_progress"
+        assert updated[1]["content"] == "Doing Task B"
+
+    def test_delete_removes_cached_items(self) -> None:
+        """delete removes matching items."""
+        items = [
+            {"id": "a", "content": "Task A", "status": "pending"},
+            {"id": "b", "content": "Task B", "status": "pending"},
+        ]
+        updated = apply_todo_modify_args(
+            items,
+            {"action": "delete", "ids": ["a"]},
+        )
+        assert updated == [
+            {"id": "b", "content": "Task B", "status": "pending"}
+        ]
+
+    def test_insert_after_keeps_order(self) -> None:
+        """insert_after inserts directly after the target item."""
+        items = [
+            {"id": "a", "content": "Task A", "status": "in_progress"},
+            {"id": "b", "content": "Task B", "status": "pending"},
+        ]
+        updated = apply_todo_modify_args(
+            items,
+            {
+                "action": "insert_after",
+                "todo_data": [
+                    "a",
+                    [
+                        {
+                            "id": "c",
+                            "content": "Task C",
+                            "activeForm": "Task C",
+                            "status": "pending",
+                        }
+                    ],
+                ],
+            },
+        )
+        assert updated is not None
+        assert [item["id"] for item in updated] == ["a", "c", "b"]

@@ -39,7 +39,7 @@ class Updater(Protocol):
         """
         ...
 
-    def update(
+    async def update(
         self,
         trajectories: List[Trajectory],
         evaluated_cases: List[Any],

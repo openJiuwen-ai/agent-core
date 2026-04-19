@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from openjiuwen.core.operator import Operator
 from openjiuwen.agent_evolving.trajectory import Trajectory, Updates
 from openjiuwen.agent_evolving.optimizer import BaseOptimizer
+from openjiuwen.agent_evolving.signal.from_eval import from_evaluated_case
 
 
 class SingleDimUpdater:
@@ -29,11 +30,14 @@ class SingleDimUpdater:
         """Delegate to internal optimizer."""
         return self._opt.requires_forward_data()
 
-    def update(self, trajectories: List[Trajectory], evaluated_cases: List[Any], config: Dict[str, Any]) -> Updates:
+    async def update(
+        self, trajectories: List[Trajectory], evaluated_cases: List[Any], config: Dict[str, Any]
+    ) -> Updates:
         """Write trajectories -> backward -> update, return Updates applied uniformly by Trainer.apply_updates."""
         for traj in trajectories:
             self._opt.add_trajectory(traj)
-        self._opt.backward(evaluated_cases)
+        signals = [from_evaluated_case(c) for c in evaluated_cases]
+        await self._opt.backward(signals)
         return self._opt.step()
 
     @staticmethod

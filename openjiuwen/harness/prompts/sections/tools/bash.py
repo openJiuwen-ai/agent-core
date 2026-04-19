@@ -200,8 +200,9 @@ BASH_PARAMS: Dict[str, Dict[str, str]] = {
         "en": "The command to execute",
     },
     "timeout": {
-        "cn": "可选超时时间（秒），默认 300，上限 3600",
-        "en": "Optional timeout in seconds, default 300, max 3600",
+        "cn": "可选超时时间（秒），默认 300，上限 3600。对于长时间运行的任务，建议适当增大该值以避免任务被提前中断",
+        "en": "Optional timeout in seconds, default 300, max 3600. For long-running tasks, it is recommended to "
+              "increase this value to avoid premature termination"
     },
     "description": {
         "cn": _DESCRIPTION_PARAM_CN,

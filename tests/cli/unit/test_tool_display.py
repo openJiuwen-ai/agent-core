@@ -108,6 +108,14 @@ class TestFormatToolResult:
         )
         assert "Read 3 lines" in result
 
+    def test_read_file_single_line(self) -> None:
+        result = format_tool_result("read_file", "line1")
+        assert result == "Read 1 lines"
+
+    def test_read_file_single_line_with_trailing_newline(self) -> None:
+        result = format_tool_result("read_file", "line1\n")
+        assert result == "Read 1 lines"
+
     def test_bash_single_line(self) -> None:
         """Short bash output shown directly."""
         result = format_tool_result("bash", "hello world")

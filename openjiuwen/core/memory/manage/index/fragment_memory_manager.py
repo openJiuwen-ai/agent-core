@@ -13,7 +13,10 @@ from openjiuwen.core.memory.manage.mem_model.data_id_manager import DataIdManage
 from openjiuwen.core.memory.manage.mem_model.memory_unit import BaseMemoryUnit, FragmentMemoryUnit, MemoryType
 from openjiuwen.core.memory.manage.mem_model.semantic_store import SemanticStore
 from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
-from openjiuwen.core.memory.manage.update.mem_update_checker import MemUpdateChecker, MemoryStatus
+from openjiuwen.core.memory.manage.update.mem_update_checker import (
+    MemUpdateChecker,
+    MemoryStatus,
+)
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import memory_logger

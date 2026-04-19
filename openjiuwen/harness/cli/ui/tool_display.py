@@ -170,7 +170,7 @@ def format_tool_result(
         return "Done"
 
     if tool_name in ("read_file",):
-        lines = tool_result.count("\n")
+        lines = _count_text_lines(tool_result)
         return f"Read {lines} lines"
 
     if tool_name in ("write_file",):
@@ -255,6 +255,11 @@ def format_write_preview(tool_result: str) -> str:
     if len(lines) > 5:
         parts.append(f"     … +{len(lines) - 5} lines")
     return "\n".join(parts)
+
+
+def _count_text_lines(text: str) -> int:
+    """Count rendered text lines without undercounting single-line content."""
+    return len(text.splitlines())
 
 
 def _short_path(path: str) -> str:

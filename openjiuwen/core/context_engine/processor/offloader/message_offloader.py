@@ -263,19 +263,7 @@ class MessageOffloader(ContextProcessor):
         Returns:
             The matching tool_call object, or None if not found.
         """
-        if not isinstance(message, ToolMessage):
-            return None
-        tool_call_id = getattr(message, "tool_call_id", None)
-        if not tool_call_id:
-            return None
-        for context_message in reversed(context_messages):
-            if not isinstance(context_message, AssistantMessage):
-                continue
-            tool_calls = getattr(context_message, "tool_calls", None) or []
-            for tool_call in tool_calls:
-                if ContextUtils.tool_call_matches_id(tool_call, tool_call_id):
-                    return tool_call
-        return None
+        return ContextUtils.resolve_tool_call_from_message(message, context_messages)
 
     def _resolve_tool_name_from_message(
         self,
@@ -291,10 +279,7 @@ class MessageOffloader(ContextProcessor):
         Returns:
             Tool name string, or None if not found.
         """
-        tool_call = self._resolve_tool_call_from_message(message, context_messages)
-        if not tool_call:
-            return None
-        return ContextUtils.extract_tool_name(tool_call)
+        return ContextUtils.resolve_tool_name_from_message(message, context_messages)
 
     @staticmethod
     def _extract_tool_args(tool_call: Any) -> dict[str, Any]:

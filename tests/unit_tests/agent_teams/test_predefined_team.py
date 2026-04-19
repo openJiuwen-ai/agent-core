@@ -230,6 +230,54 @@ class TestToolExclusion:
 
         assert "claim_task" in tool_names
 
+    def test_leader_has_approval_tools_in_plan_mode(self):
+        """Leader must get approve_plan and approve_tool in plan_mode — required for plan review."""
+        agent_team = AsyncMock()
+        agent_team.is_leader = True
+
+        tools = create_team_tools(
+            role="leader",
+            agent_team=agent_team,
+            teammate_mode="plan_mode",
+        )
+        tool_names = {t.card.name for t in tools}
+        logger.info("Leader tools (plan_mode): {}", tool_names)
+
+        assert "approve_plan" in tool_names
+        assert "approve_tool" in tool_names
+
+    def test_leader_no_approval_tools_in_build_mode(self):
+        """build_mode has no plan workflow — approval tools must be excluded from the leader."""
+        agent_team = AsyncMock()
+        agent_team.is_leader = True
+
+        tools = create_team_tools(
+            role="leader",
+            agent_team=agent_team,
+            teammate_mode="build_mode",
+        )
+        tool_names = {t.card.name for t in tools}
+        logger.info("Leader tools (build_mode): {}", tool_names)
+
+        assert "approve_plan" not in tool_names
+        assert "approve_tool" not in tool_names
+
+    def test_teammate_does_not_have_approval_tools(self):
+        """approve_plan / approve_tool are leader-only, regardless of mode."""
+        agent_team = AsyncMock()
+        agent_team.is_leader = False
+
+        for mode in ("build_mode", "plan_mode"):
+            tools = create_team_tools(
+                role="teammate",
+                agent_team=agent_team,
+                teammate_mode=mode,
+            )
+            tool_names = {t.card.name for t in tools}
+
+            assert "approve_plan" not in tool_names, f"teammate got approve_plan in {mode}"
+            assert "approve_tool" not in tool_names, f"teammate got approve_tool in {mode}"
+
 
 class TestPredefinedTeamPrompt:
     """Test system prompt includes predefined team override."""
@@ -268,3 +316,127 @@ class TestPredefinedTeamPrompt:
         )
 
         assert "预定义团队模式" not in prompt
+
+
+class TestResolveAgentSpecByMemberName:
+    """Test _resolve_agent_spec resolves custom member_name key correctly."""
+
+    def test_resolve_by_member_name_first(self):
+        """When member_name exists in agents dict, use that spec."""
+        from openjiuwen.agent_teams.schema.blueprint import (
+            DeepAgentSpec,
+            TeamAgentSpec,
+            LeaderSpec,
+        )
+        from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+
+        # Create agent specs with different max_iterations
+        leader_spec = DeepAgentSpec(max_iterations=100)
+        teammate_spec = DeepAgentSpec(max_iterations=50)
+        custom_spec = DeepAgentSpec(max_iterations=30)
+
+        spec = TeamAgentSpec(
+            agents={
+                "leader": leader_spec,
+                "teammate": teammate_spec,
+                "custom-member": custom_spec,  # Custom key matching member_name
+            },
+            leader=LeaderSpec(),
+        )
+
+        # Create a minimal TeamAgent to test _resolve_agent_spec
+        from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+        card = AgentCard(id="test", name="test")
+        agent = TeamAgent(card)
+        agent._spec = spec
+
+        # Resolve by member_name should return custom_spec
+        result = agent._resolve_agent_spec(spec, TeamRole.TEAMMATE, "custom-member")
+        assert result.max_iterations == 30
+
+    def test_fallback_to_role_value(self):
+        """When member_name not in agents, fallback to role.value."""
+        from openjiuwen.agent_teams.schema.blueprint import (
+            DeepAgentSpec,
+            TeamAgentSpec,
+            LeaderSpec,
+        )
+        from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+        from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+        leader_spec = DeepAgentSpec(max_iterations=100)
+        teammate_spec = DeepAgentSpec(max_iterations=50)
+
+        spec = TeamAgentSpec(
+            agents={
+                "leader": leader_spec,
+                "teammate": teammate_spec,
+                # No "unknown-member" key
+            },
+            leader=LeaderSpec(),
+        )
+
+        card = AgentCard(id="test", name="test")
+        agent = TeamAgent(card)
+        agent._spec = spec
+
+        # Fallback to teammate spec
+        result = agent._resolve_agent_spec(spec, TeamRole.TEAMMATE, "unknown-member")
+        assert result.max_iterations == 50
+
+    def test_fallback_chain_to_leader(self):
+        """When neither member_name nor role.value in agents, fallback to leader."""
+        from openjiuwen.agent_teams.schema.blueprint import (
+            DeepAgentSpec,
+            TeamAgentSpec,
+            LeaderSpec,
+        )
+        from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+        from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+        leader_spec = DeepAgentSpec(max_iterations=100)
+
+        spec = TeamAgentSpec(
+            agents={
+                "leader": leader_spec,
+                # No "teammate" key
+            },
+            leader=LeaderSpec(),
+        )
+
+        card = AgentCard(id="test", name="test")
+        agent = TeamAgent(card)
+        agent._spec = spec
+
+        # Fallback chain: member_name -> role.value -> "teammate" -> "leader"
+        result = agent._resolve_agent_spec(spec, TeamRole.TEAMMATE, "unknown-member")
+        assert result.max_iterations == 100
+
+    def test_leader_role_uses_leader_spec(self):
+        """Leader role should use leader spec regardless of member_name."""
+        from openjiuwen.agent_teams.schema.blueprint import (
+            DeepAgentSpec,
+            TeamAgentSpec,
+            LeaderSpec,
+        )
+        from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+        from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+        leader_spec = DeepAgentSpec(max_iterations=100)
+        teammate_spec = DeepAgentSpec(max_iterations=50)
+
+        spec = TeamAgentSpec(
+            agents={
+                "leader": leader_spec,
+                "teammate": teammate_spec,
+            },
+            leader=LeaderSpec(),
+        )
+
+        card = AgentCard(id="test", name="test")
+        agent = TeamAgent(card)
+        agent._spec = spec
+
+        # Leader role with no member_name uses leader spec
+        result = agent._resolve_agent_spec(spec, TeamRole.LEADER, None)
+        assert result.max_iterations == 100

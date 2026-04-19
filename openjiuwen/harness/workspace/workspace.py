@@ -431,6 +431,21 @@ DEFAULT_WORKSPACE_SCHEMA: List[DirectoryNode] = [
         "path": "agents",
         "children": [],
     },
+    {
+        "name": "context",
+        "description": "上下文offload以及session memory目录",
+        "path": "context",
+        "children": [
+            {
+                "name": "session_memory.md",
+                "description": "session memory模版",
+                "path": "session_memory.md",
+                "children": [],
+                "is_file": True,
+                "default_content": _load_default_content("cn", "context/session_memory.md"),
+            },
+        ],
+    },
 ]
 
 
@@ -582,6 +597,21 @@ DEFAULT_WORKSPACE_SCHEMA_EN: List[DirectoryNode] = [
         "description": "Sub-agent nesting directory",
         "path": "agents",
         "children": [],
+    },
+    {
+        "name": "context",
+        "description": "context offload and session memory file",
+        "path": "context",
+        "children": [
+            {
+                "name": "session_memory.md",
+                "description": "session memory模版",
+                "path": "session_memory.md",
+                "children": [],
+                "is_file": True,
+                "default_content": _load_default_content("en", "context/session_memory.md"),
+            },
+        ],
     },
 ]
 
