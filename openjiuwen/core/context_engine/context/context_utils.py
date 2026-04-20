@@ -105,9 +105,15 @@ class ContextUtils:
         rounds: List[List[Optional[int]]] = []
         i = len(messages) - 1
 
+        def find_contiguous_user_group_start(user_idx: int) -> int:
+            while user_idx - 1 >= 0 and messages[user_idx - 1].role == "user":
+                user_idx -= 1
+            return user_idx
+
         while i >= 0:
             # Find the closing assistant of this round (may not exist)
             assistant_idx = None
+            round_end = i
 
             # Skip any trailing non-assistant messages (shouldn't happen in valid data)
             while i >= 0 and messages[i].role != "assistant":
@@ -129,6 +135,10 @@ class ContextUtils:
 
                 # Move to find the user that started this round
                 i -= 1
+            else:
+                # No assistant found in this remaining prefix. Treat the latest
+                # user plus any following messages as an incomplete round.
+                i = round_end
 
             # Now find the user message that starts this round
             while i >= 0 and messages[i].role != "user":
@@ -138,16 +148,18 @@ class ContextUtils:
                 # No user found, incomplete round at start
                 break
 
-            user_idx = i
+            found_user_idx = i
+            user_idx = find_contiguous_user_group_start(found_user_idx)
+
             if not rounds:
                 # Find incomplete round
-                for last_round_index in range(len(messages) - 1, user_idx, -1):
+                for last_round_index in range(len(messages) - 1, found_user_idx, -1):
                     if messages[last_round_index].role == "user":
-                        rounds.append([last_round_index, None])
+                        rounds.append([find_contiguous_user_group_start(last_round_index), None])
                         break
 
             rounds.append([user_idx, assistant_idx])
-            i -= 1  # Continue to previous round
+            i = user_idx - 1  # Continue before the contiguous user-message group
 
         return rounds
 

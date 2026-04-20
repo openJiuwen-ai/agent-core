@@ -32,6 +32,26 @@ class _TestableRoundLevelCompressor(RoundLevelCompressor):
 
 class TestRoundLevelCompressor:
     @pytest.mark.asyncio
+    async def test_trigger_get_context_window_uses_trigger_total_tokens(self):
+        compressor = _TestableRoundLevelCompressor(
+            RoundLevelCompressorConfig(
+                trigger_total_tokens=100,
+                target_total_tokens=50,
+            )
+        )
+        context = MagicMock()
+        context_window = ContextWindow(
+            system_messages=[],
+            context_messages=[UserMessage(content="u")],
+            tools=[],
+        )
+        compressor._count_context_window_tokens = MagicMock(return_value=75)
+        assert await compressor.trigger_get_context_window(context, context_window) is False
+
+        compressor._count_context_window_tokens = MagicMock(return_value=101)
+        assert await compressor.trigger_get_context_window(context, context_window) is True
+
+    @pytest.mark.asyncio
     async def test_build_memory_message_offload_falls_back_to_plain_user_message(self):
         compressor = _TestableRoundLevelCompressor(
             RoundLevelCompressorConfig(
@@ -96,6 +116,7 @@ class TestRoundLevelCompressor:
         assert event.messages_to_modify == [0, 1, 2, 3]
         assert len(updated_context_window.context_messages) == 1
         assert updated_context_window.context_messages[0].content.startswith(ROUND_LEVEL_FALLBACK_MARKER)
+        context.set_messages.assert_called_once_with(updated_context_window.context_messages)
 
     @staticmethod
     def test_build_compression_user_prompt_includes_ongoing_and_completed_requirements():
