@@ -132,40 +132,7 @@ class TestEvolutionStoreLogCRUD:
         assert evo_log.entries[0].change.content == "new"
 
 
-class TestEvolutionStoreSolidifyAndFormatting:
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_solidify_injects_pending_body_and_marks_applied(tmp_path: Path):
-        root = tmp_path / "skills"
-        prepare_skill(root, "skill-a", "# Skill\n\n## Troubleshooting\n- old\n")
-        store = EvolutionStore(str(root))
-        await store.append_record("skill-a", 
-        make_record("ev_body_1", target=EvolutionTarget.BODY, content="- check logs"))
-        await store.append_record("skill-a", 
-        make_record("ev_desc_1", target=EvolutionTarget.DESCRIPTION, content="desc only"))
-
-        count = await store.solidify("skill-a")
-        skill_md = (root / "skill-a" / "SKILL.md").read_text(encoding="utf-8")
-        full_log = await store.load_evolution_log("skill-a")
-
-        assert count == 1
-        assert "- check logs" in skill_md
-        status = {item.id: item.applied for item in full_log.entries}
-        assert status["ev_body_1"] is True
-        assert status["ev_desc_1"] is False
-
-    @staticmethod
-    def test_inject_section_appends_new_header_when_missing():
-        patch = EvolutionPatch(
-            section="Examples",
-            action="append",
-            content="- do this",
-            target=EvolutionTarget.BODY,
-        )
-        result = EvolutionStore._inject_section("# Skill", patch)
-        assert "## Examples" in result
-        assert "- do this" in result
-
+class TestEvolutionStoreFormatting:
     @staticmethod
     @pytest.mark.asyncio
     async def test_formatting_helpers_and_pending_summary(tmp_path: Path):
@@ -237,9 +204,7 @@ class TestEvolutionStoreSysOperationPath:
     async def test_write_file_text_with_sys_operation(tmp_path: Path):
         store = EvolutionStore(str(tmp_path))
         fs_mock = MagicMock()
-        fs_mock.write_file = AsyncMock(
-            return_value=SimpleNamespace(code=0, message="ok")
-        )
+        fs_mock.write_file = AsyncMock(return_value=SimpleNamespace(code=0, message="ok"))
         store.sys_operation = SimpleNamespace(fs=lambda: fs_mock)
 
         await store._write_file_text(tmp_path / "x.txt", "hello")
@@ -409,8 +374,7 @@ class TestEvolutionStoreRenderMarkdown:
     async def test_render_replaces_existing_index_block(tmp_path: Path):
         root = tmp_path / "skills"
         initial_content = (
-            "# Skill A\n\nContent\n\n"
-            "<!-- evolution-index-start -->\nold index\n<!-- evolution-index-end -->\n"
+            "# Skill A\n\nContent\n\n<!-- evolution-index-start -->\nold index\n<!-- evolution-index-end -->\n"
         )
         prepare_skill(root, "skill-a", initial_content)
         store = EvolutionStore(str(root))

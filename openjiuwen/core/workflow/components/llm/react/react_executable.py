@@ -54,9 +54,33 @@ class ReActAgentCompExecutable(ComponentExecutable):
     async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
         """Execute ReAct loop with streaming output."""
         try:
-            # Stream the ReAct agent execution
-            # For workflow sessions, this writes to session.write_stream() which the workflow consumes
-            async for chunk in self._react_agent.stream(inputs, session):
+            # 流式执行 ReAct Agent
+            # 对于工作流会话，此操作将数据写入 session.write_stream()，供工作流消费
+            from openjiuwen.core.session.agent import create_agent_session
+            from openjiuwen.core.session.stream import OutputSchema
+
+            # 创建agent会话实例
+            agent_session = create_agent_session(
+                session_id=session.get_session_id(),
+                card=self._react_agent.card
+            )
+
+            # Optional: Get data from workflow Optional: Get data from workflow global state (example comment)
+            # shared_state = session.get_global_state("key")
+            # inputs = inputs.update(shared_state)
+            # Or synchronize the entire global state to the agent session
+            # agent_session.update_global_state(session.get_global_state("key"))
+
+            # 异步流式执行代理，并逐块返回结果
+            async for chunk in self._react_agent.stream(inputs, agent_session):
+                # 格式化输出块（若需要）
+                # 如果块是输出架构实例，则提取其有效载荷
+                if isinstance(chunk, OutputSchema):
+                    # if type is llm_output and content exists, extract content; otherwise, use payload directly
+                    if chunk.type == 'llm_output' and "content" in chunk.payload:
+                        chunk = {"output": chunk.payload["content"]}
+                    else:
+                        chunk = chunk.payload
                 yield chunk
         except Exception as e:
             # Handle errors appropriately
@@ -64,37 +88,3 @@ class ReActAgentCompExecutable(ComponentExecutable):
                 "type": "error",
                 "payload": {"output": f"Error in ReAct streaming: {str(e)}", "result_type": "error"}
             }
-
-    async def collect(self, inputs: Input, session: Session, context: ModelContext) -> Output:
-        """Execute ReAct loop with streaming input aggregated to batch output."""
-        # For now, just delegate to invoke since ReAct expects batch input
-        # In the future, we could aggregate streaming inputs
-        try:
-            # If inputs is an async iterator, collect it first
-            if hasattr(inputs, '__aiter__'):
-                collected_inputs = []
-                async for input_chunk in inputs:
-                    collected_inputs.append(input_chunk)
-                
-                # Combine collected inputs into a single input
-                if len(collected_inputs) == 1:
-                    final_inputs = collected_inputs[0]
-                else:
-                    # Combine multiple inputs - this depends on the input format
-                    # For now, just use the last input
-                    final_inputs = collected_inputs[-1]
-            else:
-                final_inputs = inputs
-                
-            result = await self._react_agent.invoke(final_inputs, session)
-            return result
-        except Exception as e:
-            return {
-                "output": f"Error in ReAct collect: {str(e)}",
-                "result_type": "error"
-            }
-
-    async def transform(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
-        # Transform streaming input to streaming output
-        result = await self.invoke(inputs, session, context)
-        yield result

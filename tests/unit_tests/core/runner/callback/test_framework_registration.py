@@ -612,7 +612,7 @@ async def test_on_decorator_with_handlers(framework):
     async def rollback_handler(context):
         handler_calls.append("rollback")
 
-    @framework.on(
+    @framework.on_chain(
         "event",
         error_handler=error_handler,
         rollback_handler=rollback_handler

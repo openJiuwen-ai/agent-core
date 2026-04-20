@@ -8,10 +8,9 @@ lifecycle: temporary
 teammate_mode: build_mode
 
 leader:
-  member_id: team_leader
-  name: TeamLeader
+  member_name: team_leader
+  display_name: TeamLeader
   persona: "天才项目管理专家"
-  domain: project_management
 
 agents:
   leader:

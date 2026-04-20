@@ -71,9 +71,71 @@ results = await framework.trigger("my_event", 3)  # [6]
 
 ---
 
-## Dynamic callback registration (non-decorator)
+## Callback registration (decorator way)
 
-Besides the `@framework.on(...)` decorator, you can register callbacks at runtime with **register**, so you can add or
+The decorator way is the most commonly used registration method, directly registering functions as callbacks through `@framework.on()` or `@framework.on_chain()` decorators.
+
+### @framework.on: Regular event callback
+
+Used to register regular event callbacks, supporting all trigger modes.
+
+```python
+@framework.on("user_login", priority=10, once=False, namespace="auth", tags={"user", "login"})
+async def handle_login(username: str, **kwargs):
+    print(f"User {username} logged in")
+    return f"welcome_{username}"
+```
+
+**Parameter Description**:
+- `event`: Event name, used to bind callback functions
+- `priority`: Execution priority, higher numbers execute first (default: 0)
+- `once`: Whether to execute only once, automatically disabled after execution (default: False)
+- `namespace`: Namespace, used for grouping and managing callbacks (default: "default")
+- `tags`: Tag set, used for classification and batch management (default: None)
+- `filters`: Callback-specific filters (invalid in callback chains, default: None)
+- `rollback_handler`: Rollback processing function (only valid in callback chains, default: None)
+- `error_handler`: Error handling function (only valid in callback chains, default: None)
+- `max_retries`: Maximum number of retries (default: 0)
+- `retry_delay`: Retry delay time in seconds (default: 0.0)
+- `timeout`: Execution timeout time in seconds (default: None)
+- `callback_type`: Semantic type marker, e.g., "transform" (default: "")
+
+### @framework.on_chain: Callback chain specific
+
+Specifically used to register callbacks for callback chains, automatically setting `filters=None` (callback chains don't support filters).
+
+```python
+@framework.on_chain("order_process", priority=30, rollback_handler=rollback_payment)
+async def process_payment(order: dict, **kwargs):
+    order["paid"] = True
+    return ChainResult(ChainAction.CONTINUE, result=order)
+
+@framework.on_chain("order_process", priority=20, rollback_handler=rollback_inventory)
+async def reserve_inventory(order: dict, **kwargs):
+    if order.get("quantity", 0) > 100:
+        return ChainResult(ChainAction.ROLLBACK, error=Exception("Insufficient inventory"))
+    order["reserved"] = True
+    return ChainResult(ChainAction.CONTINUE, result=order)
+```
+
+**Parameter Description**:
+- `event`: Event name, used to bind callback functions
+- `priority`: Execution priority, higher numbers execute first (default: 0)
+- `once`: Whether to execute only once, automatically disabled after execution (default: False)
+- `namespace`: Namespace, used for grouping and managing callbacks (default: "default")
+- `tags`: Tag set, used for classification and batch management (default: None)
+- `rollback_handler`: Rollback processing function, called in reverse order when chain execution fails (only valid in callback chains, default: None)
+- `error_handler`: Error handling function, called when callback execution fails (only valid in callback chains, default: None)
+- `max_retries`: Maximum number of retries (default: 0)
+- `retry_delay`: Retry delay time in seconds (default: 0.0)
+- `timeout`: Execution timeout time in seconds (default: None)
+- `callback_type`: Semantic type marker, e.g., "transform" (default: "")
+
+> **Note**: `@framework.on_chain` automatically sets `filters=None` because the current version does not support filters for callback chains.
+
+## Dynamic callback registration (non-decorator way)
+
+Besides the `@framework.on(...)` and `@framework.on_chain(...)` decorators, you can register callbacks at runtime with **register**, so you can add or
 remove handlers based on configuration, plugins, or conditions.
 
 ### When to use
@@ -324,12 +386,12 @@ async def rollback_payment(ctx):
 async def rollback_inventory(ctx):
     print("Rollback inventory")
 
-@framework.on("order_create", priority=30, rollback_handler=rollback_payment)
+@framework.on_chain("order_create", priority=30, rollback_handler=rollback_payment)
 async def pay(order: dict, **kwargs):
     order["paid"] = True
     return ChainResult(ChainAction.CONTINUE, result=order)
 
-@framework.on("order_create", priority=20, rollback_handler=rollback_inventory)
+@framework.on_chain("order_create", priority=20, rollback_handler=rollback_inventory)
 async def reserve(order: dict, **kwargs):
     if order.get("quantity", 0) > 100:
         return ChainResult(ChainAction.ROLLBACK, error=Exception("Insufficient stock"))
@@ -351,6 +413,16 @@ Use `kwargs["_chain_context"]` to get **ChainContext** and pass data between ste
 
 - **@framework.on(event, priority=0, once=False, namespace="default", tags=None, filters=None, rollback_handler=None, error_handler=None, max_retries=0, retry_delay=0.0, timeout=None, callback_type="")**
   Register a function as a callback for the event. Higher priority runs first; `once=True` disables after one run; `error_handler` is called when the callback raises; `callback_type` is a semantic marker — `"transform"` marks the callback as transform-only.
+  
+  > **Note**: The `filters` parameter only takes effect when using regular trigger modes like `trigger` and `trigger_parallel`; it is not applied when using `trigger_chain`.
+
+- **@framework.on_chain(event, priority=0, once=False, namespace="default", tags=None, rollback_handler=None, error_handler=None, max_retries=0, retry_delay=0.0, timeout=None, callback_type="")**
+  Decorator specifically for callback chains. Similar to `@framework.on()` but automatically sets `filters=None` (callback chains don't support filters), and is more suitable for configuring rollback and error handling functions.
+  
+  > **Note**: The `filters` parameter only takes effect when using regular trigger modes like `trigger` and `trigger_parallel`; it is not applied when using `trigger_chain`.
+
+- **@framework.on_chain(event, priority=0, once=False, namespace="default", tags=None, rollback_handler=None, error_handler=None, max_retries=0, retry_delay=0.0, timeout=None, callback_type="")**
+  Decorator specifically for callback chains. Similar to `@framework.on()` but automatically sets `filters=None` (callback chains don't support filters), and is more suitable for configuring rollback and error handling functions.
 
 - **@framework.trigger_on_call(event, pass_result=False, pass_args=True)**
   Trigger the event when the decorated function is **called** (optionally pass args or trigger again with result after return).

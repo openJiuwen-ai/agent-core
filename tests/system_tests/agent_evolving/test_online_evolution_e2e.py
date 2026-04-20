@@ -311,60 +311,6 @@ class TestOnlineEvolutionE2E:
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_solidify_after_evolution(tmp_path: Path):
-        """Verify that body records can be solidified into SKILL.md after
-        the evolution pipeline completes."""
-
-        skill_name = "solidify-skill"
-        _prepare_skill(
-            tmp_path / "skills", skill_name,
-            "# Solidify Skill\n\n## Troubleshooting\n- existing item\n",
-        )
-
-        llm = MagicMock()
-        llm.invoke = AsyncMock(return_value=SimpleNamespace(content=json.dumps([{
-            "action": "append",
-            "target": "body",
-            "section": "Troubleshooting",
-            "content": "### New Finding\n- Always check permissions first",
-        }])))
-
-        optimizer = SkillExperienceOptimizer(llm=llm, model="mock", language="en")
-        store = EvolutionStore(str(tmp_path / "skills"))
-
-        signals = SignalDetector().detect([
-            {"role": "tool", "name": "bash", "content": "Error: EACCES permission denied"},
-        ])
-
-        ctx = EvolutionContext(
-            skill_name=skill_name,
-            signals=signals,
-            skill_content="# Solidify Skill\n\n## Troubleshooting\n- existing item\n",
-            messages=[{"role": "user", "content": "fix it"}],
-            existing_desc_records=[],
-            existing_body_records=[],
-        )
-
-        records = await optimizer.generate_records(ctx)
-        for record in records:
-            await store.append_record(skill_name, record)
-
-        pending_before = await store.get_pending_records(skill_name, EvolutionTarget.BODY)
-        assert len(pending_before) == 1
-
-        count = await store.solidify(skill_name)
-        assert count == 1
-
-        pending_after = await store.get_pending_records(skill_name, EvolutionTarget.BODY)
-        assert len(pending_after) == 0
-
-        skill_md = (tmp_path / "skills" / skill_name / "SKILL.md").read_text(encoding="utf-8")
-        assert "New Finding" in skill_md
-        assert "existing item" in skill_md
-        assert "Always check permissions first" in skill_md
-
-    @staticmethod
-    @pytest.mark.asyncio
     async def test_merge_target_replaces_existing_record(tmp_path: Path):
         """Verify that a new record with merge_target replaces the old one
         instead of appending a duplicate."""

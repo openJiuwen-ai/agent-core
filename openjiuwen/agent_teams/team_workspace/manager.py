@@ -85,17 +85,37 @@ class TeamWorkspaceManager:
     async def initialize(self, *, remote_url: str | None = None) -> None:
         """Initialize workspace directory and git repo.
 
-        LOCAL mode: git init a fresh repo with an empty initial commit.
-        DISTRIBUTED mode:
+        When ``config.version_control`` is False, only the workspace and
+        artifact directories are created — no git repo, no remote, no
+        initial commit. The workspace behaves as a plain shared directory.
+
+        When ``config.version_control`` is True:
+        - LOCAL mode: git init a fresh repo with an empty initial commit.
+        - DISTRIBUTED mode:
           - Leader: git init + add remote origin (if remote_url provided).
           - Remote node: git clone from remote_url.
-
-        Skips initialization if .git directory already exists.
+        Skips git init if .git directory already exists.
 
         Args:
             remote_url: Git remote URL for distributed workspace repo.
         """
         os.makedirs(self.workspace_path, exist_ok=True)
+
+        # Create artifact directories regardless of version_control mode
+        for d in self.config.artifact_dirs:
+            os.makedirs(os.path.join(self.workspace_path, d), exist_ok=True)
+
+        # Shared skills directory; each member agent's SkillUseRail picks
+        # this up via the ``.team/{team_name}`` mount so team-authored
+        # skills are visible everywhere.
+        os.makedirs(os.path.join(self.workspace_path, "skills"), exist_ok=True)
+
+        if not self.config.version_control:
+            team_logger.info(
+                "Workspace %s initialized as plain shared directory (version_control disabled)",
+                self.workspace_path,
+            )
+            return
 
         git_dir = os.path.join(self.workspace_path, ".git")
         if os.path.isdir(git_dir):
@@ -117,15 +137,6 @@ class TeamWorkspaceManager:
                 check=True,
             )
             team_logger.info("Initialized workspace git repo at %s", self.workspace_path)
-
-        # Create artifact directories
-        for d in self.config.artifact_dirs:
-            os.makedirs(os.path.join(self.workspace_path, d), exist_ok=True)
-
-        # Shared skills directory; each member agent's SkillUseRail picks
-        # this up via the ``.team/{team_name}`` mount so team-authored
-        # skills are visible everywhere.
-        os.makedirs(os.path.join(self.workspace_path, "skills"), exist_ok=True)
 
         # Leader in DISTRIBUTED: set up remote if provided
         if self.mode == WorkspaceMode.DISTRIBUTED and remote_url and self._leader_id == self._node_id:
@@ -236,8 +247,10 @@ class TeamWorkspaceManager:
 
         Returns:
             True if new changes were pulled, False otherwise.
-            Always returns False in LOCAL mode.
+            Always returns False in LOCAL mode or when version_control is off.
         """
+        if not self.config.version_control:
+            return False
         if self.mode != WorkspaceMode.DISTRIBUTED:
             return False
 
@@ -251,8 +264,11 @@ class TeamWorkspaceManager:
         """Push local commits to remote (DISTRIBUTED only).
 
         Returns:
-            True on success or in LOCAL mode (no-op). False on push failure.
+            True on success, in LOCAL mode, or when version_control is off
+            (all no-ops). False on push failure.
         """
+        if not self.config.version_control:
+            return True
         if self.mode != WorkspaceMode.DISTRIBUTED:
             return True
 
@@ -277,8 +293,12 @@ class TeamWorkspaceManager:
             member_name: ID of the member making the change.
 
         Returns:
-            Commit SHA on success, None if nothing to commit or commit failed.
+            Commit SHA on success, None if nothing to commit, commit
+            failed, or ``version_control`` is disabled.
         """
+        if not self.config.version_control:
+            return None
+
         await _run_git(["add", relative_path], cwd=self.workspace_path)
 
         status = await _run_git(["diff", "--cached", "--quiet"], cwd=self.workspace_path)
@@ -306,6 +326,7 @@ class TeamWorkspaceManager:
         """Get version history for a file.
 
         In distributed mode, pulls latest before querying history.
+        Returns an empty list when ``version_control`` is disabled.
 
         Args:
             relative_path: File path relative to workspace root.
@@ -314,6 +335,9 @@ class TeamWorkspaceManager:
         Returns:
             List of dicts with keys: commit, author, date, message.
         """
+        if not self.config.version_control:
+            return []
+
         if self.mode == WorkspaceMode.DISTRIBUTED:
             await self.pull()
 

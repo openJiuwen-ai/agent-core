@@ -4,6 +4,6 @@
 
 - [概述](./概述.md)
 - [TeamRuntime 与 CommunicableAgent](./TeamRuntime与CommunicableAgent.md)
-- [BaseTeam 智能体团队](./BaseTeam.md)
+- [BaseTeam 团队封装](./BaseTeam.md)
 - [Agent as Tool](./AgentAsTool.md)
-- [AgentTeams](./AgentTeams.md)
+- [预置协作模式](./预置协作模式.md)

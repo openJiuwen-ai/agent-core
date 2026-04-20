@@ -178,9 +178,7 @@ class EvolutionLog:
 
     skill_id: str
     version: str = "1.0.0"
-    updated_at: str = field(
-        default_factory=lambda: datetime.now(tz=timezone.utc).isoformat()
-    )
+    updated_at: str = field(default_factory=lambda: datetime.now(tz=timezone.utc).isoformat())
     entries: List[EvolutionRecord] = field(default_factory=list)
 
     @property
@@ -268,6 +266,7 @@ class EvolutionContext:
     messages: List[dict]
     existing_desc_records: List[EvolutionRecord]
     existing_body_records: List[EvolutionRecord]
+    user_query: str = ""
 
 
 __all__ = [

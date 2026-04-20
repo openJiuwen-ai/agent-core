@@ -151,34 +151,22 @@ class DefaultCheckpointManager:
         return list(self._pending.get(operator_id, []))
 
     def commit_pending(self, operator_id: str, store: "EvolutionStore") -> int:
-        """Commit all pending changes for an operator to EvolutionStore.
+        """Drain and count pending changes for an operator without persisting.
 
-        Persists all pending records to SKILL.md via EvolutionStore
-        append_record() + solidify() logic.
+        This method only clears in-memory pending state and returns the
+        record count. It does **not** write to disk. The caller is
+        responsible for persisting records via ``store.append_record()``
+        before or after calling this method.
 
         Args:
-            operator_id: Operator identifier whose changes to commit.
-            store: EvolutionStore to write changes to.
+            operator_id: Operator identifier whose changes to drain.
+            store: EvolutionStore (reserved for future async commit path).
 
         Returns:
-            Number of records committed (synchronously returns 0,
-            async write happens in background).
-
-        Note:
-            This method returns the count immediately but actual write
-            is async. For async commit, the caller should use an async
-            wrapper that awaits store operations.
+            Number of records that were in the pending queue.
         """
-        pending_list = self._pending.get(operator_id, [])
-        count = 0
-        for change in pending_list:
-            for record in change.payload:
-                # Note: store.append_record is async; caller should
-                # handle async execution if needed.
-                count += 1
-        # Clear pending after counting (async commit by caller)
-        if operator_id in self._pending:
-            del self._pending[operator_id]
+        pending_list = self._pending.pop(operator_id, [])
+        count = sum(len(change.payload) for change in pending_list)
         return count
 
     def discard_pending(self, operator_id: str, change_id: str) -> None:
@@ -190,7 +178,4 @@ class DefaultCheckpointManager:
         """
         if operator_id not in self._pending:
             return
-        self._pending[operator_id] = [
-            change for change in self._pending[operator_id]
-            if change.change_id != change_id
-        ]
+        self._pending[operator_id] = [change for change in self._pending[operator_id] if change.change_id != change_id]

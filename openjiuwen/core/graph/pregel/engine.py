@@ -64,18 +64,19 @@ class PregelLoop:
             return await self._run_step()
         except Exception as e:
             # Add GRAPH_SUPER_STEP_ERROR log
-            graph_logger.error(
-                f"Failed to run graph super-step[{self.step}]",
-                event_type=LogEventType.GRAPH_SUPER_STEP_ERROR,
-                exception=e,
-                graph_id=self.config.get(NS),
-                session_id=self.config.get(SESSION_ID),
-                metadata={
-                    "ns": self.config.get(NS),
-                    "step": self.step,
-                    "active_nodes": list(self.active_nodes) if self.active_nodes else [],
-                }
-            )
+            if not isinstance(e, GraphInterrupt):
+                graph_logger.error(
+                    f"Failed to run graph super-step[{self.step}]",
+                    event_type=LogEventType.GRAPH_SUPER_STEP_ERROR,
+                    exception=e,
+                    graph_id=self.config.get(NS),
+                    session_id=self.config.get(SESSION_ID),
+                    metadata={
+                        "ns": self.config.get(NS),
+                        "step": self.step,
+                        "active_nodes": list(self.active_nodes) if self.active_nodes else [],
+                    }
+                )
             await self._save_state_on_error(e)
             raise e
 

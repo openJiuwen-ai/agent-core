@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import re
-import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
@@ -28,6 +27,8 @@ from openjiuwen.agent_evolving.checkpointing.types import (
 from openjiuwen.agent_evolving.optimizer.skill_call import (
     SkillExperienceOptimizer,
     ExperienceScorer,
+    SkillRewriter,
+    SkillRewriteResult,
     update_score,
 )
 from openjiuwen.agent_evolving.signal import (
@@ -322,8 +323,7 @@ class SkillEvolutionRail(EvolutionRail):
 
             # Branch 2: Detect new skill creation (only when no existing skill was processed)
             logger.info(
-                "[SkillEvolutionRail] existing_skill_processed=%s, "
-                "new_skill_detection=%s",
+                "[SkillEvolutionRail] existing_skill_processed=%s, new_skill_detection=%s",
                 existing_skill_processed,
                 self._new_skill_detection,
             )
@@ -362,6 +362,7 @@ class SkillEvolutionRail(EvolutionRail):
         skill_name: str,
         signals: List[EvolutionSignal],
         messages: List[dict],
+        user_query: str = "",
     ) -> bool:
         """Generate experience records and emit approval events for a skill.
 
@@ -372,12 +373,33 @@ class SkillEvolutionRail(EvolutionRail):
             skill_name: Name of the skill to evolve.
             signals: Detected evolution signals attributed to the skill.
             messages: Parsed conversation messages for context.
+            user_query: Optional user-specified optimization direction.
 
         Returns:
             True if at least one experience record was staged and emitted.
         """
+        # If user_query is non-empty, create a synthetic signal
+        if user_query:
+            signals = list(signals)  # avoid mutating the caller's list
+            signals.append(
+                EvolutionSignal(
+                    signal_type="user_query",
+                    evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
+                    section="",
+                    excerpt=user_query,
+                    skill_name=skill_name,
+                )
+            )
+
+        # If messages is empty but user_query is non-empty, construct a synthetic user message
+        if not messages and user_query:
+            messages = [{"role": "user", "content": user_query}]
+
         has_records = await self._generate_experience_via_optimizer(
-            skill_name, signals, messages
+            skill_name,
+            signals,
+            messages,
+            user_query=user_query,
         )
         if not has_records:
             return False
@@ -415,20 +437,22 @@ class SkillEvolutionRail(EvolutionRail):
             content_preview = record.change.content[:1000]
             section = record.change.section
             target_tag = record.change.target.value
-            questions.append({
-                "question": (
-                    f"**Skill '{skill_name}' 演进生成了新经验：**\n\n"
-                    f"- **目标**: {target_tag}\n"
-                    f"- **章节**: {section}\n\n"
-                    f"{content_preview}"
-                ),
-                "header": "技能演进审批",
-                "options": [
-                    {"label": "接收", "description": "保留此演进经验"},
-                    {"label": "拒绝", "description": "丢弃此演进经验"},
-                ],
-                "multi_select": False,
-            })
+            questions.append(
+                {
+                    "question": (
+                        f"**Skill '{skill_name}' 演进生成了新经验：**\n\n"
+                        f"- **目标**: {target_tag}\n"
+                        f"- **章节**: {section}\n\n"
+                        f"{content_preview}"
+                    ),
+                    "header": "技能演进审批",
+                    "options": [
+                        {"label": "接收", "description": "保留此演进经验"},
+                        {"label": "拒绝", "description": "丢弃此演进经验"},
+                    ],
+                    "multi_select": False,
+                }
+            )
 
         event = OutputSchema(
             type="chat.ask_user_question",
@@ -525,7 +549,11 @@ class SkillEvolutionRail(EvolutionRail):
         return max(hits, key=hits.get)  # type: ignore[arg-type]
 
     async def _generate_experience_via_optimizer(
-        self, skill_name: str, signals: List[EvolutionSignal], messages: List[dict]
+        self,
+        skill_name: str,
+        signals: List[EvolutionSignal],
+        messages: List[dict],
+        user_query: str = "",
     ) -> bool:
         """Stage experience records in memory; no disk write until on_approve().
 
@@ -538,6 +566,8 @@ class SkillEvolutionRail(EvolutionRail):
         # Inject current conversation messages so the optimizer can use them for context
         state = skill_op.get_state()
         state["messages"] = messages
+        if user_query:
+            state["user_query"] = user_query
         skill_op.load_state(state)
 
         # bind() expects Dict[str, Operator], not a list
@@ -555,7 +585,7 @@ class SkillEvolutionRail(EvolutionRail):
         return bool(skill_op.staged_records)
 
     async def on_approve(self, request_id: str) -> None:
-        """Called by host when user accepts: flush the snapshotted records then solidify.
+        """Called by host when user accepts: flush the snapshotted records.
 
         The ``request_id`` matches ``payload["request_id"]`` from the approval event.
         Records are re-enqueued into ``SkillCallOperator._staged_records`` and written via
@@ -584,22 +614,6 @@ class SkillEvolutionRail(EvolutionRail):
                 flushed + len(pending.payload),
                 skill_name,
                 request_id,
-            )
-            return
-        # All records flushed — solidify first, then remove the snapshot.
-        # Keeping the snapshot until solidify() succeeds means a transient I/O
-        # failure (e.g. permission error on SKILL.md) can be retried: on the
-        # next on_approve() call pending.payload is empty so flush_to_store()
-        # is a no-op and only solidify() is retried.
-        try:
-            await self._evolution_store.solidify(skill_name)
-        except Exception as exc:
-            logger.warning(
-                "[SkillEvolutionRail] on_approve solidify failed for skill=%s (request=%s): %s; "
-                "retry on_approve to complete",
-                skill_name,
-                request_id,
-                exc,
             )
             return
         self._pending_approval_snapshots.pop(request_id)
@@ -631,6 +645,7 @@ class SkillEvolutionRail(EvolutionRail):
         skill_name: str,
         signals: List[EvolutionSignal],
         messages: List[dict],
+        user_query: str = "",
     ) -> List[EvolutionRecord]:
         context = EvolutionContext(
             skill_name=skill_name,
@@ -641,6 +656,7 @@ class SkillEvolutionRail(EvolutionRail):
                 skill_name, EvolutionTarget.DESCRIPTION
             ),
             existing_body_records=await self._evolution_store.get_pending_records(skill_name, EvolutionTarget.BODY),
+            user_query=user_query,
         )
         try:
             return await self._evolver.generate_records(context)
@@ -891,11 +907,10 @@ class SkillEvolutionRail(EvolutionRail):
                     tool_calls.extend(calls)
 
         logger.info(
-                "[SkillEvolutionRail] new skill check: "
-                "tool_calls=%d, threshold=%d",
-                len(tool_calls),
-                self._new_skill_tool_threshold,
-            )
+            "[SkillEvolutionRail] new skill check: tool_calls=%d, threshold=%d",
+            len(tool_calls),
+            self._new_skill_tool_threshold,
+        )
 
         if len(tool_calls) < self._new_skill_tool_threshold:
             logger.info(
@@ -1054,6 +1069,49 @@ class SkillEvolutionRail(EvolutionRail):
                 "[SkillEvolutionRail] user rejected new skill creation: %s",
                 pending.name,
             )
+
+    async def rewrite_skill(
+        self,
+        skill_name: str,
+        *,
+        min_score: float = 0.0,
+        dry_run: bool = False,
+        user_query: str = "",
+    ) -> Optional[SkillRewriteResult]:
+        """Rewrite SKILL.md by integrating evolution experiences.
+
+        This is a public API for callers to actively trigger skill rewriting.
+        This method uses LLM to deeply integrate experiences into the
+        SKILL.md body for a more natural, coherent document.
+
+        Args:
+            skill_name: Name of the skill to rewrite
+            min_score: Minimum score threshold for experiences to include
+            dry_run: If True, only return result without writing to disk
+            user_query: Optional user-specified optimization direction
+
+        Returns:
+            SkillRewriteResult on success, None if no valid experiences or rewrite not needed
+
+        Example:
+            result = await rail.rewrite_skill("my-skill", min_score=0.5)
+            if result:
+                print(result.summary)
+        """
+        rewriter = SkillRewriter(
+            self._optimizer_llm,
+            self._optimizer_model,
+            self._optimizer_language,
+        )
+        result = await rewriter.rewrite(
+            skill_name,
+            self._evolution_store,
+            min_score=min_score,
+            dry_run=dry_run,
+            user_query=user_query,
+        )
+        # The rewriter already deletes consumed records in rewrite().
+        return result
 
 
 __all__ = ["SkillEvolutionRail"]

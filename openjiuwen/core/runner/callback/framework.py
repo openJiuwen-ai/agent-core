@@ -233,8 +233,6 @@ class AsyncCallbackFramework:
             namespace: str = "default",
             tags: Optional[Set[str]] = None,
             filters: Optional[List[EventFilter]] = None,
-            rollback_handler: Optional[Callable] = None,
-            error_handler: Optional[Callable] = None,
             max_retries: int = 0,
             retry_delay: float = 0.0,
             timeout: Optional[float] = None,
@@ -273,6 +271,65 @@ class AsyncCallbackFramework:
             namespace=namespace,
             tags=tags,
             filters=filters,
+            rollback_handler=None,
+            error_handler=None,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
+            timeout=timeout,
+            callback_type=callback_type,
+        )
+
+    def on_chain(
+            self,
+            event: str,
+            *,
+            priority: int = 0,
+            once: bool = False,
+            namespace: str = "default",
+            tags: Optional[Set[str]] = None,
+            rollback_handler: Optional[Callable] = None,
+            error_handler: Optional[Callable] = None,
+            max_retries: int = 0,
+            retry_delay: float = 0.0,
+            timeout: Optional[float] = None,
+            callback_type: str = "",
+    ):
+        """Decorator to register an async callback specifically for callback chains.
+
+        This method is similar to `on()` but is designed specifically for use with
+        callback chains. All chain-related parameters should be provided here instead
+        of in the regular `on()` method.
+
+        Example:
+            >>> framework = AsyncCallbackFramework()
+            >>> @framework.on_chain("order_process", rollback_handler=rollback_order)
+            >>> async def process_payment(order_id: str):
+            >>>     print(f"Processing payment for order: {order_id}")
+
+        Args:
+            event: Event name to listen for
+            priority: Execution priority (higher first)
+            once: Execute only once then disable
+            namespace: Namespace for grouping
+            tags: Set of tags for filtering
+            rollback_handler: Function to call on rollback
+            error_handler: Function to call on error
+            max_retries: Maximum retry attempts
+            retry_delay: Delay between retries in seconds
+            timeout: Execution timeout in seconds
+            callback_type: Semantic type marker, e.g. "transform"
+
+        Returns:
+            Decorator function
+        """
+        return create_on_decorator(
+            self,
+            event,
+            priority=priority,
+            once=once,
+            namespace=namespace,
+            tags=tags,
+            filters=None,
             rollback_handler=rollback_handler,
             error_handler=error_handler,
             max_retries=max_retries,

@@ -40,3 +40,18 @@
 | [ListFilesResult](./sys_operation/result.md) | 列出文件结果。 |
 | [ListDirsResult](./sys_operation/result.md) | 列出目录结果。 |
 | [SearchFilesResult](./sys_operation/result.md) | 搜索文件结果。 |
+
+## 沙箱模式
+
+沙箱模式是 SysOperation 的一种运行模式，将文件系统、Shell 和代码执行能力路由到隔离环境中执行。
+
+**沙箱 API 文档**：
+
+| CLASS | DESCRIPTION |
+|-------|-------------|
+| [sandbox_config](./sys_operation/sandbox/sandbox_config.md) | 沙箱配置类 |
+| [sandbox_registry](./sys_operation/sandbox/sandbox_registry.md) | 沙箱注册中心 |
+| [gateway](./sys_operation/sandbox/gateway/gateway.md) | 沙箱网关 |
+| [gateway_client](./sys_operation/sandbox/gateway/gateway_client.md) | 沙箱网关客户端 |
+| [launchers/base](./sys_operation/sandbox/launchers/base.md) | 沙箱启动器基类 |
+| [providers/base_provider](./sys_operation/sandbox/providers/base_provider.md) | 沙箱 Provider 基类 |

@@ -11,6 +11,10 @@ from openjiuwen.agent_evolving.optimizer.skill_call.experience_scorer import (
     calc_score,
     update_score,
 )
+from openjiuwen.agent_evolving.optimizer.skill_call.skill_rewriter import (
+    SkillRewriter,
+    SkillRewriteResult,
+)
 
 __all__ = [
     "SkillExperienceOptimizer",
@@ -20,4 +24,6 @@ __all__ = [
     "calc_freshness",
     "calc_score",
     "update_score",
+    "SkillRewriter",
+    "SkillRewriteResult",
 ]

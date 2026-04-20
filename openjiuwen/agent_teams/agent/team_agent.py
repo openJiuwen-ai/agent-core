@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from typing import (
     Any,
@@ -97,6 +98,11 @@ class TeamAgent(BaseAgent):
         self._dispatcher = None
         self._teammate_port_counter: int = 0
         self._spawned_handles: dict[str, SpawnedProcessHandle] = {}
+        # Strong refs for fire-and-forget teammate-recovery tasks. Health-check
+        # callbacks are invoked synchronously from process_manager, so the
+        # coroutine they schedule has no other owner — without a set here, the
+        # event loop's weak reference lets the GC reap it mid-restart.
+        self._recovery_tasks: set[asyncio.Task] = set()
         self._member_port_map: dict[str, int] = {}
         self._first_iter_gate: Optional["FirstIterationGate"] = None
         self._pending_interrupt_resumes: list[InteractiveInput] = []
@@ -906,6 +912,26 @@ class TeamAgent(BaseAgent):
             )
         )
 
+    async def _drain_agent_task(self) -> None:
+        """Cancel the in-flight agent round and wait for it to exit.
+
+        Called from the pause/stop paths so an agent task whose stream
+        consumer has already detached (early ``break`` / ``GeneratorExit``)
+        cannot keep producing chunks against a queue that nobody is
+        draining. Clears ``_pending_inputs`` and
+        ``_pending_interrupt_resumes`` first because ``_run_one_round``'s
+        ``finally`` block would otherwise relaunch a fresh round mid
+        teardown.
+        """
+        task = self._agent_task
+        if task is None or task.done():
+            return
+        self._pending_inputs.clear()
+        self._pending_interrupt_resumes.clear()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
     async def _pause_coordination(self) -> None:
         """Pause coordination for persistent teams.
 
@@ -914,6 +940,7 @@ class TeamAgent(BaseAgent):
         teammate processes.
         """
         team_logger.info("[{}] coordination pausing (persistent)", self._member_name() or "?")
+        await self._drain_agent_task()
         # Signal teammates to pause polls
         if self._messager and self.role == TeamRole.LEADER:
             from openjiuwen.agent_teams.schema.events import (
@@ -940,7 +967,20 @@ class TeamAgent(BaseAgent):
     async def _stop_coordination(self) -> None:
         """Stop the coordination loop, send sentinel, and unsubscribe."""
         team_logger.info("[{}] coordination stopping", self._member_name() or "?")
+        await self._drain_agent_task()
         await self._unsubscribe_transport()
+        # Cancel any in-flight teammate-recovery tasks before tearing down
+        # the spawn handles they would operate on. Snapshot the set because
+        # done_callback mutates it.
+        if self._recovery_tasks:
+            pending = list(self._recovery_tasks)
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            for task in pending:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+            self._recovery_tasks.clear()
         # Shut down all spawned teammate processes
         for mid, handle in list(self._spawned_handles.items()):
             try:
@@ -1458,7 +1498,10 @@ class TeamAgent(BaseAgent):
         self._spawned_handles[member_name] = handle
 
         def _trigger_unhealthy_recovery() -> asyncio.Task:
-            return asyncio.ensure_future(self._on_teammate_unhealthy(member_name))
+            task = asyncio.ensure_future(self._on_teammate_unhealthy(member_name))
+            self._recovery_tasks.add(task)
+            task.add_done_callback(self._recovery_tasks.discard)
+            return task
 
         handle.on_unhealthy = _trigger_unhealthy_recovery
         return handle
