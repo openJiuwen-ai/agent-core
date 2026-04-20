@@ -634,7 +634,7 @@ class SiliconFlowModelClient(BaseModelClient):
                         id=tool_call_id or "",
                         type="function",
                         name=name_delta or "",
-                        arguments=args_delta,
+                        arguments=args_delta or "",
                         index=index
                     )
                     tool_calls.append(tool_call)
