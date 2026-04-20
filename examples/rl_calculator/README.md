@@ -1,10 +1,10 @@
-Calculator 强化学习示例
+﻿Calculator 强化学习示例
 =======================
 
 请先阅读仓库文档 **[ReactAgent 强化学习](../../docs/zh/2.开发指南/高阶用法/ReactAgent强化学习.md)**，其中说明了详细的 **verl**、**vLLM / vllm-ascend**、OpenYuanrong 等环境与依赖部署，以及通用训练流程。
 
 
-本示例演示如何使用 openjiuwen 的 `agentrl` 模块训练一个借助计算器工具求解数学题的 ReactAgent。
+本示例演示如何使用 openjiuwen 的 `openjiuwen.agent_evolving.agent_rl` 模块训练一个借助计算器工具求解数学题的 ReactAgent。
 
 目录结构
 --------
@@ -13,18 +13,24 @@ Calculator 强化学习示例
 - `prompts.py`：计算器场景的系统提示词模板。
 - `tools.py`：计算器工具，支持算术、代数化简和方程求解。
 - `reward.py`：奖励函数，答案正确记 1 分，否则 0 分。
-- `train.py`：训练入口，配置 `RLConfig`，注册 reward / tool / task_data_fn，启动 `RLOptimizer.train()以开启训练`。
+- `train.py`：训练入口，配置 `RLConfig`，注册 reward / tool / task_data_fn，创建 `OfflineRLOptimizer` 并调用 `train()` 开启训练。
 
 运行步骤
 --------
 
-1. 下载 Calc-X 数据：从 [calc-x-data.zip](https://drive.google.com/file/d/1bQF0Etkw2TC6W7SX-LPA6Aq4XmLZC4e6/view?usp=drive_link) 下载压缩包并解压。解压后应得到包含 `train.parquet` 与 `test.parquet` 的目录（Parquet 含 `question`、`result` 列，分别对应题目与标准答案）。
+1. 安装计算器工具依赖：
 
-2. 编辑并启动训练：
+   ```bash
+   pip install simpleeval
+   ```
+
+2. 下载 Calc-X 数据：从 [calc-x-data.zip](https://drive.google.com/file/d/1bQF0Etkw2TC6W7SX-LPA6Aq4XmLZC4e6/view?usp=drive_link) 下载压缩包并解压。解压后应得到包含 `train.parquet` 与 `test.parquet` 的目录（Parquet 含 `question`、`result` 列，分别对应题目与标准答案）。
+
+3. 编辑并启动训练：
 
    打开 `examples/rl_calculator/train.py`，至少配置好以下内容：
 
-   - **Parquet 训练/验证数据**：修改文件顶部的 `DATA_DIR`，使其指向第 1 步解压后的目录（目录中应有 `train.parquet`、`test.parquet`）。
+   - **Parquet 训练/验证数据**：修改文件顶部的 `DATA_DIR`，使其指向第 2 步解压后的目录（目录中应有 `train.parquet`、`test.parquet`）。
    - **基座模型**：在 `TrainingConfig` 中设置 `model_path`，指向本机 Hugging Face 格式的模型目录。
    - **其它**：按需调整 `save_path`（checkpoint 输出）、`n_gpus_per_node`、`visible_device` 等。
 
@@ -61,6 +67,8 @@ export HCCL_EXEC_TIMEOUT=3600
 export HCCL_CONNECT_TIMEOUT=3600
 export HCCL_IF_BASE_PORT=48890
 export TASK_QUEUE_ENABLE=1
+export VLLM_ASCEND_ENABLE_NZ=0
+export VLLM_USE_V1=1
    ```
 
 启动训练：

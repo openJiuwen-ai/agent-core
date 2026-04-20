@@ -78,6 +78,9 @@ class EvolutionRail(DeepAgentRail):
             source="online",
         )
 
+        # Trigger extension point for subclasses
+        await self._on_before_invoke(ctx)
+
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         """Record LLM step and trigger evolution extension point."""
         if self._builder is None:
@@ -169,6 +172,14 @@ class EvolutionRail(DeepAgentRail):
         self._builder = None
 
     # ---- Evolution extension points (override as needed, default no-op) ----
+
+    async def _on_before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Called at the start of each invoke.
+
+        ctx contains the invoke inputs and agent context.
+        Override this method to initialize RL-specific state.
+        """
+        pass
 
     async def _on_after_model_call(self, ctx: AgentCallbackContext) -> None:
         """Called after each model call.

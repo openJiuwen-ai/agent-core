@@ -21,5 +21,6 @@
 | [checkpointing](openjiuwen.agent_evolving/checkpointing.md) | Checkpoint and restore (EvolveCheckpoint, FileCheckpointStore, CheckpointManager) |
 | [optimizer](openjiuwen.agent_evolving/optimizer.md) | Optimizers (BaseOptimizer, TextualParameter, InstructionOptimizer) |
 | [evaluator](openjiuwen.agent_evolving/evaluator.md) | Evaluation interfaces and metrics (BaseEvaluator, DefaultEvaluator, MetricEvaluator, Metric) |
+| [agent_rl](openjiuwen.agent_evolving/agent_rl/agent_rl.README.md) | VERL-based RL training (`RLConfig`, `OfflineRLOptimizer`, rollout coordination, reward registry) |
 
 For **atomic operators** used with self-evolving, see [openjiuwen.core.operator](openjiuwen.core/operator.README.md) (Operator, LLMCallOperator, ToolCallOperator, MemoryCallOperator).

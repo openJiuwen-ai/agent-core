@@ -9,7 +9,7 @@ import random
 import re
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.dev_tools.agentrl.coordinator.schemas import RolloutMessage
+from openjiuwen.agent_evolving.agent_rl.schemas import RolloutMessage
 
 
 def _try_parse_number(s: str) -> float:
