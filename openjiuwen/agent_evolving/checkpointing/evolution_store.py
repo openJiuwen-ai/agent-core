@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from openjiuwen.agent_evolving.checkpointing.types import (
-    EvolutionPatch,
     EvolutionRecord,
     EvolutionLog,
     EvolutionTarget,
@@ -159,11 +158,7 @@ class EvolutionStore:
         try:
             if self.sys_operation is not None:
                 result = await self.sys_operation.fs().write_file(
-                    str(path),
-                    content=content,
-                    mode="text",
-                    encoding="utf-8",
-                    prepend_newline=False
+                    str(path), content=content, mode="text", encoding="utf-8", prepend_newline=False
                 )
                 if getattr(result, "code", 0) != 0:
                     logger.warning("[EvolutionStore] failed to write %s: %s", path, result.message)
@@ -303,47 +298,6 @@ class EvolutionStore:
         target: Optional[EvolutionTarget] = None,
     ) -> List[EvolutionRecord]:
         return (await self.load_evolution_log(name, target)).pending_entries
-
-    async def solidify(self, name: str) -> int:
-        """Inject pending body records into SKILL.md and mark as applied."""
-        skill_dir = self._resolve_skill_dir(name)
-        if skill_dir is None:
-            return 0
-
-        evo_log = await self._load_full_evolution_log(name)
-        pending = [record for record in evo_log.pending_entries if record.change.target == EvolutionTarget.BODY]
-        if not pending:
-            return 0
-
-        skill_md_path = self._find_skill_md(skill_dir)
-        if skill_md_path is None:
-            logger.warning("[EvolutionStore] solidify: SKILL.md not found (skill=%s)", name)
-            return 0
-
-        content = await self._read_file_text(skill_md_path)
-        for record in pending:
-            content = self._inject_section(content, record.change)
-            record.applied = True
-
-        await self._write_file_text(skill_md_path, content)
-        evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
-        await self._save_evolution_log(name, evo_log, skill_dir=skill_dir)
-        logger.info("[EvolutionStore] solidified %d body records (skill=%s)", len(pending), name)
-        return len(pending)
-
-    @staticmethod
-    def _inject_section(content: str, patch: EvolutionPatch) -> str:
-        section = patch.section
-        addition = f"\n{patch.content}\n"
-        header_pattern = re.compile(
-            rf"(## {re.escape(section)}.*?)(\n## |\Z)",
-            re.DOTALL,
-        )
-        matched = header_pattern.search(content)
-        if matched:
-            insert_pos = matched.start(2)
-            return content[:insert_pos] + addition + content[insert_pos:]
-        return content.rstrip() + f"\n\n## {section}\n{patch.content}\n"
 
     async def _persist_script(self, skill_dir: Path, record: EvolutionRecord) -> None:
         """Write script source code to a standalone file; replace content with a reference."""
@@ -681,6 +635,43 @@ class EvolutionStore:
             )
 
         return deleted_count
+
+    async def mark_records_applied(self, name: str, record_ids: List[str]) -> int:
+        """Mark specified records as applied (integrated into SKILL.md).
+
+        Called by SkillRewriter after a successful rewrite to mark consumed
+        records whose content has been integrated into the rewritten SKILL.md.
+
+        Args:
+            name: Skill name
+            record_ids: List of record IDs to mark as applied
+
+        Returns:
+            Number of records marked as applied
+        """
+        if not record_ids:
+            return 0
+
+        evo_log = await self._load_full_evolution_log(name)
+        ids_set = set(record_ids)
+        updated_count = 0
+
+        for record in evo_log.entries:
+            if record.id in ids_set and not record.applied:
+                record.applied = True
+                updated_count += 1
+
+        if updated_count > 0:
+            evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
+            await self._save_evolution_log(name, evo_log)
+            await self.render_evolution_markdown(name)
+            logger.info(
+                "[EvolutionStore] marked %d record(s) as applied for skill=%s",
+                updated_count,
+                name,
+            )
+
+        return updated_count
 
     async def merge_records(
         self,

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import re
-import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
@@ -586,7 +585,7 @@ class SkillEvolutionRail(EvolutionRail):
         return bool(skill_op.staged_records)
 
     async def on_approve(self, request_id: str) -> None:
-        """Called by host when user accepts: flush the snapshotted records then solidify.
+        """Called by host when user accepts: flush the snapshotted records.
 
         The ``request_id`` matches ``payload["request_id"]`` from the approval event.
         Records are re-enqueued into ``SkillCallOperator._staged_records`` and written via
@@ -615,22 +614,6 @@ class SkillEvolutionRail(EvolutionRail):
                 flushed + len(pending.payload),
                 skill_name,
                 request_id,
-            )
-            return
-        # All records flushed — solidify first, then remove the snapshot.
-        # Keeping the snapshot until solidify() succeeds means a transient I/O
-        # failure (e.g. permission error on SKILL.md) can be retried: on the
-        # next on_approve() call pending.payload is empty so flush_to_store()
-        # is a no-op and only solidify() is retried.
-        try:
-            await self._evolution_store.solidify(skill_name)
-        except Exception as exc:
-            logger.warning(
-                "[SkillEvolutionRail] on_approve solidify failed for skill=%s (request=%s): %s; "
-                "retry on_approve to complete",
-                skill_name,
-                request_id,
-                exc,
             )
             return
         self._pending_approval_snapshots.pop(request_id)
@@ -1098,8 +1081,7 @@ class SkillEvolutionRail(EvolutionRail):
         """Rewrite SKILL.md by integrating evolution experiences.
 
         This is a public API for callers to actively trigger skill rewriting.
-        Unlike solidify() which appends experiences as separate entries,
-        this method uses LLM to deeply integrate experiences into the
+        This method uses LLM to deeply integrate experiences into the
         SKILL.md body for a more natural, coherent document.
 
         Args:
@@ -1121,13 +1103,15 @@ class SkillEvolutionRail(EvolutionRail):
             self._optimizer_model,
             self._optimizer_language,
         )
-        return await rewriter.rewrite(
+        result = await rewriter.rewrite(
             skill_name,
             self._evolution_store,
             min_score=min_score,
             dry_run=dry_run,
             user_query=user_query,
         )
+        # The rewriter already deletes consumed records in rewrite().
+        return result
 
 
 __all__ = ["SkillEvolutionRail"]

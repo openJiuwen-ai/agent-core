@@ -164,8 +164,7 @@ class SkillRewriteResult:
 class SkillRewriter:
     """Rewrite SKILL.md by integrating evolution experiences.
 
-    Unlike solidify() which appends experiences as separate entries,
-    this rewriter uses LLM to deeply integrate experiences into the
+    This rewriter uses LLM to deeply integrate experiences into the
     SKILL.md body for a more natural, coherent document.
     """
 
