@@ -121,7 +121,7 @@ mcp_config = McpServerConfig(
 
 # 创建ReActAgent
 
-首先使用openJiuwen提供的`create_react_agent_config`方法快速创建天气查询的`ReActAgentConfig`对象，涵盖`ReActAgent`相关的配置参数信息，如提示词定义及大模型配置信息等。示例代码如下：
+首先直接构造天气查询场景所需的`ReActAgentConfig`对象，统一配置`ReActAgent`所需的提示词模板和大模型参数等信息。示例代码如下：
 
 ```python
 from openjiuwen.core.single_agent import AgentCard, ReActAgentConfig, ReActAgent
@@ -171,6 +171,8 @@ def _create_client_model():
     )
 ```
 
+如果需要为大模型请求附带业务自定义请求头，可在 `ModelClientConfig` 中配置 `custom_headers`，或通过 `ReActAgentConfig.configure_custom_headers(...)` 统一设置。该能力属于模型接入层通用能力，详细说明见 [接入大模型](../基础功能/接入大模型.md) 文档中的“配置自定义请求头”章节。
+
 接着使用openJiuwen提供的`ReActAgent`类的构造函数实例化对象，包括天气查询助手配置，示例代码如下：
 
 ```python
@@ -178,9 +180,9 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent import AgentCard, ReActAgentConfig, ReActAgent
 
 react_agent = ReActAgent(card=agent_card).configure(react_agent_config)
-    tool = ReactAgentImpl._create_tool()
-    Runner.resource_mgr.add_tool(tool)
-    react_agent.ability_manager.add(tool.card)
+tool = ReactAgentImpl._create_tool()
+Runner.resource_mgr.add_tool(tool)
+react_agent.ability_manager.add(tool.card)
 ```
 
 # 运行ReActAgent
@@ -191,7 +193,7 @@ react_agent = ReActAgent(card=agent_card).configure(react_agent_config)
 import asyncio
 
 result = asyncio.run(react_agent.invoke({"query": "查询杭州的天气"}))
-print(f"ReActAgent 最终输出结果：{result.get("output")}")
+print(f"ReActAgent 最终输出结果：{result.get('output')}")
 ```
 
 查询成功后，会得到如下的结果：

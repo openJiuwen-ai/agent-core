@@ -4,7 +4,7 @@ Different models have their own strengths in reasoning ability, conversational f
 
 openJiuwen provides a unified **model client + configuration** system through `openjiuwen.core.foundation.llm`. The recommended integration approach is:
 
-- Use `ModelClientConfig` to describe "how to connect to the model service" (client_provider/api_base/api_key/SSL, etc.);
+- Use `ModelClientConfig` to describe "how to connect to the model service" (client_provider/api_base/api_key/custom_headers/SSL, etc.);
 - Use `ModelRequestConfig` to describe "which model to use for this call + call parameters" (model/temperature/top_p, etc.);
 - Use the unified entry class `Model`, and call via `invoke/stream`. The framework will automatically select the corresponding model client implementation based on `client_provider`.
 
@@ -26,6 +26,10 @@ model_client_config = ModelClientConfig(
     client_provider="SiliconFlow",              # Model provider identifier, framework automatically selects client implementation based on this value
     api_base="https://api.siliconflow.cn/v1",   # Model service URL
     api_key="sk-****************************",  # Authentication Token
+    custom_headers={                            # Optional: inject custom headers for OpenAI-compatible requests
+        "Token": "tenant-token",
+        "UserID": "user-a",
+    },
     verify_ssl=False                            # SSL verification disabled in example, recommended to enable in production
 )
 
@@ -46,6 +50,74 @@ model = Model(
 > **Note**
 > - Users need to register accounts on SiliconFlow or OpenAI vendor websites to obtain available model `api_key` and model invocation URL address `api_base`.
 > - `client_provider` currently has built-in support for `OpenAI` and `SiliconFlow`. The framework will automatically select the corresponding model client implementation based on this configuration.
+
+### Configure Custom Headers
+
+When the model service is based on an OpenAI-compatible protocol and requires extra request headers, you can use `custom_headers` to inject custom headers. Examples include multi-tenant identifiers, business-side user identifiers, or gateway extension headers.
+
+#### Config-level Headers
+
+You can configure default headers through `custom_headers` in `ModelClientConfig`. These headers will be automatically forwarded on every request made by the current model object:
+
+```python
+from openjiuwen.core.foundation.llm import ModelClientConfig
+
+model_client_config = ModelClientConfig(
+    client_provider="OpenAI",
+    api_base="https://your-openai-compatible-endpoint/v1",
+    api_key="sk-****************************",
+    custom_headers={
+        "Token": "tenant-token",
+        "UserID": "user-a",
+    },
+)
+```
+
+#### Request-level Headers
+
+If a single request needs to temporarily override or supplement headers, you can pass `custom_headers` to `invoke` or `stream`:
+
+```python
+response = await model.invoke(
+    messages=messages,
+    custom_headers={
+        "userid": "user-b",   # Overrides the config-level UserID
+        "X-Trace-Id": "trace-001",
+    },
+)
+```
+
+#### Header Merge Rules
+
+- Request-level `custom_headers` override config-level headers with the same name.
+- Header names are compared in a case-insensitive way. For example, `UserID` and `userid` are treated as the same header.
+- The framework automatically filters protected headers: `Authorization`, `Host`, `Content-Length`, `Transfer-Encoding`, and `Connection`.
+- Keys or values that are `None`, empty strings, or whitespace-only strings will not be forwarded.
+
+#### Other Entry Points
+
+In addition to constructing `ModelClientConfig` directly, you can also use this capability through other unified entry points:
+
+```python
+from openjiuwen.core.foundation.llm import init_model
+from openjiuwen.core.single_agent.agents.react_agent import ReActAgentConfig
+
+# Option 1: init_model
+model = init_model(
+    provider="OpenAI",
+    model_name="qwen-plus",
+    api_key="sk-****************************",
+    api_base="https://your-openai-compatible-endpoint/v1",
+    custom_headers={"Token": "tenant-token"},
+)
+
+# Option 2: ReActAgentConfig
+react_agent_config = ReActAgentConfig()
+react_agent_config.configure_custom_headers({
+    "Token": "tenant-token",
+    "UserID": "user-a",
+})
+```
 
 ### Prepare Model Input
 
@@ -125,6 +197,7 @@ Asynchronously calls the large model, obtaining complete response result at once
 - **stop** (str, optional): Stop sequence. Default value: None.
 - **output_parser** (BaseOutputParser, optional): Output parser for parsing model response content. Default value: None.
 - **timeout** (float, optional): Timeout for this request. Overrides configuration in ModelClientConfig. Default value: None (uses configured value).
+- **custom_headers** (Mapping[str, Any], optional): Custom headers attached to this request. These headers are merged with `ModelClientConfig.custom_headers` in a case-insensitive manner and override config-level headers with the same name. Default value: None.
 
 **Returns**:
 
@@ -217,7 +290,7 @@ Asynchronously streams calls to the large model, returning response content bloc
 
 **Parameters**:
 
-Parameters are the same as the `invoke` method.
+Parameters are the same as the `invoke` method, including the optional `custom_headers`.
 
 **Returns**:
 
