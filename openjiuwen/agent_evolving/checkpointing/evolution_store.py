@@ -172,6 +172,36 @@ class EvolutionStore:
         except Exception as exc:
             logger.error("[EvolutionStore] write %s failed: %s", path, exc)
 
+    async def write_skill_content(self, name: str, content: str) -> bool:
+        """Write full SKILL.md content for a skill.
+
+        This is the public API for SkillRewriter to write rewritten content.
+
+        Args:
+            name: Skill name
+            content: Complete SKILL.md content to write
+
+        Returns:
+            True on success, False on failure
+        """
+        skill_dir = self._resolve_skill_dir(name)
+        if skill_dir is None:
+            logger.warning("[EvolutionStore] write_skill_content: skill '%s' not found", name)
+            return False
+
+        skill_md_path = self._find_skill_md(skill_dir)
+        if skill_md_path is None:
+            # Try default path
+            skill_md_path = skill_dir / "SKILL.md"
+
+        try:
+            await self._write_file_text(skill_md_path, content)
+            logger.info("[EvolutionStore] wrote SKILL.md for skill='%s'", name)
+            return True
+        except Exception as exc:
+            logger.error("[EvolutionStore] write_skill_content failed for '%s': %s", name, exc)
+            return False
+
     async def load_evolution_log(
         self,
         name: str,

@@ -121,6 +121,9 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
 ### 已有 body 经验
 {existing_body_summary}
 
+### 用户主动描述的优化方向（可选）
+{user_query}
+
 ## 经验来源
 
 经验来自两个渠道，都要处理：
@@ -222,6 +225,9 @@ You are a Skill optimization expert. Based on problem signals discovered in the 
 
 ### Existing body experiences
 {existing_body_summary}
+
+### User-specified optimization direction (optional)
+{user_query}
 
 ## Experience Sources
 
@@ -350,11 +356,7 @@ def _build_conversation_snippet(
             )
         tool_calls = message.get("tool_calls")
         if role == "assistant" and tool_calls:
-            names = [
-                tool_call.get("name", "")
-                for tool_call in tool_calls
-                if isinstance(tool_call, dict)
-            ]
+            names = [tool_call.get("name", "") for tool_call in tool_calls if isinstance(tool_call, dict)]
             prefix = f"[assistant] (tool_calls: {', '.join(names)})\n  "
         else:
             prefix = f"[{role}] "
@@ -492,9 +494,7 @@ def _build_existing_summary(records: List[EvolutionRecord], label: str = "") -> 
     lines: List[str] = []
     for record in records:
         prefix = f"[{label}] " if label else ""
-        lines.append(
-            f"- {prefix}[{record.id}] [{record.change.section}] {record.change.content}"
-        )
+        lines.append(f"- {prefix}[{record.id}] [{record.change.section}] {record.change.content}")
     return "\n".join(lines)
 
 
@@ -598,10 +598,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
         """Generate experience records for each bound SkillCallOperator."""
         for op_id, op in self._operators.items():
             skill_name = op_id.removeprefix("skill_call_")
-            skill_signals = [
-                s for s in self._bad_signals
-                if s.skill_name == skill_name or not s.skill_name
-            ]
+            skill_signals = [s for s in self._bad_signals if s.skill_name == skill_name or not s.skill_name]
             if not skill_signals:
                 continue
             state = op.get_state()
@@ -612,18 +609,18 @@ class SkillExperienceOptimizer(BaseOptimizer):
                 messages=state.get("messages", []),
                 existing_desc_records=state.get("desc_records", []),
                 existing_body_records=state.get("body_records", []),
+                user_query=state.get("user_query", ""),
             )
             records = await self.generate_records(ctx)
             if not records:
-                logger.info(
-                    "[SkillExperienceOptimizer] no records generated for skill=%s", skill_name
-                )
+                logger.info("[SkillExperienceOptimizer] no records generated for skill=%s", skill_name)
                 continue
             existing: List = self._parameters[op_id].get_gradient("experiences") or []
             self._parameters[op_id].set_gradient("experiences", existing + records)
             logger.info(
                 "[SkillExperienceOptimizer] generated %d record(s) for skill=%s",
-                len(records), skill_name,
+                len(records),
+                skill_name,
             )
 
     def _step(self) -> Updates:
@@ -652,8 +649,9 @@ class SkillExperienceOptimizer(BaseOptimizer):
             skill_content=skill_content,
             signals_json=signals_json,
             conversation_snippet=(conversation_snippet or "").strip(),
-            existing_desc_summary=desc_summary or f"({'无已有记录' if self._language == 'cn' else 'No existing records'})",
-            existing_body_summary=body_summary or f"({'无已有记录' if self._language == 'cn' else 'No existing records'})",
+            existing_desc_summary=desc_summary or ("无已有记录" if self._language == "cn" else "No existing records"),
+            existing_body_summary=body_summary or ("无已有记录" if self._language == "cn" else "No existing records"),
+            user_query=ctx.user_query or ("无" if self._language == "cn" else "None"),
         )
 
         logger.info("[SkillExperienceOptimizer] calling LLM (skill=%s)", ctx.skill_name)
@@ -714,9 +712,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
         """One-shot retry: fix JSON if malformed, or regenerate if truncated."""
         truncated = _looks_truncated(broken_raw)
         if truncated:
-            logger.warning(
-                "[SkillExperienceOptimizer] output appears truncated, retrying full regeneration"
-            )
+            logger.warning("[SkillExperienceOptimizer] output appears truncated, retrying full regeneration")
             retry_prompt = original_prompt
         else:
             logger.warning(

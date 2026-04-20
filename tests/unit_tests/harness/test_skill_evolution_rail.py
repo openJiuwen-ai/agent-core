@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -1349,7 +1349,6 @@ async def test_generate_and_emit_experience_returns_true_when_records_staged(tmp
     messages = [{"role": "user", "content": "test"}]
 
     # Mock optimizer to stage records
-    record = _make_record("skill-a")
     rail._generate_experience_via_optimizer = AsyncMock(return_value=True)
     rail._emit_generated_records = AsyncMock()
 
@@ -1357,7 +1356,10 @@ async def test_generate_and_emit_experience_returns_true_when_records_staged(tmp
 
     assert result is True
     rail._generate_experience_via_optimizer.assert_awaited_once_with(
-        "skill-a", signals, messages
+        "skill-a",
+        signals,
+        messages,
+        user_query="",
     )
     rail._emit_generated_records.assert_awaited_once_with(None, "skill-a")
 
@@ -1377,7 +1379,10 @@ async def test_generate_and_emit_experience_returns_false_when_no_records(tmp_pa
 
     assert result is False
     rail._generate_experience_via_optimizer.assert_awaited_once_with(
-        "skill-a", signals, messages
+        "skill-a",
+        signals,
+        messages,
+        user_query="",
     )
     rail._emit_generated_records.assert_not_awaited()
 
@@ -1392,4 +1397,200 @@ async def test_generate_and_emit_experience_with_empty_inputs(tmp_path):
     result = await rail.generate_and_emit_experience("skill-a", [], [])
 
     assert result is False
-    rail._generate_experience_via_optimizer.assert_awaited_once_with("skill-a", [], [])
+    rail._generate_experience_via_optimizer.assert_awaited_once_with("skill-a", [], [], user_query="")
+
+
+@pytest.mark.asyncio
+async def test_generate_and_emit_experience_with_user_query_creates_synthetic_signal(tmp_path):
+    """user_query should create a synthetic EvolutionSignal of type 'user_query'."""
+    rail = _make_rail(tmp_path, auto_save=False)
+    signals = [_make_signal("skill-a")]
+    messages = [{"role": "user", "content": "test"}]
+
+    captured_args = {}
+
+    async def fake_generate_via_optimizer(skill_name, sigs, msgs, user_query=""):
+        captured_args["signals"] = sigs
+        captured_args["messages"] = msgs
+        captured_args["user_query"] = user_query
+        return True
+
+    rail._generate_experience_via_optimizer = fake_generate_via_optimizer
+    rail._emit_generated_records = AsyncMock()
+
+    result = await rail.generate_and_emit_experience(
+        "skill-a",
+        signals,
+        messages,
+        user_query="improve error handling",
+    )
+
+    assert result is True
+    assert len(captured_args["signals"]) == 2
+    assert captured_args["signals"][0] is signals[0]
+    synthetic = captured_args["signals"][1]
+    assert synthetic.signal_type == "user_query"
+    assert synthetic.excerpt == "improve error handling"
+    assert synthetic.skill_name == "skill-a"
+    # Original signals list should not be mutated
+    assert len(signals) == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_and_emit_experience_with_user_query_and_empty_messages(tmp_path):
+    """When messages is empty but user_query is non-empty, a synthetic message should be created."""
+    rail = _make_rail(tmp_path, auto_save=False)
+
+    captured_args = {}
+
+    async def fake_generate_via_optimizer(skill_name, sigs, msgs, user_query=""):
+        captured_args["messages"] = msgs
+        return True
+
+    rail._generate_experience_via_optimizer = fake_generate_via_optimizer
+    rail._emit_generated_records = AsyncMock()
+
+    result = await rail.generate_and_emit_experience(
+        "skill-a",
+        [],
+        [],
+        user_query="add more examples",
+    )
+
+    assert result is True
+    assert captured_args["messages"] == [{"role": "user", "content": "add more examples"}]
+
+
+@pytest.mark.asyncio
+async def test_generate_and_emit_experience_without_user_query_no_synthetic(tmp_path):
+    """Without user_query, no synthetic signal or message should be created."""
+    rail = _make_rail(tmp_path, auto_save=False)
+    signals = [_make_signal("skill-a")]
+    messages = [{"role": "user", "content": "test"}]
+
+    captured_args = {}
+
+    async def fake_generate_via_optimizer(skill_name, sigs, msgs, user_query=""):
+        captured_args["signals"] = sigs
+        captured_args["messages"] = msgs
+        return True
+
+    rail._generate_experience_via_optimizer = fake_generate_via_optimizer
+    rail._emit_generated_records = AsyncMock()
+
+    result = await rail.generate_and_emit_experience("skill-a", signals, messages)
+
+    assert result is True
+    assert captured_args["signals"] is signals
+    assert captured_args["messages"] is messages
+
+
+# =============================================================================
+# Rewrite Skill Tests
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_rewrite_skill_delegates_to_rewriter(tmp_path):
+    """rewrite_skill should create SkillRewriter and call rewrite."""
+    from openjiuwen.agent_evolving.optimizer.skill_call import SkillRewriteResult
+
+    rail = _make_rail(tmp_path)
+
+    mock_result = SkillRewriteResult(
+        skill_name="test-skill",
+        original_content="# Original",
+        rewritten_content="# Rewritten",
+        consumed_record_ids=["ev_001"],
+        records_cleaned=1,
+        summary="Test summary",
+    )
+
+    with patch("openjiuwen.harness.rails.skill_evolution_rail.SkillRewriter") as MockRewriter:
+        instance = MockRewriter.return_value
+        instance.rewrite = AsyncMock(return_value=mock_result)
+
+        result = await rail.rewrite_skill("test-skill", min_score=0.5, dry_run=True)
+
+        assert result is mock_result
+        MockRewriter.assert_called_once_with(
+            rail._optimizer_llm,
+            rail._optimizer_model,
+            rail._optimizer_language,
+        )
+        instance.rewrite.assert_awaited_once_with(
+            "test-skill",
+            rail._evolution_store,
+            min_score=0.5,
+            dry_run=True,
+            user_query="",
+        )
+
+
+@pytest.mark.asyncio
+async def test_rewrite_skill_returns_none_when_no_result(tmp_path):
+    """rewrite_skill should return None when rewriter returns None."""
+    rail = _make_rail(tmp_path)
+
+    with patch("openjiuwen.harness.rails.skill_evolution_rail.SkillRewriter") as MockRewriter:
+        instance = MockRewriter.return_value
+        instance.rewrite = AsyncMock(return_value=None)
+
+        result = await rail.rewrite_skill("test-skill")
+
+        assert result is None
+
+
+@pytest.mark.asyncio
+async def test_rewrite_skill_uses_default_params(tmp_path):
+    """rewrite_skill should use default min_score=0.0 and dry_run=False."""
+    rail = _make_rail(tmp_path)
+
+    with patch("openjiuwen.harness.rails.skill_evolution_rail.SkillRewriter") as MockRewriter:
+        instance = MockRewriter.return_value
+        instance.rewrite = AsyncMock(return_value=None)
+
+        await rail.rewrite_skill("test-skill")
+
+        instance.rewrite.assert_awaited_once_with(
+            "test-skill",
+            rail._evolution_store,
+            min_score=0.0,
+            dry_run=False,
+            user_query="",
+        )
+
+
+@pytest.mark.asyncio
+async def test_rewrite_skill_passes_user_query(tmp_path):
+    """rewrite_skill should forward user_query to SkillRewriter.rewrite."""
+    from openjiuwen.agent_evolving.optimizer.skill_call import SkillRewriteResult
+
+    rail = _make_rail(tmp_path)
+
+    mock_result = SkillRewriteResult(
+        skill_name="test-skill",
+        original_content="# Original",
+        rewritten_content="# Rewritten",
+        consumed_record_ids=["ev_001"],
+        records_cleaned=1,
+        summary="Test summary",
+    )
+
+    with patch("openjiuwen.harness.rails.skill_evolution_rail.SkillRewriter") as MockRewriter:
+        instance = MockRewriter.return_value
+        instance.rewrite = AsyncMock(return_value=mock_result)
+
+        result = await rail.rewrite_skill(
+            "test-skill",
+            user_query="optimize troubleshooting section",
+        )
+
+        assert result is mock_result
+        instance.rewrite.assert_awaited_once_with(
+            "test-skill",
+            rail._evolution_store,
+            min_score=0.0,
+            dry_run=False,
+            user_query="optimize troubleshooting section",
+        )
