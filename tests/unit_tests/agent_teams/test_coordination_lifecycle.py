@@ -20,6 +20,7 @@ from openjiuwen.agent_teams.schema.events import (
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
 async def test_start_stop_sets_running_flag():
     """start() sets is_running, stop() clears it."""
     loop = CoordinatorLoop(role=TeamRole.LEADER)
@@ -33,6 +34,7 @@ async def test_start_stop_sets_running_flag():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
 async def test_stop_is_idempotent():
     """Calling stop() twice does not raise."""
     loop = CoordinatorLoop(role=TeamRole.LEADER)
@@ -43,6 +45,7 @@ async def test_stop_is_idempotent():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_wake_callback_invoked_on_event():
     """When an event is enqueued, the wake callback fires."""
     woke: list[CoordinationEvent] = []
@@ -69,6 +72,7 @@ async def test_wake_callback_invoked_on_event():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_poll_timer_fires_periodically():
     """Poll timer enqueues synthetic poll events."""
     woke: list[CoordinationEvent] = []

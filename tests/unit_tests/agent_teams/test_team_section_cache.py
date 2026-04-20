@@ -47,6 +47,7 @@ class _Counter:
 
 class TestFirstCallIsMiss:
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_zero_mtime_still_loads(self):
         """First refresh always fetches even when probe returns 0."""
         counter = _Counter(mtime=0, section=_make_section("hello"))
@@ -60,6 +61,7 @@ class TestFirstCallIsMiss:
         logger.info("First refresh triggered fetch")
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_first_call_caches_none_section(self):
         """A None result is still considered initialized for cache hits."""
         counter = _Counter(mtime=42, section=None)
@@ -72,6 +74,7 @@ class TestFirstCallIsMiss:
 
 class TestCacheHit:
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_same_mtime_skips_fetch(self):
         counter = _Counter(mtime=100, section=_make_section("v1"))
         cache = MtimeSectionCache(probe=counter.probe, fetch_and_build=counter.fetch)
@@ -86,6 +89,7 @@ class TestCacheHit:
         logger.info("Cache hit: 3 probes, 1 fetch")
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_cache_hit_when_fetch_returned_none(self):
         """Even when fetch returns None, repeated probes don't refire it."""
         counter = _Counter(mtime=7, section=None)
@@ -100,6 +104,7 @@ class TestCacheHit:
 
 class TestCacheMiss:
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_mtime_change_triggers_refetch(self):
         counter = _Counter(mtime=10, section=_make_section("v1"))
         cache = MtimeSectionCache(probe=counter.probe, fetch_and_build=counter.fetch)
@@ -115,6 +120,7 @@ class TestCacheMiss:
         logger.info("mtime bump triggered refetch")
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_each_change_triggers_one_refetch(self):
         counter = _Counter(mtime=1, section=_make_section("a"))
         cache = MtimeSectionCache(probe=counter.probe, fetch_and_build=counter.fetch)
@@ -128,6 +134,7 @@ class TestCacheMiss:
         assert counter.fetch_calls == 5
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_cache_hit_after_miss(self):
         """A miss-then-hit-then-hit pattern only fetches twice (initial + bump)."""
         counter = _Counter(mtime=1, section=_make_section("init"))
@@ -147,6 +154,7 @@ class TestCacheMiss:
 
 class TestInvalidate:
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invalidate_forces_refetch(self):
         counter = _Counter(mtime=1, section=_make_section("v1"))
         cache = MtimeSectionCache(probe=counter.probe, fetch_and_build=counter.fetch)
@@ -158,6 +166,7 @@ class TestInvalidate:
         assert counter.fetch_calls == 2
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invalidate_resets_to_uninitialized(self):
         counter = _Counter(mtime=99, section=_make_section("payload"))
         cache = MtimeSectionCache(probe=counter.probe, fetch_and_build=counter.fetch)

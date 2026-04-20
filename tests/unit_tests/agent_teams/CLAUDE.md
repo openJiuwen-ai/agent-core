@@ -70,6 +70,33 @@ make test TESTFLAGS="tests/unit_tests/agent_teams/test_team.py::TestTeam::test_x
 make test TESTFLAGS="tests/unit_tests/agent_teams/worktree/"
 ```
 
+## 用例分级与筛选
+
+所有 562 个用例已标注 `@pytest.mark.level0` 或 `@pytest.mark.level1`（参见
+`docs/test_design.md`）：
+
+- **Level 0**（194 个）：冒烟/正向主路径，~60s 完成，PR gate 必须全绿
+- **Level 1**（368 个）：功能分支/异常/生命周期边界，可在 CI 或本地详细测试
+
+筛选运行：
+
+```bash
+# 仅 level0（冒烟，推荐 PR 提交前本地验证）
+make test TESTFLAGS="-m level0 tests/unit_tests/agent_teams/"
+
+# 仅 level1
+make test TESTFLAGS="-m level1 tests/unit_tests/agent_teams/"
+
+# 排除 level1（= 仅 level0）
+make test TESTFLAGS="-m \"not level1\" tests/unit_tests/agent_teams/"
+
+# 排除 level0（= 仅 level1）
+make test TESTFLAGS="-m \"not level0\" tests/unit_tests/agent_teams/"
+
+# 联合条件：level0 或 level1（即全量）
+make test TESTFLAGS="-m \"level0 or level1\" tests/unit_tests/agent_teams/"
+```
+
 ## 编写约定
 
 ### 通用
@@ -116,13 +143,13 @@ make test TESTFLAGS="tests/unit_tests/agent_teams/worktree/"
 
 ## 用例分级
 
-参考 `docs/test_design.md` 的 Level 0 / Level 1 划分：
+所有 562 个用例已用 `@pytest.mark.level0` / `@pytest.mark.level1` 标注。参考
+`docs/test_design.md` 的分级原则：
 
-- **Level 0**：默认构造 + 主正向路径。PR gate 必须全绿。
-- **Level 1**：参数组合、异常分支、并发/生命周期边界、schema 兼容。
+- **Level 0**（194 个）：默认构造 + 主正向路径。PR gate 必须全绿。
+- **Level 1**（368 个）：参数组合、异常分支、并发/生命周期边界、schema 兼容。
 
-目前未用 `pytest.mark.level0/level1` 硬编码，如需按级别筛选请在 PR 里
-先批量打标再启用。
+运行筛选见上文"用例分级与筛选"。
 
 ## 常见陷阱
 

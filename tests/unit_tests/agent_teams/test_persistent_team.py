@@ -70,6 +70,7 @@ async def message_bus():
 class TestCoordinatorLoopPauseResume:
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_pause_polls_stops_polling(self):
         loop = CoordinatorLoop(role=TeamRole.LEADER)
         await loop.start()
@@ -85,6 +86,7 @@ class TestCoordinatorLoopPauseResume:
         await loop.stop()
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_resume_polls_restarts_polling(self):
         loop = CoordinatorLoop(role=TeamRole.LEADER)
         await loop.start()
@@ -100,6 +102,7 @@ class TestCoordinatorLoopPauseResume:
         await loop.stop()
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_pause_polls_idempotent(self):
         loop = CoordinatorLoop(role=TeamRole.LEADER)
         await loop.start()
@@ -109,6 +112,7 @@ class TestCoordinatorLoopPauseResume:
         await loop.stop()
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_resume_polls_noop_when_not_paused(self):
         loop = CoordinatorLoop(role=TeamRole.LEADER)
         await loop.start()
@@ -122,12 +126,14 @@ class TestCoordinatorLoopPauseResume:
 
 class TestTeamStandbyEvent:
 
+    @pytest.mark.level1
     def test_standby_event_serialization(self):
         event = TeamStandbyEvent(team_name="test_team")
         msg = EventMessage.from_event(event)
         assert msg.event_type == TeamEvent.STANDBY
         logger.info("Standby event type: {}", msg.event_type)
 
+    @pytest.mark.level1
     def test_standby_event_deserialization(self):
         event = TeamStandbyEvent(team_name="test_team")
         msg = EventMessage.from_event(event)
@@ -140,9 +146,11 @@ class TestTeamStandbyEvent:
 
 class TestReadySelfTransition:
 
+    @pytest.mark.level1
     def test_ready_to_ready_is_valid(self):
         assert is_valid_transition(MemberStatus.READY, MemberStatus.READY, MEMBER_TRANSITIONS)
 
+    @pytest.mark.level1
     def test_ready_to_busy_still_valid(self):
         assert is_valid_transition(MemberStatus.READY, MemberStatus.BUSY, MEMBER_TRANSITIONS)
 
@@ -170,6 +178,7 @@ class TestPersistentTeamBuildTeam:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_build_team_persistent_members_unstarted(self, persistent_team, db):
         await persistent_team.build_team(
             display_name="Persistent Team",
@@ -183,6 +192,7 @@ class TestPersistentTeamBuildTeam:
         logger.info("Persistent team member status after build: {}", dev.status)
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_persistent_team_member_can_go_ready_then_ready(self, persistent_team, db):
         """Verify READY -> READY transition works for persistent team resume."""
         await persistent_team.build_team(
@@ -222,6 +232,7 @@ class TestResumeForNewSession:
             await database.close()
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_new_session_creates_dynamic_tables(self, db_file):
         database, config = db_file
         team_id = "persistent_team"

@@ -71,6 +71,7 @@ def _make_leader() -> TeamAgent:
     return agent
 
 
+@pytest.mark.level0
 def test_coordination_loop_created_on_configure():
     """configure() creates a CoordinatorLoop."""
     agent = _make_leader()
@@ -79,6 +80,7 @@ def test_coordination_loop_created_on_configure():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
 async def test_start_stop_coordination():
     """_start/_stop manage the loop lifecycle."""
     agent = _make_leader()
@@ -89,6 +91,7 @@ async def test_start_stop_coordination():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
 async def test_wake_feeds_messages_to_agent():
     """When loop wakes, unread messages are fed
     to the DeepAgent via follow_up or Runner."""
@@ -161,6 +164,7 @@ def _make_teammate() -> TeamAgent:
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
 async def test_mention_routes_direct_message():
     """@member_id pattern sends a direct message from 'user', bypassing leader agent."""
     agent = _make_leader_with_teammate()
@@ -180,6 +184,7 @@ async def test_mention_routes_direct_message():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
 async def test_mention_invalid_member_falls_through():
     """@nonexistent falls through to normal leader-agent path."""
     agent = _make_leader_with_teammate()
@@ -198,6 +203,7 @@ async def test_mention_invalid_member_falls_through():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
 async def test_no_mention_normal_flow():
     """Plain message without @ goes through existing leader flow."""
     agent = _make_leader_with_teammate()
@@ -216,6 +222,7 @@ async def test_no_mention_normal_flow():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
 async def test_mention_no_body_falls_through():
     """@member_id with no message body falls through (regex requires body)."""
     agent = _make_leader_with_teammate()
@@ -234,6 +241,7 @@ async def test_mention_no_body_falls_through():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
 async def test_tool_approval_event_resumes_interrupt():
     """Tool approval result event should resume teammate HITL with InteractiveInput."""
     team_spec = TeamSpec(
@@ -266,6 +274,7 @@ async def test_tool_approval_event_resumes_interrupt():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
 async def test_mailbox_messages_deferred_while_interrupt_pending():
     """Normal mailbox messages should not preempt a pending tool interrupt."""
     agent = _make_leader_with_teammate()
@@ -293,6 +302,7 @@ async def test_mailbox_messages_deferred_while_interrupt_pending():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
 async def test_resume_interrupt_queues_while_agent_running():
     """Approval resume should queue when teammate is already running another round."""
     agent = _make_leader()
@@ -316,6 +326,7 @@ async def test_resume_interrupt_queues_while_agent_running():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_member_ready_with_claimed_task_triggers_nudge():
     """Leader nudges a member returning to READY while still holding a claimed task."""
     agent = _make_leader()
@@ -349,6 +360,7 @@ async def test_member_ready_with_claimed_task_triggers_nudge():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_member_error_with_claimed_task_triggers_nudge():
     """Leader also nudges on transition into ERROR when claimed tasks remain."""
     agent = _make_leader()
@@ -375,6 +387,7 @@ async def test_member_error_with_claimed_task_triggers_nudge():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_member_ready_without_claimed_task_skips_nudge():
     """No message is sent when the member has no claimed tasks."""
     agent = _make_leader()
@@ -395,6 +408,7 @@ async def test_member_ready_without_claimed_task_skips_nudge():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_member_status_unchanged_skips_nudge():
     """Redundant READY → READY transitions should not query tasks nor send messages."""
     agent = _make_leader()
@@ -449,6 +463,7 @@ def _make_pending_task(
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_stale_claim_leader_messages_assignee():
     """Leader messages a member whose claimed task has aged past the threshold."""
     agent = _make_leader()
@@ -471,6 +486,7 @@ async def test_stale_claim_leader_messages_assignee():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_stale_claim_fresh_task_does_not_nudge():
     """A task just claimed (updated_at ≈ now) is under the threshold and skipped."""
     agent = _make_leader()
@@ -489,6 +505,7 @@ async def test_stale_claim_fresh_task_does_not_nudge():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_stale_claim_throttles_follow_up_polls():
     """After one nudge, follow-up polls in the same window do not re-nudge."""
     agent = _make_leader()
@@ -506,6 +523,7 @@ async def test_stale_claim_throttles_follow_up_polls():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_stale_claim_self_nudge_when_idle():
     """Teammate nudges itself via start_agent when idle on a stale self-claim."""
     agent = _make_teammate()
@@ -527,6 +545,7 @@ async def test_stale_claim_self_nudge_when_idle():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_stale_claim_self_nudge_steers_when_running():
     """A running self-owned stale task is nudged via steer rather than start."""
     agent = _make_teammate()
@@ -548,6 +567,7 @@ async def test_stale_claim_self_nudge_steers_when_running():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_stale_claim_throttle_drops_unrelated_entries():
     """Throttle entries for tasks no longer claimed are cleaned up."""
     agent = _make_leader()
@@ -568,6 +588,7 @@ async def test_stale_claim_throttle_drops_unrelated_entries():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_stale_pending_leader_self_nudges_with_hint():
     """Leader self-prompts about stale pending tasks so its LLM picks targets."""
     agent = _make_leader()
@@ -592,6 +613,7 @@ async def test_stale_pending_leader_self_nudges_with_hint():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_stale_pending_leader_steers_when_running():
     """A running leader should still receive the hint via steer."""
     agent = _make_leader()
@@ -612,6 +634,7 @@ async def test_stale_pending_leader_steers_when_running():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_stale_pending_fresh_task_skipped():
     """A pending task whose updated_at is recent should not trigger a nudge."""
     agent = _make_leader()
@@ -629,6 +652,7 @@ async def test_stale_pending_fresh_task_skipped():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_stale_pending_throttled_after_first_nudge():
     """Follow-up polls inside the same window should not re-nudge."""
     agent = _make_leader()
@@ -646,6 +670,7 @@ async def test_stale_pending_throttled_after_first_nudge():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_stale_pending_teammate_skips_check():
     """Only the leader should self-prompt about pending tasks."""
     agent = _make_teammate()
@@ -664,6 +689,7 @@ async def test_stale_pending_teammate_skips_check():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_team_cleaned_event_shuts_down_teammate():
     """A teammate receiving TEAM_CLEANED must call shutdown_self exactly once."""
     agent = _make_teammate()
@@ -677,6 +703,7 @@ async def test_team_cleaned_event_shuts_down_teammate():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_team_cleaned_event_ignored_by_leader():
     """A leader must NEVER shutdown_self from its own CLEANED event.
 
@@ -694,6 +721,7 @@ async def test_team_cleaned_event_ignored_by_leader():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_shutdown_self_cancels_running_round_and_closes_stream():
     """shutdown_self cancels the in-flight agent task and unblocks stream()."""
     agent = _make_teammate()
@@ -712,6 +740,7 @@ async def test_shutdown_self_cancels_running_round_and_closes_stream():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_teammate_round_completion_wakes_mailbox_after_interrupt_clears():
     """Deferred mailbox messages should be retried immediately after interrupt clears."""
     agent = _make_teammate()

@@ -24,6 +24,7 @@ def _make_session(name: str = "test") -> WorktreeSession:
 
 
 class TestGetCurrentSession:
+    @pytest.mark.level0
     def test_default_none(self):
         # Reset to clean state
         set_current_session(None)
@@ -32,6 +33,7 @@ class TestGetCurrentSession:
 
 
 class TestSetCurrentSession:
+    @pytest.mark.level0
     def test_set_and_get(self):
         session = _make_session()
         set_current_session(session)
@@ -40,6 +42,7 @@ class TestSetCurrentSession:
         # Cleanup
         set_current_session(None)
 
+    @pytest.mark.level1
     def test_clear(self):
         session = _make_session()
         set_current_session(session)
@@ -48,12 +51,14 @@ class TestSetCurrentSession:
 
 
 class TestRequireCurrentSession:
+    @pytest.mark.level1
     def test_raises_when_none(self):
         set_current_session(None)
         with pytest.raises(RuntimeError, match="Not in a worktree session"):
             require_current_session()
         logger.info("require_current_session raises RuntimeError verified")
 
+    @pytest.mark.level1
     def test_returns_session(self):
         session = _make_session()
         set_current_session(session)
@@ -65,6 +70,7 @@ class TestRequireCurrentSession:
 
 @pytest.mark.asyncio
 class TestSharedContainerAcrossGather:
+    @pytest.mark.level1
     async def test_mutation_propagates_within_gather(self):
         """Tasks spawned via asyncio.gather share the same mutable session holder.
 
