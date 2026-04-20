@@ -178,7 +178,7 @@ def build_explore_agent_config(
 
     return SubAgentConfig(
         agent_card=card or AgentCard(
-            name="Explore",
+            name="explore_agent",
             description=DEFAULT_EXPLORE_AGENT_DESCRIPTION.get(
                 resolved_language,
                 DEFAULT_EXPLORE_AGENT_DESCRIPTION["cn"],
@@ -225,7 +225,7 @@ def create_explore_agent(
     resolved_language = resolve_language(language)
 
     final_card = card or AgentCard(
-        name="Explore",
+        name="explore_agent",
         description=DEFAULT_EXPLORE_AGENT_DESCRIPTION.get(
             resolved_language,
             DEFAULT_EXPLORE_AGENT_DESCRIPTION["cn"],

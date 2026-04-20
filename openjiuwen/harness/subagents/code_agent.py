@@ -74,7 +74,7 @@ def _inject_builtin_plan_agents(
 ) -> list[SubAgentConfig | DeepAgent]:
     """Inject explore and plan builtin sub-agents if missing."""
     effective = list(subagents)
-    if not _has_agent(effective, "Explore"):
+    if not _has_agent(effective, "explore_agent"):
         effective.append(
             build_explore_agent_config(
                 model=model,

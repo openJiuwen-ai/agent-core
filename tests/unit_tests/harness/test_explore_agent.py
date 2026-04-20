@@ -27,7 +27,7 @@ def _create_dummy_model() -> Model:
 def test_build_explore_agent_config_defaults():
     spec = build_explore_agent_config(language="en")
 
-    assert spec.agent_card.name == "Explore"
+    assert spec.agent_card.name == "explore_agent"
     assert spec.agent_card.description
     assert spec.system_prompt
     assert isinstance(spec.rails, list)
@@ -47,10 +47,10 @@ def test_create_subagent_explore_initializes_tools(tmp_path):
                 workspace=str(tmp_path),
             )
 
-            subagent = parent_agent.create_subagent("Explore", "sub_session_id")
+            subagent = parent_agent.create_subagent("explore_agent", "sub_session_id")
             await subagent.ensure_initialized()
 
-            assert subagent.card.name == "Explore"
+            assert subagent.card.name == "explore_agent"
             assert subagent.ability_manager.get("read_file") is not None
             assert subagent.ability_manager.get("glob") is not None
             assert subagent.ability_manager.get("list_files") is not None
