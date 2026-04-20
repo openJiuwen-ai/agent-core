@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import json
 import mimetypes
 import os
 import shutil
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.request import urlopen
@@ -28,6 +30,89 @@ from ..drivers.managed_browser import ManagedBrowserDriver, _default_chrome_user
 from ..utils.parsing import extract_json_object
 
 MAX_ITERATION_MESSAGE = "Max iterations reached without completion"
+_ctx_observer_session_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "playwright_runtime_observer_session_id",
+    default="",
+)
+_ctx_observer_request_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "playwright_runtime_observer_request_id",
+    default="",
+)
+
+
+@dataclass
+class BrowserTaskProgressState:
+    request_id: str = ""
+    status: str = "unknown"
+    completed_steps: list[str] = field(default_factory=list)
+    remaining_steps: list[str] = field(default_factory=list)
+    next_step: str = ""
+    completion_evidence: list[str] = field(default_factory=list)
+    missing_requirements: list[str] = field(default_factory=list)
+    recent_tool_steps: list[str] = field(default_factory=list)
+    last_page_url: str = ""
+    last_page_title: str = ""
+    last_screenshot: Any = None
+    last_worker_final: str = ""
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, Any]]) -> "BrowserTaskProgressState":
+        if not isinstance(data, dict):
+            return cls()
+        last_page = data.get("last_page") if isinstance(data.get("last_page"), dict) else {}
+        return cls(
+            request_id=str(data.get("request_id") or "").strip(),
+            status=str(data.get("status") or "unknown").strip() or "unknown",
+            completed_steps=[str(item).strip() for item in data.get("completed_steps") or [] if str(item).strip()],
+            remaining_steps=[str(item).strip() for item in data.get("remaining_steps") or [] if str(item).strip()],
+            next_step=str(data.get("next_step") or "").strip(),
+            completion_evidence=[
+                str(item).strip() for item in data.get("completion_evidence") or [] if str(item).strip()
+            ],
+            missing_requirements=[
+                str(item).strip() for item in data.get("missing_requirements") or [] if str(item).strip()
+            ],
+            recent_tool_steps=[
+                str(item).strip() for item in data.get("recent_tool_steps") or [] if str(item).strip()
+            ],
+            last_page_url=str(last_page.get("url") or "").strip(),
+            last_page_title=str(last_page.get("title") or "").strip(),
+            last_screenshot=data.get("last_screenshot"),
+            last_worker_final=str(data.get("last_worker_final") or "").strip(),
+        )
+
+    def is_empty(self) -> bool:
+        return (
+            self.status == "unknown"
+            and not self.completed_steps
+            and not self.remaining_steps
+            and not self.next_step
+            and not self.completion_evidence
+            and not self.missing_requirements
+            and not self.recent_tool_steps
+            and not self.last_page_url
+            and not self.last_page_title
+            and not self.last_worker_final
+            and self.last_screenshot in (None, "")
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "status": self.status,
+            "completed_steps": list(self.completed_steps),
+            "remaining_steps": list(self.remaining_steps),
+            "next_step": self.next_step or None,
+            "completion_evidence": list(self.completion_evidence),
+            "missing_requirements": list(self.missing_requirements),
+            "recent_tool_steps": list(self.recent_tool_steps),
+            "last_page": {
+                "url": self.last_page_url,
+                "title": self.last_page_title,
+            },
+            "last_screenshot": self.last_screenshot,
+            "last_worker_final": self.last_worker_final or None,
+            "request_id": self.request_id or None,
+        }
 
 
 class BrowserService:
@@ -68,6 +153,7 @@ class BrowserService:
         self._managed_driver: Optional[ManagedBrowserDriver] = None
         self._registered_cdp_endpoint: str = ""
         self._failure_context_by_session: Dict[str, str] = {}
+        self._progress_by_session: Dict[str, BrowserTaskProgressState] = {}
         self._heartbeat_task: Optional[asyncio.Task[Any]] = None
         self._heartbeat_interval: float = 30.0
         self._connection_healthy: bool = False
@@ -247,22 +333,26 @@ class BrowserService:
         params["env"] = env_map
         self.mcp_cfg.params = params
 
-    async def _ensure_managed_driver_started(self) -> None:
+    async def _ensure_managed_driver_started(self) -> bool:
         if self._driver_mode != "managed":
-            return
+            return False
+        previous_endpoint = self._configured_cdp_endpoint()
         reusable_profile = self._resolve_existing_cdp_profile()
         if reusable_profile is not None:
+            replaced_driver = False
             if self._should_replace_managed_driver(reusable_profile):
                 await self._stop_managed_driver()
+                replaced_driver = True
             self._active_profile = reusable_profile
-            self._inject_cdp_endpoint(str(reusable_profile.cdp_url or "").strip())
-            return
+            endpoint = str(reusable_profile.cdp_url or "").strip()
+            self._inject_cdp_endpoint(endpoint)
+            return replaced_driver or endpoint != previous_endpoint
 
         if self._managed_driver is not None:
             ready = await asyncio.to_thread(self._managed_driver.is_endpoint_ready)
             if ready:
-                return
-            self._managed_driver = None
+                return False
+            await self._stop_managed_driver()
 
         profile = self._profile_store.get_profile(self._profile_name)
         if (
@@ -287,6 +377,7 @@ class BrowserService:
         profile.cdp_url = endpoint
         self._profile_store.upsert_profile(profile, select=True)
         self._managed_driver = driver
+        return True
 
     async def _stop_managed_driver(self) -> None:
         if self._managed_driver is None:
@@ -484,19 +575,20 @@ class BrowserService:
             self._locks[sid] = asyncio.Lock()
         return sid
 
-    async def ensure_started(self) -> None:
+    async def ensure_runtime_ready(self) -> None:
         if self.started:
-            await self._ensure_managed_driver_started()
+            browser_rebound = await self._ensure_managed_driver_started()
             configured_endpoint = self._configured_cdp_endpoint()
-            if configured_endpoint != self._registered_cdp_endpoint:
+            if browser_rebound or configured_endpoint != self._registered_cdp_endpoint:
                 await self._refresh_mcp_server_binding()
+                self._browser_agent = None
             return
 
         if shutil.which("npx") is None:
             raise RuntimeError("npx not found in PATH. Install Node.js first.")
 
-        from .browser_tools import _ensure_openjiuwen_client_patch
-        _ensure_openjiuwen_client_patch()
+        from .browser_tools import ensure_browser_runtime_client_patch
+        ensure_browser_runtime_client_patch()
 
         await self._ensure_managed_driver_started()
         self._ensure_screenshots_dir()
@@ -513,6 +605,15 @@ class BrowserService:
             if "already exist" not in str(error_value):
                 raise RuntimeError(f"Failed to register Playwright MCP server: {error_value}")
 
+        self._registered_cdp_endpoint = self._configured_cdp_endpoint()
+        self.started = True
+        self._start_heartbeat()
+
+    async def ensure_started(self) -> None:
+        await self.ensure_runtime_ready()
+        if self._browser_agent is not None:
+            return
+
         self._browser_agent = build_browser_worker_agent(
             provider=self.provider,
             api_key=self.api_key,
@@ -522,10 +623,8 @@ class BrowserService:
             max_steps=self.guardrails.max_steps,
             screenshot_subdir=self._screenshot_subdir,
             artifacts_subdir=self._artifacts_subdir,
+            tool_result_observer=self._observe_worker_tool_result,
         )
-        self._registered_cdp_endpoint = self._configured_cdp_endpoint()
-        self.started = True
-        self._start_heartbeat()
 
     def _start_heartbeat(self) -> None:
         if self._heartbeat_task is None or self._heartbeat_task.done():
@@ -617,6 +716,384 @@ class BrowserService:
         rid = (request_id or "").strip() or "request"
         return f"{sid}:worker:{rid}:{uuid.uuid4().hex}"
 
+    @classmethod
+    def _clean_progress_items(cls, value: Any, *, limit: int) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set)):
+            candidates = list(value)
+        else:
+            candidates = [value]
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in candidates:
+            text_value = " ".join(str(item or "").split()).strip()
+            if not text_value:
+                continue
+            lowered = text_value.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            cleaned.append(cls._trim_text(text_value, 220))
+            if len(cleaned) >= limit:
+                break
+        return cleaned
+
+    @staticmethod
+    def _normalize_progress_status(value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        aliases = {
+            "complete": "completed",
+            "completed": "completed",
+            "done": "completed",
+            "partial": "partial",
+            "in_progress": "partial",
+            "in-progress": "partial",
+            "blocked": "blocked",
+            "failed": "failed",
+        }
+        return aliases.get(normalized, "")
+
+    @staticmethod
+    def _push_recent_tool_step(existing: list[str], step: str, *, limit: int = 8) -> list[str]:
+        normalized = " ".join(str(step or "").split()).strip()
+        if not normalized:
+            return list(existing)
+        updated = [item for item in existing if item != normalized]
+        updated.append(normalized)
+        return updated[-limit:]
+
+    @classmethod
+    def _extract_page_snapshot(cls, value: Any) -> tuple[str, str]:
+        if not isinstance(value, dict):
+            return "", ""
+        page = value.get("page") if isinstance(value.get("page"), dict) else {}
+        url = str(value.get("url") or page.get("url") or "").strip()
+        title = str(value.get("title") or page.get("title") or "").strip()
+        return cls._trim_text(url, 240), cls._trim_text(title, 120)
+
+    @staticmethod
+    def _extract_screenshot_snapshot(value: Any) -> Any:
+        if not isinstance(value, dict):
+            return None
+        screenshot = value.get("screenshot")
+        if screenshot in (None, ""):
+            return None
+        return screenshot
+
+    @classmethod
+    def _summarize_observation_payload(cls, value: Any) -> str:
+        if isinstance(value, dict):
+            parts: list[str] = []
+            error_text = str(value.get("error") or "").strip()
+            if error_text:
+                parts.append(f"error={cls._trim_text(error_text, 140)}")
+            for key in ("message", "text", "result", "output", "value", "selector"):
+                candidate = value.get(key)
+                if candidate in (None, "") or isinstance(candidate, (dict, list, tuple, set)):
+                    continue
+                parts.append(cls._trim_text(str(candidate), 160))
+                break
+            url, title = cls._extract_page_snapshot(value)
+            if url:
+                parts.append(f"url={url}")
+            if title:
+                parts.append(f"title={title}")
+            ok_value = value.get("ok")
+            if ok_value is True and not parts:
+                parts.append("ok")
+            if not parts and value:
+                parts.append(", ".join(list(value.keys())[:4]))
+            return "; ".join(parts)
+        if isinstance(value, (list, tuple)):
+            nested = [cls._summarize_observation_payload(item) for item in list(value)[:2]]
+            nested = [item for item in nested if item]
+            return " | ".join(nested)
+        text_value = " ".join(str(value or "").split()).strip()
+        return cls._trim_text(text_value, 160)
+
+    @classmethod
+    def _summarize_tool_result(cls, tool_name: str, tool_result: Any) -> str:
+        payload_summary = cls._summarize_observation_payload(tool_result) or "completed"
+        if tool_name:
+            return f"{tool_name}: {payload_summary}"
+        return payload_summary
+
+    def _get_progress_state(self, session_id: str) -> BrowserTaskProgressState:
+        return self._progress_by_session.setdefault(session_id, BrowserTaskProgressState())
+
+    def _update_progress_from_tool_observation(
+        self,
+        *,
+        session_id: str,
+        request_id: str,
+        tool_name: str,
+        tool_result: Any,
+    ) -> None:
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        progress_state = self._get_progress_state(sid)
+        if request_id:
+            progress_state.request_id = request_id
+        progress_state.recent_tool_steps = self._push_recent_tool_step(
+            progress_state.recent_tool_steps,
+            self._summarize_tool_result(tool_name, tool_result),
+        )
+        url, title = self._extract_page_snapshot(tool_result)
+        if url:
+            progress_state.last_page_url = url
+        if title:
+            progress_state.last_page_title = title
+        screenshot = self._extract_screenshot_snapshot(tool_result)
+        if screenshot is not None:
+            progress_state.last_screenshot = screenshot
+        if progress_state.status == "unknown":
+            progress_state.status = "partial"
+
+    async def _observe_worker_tool_result(self, tool_name: str, tool_result: Any) -> None:
+        session_id = _ctx_observer_session_id.get().strip()
+        if not session_id:
+            return
+        request_id = _ctx_observer_request_id.get().strip()
+        self._update_progress_from_tool_observation(
+            session_id=session_id,
+            request_id=request_id,
+            tool_name=tool_name,
+            tool_result=tool_result,
+        )
+
+    @classmethod
+    def _should_treat_as_completed(cls, parsed: Dict[str, Any]) -> bool:
+        status = cls._normalize_progress_status(
+            parsed.get("status") or parsed.get("task_status")
+        )
+        if status != "completed":
+            return False
+        progress = parsed.get("progress") if isinstance(parsed.get("progress"), dict) else {}
+        missing = cls._clean_progress_items(
+            progress.get("missing_requirements") or parsed.get("missing_requirements"),
+            limit=4,
+        )
+        evidence = cls._clean_progress_items(
+            progress.get("completion_evidence") or parsed.get("completion_evidence"),
+            limit=4,
+        )
+        final_text = str(parsed.get("final") or "").strip()
+        return not missing and bool(evidence or final_text)
+
+    def _update_progress_from_worker_result(
+        self,
+        *,
+        session_id: str,
+        request_id: str,
+        parsed: Dict[str, Any],
+    ) -> None:
+        sid = (session_id or "").strip()
+        if not sid or not isinstance(parsed, dict):
+            return
+        progress_state = self._get_progress_state(sid)
+        if request_id:
+            progress_state.request_id = request_id
+
+        progress_payload = parsed.get("progress") if isinstance(parsed.get("progress"), dict) else {}
+        status = self._normalize_progress_status(
+            parsed.get("status") or parsed.get("task_status")
+        )
+        if not status:
+            if bool(parsed.get("ok", False)):
+                status = "completed"
+            elif self._is_max_iteration_result(parsed):
+                status = "partial"
+            elif str(parsed.get("error") or "").strip():
+                status = "failed"
+            else:
+                status = "partial"
+        progress_state.status = status
+
+        completed_steps = self._clean_progress_items(
+            progress_payload.get("completed_steps") or parsed.get("completed_steps"),
+            limit=8,
+        )
+        if completed_steps:
+            progress_state.completed_steps = completed_steps
+
+        remaining_steps = self._clean_progress_items(
+            progress_payload.get("remaining_steps") or parsed.get("remaining_steps"),
+            limit=8,
+        )
+        if remaining_steps:
+            progress_state.remaining_steps = remaining_steps
+
+        next_step = str(progress_payload.get("next_step") or parsed.get("next_step") or "").strip()
+        if next_step:
+            progress_state.next_step = self._trim_text(next_step, 220)
+
+        completion_evidence = self._clean_progress_items(
+            progress_payload.get("completion_evidence") or parsed.get("completion_evidence"),
+            limit=6,
+        )
+        if completion_evidence:
+            progress_state.completion_evidence = completion_evidence
+
+        missing_requirements = self._clean_progress_items(
+            progress_payload.get("missing_requirements") or parsed.get("missing_requirements"),
+            limit=6,
+        )
+        if missing_requirements:
+            progress_state.missing_requirements = missing_requirements
+
+        url, title = self._extract_page_snapshot(parsed)
+        if url:
+            progress_state.last_page_url = url
+        if title:
+            progress_state.last_page_title = title
+        screenshot = self._extract_screenshot_snapshot(parsed)
+        if screenshot is not None:
+            progress_state.last_screenshot = screenshot
+
+        final_text = str(parsed.get("final") or "").strip()
+        if final_text:
+            progress_state.last_worker_final = self._trim_text(final_text, 1200)
+            if bool(parsed.get("ok", False)) and not progress_state.completion_evidence:
+                progress_state.completion_evidence = [self._trim_text(final_text, 220)]
+
+    @classmethod
+    def _build_progress_context(cls, progress_state: Optional[BrowserTaskProgressState]) -> str:
+        if progress_state is None:
+            return ""
+        lines: list[str] = []
+        if progress_state.status and progress_state.status != "unknown":
+            lines.append(f"- Known progress status: {progress_state.status}")
+        if progress_state.completed_steps:
+            lines.append(f"- Completed steps: {' | '.join(progress_state.completed_steps)}")
+        if progress_state.remaining_steps:
+            lines.append(f"- Remaining steps: {' | '.join(progress_state.remaining_steps)}")
+        if progress_state.next_step:
+            lines.append(f"- Next step to try: {progress_state.next_step}")
+        if progress_state.completion_evidence:
+            lines.append(
+                f"- Completion evidence observed: {' | '.join(progress_state.completion_evidence)}"
+            )
+        if progress_state.missing_requirements:
+            lines.append(
+                f"- Missing requirements / blockers: {' | '.join(progress_state.missing_requirements)}"
+            )
+        if progress_state.recent_tool_steps:
+            lines.append("- Recent browser tool activity:")
+            lines.extend(f"  - {step}" for step in progress_state.recent_tool_steps[-6:])
+        if not lines:
+            return ""
+        return "Known progress for continuation:\n" + "\n".join(lines)
+
+    @staticmethod
+    def _is_empty_progress_state(progress_state: BrowserTaskProgressState) -> bool:
+        return (
+            progress_state.status == "unknown"
+            and not any(
+                (
+                    progress_state.completed_steps,
+                    progress_state.remaining_steps,
+                    progress_state.next_step,
+                    progress_state.completion_evidence,
+                    progress_state.missing_requirements,
+                    progress_state.recent_tool_steps,
+                    progress_state.last_page_url,
+                    progress_state.last_page_title,
+                    progress_state.last_worker_final,
+                )
+            )
+            and progress_state.last_screenshot in (None, "")
+        )
+
+    def _export_progress_state(self, session_id: str) -> Optional[Dict[str, Any]]:
+        progress_state = self._progress_by_session.get((session_id or "").strip())
+        if progress_state is None:
+            return None
+        if self._is_empty_progress_state(progress_state):
+            return None
+        return progress_state.to_dict()
+
+    @classmethod
+    def build_progress_context(cls, progress_state: Optional[BrowserTaskProgressState]) -> str:
+        return cls._build_progress_context(progress_state)
+
+    def record_tool_progress(
+        self,
+        *,
+        session_id: str,
+        request_id: str,
+        tool_name: str,
+        tool_result: Any,
+    ) -> None:
+        self._update_progress_from_tool_observation(
+            session_id=session_id,
+            request_id=request_id,
+            tool_name=tool_name,
+            tool_result=tool_result,
+        )
+
+    @classmethod
+    def should_treat_as_completed(cls, parsed: Dict[str, Any]) -> bool:
+        return cls._should_treat_as_completed(parsed)
+
+    def record_worker_progress(
+        self,
+        *,
+        session_id: str,
+        request_id: str,
+        parsed: Dict[str, Any],
+    ) -> None:
+        self._update_progress_from_worker_result(
+            session_id=session_id,
+            request_id=request_id,
+            parsed=parsed,
+        )
+
+    def get_progress_state(self, session_id: str) -> Optional[BrowserTaskProgressState]:
+        return self._progress_by_session.get((session_id or "").strip())
+
+    def export_progress_state(self, session_id: str) -> Optional[Dict[str, Any]]:
+        return self._export_progress_state(session_id)
+
+    def build_failure_summary(
+        self,
+        *,
+        task: str,
+        error: str,
+        page_url: str,
+        page_title: str,
+        final: str,
+        screenshot: Optional[str],
+        attempt: int,
+        progress_state: Optional[BrowserTaskProgressState],
+    ) -> str:
+        return self._build_failure_summary(
+            task=task,
+            error=error,
+            page_url=page_url,
+            page_title=page_title,
+            final=final,
+            screenshot=screenshot,
+            attempt=attempt,
+            progress_state=progress_state,
+        )
+
+    def set_progress_state(self, session_id: str, progress_state: BrowserTaskProgressState) -> None:
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        if progress_state.is_empty():
+            self._progress_by_session.pop(sid, None)
+            return
+        self._progress_by_session[sid] = progress_state
+
+    def clear_progress_state(self, session_id: str) -> None:
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        self._progress_by_session.pop(sid, None)
+
     async def _run_task_once(self, task: str, session_id: str, request_id: str) -> Dict[str, Any]:
         if self._browser_agent is None:
             raise RuntimeError("BrowserService is not started")
@@ -630,33 +1107,58 @@ class BrowserService:
             "Perform the task in the current logical browser session/tab for this session id."
         )
         worker_conversation_id = self._build_worker_conversation_id(session_id, request_id)
-        result = await Runner.run_agent(
-            self._browser_agent,
-            {"query": task_prompt, "conversation_id": worker_conversation_id, "request_id": request_id},
-        )
+        token_session = _ctx_observer_session_id.set(session_id)
+        token_request = _ctx_observer_request_id.set(request_id)
+        try:
+            result = await Runner.run_agent(
+                self._browser_agent,
+                {"query": task_prompt, "conversation_id": worker_conversation_id, "request_id": request_id},
+            )
+        finally:
+            _ctx_observer_session_id.reset(token_session)
+            _ctx_observer_request_id.reset(token_request)
         output_text = result.get("output") if isinstance(result, dict) else result
         parsed = extract_json_object(output_text)
         if parsed:
+            self._update_progress_from_worker_result(
+                session_id=session_id,
+                request_id=request_id,
+                parsed=parsed,
+            )
             return parsed
 
         output_str = str(output_text) if output_text is not None else ""
         output_lower = output_str.lower()
         if MAX_ITERATION_MESSAGE.lower() in output_lower:
-            return {
+            parsed = {
                 "ok": False,
                 "final": output_str,
                 "page": {"url": "", "title": ""},
                 "screenshot": None,
                 "error": "max_iterations_reached",
+                "status": "partial",
             }
+            self._update_progress_from_worker_result(
+                session_id=session_id,
+                request_id=request_id,
+                parsed=parsed,
+            )
+            return parsed
 
-        return {
+        parsed = {
             "ok": False,
             "final": output_str,
             "page": {"url": "", "title": ""},
             "screenshot": None,
             "error": "Browser worker did not return valid JSON output",
+            "status": "failed",
         }
+        self._update_progress_from_worker_result(
+            session_id=session_id,
+            request_id=request_id,
+            parsed=parsed,
+        )
+        return parsed
 
     async def run_task_once(self, task: str, session_id: str, request_id: str) -> Dict[str, Any]:
         return await self._run_task_once(task=task, session_id=session_id, request_id=request_id)
@@ -677,28 +1179,27 @@ class BrowserService:
         return False
 
     @staticmethod
-    def _build_resume_task(task: str, previous_final: str) -> str:
+    def _build_resume_task(task: str, previous_final: str, progress_context: str = "") -> str:
         base = (task or "").strip()
         previous = (previous_final or "").strip()
         if len(previous) > 1200:
             previous = previous[:1200] + "...[truncated]"
+        context_parts: list[str] = [
+            "Continuation context:",
+            "- The previous run reached max iterations before completion.",
+            "- Continue from the current browser state in this same session.",
+            "- Avoid repeating already completed steps unless needed for recovery.",
+        ]
+        if progress_context:
+            context_parts.append(progress_context)
         if previous:
-            return (
-                f"{base}\n\n"
-                "Continuation context:\n"
-                "- The previous run reached max iterations before completion.\n"
-                "- Continue from the current browser state in this same session.\n"
-                "- Avoid repeating already completed steps unless needed for recovery.\n"
-                "- Previous partial status (may be incomplete):\n"
-                f"{previous}"
+            context_parts.extend(
+                [
+                    "- Previous partial status (may be incomplete):",
+                    previous,
+                ]
             )
-        return (
-            f"{base}\n\n"
-            "Continuation context:\n"
-            "- The previous run reached max iterations before completion.\n"
-            "- Continue from the current browser state in this same session.\n"
-            "- Avoid repeating already completed steps unless needed for recovery."
-        )
+        return f"{base}\n\n" + "\n".join(context_parts)
 
     @staticmethod
     def _trim_text(value: Any, limit: int) -> str:
@@ -718,6 +1219,7 @@ class BrowserService:
         final: str,
         screenshot: Any,
         attempt: int,
+        progress_state: Optional[BrowserTaskProgressState] = None,
     ) -> str:
         lines = [
             "Failure summary for continuation:",
@@ -733,6 +1235,9 @@ class BrowserService:
         screenshot_text = cls._trim_text(screenshot, 200)
         if screenshot_text:
             lines.append(f"- Last screenshot: {screenshot_text}")
+        progress_context = cls._build_progress_context(progress_state)
+        if progress_context:
+            lines.append(progress_context)
         final_excerpt = cls._trim_text(final, 1200)
         if final_excerpt:
             lines.append("- Partial output excerpt:")
@@ -788,6 +1293,7 @@ class BrowserService:
                         "error": "cancelled_by_frontend",
                         "attempt": 0,
                         "failure_summary": None,
+                        "progress_state": None,
                     }
                     return result
                 last_error: Optional[str] = None
@@ -805,7 +1311,17 @@ class BrowserService:
                             timeout=float(effective_timeout),
                         )
                         attempt_idx += 1
+                        self._update_progress_from_worker_result(
+                            session_id=sid,
+                            request_id=rid,
+                            parsed=parsed,
+                        )
                         parsed_ok = bool(parsed.get("ok", False))
+                        if not parsed_ok and self._should_treat_as_completed(parsed):
+                            parsed = dict(parsed)
+                            parsed["ok"] = True
+                            parsed["error"] = None
+                            parsed_ok = True
                         should_resume_max_iter = (
                             (not parsed_ok)
                             and self._is_max_iteration_result(parsed)
@@ -822,7 +1338,13 @@ class BrowserService:
                             should_resume_max_iter
                         ):
                             used_max_iteration_resume = True
-                            next_task = self._build_resume_task(next_task, str(parsed.get("final", "")))
+                            next_task = self._build_resume_task(
+                                next_task,
+                                str(parsed.get("final", "")),
+                                progress_context=self._build_progress_context(
+                                    self._progress_by_session.get(sid)
+                                ),
+                            )
                             last_error = str(parsed.get("error") or MAX_ITERATION_MESSAGE)
                             continue
 
@@ -840,6 +1362,7 @@ class BrowserService:
                                 final=str(parsed.get("final", "")),
                                 screenshot=parsed.get("screenshot"),
                                 attempt=attempt_idx,
+                                progress_state=self._progress_by_session.get(sid),
                             )
                             should_restart = (
                                 self._is_retryable_transport_message(failure_summary)
@@ -868,9 +1391,11 @@ class BrowserService:
                             "screenshot": screenshot,
                             "error": parsed.get("error"),
                             "attempt": attempt_idx,
+                            "progress_state": None,
                         }
                         if parsed_ok:
                             self._failure_context_by_session.pop(sid, None)
+                            self._progress_by_session.pop(sid, None)
                             response["failure_summary"] = None
                             return response
 
@@ -882,9 +1407,11 @@ class BrowserService:
                             final=str(parsed.get("final", "")),
                             screenshot=parsed.get("screenshot"),
                             attempt=attempt_idx,
+                            progress_state=self._progress_by_session.get(sid),
                         )
                         self._failure_context_by_session[sid] = failure_summary
                         response["failure_summary"] = failure_summary
+                        response["progress_state"] = self._export_progress_state(sid)
                         return response
                     except TimeoutError:
                         attempt_idx += 1
@@ -904,6 +1431,7 @@ class BrowserService:
                             "error": "cancelled_by_frontend",
                             "attempt": attempt_idx + 1,
                             "failure_summary": None,
+                            "progress_state": None,
                         }
                         return result
                     except Exception as exc:
@@ -931,6 +1459,7 @@ class BrowserService:
                     final=last_failure_final,
                     screenshot=last_failure_screenshot,
                     attempt=min(attempt_idx, max_attempts),
+                    progress_state=self._progress_by_session.get(sid),
                 )
                 self._failure_context_by_session[sid] = failure_summary
                 result = {
@@ -943,6 +1472,7 @@ class BrowserService:
                     "error": last_error or "unknown browser execution error",
                     "attempt": min(attempt_idx, max_attempts),
                     "failure_summary": failure_summary,
+                    "progress_state": self._export_progress_state(sid),
                 }
                 return result
             finally:

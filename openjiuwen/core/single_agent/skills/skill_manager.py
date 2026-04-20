@@ -19,6 +19,15 @@ class Skill(BaseModel):
     description: str = None
     directory: Path
 
+    def asdict(self, include_directory: bool = True):
+        skill_dict = {
+            'name': self.name,
+            'description': self.description,
+        }
+        if (include_directory):
+            skill_dict['directory'] = str(self.directory)
+        return skill_dict
+
     def __str__(self):
         return f"Skill: {self.name}\nDescription: {self.description}\nDirectory: {self.directory}"
 
@@ -57,11 +66,10 @@ class SkillManager:
 
         result = await sys_operation.fs().read_file(str(path), mode="text", encoding="utf-8")
 
-        if getattr(result, "code", 0) != 0:
-            raise FileNotFoundError(getattr(result, "message", f"read_file failed: {path}"))
+        if result.code != 0:
+            raise FileNotFoundError(result.message)
 
-        data = getattr(result, "data", None)
-        content = getattr(data, "content", None) if data is not None else None
+        content = result.data.content if result.data is not None else None
         if content is None:
             raise FileNotFoundError(f"read_file is None：{path}")
 
@@ -107,6 +115,46 @@ class SkillManager:
             return Skill(name=skill_dir.name, description=description, directory=skill_dir)
         return None
 
+    @staticmethod
+    def _find_skill_md(file_items) -> tuple[bool, Optional[str]]:
+        """Return (found, path) for the first skill.md entry in file_items."""
+        for f in file_items:
+            if f.name.lower() == "skill.md":
+                return True, f.path
+        return False, None
+
+    async def _add_to_registry(self, skill: Skill, overwrite: bool) -> None:
+        """Add a skill to the registry, raising ValueError on duplicate when overwrite is False."""
+        if (not overwrite) and (skill.name in self._registry):
+            raise ValueError(f"Skill already exists: {skill.name}")
+        self._registry[skill.name] = skill
+
+    async def _register_skill_from_md(self, skill_md_path: Optional[str], session_id: str, overwrite: bool) -> None:
+        """Register a skill from a skill.md path; no-op if path is falsy or skill cannot be loaded."""
+        if not skill_md_path:
+            return
+        skill = await self._create_skill_from_path(Path(str(skill_md_path)), session_id)
+        if skill is not None:
+            await self._add_to_registry(skill, overwrite)
+
+    async def _try_register_dir_as_skill(self, fs, dir_path: str, session_id: str, overwrite: bool) -> bool:
+        """Attempt to register dir as a skill directory.
+
+        Returns True if a skill.md file was found (registration may still be skipped
+        if the path is invalid or the skill cannot be loaded).
+        """
+        files_res = await fs.list_files(dir_path, recursive=False)
+        if files_res.code != 0:
+            return False
+        file_items = files_res.data.list_items if files_res.data is not None else None
+        if not file_items:
+            return False
+        found, skill_md_path = self._find_skill_md(file_items)
+        if not found:
+            return False
+        await self._register_skill_from_md(skill_md_path, session_id, overwrite)
+        return True
+
     async def register(
             self,
             skill_path: Union[Path, List[Path]],
@@ -131,56 +179,27 @@ class SkillManager:
 
         async def _register_root(root: Path):
             dirs_res = await fs.list_directories(str(root), recursive=False)
-            if getattr(dirs_res, "code", 0) != 0:
-                raise NotADirectoryError(getattr(dirs_res, "message", f"list_directories failed: {root}"))
-
-            data = getattr(dirs_res, "data", None)
-            resolved_root = getattr(data, "root_path", None) if data is not None else None
-            dir_items = getattr(data, "list_items", None) if data is not None else None
-
-            # 如果解析后的 root_path 是目录，就不要把 root 当文件去读
-            if resolved_root and Path(resolved_root).is_dir():
-                if not dir_items:
-                    return
-            else:
+            if dirs_res.code != 0:
+                # root is not a directory — treat it as a direct skill.md file path
                 skill = await self._create_skill_from_path(root, session_id)
                 if skill is not None:
-                    if (not overwrite) and (skill.name in self._registry):
-                        raise ValueError(f"Skill already exists: {skill.name}")
-                    self._registry[skill.name] = skill
+                    await self._add_to_registry(skill, overwrite)
                 return
 
+            dir_items = dirs_res.data.list_items if dirs_res.data is not None else None
+
+            # Check if root itself is a skill directory (directly contains skill.md).
+            # This supports passing the skill directory instead of its parent.
+            if await self._try_register_dir_as_skill(fs, str(root), session_id, overwrite):
+                return
+
+            # root is a parent directory — iterate subdirectories for multiple skills
+            if not dir_items:
+                return
             for d in dir_items:
-                dir_path = getattr(d, "path", None)
-                dir_name = getattr(d, "name", None)
-                if not dir_path or not dir_name:
+                if not d.path or not d.name:
                     continue
-
-                files_res = await fs.list_files(str(dir_path), recursive=False)
-                if getattr(files_res, "code", 0) != 0:
-                    continue
-
-                fdata = getattr(files_res, "data", None)
-                file_items = getattr(fdata, "list_items", None) if fdata is not None else None
-                if not file_items:
-                    continue
-
-                skill_md_path = None
-                for f in file_items:
-                    fname = getattr(f, "name", "") or ""
-                    if fname.lower() == "skill.md":
-                        skill_md_path = getattr(f, "path", None)
-                        break
-                if not skill_md_path:
-                    continue
-
-                skill = await self._create_skill_from_path(Path(str(skill_md_path)), session_id)
-                if skill is None:
-                    continue
-
-                if (not overwrite) and (skill.name in self._registry):
-                    raise ValueError(f"Skill already exists: {skill.name}")
-                self._registry[skill.name] = skill
+                await self._try_register_dir_as_skill(fs, str(d.path), session_id, overwrite)
 
         if skill_path is not None and isinstance(skill_path, Path):
             await _register_root(skill_path)

@@ -7,7 +7,7 @@ from openjiuwen.agent_teams.messager.base import (
     MessagerTransportConfig,
     SubscriptionHandle,
 )
-from openjiuwen.agent_teams.messager.team_runtime import TeamRuntimeMessager
+from openjiuwen.agent_teams.messager.inprocess import InProcessMessager
 from openjiuwen.agent_teams.messager.messager import (
     Messager,
     MessagerHandler,
@@ -15,7 +15,7 @@ from openjiuwen.agent_teams.messager.messager import (
 from openjiuwen.agent_teams.messager.pyzmq_backend import PyZmqMessager
 
 __all__ = [
-    "TeamRuntimeMessager",
+    "InProcessMessager",
     "Messager",
     "MessagerHandler",
     "PyZmqMessager",

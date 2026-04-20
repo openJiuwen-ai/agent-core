@@ -8,6 +8,7 @@ import pytest
 
 from openjiuwen.agent_teams import create_agent_team
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+from openjiuwen.agent_teams.agent.team_rail import TeamRail, TeamSectionName
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
     TransportSpec,
@@ -34,7 +35,15 @@ def test_team_agent_leader_policy() -> None:
     )
 
     assert leader.role == TeamRole.LEADER
-    assert "TeamLeader" in leader.deep_config.system_prompt
+    # TeamLeader policy is injected by TeamRail as a PromptSection before each
+    # model call, not stored in deep_config.system_prompt (which stays None).
+    team_rail = next(
+        r for r in leader.deep_agent._pending_rails if isinstance(r, TeamRail)
+    )
+    role_section = next(
+        s for s in team_rail._static_sections if s.name == TeamSectionName.ROLE
+    )
+    assert "TeamLeader" in role_section.render("cn")
 
 
 def test_spawn_payload_contains_member_identity() -> None:
@@ -49,22 +58,20 @@ def test_spawn_payload_contains_member_identity() -> None:
             "pubsub_subscribe_addr": "tcp://127.0.0.1:19101",
         }),
     )
-    member = TeamMemberSpec(
-        member_id="fe-1",
-        name="Frontend Expert",
+    ctx = leader.build_member_context(TeamMemberSpec(
+        member_name="fe-1",
+        display_name="Frontend Expert",
         role_type=TeamRole.TEAMMATE,
         persona="追求交互质量的前端工程师",
-        domain="frontend",
-    )
+    ))
 
     payload = leader.build_spawn_payload(
-        member,
+        ctx,
         initial_message="Review the design system impact.",
     )
 
     assert payload["coordination"]["role"] == "teammate"
-    assert payload["coordination"]["persona"] == member.persona
-    assert payload["coordination"]["domain"] == "frontend"
+    assert payload["coordination"]["persona"] == "追求交互质量的前端工程师"
     assert payload["coordination"]["transport"]["node_id"] == "fe-1"
     assert payload["query"] == "Review the design system impact."
 
@@ -82,15 +89,14 @@ async def test_spawn_config_contains_serializable_team_agent_payload() -> None:
             "pubsub_subscribe_addr": "tcp://127.0.0.1:19101",
         }),
     )
-    member = TeamMemberSpec(
-        member_id="be-1",
-        name="Backend Expert",
+    ctx = leader.build_member_context(TeamMemberSpec(
+        member_name="be-1",
+        display_name="Backend Expert",
         role_type=TeamRole.TEAMMATE,
         persona="严谨的后端架构师",
-        domain="backend",
-    )
+    ))
 
-    spawn_config = leader.build_spawn_config(member)
+    spawn_config = leader.build_spawn_config(ctx)
 
     assert spawn_config.agent_kind == SpawnAgentKind.TEAM_AGENT
     assert spawn_config.runner_config is not None
@@ -104,29 +110,22 @@ async def test_spawn_config_contains_serializable_team_agent_payload() -> None:
     teammate = await TeamAgent.from_spawn_payload(spawn_config.payload)
 
     assert teammate.role == TeamRole.TEAMMATE
-    assert teammate.card.name == "Backend Expert"
+    assert teammate.card.name == "be-1"
     assert teammate.runtime_context is not None
     assert teammate.runtime_context.messager_config is not None
     assert teammate.runtime_context.messager_config.node_id == "be-1"
 
 
 def test_runtime_context_roundtrips_with_pydantic_serialization() -> None:
-    leader_member = TeamMemberSpec(
-        member_id="leader-1",
-        name="Leader",
-        role_type=TeamRole.LEADER,
-        persona="pm",
-        domain="project_management",
-    )
     context = TeamRuntimeContext(
         role=TeamRole.LEADER,
-        member_spec=leader_member,
-        team_spec=TeamSpec(team_id="demo", name="demo"),
+        member_name="leader-1",
+        persona="pm",
+        team_spec=TeamSpec(team_name="demo", display_name="demo"),
     )
 
     restored = TeamRuntimeContext.model_validate(context.model_dump(mode="json"))
 
     assert restored.role == TeamRole.LEADER
-    assert restored.member_id == "leader-1"
+    assert restored.member_name == "leader-1"
     assert restored.persona == "pm"
-    assert restored.domain == "project_management"

@@ -22,6 +22,7 @@ DeepAgent 内置工具实现。所有工具通过 Rails 或 `create_deep_agent()
 | 工具 | 说明 |
 |---|---|
 | `BashTool` | 执行 Bash 命令，支持超时控制 |
+| `PowerShellTool` | 执行 PowerShell 命令并返回输出 |
 
 ### 代码工具
 
@@ -65,7 +66,8 @@ DeepAgent 内置工具实现。所有工具通过 Rails 或 `create_deep_agent()
 
 | 工具 | 说明 |
 |---|---|
-| `ListSkillTool` | 列出可用技能 |
+| `ListSkillTool` | 列出可用技能 | 
+| `SkillTool` | 获取与技能相关的技能文件 |
 
 ### 工具管理
 

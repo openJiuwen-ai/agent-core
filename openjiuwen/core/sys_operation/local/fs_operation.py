@@ -5,14 +5,14 @@ import asyncio
 import datetime
 import os
 import pathlib
-import re
+import weakref
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any, Literal, List, AsyncIterator, Iterator
 
 from pydantic import BaseModel, field_validator
 
 import aiofiles
-from filelock import AsyncFileLock, BaseAsyncFileLock
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -127,9 +127,67 @@ class _ErrorLogParams:
     start_time: Optional[float] = None
 
 
+class _AsyncReadWriteLock:
+    """Async read-write lock: concurrent readers, exclusive writers."""
+
+    def __init__(self):
+        self._condition = asyncio.Condition()
+        self._readers = 0
+        self._writer_active = False
+        self._waiting_writers = 0
+
+    async def acquire_read(self):
+        async with self._condition:
+            while self._writer_active or self._waiting_writers > 0:
+                await self._condition.wait()
+            self._readers += 1
+
+    async def release_read(self):
+        async with self._condition:
+            self._readers -= 1
+            if self._readers == 0:
+                self._condition.notify_all()
+
+    async def acquire_write(self):
+        async with self._condition:
+            self._waiting_writers += 1
+            try:
+                while self._writer_active or self._readers > 0:
+                    await self._condition.wait()
+                self._writer_active = True
+            finally:
+                self._waiting_writers -= 1
+
+    async def release_write(self):
+        async with self._condition:
+            self._writer_active = False
+            self._condition.notify_all()
+
+
+class _AsyncReadWriteLockGuard:
+    def __init__(self, lock: _AsyncReadWriteLock, mode: Literal["read", "write"]):
+        self._lock = lock
+        self._mode = mode
+
+    async def __aenter__(self):
+        if self._mode == "read":
+            await self._lock.acquire_read()
+        else:
+            await self._lock.acquire_write()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if self._mode == "read":
+            await self._lock.release_read()
+        else:
+            await self._lock.release_write()
+        return False
+
+
 @operation(name="fs", mode=OperationMode.LOCAL, description="local fs operation")
 class FsOperation(BaseFsOperation):
     """File system operation"""
+    _rw_locks: weakref.WeakValueDictionary[str, _AsyncReadWriteLock] = weakref.WeakValueDictionary()
 
     @staticmethod
     def _get_lock_timeout(options: Optional[Dict[str, Any]] = None) -> float:
@@ -146,42 +204,66 @@ class FsOperation(BaseFsOperation):
             return float(options["lock_timeout"])
         return 300.0
 
-    @staticmethod
-    def _get_async_lock(file_path: pathlib.Path) -> BaseAsyncFileLock:
-        """Gets an async file lock for the given file.
-
-        Args:
-            file_path: Path to the target file that needs locking.
-
-        Returns:
-            BaseAsyncFileLock: Async file lock instance using a .lock suffix file.
-        """
-        lock_file = file_path.with_suffix(file_path.suffix + ".lock")
-        lock = AsyncFileLock(lock_file)
+    @classmethod
+    def _get_rw_lock(cls, file_path: pathlib.Path) -> _AsyncReadWriteLock:
+        """Gets the in-process read-write lock for the given file path."""
+        key = os.path.normcase(str(file_path))
+        lock = cls._rw_locks.get(key)
+        if lock is None:
+            lock = _AsyncReadWriteLock()
+            cls._rw_locks[key] = lock
         return lock
 
-    @staticmethod
-    def _get_ordered_locks(path1: pathlib.Path, path2: pathlib.Path) -> Tuple[BaseAsyncFileLock, BaseAsyncFileLock]:
-        """Gets two file locks in a globally consistent order to prevent deadlocks.
+    @classmethod
+    @asynccontextmanager
+    async def _file_lock(
+            cls,
+            file_path: pathlib.Path,
+            mode: Literal["read", "write"],
+            timeout: float,
+    ):
+        lock = cls._get_rw_lock(file_path)
+        async with asyncio.timeout(timeout):
+            async with _AsyncReadWriteLockGuard(lock, mode):
+                yield
+
+    @classmethod
+    @asynccontextmanager
+    async def _maybe_read_lock(cls, file_path: pathlib.Path, timeout: float, *, skip_lock: bool = False):
+        if skip_lock:
+            yield
+            return
+        async with cls._file_lock(file_path, "read", timeout):
+            yield
+
+    @classmethod
+    @asynccontextmanager
+    async def _ordered_file_locks(
+            cls,
+            *lock_requests: Tuple[pathlib.Path, Literal["read", "write"]],
+            timeout: float,
+    ):
+        """Acquire file read/write locks in path order to prevent deadlocks.
 
         Uses case-normalized path comparison for cross-platform (Windows/Linux) safety.
-
-        Args:
-            path1: First file path to lock (e.g., source file).
-            path2: Second file path to lock (e.g., destination file).
-
-        Returns:
-            Tuple[BaseAsyncFileLock, BaseAsyncFileLock]: A Pair of async locks ordered deterministically by path.
         """
-        key1 = os.path.normcase(str(path1))
-        key2 = os.path.normcase(str(path2))
+        merged_requests: Dict[str, Tuple[pathlib.Path, Literal["read", "write"]]] = {}
+        for lock_path, lock_mode in lock_requests:
+            key = os.path.normcase(str(lock_path))
+            current = merged_requests.get(key)
+            if current is None or current[1] == "read" and lock_mode == "write":
+                merged_requests[key] = (lock_path, lock_mode)
 
-        if key1 <= key2:
-            first_path, second_path = path1, path2
-        else:
-            first_path, second_path = path2, path1
-
-        return FsOperation._get_async_lock(first_path), FsOperation._get_async_lock(second_path)
+        ordered_requests = sorted(
+            merged_requests.values(),
+            key=lambda item: os.path.normcase(str(item[0])),
+        )
+        async with AsyncExitStack() as stack:
+            async with asyncio.timeout(timeout):
+                for lock_path, lock_mode in ordered_requests:
+                    lock = cls._get_rw_lock(lock_path)
+                    await stack.enter_async_context(_AsyncReadWriteLockGuard(lock, lock_mode))
+                yield
 
     async def read_file(
             self,
@@ -193,7 +275,8 @@ class FsOperation(BaseFsOperation):
             line_range: Optional[Tuple[int, int]] = None,
             encoding: str = "utf-8",
             chunk_size: int = DEFAULT_READ_CHUNK_SIZE,
-            options: Optional[Dict[str, Any]] = None
+            only_read: bool = False,
+            options: Optional[Dict[str, Any]] = None,
     ) -> ReadFileResult:
         """
         Asynchronously read file with specified mode and parameters.
@@ -248,19 +331,17 @@ class FsOperation(BaseFsOperation):
             # Extract validated parameters
             file_path = validated_params.file_path
 
-            lock = self._get_async_lock(file_path)
             timeout = self._get_lock_timeout(options)
 
-            async with asyncio.timeout(timeout):
-                async with lock:
-                    if mode == "bytes":
-                        final_content = await self._read_bytes(file_path, validated_params.chunk_size)
-                    else:
-                        # Line-based operations - lines already contain original line endings
-                        lines = []
-                        async for line in FsOperation._read_text_content(validated_params):
-                            lines.append(line)
-                        final_content = "".join(lines)
+            async with self._maybe_read_lock(file_path, timeout, skip_lock=only_read):
+                if mode == "bytes":
+                    final_content = await self._read_bytes(file_path, validated_params.chunk_size)
+                else:
+                    # Line-based operations - lines already contain original line endings
+                    lines = []
+                    async for line in FsOperation._read_text_content(validated_params):
+                        lines.append(line)
+                    final_content = "".join(lines)
 
             data = ReadFileData(path=str(file_path), content=final_content, mode=mode)
             success_result = ReadFileResult(
@@ -290,6 +371,7 @@ class FsOperation(BaseFsOperation):
             line_range: Optional[Tuple[int, int]] = None,
             encoding: str = "utf-8",
             chunk_size: int = DEFAULT_READ_STREAM_CHUNK_SIZE,
+            only_read: bool = False,
             options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[ReadFileStreamResult]:
         """
@@ -320,7 +402,6 @@ class FsOperation(BaseFsOperation):
             method_name=method_name,
             method_params=method_params
         ))
-        lock = None
         try:
             # Create _ReadParams object
             read_params = _ReadParams(
@@ -346,32 +427,28 @@ class FsOperation(BaseFsOperation):
             # Extract validated parameters
             file_path = validated_params.file_path
 
-            lock = self._get_async_lock(file_path)
             timeout = self._get_lock_timeout(options)
 
-            await lock.acquire(timeout=timeout)
-            # bytes mode
-            if mode != "text":
-                async for chunk in self._read_bytes_stream(file_path, validated_params.chunk_size):
+            async with self._maybe_read_lock(file_path, timeout, skip_lock=only_read):
+                # bytes mode
+                if mode != "text":
+                    async for chunk in self._read_bytes_stream(file_path, validated_params.chunk_size):
+                        yield chunk
+                        self._log_stream_chunk(chunk, method_name, method_params, start_time,
+                                               stream_log="Receive read file stream",
+                                               end_stream_log="End to read file streaming")
+                    return
+
+                # text mode
+                async for chunk in self._stream_text_file(validated_params):
                     yield chunk
                     self._log_stream_chunk(chunk, method_name, method_params, start_time,
                                            stream_log="Receive read file stream",
                                            end_stream_log="End to read file streaming")
-                return
-
-            # text mode
-            async for chunk in self._stream_text_file(validated_params):
-                yield chunk
-                self._log_stream_chunk(chunk, method_name, method_params, start_time,
-                                       stream_log="Receive read file stream",
-                                       end_stream_log="End to read file streaming")
 
         except Exception as e:
             yield self._create_error_result("read_file_stream", str(e), ReadFileStreamResult,
                                             _ErrorLogParams(method_name, method_params, start_time))
-        finally:
-            if lock and lock.is_locked:
-                await lock.release()
 
     async def write_file(
             self,
@@ -426,26 +503,24 @@ class FsOperation(BaseFsOperation):
                                                  WriteFileResult,
                                                  _ErrorLogParams(method_name, method_params, start_time))
 
-            lock = self._get_async_lock(file_path)
             timeout = self._get_lock_timeout(options)
 
-            async with asyncio.timeout(timeout):
-                async with lock:
-                    if mode == "text":
-                        txt = str(content)
-                        if prepend_newline:
-                            txt = "\n" + txt
-                        if append_newline:
-                            txt = txt + "\n"
-                        data_bytes = txt.encode(encoding)
-                    else:
-                        data_bytes = content if isinstance(content, (bytes, bytearray)) else bytes(content)
+            async with self._file_lock(file_path, "write", timeout):
+                if mode == "text":
+                    txt = str(content)
+                    if prepend_newline:
+                        txt = "\n" + txt
+                    if append_newline:
+                        txt = txt + "\n"
+                    data_bytes = txt.encode(encoding)
+                else:
+                    data_bytes = content if isinstance(content, (bytes, bytearray)) else bytes(content)
 
-                    write_mode = "ab" if append else "wb"
-                    async with aiofiles.open(file_path, mode=write_mode) as f:
-                        await f.write(data_bytes)
+                write_mode = "ab" if append else "wb"
+                async with aiofiles.open(file_path, mode=write_mode) as f:
+                    await f.write(data_bytes)
 
-                    self._apply_permissions(file_path, permissions)
+                self._apply_permissions(file_path, permissions)
 
             success_result = WriteFileResult(
                 code=StatusCode.SUCCESS.code,
@@ -510,14 +585,12 @@ class FsOperation(BaseFsOperation):
                 return self._create_error_result("upload_file", f"Target exists: {dst}", UploadFileResult,
                                                  _ErrorLogParams(method_name, method_params, start_time))
 
-            src_lock, dst_lock = self._get_ordered_locks(src, dst)
             timeout = self._get_lock_timeout(options)
 
-            async with asyncio.timeout(timeout):
-                async with src_lock, dst_lock:
-                    size = await self._transfer_file(src, dst, chunk_size)
-                    if preserve_permissions:
-                        self._copy_permissions(src, dst)
+            async with self._ordered_file_locks((src, "read"), (dst, "write"), timeout=timeout):
+                size = await self._transfer_file(src, dst, chunk_size)
+                if preserve_permissions:
+                    self._copy_permissions(src, dst)
 
             success_result = UploadFileResult(
                 code=StatusCode.SUCCESS.code,
@@ -573,8 +646,6 @@ class FsOperation(BaseFsOperation):
             method_params=method_params
         ))
 
-        src_lock = None
-        dst_lock = None
         try:
             src = pathlib.Path(local_path).expanduser().resolve()
             dst = self._resolve_path(target_path, create_parent=create_parent_dirs)
@@ -588,49 +659,42 @@ class FsOperation(BaseFsOperation):
                                                 _ErrorLogParams(method_name, method_params, start_time))
                 return
 
-            src_lock, dst_lock = self._get_ordered_locks(src, dst)
             timeout = self._get_lock_timeout(options)
 
-            await src_lock.acquire(timeout=timeout)
-            await dst_lock.acquire(timeout=timeout)
+            async with self._ordered_file_locks((src, "read"), (dst, "write"), timeout=timeout):
+                async with aiofiles.open(src, mode="rb") as src_f, aiofiles.open(dst, mode="wb") as dst_f:
+                    index = 0
+                    # Read first chunk
+                    chunk_bytes = await src_f.read(chunk_size)
+                    while chunk_bytes:
+                        # Read next chunk to check if this is the last one
+                        next_chunk = await src_f.read(chunk_size)
+                        is_last = not next_chunk
 
-            async with aiofiles.open(src, mode="rb") as src_f, aiofiles.open(dst, mode="wb") as dst_f:
-                index = 0
-                # Read first chunk
-                chunk_bytes = await src_f.read(chunk_size)
-                while chunk_bytes:
-                    # Read next chunk to check if this is the last one
-                    next_chunk = await src_f.read(chunk_size)
-                    is_last = not next_chunk
-
-                    await dst_f.write(chunk_bytes)
-                    upload_file_res = UploadFileStreamResult(
-                        code=StatusCode.SUCCESS.code,
-                        message=StatusCode.SUCCESS.errmsg,
-                        data=UploadFileChunkData(
-                            local_path=str(src), target_path=str(dst), chunk_size=len(chunk_bytes), chunk_index=index,
-                            is_last_chunk=is_last
+                        await dst_f.write(chunk_bytes)
+                        upload_file_res = UploadFileStreamResult(
+                            code=StatusCode.SUCCESS.code,
+                            message=StatusCode.SUCCESS.errmsg,
+                            data=UploadFileChunkData(
+                                local_path=str(src), target_path=str(dst), chunk_size=len(chunk_bytes),
+                                chunk_index=index,
+                                is_last_chunk=is_last
+                            )
                         )
-                    )
-                    yield upload_file_res
-                    self._log_stream_chunk(upload_file_res, method_name, method_params, start_time,
-                                           stream_log="Receive upload file stream",
-                                           end_stream_log="End to upload file streaming")
-                    index += 1
+                        yield upload_file_res
+                        self._log_stream_chunk(upload_file_res, method_name, method_params, start_time,
+                                               stream_log="Receive upload file stream",
+                                               end_stream_log="End to upload file streaming")
+                        index += 1
 
-                    # Move to next chunk
-                    chunk_bytes = next_chunk
+                        # Move to next chunk
+                        chunk_bytes = next_chunk
 
-            if preserve_permissions:
-                self._copy_permissions(src, dst)
+                if preserve_permissions:
+                    self._copy_permissions(src, dst)
         except Exception as e:
             yield self._create_error_result("upload_file_stream", str(e), UploadFileStreamResult,
                                             _ErrorLogParams(method_name, method_params, start_time))
-        finally:
-            if src_lock and src_lock.is_locked:
-                await src_lock.release()
-            if dst_lock and dst_lock.is_locked:
-                await dst_lock.release()
 
     async def download_file(
             self,
@@ -682,14 +746,12 @@ class FsOperation(BaseFsOperation):
             if create_parent_dirs:
                 dst.parent.mkdir(parents=True, exist_ok=True)
 
-            src_lock, dst_lock = self._get_ordered_locks(src, dst)
             timeout = self._get_lock_timeout(options)
 
-            async with asyncio.timeout(timeout):
-                async with src_lock, dst_lock:
-                    size = await self._transfer_file(src, dst, chunk_size)
-                    if preserve_permissions:
-                        self._copy_permissions(src, dst)
+            async with self._ordered_file_locks((src, "read"), (dst, "write"), timeout=timeout):
+                size = await self._transfer_file(src, dst, chunk_size)
+                if preserve_permissions:
+                    self._copy_permissions(src, dst)
 
             success_result = DownloadFileResult(
                 code=StatusCode.SUCCESS.code,
@@ -745,8 +807,6 @@ class FsOperation(BaseFsOperation):
             method_params=method_params
         ))
 
-        src_lock = None
-        dst_lock = None
         try:
             src = self._resolve_path(source_path)
             dst = pathlib.Path(local_path).expanduser().resolve()
@@ -763,50 +823,43 @@ class FsOperation(BaseFsOperation):
             if create_parent_dirs:
                 dst.parent.mkdir(parents=True, exist_ok=True)
 
-            src_lock, dst_lock = self._get_ordered_locks(src, dst)
             timeout = self._get_lock_timeout(options)
 
-            await src_lock.acquire(timeout=timeout)
-            await dst_lock.acquire(timeout=timeout)
+            async with self._ordered_file_locks((src, "read"), (dst, "write"), timeout=timeout):
+                async with aiofiles.open(src, mode="rb") as src_f, aiofiles.open(dst, mode="wb") as dst_f:
+                    index = 0
+                    # Read first chunk
+                    chunk_bytes = await src_f.read(chunk_size)
+                    while chunk_bytes:
+                        # Read next chunk to check if this is the last one
+                        next_chunk = await src_f.read(chunk_size)
+                        is_last = not next_chunk
 
-            async with aiofiles.open(src, mode="rb") as src_f, aiofiles.open(dst, mode="wb") as dst_f:
-                index = 0
-                # Read first chunk
-                chunk_bytes = await src_f.read(chunk_size)
-                while chunk_bytes:
-                    # Read next chunk to check if this is the last one
-                    next_chunk = await src_f.read(chunk_size)
-                    is_last = not next_chunk
-
-                    await dst_f.write(chunk_bytes)
-                    download_file_res = DownloadFileStreamResult(
-                        code=StatusCode.SUCCESS.code,
-                        message=StatusCode.SUCCESS.errmsg,
-                        data=DownloadFileChunkData(
-                            source_path=str(src), local_path=str(dst), chunk_size=len(chunk_bytes), chunk_index=index,
-                            is_last_chunk=is_last
+                        await dst_f.write(chunk_bytes)
+                        download_file_res = DownloadFileStreamResult(
+                            code=StatusCode.SUCCESS.code,
+                            message=StatusCode.SUCCESS.errmsg,
+                            data=DownloadFileChunkData(
+                                source_path=str(src), local_path=str(dst), chunk_size=len(chunk_bytes),
+                                chunk_index=index,
+                                is_last_chunk=is_last
+                            )
                         )
-                    )
-                    yield download_file_res
-                    self._log_stream_chunk(download_file_res, method_name, method_params, start_time,
-                                           stream_log="Receive download file stream",
-                                           end_stream_log="End to download file streaming")
+                        yield download_file_res
+                        self._log_stream_chunk(download_file_res, method_name, method_params, start_time,
+                                               stream_log="Receive download file stream",
+                                               end_stream_log="End to download file streaming")
 
-                    index += 1
+                        index += 1
 
-                    # Move to next chunk
-                    chunk_bytes = next_chunk
+                        # Move to next chunk
+                        chunk_bytes = next_chunk
 
-            if preserve_permissions:
-                self._copy_permissions(src, dst)
+                if preserve_permissions:
+                    self._copy_permissions(src, dst)
         except Exception as e:
             yield self._create_error_result("download_file_stream", str(e), DownloadFileStreamResult,
                                             _ErrorLogParams(method_name, method_params, start_time))
-        finally:
-            if src_lock and src_lock.is_locked:
-                await src_lock.release()
-            if dst_lock and dst_lock.is_locked:
-                await dst_lock.release()
 
     async def list_files(
             self,
@@ -1043,30 +1096,65 @@ class FsOperation(BaseFsOperation):
         return items
 
     def _resolve_path(self, path: str, create_parent: bool = False) -> pathlib.Path:
-        """Resolve path, enforce work_dir sandbox (if configured), and sanitize filenames."""
-        work_dir_val = getattr(self._run_config, 'work_dir', None)
+        """Resolve path against ContextVar CWD, enforce sandbox if configured.
 
-        if work_dir_val is None:
-            # if work_dir is not configured
-            final_path = pathlib.Path(path).expanduser().resolve()
-        else:
-            work_dir = pathlib.Path(work_dir_val).expanduser().resolve()
-            try:
-                raw_resolved = (work_dir / path).resolve()
-                rel_path = raw_resolved.relative_to(work_dir)
-            except ValueError as e:
-                raise build_error(status=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR,
-                                  execution="resolve_path",
-                                  error_msg=f"Access denied: Path {path} traverses outside {work_dir}",
-                                  cause=e) from e
+        Path resolution uses ``get_cwd()`` as base for relative paths.
+        Sandbox enforcement uses ``sandbox_root`` from config -- a list of
+        allowed root directories.  A path is accepted when it falls within
+        any one of the entries.  When ``sandbox_root`` is ``None``, the
+        effective list falls back to ``[get_workspace(), get_project_root()]``
+        read from the per-agent CwdState ContextVar so every DeepAgent gets
+        sensible defaults without having to plumb paths through config.
+        The sandbox list is independent of CWD so the security boundary
+        stays fixed even when CWD moves (e.g. worktree enter).
+        """
+        from openjiuwen.core.sys_operation.cwd import (
+            get_cwd,
+            get_project_root,
+            get_workspace,
+        )
 
-            sanitized_parts = [re.sub(r'[^\w.-]', '_', part) for part in rel_path.parts]
-            final_path = work_dir.joinpath(*sanitized_parts)
+        # Path resolution: based on ContextVar CWD. Resolve symlinks with
+        # strict=False so the comparison matches sandbox roots (which are
+        # also resolved) even on platforms where the base directory is a
+        # symlink (e.g. macOS /var → /private/var for tempfile paths).
+        base = pathlib.Path(get_cwd())
+        raw = base / path
+        normalized = pathlib.Path(os.path.normpath(raw)).resolve(strict=False)
 
+        # Sandbox check: based on config (independent of CWD)
+        restrict = getattr(self._run_config, 'restrict_to_sandbox', False)
+        if restrict:
+            configured = getattr(self._run_config, 'sandbox_root', None)
+            if configured:
+                roots = list(configured)
+            else:
+                roots = [p for p in (get_workspace(), get_project_root()) if p]
+
+            resolved_roots = [pathlib.Path(r).expanduser().resolve() for r in roots]
+            if not any(self._is_within(normalized, root) for root in resolved_roots):
+                raise build_error(
+                    status=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR,
+                    execution="resolve_path",
+                    error_msg=(
+                        f"Access denied: Path {path} outside sandbox "
+                        f"{[str(r) for r in resolved_roots]}"
+                    ),
+                )
+
+        final_path = normalized
         if create_parent:
             final_path.parent.mkdir(parents=True, exist_ok=True)
-
         return final_path
+
+    @staticmethod
+    def _is_within(path: pathlib.Path, root: pathlib.Path) -> bool:
+        """Return True when ``path`` is equal to or nested under ``root``."""
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            return False
 
     @staticmethod
     def _apply_permissions(path: pathlib.Path, permissions: str | int) -> None:

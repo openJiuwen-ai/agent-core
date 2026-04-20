@@ -1,0 +1,4 @@
+# Agent workspace root marker.
+# This file marks the root directory of an agent's workspace.
+# It is used by the workspace handler to determine the accessible file scope
+# and for sandbox boundary validation in LSP and other tools.

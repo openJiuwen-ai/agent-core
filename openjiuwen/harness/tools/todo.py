@@ -176,30 +176,28 @@ class TodoTool(Tool):
         """
         await _global_lock_manager.acquire_lock(self._file)
         try:
+            file_path = os.path.abspath(self._file)
+            if not os.path.isfile(file_path):
+                raise build_error(
+                    StatusCode.TOOL_TODOS_LOAD_FAILED,
+                    reason=f"Todo file not found: {file_path}"
+                )
+
             read_res = await self.fs.read_file(self._file, mode="text")
-            if read_res.code == 0:
-                data = json.loads(read_res.data.content)
-                todos = [TodoItem.from_dict(item) for item in data]
-                tool_logger.info(
-                    "Successfully loaded todo items",
-                    event_type=LogEventType.TOOL_CALL_START
-                )
-                return todos
-            else:
-                tool_logger.error(
-                    "Failed to load todo list, because read_file fail",
-                    event_type=LogEventType.TOOL_CALL_ERROR,
-                )
+            if read_res.code != 0:
                 raise build_error(
                     StatusCode.TOOL_TODOS_LOAD_FAILED,
                     reason=f"Failed to load todo list, because read_file fail"
                 )
-        except Exception as e:
-            tool_logger.error(
-                "Failed to load todo list",
-                event_type=LogEventType.TOOL_CALL_ERROR,
-                exception=str(e)
+
+            data = json.loads(read_res.data.content)
+            todos = [TodoItem.from_dict(item) for item in data]
+            tool_logger.info(
+                "Successfully loaded todo items",
+                event_type=LogEventType.TOOL_CALL_END
             )
+            return todos
+        except Exception as e:
             raise build_error(
                 StatusCode.TOOL_TODOS_LOAD_FAILED,
                 reason=f"Failed to load todo list: {str(e)}"
@@ -261,16 +259,18 @@ class TodoTool(Tool):
 class TodoCreateTool(TodoTool):
     """Todo Create Tool - Create new todo items with session"""
 
-    def __init__(self, operation: SysOperation, workspace: Optional[str] = None, language: str = "cn"):
+    def __init__(self, operation: SysOperation, workspace: Optional[str] = None,
+                 language: str = "cn", agent_id: Optional[str] = None):
         """Initialize TodoCreate tool
 
         Args:
             operation: System operation for file system access
             workspace: Path for file system operations
             language: Prompt language ("cn" or "en")
+            agent_id: Optional agent ID for unique tool ID
         """
         super().__init__(
-            build_tool_card("todo_create", "TodoCreateTool", language),
+            build_tool_card("todo_create", "TodoCreateTool", language, agent_id=agent_id),
             operation,
             workspace
         )
@@ -408,16 +408,18 @@ class TodoListTool(TodoTool):
     2. Format output for human-readable display
     """
 
-    def __init__(self, operation: SysOperation, workspace: Optional[str] = None, language: str = "cn"):
+    def __init__(self, operation: SysOperation, workspace: Optional[str] = None,
+                 language: str = "cn", agent_id: Optional[str] = None):
         """Initialize TodoList tool with persistence layer
 
         Args:
             operation: System operation for file system access
             workspace: Path for file system operations
             language: Prompt language ("cn" or "en")
+            agent_id: Optional agent ID for unique tool ID
         """
         super().__init__(
-            build_tool_card("todo_list", "TodoListTool", language),
+            build_tool_card("todo_list", "TodoListTool", language, agent_id=agent_id),
             operation,
             workspace
         )
@@ -527,16 +529,18 @@ class TodoModifyTool(TodoTool):
     update/delete/cancel/append/insert_after/insert_before action operations todo items with session
     """
 
-    def __init__(self, operation: SysOperation, workspace: Optional[str] = None, language: str = "cn"):
+    def __init__(self, operation: SysOperation, workspace: Optional[str] = None,
+                 language: str = "cn", agent_id: Optional[str] = None):
         """Initialize TodoModify tool with persistence layer
 
         Args:
             operation: System operation for file system access
             workspace: Path for file system operations
             language: Prompt language ("cn" or "en")
+            agent_id: Optional agent ID for unique tool ID
         """
         super().__init__(
-            build_tool_card("todo_modify", "TodoModifyTool", language),
+            build_tool_card("todo_modify", "TodoModifyTool", language, agent_id=agent_id),
             operation,
             workspace
         )
@@ -598,13 +602,15 @@ class TodoModifyTool(TodoTool):
             elif action == "insert_after":
                 todo_data = inputs.get("todo_data")
                 self._validate_todo_data_structure(todo_data)
-                target_id, insert_todos = todo_data
+                target_id = todo_data["target_id"]
+                insert_todos = todo_data["items"]
                 results["message"] = await self._insert_after_todos(target_id, insert_todos, current_todos)
 
             elif action == "insert_before":
                 todo_data = inputs.get("todo_data")
                 self._validate_todo_data_structure(todo_data)
-                target_id, insert_todos = todo_data
+                target_id = todo_data["target_id"]
+                insert_todos = todo_data["items"]
                 results["message"] = await self._insert_before_todos(target_id, insert_todos, current_todos)
 
             else:
@@ -629,35 +635,36 @@ class TodoModifyTool(TodoTool):
         """Stream response handler (not supported for TodoModify tool)"""
         raise build_error(StatusCode.TOOL_STREAM_NOT_SUPPORTED, card=self._card)
 
-    def _validate_todo_data_structure(self, todo_data: List):
-        """Validate structure of todo_data array for insert_after/insert_before actions
+    def _validate_todo_data_structure(self, todo_data: Dict):
+        """Validate structure of todo_data object for insert_after/insert_before actions
 
         Args:
-            todo_data: [target_id, todo_list] array to validate
+            todo_data: {"target_id": str, "items": [todo_list]} object to validate
 
         Raises:
-            ToolError: If todo_data is invalid (incorrect length/type)
+            ToolError: If todo_data is invalid (missing fields or wrong type)
         """
-        if not todo_data or not isinstance(todo_data, list) or len(todo_data) != 2:
+        if not todo_data or not isinstance(todo_data, dict):
             raise build_error(
                 StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                reason="Invalid input for insert action: 'todo_data' must be a 2-element array [target_id, todo_list]"
+                reason="Invalid input for insert action: 'todo_data' must be an object with 'target_id' and 'items'"
             )
 
-        target_id, insert_todos = todo_data
+        target_id = todo_data.get("target_id")
+        insert_todos = todo_data.get("items")
+
         if not target_id or not isinstance(target_id, str):
             raise build_error(
                 StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                reason="Invalid input: todo_data first element must be a non-empty target task ID (string)"
+                reason="Invalid input: todo_data 'target_id' must be a non-empty string"
             )
 
         if not insert_todos or not isinstance(insert_todos, list):
             raise build_error(
                 StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                reason="Invalid input: todo_data second element must be a non-empty list of todo objects"
+                reason="Invalid input: todo_data 'items' must be a non-empty list of todo objects"
             )
 
-        # Validate each todo item in the insert list
         for todo_item in insert_todos:
             self._validate_single_todo_item(todo_item)
 
@@ -1071,9 +1078,9 @@ class TodoModifyTool(TodoTool):
 
 
 def create_todos_tool(operation: SysOperation, workspace: Optional[str] = None,
-                      language: str = "cn") -> List[TodoTool]:
+                      language: str = "cn", agent_id: Optional[str] = None) -> List[TodoTool]:
     return [
-        TodoCreateTool(operation, workspace, language),
-        TodoListTool(operation, workspace, language),
-        TodoModifyTool(operation, workspace, language)
+        TodoCreateTool(operation, workspace, language, agent_id),
+        TodoListTool(operation, workspace, language, agent_id),
+        TodoModifyTool(operation, workspace, language, agent_id)
     ]

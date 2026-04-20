@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any, Dict, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol
 
-from openjiuwen.agent_evolving.checkpointing.types import EvolveCheckpoint
+from openjiuwen.agent_evolving.checkpointing.types import EvolveCheckpoint, PendingChange
 from openjiuwen.core.operator import Operator
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 
 
 class CheckpointManager(Protocol):
@@ -29,6 +32,7 @@ class DefaultCheckpointManager:
     Default checkpoint manager:
     - Save timing: improved or every N epoch
     - Restore content: operators_state + progress best/epoch
+    - Pending change management for online evolution
     """
 
     def __init__(
@@ -43,6 +47,8 @@ class DefaultCheckpointManager:
         self._ckpt_version = checkpoint_version
         self._save_every_n_epochs = max(int(save_every_n_epochs), 1)
         self._save_on_improve = bool(save_on_improve)
+        # In-memory pending changes storage
+        self._pending: Dict[str, List[PendingChange]] = {}
 
     @property
     def run_id(self) -> str:
@@ -119,3 +125,57 @@ class DefaultCheckpointManager:
             "best_score": float((checkpoint.best or {}).get("best_score", 0.0)),
             "run_id": checkpoint.run_id,
         }
+
+    # ── Pending change management ────────────────────────────────────────
+
+    def add_pending(self, operator_id: str, change: PendingChange) -> None:
+        """Add a pending change to the in-memory storage.
+
+        Args:
+            operator_id: Operator identifier for grouping changes.
+            change: PendingChange to store.
+        """
+        if operator_id not in self._pending:
+            self._pending[operator_id] = []
+        self._pending[operator_id].append(change)
+
+    def get_pending(self, operator_id: str) -> List[PendingChange]:
+        """Get pending changes for an operator.
+
+        Args:
+            operator_id: Operator identifier to query.
+
+        Returns:
+            List of PendingChange for the operator, empty if none.
+        """
+        return list(self._pending.get(operator_id, []))
+
+    def commit_pending(self, operator_id: str, store: "EvolutionStore") -> int:
+        """Drain and count pending changes for an operator without persisting.
+
+        This method only clears in-memory pending state and returns the
+        record count. It does **not** write to disk. The caller is
+        responsible for persisting records via ``store.append_record()``
+        before or after calling this method.
+
+        Args:
+            operator_id: Operator identifier whose changes to drain.
+            store: EvolutionStore (reserved for future async commit path).
+
+        Returns:
+            Number of records that were in the pending queue.
+        """
+        pending_list = self._pending.pop(operator_id, [])
+        count = sum(len(change.payload) for change in pending_list)
+        return count
+
+    def discard_pending(self, operator_id: str, change_id: str) -> None:
+        """Discard a specific pending change.
+
+        Args:
+            operator_id: Operator identifier containing the change.
+            change_id: Change ID to discard.
+        """
+        if operator_id not in self._pending:
+            return
+        self._pending[operator_id] = [change for change in self._pending[operator_id] if change.change_id != change_id]

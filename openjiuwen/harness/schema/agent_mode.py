@@ -1,0 +1,22 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+"""Agent mode enum for DeepAgent."""
+from __future__ import annotations
+
+from enum import Enum
+
+
+class AgentMode(str, Enum):
+    """DeepAgent operation mode.
+
+    Attributes:
+        PLAN: Read-only planning mode — LLM explores codebase and writes a
+            plan file before any modifications are made.
+        AUTO: Normal execution mode (default).
+    """
+
+    PLAN = "plan"
+    AUTO = "auto"
+
+
+__all__ = ["AgentMode"]

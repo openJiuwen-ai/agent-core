@@ -88,8 +88,8 @@ class TestSubagentRail:
     def test_uninit_with_tools():
         """Test uninit method when tools are registered."""
         mock_tool = Mock()
-        mock_tool.name = "test_tool"
         mock_tool.card = Mock()
+        mock_tool.card.name = "test_tool"
         mock_tool.card.id = "test_tool_id"
 
         mock_agent = Mock()
@@ -279,17 +279,13 @@ class TestSubagentRail:
 
     @staticmethod
     @pytest.mark.asyncio
-    @patch("openjiuwen.harness.rails.subagent_rail.build_task_section")
     @patch("openjiuwen.harness.rails.subagent_rail.Runner")
     @patch("openjiuwen.harness.rails.subagent_rail.create_task_tool")
-    async def test_before_model_call_with_builder(
-        mock_create, mock_runner, mock_build_task_section
-    ):
-        """before_model_call adds task section to builder; build is deferred."""
+    async def test_before_model_call_with_builder(mock_create, mock_runner):
+        """before_model_call is a no-op after task_tool moved into tools section."""
         mock_runner.resource_mgr = Mock()
         mock_tool = _make_tool_mock()
         mock_create.return_value = [mock_tool]
-        mock_build_task_section.return_value = "task section content"
 
         system_prompt_builder = Mock()
         system_prompt_builder.language = "cn"
@@ -306,9 +302,7 @@ class TestSubagentRail:
 
         await rail.before_model_call(ctx)
 
-        system_prompt_builder.add_section.assert_called_once_with("task section content")
-        # build() is deferred to _railed_model_call — NOT called here.
-        system_prompt_builder.build.assert_not_called()
+        system_prompt_builder.remove_section.assert_not_called()
 
     @staticmethod
     @pytest.mark.asyncio

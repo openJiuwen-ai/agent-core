@@ -2,7 +2,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Tests for updater protocol and SingleDimUpdater."""
 
-from unittest.mock import MagicMock
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
 from openjiuwen.agent_evolving.updater.protocol import Updater
 from openjiuwen.agent_evolving.updater.single_dim import SingleDimUpdater
@@ -14,9 +15,10 @@ def make_single_dim_updater():
 
 
 def make_mock_optimizer(bind_return=3, step_return=None):
-    """Factory for creating mock optimizers."""
+    """Factory for creating mock optimizers (backward is async)."""
     mock = MagicMock()
     mock.bind.return_value = bind_return
+    mock.backward = AsyncMock(return_value=None)
     if step_return is not None:
         mock.step.return_value = step_return
     return mock
@@ -72,12 +74,14 @@ class TestSingleDimUpdater:
         updater = SingleDimUpdater(optimizer=mock_optimizer)
 
         trajectories = [MagicMock(), MagicMock()]
-        evaluated_cases = [MagicMock()]
+        evaluated_cases = []  # empty since backward now takes signals
 
-        result = updater.update(trajectories=trajectories, evaluated_cases=evaluated_cases, config={})
+        result = asyncio.run(
+            updater.update(trajectories=trajectories, evaluated_cases=evaluated_cases, config={})
+        )
 
         assert mock_optimizer.add_trajectory.call_count == 2
-        mock_optimizer.backward.assert_called_once_with(evaluated_cases)
+        mock_optimizer.backward.assert_called_once()
         mock_optimizer.step.assert_called_once()
         assert result == expected_updates
 
@@ -87,7 +91,7 @@ class TestSingleDimUpdater:
         mock_optimizer = make_mock_optimizer(step_return={})
         updater = SingleDimUpdater(optimizer=mock_optimizer)
 
-        updater.update(trajectories=[], evaluated_cases=[], config={})
+        asyncio.run(updater.update(trajectories=[], evaluated_cases=[], config={}))
 
         mock_optimizer.add_trajectory.assert_not_called()
         mock_optimizer.backward.assert_called_once()
@@ -113,7 +117,7 @@ class TestSingleDimUpdater:
 
         traj1 = MagicMock()
         traj2 = MagicMock()
-        updater.update(trajectories=[traj1, traj2], evaluated_cases=[], config={})
+        asyncio.run(updater.update(trajectories=[traj1, traj2], evaluated_cases=[], config={}))
 
         calls = mock_optimizer.add_trajectory.call_args_list
         assert calls[0][0][0] is traj1
@@ -126,6 +130,6 @@ class TestSingleDimUpdater:
         mock_optimizer = make_mock_optimizer(step_return=expected_updates)
         updater = SingleDimUpdater(optimizer=mock_optimizer)
 
-        result = updater.update(trajectories=[], evaluated_cases=[], config={})
+        result = asyncio.run(updater.update(trajectories=[], evaluated_cases=[], config={}))
 
         assert result is expected_updates

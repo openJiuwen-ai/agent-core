@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Dict, List, Optional
+from typing import List, Optional
 
-from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.harness.prompts.sections.task_completion import (
+    build_completion_signal_section,
+)
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.stop_condition import (
     CompletionPromiseEvaluator,
@@ -38,30 +40,6 @@ PROMISE_TAG_PATTERN = re.compile(
     r"<promise>\s*(.*?)\s*</promise>",
     re.DOTALL | re.IGNORECASE,
 )
-
-# ----------------------------------------------------------------
-# Completion-signal system-prompt guidance (injected via builder)
-# ----------------------------------------------------------------
-_PROMISE_GUIDANCE: Dict[str, str] = {
-    "cn": (
-        "\n\n## 完成信号\n"
-        "任务完全完成后，在回复的最后一行输出 "
-        "<promise>{promise}</promise>。\n"
-        "在确认任务完成前，不要输出此标签。"
-    ),
-    "en": (
-        "\n\n## Completion Signal\n"
-        "When the task is fully completed, output "
-        "<promise>{promise}</promise> as the final "
-        "line of your response. Do not output this "
-        "tag until you are confident the task is "
-        "complete."
-    ),
-}
-
-_COMPLETION_SIGNAL_SECTION_NAME = "completion_signal"
-# priority 85: after identity (10), before todo (90)
-_COMPLETION_SIGNAL_PRIORITY = 85
 
 
 class TaskCompletionRail(DeepAgentRail):
@@ -151,18 +129,11 @@ class TaskCompletionRail(DeepAgentRail):
         )
         if builder is None:
             return
-        language: str = getattr(builder, "language", "cn")
-        section = PromptSection(
-            name=_COMPLETION_SIGNAL_SECTION_NAME,
-            content={
-                lang: tmpl.format(
-                    promise=self.completion_promise
-                )
-                for lang, tmpl in _PROMISE_GUIDANCE.items()
-            },
-            priority=_COMPLETION_SIGNAL_PRIORITY,
+        language = getattr(builder, "language", "cn")
+        section = build_completion_signal_section(
+            language,
+            self.completion_promise,
         )
-        _ = language  # priority-based ordering handles placement
         builder.add_section(section)
 
     async def before_task_iteration(

@@ -1,6 +1,6 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from typing import Any, Callable, Optional, Tuple, List, Type, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Tuple, List, Type, Union
 from pydantic import BaseModel
 
 from openjiuwen.core.common import BaseCard
@@ -12,7 +12,6 @@ from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.tool import Tool, ToolInfo, ToolCard
 from openjiuwen.core.multi_agent import BaseTeam, TeamCard
-from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
 from openjiuwen.core.runner.resources_manager.base import (
     AgentTeamProvider,
     Error,
@@ -35,6 +34,19 @@ from openjiuwen.core.sys_operation.tool_adapter import SysOperationToolAdapter
 from openjiuwen.core.sys_operation.registry import OperationRegistry
 from openjiuwen.core.workflow.workflow import Workflow
 from openjiuwen.core.workflow import WorkflowCard
+
+if TYPE_CHECKING:
+    from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
+
+
+def _is_remote_agent(provider: Any) -> bool:
+    try:
+        from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
+    except ModuleNotFoundError as exc:
+        if exc.name != "a2a":
+            raise
+        return False
+    return isinstance(provider, RemoteAgent)
 
 
 class ResourceMgr:
@@ -138,7 +150,7 @@ class ResourceMgr:
 
     def add_agent(self,
                   card: AgentCard,
-                  agent: AgentProvider | RemoteAgent,
+                  agent: AgentProvider | "RemoteAgent",
                   *,
                   tag: Optional[Tag | list[Tag]] = None
                   ) -> Result[AgentCard, Exception]:
@@ -1317,7 +1329,7 @@ class ResourceMgr:
                         resource_id=resource_id,
                         resource_type=resource_type,
                         tag=tag if tag else GLOBAL,
-                        card=resource_card.str() if resource_card else None)
+                        card=resource_card.to_str() if resource_card else None)
             return Ok(resource_card if resource_card else resource_id)
         except Exception as e:
             logger.error(f"add resource failed",
@@ -1326,7 +1338,7 @@ class ResourceMgr:
                          resource_type=resource_type,
                          exception=e,
                          tag=tag if tag else GLOBAL,
-                         card=resource_card.str() if resource_card else None)
+                         card=resource_card.to_str() if resource_card else None)
 
             return Error(e)
 
@@ -1392,7 +1404,7 @@ class ResourceMgr:
                              resource_type=resource_type,
                              exception=error,
                              tag=tag if tag else GLOBAL,
-                             card=removed_card.str() if removed_card else None)
+                             card=removed_card.to_str() if removed_card else None)
                 results.append(Error(error))
             elif resource_type in ["tool", "prompt"]:
                 results.append(Ok(remove_id))
@@ -1405,7 +1417,7 @@ class ResourceMgr:
                             resource_id=remove_id,
                             resource_type=resource_type,
                             tag=tag if tag else GLOBAL,
-                            card=removed_card.str() if removed_card else None)
+                            card=removed_card.to_str() if removed_card else None)
         return results if not isinstance(resource_id, str) else results[0]
 
     def _inner_find_resource_ids(self, *, resource_id: Optional[str | list[str]], tag: Tag | list[Tag],
@@ -1729,7 +1741,7 @@ class ResourceMgr:
         if not resource_id:
             raise build_error(
                 StatusCode.RESOURCE_ID_VALUE_INVALID,
-                resource_id=resource_id,
+                resource_type=resource_type,
                 reason=f"{resource_type} id list cannot be empty or None"
             )
         if isinstance(resource_id, str):
@@ -1743,7 +1755,7 @@ class ResourceMgr:
                 except ValidationError as e:
                     raise build_error(
                         StatusCode.RESOURCE_ID_VALUE_INVALID,
-                        resource_id=resource_id,
+                        resource_type=resource_type,
                         reason=(
                             f"invalid {resource_type} id at idx {idx}: {e.message}"
                         )
@@ -1752,7 +1764,7 @@ class ResourceMgr:
                 if rid in tmp_ids:
                     raise build_error(
                         StatusCode.RESOURCE_ID_VALUE_INVALID,
-                        resource_id=resource_id,
+                        resource_type=resource_type,
                         reason=(
                             f"duplicate {resource_type} id found: "
                             f"'{rid}' appears multiple times in the list"
@@ -1840,7 +1852,7 @@ class ResourceMgr:
                         )
                     )
 
-            if not (resource_type == "agent" and isinstance(provider, RemoteAgent)):
+            if not (resource_type == "agent" and _is_remote_agent(provider)):
                 if not isinstance(provider, Callable):
                     raise build_error(
                         StatusCode.RESOURCE_PROVIDER_INVALID,
@@ -1949,7 +1961,7 @@ class ResourceMgr:
                     f"provider cannot be None, must be a callable function"
                 )
             )
-        if not (resource_type == "agent" and isinstance(provider, RemoteAgent)):
+        if not (resource_type == "agent" and _is_remote_agent(provider)):
             if not isinstance(provider, Callable):
                 raise build_error(
                     StatusCode.RESOURCE_PROVIDER_INVALID,

@@ -16,6 +16,31 @@ from openjiuwen.core.runner.callback.events import ToolCallEvents
 NO_TIMEOUT = -1
 
 
+def extract_mcp_tool_result_content(tool_result: Any) -> Any:
+    """Return a compact value from an MCP CallToolResult."""
+    content = getattr(tool_result, "content", None)
+    if not content:
+        return None
+
+    item = content[-1]
+    text = getattr(item, "text", None)
+    if text is not None:
+        return text
+
+    mime_type = getattr(item, "mimeType", None) or getattr(item, "mime_type", None)
+    data = getattr(item, "data", None)
+    if data is not None:
+        if mime_type and str(mime_type).startswith("image/"):
+            return f"[image content: {mime_type}, {len(str(data))} base64 chars]"
+        return data
+
+    if hasattr(item, "model_dump"):
+        dumped = item.model_dump(exclude_none=True)
+        dumped.pop("data", None)
+        return dumped
+    return str(item)
+
+
 class McpServerConfig(BaseModel):
     server_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     server_name: str
@@ -64,9 +89,12 @@ class MCPTool(Tool):
                     ToolCallEvents.TOOL_PARSE_STARTED,
                     tool_name=self.card.name, tool_id=self.card.id,
                     raw_inputs=inputs, schema=self._card.input_params)
+                skip_none_value = kwargs.get("skip_none_value", True)
                 arguments = SchemaUtils.format_with_schema(inputs, self._card.input_params,
-                                                           skip_none_value=kwargs.get("skip_none_value", False),
+                                                           skip_none_value=False,
                                                            skip_validate=kwargs.get("skip_inputs_validate", False))
+                if skip_none_value:
+                    arguments = SchemaUtils.remove_none_values(arguments) or {}
                 await trigger(
                     ToolCallEvents.TOOL_PARSE_FINISHED,
                     tool_name=self.card.name, tool_id=self.card.id,

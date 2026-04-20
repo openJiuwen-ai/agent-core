@@ -61,8 +61,6 @@ def on(
     namespace: str = "default",
     tags: Optional[Set[str]] = None,
     filters: Optional[List[EventFilter]] = None,
-    rollback_handler: Optional[Callable] = None,
-    error_handler: Optional[Callable] = None,
     max_retries: int = 0,
     retry_delay: float = 0.0,
     timeout: Optional[float] = None,
@@ -80,12 +78,10 @@ def on(
 * **namespace**(str, 可选)：命名空间。默认值："default"。
 * **tags**(Optional[Set[str]], 可选)：标签。默认值：None。
 * **filters**(Optional[List[EventFilter]], 可选)：该回调专属过滤器。默认值：None。
-* **rollback_handler**(Optional[Callable], 可选)：回滚时调用的函数。默认值：None。
-* **error_handler**(Optional[Callable], 可选)：出错时调用的函数。默认值：None。
 * **max_retries**(int, 可选)：最大重试次数。默认值：0。
 * **retry_delay**(float, 可选)：重试间隔（秒）。默认值：0.0。
 * **timeout**(Optional[float], 可选)：单次执行超时（秒）。默认值：None。
-* **callback_type**(str, 可选)：语义类型标记，如 "transform"。默认值：""。
+* **callback_type**(str, 可选)：语义类型标记，如 "transform"、"chain"。默认值：""。
 
 **返回**：
 
@@ -105,6 +101,48 @@ def on_transform(self, event: str, *, priority: int = 0)
 
 * **event**(str)：事件名。
 * **priority**(int, 可选)：优先级。默认值：0。
+
+**返回**：
+
+* 装饰器函数。
+
+---
+
+### on_chain
+
+```python
+def on_chain(
+    self,
+    event: str,
+    *,
+    priority: int = 0,
+    once: bool = False,
+    namespace: str = "default",
+    tags: Optional[Set[str]] = None,
+    rollback_handler: Optional[Callable] = None,
+    error_handler: Optional[Callable] = None,
+    max_retries: int = 0,
+    retry_delay: float = 0.0,
+    timeout: Optional[float] = None,
+    callback_type: str = ""
+)
+```
+
+装饰器：专门用于回调链的异步函数注册。与`on()`方法类似，但专为回调链设计。
+
+**参数**：
+
+* **event**(str)：事件名。
+* **priority**(int, 可选)：优先级。默认值：0。
+* **once**(bool, 可选)：是否只执行一次。默认值：False。
+* **namespace**(str, 可选)：命名空间。默认值："default"。
+* **tags**(Optional[Set[str]], 可选)：标签。默认值：None。
+* **rollback_handler**(Optional[Callable], 可选)：回滚时调用的函数。默认值：None。
+* **error_handler**(Optional[Callable], 可选)：出错时调用的函数。默认值：None。
+* **max_retries**(int, 可选)：最大重试次数。默认值：0。
+* **retry_delay**(float, 可选)：重试间隔（秒）。默认值：0.0。
+* **timeout**(Optional[float], 可选)：单次执行超时（秒）。默认值：None。
+* **callback_type**(str, 可选)：语义类型标记。默认值：""。
 
 **返回**：
 

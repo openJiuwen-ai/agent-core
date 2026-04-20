@@ -74,6 +74,7 @@ class SandboxGateway:
     def _register_builtin_providers():
         """Import provider modules to trigger @SandboxRegistry.provider registration."""
         import openjiuwen.extensions.sys_operation.sandbox.providers.aio  # noqa: F401
+        import openjiuwen.extensions.sys_operation.sandbox.providers.jiuwenbox  # noqa: F401
 
     @classmethod
     def get_instance(

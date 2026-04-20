@@ -5,6 +5,8 @@ import re
 import string
 from typing import AsyncIterator, Union, AsyncGenerator, Any, Generator
 
+import anyio
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from openjiuwen.core.common.constants.constant import END_NODE_STREAM
@@ -217,8 +219,9 @@ class End(WorkflowComponent):
             if self._mix:
                 async with self._batch_template.condition:
                     try:
-                        await asyncio.wait_for(self._batch_template.condition.wait(), render_timeout)
-                    except asyncio.TimeoutError as e:
+                        with anyio.fail_after(render_timeout):
+                            await self._batch_template.condition.wait()
+                    except TimeoutError as e:
                         workflow_logger.error(
                             f"End component render timeout {render_timeout}s",
                             event_type=LogEventType.WORKFLOW_COMPONENT_ERROR,
@@ -372,8 +375,9 @@ class TemplateProcessor:
             if should_wait:
                 async with self._condition:
                     try:
-                        await asyncio.wait_for(self._condition.wait(), timeout=wait_timeout)
-                    except asyncio.TimeoutError as e:
+                        with anyio.fail_after(wait_timeout):
+                            await self._condition.wait()
+                    except TimeoutError as e:
                         workflow_logger.warning(
                             f"Template render stream timeout {wait_timeout}s",
                             event_type=LogEventType.WORKFLOW_COMPONENT_ERROR,

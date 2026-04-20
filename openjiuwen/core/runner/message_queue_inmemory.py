@@ -5,8 +5,11 @@ import asyncio
 import uuid
 from typing import Awaitable, AsyncIterator
 
+import anyio
+
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
+from openjiuwen.core.common.background_tasks import BackgroundTask, start_background_task
 from openjiuwen.core.runner.resources_manager.thread_safe_dict import ThreadSafeDict
 from openjiuwen.core.runner.message_queue_base import (
     MessageQueueBase,
@@ -29,7 +32,7 @@ class SubscriptionInMemory(SubscriptionBase):
         """
         self._queue_max_size = max_size
         self._queue = asyncio.Queue(maxsize=self._queue_max_size)
-        self._consume_task = None
+        self._consume_task: BackgroundTask | None = None
         self._handler = None
         self._is_active = False
         self._timeout = timeout
@@ -40,19 +43,18 @@ class SubscriptionInMemory(SubscriptionBase):
     def activate(self):
         if not self._is_active:
             self._is_active = True
-            self._consume_task = asyncio.create_task(self._consume_message())
+            self._consume_task = start_background_task(
+                self._consume_message(),
+                name="subscription_consume_message",
+                group="runner_mq_subscription",
+            )
 
     async def deactivate(self):
         if self._is_active:
             self._is_active = False
             if self._consume_task:
-                self._consume_task.cancel()
-                try:
-                    await self._consume_task
-                except asyncio.CancelledError:
-                    pass
-                finally:
-                    self._consume_task = None
+                await self._consume_task.cancel(reason="subscription_deactivated")
+                self._consume_task = None
             self._queue = asyncio.Queue(maxsize=self._queue_max_size)
 
     def is_active(self):
@@ -92,7 +94,8 @@ class SubscriptionInMemory(SubscriptionBase):
                     dispatched_async = True
                     async def _run(msg=message, coro=response):
                         try:
-                            result = await asyncio.wait_for(coro, timeout=self._timeout)
+                            with anyio.fail_after(self._timeout):
+                                result = await coro
                             await self._handle_response(msg, result)
                         except BaseError as e:
                             msg.error_code = e.code
@@ -108,7 +111,11 @@ class SubscriptionInMemory(SubscriptionBase):
                                     msg.response.set_exception(e)
                         finally:
                             self._queue.task_done()
-                    asyncio.create_task(_run())
+                    start_background_task(
+                        _run(),
+                        name="subscription_handle_async_message",
+                        group="runner_mq_subscription",
+                    )
                     continue
                 await self._handle_response(message, response)
             except BaseError as e:
@@ -136,25 +143,24 @@ class MessageQueueInMemory(MessageQueueBase):
         self._subscribers: ThreadSafeDict[str, SubscriptionInMemory] = ThreadSafeDict()
         self._queue_max_size = queue_max_size
         self._queue = asyncio.Queue(maxsize=self._queue_max_size)
-        self._consume_task = None
+        self._consume_task: BackgroundTask | None = None
         self._timeout = timeout
 
     def start(self):
         if not self._is_running:
             self._is_running = True
-            self._consume_task = asyncio.create_task(self._consume_message())
+            self._consume_task = start_background_task(
+                self._consume_message(),
+                name="message_queue_consume_message",
+                group="runner_mq",
+            )
 
     async def stop(self):
         if self._is_running:
             self._is_running = False
             if self._consume_task:
-                self._consume_task.cancel()
-                try:
-                    await self._consume_task
-                except asyncio.CancelledError:
-                    pass
-                finally:
-                    self._consume_task = None
+                await self._consume_task.cancel(reason="message_queue_stopped")
+                self._consume_task = None
             self._queue = asyncio.Queue(maxsize=self._queue_max_size)
 
     def subscribe(self, topic: str) -> SubscriptionInMemory:
@@ -178,3 +184,4 @@ class MessageQueueInMemory(MessageQueueBase):
             if topic in self._subscribers and self._subscribers[topic].is_active():
                 await self._subscribers[topic].push_message(message)
             self._queue.task_done()
+

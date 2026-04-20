@@ -397,7 +397,7 @@ class TestContextEngine:
         engine2 = ContextEngine()
         context2 = await engine2.create_context(context_id="ctx", session=session,
                                                 history_messages=[SystemMessage(content="1", name="first")])
-        assert context2.get_messages() == [SystemMessage(content="1", name="first")]
+        assert context2.get_messages() == [SystemMessage(content="1", name="first", metadata=context2.get_messages()[0].metadata)]
 
     @pytest.mark.asyncio
     async def test_get_context_window(self, request):

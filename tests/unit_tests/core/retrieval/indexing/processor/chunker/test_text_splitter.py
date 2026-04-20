@@ -191,3 +191,85 @@ class TestIndexSentenceSplitter:
             text_chunk = TextChunk(id_="1", text="This is a test", doc_id="doc_1")
             chunks = splitter.split(text_chunk)
             assert len(chunks) == 1
+
+    @staticmethod
+    def test_init_passes_tokenizer_dec_when_encode_and_decode():
+        """HuggingFace-style tokenizer should receive a decode callable for long-segment splits."""
+
+        class _Tok:
+            model_max_length = 512
+
+            def encode(self, text, **kwargs):
+                if not (text and text.strip()):
+                    return []
+                return text.split()
+
+            def decode(self, ids, **kwargs):
+                return " ".join(ids)
+
+        tok = _Tok()
+        with patch(
+            "openjiuwen.core.retrieval.indexing.processor.chunker.text_splitter.SentenceSplitter"
+        ) as mock_sentence_splitter_class:
+            IndexSentenceSplitter(tokenizer=tok, chunk_size=64, chunk_overlap=8)
+            kwargs = mock_sentence_splitter_class.call_args.kwargs
+            assert kwargs.get("tokenizer_dec") is not None
+            assert callable(kwargs["tokenizer_dec"])
+            assert kwargs.get("tokenizer") is not tok
+
+    @staticmethod
+    def test_init_tokenizer_dec_none_when_only_tokenize():
+        """tokenize()-only models do not get a decode wrapper."""
+
+        class TokenizeOnly:
+            model_max_length = 512
+
+            def tokenize(self, x):
+                return x.split()
+
+        with patch(
+            "openjiuwen.core.retrieval.indexing.processor.chunker.text_splitter.SentenceSplitter"
+        ) as mock_sentence_splitter_class:
+            IndexSentenceSplitter(tokenizer=TokenizeOnly(), chunk_size=64, chunk_overlap=8)
+            kwargs = mock_sentence_splitter_class.call_args.kwargs
+            assert kwargs.get("tokenizer_dec") is None
+
+    @staticmethod
+    def test_split_long_single_sentence_multiple_chunks_integration():
+        """End-to-end: one over-limit sentence yields multiple TextChunks when decode is available."""
+        long_sent = " ".join([f"w{i}" for i in range(30)])
+
+        class _Tok:
+            model_max_length = 1024
+
+            def encode(self, text, **kwargs):
+                if not (text and text.strip()):
+                    return []
+                return text.split()
+
+            def decode(self, ids, **kwargs):
+                return " ".join(ids)
+
+        with patch(
+            "openjiuwen.core.retrieval.indexing.processor.splitter.splitter.Segmenter"
+        ) as seg_cls:
+            seg = MagicMock()
+            seg.segment.return_value = [long_sent]
+            seg_cls.return_value = seg
+
+            splitter = IndexSentenceSplitter(
+                tokenizer=_Tok(),
+                chunk_size=8,
+                chunk_overlap=2,
+                language="en",
+            )
+            doc = Document(id_="doc_long", text=long_sent, metadata={"k": "v"})
+            chunks = splitter.split(doc)
+
+        assert len(chunks) > 1
+        assert all(c.doc_id == "doc_long" for c in chunks)
+        assert all(c.metadata.get("k") == "v" for c in chunks)
+        covered = set()
+        for c in chunks:
+            covered.update(c.text.split())
+        assert covered == set(long_sent.split())

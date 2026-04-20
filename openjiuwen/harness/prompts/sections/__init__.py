@@ -17,3 +17,4 @@ class SectionName:
     RUNTIME = "runtime"
     MEMORY = "memory"
     SESSION_TOOLS = "session_tools"
+    MODE_INSTRUCTIONS = "mode_instructions"

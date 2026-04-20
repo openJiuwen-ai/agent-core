@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import TYPE_CHECKING, List, Optional, AsyncIterator, Union, Any
+from typing import TYPE_CHECKING, List, Optional, AsyncIterator, Union, Any, Mapping
 
 import httpx
 
@@ -22,6 +22,11 @@ from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
+from openjiuwen.core.foundation.llm.headers_helper import (
+    PROTECTED_HEADERS,
+    build_base_headers,
+    merge_request_headers,
+)
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig, ProviderType
 from openjiuwen.core.runner.callback import trigger
@@ -34,13 +39,26 @@ if TYPE_CHECKING:
 class OpenAIModelClient(BaseModelClient):
     """OpenAI API client supporting GPT models and OpenAI-compatible services."""
     __client_name__ = [ProviderType.OpenAI.value, ProviderType.OpenRouter.value]
+    _PROTECTED_HEADERS = PROTECTED_HEADERS
 
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
+        self._base_headers = build_base_headers(
+            custom_headers=model_client_config.custom_headers,
+        )
 
     def _get_client_name(self) -> str:
         """Get client name."""
         return "OpenAI client"
+
+    @classmethod
+    def _build_request_headers(
+            cls,
+            base_headers: Optional[Mapping[str, Any]],
+            request_headers: Optional[Mapping[str, Any]],
+    ) -> dict[str, str]:
+        """Merge request-level headers with prebuilt config-level headers (request wins)."""
+        return merge_request_headers(base_headers, request_headers)
 
     def _build_request_params(
             self,
@@ -155,6 +173,8 @@ class OpenAIModelClient(BaseModelClient):
             AssistantMessage: Model response
         """
         tracer_record_data = kwargs.pop("tracer_record_data", None)
+        request_custom_headers = kwargs.pop("custom_headers", None)
+
         # Build request parameters
         params = self._build_request_params(
             messages=messages,
@@ -167,6 +187,14 @@ class OpenAIModelClient(BaseModelClient):
             stream=False,
             **kwargs
         )
+
+        effective_headers = self._build_request_headers(
+            self._base_headers,
+            request_custom_headers,
+        )
+        if effective_headers:
+            params["extra_headers"] = effective_headers
+
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
@@ -284,6 +312,8 @@ class OpenAIModelClient(BaseModelClient):
             AssistantMessageChunk: Streaming response chunk
         """
         tracer_record_data = kwargs.pop("tracer_record_data", None)
+        request_custom_headers = kwargs.pop("custom_headers", None)
+
         # Build request parameters
         params = self._build_request_params(
             messages=messages,
@@ -296,9 +326,16 @@ class OpenAIModelClient(BaseModelClient):
             stream=True,
             **kwargs
         )
+
+        effective_headers = self._build_request_headers(
+            self._base_headers,
+            request_custom_headers,
+        )
+        if effective_headers:
+            params["extra_headers"] = effective_headers
+
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
-
 
         async_client = None
         try:
@@ -355,6 +392,11 @@ class OpenAIModelClient(BaseModelClient):
                 is_stream=True)
 
         except Exception as e:
+            # Many stream-layer exceptions (httpx.RemoteProtocolError,
+            # APIConnectionError wrappers, asyncio.CancelledError) return an
+            # empty str(), which leaves the error log unactionable. Always
+            # surface the exception type so the cause is identifiable.
+            error_detail = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
             await trigger(
                 LLMCallEvents.LLM_CALL_ERROR,
                 model_name=params.get("model"),
@@ -372,11 +414,11 @@ class OpenAIModelClient(BaseModelClient):
                 top_p=params.get("top_p"),
                 max_tokens=params.get("max_tokens"),
                 is_stream=True,
-                exception=str(e)
+                exception=error_detail
             )
             raise build_error(
                 StatusCode.MODEL_CALL_FAILED,
-                error_msg=f"openAI API async stream error: {str(e)}"
+                error_msg=f"openAI API async stream error: {error_detail}"
             ) from e
         finally:
             if async_client is not None:
@@ -534,12 +576,18 @@ class OpenAIModelClient(BaseModelClient):
             if prompt_tokens_details:
                 cache_tokens = getattr(prompt_tokens_details, 'cached_tokens', 0) or 0
 
+            # Extract cost information if available
+            input_cost, output_cost, total_cost = self._extract_cost_info(response.usage)
+
             usage_metadata = UsageMetadata(
                 model_name=self.model_config.model_name,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
                 cache_tokens=cache_tokens,
+                input_cost=input_cost,
+                output_cost=output_cost,
+                total_cost=total_cost,
             )
 
         # Get content
@@ -633,11 +681,17 @@ class OpenAIModelClient(BaseModelClient):
         # Build usage_metadata (usually only in the last chunk)
         usage_metadata = None
         if hasattr(chunk, 'usage') and chunk.usage:
+            # Extract cost information if available
+            input_cost, output_cost, total_cost = self._extract_cost_info(chunk.usage)
+
             usage_metadata = UsageMetadata(
                 model_name=self.model_config.model_name,
-                input_tokens=chunk.usage.prompt_tokens if hasattr(chunk.usage, 'prompt_tokens') else 0,
-                output_tokens=chunk.usage.completion_tokens if hasattr(chunk.usage, 'completion_tokens') else 0,
-                total_tokens=chunk.usage.total_tokens if hasattr(chunk.usage, 'total_tokens') else 0,
+                input_tokens=getattr(chunk.usage, 'prompt_tokens', 0) or 0,
+                output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
+                total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0,
+                input_cost=input_cost,
+                output_cost=output_cost,
+                total_cost=total_cost,
             )
 
         return AssistantMessageChunk(

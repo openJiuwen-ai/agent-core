@@ -12,6 +12,7 @@ behavior via team tools. The loop manages:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from enum import Enum
 from typing import (
     Any,
@@ -22,10 +23,13 @@ from typing import (
     Union,
 )
 
-from pydantic import BaseModel, Field
+from pydantic import (
+    BaseModel,
+    Field,
+)
 
+from openjiuwen.agent_teams.schema.events import EventMessage
 from openjiuwen.agent_teams.schema.team import TeamRole
-from openjiuwen.agent_teams.tools.team_events import EventMessage
 from openjiuwen.core.common.logging import team_logger
 
 
@@ -74,8 +78,8 @@ class CoordinatorLoop:
         *,
         role: TeamRole,
         wake_callback: Optional[WakeCallback] = None,
-        mailbox_poll_interval: float = 3000.0,
-        task_poll_interval: float = 3000.0,
+        mailbox_poll_interval: float = 30.0,
+        task_poll_interval: float = 30.0,
     ) -> None:
         self._role = role
         self._wake_callback = wake_callback
@@ -131,6 +135,11 @@ class CoordinatorLoop:
             return
         team_logger.info("CoordinatorLoop[{}] stopping", self._role.value)
         self._running = False
+        # Reset pause flag before touching the poll tasks so partial failures
+        # below still leave the state machine consistent: a subsequent start()
+        # must not inherit a stale ``_polls_paused = True`` from a prior
+        # pause_polls().
+        self._polls_paused = False
 
         # Cancel polling timers
         for task in (self._mailbox_poll_task, self._task_poll_task):
@@ -158,6 +167,8 @@ class CoordinatorLoop:
                     asyncio.CancelledError,
             ):
                 self._loop_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._loop_task
             self._loop_task = None
 
     async def pause_polls(self) -> None:
@@ -201,7 +212,7 @@ class CoordinatorLoop:
         self,
         event: CoordinationEvent,
     ) -> None:
-        team_logger.debug("received message {}", event)
+        # team_logger.debug("received message {}", event)
         """Push an event into the processing queue."""
         await self._event_queue.put(event)
 

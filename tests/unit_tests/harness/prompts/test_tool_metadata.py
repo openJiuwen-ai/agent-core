@@ -201,10 +201,24 @@ class TestBuildToolCard:
     @staticmethod
     def test_returns_correct_card():
         card = build_tool_card("bash", "BashTool", "cn")
-        assert card.id == "BashTool"
+        assert card.id.startswith("BashTool_")
         assert card.name == "bash"
         assert card.description == get_tool_description("bash", "cn")
         assert card.input_params == get_tool_input_params("bash", "cn")
+
+    @staticmethod
+    def test_returns_correct_powershell_card():
+        card = build_tool_card("powershell", "PowerShellTool", "en")
+        assert card.id.startswith("PowerShellTool_")
+        assert card.name == "powershell"
+        assert card.description == get_tool_description("powershell", "en")
+        assert card.input_params == get_tool_input_params("powershell", "en")
+
+    @staticmethod
+    def test_with_agent_id():
+        card = build_tool_card("bash", "BashTool", "cn", agent_id="test_agent_123")
+        assert card.id == "BashTool_test_agent_123"
+        assert card.name == "bash"
 
     @staticmethod
     def test_en_language():

@@ -6,96 +6,190 @@ import pytest
 
 from openjiuwen.agent_teams.messager import (
     create_messager,
+    InProcessMessager,
     Messager,
     MessagerTransportConfig,
     PyZmqMessager,
     SubscriptionHandle,
-    TeamRuntimeMessager,
 )
-from openjiuwen.agent_teams.tools.team_events import BaseEventMessage
-
-
-class _FakeRuntime:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, dict]] = []
-
-    async def start(self) -> None:
-        self.calls.append(("start", {}))
-
-    async def stop(self) -> None:
-        self.calls.append(("stop", {}))
-
-    async def send(self, **kwargs):
-        self.calls.append(("send", kwargs))
-        return {"ok": True}
-
-    async def publish(self, **kwargs) -> None:
-        self.calls.append(("publish", kwargs))
-
-    async def subscribe(self, **kwargs) -> None:
-        self.calls.append(("subscribe", kwargs))
-
-    async def unsubscribe(self, **kwargs) -> None:
-        self.calls.append(("unsubscribe", kwargs))
+from openjiuwen.agent_teams.messager.inprocess import cleanup_inprocess_bus
+from openjiuwen.agent_teams.schema.events import BaseEventMessage, EventMessage
 
 
 class _SampleEvent(BaseEventMessage):
-    team_id: str = "team-1"
+    team_name: str = "team-1"
     detail: str = "test"
 
 
-async def _noop_handler(
-    message: BaseEventMessage,
-) -> None:
-    del message
+@pytest.fixture(autouse=True)
+def _clean_bus():
+    """Reset the process-global bus between tests."""
+    cleanup_inprocess_bus()
+    yield
+    cleanup_inprocess_bus()
 
 
-# === TeamRuntimeMessager ===
+# === InProcessMessager ===
 
 
 @pytest.mark.asyncio
-async def test_team_runtime_transport_maps_runtime_calls() -> None:
-    """subscribe/unsubscribe delegate to runtime with node_id."""
-    runtime = _FakeRuntime()
+async def test_inprocess_messager_is_messager() -> None:
     config = MessagerTransportConfig(
-        backend="team_runtime",
+        backend="inprocess",
         team_id="team-1",
         node_id="worker",
     )
-    transport = TeamRuntimeMessager(
-        runtime=runtime, config=config,
-    )
+    transport = InProcessMessager(config=config)
     assert isinstance(transport, Messager)
 
+
+@pytest.mark.asyncio
+async def test_inprocess_pubsub_delivers_to_subscriber() -> None:
+    """publish fans out to all subscribed handlers."""
+    received: list[BaseEventMessage] = []
+
+    async def handler(msg: BaseEventMessage) -> None:
+        received.append(msg)
+
+    leader = InProcessMessager(config=MessagerTransportConfig(node_id="leader"))
+    worker = InProcessMessager(config=MessagerTransportConfig(node_id="worker"))
+
+    await worker.subscribe("topic:team", handler)
+
     event = _SampleEvent()
+    await leader.publish("topic:team", event)
 
-    await transport.send("worker", event)
-    await transport.publish("team:team-1:broadcast", event)
-    await transport.subscribe(
-        "team:team-1:broadcast", _noop_handler,
-    )
-    await transport.unsubscribe("team:team-1:broadcast")
+    assert len(received) == 1
+    assert received[0] is event
 
-    assert runtime.calls[0][0] == "send"
-    assert runtime.calls[1][0] == "publish"
-    assert runtime.calls[1][1]["topic_id"] == (
-        "team:team-1:broadcast"
-    )
-    assert runtime.calls[2] == (
-        "subscribe",
-        {"agent_id": "worker", "topic": "team:team-1:broadcast"},
-    )
-    assert runtime.calls[3] == (
-        "unsubscribe",
-        {"agent_id": "worker", "topic": "team:team-1:broadcast"},
-    )
+
+@pytest.mark.asyncio
+async def test_inprocess_publish_stamps_sender_id() -> None:
+    """publish must stamp sender_id so subscribers can filter self-events."""
+    received: list[EventMessage] = []
+
+    async def handler(msg: EventMessage) -> None:
+        received.append(msg)
+
+    leader = InProcessMessager(config=MessagerTransportConfig(node_id="leader"))
+    worker = InProcessMessager(config=MessagerTransportConfig(node_id="worker"))
+
+    await worker.subscribe("topic:team", handler)
+
+    msg = EventMessage(event_type="team_cleaned", payload={"team_name": "t"})
+    assert msg.sender_id == ""
+    await leader.publish("topic:team", msg)
+
+    assert len(received) == 1
+    assert received[0].sender_id == "leader"
+
+
+@pytest.mark.asyncio
+async def test_inprocess_pubsub_fan_out() -> None:
+    """Multiple subscribers on the same topic all receive the message."""
+    received_a: list[BaseEventMessage] = []
+    received_b: list[BaseEventMessage] = []
+
+    async def handler_a(msg: BaseEventMessage) -> None:
+        received_a.append(msg)
+
+    async def handler_b(msg: BaseEventMessage) -> None:
+        received_b.append(msg)
+
+    pub = InProcessMessager(config=MessagerTransportConfig(node_id="pub"))
+    sub_a = InProcessMessager(config=MessagerTransportConfig(node_id="sub-a"))
+    sub_b = InProcessMessager(config=MessagerTransportConfig(node_id="sub-b"))
+
+    await sub_a.subscribe("t", handler_a)
+    await sub_b.subscribe("t", handler_b)
+
+    await pub.publish("t", _SampleEvent())
+
+    assert len(received_a) == 1
+    assert len(received_b) == 1
+
+
+@pytest.mark.asyncio
+async def test_inprocess_unsubscribe_stops_delivery() -> None:
+    received: list[BaseEventMessage] = []
+
+    async def handler(msg: BaseEventMessage) -> None:
+        received.append(msg)
+
+    m = InProcessMessager(config=MessagerTransportConfig(node_id="a"))
+    await m.subscribe("t", handler)
+    await m.unsubscribe("t")
+
+    await m.publish("t", _SampleEvent())
+    assert len(received) == 0
+
+
+@pytest.mark.asyncio
+async def test_inprocess_p2p_delivers_to_handler() -> None:
+    """send delivers to the registered direct-message handler."""
+    received: list[BaseEventMessage] = []
+
+    async def handler(msg: BaseEventMessage) -> None:
+        received.append(msg)
+
+    receiver = InProcessMessager(config=MessagerTransportConfig(node_id="receiver"))
+    sender = InProcessMessager(config=MessagerTransportConfig(node_id="sender"))
+
+    await receiver.register_direct_message_handler(handler)
+
+    event = _SampleEvent()
+    await sender.send("receiver", event)
+
+    assert len(received) == 1
+    assert received[0] is event
+
+
+@pytest.mark.asyncio
+async def test_inprocess_unregister_p2p_stops_delivery() -> None:
+    received: list[BaseEventMessage] = []
+
+    async def handler(msg: BaseEventMessage) -> None:
+        received.append(msg)
+
+    m = InProcessMessager(config=MessagerTransportConfig(node_id="x"))
+    await m.register_direct_message_handler(handler)
+    await m.unregister_direct_message_handler()
+
+    await m.send("x", _SampleEvent())
+    assert len(received) == 0
+
+
+@pytest.mark.asyncio
+async def test_inprocess_pubsub_handler_error_does_not_block_others() -> None:
+    """A failing handler should not prevent other subscribers from receiving."""
+    received: list[BaseEventMessage] = []
+
+    async def bad_handler(msg: BaseEventMessage) -> None:
+        raise RuntimeError("boom")
+
+    async def good_handler(msg: BaseEventMessage) -> None:
+        received.append(msg)
+
+    bad = InProcessMessager(config=MessagerTransportConfig(node_id="bad"))
+    good = InProcessMessager(config=MessagerTransportConfig(node_id="good"))
+    pub = InProcessMessager(config=MessagerTransportConfig(node_id="pub"))
+
+    await bad.subscribe("t", bad_handler)
+    await good.subscribe("t", good_handler)
+
+    await pub.publish("t", _SampleEvent())
+    assert len(received) == 1
 
 
 # === Factory ===
 
 
-def test_create_transport_builds_pyzmq_backend() -> None:
-    """create_messager_transport returns PyZmqMessagerTransport for pyzmq."""
+def test_create_messager_builds_inprocess() -> None:
+    transport = create_messager(MessagerTransportConfig(backend="inprocess"))
+    assert isinstance(transport, InProcessMessager)
+
+
+def test_create_messager_builds_pyzmq() -> None:
     transport = create_messager(
         MessagerTransportConfig(
             backend="pyzmq",
@@ -114,7 +208,6 @@ def test_create_transport_builds_pyzmq_backend() -> None:
 
 
 def test_models_roundtrip_with_pydantic_serialization() -> None:
-    """Pydantic models serialize and deserialize correctly."""
     subscription = SubscriptionHandle(
         subscription_id="sub-1",
         topic="topic",

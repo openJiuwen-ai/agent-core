@@ -3,9 +3,11 @@
 
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 from openjiuwen.agent_teams.factory import create_agent_team, resume_persistent_team
+from openjiuwen.agent_teams.spawn import InProcessSpawnHandle
+from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 from openjiuwen.agent_teams.messager import (
     create_messager,
-    TeamRuntimeMessager,
+    InProcessMessager,
     Messager,
     MessagerPeerConfig,
     MessagerTransportConfig,
@@ -25,7 +27,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamRole,
     TeamSpec,
 )
-from openjiuwen.agent_teams.tools.team_events import TeamEvent
+from openjiuwen.agent_teams.schema.events import TeamEvent
 
 __all__ = [
     "DeepAgentSpec",
@@ -46,6 +48,8 @@ __all__ = [
     "TeamRuntimeMessager",
     "PyZmqMessager",
     "create_messager",
+    "InProcessSpawnHandle",
+    "MemoryDatabaseConfig",
     "create_agent_team",
     "resume_persistent_team",
 ]

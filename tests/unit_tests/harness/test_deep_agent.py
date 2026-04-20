@@ -4,6 +4,7 @@
 # pylint: disable=protected-access
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 from unittest.mock import AsyncMock, call, patch
 
@@ -14,6 +15,7 @@ from openjiuwen.core.foundation.tool import Tool, ToolCard, McpServerConfig
 from openjiuwen.core.foundation.tool.schema import ToolInfo
 from openjiuwen.core.runner.resources_manager.base import Ok
 from openjiuwen.core.session.stream.base import StreamMode
+from openjiuwen.core.single_agent.agents.react_agent import ReActAgentConfig
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
@@ -25,11 +27,24 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent, Workspace
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
-from openjiuwen.harness.schema.config import DeepAgentConfig
-from openjiuwen.harness.subagents import create_code_agent
+from openjiuwen.harness.schema.config import DeepAgentConfig, SubAgentConfig
+from openjiuwen.harness.subagents import (
+    build_code_agent_config,
+    build_research_agent_config,
+    create_code_agent,
+)
+from openjiuwen.harness.subagents.code_agent import (
+    CODE_AGENT_FACTORY_NAME,
+    DEFAULT_CODE_AGENT_SYSTEM_PROMPT,
+)
+from openjiuwen.harness.subagents.research_agent import (
+    DEFAULT_RESEARCH_AGENT_SYSTEM_PROMPT,
+    RESEARCH_AGENT_FACTORY_NAME,
+)
 from openjiuwen.harness.task_loop.task_loop_event_handler import TaskLoopEventHandler
 from openjiuwen.harness.task_loop.loop_coordinator import LoopCoordinator
 from openjiuwen.harness.tools.task_tool import create_task_tool
+from openjiuwen.harness.tools.web_tools import WebFreeSearchTool
 
 
 def _create_dummy_model() -> Model:
@@ -59,6 +74,9 @@ class FakeReactAgent:
         self.stream_calls: List[Dict[str, Any]] = []
         self.registered_callbacks: List[Tuple[AgentCallbackEvent, Any, int]] = []
         self.agent_callback_manager = FakeInnerCallbackManager()
+        self.config = ReActAgentConfig()
+        self.prompt_builder = None
+        self.system_prompt_builder = None
 
     async def register_callback(
         self,
@@ -111,6 +129,9 @@ class FakeReactAgent:
                     "result_type": result.get("result_type", ""),
                 },
             ))
+
+    def configure(self, config: ReActAgentConfig) -> None:
+        self.config = config
 
 
 class CountingRail(AgentRail):
@@ -430,6 +451,51 @@ def test_create_deep_agent_registers_tool_instances() -> None:
         Runner.resource_mgr.remove_tool(tool.card.id)
 
 
+def test_create_deep_agent_skips_free_search_when_all_free_engines_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "false")
+    monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "false")
+    tool = WebFreeSearchTool(language="cn", agent_id="disabled")
+
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        tools=[tool],
+    )
+
+    assert agent.ability_manager.get("free_search") is None
+    assert Runner.resource_mgr.get_tool(tool.card.id) is None
+
+
+def test_deep_agent_hot_reload_removes_and_restores_free_search(monkeypatch) -> None:
+    monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "true")
+    monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "false")
+    tool = WebFreeSearchTool(language="cn", agent_id="hot_reload")
+
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        tools=[tool],
+    )
+
+    try:
+        assert agent.ability_manager.get("free_search") is tool.card
+        assert Runner.resource_mgr.get_tool(tool.card.id) is not None
+
+        monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "false")
+        monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "false")
+        agent.configure(DeepAgentConfig(tools=[tool.card]))
+
+        assert agent.ability_manager.get("free_search") is None
+        assert Runner.resource_mgr.get_tool(tool.card.id) is None
+
+        monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "true")
+        agent.configure(DeepAgentConfig(tools=[tool.card], language="cn"))
+
+        assert agent.ability_manager.get("free_search") is tool.card
+        assert Runner.resource_mgr.get_tool(tool.card.id) is not None
+    finally:
+        if Runner.resource_mgr.get_tool(tool.card.id) is not None:
+            Runner.resource_mgr.remove_tool(tool.card.id)
+
+
 def test_create_deep_agent_reuses_same_tool_instance_across_agents() -> None:
     tool = DummyTool("shared_tool_instance", tool_id="shared_tool_instance_id")
 
@@ -632,19 +698,61 @@ def test_create_deep_agent_auto_add_task_planning_rail() -> None:
     assert "TaskPlanningRail" in rail_types
 
 
+@pytest.mark.asyncio
+async def test_hot_reconfigure_preserves_task_tool_from_subagent_rail() -> None:
+    tool = _build_tool_card("factory_tool")
+    subagent = SubAgentConfig(
+        agent_card=AgentCard(name="browser_agent", description="browser subagent"),
+        system_prompt="browser prompt",
+        model=_create_dummy_model(),
+    )
+
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        tools=[tool],
+        subagents=[subagent],
+        enable_task_loop=False,
+    )
+    fake_react = FakeReactAgent()
+    agent.set_react_agent(fake_react, initialized=False)
+
+    await agent.invoke("initialize subagent rail")
+    assert agent.ability_manager.get("task_tool") is not None
+
+    agent.configure(
+        DeepAgentConfig(
+            model=_create_dummy_model(),
+            tools=[tool],
+            subagents=[subagent],
+            rails=[],
+            enable_task_loop=False,
+            system_prompt="updated prompt",
+        )
+    )
+
+    assert agent.ability_manager.get("task_tool") is not None
+
+
 def test_create_deep_agent_auto_add_skill_rail() -> None:
     """Test that SkillUseRail is auto-added when skills parameter is provided."""
     skills = ["name", "test_skill", "description", "test"]
     agent = create_deep_agent(
         model=_create_dummy_model(),
         skills=skills,
+        workspace=Workspace(root_path="./team_member_workspace"),
     )
 
     pending_rails = agent._pending_rails
     assert len(pending_rails) > 0
 
-    rail_types = [type(rail).__name__ for rail in [r for r in pending_rails if r is not None]]
+    non_null_rails = [rail for rail in pending_rails if rail is not None]
+    rail_types = [type(rail).__name__ for rail in non_null_rails]
     assert "SkillUseRail" in rail_types
+
+    skill_rail = next(rail for rail in non_null_rails if type(rail).__name__ == "SkillUseRail")
+    assert isinstance(skill_rail.skills_dir, list)
+    assert Path(skill_rail.skills_dir[0]) == Path("team_member_workspace") / "skills"
+    assert set(skill_rail.enabled_skills) == set(skills)
 
 
 def test_create_deep_agent_no_duplicate_task_planning_rail() -> None:
@@ -726,24 +834,7 @@ def test_create_code_agent_injects_default_code_tool_and_fs_rail() -> None:
 
     assert isinstance(agent, DeepAgent)
     assert agent.card.name == "code_agent"
-    assert agent.ability_manager.get("code") is not None
     assert any(isinstance(rail, FileSystemRail) for rail in agent._pending_rails)
-
-
-def test_create_code_agent_explicit_tools_and_rails_override_defaults() -> None:
-    custom_tool = _build_tool_card("custom_tool")
-    custom_rail = CountingRail()
-
-    agent = create_code_agent(
-        model=_create_dummy_model(),
-        tools=[custom_tool],
-        rails=[custom_rail],
-    )
-
-    assert agent.ability_manager.get("custom_tool") is custom_tool
-    assert agent.ability_manager.get("code") is None
-    assert any(isinstance(rail, CountingRail) for rail in agent._pending_rails)
-    assert not any(isinstance(rail, FileSystemRail) for rail in agent._pending_rails)
 
 
 def test_create_code_agent_accepts_explicit_mcps() -> None:
@@ -762,9 +853,81 @@ def test_create_code_agent_accepts_explicit_mcps() -> None:
     assert agent.deep_config.mcps == [mcp_config]
 
 
+def test_build_code_agent_config_uses_code_factory() -> None:
+    spec = build_code_agent_config(_create_dummy_model(), language="en")
+
+    assert isinstance(spec, SubAgentConfig)
+    assert spec.agent_card.name == "code_agent"
+    assert spec.system_prompt == DEFAULT_CODE_AGENT_SYSTEM_PROMPT["en"]
+    assert spec.factory_name == CODE_AGENT_FACTORY_NAME
+    assert spec.tools is None
+    assert spec.rails is None
+
+
+def test_build_research_agent_config_uses_research_factory() -> None:
+    spec = build_research_agent_config(_create_dummy_model(), language="en")
+
+    assert isinstance(spec, SubAgentConfig)
+    assert spec.agent_card.name == "research_agent"
+    assert spec.system_prompt == DEFAULT_RESEARCH_AGENT_SYSTEM_PROMPT["en"]
+    assert spec.factory_name == RESEARCH_AGENT_FACTORY_NAME
+    assert spec.tools is None
+    assert spec.rails is None
+
+
+def test_create_subagent_uses_code_agent_factory() -> None:
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        system_prompt="parent prompt",
+        workspace=Workspace(root_path="./parent_workspace"),
+        subagents=[build_code_agent_config(_create_dummy_model(), language="en")],
+    )
+    factory_result = object()
+
+    with patch(
+        "openjiuwen.harness.subagents.code_agent.create_code_agent",
+        return_value=factory_result,
+    ) as mock_create_code_agent:
+        sub = parent.create_subagent("code_agent", "sub_session_id")
+
+    assert sub is factory_result
+    mock_create_code_agent.assert_called_once()
+    call_kwargs = mock_create_code_agent.call_args.kwargs
+    assert call_kwargs["card"].name == "code_agent"
+    assert call_kwargs["tools"] is None
+    assert call_kwargs["rails"] is None
+    assert call_kwargs["workspace"].root_path.endswith("/sub_session_id")
+
+
+def test_create_subagent_uses_research_agent_factory() -> None:
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        system_prompt="parent prompt",
+        workspace=Workspace(root_path="./parent_workspace"),
+        subagents=[build_research_agent_config(_create_dummy_model(), language="en")],
+    )
+    factory_result = object()
+
+    with patch(
+        "openjiuwen.harness.subagents.research_agent.create_research_agent",
+        return_value=factory_result,
+    ) as mock_create_research_agent:
+        sub = parent.create_subagent("research_agent", "sub_session_id")
+
+    assert sub is factory_result
+    mock_create_research_agent.assert_called_once()
+    call_kwargs = mock_create_research_agent.call_args.kwargs
+    assert call_kwargs["card"].name == "research_agent"
+    assert call_kwargs["tools"] is None
+    assert call_kwargs["rails"] is None
+    assert call_kwargs["workspace"].root_path.endswith("/sub_session_id")
+
+
 @pytest.mark.asyncio
 async def test_create_deep_agent_with_restrict_to_work_dir_enabled() -> None:
-    """Test that restrict_to_work_dir=True uses workspace root_path."""
+    """Test that restrict_to_work_dir=False results in no sandbox."""
     agent = create_deep_agent(
         model=_create_dummy_model(),
         workspace=Workspace(root_path="./"),
@@ -776,4 +939,5 @@ async def test_create_deep_agent_with_restrict_to_work_dir_enabled() -> None:
 
     sys_op = Runner.resource_mgr.get_sys_operation(f"{agent.card.name}_{agent.card.id}")
     assert sys_op is not None
-    assert sys_op._run_config.work_dir != "./"
+    assert sys_op._run_config.sandbox_root is None
+    assert sys_op._run_config.restrict_to_sandbox is False

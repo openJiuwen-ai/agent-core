@@ -126,7 +126,9 @@ class TestTodoTool(unittest.IsolatedAsyncioTestCase):
         tool = TodoTool(MagicMock(), self.mock_operation)
 
         # Execute and verify
-        loaded_todos = await tool.load_todos()
+        with patch('os.path.abspath', return_value='/mock/absolute/path'), \
+             patch('os.path.isfile', return_value=True):
+            loaded_todos = await tool.load_todos()
         self.assertEqual(len(loaded_todos), 2)
         self.assertEqual(loaded_todos[0].content, "Task 1")
         self.assertEqual(loaded_todos[1].status, TodoStatus.PENDING)
@@ -142,7 +144,7 @@ class TestTodoTool(unittest.IsolatedAsyncioTestCase):
         # Verify exception
         with self.assertRaises(FrameworkError) as cm:
             await tool.load_todos()
-        self.assertIn("Failed to load todo list, because read_file fail", str(cm.exception))
+        self.assertIn("Failed to load todo list: [182500] todo tool loads failed", str(cm.exception))
 
     async def test_save_todos_success(self):
         """Test successful saving of todo list"""
@@ -467,7 +469,7 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
         }]
         inputs = {
             "action": "insert_after",
-            "todo_data": [self.test_todo_ids[0], insert_data]  # Insert after Task 1
+            "todo_data": {"target_id": self.test_todo_ids[0], "items": insert_data}
         }
 
         # Execute call
@@ -492,7 +494,7 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
         }]
         inputs = {
             "action": "insert_before",
-            "todo_data": [self.test_todo_ids[1], insert_data]  # Insert before Task 2
+            "todo_data": {"target_id": self.test_todo_ids[1], "items": insert_data}
         }
 
         # Execute call

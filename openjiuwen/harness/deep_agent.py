@@ -3,6 +3,7 @@
 """DeepAgent implementation."""
 from __future__ import annotations
 
+import os
 import sys
 from typing import (
     Any, AsyncIterator, Dict, List, Optional,
@@ -65,6 +66,7 @@ from openjiuwen.harness.task_loop.task_loop_controller import (
 )
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
 from openjiuwen.harness.tools.session_tools import SessionToolkit
+from openjiuwen.harness.tools.web_tools import is_free_search_enabled
 
 if TYPE_CHECKING:
     from openjiuwen.core.controller.modules.event_queue import (
@@ -125,7 +127,6 @@ class DeepAgent(BaseAgent):
         self._task_completion_rail: Optional[TaskCompletionRail] = None
         self._initialized = False
         self.system_prompt_builder: Optional[SystemPromptBuilder] = None
-        self._workspace_initialized: bool = False
         self._invoke_active: bool = False
         self._auto_invoke_scheduled: bool = False
         self._bound_session_id: Optional[str] = None
@@ -139,23 +140,74 @@ class DeepAgent(BaseAgent):
     def configure(self, config: DeepAgentConfig) -> "DeepAgent":
         """Apply configuration and rebuild the internal ReActAgent."""
 
-        # Pre-calculate the workspace root path (per-agent isolation)
-        # Only do this if factory hasn't already processed it
-        if config.workspace is not None:
-            agent_id = self.card.id or "default"
-            root = Path(config.workspace.root_path)
-            expected_suffix = f"{agent_id}_workspace"
-            if root.name != expected_suffix:
-                config.workspace.root_path = str(root / expected_suffix)
-
+        self._filter_disabled_tools(config)
         if self._deep_config is None:
             self._initial_configure(config)
         else:
             self._hot_reconfigure(config)
 
         self._initialized = False
-        self._workspace_initialized = False
         return self
+
+    @staticmethod
+    def _filter_disabled_tools(config: DeepAgentConfig) -> None:
+        if config.tools is None or is_free_search_enabled():
+            return
+        config.tools = [
+            card for card in config.tools
+            if not (isinstance(card, ToolCard) and card.name == "free_search")
+        ]
+
+    def _unregister_tool_resource(self, card: ToolCard) -> None:
+        if card.name != "free_search":
+            return
+        if not getattr(card, "id", None):
+            return
+        if Runner.resource_mgr.get_tool(card.id) is None:
+            return
+        tags = Runner.resource_mgr.get_resource_tag(card.id) or []
+        if self.card.id in tags and len(tags) > 1:
+            result = Runner.resource_mgr.remove_resource_tag(
+                card.id,
+                self.card.id,
+                skip_if_tag_not_exists=True,
+            )
+            if result.is_err():
+                logger.warning(
+                    "[DeepAgent] Failed to remove tool tag during hot reload: %s",
+                    result.msg(),
+                )
+            return
+        if self.card.id in tags or not tags:
+            result = Runner.resource_mgr.remove_tool(card.id)
+            if result.is_err():
+                logger.warning(
+                    "[DeepAgent] Failed to unregister tool during hot reload: %s",
+                    result.msg(),
+                )
+
+    def _ensure_builtin_tool_resource(self, card: ToolCard, config: DeepAgentConfig) -> None:
+        if card.name != "free_search":
+            return
+        existing_tool = Runner.resource_mgr.get_tool(card.id)
+        if existing_tool is not None:
+            tag_result = Runner.resource_mgr.add_resource_tag(card.id, self.card.id)
+            if tag_result.is_err():
+                logger.warning(
+                    "[DeepAgent] Failed to tag existing free_search during hot reload: %s",
+                    tag_result.msg(),
+                )
+            return
+
+        from openjiuwen.harness.tools.web_tools import WebFreeSearchTool
+
+        tool = WebFreeSearchTool(language=resolve_language(config.language), card=card)
+        result = Runner.resource_mgr.add_tool(tool, tag=self.card.id)
+        if result.is_err():
+            logger.warning(
+                "[DeepAgent] Failed to register free_search during hot reload: %s",
+                result.msg(),
+            )
 
     def _initial_configure(self, config: DeepAgentConfig) -> None:
         """First-time setup: persist config, create the inner ReActAgent, and queue rails."""
@@ -168,6 +220,7 @@ class DeepAgent(BaseAgent):
 
     def _hot_reconfigure(self, config: DeepAgentConfig) -> None:
         """Hot-reconfigure an already-running agent without restarting it."""
+        previous_config = self._deep_config
         self._deep_config = config
         if config.card is not None:
             self.card = config.card
@@ -178,7 +231,10 @@ class DeepAgent(BaseAgent):
             self._hot_reload_model(config)
 
         if config.tools is not None and self._react_agent is not None:
-            self._hot_reload_tools(config)
+            self._hot_reload_tools(
+                config,
+                previous_tools=(previous_config.tools if previous_config is not None else None),
+            )
 
         if config.system_prompt is not None and self._react_agent is not None:
             self._hot_reload_system_prompt(config)
@@ -203,11 +259,15 @@ class DeepAgent(BaseAgent):
                 else:
                     retained.append(rail)
             self._registered_rails = retained
+            self._pending_rails = [
+                rail for rail in self._pending_rails
+                if type(rail) not in replacing_types
+            ]
         else:
             # Full replacement: all existing rails become stale.
             self._stale_rails.extend(self._registered_rails)
             self._registered_rails.clear()
-        self._pending_rails.clear()
+            self._pending_rails.clear()
 
     def _hot_reload_model(self, config: DeepAgentConfig) -> None:
         """Apply updated model/iteration config to the live inner ReActAgent.
@@ -242,7 +302,12 @@ class DeepAgent(BaseAgent):
         self._react_agent.configure(new_react_config)
         logger.info("[DeepAgent] Model configuration hot reloaded")
 
-    def _hot_reload_tools(self, config: DeepAgentConfig) -> None:
+    def _hot_reload_tools(
+        self,
+        config: DeepAgentConfig,
+        *,
+        previous_tools: Optional[List[ToolCard]] = None,
+    ) -> None:
         """Sync tool cards in the shared AbilityManager during hot-reconfigure.
 
         Tools are matched by id: a card whose id already exists in the
@@ -252,13 +317,21 @@ class DeepAgent(BaseAgent):
         MCP server registrations and other ability types are not affected.
         """
         new_by_name = {card.name: card for card in (config.tools or [])}
-
-        # Remove tools that are no longer in the new config.
-        existing_tool_names = {
-            a.name for a in self.ability_manager.list() if isinstance(a, ToolCard)
+        previous_by_name = {
+            card.name: card for card in (previous_tools or []) if isinstance(card, ToolCard)
         }
-        stale = [name for name in existing_tool_names if name not in new_by_name]
+
+        # Only remove tools that were previously managed by config.tools.
+        # Rail-registered tools such as task_tool must survive hot reload.
+        managed_tool_names = set(previous_by_name)
+        if not managed_tool_names:
+            managed_tool_names = set(new_by_name)
+        stale = [name for name in managed_tool_names if name not in new_by_name]
         if stale:
+            for name in stale:
+                card = previous_by_name.get(name)
+                if card is not None:
+                    self._unregister_tool_resource(card)
             self.ability_manager.remove(stale)
 
         # Add or replace tools whose id has changed (or are new).
@@ -266,10 +339,13 @@ class DeepAgent(BaseAgent):
             existing = self.ability_manager.get(name)
             existing_tool = existing if isinstance(existing, ToolCard) else None
             if existing_tool is not None and existing_tool.id == card.id:
-                continue  # Same id — no update needed.
+                self._ensure_builtin_tool_resource(card, config)
+                continue  # Same id - no update needed.
             if existing_tool is not None:
+                self._unregister_tool_resource(existing_tool)
                 self.ability_manager.remove(name)
             self.ability_manager.add(card)
+            self._ensure_builtin_tool_resource(card, config)
 
     def _hot_reload_system_prompt(self, config: DeepAgentConfig) -> None:
         """Rebuild the SystemPromptBuilder and update both agents during hot-reconfigure.
@@ -285,6 +361,7 @@ class DeepAgent(BaseAgent):
             prompt_builder.add_section(PromptSection(
                 name=SectionName.IDENTITY,
                 content={"cn": config.system_prompt, "en": config.system_prompt},
+                priority=10,
             ))
         else:
             prompt_builder.add_section(build_identity_section(language))
@@ -404,6 +481,7 @@ class DeepAgent(BaseAgent):
         )
         if cfg.context_engine_config is not None:
             react_config.context_engine_config = cfg.context_engine_config
+        react_config.workspace = cfg.workspace
 
         language = resolve_language(cfg.language)
         mode = resolve_mode(cfg.prompt_mode)
@@ -414,6 +492,7 @@ class DeepAgent(BaseAgent):
             prompt_builder.add_section(PromptSection(
                 name=SectionName.IDENTITY,
                 content={"cn": cfg.system_prompt, "en": cfg.system_prompt},
+                priority=10,
             ))
         else:
             prompt_builder.add_section(build_identity_section(language))
@@ -495,11 +574,22 @@ class DeepAgent(BaseAgent):
         if self._initialized:
             return
 
+        # Initialize ContextVar CWD in the current asyncio Task context.
+        # Each agent sets its own CWD unconditionally — ContextVar copies
+        # are per-Task, so this won't affect the parent agent.
+        if self._deep_config and self._deep_config.workspace:
+            from openjiuwen.core.sys_operation.cwd import init_cwd
+
+            init_root = self._deep_config.workspace.root_path or os.getcwd()
+            init_cwd(
+                init_root,
+                workspace=self._deep_config.workspace.root_path,
+            )
+
         await self._register_pending_mcps()
 
         if self._needs_workspace_init():
             await self.init_workspace()
-            self._workspace_initialized = True
 
         # Unregister stale rails left over from a previous configure() cycle.
         for stale_rail in self._stale_rails:
@@ -525,7 +615,6 @@ class DeepAgent(BaseAgent):
                     config.workspace is not None
                     and config.sys_operation is not None
                     and config.auto_create_workspace
-                    and not self._workspace_initialized
             )
         return False
 
@@ -536,17 +625,26 @@ class DeepAgent(BaseAgent):
     async def init_workspace(self) -> None:
         """Initialize the workspace with directory structure and default content.
 
-        The root_path is pre-calculated in configure(), so we only need to
-        create the directory structure here.
+        Only creates directories/files if they don't exist, so it's safe to call
+        multiple times.
         """
         from openjiuwen.harness.workspace.directory_builder import DirectoryBuilder
 
         if self._deep_config and self._deep_config.workspace:
+            root = Path(self._deep_config.workspace.root_path)
+            if (root / ".workspace").exists():
+                return
+
             builder = DirectoryBuilder(
                 sys_operation=self._deep_config.sys_operation,
                 root_path=self._deep_config.workspace.root_path,
             )
             await builder.build(self._deep_config.workspace.directories)
+
+    @property
+    def loop_session(self) -> Optional[Session]:
+        """The active loop session, or None if no session is running."""
+        return self._loop_session
 
     @property
     def react_config(self) -> ReActAgentConfig:
@@ -597,8 +695,8 @@ class DeepAgent(BaseAgent):
             "model": spec.model or self._deep_config.model,
             "card": spec.agent_card,
             "system_prompt": spec.system_prompt,
-            "tools": spec.tools or [],
-            "mcps": spec.mcps or [],
+            "tools": spec.tools,
+            "mcps": spec.mcps,
             "rails": spec.rails,
             "enable_task_loop": spec.enable_task_loop,
             "max_iterations": (
@@ -634,7 +732,8 @@ class DeepAgent(BaseAgent):
             ),
             "subagents": None,
             "enable_async_subagent": False,
-            "add_general_purpose_agent": False
+            "add_general_purpose_agent": False,
+            "enable_plan_mode": spec.enable_plan_mode
         }
 
         if spec.factory_name:
@@ -645,6 +744,24 @@ class DeepAgent(BaseAgent):
                 )
 
                 return create_browser_agent(
+                    **create_kwargs,
+                    **dict(spec.factory_kwargs or {}),
+                )
+            if normalized_factory == "code_agent":
+                from openjiuwen.harness.subagents.code_agent import (
+                    create_code_agent,
+                )
+
+                return create_code_agent(
+                    **create_kwargs,
+                    **dict(spec.factory_kwargs or {}),
+                )
+            if normalized_factory == "research_agent":
+                from openjiuwen.harness.subagents.research_agent import (
+                    create_research_agent,
+                )
+
+                return create_research_agent(
                     **create_kwargs,
                     **dict(spec.factory_kwargs or {}),
                 )
@@ -1015,6 +1132,55 @@ class DeepAgent(BaseAgent):
         self._clear_runtime_state(session)
         if clear_persisted:
             session.update_state({_SESSION_STATE_KEY: None})
+
+    def switch_mode(self, session: Session, mode: str) -> None:
+        """Switch agent mode, updating session-scoped PlanModeState.
+
+        Args:
+            session: Current session.
+            mode: Target mode string — ``"plan"`` or ``"auto"``.
+        """
+        state = self.load_state(session)
+        if state.plan_mode.mode == mode:
+            return
+        if mode == "plan":
+            state.plan_mode.pre_plan_mode = state.plan_mode.mode
+        state.plan_mode.mode = mode
+        self.save_state(session, state)
+
+    def restore_mode_after_plan_exit(self, session: Session) -> None:
+        """Restore the mode that was active before entering plan mode.
+
+        Does **not** clear ``plan_slug`` so that the execution phase can
+        still reference the plan file.
+
+        Args:
+            session: Current session.
+        """
+        state = self.load_state(session)
+        state.plan_mode.mode = state.plan_mode.pre_plan_mode or "auto"
+        state.plan_mode.pre_plan_mode = None
+        self.save_state(session, state)
+
+    def get_plan_file_path(self, session: Session) -> Path | None:
+        """Derive the plan file path from the slug stored in session state.
+
+        Args:
+            session: Current session.
+
+        Returns:
+            Resolved ``Path`` to the plan Markdown file, or ``None`` if
+            no slug has been set or the workspace is unavailable.
+        """
+        from openjiuwen.harness.tools.agent_mode_tools import resolve_plan_file_path
+
+        state = self.load_state(session)
+        slug = state.plan_mode.plan_slug
+        if not slug or not self._deep_config or not self._deep_config.workspace:
+            return None
+        return resolve_plan_file_path(
+            self._deep_config.workspace.root_path, slug
+        )
 
     def _has_remaining_tasks(self, session: Session) -> bool:
         """Check whether the task plan still has pending tasks."""

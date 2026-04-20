@@ -59,7 +59,7 @@ class TeamToolApprovalRail(ConfirmInterruptRail):
     leader 收到消息后使用 ToolApprove 工具进行回复。
 
     审批请求包含以下信息：
-    - 成员 ID (member_id)
+    - 成员 ID (member_name)
     - 工具名称 (tool_name)
     - 工具调用 ID (tool_call_id)
     - 工具参数 (tool_args)
@@ -75,9 +75,9 @@ class TeamToolApprovalRail(ConfirmInterruptRail):
     Usage:
         # 在 teammate 端注册
         rail = TeamToolApprovalRail(
-            team_id="team_001",
-            member_id="member_001",
-            leader_id="leader_001",
+            team_name="team_001",
+            member_name="member_001",
+            leader_member_name="leader_001",
             db=team_db,
             messager=messager_instance,
             tool_names=["delete_file", "execute_command"],
@@ -94,18 +94,19 @@ class TeamToolApprovalRail(ConfirmInterruptRail):
 
     def __init__(
         self,
-        team_id: str,
-        member_id: str,
+        team_name: str,
+        member_name: str,
         db: TeamDatabase,
         messager: Messager,
-        leader_id: str,
+        leader_member_name: str,
         tool_names: Optional[Iterable[str]] = None,
     ):
         super().__init__(tool_names=tool_names)
-        self.team_id = team_id
-        self.member_id = member_id
-        self.leader_id = leader_id
-        self.message_manager = TeamMessageManager(team_id=team_id, member_id=member_id, db=db, messager=messager)
+        self.team_name = team_name
+        self.member_name = member_name
+        self.leader_member_name = leader_member_name
+        self.message_manager = TeamMessageManager(team_name=team_name, member_name=member_name, db=db,
+                                                  messager=messager)
 
     async def resolve_interrupt(
             self,
@@ -133,7 +134,7 @@ class TeamToolApprovalRail(ConfirmInterruptRail):
         if tool_call:
             tool_name = tool_call.name
         else:
-            team_logger.error(f"tool_call not provided for member {self.member_id}")
+            team_logger.error(f"tool_call not provided for member {self.member_name}")
             return self.reject(tool_result="Invalid tool call")
 
         # First call: send approval request to leader and interrupt
@@ -141,7 +142,7 @@ class TeamToolApprovalRail(ConfirmInterruptRail):
             # Check auto-confirm first
             auto_confirm_key = self._get_auto_confirm_key(tool_call)
             if self._is_auto_confirmed(auto_confirm_config, auto_confirm_key):
-                team_logger.debug(f"Tool {tool_name} auto-approved for member {self.member_id}")
+                team_logger.debug(f"Tool {tool_name} auto-approved for member {self.member_name}")
                 return self.approve()
 
             tool_call_id = self._resolve_tool_call_id(tool_call)
@@ -152,7 +153,7 @@ class TeamToolApprovalRail(ConfirmInterruptRail):
                 args_str = "{}"
             message = (
                 "Teammate tool approval request.\n"
-                f"Member: {self.member_id}\n"
+                f"Member: {self.member_name}\n"
                 f"Tool: {tool_name}\n"
                 f"Tool Call ID: {tool_call_id}\n"
                 f"Arguments: {args_str}\n"
@@ -163,7 +164,7 @@ class TeamToolApprovalRail(ConfirmInterruptRail):
             team_logger.info(f"Sending tool approval request to leader for {tool_name} (call_id: {tool_call_id})")
             message_id = await self.message_manager.send_message(
                 content=message,
-                to_member=self.leader_id
+                to_member_name=self.leader_member_name
             )
 
             if not message_id:
@@ -200,11 +201,11 @@ class TeamToolApprovalRail(ConfirmInterruptRail):
             ))
 
         if payload.approved:
-            team_logger.info(f"Tool {tool_name} approved by leader for member {self.member_id}")
+            team_logger.info(f"Tool {tool_name} approved by leader for member {self.member_name}")
             return self.approve()
 
         feedback = payload.feedback or "Tool call rejected by leader"
-        team_logger.info(f"Tool {tool_name} rejected by leader for member {self.member_id}: {feedback}")
+        team_logger.info(f"Tool {tool_name} rejected by leader for member {self.member_name}: {feedback}")
         return self.reject(tool_result=feedback)
 
     @staticmethod

@@ -14,6 +14,7 @@ from openjiuwen.core.operator.base import Operator, TunableSpec
 from openjiuwen.core.operator.llm_call import LLMCallOperator, LLMCall
 from openjiuwen.core.operator.tool_call import ToolCallOperator
 from openjiuwen.core.operator.memory_call import MemoryCallOperator
+from openjiuwen.core.operator.skill_call import SkillCallOperator
 
 __all__ = [
     "Operator",
@@ -22,4 +23,5 @@ __all__ = [
     "LLMCall",
     "ToolCallOperator",
     "MemoryCallOperator",
+    "SkillCallOperator",
 ]

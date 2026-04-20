@@ -56,11 +56,12 @@ class DirectoryBuilder:
         is_file = node.get("is_file", False)
         default_content = node.get("default_content", "")
         if is_file:
-            await self.sys_operation.fs().write_file(
-                full_path,
-                content=default_content,
-                create_if_not_exist=True
-            )
+            if not Path(full_path).exists():
+                await self.sys_operation.fs().write_file(
+                    full_path,
+                    content=default_content,
+                    create_if_not_exist=True
+                )
         else:
             marker_file = f"{full_path}/.workspace"
             await self.sys_operation.fs().write_file(

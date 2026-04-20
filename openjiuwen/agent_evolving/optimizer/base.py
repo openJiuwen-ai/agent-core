@@ -10,16 +10,16 @@ TextualParameter: Gradient container for operator_id.
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import Dict, Optional, Any, List, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.agent_evolving.trajectory.types import Trajectory, Updates
-from openjiuwen.agent_evolving.dataset import EvaluatedCase
 
 if TYPE_CHECKING:
     from openjiuwen.core.operator.base import Operator
+    from openjiuwen.agent_evolving.signal.base import EvolutionSignal
 
 
 class BaseOptimizer:
@@ -37,7 +37,7 @@ class BaseOptimizer:
         self._parameters: Dict[str, TextualParameter] = {}
         self._targets: List[str] = []
         self._trajectories: List[Trajectory] = []
-        self._bad_cases: List[EvaluatedCase] = []
+        self._bad_signals: List["EvolutionSignal"] = []
 
     @staticmethod
     def requires_forward_data() -> bool:
@@ -98,7 +98,7 @@ class BaseOptimizer:
         self._operators = self.filter_operators(operators, self._targets)
         self._parameters = {op_id: TextualParameter(operator_id=op_id) for op_id in self._operators}
         self._trajectories = []
-        self._bad_cases = []
+        self._bad_signals = []
         if not self._operators:
             logger.error(
                 "[optimizer] no operator matches targets=%s; will soft-exit",
@@ -122,14 +122,11 @@ class BaseOptimizer:
         """Clear cache after update."""
         self._trajectories.clear()
 
-    def backward(
-        self,
-        evaluated_cases: List[EvaluatedCase],
-    ):
+    async def backward(self, signals: List["EvolutionSignal"]) -> None:
         self._validate_parameters()
-        self._get_bad_cases(evaluated_cases)
+        self._get_bad_signals(signals)
         try:
-            self._backward(evaluated_cases)
+            await self._backward(signals)
         except Exception as e:
             raise build_error(
                 StatusCode.TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR, error_msg=f"{str(e)}", cause=e
@@ -149,33 +146,26 @@ class BaseOptimizer:
             ) from e
 
     @abstractmethod
-    def _step(self) -> Updates:
-        """Subclass implements: generates Updates based on gradients written during backward."""
+    async def _backward(self, signals: List["EvolutionSignal"]) -> None:
         pass
 
     @abstractmethod
-    def _backward(
-        self,
-        evaluated_cases: List[EvaluatedCase],
-    ):
+    def _step(self) -> Updates:
+        """Subclass implements: generates Updates based on gradients written during backward."""
         pass
 
     def parameters(self) -> Dict[str, "TextualParameter"]:
         return self._parameters.copy()
 
-    def _get_bad_cases(self, evaluated_cases: List[EvaluatedCase]) -> List[EvaluatedCase]:
-        """
-        Get cases with score == 0, limited to max_bad_cases.
+    def _get_bad_signals(self, signals: List["EvolutionSignal"]) -> List["EvolutionSignal"]:
+        """Filter signals for backward.
 
-        Args:
-            evaluated_cases: All evaluated cases
-
-        Returns:
-            Filtered list of bad cases
+        - context is None → online signal, keep all
+        - context has value → offline signal, filter by score == 0
         """
-        bad_cases = [case for case in evaluated_cases if case.score == 0]
-        self._bad_cases = bad_cases
-        return bad_cases
+        bad = [s for s in signals if s.context is None or s.context.get("score", 1) == 0]
+        self._bad_signals = bad
+        return bad
 
     def _validate_parameters(self):
         if not self._parameters:
@@ -183,19 +173,19 @@ class BaseOptimizer:
 
 
 class TextualParameter:
-    """Gradient container for operator_id, stores target -> gradient text and
+    """Gradient container for operator_id, stores target -> gradient value and
     optional description. No longer holds Operator reference.
     """
 
     def __init__(self, operator_id: str):
         self.operator_id = operator_id
-        self.gradients: Dict[str, str] = {}  # target -> gradient text
+        self.gradients: Dict[str, Any] = {}  # target -> gradient value (str or list)
         self.description: str = ""
 
-    def set_gradient(self, name: str, gradient: str) -> None:
+    def set_gradient(self, name: str, gradient: Any) -> None:
         self.gradients[name] = gradient
 
-    def get_gradient(self, name: str) -> Optional[str]:
+    def get_gradient(self, name: str) -> Optional[Any]:
         return self.gradients.get(name)
 
     def set_description(self, description: str) -> None:

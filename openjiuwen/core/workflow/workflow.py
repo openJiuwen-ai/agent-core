@@ -3,6 +3,7 @@
 import asyncio
 import uuid
 from abc import ABCMeta
+from contextlib import asynccontextmanager
 from typing import (
     AsyncIterator,
     Self,
@@ -64,6 +65,7 @@ from openjiuwen.core.workflow.base import (
 from openjiuwen.core.workflow.components.base import ComponentAbility
 from openjiuwen.core.workflow.components.component import ComponentComposable
 from openjiuwen.core.workflow.workflow_config import WorkflowConfig
+from openjiuwen.core.common.background_tasks import BackgroundTask, create_background_task
 from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import WorkflowEvents
 
@@ -113,6 +115,18 @@ class Workflow(metaclass=_WorkflowMeta):
         self._internal = BaseWorkflow(WorkflowConfig(card=self._card, **kwargs), PregelGraph())
         self._end_comp_id: str = ""
         self._is_streaming = False
+
+    @asynccontextmanager
+    async def _task_group_scope(self):
+        """Create a task-manager scope for direct workflow execution."""
+        from openjiuwen.core.common.task_manager.context import get_task_group
+        from openjiuwen.core.common.task_manager.manager import get_task_manager
+
+        if get_task_group() is not None:
+            yield
+            return
+        async with get_task_manager().task_group():
+            yield
 
     @property
     def card(self):
@@ -497,7 +511,10 @@ class Workflow(metaclass=_WorkflowMeta):
                 await asyncio.shield(TracerWorkflowUtils.trace_workflow_done(session, outputs))
                 await asyncio.shield(session.stream_writer_manager().stream_emitter().close())
 
-        task = asyncio.create_task(self._execute_with_timeout(stream_process, timeout))
+        task = await self._spawn_background_task(
+            self._execute_with_timeout(stream_process, timeout),
+            name=f"workflow_stream_process:{self._card.id}",
+        )
 
         try:
             interaction_chuck_list = []
@@ -510,7 +527,7 @@ class Workflow(metaclass=_WorkflowMeta):
                     interaction_chuck_list.append(chunk)
                 chunks.append(chunk)
             try:
-                await task
+                await self._wait_background_task(task)
                 results = session.state().get_outputs(self._end_comp_id)
                 await trigger(
                     WorkflowEvents.WORKFLOW_FINISHED,
@@ -538,12 +555,8 @@ class Workflow(metaclass=_WorkflowMeta):
                 workflow_id=self._card.id,
                 workflow_name=self._card.name
             )
-            if not task.done() and not task.cancelled():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+            if not self._is_background_task_done(task):
+                await task.cancel(reason="workflow_cancelled")
             raise
         except BaseError as e:
             await trigger(
@@ -553,24 +566,8 @@ class Workflow(metaclass=_WorkflowMeta):
                 error=e)
             raise
         finally:
-            if not task.done() and task.cancelled():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    logger.warning(
-                        "workflow task was cancelled",
-                        event_type=LogEventType.WORKFLOW_EXECUTE_ERROR,
-                        workflow_id=self._card.id,
-                        workflow_name=self._card.name
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "unexpected exception",
-                        event_type=LogEventType.WORKFLOW_EXECUTE_ERROR,
-                        workflow_id=self._card.id,
-                        workflow_name=self._card.name
-                    )
+            if not self._is_background_task_done(task):
+                await task.cancel(reason="workflow_cancelled")
             await asyncio.shield(session.close())
             await asyncio.shield(self._internal.reset())
 
@@ -634,9 +631,15 @@ class Workflow(metaclass=_WorkflowMeta):
             await asyncio.shield(self._internal.reset())
 
     async def _execute_with_timeout(self, func, timeout):
-        task = asyncio.create_task(func())
+        task = await self._spawn_background_task(
+            func(),
+            name=f"workflow_exec_timeout:{self._card.id}",
+        )
         try:
-            return await asyncio.wait_for(task, timeout=timeout if (timeout and timeout > 0) else None)
+            return await asyncio.wait_for(
+                self._wait_background_task(task),
+                timeout=timeout if (timeout and timeout > 0) else None,
+            )
         except asyncio.CancelledError:
             logger.error(
                 "Workflow execution cancelled",
@@ -645,7 +648,7 @@ class Workflow(metaclass=_WorkflowMeta):
                 workflow_name=self._card.name
             )
             raise
-        except asyncio.TimeoutError as e:
+        except (asyncio.TimeoutError, TimeoutError) as e:
             logger.error(
                 f"Workflow execution timeout {timeout} s",
                 event_type=LogEventType.WORKFLOW_EXECUTE_ERROR,
@@ -662,16 +665,24 @@ class Workflow(metaclass=_WorkflowMeta):
                 workflow_name=self._card.name,
                 exception=e
             )
-            raise build_error(StatusCode.WORKFLOW_EXECUTION_ERROR, cause=e, reason=e, workflow=self._card.str()) from e
+            raise build_error(StatusCode.WORKFLOW_EXECUTION_ERROR, cause=e, reason=e,
+                              workflow=self._card.to_str()) from e
         except BaseError as e:
             raise e
         finally:
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except Exception:
-                    pass
+            if not self._is_background_task_done(task):
+                await task.cancel(reason="workflow_cancelled")
+
+    async def _spawn_background_task(self, coro, name: str) -> BackgroundTask:
+        return await create_background_task(coro, name=name, group="workflow")
+
+    @staticmethod
+    async def _wait_background_task(task: BackgroundTask):
+        return await task.wait()
+
+    @staticmethod
+    def _is_background_task_done(task: BackgroundTask) -> bool:
+        return task.done()
 
     def _create_workflow_session(self, session, stream_modes=None, is_sub: bool = False):
         if not is_sub:
@@ -716,13 +727,13 @@ class Workflow(metaclass=_WorkflowMeta):
             except Exception as e:
                 raise build_error(StatusCode.WORKFLOW_EXECUTE_INPUT_INVALID, cause=e, inputs=inputs,
                                   reason=f"input validation failed against schema: {str(e) if e else 'Unknown error'}",
-                                  workflow=self._card.str())
+                                  workflow=self._card.to_str())
 
     def _validate_session(self, session):
         if not session:
             raise build_error(StatusCode.WORKFLOW_EXECUTE_SESSION_INVALID,
                               reason="session is required for workflow execution",
-                              workflow=self._card.str())
+                              workflow=self._card.to_str())
 
 
     @staticmethod

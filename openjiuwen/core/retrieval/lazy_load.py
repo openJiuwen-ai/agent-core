@@ -22,7 +22,7 @@ _LAZY_MILVUS = [
 ]
 _LAZY_CHROMA = ["ChromaIndexer", "ChromaVectorStore", "ChromaVectorField"]
 _LAZY_OPENAI = ["OpenAIEmbedding", "VLLMEmbedding", "DashscopeEmbedding", "parse_base64_embedding"]
-_LAZY_HTTPX = ["StandardReranker", "ChatReranker"]
+_LAZY_HTTPX = ["StandardReranker", "ChatReranker", "DashscopeReranker"]
 _LAZY_PARSER = [
     "AutoFileParser",
     "AutoLinkParser",
@@ -61,10 +61,12 @@ _LAZY_IMPORT_CACHE = dict.fromkeys(_LAZY_ATTRIBUTES, None)
 
 def _load_httpx():
     from openjiuwen.core.retrieval.reranker.chat_reranker import ChatReranker
+    from openjiuwen.core.retrieval.reranker.dashscope_reranker import DashscopeReranker
     from openjiuwen.core.retrieval.reranker.standard_reranker import StandardReranker
 
     _LAZY_IMPORT_CACHE["StandardReranker"] = StandardReranker
     _LAZY_IMPORT_CACHE["ChatReranker"] = ChatReranker
+    _LAZY_IMPORT_CACHE["DashscopeReranker"] = DashscopeReranker
 
 
 def _load_openai():

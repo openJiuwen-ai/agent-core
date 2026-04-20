@@ -79,6 +79,45 @@ class BaseModelClient(ABC):
         self.model_client_config = model_client_config
         self._validate_config()
 
+    @staticmethod
+    def _extract_cost_info(obj: Any) -> tuple:
+        """Extract cost information from a response or chunk object.
+        Supports three formats:
+        1. ``cost`` as a simple numeric value (int/float)
+        2. ``cost`` / ``usage_cost`` as an object with input/output/total cost attributes
+        3. ``cost_details`` with upstream_inference_*_cost fields as fallback
+        Returns:
+            tuple: (input_cost, output_cost, total_cost)
+        """
+        input_cost = 0.
+        output_cost = 0.
+        total_cost = 0.
+        cost_info = getattr(obj, 'cost', None) or getattr(obj, 'usage_cost', None)
+        cost_details = getattr(obj, 'cost_details', None)
+        if cost_info:
+            if isinstance(cost_info, (int, float)):
+                total_cost = float(cost_info)
+            else:
+                input_cost = float(getattr(cost_info, 'input_cost', 0) or
+                                   getattr(cost_info, 'prompt_cost', 0) or 0)
+                output_cost = float(getattr(cost_info, 'output_cost', 0) or
+                                    getattr(cost_info, 'completion_cost', 0) or 0)
+                total_cost = float(getattr(cost_info, 'total_cost', 0) or 0)
+                if not total_cost:
+                    total_cost = input_cost + output_cost
+        if cost_details and not input_cost and not output_cost:
+            if isinstance(cost_details, dict):
+                input_cost = float(cost_details.get('upstream_inference_prompt_cost', 0) or 0)
+                output_cost = float(cost_details.get('upstream_inference_completions_cost', 0) or 0)
+                detail_total = float(cost_details.get('upstream_inference_cost', 0) or 0)
+            else:
+                input_cost = float(getattr(cost_details, 'upstream_inference_prompt_cost', 0) or 0)
+                output_cost = float(getattr(cost_details, 'upstream_inference_completions_cost', 0) or 0)
+                detail_total = float(getattr(cost_details, 'upstream_inference_cost', 0) or 0)
+            if not total_cost:
+                total_cost = detail_total or (input_cost + output_cost)
+        return input_cost, output_cost, total_cost
+
     def _get_client_name(self) -> str:
         """Get client name for error messages (subclasses can override)
 

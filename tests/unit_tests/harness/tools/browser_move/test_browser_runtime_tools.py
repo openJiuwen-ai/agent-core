@@ -5,20 +5,20 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
+from openjiuwen.core.foundation.tool import McpServerConfig, Tool, ToolCard
+from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import BrowserRunGuardrails
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserAgentRuntime
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime_tools import (
     BrowserCancelTool,
+    BrowserClearCancelTool,
     BrowserCustomActionTool,
     BrowserListActionsTool,
-    BrowserRunTaskTool,
+    BrowserRuntimeHealthTool,
     build_browser_runtime_tools,
 )
-from openjiuwen.core.foundation.tool import Tool, ToolCard
-from openjiuwen.core.foundation.tool import McpServerConfig
-from openjiuwen.harness.tools.base_tool import ToolOutput
 
 
 def _run(coro):
@@ -43,288 +43,122 @@ def _make_runtime() -> BrowserAgentRuntime:
     )
 
 
-# ---------------------------------------------------------------------------
-# build_browser_runtime_tools
-# ---------------------------------------------------------------------------
-
-
-def test_build_browser_runtime_tools_returns_four_tools() -> None:
+def test_build_browser_runtime_tools_returns_five_helper_tools_by_default() -> None:
     tools = build_browser_runtime_tools(_make_runtime())
-    assert len(tools) == 4
+    assert len(tools) == 5
 
 
 def test_each_tool_is_tool_subclass() -> None:
-    for t in build_browser_runtime_tools(_make_runtime()):
-        assert isinstance(t, Tool), f"{type(t)} is not a Tool subclass"
+    for tool in build_browser_runtime_tools(_make_runtime()):
+        assert isinstance(tool, Tool)
 
 
-def test_each_tool_has_a_card() -> None:
-    for t in build_browser_runtime_tools(_make_runtime()):
-        assert isinstance(t.card, ToolCard), f"{t} missing ToolCard"
+def test_each_tool_has_tool_card() -> None:
+    for tool in build_browser_runtime_tools(_make_runtime()):
+        assert isinstance(tool.card, ToolCard)
 
 
-def test_tool_names() -> None:
-    run_task, cancel, custom_action, list_actions = build_browser_runtime_tools(_make_runtime())
-    assert run_task.card.name == "browser_run_task"
-    assert cancel.card.name == "browser_cancel_run"
-    assert custom_action.card.name == "browser_custom_action"
-    assert list_actions.card.name == "browser_list_custom_actions"
+def test_default_helper_tool_names() -> None:
+    names = [tool.card.name for tool in build_browser_runtime_tools(_make_runtime())]
+    assert names == [
+        "browser_cancel_run",
+        "browser_clear_cancel",
+        "browser_custom_action",
+        "browser_list_custom_actions",
+        "browser_runtime_health",
+    ]
 
 
-def test_tool_classes() -> None:
-    run_task, cancel, custom_action, list_actions = build_browser_runtime_tools(_make_runtime())
-    assert isinstance(run_task, BrowserRunTaskTool)
+def test_helper_tool_classes() -> None:
+    cancel, clear_cancel, custom_action, list_actions, health = build_browser_runtime_tools(_make_runtime())
     assert isinstance(cancel, BrowserCancelTool)
+    assert isinstance(clear_cancel, BrowserClearCancelTool)
     assert isinstance(custom_action, BrowserCustomActionTool)
     assert isinstance(list_actions, BrowserListActionsTool)
+    assert isinstance(health, BrowserRuntimeHealthTool)
 
 
-def test_language_en_uses_english_descriptions() -> None:
+def test_language_en_uses_non_empty_descriptions() -> None:
     tools = build_browser_runtime_tools(_make_runtime(), language="en")
-    for t in tools:
-        assert t.card.description, "description must not be empty"
-        # English descriptions use Latin characters
-        assert any(c.isascii() and c.isalpha() for c in t.card.description)
-
-
-def test_separate_runtimes_produce_independent_instances() -> None:
-    tools_a = build_browser_runtime_tools(_make_runtime())
-    tools_b = build_browser_runtime_tools(_make_runtime())
-    for a, b in zip(tools_a, tools_b):
-        assert a is not b
+    for tool in tools:
+        assert tool.card.description
+        assert any(ch.isascii() and ch.isalpha() for ch in tool.card.description)
 
 
 def test_tool_ids_are_non_empty() -> None:
-    for t in build_browser_runtime_tools(_make_runtime()):
-        assert t.card.id, f"{t.card.name} has empty id"
-
-
-# ---------------------------------------------------------------------------
-# BrowserRunTaskTool
-# ---------------------------------------------------------------------------
-
-
-def test_run_task_returns_tool_output() -> None:
-    runtime = _make_runtime()
-    runtime.ensure_started = AsyncMock()
-    runtime._service.run_task = AsyncMock(return_value={
-        "ok": True, "session_id": "s1", "final": "done",
-        "page": {}, "screenshot": None, "error": None,
-    })
-    t = BrowserRunTaskTool(runtime)
-    result = _run(t.invoke({"task": "open google", "session_id": "s1"}))
-    assert isinstance(result, ToolOutput)
-
-
-def test_run_task_success_maps_to_tool_output_success() -> None:
-    runtime = _make_runtime()
-    runtime.ensure_started = AsyncMock()
-    runtime._service.run_task = AsyncMock(return_value={
-        "ok": True, "session_id": "s1", "final": "done",
-        "page": {}, "screenshot": None, "error": None,
-    })
-    t = BrowserRunTaskTool(runtime)
-    result = _run(t.invoke({"task": "nav", "session_id": "s1"}))
-    assert result.success is True
-    assert result.data["ok"] is True
-
-
-def test_run_task_calls_ensure_started() -> None:
-    runtime = _make_runtime()
-    runtime.ensure_started = AsyncMock()
-    runtime._service.run_task = AsyncMock(return_value={
-        "ok": True, "session_id": "s1", "final": "done",
-        "page": {}, "screenshot": None, "error": None,
-    })
-    t = BrowserRunTaskTool(runtime)
-    _run(t.invoke({"task": "nav", "session_id": "s1"}))
-    runtime.ensure_started.assert_called_once()
-
-
-def test_run_task_strips_base64_screenshot() -> None:
-    runtime = _make_runtime()
-    runtime.ensure_started = AsyncMock()
-    runtime._service.run_task = AsyncMock(return_value={
-        "ok": True, "session_id": "s1", "final": "done",
-        "page": {}, "screenshot": "data:image/png;base64,AAAA==", "error": None,
-    })
-    t = BrowserRunTaskTool(runtime)
-    result = _run(t.invoke({"task": "screenshot task", "session_id": "s1"}))
-    assert result.data["screenshot"] == "[screenshot saved]"
-
-
-def test_run_task_preserves_non_data_screenshot() -> None:
-    runtime = _make_runtime()
-    runtime.ensure_started = AsyncMock()
-    runtime._service.run_task = AsyncMock(return_value={
-        "ok": True, "session_id": "s1", "final": "done",
-        "page": {}, "screenshot": "/tmp/screen.png", "error": None,
-    })
-    t = BrowserRunTaskTool(runtime)
-    result = _run(t.invoke({"task": "screenshot task", "session_id": "s1"}))
-    assert result.data["screenshot"] == "/tmp/screen.png"
-
-
-def test_run_task_forwards_session_and_request_ids() -> None:
-    runtime = _make_runtime()
-    runtime.ensure_started = AsyncMock()
-    captured: dict = {}
-
-    async def fake_run_task(*, task, session_id=None, request_id=None, timeout_s=None):
-        captured.update(task=task, session_id=session_id, request_id=request_id, timeout_s=timeout_s)
-        return {"ok": True, "session_id": session_id, "final": "", "page": {}, "screenshot": None, "error": None}
-
-    runtime._service.run_task = fake_run_task
-    t = BrowserRunTaskTool(runtime)
-    _run(t.invoke({"task": "nav", "session_id": "s-abc", "request_id": "r-xyz", "timeout_s": 60}))
-    assert captured == {"task": "nav", "session_id": "s-abc", "request_id": "r-xyz", "timeout_s": 60}
-
-
-def test_run_task_returns_failure_on_exception() -> None:
-    runtime = _make_runtime()
-    runtime.ensure_started = AsyncMock()
-    runtime._service.run_task = AsyncMock(side_effect=RuntimeError("boom"))
-    t = BrowserRunTaskTool(runtime)
-    result = _run(t.invoke({"task": "nav"}))
-    assert result.success is False
-    assert "boom" in result.error
-
-
-# ---------------------------------------------------------------------------
-# BrowserCancelTool
-# ---------------------------------------------------------------------------
-
-
-def test_cancel_tool_returns_tool_output() -> None:
-    runtime = _make_runtime()
-    runtime.ensure_started = AsyncMock()
-    runtime.cancel_run = AsyncMock(return_value={"ok": True, "session_id": "s1", "request_id": None, "error": None})
-    t = BrowserCancelTool(runtime)
-    result = _run(t.invoke({"session_id": "s1"}))
-    assert isinstance(result, ToolOutput)
+    for tool in build_browser_runtime_tools(_make_runtime()):
+        assert tool.card.id
 
 
 def test_cancel_tool_calls_cancel_run() -> None:
     runtime = _make_runtime()
-    runtime.ensure_started = AsyncMock()
+    runtime.ensure_runtime_ready = AsyncMock()
     runtime.cancel_run = AsyncMock(return_value={"ok": True, "session_id": "s1", "request_id": None, "error": None})
-    t = BrowserCancelTool(runtime)
-    _run(t.invoke({"session_id": "s1"}))
-    runtime.ensure_started.assert_called_once()
+    tool = BrowserCancelTool(runtime)
+    result = _run(tool.invoke({"session_id": "s1"}))
+    runtime.ensure_runtime_ready.assert_called_once()
     runtime.cancel_run.assert_called_once_with(session_id="s1", request_id=None)
+    assert result.success is True
 
 
-def test_cancel_tool_passes_non_empty_request_id() -> None:
+def test_clear_cancel_tool_calls_runtime_clear_cancel() -> None:
     runtime = _make_runtime()
-    runtime.ensure_started = AsyncMock()
-    runtime.cancel_run = AsyncMock(return_value={"ok": True, "session_id": "s1", "request_id": "r1", "error": None})
-    t = BrowserCancelTool(runtime)
-    _run(t.invoke({"session_id": "s1", "request_id": "r1"}))
-    runtime.cancel_run.assert_called_once_with(session_id="s1", request_id="r1")
+    runtime.ensure_runtime_ready = AsyncMock()
+    runtime.clear_cancel = AsyncMock(return_value={"ok": True, "session_id": "s1", "request_id": "r1", "error": None})
+    tool = BrowserClearCancelTool(runtime)
+    result = _run(tool.invoke({"session_id": "s1", "request_id": "r1"}))
+    runtime.ensure_runtime_ready.assert_called_once()
+    runtime.clear_cancel.assert_called_once_with(session_id="s1", request_id="r1")
+    assert result.success is True
 
 
-def test_cancel_tool_converts_empty_request_id_to_none() -> None:
+def test_list_actions_tool_uses_runtime_api() -> None:
     runtime = _make_runtime()
-    runtime.ensure_started = AsyncMock()
-    runtime.cancel_run = AsyncMock(return_value={"ok": True, "session_id": "s1", "request_id": None, "error": None})
-    t = BrowserCancelTool(runtime)
-    _run(t.invoke({"session_id": "s1", "request_id": ""}))
-    runtime.cancel_run.assert_called_once_with(session_id="s1", request_id=None)
-
-
-# ---------------------------------------------------------------------------
-# BrowserListActionsTool
-# ---------------------------------------------------------------------------
-
-
-def test_list_actions_returns_tool_output() -> None:
-    runtime = _make_runtime()
-    runtime.ensure_started = AsyncMock()
-    runtime._controller.list_actions = MagicMock(return_value=["echo"])
-    runtime._controller.describe_actions = MagicMock(return_value={"echo": {}})
-    t = BrowserListActionsTool(runtime)
-    result = _run(t.invoke({}))
-    assert isinstance(result, ToolOutput)
+    runtime.list_actions = AsyncMock(return_value={"ok": True, "actions": ["echo"], "details": {"echo": {}}})
+    tool = BrowserListActionsTool(runtime)
+    result = _run(tool.invoke({}))
+    runtime.list_actions.assert_called_once()
     assert result.success is True
     assert result.data["actions"] == ["echo"]
 
 
-def test_list_actions_calls_ensure_started() -> None:
+def test_custom_action_tool_uses_runtime_api() -> None:
     runtime = _make_runtime()
-    runtime.ensure_started = AsyncMock()
-    runtime._controller.list_actions = MagicMock(return_value=[])
-    runtime._controller.describe_actions = MagicMock(return_value={})
-    t = BrowserListActionsTool(runtime)
-    _run(t.invoke({}))
-    runtime.ensure_started.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# BrowserCustomActionTool
-# ---------------------------------------------------------------------------
-
-
-def test_custom_action_returns_tool_output() -> None:
-    runtime = _make_runtime()
-    runtime.ensure_started = AsyncMock()
-    runtime._controller.bind_runtime = MagicMock()
-    runtime._controller.bind_code_executor = MagicMock()
-    runtime._controller.run_action = AsyncMock(return_value={"ok": True})
-    t = BrowserCustomActionTool(runtime)
-    result = _run(t.invoke({"action": "echo", "session_id": "s1"}))
-    assert isinstance(result, ToolOutput)
+    runtime.run_custom_action = AsyncMock(return_value={"ok": True, "session_id": "s1"})
+    tool = BrowserCustomActionTool(runtime)
+    result = _run(
+        tool.invoke(
+            {
+                "action": "echo",
+                "session_id": "s1",
+                "request_id": "r1",
+                "params": {"text": "hello"},
+            }
+        )
+    )
+    runtime.run_custom_action.assert_called_once_with(
+        action="echo",
+        session_id="s1",
+        request_id="r1",
+        params={"text": "hello"},
+    )
     assert result.success is True
 
 
-def test_custom_action_calls_ensure_started_and_controller() -> None:
+def test_runtime_health_tool_uses_runtime_api() -> None:
     runtime = _make_runtime()
-    runtime.ensure_started = AsyncMock()
-    runtime._controller.bind_runtime = MagicMock()
-    runtime._controller.bind_code_executor = MagicMock()
-    runtime._controller.run_action = AsyncMock(return_value={"ok": True})
-    t = BrowserCustomActionTool(runtime)
-    _run(t.invoke({"action": "echo", "session_id": "s1"}))
-    runtime.ensure_started.assert_called_once()
-    runtime._controller.bind_runtime.assert_called_once_with(runtime)
-    runtime._controller.run_action.assert_called_once()
-
-
-def test_custom_action_rebinds_code_executor_when_set() -> None:
-    runtime = _make_runtime()
-    runtime.ensure_started = AsyncMock()
-    runtime._code_executor = MagicMock()
-    runtime._controller.bind_runtime = MagicMock()
-    runtime._controller.bind_code_executor = MagicMock()
-    runtime._controller.run_action = AsyncMock(return_value={"ok": True})
-    t = BrowserCustomActionTool(runtime)
-    _run(t.invoke({"action": "echo", "session_id": "s1"}))
-    runtime._controller.bind_code_executor.assert_called_once_with(runtime._code_executor)
-
-
-def test_custom_action_skips_bind_when_executor_is_none() -> None:
-    runtime = _make_runtime()
-    runtime.ensure_started = AsyncMock()
-    runtime._code_executor = None
-    runtime._controller.bind_runtime = MagicMock()
-    runtime._controller.bind_code_executor = MagicMock()
-    runtime._controller.run_action = AsyncMock(return_value={"ok": True})
-    t = BrowserCustomActionTool(runtime)
-    _run(t.invoke({"action": "echo", "session_id": "s1"}))
-    runtime._controller.bind_code_executor.assert_not_called()
-
-
-def test_custom_action_passes_params_as_kwargs() -> None:
-    runtime = _make_runtime()
-    runtime.ensure_started = AsyncMock()
-    runtime._controller.bind_runtime = MagicMock()
-    runtime._controller.bind_code_executor = MagicMock()
-    captured_kwargs: dict = {}
-
-    async def fake_run_action(action, session_id="", request_id="", **kwargs):
-        captured_kwargs.update(kwargs)
-        return {"ok": True}
-
-    runtime._controller.run_action = fake_run_action
-    t = BrowserCustomActionTool(runtime)
-    _run(t.invoke({"action": "drag", "session_id": "s1", "params": {"element_source": "#a", "element_target": "#b"}}))
-    assert captured_kwargs == {"element_source": "#a", "element_target": "#b"}
+    runtime.runtime_health = AsyncMock(
+        return_value={
+            "ok": False,
+            "started": False,
+            "last_heartbeat_ok": None,
+            "provider": "openai",
+            "api_base": "https://example.invalid/v1",
+            "model_name": "test-model",
+        }
+    )
+    tool = BrowserRuntimeHealthTool(runtime)
+    result = _run(tool.invoke({}))
+    runtime.runtime_health.assert_called_once()
+    assert result.success is True
+    assert result.data["started"] is False

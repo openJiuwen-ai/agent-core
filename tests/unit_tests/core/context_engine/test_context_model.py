@@ -10,23 +10,38 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig, ModelContext
 from openjiuwen.core.foundation.llm import (
-    BaseMessage, SystemMessage, UserMessage, AssistantMessage, ToolMessage, ToolCall
+    BaseMessage,
+    SystemMessage,
+    UserMessage,
+    AssistantMessage,
+    ToolMessage,
+    ToolCall,
 )
 from openjiuwen.core.foundation.tool import ToolInfo
 
 
+def strip_metadata(messages: List[BaseMessage]) -> List[BaseMessage]:
+    result = []
+    for msg in messages:
+        msg_copy = msg.model_copy()
+        if hasattr(msg_copy, "metadata"):
+            msg_copy.metadata = {}
+        result.append(msg_copy)
+    return result
+
+
 class TestModelContext:
     async def create_context(
-            self,
-            history: List[BaseMessage] = None,
-            *,
-            window_message_limit: int = 100,
-            dialogue_round: int = None,
-            max_context_message_num: Optional[int] = None,
-            enable_reload: bool = False,
-            enable_kv_cache_release: bool = False,
-            processors: Optional[List] = None,
-            token_counter=None,
+        self,
+        history: List[BaseMessage] = None,
+        *,
+        window_message_limit: int = 100,
+        dialogue_round: int = None,
+        max_context_message_num: Optional[int] = None,
+        enable_reload: bool = False,
+        enable_kv_cache_release: bool = False,
+        processors: Optional[List] = None,
+        token_counter=None,
     ) -> ModelContext:
         config = ContextEngineConfig(
             default_window_message_num=window_message_limit,
@@ -38,7 +53,8 @@ class TestModelContext:
         context_engine = ContextEngine(config)
         session = None
         return await context_engine.create_context(
-            "test_context", session,
+            "test_context",
+            session,
             history_messages=history,
             processors=processors,
             token_counter=token_counter,
@@ -48,9 +64,9 @@ class TestModelContext:
     async def test_model_context_add_one_messages(self):
         context = await self.create_context()
         message = await context.add_messages(UserMessage(content="test"))
-        assert message == [UserMessage(content="test")]
-        assert context.get_messages() == [UserMessage(content="test")]
-        assert context.get_messages(with_history=True) == [UserMessage(content="test")]
+        assert strip_metadata(message) == [UserMessage(content="test")]
+        assert strip_metadata(context.get_messages()) == [UserMessage(content="test")]
+        assert strip_metadata(context.get_messages(with_history=True)) == [UserMessage(content="test")]
         assert len(context) == 1
         context.pop_messages()
 
@@ -84,9 +100,9 @@ class TestModelContext:
         history_list = [UserMessage(content=f"history-{i}") for i in range(100)]
         context = await self.create_context(history_list)
         message = await context.add_messages(UserMessage(content="test"))
-        assert message == [UserMessage(content="test")]
-        assert context.get_messages() == history_list + [UserMessage(content="test")]
-        assert context.get_messages(with_history=False) == [UserMessage(content="test")]
+        assert strip_metadata(message) == [UserMessage(content="test")]
+        assert strip_metadata(context.get_messages()) == strip_metadata(history_list) + [UserMessage(content="test")]
+        assert strip_metadata(context.get_messages(with_history=False)) == [UserMessage(content="test")]
         assert len(context) == len(history_list) + 1
         context.pop_messages()
 
@@ -455,10 +471,7 @@ class TestModelContext:
         assert window.tools == []
 
         message_list = [UserMessage(content=f"test-{i}") for i in range(100)]
-        system_messages = [
-            SystemMessage(content="system message-1"),
-            SystemMessage(content="system message-2")
-        ]
+        system_messages = [SystemMessage(content="system message-1"), SystemMessage(content="system message-2")]
         context = await self.create_context(window_message_limit=1)
         await context.add_messages(message_list)
         window = await context.get_context_window(system_messages=system_messages)
@@ -478,9 +491,8 @@ class TestModelContext:
             if idx % 4 == 3:
                 return ToolMessage(content=f"tool message-{idx}", tool_call_id="")
             return None
-        message_list = [
-            generate_message(i) for i in range(100)
-        ]
+
+        message_list = [generate_message(i) for i in range(100)]
         context = await self.create_context()
         await context.add_messages(message_list)
         stat = context.statistic()
@@ -501,6 +513,7 @@ class TestModelContext:
     @pytest.mark.asyncio
     async def test_statistic_total_dialogues(self):
         """Assert total_dialogues in ContextStats for various message list shapes."""
+
         def make_tool_calls(ids: List[str]):
             return [ToolCall(id=tc, name="test-tool", type="function", arguments="") for tc in ids]
 
@@ -509,72 +522,84 @@ class TestModelContext:
         stat = context.statistic()
         assert stat.total_dialogues == 0
 
-        # Only user messages -> 0 rounds (no closing assistant)
+        # Only user messages -> 1 incomplete round under the new semantics
         context = await self.create_context()
         await context.add_messages([UserMessage(content="u1"), UserMessage(content="u2")])
         stat = context.statistic()
-        assert stat.total_dialogues == 0
+        assert stat.total_dialogues == 1
 
         # One complete round: user + assistant (no tool_calls)
         context = await self.create_context()
-        await context.add_messages([
-            UserMessage(content="u1"),
-            AssistantMessage(content="a1"),
-        ])
+        await context.add_messages(
+            [
+                UserMessage(content="u1"),
+                AssistantMessage(content="a1"),
+            ]
+        )
         stat = context.statistic()
         assert stat.total_dialogues == 1
 
         # One round with tool_calls: user + assistant(tool) + tool + assistant(final)
         context = await self.create_context()
-        await context.add_messages([
-            UserMessage(content="u1"),
-            AssistantMessage(content="", tool_calls=make_tool_calls(["tc-1"])),
-            ToolMessage(content="result", tool_call_id="tc-1"),
-            AssistantMessage(content="a-final"),
-        ])
+        await context.add_messages(
+            [
+                UserMessage(content="u1"),
+                AssistantMessage(content="", tool_calls=make_tool_calls(["tc-1"])),
+                ToolMessage(content="result", tool_call_id="tc-1"),
+                AssistantMessage(content="a-final"),
+            ]
+        )
         stat = context.statistic()
         assert stat.total_dialogues == 1
 
         # Two complete rounds
         context = await self.create_context()
-        await context.add_messages([
-            UserMessage(content="u1"),
-            AssistantMessage(content="a1"),
-            UserMessage(content="u2"),
-            AssistantMessage(content="a2"),
-        ])
+        await context.add_messages(
+            [
+                UserMessage(content="u1"),
+                AssistantMessage(content="a1"),
+                UserMessage(content="u2"),
+                AssistantMessage(content="a2"),
+            ]
+        )
         stat = context.statistic()
         assert stat.total_dialogues == 2
 
         # System + user + assistant: system is not a round, one dialogue round
         context = await self.create_context()
-        await context.add_messages([
-            SystemMessage(content="sys"),
-            UserMessage(content="u1"),
-            AssistantMessage(content="a1"),
-        ])
+        await context.add_messages(
+            [
+                SystemMessage(content="sys"),
+                UserMessage(content="u1"),
+                AssistantMessage(content="a1"),
+            ]
+        )
         stat = context.statistic()
         assert stat.total_dialogues == 1
 
         # Three full rounds
         context = await self.create_context()
-        await context.add_messages([
-            UserMessage(content="u1"),
-            AssistantMessage(content="a1"),
-            UserMessage(content="u2"),
-            AssistantMessage(content="a2"),
-            UserMessage(content="u3"),
-            AssistantMessage(content="a3"),
-        ])
+        await context.add_messages(
+            [
+                UserMessage(content="u1"),
+                AssistantMessage(content="a1"),
+                UserMessage(content="u2"),
+                AssistantMessage(content="a2"),
+                UserMessage(content="u3"),
+                AssistantMessage(content="a3"),
+            ]
+        )
         stat = context.statistic()
         assert stat.total_dialogues == 3
 
         # Context window statistic also has total_dialogues
         context = await self.create_context()
-        await context.add_messages([
-            UserMessage(content="u1"),
-            AssistantMessage(content="a1"),
-        ])
+        await context.add_messages(
+            [
+                UserMessage(content="u1"),
+                AssistantMessage(content="a1"),
+            ]
+        )
         window = await context.get_context_window()
         assert window.statistic.total_dialogues == 1
 
@@ -582,9 +607,9 @@ class TestModelContext:
     async def test_model_context_window_validation(self):
         # 1. Build a context with 10 human messages
         tool_msgs = [
-            ToolMessage(content='tool-0', tool_call_id='tc-0'),
-            ToolMessage(content='tool-1', tool_call_id='tc-1'),
-            ToolMessage(content='tool-2', tool_call_id='tc-2'),
+            ToolMessage(content="tool-0", tool_call_id="tc-0"),
+            ToolMessage(content="tool-1", tool_call_id="tc-1"),
+            ToolMessage(content="tool-2", tool_call_id="tc-2"),
         ]
         message_list = tool_msgs + [UserMessage(content=f"human-{i}") for i in range(10)]
         context = await self.create_context(window_message_limit=20)
@@ -602,36 +627,34 @@ class TestModelContext:
     @pytest.mark.asyncio
     async def test_model_context_window_with_dialogue_round(self):
         def create_tool_call_list(tcs: List[str]):
-            return [
-                ToolCall(id=tc, name="test-tool", type="function", arguments="")
-                for tc in tcs
-            ]
+            return [ToolCall(id=tc, name="test-tool", type="function", arguments="") for tc in tcs]
+
         context = await self.create_context(dialogue_round=1)
         dialogues = [
             # dialogue-1
             [
                 UserMessage(content="user-1"),
                 AssistantMessage(content="assistant-1", tool_calls=create_tool_call_list(["tc-1", "tc-2", "tc-3"])),
-                ToolMessage(content="tool-1", tool_call_id='tc-1'),
-                ToolMessage(content="tool-2", tool_call_id='tc-2'),
-                ToolMessage(content="tool-3", tool_call_id='tc-3'),
+                ToolMessage(content="tool-1", tool_call_id="tc-1"),
+                ToolMessage(content="tool-2", tool_call_id="tc-2"),
+                ToolMessage(content="tool-3", tool_call_id="tc-3"),
                 AssistantMessage(content="assistant-2"),
             ],
             # dialogue-2
             [
                 UserMessage(content="user-2"),
                 AssistantMessage(content="assistant-3", tool_calls=create_tool_call_list(["tc-1", "tc-2"])),
-                ToolMessage(content="tool-4", tool_call_id='tc-1'),
-                ToolMessage(content="tool-5", tool_call_id='tc-2'),
+                ToolMessage(content="tool-4", tool_call_id="tc-1"),
+                ToolMessage(content="tool-5", tool_call_id="tc-2"),
                 AssistantMessage(content="assistant-4"),
             ],
             # dialogue-3
             [
                 UserMessage(content="user-3"),
                 AssistantMessage(content="assistant-3", tool_calls=create_tool_call_list(["tc-1"])),
-                ToolMessage(content="tool-6", tool_call_id='tc-1'),
-                AssistantMessage(content="assistant-5")
-            ]
+                ToolMessage(content="tool-6", tool_call_id="tc-1"),
+                AssistantMessage(content="assistant-5"),
+            ],
         ]
 
         messages = []
@@ -681,6 +704,7 @@ class TestModelContext:
     @pytest.mark.asyncio
     async def test_enable_reload_adds_reloader_prompt(self):
         from openjiuwen.core.context_engine.context.context import _RELOADER_SYSTEM_PROMPT
+
         context = await self.create_context(enable_reload=True)
         window = await context.get_context_window()
         assert len(window.system_messages) == 1
@@ -695,6 +719,7 @@ class TestModelContext:
     @pytest.mark.asyncio
     async def test_enable_reload_with_custom_system_messages(self):
         from openjiuwen.core.context_engine.context.context import _RELOADER_SYSTEM_PROMPT
+
         context = await self.create_context(enable_reload=True)
         sys_msgs = [SystemMessage(content="custom sys")]
         window = await context.get_context_window(system_messages=sys_msgs)
@@ -744,13 +769,14 @@ class TestModelContext:
     async def test_processors_empty_add_messages_succeeds(self):
         context = await self.create_context(processors=[])
         await context.add_messages([UserMessage(content="hi")])
-        assert context.get_messages() == [UserMessage(content="hi")]
+        assert strip_metadata(context.get_messages()) == [UserMessage(content="hi")]
 
     @pytest.mark.asyncio
     async def test_processor_exception_does_not_block_add_messages(self):
         from openjiuwen.core.context_engine.processor.compressor.current_round_compressor import (
             CurrentRoundCompressorConfig,
         )
+
         mock_proc = MagicMock()
         mock_proc.processor_type = MagicMock(return_value="MockProcessor")
         mock_proc.trigger_add_messages = AsyncMock(return_value=True)
@@ -759,7 +785,8 @@ class TestModelContext:
         with patch.object(ContextEngine, "_create_processor", return_value=mock_proc):
             engine = ContextEngine(ContextEngineConfig(default_window_message_num=10))
             ctx = await engine.create_context(
-                "test", None,
+                "test",
+                None,
                 processors=[("MockProcessor", CurrentRoundCompressorConfig())],
             )
             await ctx.add_messages([UserMessage(content="msg")])
@@ -799,9 +826,7 @@ class TestModelContext:
         context.offload_messages("h1", msgs)
         state = context.save_state()
         assert "offload_messages" in state
-        assert "h1" in state["offload_messages"] or any(
-            "h1" in str(k) for k in state["offload_messages"]
-        )
+        assert "h1" in state["offload_messages"] or any("h1" in str(k) for k in state["offload_messages"])
 
     # ---------- save_state / load_state ----------
     @pytest.mark.asyncio
@@ -910,19 +935,17 @@ class TestModelContext:
     @pytest.mark.asyncio
     async def test_model_context_window_with_incomplete_dialogue_round(self):
         def create_tool_call_list(tcs: List[str]):
-            return [
-                ToolCall(id=tc, name="test-tool", type="function", arguments="")
-                for tc in tcs
-            ]
+            return [ToolCall(id=tc, name="test-tool", type="function", arguments="") for tc in tcs]
+
         context = await self.create_context(dialogue_round=1)
         dialogues = [
             # dialogue-1
             [
                 UserMessage(content="user-1"),
                 AssistantMessage(content="assistant-1", tool_calls=create_tool_call_list(["tc-1", "tc-2", "tc-3"])),
-                ToolMessage(content="tool-1", tool_call_id='tc-1'),
-                ToolMessage(content="tool-2", tool_call_id='tc-2'),
-                ToolMessage(content="tool-3", tool_call_id='tc-3'),
+                ToolMessage(content="tool-1", tool_call_id="tc-1"),
+                ToolMessage(content="tool-2", tool_call_id="tc-2"),
+                ToolMessage(content="tool-3", tool_call_id="tc-3"),
                 AssistantMessage(content="assistant-2"),
                 UserMessage(content="user-1-1"),
             ],
@@ -930,14 +953,14 @@ class TestModelContext:
             [
                 UserMessage(content="user-2"),
                 AssistantMessage(content="assistant-3", tool_calls=create_tool_call_list(["tc-1", "tc-2"])),
-                ToolMessage(content="tool-4", tool_call_id='tc-1'),
-                ToolMessage(content="tool-5", tool_call_id='tc-2'),
+                ToolMessage(content="tool-4", tool_call_id="tc-1"),
+                ToolMessage(content="tool-5", tool_call_id="tc-2"),
                 AssistantMessage(content="assistant-4"),
             ],
             # dialogue-3
             [
                 UserMessage(content="user-3"),
-            ]
+            ],
         ]
 
         messages = []
@@ -955,7 +978,7 @@ class TestModelContext:
 
         await context.add_messages(messages)
         window = await context.get_context_window(dialogue_round=2)
-        assert window.context_messages == dialogues[-2] + dialogues[-1]
+        assert window.context_messages == dialogues[0][-1:] + dialogues[-2] + dialogues[-1]
         await context.clear_messages()
 
         await context.add_messages(messages)
@@ -967,4 +990,3 @@ class TestModelContext:
         window = await context.get_context_window(dialogue_round=4)
         assert window.context_messages == messages
         await context.clear_messages()
-

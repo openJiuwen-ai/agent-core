@@ -5,3 +5,5 @@ After all tasks are done:
 1. Summarize the current round of work results
 2. Do not close members or dissolve the team
 3. The team will automatically enter standby mode, awaiting new tasks from the user
+
+**Wrap up efficiently**: Use `send_message(to="*")` to broadcast the round summary and standby notice once. Do not address members individually, and do not reply to members' acknowledgements/thanks — avoid pointless back-and-forth courtesies.

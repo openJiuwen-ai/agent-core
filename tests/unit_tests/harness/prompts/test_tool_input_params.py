@@ -17,6 +17,9 @@ from openjiuwen.harness.prompts.sections.tools.audio import (
 from openjiuwen.harness.prompts.sections.tools.bash import (
     get_bash_input_params,
 )
+from openjiuwen.harness.prompts.sections.tools.powershell import (
+    get_powershell_input_params,
+)
 from openjiuwen.harness.prompts.sections.tools.code import (
     get_code_input_params,
 )
@@ -55,7 +58,8 @@ from openjiuwen.harness.tools.filesystem import (
     WriteFileTool,
 )
 from openjiuwen.harness.tools.list_skill import ListSkillTool
-from openjiuwen.harness.tools.shell import BashTool
+from openjiuwen.harness.tools.bash import BashTool
+from openjiuwen.harness.tools.powershell import PowerShellTool
 from openjiuwen.harness.tools.vision import (
     ImageOCRTool,
     VisualQuestionAnsweringTool,
@@ -90,6 +94,7 @@ class TestBuilderInputParams:
     def test_core_builders():
         builders = [
             get_bash_input_params,
+            get_powershell_input_params,
             get_code_input_params,
             get_read_file_input_params,
             get_write_file_input_params,
@@ -113,6 +118,7 @@ class TestBuilderInputParams:
     @staticmethod
     def test_expected_required_fields():
         assert get_bash_input_params("cn")["required"] == ["command"]
+        assert get_powershell_input_params("cn")["required"] == ["command"]
         assert get_code_input_params("cn")["required"] == ["code"]
         assert get_read_file_input_params("cn")["required"] == ["file_path"]
         assert set(get_write_file_input_params("cn")["required"]) == {
@@ -144,6 +150,7 @@ class TestGetToolInputParams:
     def test_all_registered_tools():
         names = [
             "bash",
+            "powershell",
             "code",
             "read_file",
             "write_file",
@@ -173,6 +180,7 @@ class TestGetToolInputParams:
     @staticmethod
     def test_registry_matches_direct_builder():
         assert get_tool_input_params("bash", "cn") == get_bash_input_params("cn")
+        assert get_tool_input_params("powershell", "cn") == get_powershell_input_params("cn")
         assert get_tool_input_params("image_ocr", "en") == (
             get_image_ocr_input_params("en")
         )
@@ -185,8 +193,10 @@ class TestToolClassInputParams:
     @staticmethod
     def test_existing_tools_use_builders():
         bash_tool = BashTool(MagicMock(), language="en")
+        powershell_tool = PowerShellTool(MagicMock(), language="en")
         code_tool = CodeTool(MagicMock(), language="en")
         assert bash_tool.card.input_params == get_bash_input_params("en")
+        assert powershell_tool.card.input_params == get_powershell_input_params("en")
         assert code_tool.card.input_params == get_code_input_params("en")
 
         filesystem_builders = [

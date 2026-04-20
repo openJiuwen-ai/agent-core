@@ -2,7 +2,7 @@
 你的任务是识别、消歧并分类JSON文件中的重要实体。
 `#user#`# 上下文信息{{source_description}}
 <JSON>
-{{content}}
+{{context}}
 </JSON>
 
 <实体类型>

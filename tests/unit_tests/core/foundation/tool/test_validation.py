@@ -1,10 +1,12 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+import socket
 from unittest.mock import patch, AsyncMock, MagicMock
 
 import httpx
 import pytest
 
+from openjiuwen.core.foundation.tool.auth.auth import ToolAuthResult
 from openjiuwen.core.foundation.tool.auth.auth_callback import AuthHeaderAndQueryProvider
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.foundation.tool.mcp.client.sse_client import SseClient
@@ -39,7 +41,10 @@ class TestToolValidation:
             
             # Configure mock_trigger return value
             mock_auth_provider = AuthHeaderAndQueryProvider(auth_headers, auth_query_params)
-            mock_trigger.return_value = [None, MagicMock(auth_data={"auth_provider": mock_auth_provider})]
+            mock_trigger.return_value = [
+                None,
+                ToolAuthResult(success=True, auth_data={"auth_provider": mock_auth_provider})
+            ]
             
             # Configure mock_sse_client
             mock_read, mock_write = AsyncMock(), AsyncMock()
@@ -90,7 +95,10 @@ class TestToolValidation:
             
             # Configure mock_trigger return value
             mock_auth_provider = AuthHeaderAndQueryProvider(auth_headers, auth_query_params)
-            mock_trigger.return_value = [None, MagicMock(auth_data={"auth_provider": mock_auth_provider})]
+            mock_trigger.return_value = [
+                None,
+                ToolAuthResult(success=True, auth_data={"auth_provider": mock_auth_provider})
+            ]
             
             # Configure mock_streamable_client
             mock_read, mock_write = AsyncMock(), AsyncMock()
@@ -166,14 +174,17 @@ class TestToolValidation:
             )
             assert valid_card_with_path.url == "https://api.example.com/users/{id}"
         
-        # Test invalid URL outside of mock
-        with pytest.raises(BaseError):
-            RestfulApiCard(
-                name="test_api",
-                url="http://invalid-url-test",
-                method="GET",
-                headers={"Content-Type": "application/json"}
-            )
+        # Test invalid URL: mock DNS resolution failure to avoid
+        # environment-dependent behavior (macOS search domains may resolve
+        # arbitrary hostnames).
+        with patch("socket.gethostbyname", side_effect=socket.error("DNS resolution failed")):
+            with pytest.raises(BaseError):
+                RestfulApiCard(
+                    name="test_api",
+                    url="http://invalid-url-test",
+                    method="GET",
+                    headers={"Content-Type": "application/json"}
+                )
             
             
     

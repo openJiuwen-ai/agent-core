@@ -23,14 +23,14 @@ from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
-from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig, ProviderType
 from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import LLMCallEvents
 
 
 class InferenceAffinityModelClient(BaseModelClient):
     """Inference Affinity (vLLM) API client with cache release support"""
-    __client_name__ = "inference_affinity"
+    __client_name__ = ProviderType.InferenceAffinity.value
 
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
@@ -823,7 +823,7 @@ class InferenceAffinityModelClient(BaseModelClient):
                             id=tool_call_id or "",
                             type="function",
                             name=name_delta or "",
-                            arguments=args_delta,
+                            arguments=args_delta or "",
                             index=index
                         )
                         tool_calls.append(tool_call)

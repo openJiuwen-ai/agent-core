@@ -25,7 +25,8 @@ from openjiuwen.harness.prompts.sections.skills import (
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools import BashTool, CodeTool, ReadFileTool
 from openjiuwen.harness.tools.list_skill import ListSkillTool
-from openjiuwen.agent_evolving.online.store import EvolutionStore
+from openjiuwen.harness.tools import SkillTool
+from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 
 
 class SkillUseRail(DeepAgentRail):
@@ -100,6 +101,10 @@ class SkillUseRail(DeepAgentRail):
         """Return all managed skills."""
         return list(self.skills)
 
+    def get_skills_meta(self) -> List[Skill]:
+        """Return all managed skills."""
+        return list(self.skills)
+
     async def _prepare_skills(self) -> None:
         """Refresh skills incrementally from skills_dir and apply filters."""
         if not self.enable_cache:
@@ -121,9 +126,19 @@ class SkillUseRail(DeepAgentRail):
 
         for root in roots:
             if not root.exists():
-                raise FileNotFoundError(f"skills_dir does not exist: {root}")
+                logger.debug(
+                    "[SkillUseRail] skills_dir does not exist, "
+                    "skipping: %s",
+                    root,
+                )
+                continue
             if not root.is_dir():
-                raise NotADirectoryError(f"skills_dir is not a directory: {root}")
+                logger.debug(
+                    "[SkillUseRail] skills_dir is not a directory, "
+                    "skipping: %s",
+                    root,
+                )
+                continue
 
             for item in sorted(root.iterdir(), key=lambda p: p.name):
                 if not item.is_dir():
@@ -221,12 +236,14 @@ class SkillUseRail(DeepAgentRail):
         tools = []
 
         lang = agent.system_prompt_builder.language
+        agent_id = getattr(getattr(agent, "card", None), "id", None)
         if self.include_tools:
             tools.extend(
                 [
-                    ReadFileTool(self.sys_operation, language=lang),
-                    CodeTool(self.sys_operation, language=lang),
-                    BashTool(self.sys_operation, language=lang),
+                    ReadFileTool(self.sys_operation, language=lang, agent_id=agent_id),
+                    CodeTool(self.sys_operation, language=lang, agent_id=agent_id),
+                    BashTool(self.sys_operation, language=lang, agent_id=agent_id),
+                    SkillTool(self.sys_operation, self.get_skills_meta, language=lang, agent_id=agent_id),
                 ]
             )
 
@@ -236,6 +253,7 @@ class SkillUseRail(DeepAgentRail):
                     get_skills=lambda: self.skills,
                     list_skill_model=self.list_skill_model,
                     language=lang,
+                    agent_id=agent_id,
                 )
             )
 
@@ -335,7 +353,7 @@ class SkillUseRail(DeepAgentRail):
                         index=idx,
                         skill_name=skill.name,
                         description=self._get_skill_description(skill),
-                        skill_md_path=str(self._skill_md_path(skill)),
+                        # skill_md_path=str(self._skill_md_path(skill)), # No longer needed with SkillTool
                     )
                 )
             return build_skills_section(
@@ -360,7 +378,7 @@ class SkillUseRail(DeepAgentRail):
                     index=idx,
                     skill_name=skill.name,
                     description=self._get_skill_description(skill),
-                    skill_md_path=str(self._skill_md_path(skill)),
+                    # skill_md_path=str(self._skill_md_path(skill)), # No longer needed with SkillTool
                 )
             )
 
@@ -489,9 +507,19 @@ class SkillUseRail(DeepAgentRail):
 
         for root in roots:
             if not root.exists():
-                raise FileNotFoundError(f"skills_dir does not exist: {root}")
+                logger.debug(
+                    "[SkillUseRail] skills_dir does not exist, "
+                    "skipping: %s",
+                    root,
+                )
+                continue
             if not root.is_dir():
-                raise NotADirectoryError(f"skills_dir is not a directory: {root}")
+                logger.debug(
+                    "[SkillUseRail] skills_dir is not a directory, "
+                    "skipping: %s",
+                    root,
+                )
+                continue
 
             for item in sorted(root.iterdir(), key=lambda p: p.name):
                 if not item.is_dir():

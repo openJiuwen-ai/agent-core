@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.context_engine.context_engine import ContextEngine
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.foundation.llm import (
     BaseMessage, SystemMessage, UserMessage,
     ModelRequestConfig, ModelClientConfig, Model
@@ -22,12 +23,12 @@ from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 # Different providers use different error formats, so we use string matching for unified detection
 # Examples: OpenAI says "maximum context length", Anthropic says "prompt is too long"
 CONTEXT_OVERFLOW_KEYWORDS = (
-    "context length",      # Context length (common in OpenAI/Azure)
-    "token limit",         # Token limit
-    "too long",            # Too long (common in Anthropic)
-    "exceeds",             # Exceeds
-    "maximum context",     # Maximum context
-    "context window",      # Context window (common in local models)
+    "context length",  # Context length (common in OpenAI/Azure)
+    "token limit",  # Token limit
+    "too long",  # Too long (common in Anthropic)
+    "exceeds",  # Exceeds
+    "maximum context",  # Maximum context
+    "context window",  # Context window (common in local models)
 )
 
 TRUNCATED_MARKER = "...[TRUNCATED]..."
@@ -127,16 +128,16 @@ Conversation context:
 # Default prompt for non-adaptive (simple LLM summary) mode
 # Used when enable_adaptive_compression=False
 DEFAULT_OFFLOAD_SUMMARY_PROMPT: str = \
-"""
-You are a "high-density summarizer".
-Your task is to shrink the overly long message below into 2–4 concise sentences that:
-Contain ≤ 15 % of the original token count;
-Keep all critical facts, figures, conclusions, requests or decisions verbatim;
-Remove greetings, repetition, filler, examples, jokes, and ornamental language;
-Speak in neutral, third-person style;
-Do NOT explain, comment, or add extra information—output the summary only.
-Begin:
-"""
+    """
+    You are a "high-density summarizer".
+    Your task is to shrink the overly long message below into 2–4 concise sentences that:
+    Contain ≤ 15 % of the original token count;
+    Keep all critical facts, figures, conclusions, requests or decisions verbatim;
+    Remove greetings, repetition, filler, examples, jokes, and ornamental language;
+    Speak in neutral, third-person style;
+    Do NOT explain, comment, or add extra information—output the summary only.
+    Begin:
+    """
 
 
 class MessageSummaryOffloaderConfig(BaseModel):
@@ -270,10 +271,10 @@ class MessageSummaryOffloader(MessageOffloader):
         return self._adaptive_config
 
     async def trigger_add_messages(
-        self,
-        context: ModelContext,
-        messages_to_add: list[BaseMessage],
-        **kwargs: Any,
+            self,
+            context: ModelContext,
+            messages_to_add: list[BaseMessage],
+            **kwargs: Any,
     ) -> bool:
         """Determine whether offloading should be triggered.
 
@@ -294,10 +295,10 @@ class MessageSummaryOffloader(MessageOffloader):
         return any(self._should_offload_message(message, context, context_messages) for message in messages_to_add)
 
     async def on_add_messages(
-        self,
-        context: ModelContext,
-        messages_to_add: list[BaseMessage],
-        **kwargs: Any,
+            self,
+            context: ModelContext,
+            messages_to_add: list[BaseMessage],
+            **kwargs: Any,
     ) -> tuple[ContextEvent | None, list[BaseMessage]]:
         """Process messages and offload large ones.
 
@@ -344,12 +345,11 @@ class MessageSummaryOffloader(MessageOffloader):
             The offloaded (summarized) message.
         """
         if not self.config.enable_adaptive_compression:
-            # Use simple LLM-based summary (original MessageSummaryOffloader behavior)
             return await self._offload_message_simple_summary(message, context)
         return await self._offload_message_adaptive(message, context)
 
     async def _offload_message_simple_summary(
-        self, message: BaseMessage, context: ModelContext
+            self, message: BaseMessage, context: ModelContext
     ) -> BaseMessage:
         """Generate a simple LLM summary for the message (non-adaptive mode).
 
@@ -405,7 +405,6 @@ class MessageSummaryOffloader(MessageOffloader):
 
         if self.config.enable_precise_step:
             step = await self._get_step_from_chain_precise(context_messages + [message])
-            # 如果 precise 返回空字符串（过滤后消息不足），fallback 到 default
             if step == "":
                 step = self._get_step_from_chain_default(context_messages)
         else:
@@ -451,10 +450,10 @@ class MessageSummaryOffloader(MessageOffloader):
         )
 
     def _should_offload_message(
-        self,
-        message: BaseMessage,
-        context: ModelContext,
-        context_messages: list[BaseMessage] | None = None,
+            self,
+            message: BaseMessage,
+            context: ModelContext,
+            context_messages: list[BaseMessage] | None = None,
     ) -> bool:
         """Check if a message should be offloaded.
 
@@ -470,6 +469,12 @@ class MessageSummaryOffloader(MessageOffloader):
         Returns:
             True if the message should be offloaded.
         """
+        if not self.config.enable_adaptive_compression:
+            return super()._should_offload_message(
+                message=message,
+                context_messages=context_messages or context.get_messages(),
+                context=context,
+            )
         if message.role != "tool":
             return False
         if isinstance(message, OffloadMixin):
@@ -507,9 +512,9 @@ class MessageSummaryOffloader(MessageOffloader):
             return len(str(message.content)) // 3
 
     def _get_function_call_from_chain(
-        self,
-        tool_message: BaseMessage,
-        context_messages: list[BaseMessage],
+            self,
+            tool_message: BaseMessage,
+            context_messages: list[BaseMessage],
     ) -> Any:
         """Extract the function call that triggered this tool message.
 
@@ -530,13 +535,13 @@ class MessageSummaryOffloader(MessageOffloader):
                 continue
             tool_calls = getattr(message, "tool_calls", None) or []
             for tool_call in tool_calls:
-                if self._tool_call_matches_id(tool_call, getattr(tool_message, "tool_call_id", None)):
+                if ContextUtils.tool_call_matches_id(tool_call, getattr(tool_message, "tool_call_id", None)):
                     return tool_call
         return None
 
     def _get_step_from_chain_default(
-        self,
-        context_messages: list[BaseMessage],
+            self,
+            context_messages: list[BaseMessage],
     ) -> str:
         """Extract current task using heuristic (last user message).
 
@@ -580,8 +585,6 @@ class MessageSummaryOffloader(MessageOffloader):
         """
         messages_to_use = self._select_messages_for_step_summary(context_messages)
 
-        # 如果过滤后消息数 <= 1，跳过 LLM 调用，直接返回空字符串
-        # 调用方会 fallback 到 _get_step_from_chain_default
         if messages_to_use == "":
             return ""
 
@@ -635,14 +638,14 @@ class MessageSummaryOffloader(MessageOffloader):
     def _select_messages_for_step_summary(self, context_messages: list[BaseMessage]) -> list[BaseMessage] | str:
         """Select recent messages for step extraction.
 
-        **过滤规则（adaptive 模式启用时）：**
-        - 只保留 role == 'user' 的消息
-        - 只保留 role == 'assistant' 且不带 tool_calls 的消息（纯对话回复）
-        - 不计入：ToolMessage、带 tool_calls 的 AssistantMessage
+        **Filtering rules (when adaptive mode is enabled):**
+        - Only keep messages with role == 'user'
+        - Only keep messages with role == 'assistant' and no tool_calls (pure conversational responses)
+        - Excluded: ToolMessage, AssistantMessage with tool_calls
 
-        **退避逻辑：**
-        - 过滤后如果消息数 <= 1，跳过 precise step，直接走 fallback
-        - 返回空字符串 ("")，调用方应使用 _get_step_from_chain_default
+        **Fallback logic:**
+        - If filtered message count <= 1, skip precise step and use fallback
+        - Returns empty string (""), caller should use _get_step_from_chain_default
 
         Args:
             context_messages: All messages in the conversation context.
@@ -651,24 +654,21 @@ class MessageSummaryOffloader(MessageOffloader):
             Subset of messages for step extraction, filtered by type.
             Returns empty string ("") when filtered count <= 1 to trigger fallback.
         """
-        # 1. 类型过滤：只保留 user 和不带 tool_call 的 assistant
         filtered = [msg for msg in context_messages if self._is_valid_for_step_summary(msg)]
 
-        # 2. 数目检查：<= 1 条时退避到 fallback 逻辑，返回空字符串
         if len(filtered) <= 1:
             return ""
 
-        # 3. 数目限制：按配置取最近 N 条
         max_messages = self.config.step_summary_max_context_messages
         if len(filtered) <= max_messages:
             return list(filtered)
         return list(filtered[-max_messages:])
 
     async def _compress_with_fallback(
-        self,
-        step: str,
-        function_call: Any,
-        tool_content: str,
+            self,
+            step: str,
+            function_call: Any,
+            tool_content: str,
     ) -> dict[str, Any] | None:
         """Compress tool content with fallback on context overflow.
 
@@ -784,10 +784,10 @@ class MessageSummaryOffloader(MessageOffloader):
         return f"{head}\n{TRUNCATED_MARKER}\n{middle}\n{TRUNCATED_MARKER}\n{tail}"
 
     def _build_compression_prompt(
-        self,
-        step: str,
-        function_call: Any,
-        tool_content: str,
+            self,
+            step: str,
+            function_call: Any,
+            tool_content: str,
     ) -> str:
         """Build the prompt for adaptive compression.
 
@@ -892,9 +892,9 @@ class MessageSummaryOffloader(MessageOffloader):
         if not getattr(self, "_config", None):
             return
         if (
-            self.config.messages_to_keep
-            and self.config.messages_threshold
-            and self.config.messages_to_keep >= self.config.messages_threshold
+                self.config.messages_to_keep
+                and self.config.messages_threshold
+                and self.config.messages_to_keep >= self.config.messages_threshold
         ):
             raise build_error(
                 StatusCode.CONTEXT_EXECUTION_ERROR,

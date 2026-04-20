@@ -140,6 +140,8 @@ def _ensure_openjiuwen_client_patch() -> None:
         normalized = _normalize_client_type(getattr(config, "client_type", ""))
         if normalized == "streamable-http":
             client = BrowserMoveStreamableHttpClient(config)
+        elif normalized == "stdio":
+            client = BrowserMoveStdioClient(config)
         else:
             client = original_create_client(config)
         _client_registry[config.server_id] = client
@@ -148,6 +150,11 @@ def _ensure_openjiuwen_client_patch() -> None:
     tool_mgr.StreamableHttpClient = BrowserMoveStreamableHttpClient
     tool_mgr.ToolMgr._create_client = staticmethod(_patched_create_client)
     _OPENJIUWEN_CLIENTS_PATCHED = True
+
+
+def ensure_browser_runtime_client_patch() -> None:
+    """Ensure MCP client creation is patched for browser runtime transports."""
+    _ensure_openjiuwen_client_patch()
 
 
 def _build_child_env() -> dict[str, str]:

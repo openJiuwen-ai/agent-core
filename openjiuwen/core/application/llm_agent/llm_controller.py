@@ -70,10 +70,9 @@ class LLMController(BaseController):
     def __init__(
             self,
             config: ReActAgentConfig,
-            context_engine,
-            session
+            context_engine
     ):
-        super().__init__(config, context_engine, session)
+        super().__init__(config, context_engine)
         self.config = config
         self._enable_long_term_mem = self.config.agent_memory_config.enable_long_term_mem
         self._enable_fragment_memory = (self.config.agent_memory_config.enable_user_profile or
@@ -827,6 +826,7 @@ class LLMController(BaseController):
                 timeout=self.config.model.model_info.timeout,
                 verify_ssl=False,
                 ssl_cert=None,
+                custom_headers=getattr(self.config.model.model_info, "custom_headers", None),
             )
             model_request_config = ModelRequestConfig(
                 model=self.config.model.model_info.model_name,

@@ -77,10 +77,13 @@ class _TrackingDirectoryBuilder:
 
 def _make_sys_operation(tmp_path: Path):
     """Create a local SysOperation for tests."""
+    from openjiuwen.core.sys_operation.cwd import init_cwd
+    init_cwd(str(tmp_path))
+
     card = SysOperationCard(
         id=f"test_workspace_sysop_{tmp_path.name}_{int(time.time() * 1000)}",
         mode=OperationMode.LOCAL,
-        work_config=LocalWorkConfig(work_dir=str(tmp_path)),
+        work_config=LocalWorkConfig(),
     )
     Runner.resource_mgr.add_sys_operation(card)
     return Runner.resource_mgr.get_sys_operation(card.id)
@@ -416,7 +419,7 @@ async def test_init_workspace_creates_directories(tmp_path: Path):
     agent = DeepAgent(card)
     agent.configure(config)
     await agent.init_workspace()
-    workspace_root = tmp_path / f"{card.id}_workspace"
+    workspace_root = tmp_path
 
     expected_files = ["AGENT.md", "SOUL.md", "HEARTBEAT.md", "IDENTITY.md"]
     for file_name in expected_files:
@@ -448,7 +451,7 @@ async def test_init_workspace_with_custom_directories(tmp_path: Path):
     card = AgentCard(name="test", description="test")
     agent = DeepAgent(card)
     agent.configure(config)
-    workspace_root = tmp_path / f"{card.id}_workspace"
+    workspace_root = tmp_path
 
     await agent.init_workspace()
 
@@ -474,10 +477,10 @@ async def test_ensure_initialized_skips_when_already_initialized(tmp_path: Path)
     agent.configure(config)
 
     await agent.ensure_initialized()
-    first_marker_exists = (tmp_path / "agent" / ".workspace").exists()
+    first_marker_exists = (tmp_path / "memory" / ".workspace").exists()
 
     await agent.ensure_initialized()
-    second_marker_exists = (tmp_path / "agent" / ".workspace").exists()
+    second_marker_exists = (tmp_path / "memory" / ".workspace").exists()
 
     assert first_marker_exists == second_marker_exists
 
@@ -501,7 +504,7 @@ async def test_ensure_initialized_skips_when_disabled(tmp_path: Path):
 
     await agent.ensure_initialized()
 
-    assert not (tmp_path / "agent").exists()
+    assert not (tmp_path / "memory").exists()
 
 
 @pytest.mark.asyncio
@@ -521,7 +524,8 @@ async def test_ensure_initialized_skips_without_sys_operation(tmp_path: Path):
 
     await agent.ensure_initialized()
 
-    assert getattr(agent, '_workspace_initialized') is False
+    # Without sys_operation, workspace should not be initialized
+    assert not (tmp_path / ".workspace").exists()
 
 
 # =============================================================================
@@ -562,7 +566,7 @@ async def test_full_workspace_flow_create_only(tmp_path: Path):
     agent = DeepAgent(card)
     agent.configure(config)
     await agent.init_workspace()
-    workspace_root = tmp_path / f"{card.id}_workspace"
+    workspace_root = tmp_path
 
     assert (workspace_root / "myapp" / ".workspace").exists()
     assert (workspace_root / "myapp" / "backend" / ".workspace").exists()
@@ -588,7 +592,7 @@ async def test_deep_agent_invoke_triggers_workspace_init(tmp_path: Path):
     agent.configure(config)
 
     await agent.invoke(inputs="test query")
-    workspace_root = tmp_path / f"{card.id}_workspace"
+    workspace_root = tmp_path
 
     expected_dirs = ["memory", "todo", "messages", "skills", "agents"]
     for dir_name in expected_dirs:
@@ -600,7 +604,7 @@ async def test_deep_agent_invoke_triggers_workspace_init(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_workspace_agent_id_naming(tmp_path: Path):
-    """Test that workspace root is named as {agent_id}_workspace/."""
+    """Test that workspace root is directly the provided root path."""
     sys_op = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
     config = DeepAgentConfig(
@@ -615,7 +619,7 @@ async def test_workspace_agent_id_naming(tmp_path: Path):
     agent.configure(config)
     await agent.ensure_initialized()
 
-    workspace_root = tmp_path / f"{card.id}_workspace"
+    workspace_root = tmp_path
     assert workspace_root.exists(), f"Missing workspace root: {workspace_root}"
 
     expected_dirs = ["memory", "todo", "messages", "skills", "agents"]
@@ -641,7 +645,7 @@ async def test_workspace_creates_files_not_directories(tmp_path: Path):
     agent.configure(config)
     await agent.init_workspace()
 
-    workspace_root = tmp_path / f"{card.id}_workspace"
+    workspace_root = tmp_path
     md_files = ["AGENT.md", "SOUL.md", "HEARTBEAT.md", "IDENTITY.md", "memory/MEMORY.md"]
     for file_path in md_files:
         full_path = workspace_root / file_path
@@ -669,7 +673,7 @@ async def test_workspace_memory_subdirectory_structure(tmp_path: Path):
     agent = DeepAgent(card)
     agent.configure(config)
     await agent.init_workspace()
-    workspace_root = tmp_path / f"{card.id}_workspace"
+    workspace_root = tmp_path
 
     assert (workspace_root / "memory").exists()
     assert (workspace_root / "memory" / ".workspace").exists()
@@ -698,7 +702,7 @@ async def test_workspace_todo_session_isolated_structure(tmp_path: Path):
     agent.configure(config)
     await agent.init_workspace()
 
-    workspace_root = tmp_path / f"{card.id}_workspace"
+    workspace_root = tmp_path
 
     assert (workspace_root / "todo").exists()
     assert (workspace_root / "todo" / ".workspace").exists()
@@ -734,7 +738,7 @@ async def test_init_workspace_writes_default_content_to_md_files(tmp_path: Path)
     agent = DeepAgent(card)
     agent.configure(config)
     await agent.init_workspace()
-    workspace_root = tmp_path / f"{card.id}_workspace"
+    workspace_root = tmp_path
 
     md_files = ["AGENT.md", "SOUL.md", "HEARTBEAT.md", "IDENTITY.md", "memory/MEMORY.md"]
     for file_path in md_files:
@@ -815,7 +819,7 @@ async def test_init_workspace_english_soul_md_has_english_content(tmp_path: Path
     agent = DeepAgent(card)
     agent.configure(config)
     await agent.init_workspace()
-    workspace_root = tmp_path / f"{card.id}_workspace"
+    workspace_root = tmp_path
 
     soul_md = workspace_root / "SOUL.md"
     assert soul_md.exists()
@@ -834,25 +838,25 @@ def test_get_node_path_with_string_name():
     """Test get_node_path returns correct absolute path using string name."""
     workspace = Workspace(root_path="/workspace")
 
-    # After configure(), root_path is pre-calculated to include agent_id
-    workspace.root_path = "/workspace/test_agent_workspace"
+    # Workspace root_path is used directly without agent_id suffix
+    workspace.root_path = "/workspace"
 
     # Test top-level directories
     memory_path = workspace.get_node_path("memory")
-    assert memory_path == Path("/workspace/test_agent_workspace/memory")
+    assert memory_path == Path("/workspace/memory")
 
     todo_path = workspace.get_node_path("todo")
-    assert todo_path == Path("/workspace/test_agent_workspace/todo")
+    assert todo_path == Path("/workspace/todo")
 
     skills_path = workspace.get_node_path("skills")
-    assert skills_path == Path("/workspace/test_agent_workspace/skills")
+    assert skills_path == Path("/workspace/skills")
 
     # Test top-level files
     agent_md_path = workspace.get_node_path("AGENT.md")
-    assert agent_md_path == Path("/workspace/test_agent_workspace/AGENT.md")
+    assert agent_md_path == Path("/workspace/AGENT.md")
 
     soul_md_path = workspace.get_node_path("SOUL.md")
-    assert soul_md_path == Path("/workspace/test_agent_workspace/SOUL.md")
+    assert soul_md_path == Path("/workspace/SOUL.md")
 
 
 def test_get_node_path_with_workspace_node_enum():
@@ -860,26 +864,26 @@ def test_get_node_path_with_workspace_node_enum():
     from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
     workspace = Workspace(root_path="/workspace")
-    workspace.root_path = "/workspace/test_agent_workspace"
+    workspace.root_path = "/workspace"
 
     assert workspace.get_node_path(WorkspaceNode.MEMORY) == Path(
-        "/workspace/test_agent_workspace/memory"
+        "/workspace/memory"
     )
     assert workspace.get_node_path(WorkspaceNode.TODO) == Path(
-        "/workspace/test_agent_workspace/todo"
+        "/workspace/todo"
     )
     assert workspace.get_node_path(WorkspaceNode.SKILLS) == Path(
-        "/workspace/test_agent_workspace/skills"
+        "/workspace/skills"
     )
     assert workspace.get_node_path(WorkspaceNode.AGENT_MD) == Path(
-        "/workspace/test_agent_workspace/AGENT.md"
+        "/workspace/AGENT.md"
     )
 
 
 def test_get_node_path_returns_none_for_nested_nodes():
     """Test get_node_path returns None for nested nodes (not supported)."""
     workspace = Workspace(root_path="/workspace")
-    workspace.root_path = "/workspace/test_agent_workspace"
+    workspace.root_path = "/workspace"
 
     # Nested nodes (children of top-level nodes) are not supported
     memory_md_path = workspace.get_node_path("MEMORY.md")
@@ -892,7 +896,7 @@ def test_get_node_path_returns_none_for_nested_nodes():
 def test_get_node_path_returns_none_for_unknown_node():
     """Test get_node_path returns None for unknown node names."""
     workspace = Workspace(root_path="/workspace")
-    workspace.root_path = "/workspace/test_agent_workspace"
+    workspace.root_path = "/workspace"
 
     unknown_path = workspace.get_node_path("unknown_directory")
     assert unknown_path is None
@@ -913,8 +917,8 @@ def test_get_node_path_after_deep_agent_configure(tmp_path: Path):
     agent = DeepAgent(card)
     agent.configure(config)
 
-    # After configure(), root_path should be pre-calculated
-    expected_root = tmp_path / f"{card.id}_workspace"
+    # Workspace root_path is used directly without agent_id suffix
+    expected_root = tmp_path
 
     memory_path = agent.deep_config.workspace.get_node_path("memory")
     assert memory_path == expected_root / "memory"

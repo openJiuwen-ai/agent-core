@@ -26,15 +26,18 @@ class ListSkillTool(Tool):
         get_skills: Callable[[], List[Skill]],
         list_skill_model: Optional[Model] = None,
         language: str = "cn",
+        agent_id: Optional[str] = None,
     ):
         """Initialize ListSkillTool.
 
         Args:
             get_skills: Callable that returns current enabled skills.
             list_skill_model: Optional model used for skill routing.
+            language: Language for tool description.
+            agent_id: Optional agent ID for unique tool ID.
         """
         super().__init__(
-            build_tool_card("list_skill", "ListSkillTool", language)
+            build_tool_card("list_skill", "ListSkillTool", language, agent_id=agent_id)
         )
         self.get_skills = get_skills
         self.list_skill_model = list_skill_model
@@ -93,14 +96,9 @@ class ListSkillTool(Tool):
         """Dump skill objects into serializable dicts."""
         results: List[Dict[str, Any]] = []
         for skill in skills:
-            results.append(
-                {
-                    "name": skill.name,
-                    "description": skill.description,
-                    "directory": str(skill.directory),
-                    "skill_md_path": str(Path(skill.directory) / "SKILL.md"),
-                }
-            )
+            skill_dict = skill.asdict(include_directory=True)
+            skill_dict["skill_md_path"] = str(Path(skill.directory) / "SKILL.md")
+            results.append(skill_dict)
         return results
 
     async def _route_skills(self, query: str) -> List[str]:

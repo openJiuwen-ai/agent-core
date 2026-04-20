@@ -1,6 +1,6 @@
-# ReactAgent强化学习
+﻿# ReactAgent强化学习
 
-`openjiuwen.dev_tools.agentrl` 模块提供基于 VERL 强化学习框架和 OpenYuanrong 分布式计算引擎的强化学习训练能力。 本教程提供详细的训练环境配置引导，并简要介绍如何使用该模块训练一个借助计算器工具求解数学题的 ReactAgent。
+`openjiuwen.agent_evolving.agent_rl` 模块提供基于 VERL 强化学习框架和 OpenYuanrong 分布式计算引擎的强化学习训练能力。 本教程提供详细的训练环境配置引导，并简要介绍如何使用该模块训练一个借助计算器工具求解数学题的 ReactAgent。
 
 ## 运行环境部署
 
@@ -87,7 +87,7 @@ patch -p1 < ../yr_v7.patch.utf8
 2. **定义奖励函数**：实现并注册奖励函数，根据 Agent 输出与标准答案计算奖励。
 3. **注册工具**：为 Agent 提供可调用的工具（如计算器工具，可进行简单的表达式运算和方程求解）。
 4. **准备数据**：实现 `task_data_fn`，将数据集行转换为 Agent 输入格式。
-5. **启动训练**：创建 `RLOptimizer`，配置完成后调用 `train()` 启动训练。
+5. **启动训练**：创建 `OfflineRLOptimizer`，配置完成后调用 `train()` 启动训练。
 
 ## 配置
 
@@ -96,8 +96,8 @@ patch -p1 < ../yr_v7.patch.utf8
 `RLConfig` 是强化学习训练的顶层配置，包含训练、Rollout、运行时和持久化等子配置：
 
 ```python
-from openjiuwen.dev_tools.agentrl import RLConfig
-from openjiuwen.dev_tools.agentrl.config.schemas import (
+from openjiuwen.agent_evolving.agent_rl import RLConfig
+from openjiuwen.agent_evolving.agent_rl.config import (
     AdaConfig,
     AgentRuntimeConfig,
     PersistenceConfig,
@@ -265,7 +265,7 @@ def task_data_fn(task_sample: dict) -> dict:
 奖励函数接收 `RolloutMessage`，根据 Agent 的对话轨迹和输出计算奖励。返回值需包含 `reward_list` 和 `global_reward`：
 
 ```python
-from openjiuwen.dev_tools.agentrl.coordinator.schemas import RolloutMessage
+from openjiuwen.agent_evolving.agent_rl.schemas import RolloutMessage
 
 def calc_reward(msg: RolloutMessage) -> dict:
     """答案正确返回 1.0，否则返回 0.0。"""
@@ -294,14 +294,14 @@ def calc_reward(msg: RolloutMessage) -> dict:
 
 ## 启动训练
 
-完成以上配置后，创建 `RLOptimizer` 并启动训练：
+完成以上配置后，创建 `OfflineRLOptimizer` 并启动训练：
 
 ```python
 from openjiuwen.core.common.logging import logger
-from openjiuwen.dev_tools.agentrl import RLConfig, RLOptimizer
+from openjiuwen.agent_evolving.agent_rl import RLConfig, OfflineRLOptimizer
 
 def main():
-    optimizer = RLOptimizer(config)
+    optimizer = OfflineRLOptimizer(config)
     optimizer.register_reward(calc_reward, name="calc_reward")
     optimizer.set_tools([calculator])
     optimizer.set_task_data_fn(task_data_fn)
@@ -334,4 +334,4 @@ if __name__ == "__main__":
 
 可参考项目中的 [examples/rl_calculator 完整示例](../../../../examples/rl_calculator/README.md) 以运行；训练日志会输出模型路径、数据路径、算法、epoch 等信息，若启用了 TensorBoard 可本地加载查看训练曲线。
 
-更多 API 与配置细节见 [agentrl 模块文档](../API文档/openjiuwen.dev_tools/agentrl.README.md)。
+更多 API 与配置细节见 [agent_rl 模块文档](../API文档/openjiuwen.agent_evolving/agent_rl/agent_rl.README.md)。

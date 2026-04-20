@@ -11,7 +11,7 @@ from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent, LL
 from openjiuwen.dev_tools.tune.chat_agent.chat_config import ChatAgentConfig
 from openjiuwen.core.context_engine import ContextEngineConfig, ContextEngine
 from openjiuwen.core.operator.legacy.llm_call.base import LLMCall
-from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.tool import Tool
 
@@ -50,10 +50,6 @@ class ChatAgent(BaseAgent):
             llm_config.user_prompt,
             llm_config.freeze_system_prompt,
             llm_config.freeze_user_prompt
-        )
-        self._session = Session(
-            session_id="default_session",
-            card=AgentCard(id="prompt_optimization")
         )
 
     def _init_model(self, model_config, model_client_config):
@@ -98,8 +94,9 @@ class ChatAgent(BaseAgent):
         session_id = inputs.pop("conversation_id", "default_session")
 
         if session is None:
+            agent_session = create_agent_session(session_id=session_id, card=AgentCard(id=self.agent_config.id))
             # Compatible with old usage without session
-            agent_session = await self._session.pre_run(session_id=session_id)
+            await agent_session.pre_run(inputs=inputs)
         else:
             agent_session = session
 

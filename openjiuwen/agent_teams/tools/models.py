@@ -14,7 +14,18 @@ from typing import Dict, Optional, cast
 from sqlmodel import SQLModel, Field
 from sqlmodel.main import SQLModelMetaclass
 
-from openjiuwen.agent_teams.tools.context import get_session_id
+from openjiuwen.agent_teams.spawn.context import get_session_id
+
+TEAM_DYNAMIC_TABLE_PREFIXES = (
+    "team_task_dependency_",
+    "team_task_",
+    "team_message_",
+    "message_read_status_",
+)
+TEAM_STATIC_TABLES_TO_CLEAR = (
+    "team_info",
+    "team_member",
+)
 
 
 # ----------------- Static Table Models -----------------
@@ -23,42 +34,59 @@ class Team(SQLModel, table=True):
     """Team info table model"""
     __tablename__ = "team_info"
 
-    team_id: str = Field(primary_key=True)
-    name: str = Field(nullable=False)
-    leader_member_id: str = Field(nullable=False)
+    team_name: str = Field(primary_key=True)
+    display_name: str = Field(nullable=False)
+    leader_member_name: str = Field(nullable=False)
     desc: Optional[str] = Field(default=None, nullable=True)
     prompt: Optional[str] = Field(default=None, nullable=True)
     created: int = Field(nullable=False)
+    # Bumped on every roster-affecting write so consumers (e.g. TeamRail
+    # prompt cache) can probe a single column for change detection.
+    updated_at: Optional[int] = Field(default=None, nullable=True)
 
 
 class TeamMember(SQLModel, table=True):
     """Team member table model"""
     __tablename__ = "team_member"
 
-    member_id: str = Field(primary_key=True)
-    team_id: str = Field(primary_key=True, foreign_key="team_info.team_id", ondelete="CASCADE")
-    name: str = Field(nullable=False)
+    member_name: str = Field(primary_key=True)
+    team_name: str = Field(primary_key=True, foreign_key="team_info.team_name", ondelete="CASCADE")
+    display_name: str = Field(nullable=False)
     desc: Optional[str] = Field(default=None, nullable=True)
     agent_card: str = Field(nullable=False)
     status: str = Field(nullable=False)
     execution_status: Optional[str] = Field(default=None, nullable=True)
     mode: str = Field(nullable=False)
     prompt: Optional[str] = Field(default=None, nullable=True)
+    model_config_json: Optional[str] = Field(default=None, nullable=True)
+    # Set on roster mutations only (create_member).  Status / execution
+    # status updates intentionally do NOT bump this column because they
+    # do not change how the # 成员关系 prompt section is rendered.
+    updated_at: Optional[int] = Field(default=None, nullable=True)
 
 
 # ============== Dynamic Table Base Classes (abstract) ==============
 
 class TeamTaskBase(SQLModel):
-    """Base class for task tables (one per session)"""
+    """Base class for task tables (one per session).
+
+    ``updated_at`` stores the millisecond wall-clock timestamp of the last
+    status transition (create, claim, assign, reset, approve_plan, cancel,
+    complete, or unblock). Its semantic meaning is bound to the current
+    ``status``: e.g. when status=claimed it represents when the task was
+    claimed; when status=completed it represents the completion time. Pure
+    title/content edits do not bump this column — it tracks the state
+    lifecycle, not arbitrary writes.
+    """
     __abstract__ = True
 
     task_id: str = Field(primary_key=True)
-    team_id: str = Field(nullable=False, foreign_key="team_info.team_id", ondelete="CASCADE", index=True)
+    team_name: str = Field(nullable=False, foreign_key="team_info.team_name", ondelete="CASCADE", index=True)
     title: str = Field(nullable=False)
     content: str = Field(nullable=False)
     status: str = Field(nullable=False, index=True)
     assignee: Optional[str] = Field(default=None, nullable=True, index=True)
-    completed_at: Optional[int] = Field(default=None, nullable=True, index=True)
+    updated_at: Optional[int] = Field(default=None, nullable=True, index=True)
 
     def brief(self) -> dict:
         """Return a lightweight summary (id + title + status) for write-op responses."""
@@ -69,7 +97,7 @@ class TeamTaskDependencyBase(SQLModel):
     """Base class for task dependency tables (one per session)"""
     __abstract__ = True
 
-    team_id: str = Field(nullable=False, foreign_key="team_info.team_id", ondelete="CASCADE", index=True)
+    team_name: str = Field(nullable=False, foreign_key="team_info.team_name", ondelete="CASCADE", index=True)
     resolved: Optional[bool] = Field(default=False, nullable=True, index=True)
 
 
@@ -78,14 +106,18 @@ class TeamMessageBase(SQLModel):
     __abstract__ = True
 
     message_id: str = Field(primary_key=True)
-    team_id: str = Field(nullable=False, foreign_key="team_info.team_id", ondelete="CASCADE", index=True)
-    from_member: str = Field(nullable=False)
-    to_member: Optional[str] = Field(default=None, nullable=True, index=True)
+    team_name: str = Field(nullable=False, foreign_key="team_info.team_name", ondelete="CASCADE", index=True)
+    from_member_name: str = Field(nullable=False)
+    to_member_name: Optional[str] = Field(default=None, nullable=True, index=True)
     content: str = Field(nullable=False)
     timestamp: int = Field(nullable=False, index=True)
     broadcast: bool = Field(nullable=False, index=True)
-    # is_read only for non-broadcast messages, indicates if the recipient has read the message
-    is_read: bool = Field(default=False, nullable=True, index=True)
+    # Read state for direct (point-to-point) messages only.  Broadcast rows
+    # carry NULL here because per-recipient read state for broadcasts lives
+    # in MessageReadStatus (high-water mark by timestamp); a single bool on
+    # the message row cannot represent "read by A, unread by B".  Writers
+    # must enforce this — see ``create_message``.
+    is_read: Optional[bool] = Field(default=False, nullable=True, index=True)
 
 
 class MessageReadStatusBase(SQLModel):
@@ -96,8 +128,8 @@ class MessageReadStatusBase(SQLModel):
     """
     __abstract__ = True
 
-    member_id: str = Field(primary_key=True)
-    team_id: str = Field(primary_key=True, foreign_key="team_info.team_id", ondelete="CASCADE")
+    member_name: str = Field(primary_key=True)
+    team_name: str = Field(primary_key=True, foreign_key="team_info.team_name", ondelete="CASCADE")
     read_at: Optional[int] = Field(default=None, nullable=True, index=True)
 
 
@@ -191,3 +223,11 @@ def _get_message_read_status_model() -> type[MessageReadStatusBase]:
         _message_read_status_models[session_id] = cast(type[MessageReadStatusBase], model_cls)
 
     return _message_read_status_models[session_id]
+
+
+def _clear_session_model_cache(session_id: str) -> None:
+    """Clear cached dynamic models for a session so they are rebuilt on next access."""
+    _task_models.pop(session_id, None)
+    _task_dependency_models.pop(session_id, None)
+    _message_models.pop(session_id, None)
+    _message_read_status_models.pop(session_id, None)

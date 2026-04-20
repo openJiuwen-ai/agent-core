@@ -7,12 +7,8 @@ from __future__ import annotations
 from typing import List, TYPE_CHECKING
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
-from openjiuwen.harness.prompts.sections.task_tool import (
-    build_task_section,
-)
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.tools.task_tool import create_task_tool
@@ -51,11 +47,13 @@ class SubagentRail(DeepAgentRail):
         # Build available_agents description for tool registration
         available_agents = self._build_available_agents_description(agent.deep_config.subagents)
 
+        agent_id = getattr(getattr(agent, "card", None), "id", None)
         # Create and register task tool (使用统一的 build_tool_card)
         tools = create_task_tool(
             parent_agent=agent,
             available_agents=available_agents,
             language=self.system_prompt_builder.language,
+            agent_id=agent_id,
         )
         self.tools = tools
 
@@ -74,7 +72,7 @@ class SubagentRail(DeepAgentRail):
         """
         if self.tools and hasattr(agent, "ability_manager"):
             for tool in self.tools:
-                name = getattr(tool, "name", None)
+                name = getattr(tool.card, 'name', None)
                 if name:
                     agent.ability_manager.remove(name)
                 tool_id = tool.card.id
@@ -84,15 +82,9 @@ class SubagentRail(DeepAgentRail):
             logger.info("[SubagentRail] Unregistered task tool")
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Update system_prompt_builder with task-tool section before model call."""
-        if not self.tools or self.system_prompt_builder is None:
-            return
-
-        task_section = build_task_section(language=self.system_prompt_builder.language)
-        if task_section is not None:
-            self.system_prompt_builder.add_section(task_section)
-        else:
-            self.system_prompt_builder.remove_section(SectionName.TASK_TOOL)
+        """No standalone task_tool prompt section is managed here anymore."""
+        _ = ctx
+        return
 
     def _build_available_agents_description(self, subagents: List[SubAgentConfig | "DeepAgent"]) -> str:
         """Build description of available subagents for tool registration.

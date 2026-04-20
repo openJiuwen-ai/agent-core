@@ -7,14 +7,25 @@ keeps working.
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import (
+    Any,
+    Callable,
+    Optional,
+)
 
-from pydantic import BaseModel
-
-from openjiuwen.agent_teams.schema.team import TeamLifecycle, TeamMemberSpec
-from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from pydantic import (
+    BaseModel,
+    Field,
+)
 
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+from openjiuwen.agent_teams.schema.team import (
+    TeamLifecycle,
+    TeamMemberSpec,
+)
+from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
+from openjiuwen.agent_teams.worktree.models import WorktreeConfig
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 # ---------------------------------------------------------------------------
 # Transport / Storage registries (pluggable team infrastructure)
@@ -39,19 +50,21 @@ def _ensure_builtin_infra_registered() -> None:
     if not _TRANSPORT_REGISTRY:
         from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 
-        _TRANSPORT_REGISTRY["team_runtime"] = MessagerTransportConfig
+        _TRANSPORT_REGISTRY["inprocess"] = MessagerTransportConfig
         _TRANSPORT_REGISTRY["pyzmq"] = MessagerTransportConfig
 
     if not _STORAGE_REGISTRY:
         from openjiuwen.agent_teams.tools.database import DatabaseConfig
+        from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 
         _STORAGE_REGISTRY["sqlite"] = DatabaseConfig
+        _STORAGE_REGISTRY["memory"] = MemoryDatabaseConfig
 
 
 class TransportSpec(BaseModel):
     """Pluggable transport layer specification.
 
-    Resolved via registry: built-in types include "team_runtime" and "pyzmq".
+    Resolved via registry: built-in types include "inprocess" and "pyzmq".
     Register custom transports with ``register_transport()``.
     """
 
@@ -100,10 +113,9 @@ class StorageSpec(BaseModel):
 class LeaderSpec(BaseModel):
     """Leader identity specification."""
 
-    member_id: str = "team_leader"
-    name: str = "TeamLeader"
+    member_name: str = "team_leader"
+    display_name: str = "Team Leader"
     persona: str = "天才项目管理专家"
-    domain: str = "project_management"
 
 
 class TeamAgentSpec(BaseModel):
@@ -116,12 +128,27 @@ class TeamAgentSpec(BaseModel):
     agents: dict[str, DeepAgentSpec]
     team_name: str = "agent_team"
     lifecycle: str = TeamLifecycle.TEMPORARY
-    teammate_mode: str = "plan_mode"
+    teammate_mode: str = "build_mode"
+    spawn_mode: str = "process"
     leader: LeaderSpec = LeaderSpec()
     predefined_members: list[TeamMemberSpec] = []
     transport: Optional[TransportSpec] = None
     storage: Optional[StorageSpec] = None
+    worktree: Optional[WorktreeConfig] = None
+    """Optional worktree isolation config for team members."""
+    workspace: Optional[TeamWorkspaceConfig] = None
+    """Optional shared workspace config for team members."""
     metadata: dict[str, Any] = {}
+
+    agent_customizer: Optional[Callable[..., None]] = Field(
+        default=None, exclude=True,
+    )
+    """Optional callback invoked on each member's DeepAgent after creation.
+
+    Signature: ``(deep_agent: DeepAgent) -> None``.
+    Used by platform adapters to inject additional rails / tools.
+    Not serializable — only usable with in-process spawn mode.
+    """
 
     def build(self) -> "TeamAgent":
         """Materialize a configured TeamAgent from this spec."""
@@ -134,31 +161,29 @@ class TeamAgentSpec(BaseModel):
         if leader_agent is None:
             raise ValueError("agents dict must contain a 'leader' key")
 
-        leader_member = TeamMemberSpec(
-            member_id=self.leader.member_id,
-            name=self.leader.name,
-            role_type=TeamRole.LEADER,
-            persona=self.leader.persona,
-            domain=self.leader.domain,
-        )
         team_spec = TeamSpec(
-            team_id=self.team_name,
-            name=self.team_name,
-            leader_member_id=self.leader.member_id,
+            team_name=self.team_name,
+            display_name=self.team_name,
+            leader_member_name=self.leader.member_name,
         )
 
         messager_config = self.transport.build() if self.transport else None
         db_config = self.storage.build() if self.storage else _DatabaseConfig()
+        if db_config.db_type == "sqlite" and not db_config.connection_string:
+            from openjiuwen.agent_teams.paths import get_agent_teams_home
+            db_config.connection_string = str(get_agent_teams_home() / "team.db")
 
+        leader_card_id = f"{self.team_name}_{self.leader.member_name}"
         leader_card = leader_agent.card or AgentCard(
-            id=self.leader.member_id,
-            name=self.leader.name,
+            id=leader_card_id,
+            name=self.leader.display_name,
             description=f"Leader of team {self.team_name}",
         )
 
         context = TeamRuntimeContext(
             role=TeamRole.LEADER,
-            member_spec=leader_member,
+            member_name=self.leader.member_name,
+            persona=self.leader.persona,
             team_spec=team_spec,
             messager_config=messager_config,
             db_config=db_config,

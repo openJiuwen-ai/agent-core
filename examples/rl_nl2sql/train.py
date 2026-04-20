@@ -28,8 +28,8 @@ from reward import nl2sql_reward
 from tools import execute_sql
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.dev_tools.agentrl import RLConfig, RLOptimizer
-from openjiuwen.dev_tools.agentrl.config.schemas import (
+from openjiuwen.agent_evolving.agent_rl import RLConfig, OfflineRLOptimizer
+from openjiuwen.agent_evolving.agent_rl.config.offline_config import (
     AgentRuntimeConfig,
     PersistenceConfig,
     RolloutConfig,
@@ -56,8 +56,8 @@ config = RLConfig(
         val_files=f"{DATA_DIR}/dev.parquet",
         train_batch_size=32,
         total_epochs=2,
-        max_prompt_length=4096,
-        max_response_length=4096,
+        max_prompt_length=3072,
+        max_response_length=3072,
         n_gpus_per_node=4,
         visible_device="0,1,2,3",
         save_freq=200,
@@ -68,7 +68,7 @@ config = RLConfig(
         whole_trajectory=False,
         logger=["tensorboard"],
         val_before_train=False,
-        save_path="~/checkpoint/nl2sql",
+        save_path="./checkpoint/nl2sql",
         micro_batch_size_per_gpu=2,
     ),
     rollout=RolloutConfig(
@@ -99,7 +99,7 @@ config = RLConfig(
 
 
 def main():
-    optimizer = RLOptimizer(config)
+    optimizer = OfflineRLOptimizer(config)
     optimizer.register_reward(nl2sql_reward, name="nl2sql_reward")
     optimizer.set_tools([execute_sql])
     optimizer.set_task_data_fn(task_data_fn)

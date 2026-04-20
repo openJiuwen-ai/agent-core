@@ -11,7 +11,7 @@ from openjiuwen.agent_teams.agent.coordinator import (
     CoordinatorLoop,
 )
 from openjiuwen.agent_teams.schema.team import TeamRole
-from openjiuwen.agent_teams.tools.team_events import (
+from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     TeamEvent,
 )

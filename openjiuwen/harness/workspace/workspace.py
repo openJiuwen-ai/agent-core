@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
@@ -57,12 +58,15 @@ class WorkspaceNode(Enum):
     IDENTITY_MD = "IDENTITY.md"
     USER_MD = "USER.md"
     MEMORY = "memory"
+    CODING_MEMORY = "coding_memory"
     TODO = "todo"
     MESSAGES = "messages"
     SKILLS = "skills"
     AGENTS = "agents"
     MEMORY_MD = "MEMORY.md"
     DAILY_MEMORY = "daily_memory"
+    TEAM_LINKS = ".team"
+    WORKTREE_LINKS = ".worktree"
 
 
 @dataclass
@@ -165,6 +169,121 @@ class Workspace:
                     break
             else:
                 self.directories.append(dict(node))
+
+    # ── Link management (.team/ and .worktree/ symlinks) ──────
+
+    TEAM_LINKS_DIR = ".team"
+    WORKTREE_LINKS_DIR = ".worktree"
+
+    def _ensure_link_dir(self, subdir: str) -> Path:
+        """Create and return the link directory under workspace root.
+
+        Args:
+            subdir: Subdirectory name (".team" or ".worktree").
+
+        Returns:
+            Absolute path to the link directory.
+        """
+        link_dir = Path(self.root_path) / subdir
+        link_dir.mkdir(parents=True, exist_ok=True)
+        return link_dir
+
+    def link_team(self, team_id: str, target_path: str) -> Path:
+        """Create .team/{team_id} symlink pointing to a team workspace.
+
+        Args:
+            team_id: Team identifier used as the symlink directory name.
+            target_path: Absolute path to the team workspace directory.
+
+        Returns:
+            Path to the created symlink.
+        """
+        link_dir = self._ensure_link_dir(self.TEAM_LINKS_DIR)
+        link = link_dir / team_id
+        if not link.exists():
+            os.symlink(target_path, str(link), target_is_directory=True)
+        return link
+
+    def unlink_team(self, team_id: str) -> bool:
+        """Remove .team/{team_id} symlink.
+
+        Args:
+            team_id: Team identifier of the symlink to remove.
+
+        Returns:
+            True if the symlink was removed, False if it didn't exist.
+        """
+        link = Path(self.root_path) / self.TEAM_LINKS_DIR / team_id
+        if link.is_symlink():
+            link.unlink()
+            return True
+        return False
+
+    def link_worktree(self, slug: str, target_path: str) -> Path:
+        """Create .worktree/{slug} symlink pointing to a git worktree.
+
+        Args:
+            slug: Worktree slug used as the symlink directory name.
+            target_path: Absolute path to the git worktree directory.
+
+        Returns:
+            Path to the created symlink.
+        """
+        link_dir = self._ensure_link_dir(self.WORKTREE_LINKS_DIR)
+        link = link_dir / slug
+        if not link.exists():
+            os.symlink(target_path, str(link), target_is_directory=True)
+        return link
+
+    def unlink_worktree(self, slug: str) -> bool:
+        """Remove .worktree/{slug} symlink.
+
+        Args:
+            slug: Worktree slug of the symlink to remove.
+
+        Returns:
+            True if the symlink was removed, False if it didn't exist.
+        """
+        link = Path(self.root_path) / self.WORKTREE_LINKS_DIR / slug
+        if link.is_symlink():
+            link.unlink()
+            return True
+        return False
+
+    def list_team_links(self) -> list[tuple[str, str]]:
+        """List all .team/ symlinks.
+
+        Returns:
+            List of (team_id, resolved_target_path) tuples.
+        """
+        return self._list_links(self.TEAM_LINKS_DIR)
+
+    def list_worktree_links(self) -> list[tuple[str, str]]:
+        """List all .worktree/ symlinks.
+
+        Returns:
+            List of (slug, resolved_target_path) tuples.
+        """
+        return self._list_links(self.WORKTREE_LINKS_DIR)
+
+    def _list_links(self, subdir: str) -> list[tuple[str, str]]:
+        """List all symlinks in a subdirectory.
+
+        Args:
+            subdir: Subdirectory name (".team" or ".worktree").
+
+        Returns:
+            List of (name, resolved_target_path) tuples.
+        """
+        link_dir = Path(self.root_path) / subdir
+        if not link_dir.is_dir():
+            return []
+        result = []
+        for entry in sorted(link_dir.iterdir()):
+            if entry.is_symlink():
+                target = str(entry.resolve())
+                result.append((entry.name, target))
+        return result
 
     @classmethod
     def get_default_directory(cls, language: str = "cn") -> List[DirectoryNode]:
@@ -274,6 +393,21 @@ DEFAULT_WORKSPACE_SCHEMA: List[DirectoryNode] = [
         ],
     },
     {
+        "name": "coding_memory",
+        "description": "Coding Agent 记忆模块",
+        "path": "coding_memory",
+        "children": [
+            {
+                "name": "MEMORY.md",
+                "description": "Coding 记忆索引",
+                "path": "MEMORY.md",
+                "children": [],
+                "is_file": True,
+                "default_content": "",
+            },
+        ],
+    },
+    {
         "name": "todo",
         "description": "待办事项目录",
         "path": "todo",
@@ -296,6 +430,21 @@ DEFAULT_WORKSPACE_SCHEMA: List[DirectoryNode] = [
         "description": "子智能体嵌套目录",
         "path": "agents",
         "children": [],
+    },
+    {
+        "name": "context",
+        "description": "上下文offload以及session memory目录",
+        "path": "context",
+        "children": [
+            {
+                "name": "session_memory.md",
+                "description": "session memory模版",
+                "path": "session_memory.md",
+                "children": [],
+                "is_file": True,
+                "default_content": _load_default_content("cn", "context/session_memory.md"),
+            },
+        ],
     },
 ]
 
@@ -448,6 +597,21 @@ DEFAULT_WORKSPACE_SCHEMA_EN: List[DirectoryNode] = [
         "description": "Sub-agent nesting directory",
         "path": "agents",
         "children": [],
+    },
+    {
+        "name": "context",
+        "description": "context offload and session memory file",
+        "path": "context",
+        "children": [
+            {
+                "name": "session_memory.md",
+                "description": "session memory模版",
+                "path": "session_memory.md",
+                "children": [],
+                "is_file": True,
+                "default_content": _load_default_content("en", "context/session_memory.md"),
+            },
+        ],
     },
 ]
 

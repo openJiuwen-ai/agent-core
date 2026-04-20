@@ -105,9 +105,15 @@ class ContextUtils:
         rounds: List[List[Optional[int]]] = []
         i = len(messages) - 1
 
+        def find_contiguous_user_group_start(user_idx: int) -> int:
+            while user_idx - 1 >= 0 and messages[user_idx - 1].role == "user":
+                user_idx -= 1
+            return user_idx
+
         while i >= 0:
             # Find the closing assistant of this round (may not exist)
             assistant_idx = None
+            round_end = i
 
             # Skip any trailing non-assistant messages (shouldn't happen in valid data)
             while i >= 0 and messages[i].role != "assistant":
@@ -129,6 +135,10 @@ class ContextUtils:
 
                 # Move to find the user that started this round
                 i -= 1
+            else:
+                # No assistant found in this remaining prefix. Treat the latest
+                # user plus any following messages as an incomplete round.
+                i = round_end
 
             # Now find the user message that starts this round
             while i >= 0 and messages[i].role != "user":
@@ -138,16 +148,18 @@ class ContextUtils:
                 # No user found, incomplete round at start
                 break
 
-            user_idx = i
+            found_user_idx = i
+            user_idx = find_contiguous_user_group_start(found_user_idx)
+
             if not rounds:
                 # Find incomplete round
-                for last_round_index in range(len(messages) - 1, user_idx, -1):
+                for last_round_index in range(len(messages) - 1, found_user_idx, -1):
                     if messages[last_round_index].role == "user":
-                        rounds.append([last_round_index, None])
+                        rounds.append([find_contiguous_user_group_start(last_round_index), None])
                         break
 
             rounds.append([user_idx, assistant_idx])
-            i -= 1  # Continue to previous round
+            i = user_idx - 1  # Continue before the contiguous user-message group
 
         return rounds
 
@@ -177,3 +189,93 @@ class ContextUtils:
             return -1
         target_round = rounds[min(n, len(rounds)) - 1]
         return target_round[0]
+
+    @staticmethod
+    def tool_call_matches_id(tool_call: Any, tool_call_id: str) -> bool:
+        """Check if a tool_call object matches a given tool_call_id."""
+        if isinstance(tool_call, dict):
+            return tool_call.get("id") == tool_call_id
+        return getattr(tool_call, "id", None) == tool_call_id
+
+    @staticmethod
+    def extract_tool_name(tool_call: Any) -> Optional[str]:
+        """Extract the tool name from a tool_call object (dict or object)."""
+        if isinstance(tool_call, dict):
+            function = tool_call.get("function")
+            if isinstance(function, dict):
+                function_name = function.get("name")
+                if isinstance(function_name, str) and function_name:
+                    return function_name
+            name = tool_call.get("name")
+            return name if isinstance(name, str) and name else None
+        function = getattr(tool_call, "function", None)
+        function_name = getattr(function, "name", None) if function is not None else None
+        if isinstance(function_name, str) and function_name:
+            return function_name
+        name = getattr(tool_call, "name", None)
+        return name if isinstance(name, str) and name else None
+
+    @staticmethod
+    def resolve_tool_call_from_message(
+        message: BaseMessage,
+        context_messages: List[BaseMessage],
+    ) -> Optional[Any]:
+        """Look up the tool_call object that corresponds to a tool message by traversing context backwards.
+
+        Args:
+            message: ToolMessage to look up.
+            context_messages: Context message list.
+
+        Returns:
+            The matching tool_call object, or None if not found.
+        """
+        from openjiuwen.core.foundation.llm import ToolMessage, AssistantMessage
+
+        if not isinstance(message, ToolMessage):
+            return None
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if not tool_call_id:
+            return None
+        for context_message in reversed(context_messages):
+            if not isinstance(context_message, AssistantMessage):
+                continue
+            tool_calls = getattr(context_message, "tool_calls", None) or []
+            for tool_call in tool_calls:
+                if ContextUtils.tool_call_matches_id(tool_call, tool_call_id):
+                    return tool_call
+        return None
+
+    @staticmethod
+    def resolve_tool_name_from_message(
+        message: BaseMessage,
+        context_messages: List[BaseMessage],
+    ) -> Optional[str]:
+        """Look up the tool name that corresponds to a tool message by traversing context backwards.
+
+        Args:
+            message: ToolMessage to look up.
+            context_messages: Context message list.
+
+        Returns:
+            Tool name string, or None if not found.
+        """
+        tool_call = ContextUtils.resolve_tool_call_from_message(message, context_messages)
+        if not tool_call:
+            return None
+        return ContextUtils.extract_tool_name(tool_call)
+
+    @staticmethod
+    def estimate_tokens(content: Any) -> int:
+        """估计内容的 token 数，使用字符数 // 3 的粗略估算。"""
+        if isinstance(content, str):
+            return max(len(content) // 3, 1)
+        try:
+            return max(len(json.dumps(content, ensure_ascii=False)) // 3, 1)
+        except (TypeError, ValueError):
+            return max(len(str(content)) // 3, 1)
+
+    @staticmethod
+    def estimate_message_tokens(message: BaseMessage) -> int:
+        """估计单条消息的 token 数。"""
+        content = getattr(message, "content", "")
+        return ContextUtils.estimate_tokens(content)

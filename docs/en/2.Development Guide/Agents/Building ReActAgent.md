@@ -123,7 +123,7 @@ mcp_config = McpServerConfig(
 
 # Creating ReActAgent
 
-First use `create_react_agent_config` method provided by openJiuwen to quickly create `ReActAgentConfig` object for weather querying, covering configuration parameter information related to `ReActAgent`, such as prompt definitions and large model configuration information. Example code is as follows:
+First, construct the `ReActAgentConfig` object required for the weather query scenario directly, and use it to configure the prompt template and model-related settings needed by `ReActAgent`. Example code is as follows:
 
 ```python
 from openjiuwen.core.single_agent import AgentCard, ReActAgentConfig, ReActAgent
@@ -173,6 +173,8 @@ def _create_client_model():
     )
 ```
 
+If you need to attach business-specific custom headers to model requests, you can configure `custom_headers` in `ModelClientConfig`, or set them centrally through `ReActAgentConfig.configure_custom_headers(...)`. This capability belongs to the shared model integration layer. For details, see the "Configure Custom Headers" section in [Connect to LLM](../Basic%20Functions/Connect%20to%20LLM.md).
+
 Then use constructor of `ReActAgent` class provided by openJiuwen to instantiate object, including weather query assistant configuration. Example code is as follows:
 
 ```python
@@ -180,9 +182,9 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent import AgentCard, ReActAgentConfig, ReActAgent
 
 react_agent = ReActAgent(card=agent_card).configure(react_agent_config)
-    tool = ReactAgentImpl._create_tool()
-    Runner.resource_mgr.add_tool(tool)
-    react_agent.ability_manager.add(tool.card)
+tool = ReactAgentImpl._create_tool()
+Runner.resource_mgr.add_tool(tool)
+react_agent.ability_manager.add(tool.card)
 ```
 
 # Running ReActAgent
@@ -193,7 +195,7 @@ After creating `ReActAgent` object, can call `invoke` method to get reply to use
 import asyncio
 
 result = asyncio.run(react_agent.invoke({"query": "Query the weather in Hangzhou"}))
-print(f"ReActAgent final output result: {result.get("output")}")
+print(f"ReActAgent final output result: {result.get('output')}")
 ```
 
 After successful query, will get the following result:

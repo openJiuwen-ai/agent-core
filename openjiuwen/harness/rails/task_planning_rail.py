@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.core.foundation.llm.schema.message import UserMessage
 from openjiuwen.core.runner import Runner
@@ -68,6 +69,11 @@ class TaskPlanningRail(DeepAgentRail):
         from openjiuwen.harness.deep_agent import (
             DeepAgent,
         )
+        from openjiuwen.harness.tools.todo import (
+            TodoCreateTool,
+            TodoListTool,
+            TodoModifyTool,
+        )
 
         if not (
             isinstance(agent, DeepAgent)
@@ -84,16 +90,35 @@ class TaskPlanningRail(DeepAgentRail):
             self.set_workspace(agent.deep_config.workspace)
 
         workspace_dir = str(self.workspace.get_node_path(WorkspaceNode.TODO))
-        tools = create_todos_tool(
-            self.sys_operation,
-            workspace_dir,
-            self.system_prompt_builder.language,
-        )
-        self.tools = tools
+        agent_id = getattr(getattr(agent, "card", None), "id", None)
+        language = self.system_prompt_builder.language if self.system_prompt_builder else "cn"
+
+        tool_configs = [
+            (TodoCreateTool, False),
+            (TodoListTool, False),
+            (TodoModifyTool, False),
+        ]
+
+        existing_tools = []
+        for ability in agent.ability_manager.list():
+            if isinstance(ability, ToolCard):
+                tool_instance = Runner.resource_mgr.get_tool(tool_id=ability.id)
+                if tool_instance:
+                    for i, (tool_class, found) in enumerate(tool_configs):
+                        if isinstance(tool_instance, tool_class):
+                            tool_configs[i] = (tool_class, True)
+                            existing_tools.append(tool_instance)
+                            break
+
+        tools = existing_tools.copy()
         try:
-            Runner.resource_mgr.add_tool(list(tools))
-            for tool in tools:
-                agent.ability_manager.add(tool.card)
+            for tool_class, found in tool_configs:
+                if not found:
+                    new_tool = tool_class(self.sys_operation, workspace_dir, language, agent_id)
+                    Runner.resource_mgr.add_tool(new_tool)
+                    agent.ability_manager.add(new_tool.card)
+                    tools.append(new_tool)
+            self.tools = tools
         except Exception as exc:
             logger.warning("TaskPlanningRail: failed to add tool, error: %s", exc)
 
@@ -104,7 +129,7 @@ class TaskPlanningRail(DeepAgentRail):
                 self.system_prompt_builder.remove_section("todo")
             if self.tools and hasattr(agent, "ability_manager"):
                 for tool in self.tools:
-                    name = getattr(tool, "name", None)
+                    name = getattr(tool.card, 'name', None)
                     if name:
                         agent.ability_manager.remove(name)
                     tool_id = tool.card.id

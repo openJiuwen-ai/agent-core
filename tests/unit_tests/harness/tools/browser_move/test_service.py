@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import BrowserRunGuardrails
 from openjiuwen.harness.tools.browser_move.playwright_runtime.profiles import BrowserProfile
@@ -259,6 +259,132 @@ def test_max_iteration_resume_requires_opt_in_guardrail() -> None:
     assert "Continuation context:" in observed_tasks[1]
 
 
+
+
+def test_max_iteration_failure_includes_observed_tool_progress() -> None:
+    service = _make_service()
+    service._update_progress_from_tool_observation(
+        session_id="session-progress",
+        request_id="req-progress-1",
+        tool_name="browser_click",
+        tool_result={
+            "message": "Clicked Add to cart",
+            "page": {"url": "https://example.com/cart", "title": "Cart"},
+        },
+    )
+
+    async def fake_ensure_started() -> None:
+        return None
+
+    async def fake_run_task_once(*, task: str, session_id: str, request_id: str):
+        del task, session_id, request_id
+        return {
+            "ok": False,
+            "final": "Max iterations reached without completion",
+            "page": {"url": "https://example.com/cart", "title": "Cart"},
+            "screenshot": None,
+            "error": "max_iterations_reached",
+        }
+
+    with patch.object(service, "ensure_started", fake_ensure_started), patch.object(
+        service, "run_task_once", fake_run_task_once
+    ):
+        result = _run(
+            service.run_task(
+                task="Add item to cart",
+                session_id="session-progress",
+                request_id="req-progress-1",
+            )
+        )
+
+    assert result["ok"] is False
+    assert "Known progress for continuation:" in str(result["failure_summary"])
+    assert "Clicked Add to cart" in str(result["failure_summary"])
+    assert result["progress_state"]["recent_tool_steps"][-1].startswith("browser_click:")
+
+
+def test_structured_progress_is_reused_on_next_invocation() -> None:
+    service = _make_service()
+    observed_tasks: list[str] = []
+    responses = [
+        {
+            "ok": False,
+            "final": "Reached review page but coupon still not applied.",
+            "page": {"url": "https://example.com/review", "title": "Review"},
+            "screenshot": None,
+            "error": "max_iterations_reached",
+            "status": "partial",
+            "progress": {
+                "completed_steps": ["Opened cart", "Reached review page"],
+                "remaining_steps": ["Apply coupon", "Submit order"],
+                "next_step": "Open the coupon panel and apply the saved code",
+                "missing_requirements": ["Coupon code not applied yet"],
+            },
+        },
+        {
+            "ok": True,
+            "final": "Coupon applied and order submitted.",
+            "page": {"url": "https://example.com/done", "title": "Done"},
+            "screenshot": None,
+            "error": None,
+        },
+    ]
+
+    async def fake_ensure_started() -> None:
+        return None
+
+    async def fake_run_task_once(*, task: str, session_id: str, request_id: str):
+        del session_id, request_id
+        observed_tasks.append(task)
+        return responses[len(observed_tasks) - 1]
+
+    with patch.object(service, "ensure_started", fake_ensure_started), patch.object(
+        service, "run_task_once", fake_run_task_once
+    ):
+        first = _run(service.run_task(task="Checkout cart", session_id="session-reuse", request_id="req-1"))
+        second = _run(service.run_task(task="Checkout cart", session_id="session-reuse", request_id="req-2"))
+
+    assert first["ok"] is False
+    assert first["progress_state"]["status"] == "partial"
+    assert "Opened cart" in first["progress_state"]["completed_steps"]
+    assert second["ok"] is True
+    assert second["failure_summary"] is None
+    assert second["progress_state"] is None
+    assert "Known progress for continuation:" in observed_tasks[1]
+    assert "Opened cart" in observed_tasks[1]
+    assert "Apply coupon" in observed_tasks[1]
+
+
+def test_completed_status_overrides_false_ok_when_evidence_is_present() -> None:
+    service = _make_service()
+
+    async def fake_ensure_started() -> None:
+        return None
+
+    async def fake_run_task_once(*, task: str, session_id: str, request_id: str):
+        del task, session_id, request_id
+        return {
+            "ok": False,
+            "final": "The confirmation page shows order #12345.",
+            "page": {"url": "https://example.com/done", "title": "Done"},
+            "screenshot": None,
+            "error": "worker_marked_incomplete",
+            "status": "completed",
+            "progress": {
+                "completion_evidence": ["Confirmation page shows order #12345"],
+                "missing_requirements": [],
+            },
+        }
+
+    with patch.object(service, "ensure_started", fake_ensure_started), patch.object(
+        service, "run_task_once", fake_run_task_once
+    ):
+        result = _run(service.run_task(task="Place order", session_id="session-complete", request_id="req-complete"))
+
+    assert result["ok"] is True
+    assert result["error"] is None
+    assert result["failure_summary"] is None
+
 def test_run_task_once_uses_fresh_worker_conversation_ids() -> None:
     service = _make_service()
     service.browser_agent = object()
@@ -339,6 +465,48 @@ def test_ensure_managed_driver_started_replaces_stale_driver() -> None:
 
         assert getattr(service, "_managed_driver") is new_driver
         new_driver.start.assert_called_once()
+
+    _run(_test())
+
+
+def test_ensure_runtime_ready_refreshes_mcp_binding_after_managed_browser_restart() -> None:
+    async def _test():
+        service = _make_service()
+        setattr(service, "started", True)
+        setattr(service, "_driver_mode", "managed")
+        setattr(service, "_registered_cdp_endpoint", "http://127.0.0.1:9333")
+        getattr(service, "_inject_cdp_endpoint")("http://127.0.0.1:9333")
+        setattr(service, "_browser_agent", object())
+
+        stale_driver = MagicMock()
+        stale_driver.is_endpoint_ready.return_value = False
+        setattr(service, "_managed_driver", stale_driver)
+
+        profile = BrowserProfile(
+            name="jiuwenclaw",
+            driver_type="managed",
+            cdp_url="http://127.0.0.1:9333",
+            user_data_dir=str(Path.cwd()),
+            debug_port=9333,
+            host="127.0.0.1",
+        )
+        new_driver = MagicMock()
+        new_driver.start.return_value = "http://127.0.0.1:9333"
+        profile_store = getattr(service, "_profile_store")
+
+        with patch.object(profile_store, "get_profile", return_value=profile), patch.object(
+            profile_store,
+            "upsert_profile",
+            side_effect=lambda browser_profile, select=False: browser_profile,
+        ), patch(
+            "openjiuwen.harness.tools.browser_move.playwright_runtime.service.ManagedBrowserDriver",
+            return_value=new_driver,
+        ), patch.object(service, "_refresh_mcp_server_binding", AsyncMock()) as refresh_binding:
+            await service.ensure_runtime_ready()
+
+        refresh_binding.assert_awaited_once()
+        assert getattr(service, "_managed_driver") is new_driver
+        assert getattr(service, "_browser_agent") is None
 
     _run(_test())
 

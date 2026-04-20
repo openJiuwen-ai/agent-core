@@ -14,6 +14,7 @@ from openjiuwen.agent_teams.schema.blueprint import (
 )
 from openjiuwen.agent_teams.schema.team import TeamMemberSpec
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
+from openjiuwen.agent_teams.worktree.models import WorktreeConfig
 
 
 def create_agent_team(
@@ -21,11 +22,13 @@ def create_agent_team(
     *,
     team_name: str = "agent_team",
     lifecycle: str = "temporary",
-    teammate_mode: str = "plan_mode",
+    teammate_mode: str = "build_mode",
+    spawn_mode: str = "process",
     leader: Optional[LeaderSpec] = None,
     predefined_members: list[TeamMemberSpec] | None = None,
     transport: Optional[TransportSpec] = None,
     storage: Optional[StorageSpec] = None,
+    worktree: Optional[WorktreeConfig] = None,
     metadata: Optional[dict] = None,
 ) -> TeamAgent:
     """Create a leader-configured TeamAgent.
@@ -38,14 +41,18 @@ def create_agent_team(
         lifecycle: Team lifecycle mode — "temporary" (disband after
             completion) or "persistent" (retain team across sessions).
         teammate_mode: Default execution mode for spawned teammates —
-            "plan_mode" (require leader approval) or "build_mode"
-            (complete tasks directly).
-        leader: Leader identity specification (persona, domain, etc.).
+            "build_mode" (complete tasks directly) or "plan_mode"
+            (require leader approval). Defaults to "build_mode".
+        spawn_mode: How teammates are launched — "process" (child
+            subprocess) or "inprocess" (asyncio coroutine in the
+            same event loop).
+        leader: Leader identity specification (persona, etc.).
         predefined_members: Pre-configured team members. When provided,
             leader skips ``spawn_member`` and ``build_team`` registers
             all members automatically.
         transport: Pluggable transport layer for inter-agent messaging.
         storage: Pluggable storage layer for task/state persistence.
+        worktree: Optional worktree isolation config for team members.
         metadata: Arbitrary metadata attached to the team config.
     """
     spec = TeamAgentSpec(
@@ -53,10 +60,12 @@ def create_agent_team(
         team_name=team_name,
         lifecycle=lifecycle,
         teammate_mode=teammate_mode,
+        spawn_mode=spawn_mode,
         leader=leader or LeaderSpec(),
         predefined_members=predefined_members or [],
         transport=transport,
         storage=storage,
+        worktree=worktree,
         metadata=metadata or {},
     )
     return spec.build()

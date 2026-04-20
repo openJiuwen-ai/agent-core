@@ -8,9 +8,10 @@ Includes:
 - BaseEvaluator, DefaultEvaluator, MetricEvaluator: Evaluation interfaces
 - BaseOptimizer, TextualParameter, InstructionOptimizer: Optimization
 - Case, EvaluatedCase, CaseLoader: Dataset handling
-- Trajectory, TrajectoryStep, ExecutionSpec: Execution trace types
+- Trajectory, TrajectoryStep: Execution trace types
 - SingleDimUpdater, MultiDimUpdater: Update generation
 - Checkpointing: State persistence
+- Signal: Evolution signal detection and conversion
 """
 
 # constants
@@ -43,6 +44,7 @@ from openjiuwen.agent_evolving.optimizer import (
     TextualParameter,
     InstructionOptimizer,
 )
+from openjiuwen.agent_evolving.optimizer.skill_call import SkillExperienceOptimizer
 
 # trainer
 from openjiuwen.agent_evolving.trainer import Trainer, Progress, Callbacks
@@ -58,6 +60,30 @@ from openjiuwen.agent_evolving.trajectory import (
 
 # updater
 from openjiuwen.agent_evolving.updater import Updater, SingleDimUpdater, MultiDimUpdater
+
+# agent_rl
+from openjiuwen.agent_evolving.agent_rl import (
+    RLConfig,
+    OfflineRLOptimizer,
+    OnlineRLOptimizer,
+    RewardRegistry,
+    RLTask,
+    Rollout,
+    RolloutMessage,
+    RolloutWithReward,
+)
+
+# signal
+from openjiuwen.agent_evolving.signal import (
+    ConversationSignalDetector,
+    SignalDetector,
+    EvolutionSignal,
+    EvolutionCategory,
+    EvolutionTarget,
+    make_signal_fingerprint,
+    from_evaluated_case,
+    from_evaluated_cases,
+)
 
 _CONSTANTS = [
     "TuneConstant",
@@ -89,6 +115,7 @@ _OPTIMIZER = [
     "BaseOptimizer",
     "TextualParameter",
     "InstructionOptimizer",
+    "SkillExperienceOptimizer",
 ]
 
 _TRAINER = [
@@ -111,6 +138,28 @@ _UPDATER = [
     "MultiDimUpdater",
 ]
 
+_AGENT_RL = [
+    "RLConfig",
+    "OfflineRLOptimizer",
+    "OnlineRLOptimizer",
+    "RewardRegistry",
+    "RLTask",
+    "Rollout",
+    "RolloutMessage",
+    "RolloutWithReward",
+]
+
+_SIGNAL = [
+    "ConversationSignalDetector",
+    "SignalDetector",
+    "EvolutionSignal",
+    "EvolutionCategory",
+    "EvolutionTarget",
+    "make_signal_fingerprint",
+    "from_evaluated_case",
+    "from_evaluated_cases",
+]
+
 __all__ = (
     _CONSTANTS
     + _CHECKPOINTING
@@ -120,4 +169,6 @@ __all__ = (
     + _TRAINER
     + _TRAJECTORY
     + _UPDATER
+    + _AGENT_RL
+    + _SIGNAL
 )

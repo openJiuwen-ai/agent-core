@@ -17,6 +17,9 @@ from openjiuwen.harness.prompts.sections.tools.audio import (
 from openjiuwen.harness.prompts.sections.tools.bash import (
     DESCRIPTION as BASH_DESCRIPTION,
 )
+from openjiuwen.harness.prompts.sections.tools.powershell import (
+    DESCRIPTION as POWERSHELL_DESCRIPTION,
+)
 from openjiuwen.harness.prompts.sections.tools.code import (
     DESCRIPTION as CODE_DESCRIPTION,
 )
@@ -46,8 +49,9 @@ from openjiuwen.harness.tools.audio import (
     AudioTranscriptionTool,
 )
 from openjiuwen.harness.tools.code import CodeTool
-from openjiuwen.harness.tools.filesystem import ReadFileTool
-from openjiuwen.harness.tools.shell import BashTool
+from openjiuwen.harness.tools.filesystem import EditFileTool, ReadFileTool
+from openjiuwen.harness.tools.bash import BashTool
+from openjiuwen.harness.tools.powershell import PowerShellTool
 from openjiuwen.harness.tools.vision import (
     ImageOCRTool,
     VisualQuestionAnsweringTool,
@@ -61,6 +65,7 @@ class TestBilingualDescriptions:
     def test_core_descriptions():
         descriptions = [
             BASH_DESCRIPTION,
+            POWERSHELL_DESCRIPTION,
             CODE_DESCRIPTION,
             LIST_SKILL_DESCRIPTION,
             READ_FILE_DESCRIPTION,
@@ -87,10 +92,12 @@ class TestGetToolDescription:
     @staticmethod
     def test_known_tool_cn():
         assert get_tool_description("bash", "cn") == BASH_DESCRIPTION["cn"]
+        assert get_tool_description("powershell", "cn") == POWERSHELL_DESCRIPTION["cn"]
 
     @staticmethod
     def test_known_tool_en():
         assert get_tool_description("bash", "en") == BASH_DESCRIPTION["en"]
+        assert get_tool_description("powershell", "en") == POWERSHELL_DESCRIPTION["en"]
 
     @staticmethod
     def test_unknown_tool_raises():
@@ -101,6 +108,7 @@ class TestGetToolDescription:
     def test_all_registered_tools():
         names = [
             "bash",
+            "powershell",
             "code",
             "read_file",
             "write_file",
@@ -131,12 +139,18 @@ class TestToolClassesUseBilingualDescriptions:
         assert BashTool(MagicMock(), language="en").card.description == (
             BASH_DESCRIPTION["en"]
         )
+        assert PowerShellTool(MagicMock(), language="en").card.description == (
+            POWERSHELL_DESCRIPTION["en"]
+        )
         assert CodeTool(MagicMock(), language="en").card.description == (
             CODE_DESCRIPTION["en"]
         )
         assert ReadFileTool(MagicMock(), language="en").card.description == (
             READ_FILE_DESCRIPTION["en"]
         )
+        assert EditFileTool(MagicMock(), language="en").card.description == (
+ 	             EDIT_FILE_DESCRIPTION["en"]
+)
 
     @staticmethod
     def test_vision_tools_en():

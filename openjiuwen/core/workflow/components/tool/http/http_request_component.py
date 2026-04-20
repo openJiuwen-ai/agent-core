@@ -267,7 +267,7 @@ class HTTPRequestExecutable(ComponentExecutable):
                         headers=headers,
                         data=request_body if method in ['POST', 'PUT', 'PATCH'] else None,
                         params=query_params,
-                        allow_redirects=self.request_params.advanced_options.follow_redirect,
+                        allow_redirects=False,
                         timeout=aiohttp.ClientTimeout(total=timeout_seconds),
                         proxy=proxy
                     ) as response:

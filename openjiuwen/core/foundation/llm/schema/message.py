@@ -1,8 +1,8 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import Union, List, Optional, Any
-from pydantic import BaseModel, model_validator
+from typing import Union, List, Optional, Any, Dict
+from pydantic import BaseModel, Field, model_validator
 
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 
@@ -20,12 +20,16 @@ class UsageMetadata(BaseModel):
     output_tokens: int = 0
     total_tokens: int = 0
     cache_tokens: int = 0
+    input_cost: float = 0.
+    output_cost: float = 0.
+    total_cost: float = 0.
 
 
 class BaseMessage(BaseModel):
     role: str
     content: Union[str, List[Union[str, dict]]] = ""
     name: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class AssistantMessage(BaseMessage):
@@ -71,6 +75,10 @@ class AssistantMessage(BaseMessage):
             "role": self.role,
             "content": self.content,
         }
+        if self.name is not None:
+            result["name"] = self.name
+        if self.metadata:
+            result["metadata"] = self.metadata
         if self.tool_calls:
             tool_calls = []
             for call in self.tool_calls:

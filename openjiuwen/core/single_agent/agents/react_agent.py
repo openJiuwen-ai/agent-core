@@ -155,6 +155,7 @@ class ReActAgentConfig(BaseModel):
     model_provider: str = Field(default="openai", description="Model provider")
     api_key: str = Field(default="", description="API key")
     api_base: str = Field(default="", description="API base URL")
+    custom_headers: Optional[dict[str, Any]] = Field(default=None, description="Additional headers for LLM requests")
     prompt_template_name: str = Field(
         default="",
         description="Prompt template name"
@@ -190,6 +191,8 @@ class ReActAgentConfig(BaseModel):
         default=None,
         description="Context processors configuration"
     )
+
+    workspace: Optional[Any] = Field(default=None, description="Workspace instance for filesystem operations")
 
     def configure_model(self, model_name: str) -> 'ReActAgentConfig':
         """Configure model name
@@ -324,7 +327,7 @@ class ReActAgentConfig(BaseModel):
             api_key: str,
             api_base: str,
             model_name: str,
-            verify_ssl: bool = False
+            verify_ssl: bool = False,
     ) -> 'ReActAgentConfig':
         """Configure model client for LLM initialization
 
@@ -350,12 +353,30 @@ class ReActAgentConfig(BaseModel):
             client_provider=provider,
             api_key=api_key,
             api_base=api_base,
-            verify_ssl=verify_ssl
+            verify_ssl=verify_ssl,
+            custom_headers=self.custom_headers,
         )
         if self.model_config_obj is None:
             self.model_config_obj = ModelRequestConfig(model_name=model_name)
         else:
             self.model_config_obj.model_name = model_name
+        return self
+
+    def configure_custom_headers(
+            self,
+            custom_headers: Optional[dict[str, Any]] = None,
+    ) -> 'ReActAgentConfig':
+        """Configure additional headers sent with each model request.
+
+        Args:
+            custom_headers: Additional headers sent with each model request
+
+        Returns:
+            self (supports chaining)
+        """
+        self.custom_headers = custom_headers
+        if self.model_client_config is not None:
+            self.model_client_config.custom_headers = custom_headers
         return self
 
     def configure_context_processors(
@@ -414,8 +435,15 @@ class ReActAgent(BaseAgent):
             card: Agent card (required)
         """
         self._config = self._create_default_config()
+        # Get sys_operation if configured
+        sys_operation = None
+        if self._config.sys_operation_id:
+            from openjiuwen.core.runner import Runner
+            sys_operation = Runner.resource_mgr.get_sys_operation(self._config.sys_operation_id)
         self.context_engine = ContextEngine(
-            self._config.context_engine_config
+            self._config.context_engine_config,
+            workspace=self._config.workspace,
+            sys_operation=sys_operation,
         )
         self._llm = None
         self.prompt_builder: SystemPromptBuilder = SystemPromptBuilder()
@@ -452,10 +480,18 @@ class ReActAgent(BaseAgent):
             self._llm = None
             self._kv_release_warning_logged = False
 
+        # Get sys_operation from Runner.resource_mgr if sys_operation_id is configured
+        sys_operation = None
+        if config.sys_operation_id:
+            from openjiuwen.core.runner import Runner
+            sys_operation = Runner.resource_mgr.get_sys_operation(config.sys_operation_id)
+
         # Update context_engine if context window limit changed
         if old_config.context_engine_config != config.context_engine_config:
             self.context_engine = ContextEngine(
-                config.context_engine_config
+                config.context_engine_config,
+                workspace=config.workspace,
+                sys_operation=sys_operation,
             )
             self._ability_manager.set_context_engine(self.context_engine)
         # Reset sys operation id if changed
@@ -739,6 +775,12 @@ class ReActAgent(BaseAgent):
                 reasoning_content=accumulated_chunk.reasoning_content,
             )
         ctx.inputs.response = ai_message
+        if ai_message.usage_metadata:
+            await session.write_stream(OutputSchema(
+                type="llm_usage",
+                index=0,
+                payload={"usage_metadata": ai_message.usage_metadata.model_dump(), "result_type": "answer"},
+            ))
         return ai_message
 
     @staticmethod
@@ -1083,8 +1125,9 @@ class ReActAgent(BaseAgent):
             self,
             session: Optional[Session]
     ) -> ModelContext:
+        # Always create token_counter for token statistics, regardless of context_processors
+        from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
         if self._config.context_processors:
-            from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
             context = await self.context_engine.create_context(
                 session=session,
                 processors=self._config.context_processors,
@@ -1092,7 +1135,8 @@ class ReActAgent(BaseAgent):
             )
         else:
             context = await self.context_engine.create_context(
-                session=session
+                session=session,
+                token_counter=TiktokenCounter()
             )
         context_reloader = context.reloader_tool()
         if self._config.context_engine_config.enable_reload:

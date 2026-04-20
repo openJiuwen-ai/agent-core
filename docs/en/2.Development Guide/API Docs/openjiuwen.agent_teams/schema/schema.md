@@ -1,94 +1,94 @@
 # openjiuwen.agent_teams.schema
 
-## class openjiuwen.agent_teams.schema.StopConditionSpec
+Sub-configuration classes used by `DeepAgentSpec`. These are typically specified as nested fields within YAML/JSON configs.
 
-Defines the stop conditions for a `DeepAgent`.
-
-**Attributes**:
-
-- **max_iterations** (int, optional): Maximum number of iterations. Default: `None`.
-- **max_token_usage** (int, optional): Maximum token usage. Default: `None`.
-- **completion_promise** (str, optional): Completion promise string. Default: `None`.
-- **timeout_seconds** (float, optional): Timeout in seconds. Default: `None`.
-
-## class openjiuwen.agent_teams.schema.VisionModelSpec
+## class VisionModelSpec
 
 Vision model configuration.
 
-**Attributes**:
+* **api_key**(str, optional): API key. Default: empty string.
+* **base_url**(str, optional): Base URL. Default: `https://api.openai.com/v1`.
+* **model**(str, optional): Model name. Default: `gpt-4.1-mini`.
+* **max_retries**(int, optional): Maximum retry count. Default: `3`.
 
-- **api_key** (str, optional): API key. Default: empty string.
-- **base_url** (str, optional): Base URL. Default: `https://api.openai.com/v1`.
-- **model** (str, optional): Model name. Default: `gpt-4.1-mini`.
-- **max_retries** (int, optional): Maximum retry count. Default: `3`.
-
-## class openjiuwen.agent_teams.schema.AudioModelSpec
+## class AudioModelSpec
 
 Audio model configuration.
 
-**Attributes**:
+* **api_key**(str): API key. Default: empty string.
+* **base_url**(str): Base URL. Default: `https://api.openai.com/v1`.
+* **transcription_model**(str): Transcription model. Default: `gpt-4o-transcribe`.
+* **question_answering_model**(str): Question-answering model. Default: `gpt-4o-audio-preview`.
+* **max_retries**(int): Maximum retry count. Default: `3`.
+* **http_timeout**(int): HTTP timeout in milliseconds. Default: `20`.
+* **max_audio_bytes**(int): Maximum audio byte size. Default: `25 * 1024 * 1024`.
+* **acr_access_key**(str): ACR access key. Default: empty string.
+* **acr_access_secret**(str): ACR access secret. Default: empty string.
+* **acr_base_url**(str): ACR base URL. Default: `https://identify-ap-southeast-1.acrcloud.com/v1/identify`.
 
-- **api_key** (str): API key. Default: empty string.
-- **base_url** (str): Base URL. Default: `https://api.openai.com/v1`.
-- **transcription_model** (str): Transcription model. Default: `gpt-4o-transcribe`.
-- **question_answering_model** (str): Question-answering model. Default: `gpt-4o-audio-preview`.
-- **max_retries** (int): Maximum retry count. Default: `3`.
-- **http_timeout** (int): HTTP timeout in milliseconds. Default: `20`.
-- **max_audio_bytes** (int): Maximum audio byte size. Default: `25 * 1024 * 1024`.
-- **acr_access_key** (str): ACR access key. Default: empty string.
-- **acr_access_secret** (str): ACR access secret. Default: empty string.
-- **acr_base_url** (str): ACR base URL. Default: `https://identify-ap-southeast-1.acrcloud.com/v1/identify`.
+## class WorkspaceSpec
 
-## class openjiuwen.agent_teams.schema.WorkspaceSpec
+Workspace configuration. When `stable_base` is True, workspace path is anchored under `.agent_teams/workspaces/` to survive ephemeral worktree cleanup.
 
-Workspace configuration.
+* **root_path**(str, optional): Root directory path. Default: `./`.
+* **language**(str, optional): Language. Default: `cn`.
+* **stable_base**(bool, optional): When True, use stable workspace path. Default: `False`.
 
-**Attributes**:
-
-- **root_path** (str, optional): Root directory path. Default: `./`.
-- **language** (str, optional): Language. Default: `cn`.
-
-## class openjiuwen.agent_teams.schema.ProgressiveToolSpec
+## class ProgressiveToolSpec
 
 Progressive tool exposure configuration.
 
-**Attributes**:
+* **enabled**(bool, optional): Whether enabled. Default: `True`.
+* **always_visible_tools**(list[str], optional): Always-visible tool list. Default: `[]`.
+* **default_visible_tools**(list[str], optional): Default-visible tool list. Default: `[]`.
+* **max_loaded_tools**(int, optional): Maximum loaded tools. Default: `12`.
 
-- **enabled** (bool, optional): Whether it is enabled. Default: `True`.
-- **always_visible_tools** (list[str], optional): List of always-visible tools. Default: `[]`.
-- **default_visible_tools** (list[str], optional): List of default-visible tools. Default: `[]`.
-- **max_loaded_tools** (int, optional): Maximum number of loaded tools. Default: `12`.
-
-## class openjiuwen.agent_teams.schema.SysOperationSpec
+## class SysOperationSpec
 
 System operation configuration.
 
-**Attributes**:
+* **id**(str): Operation ID.
+* **mode**([OperationMode](../../openjiuwen.core/sys_operation/sys_operation.md#class-operationmode), optional): Operation mode — `local` or `sandbox`. Default: `local`.
+* **work_config**([LocalWorkConfig](../../openjiuwen.core/sys_operation/sys_operation.md#class-localworkconfig), optional): Local work config. Default: `None`.
+* **gateway_config**(SandboxGatewayConfig, optional): Sandbox gateway config. Default: `None`.
 
-- **id** (str): Operation ID.
-- **mode** ([OperationMode](../../openjiuwen.core/sys_operation/sys_operation.md#class-operationmode), optional): Operation mode, either `local` or `sandbox`. Default: `local`.
-- **work_config** ([LocalWorkConfig](../../openjiuwen.core/sys_operation/sys_operation.md#class-localworkconfig), optional): Local work configuration. Default: `None`.
-- **gateway_config** (SandboxGatewayConfig, optional): Sandbox gateway configuration. Default: `None`.
-
-## class openjiuwen.agent_teams.schema.RailSpec
+## class RailSpec
 
 Guardrail configuration.
 
-**Attributes**:
+* **type**(str): Guardrail type, such as `"task_planning"` or `"skill_use"`.
+* **params**(dict[str, Any], optional): Guardrail parameters. Default: `{}`.
 
-- **type** (str): Guardrail type, such as `"task_planning"` or `"skill_use"`.
-- **params** (dict[str, Any]): Guardrail parameters. Default: `{}`.
+## class BuiltinToolSpec
 
-## class openjiuwen.agent_teams.schema.SubAgentSpec
+Declarative tool reference resolved via tool type registry.
+
+* **type**(str): Tool type name, such as `"web_search"` or `"web_fetch"`.
+* **params**(dict[str, Any], optional): Tool constructor parameters. Default: `{}`.
+
+## class SubAgentSpec
 
 Sub-agent configuration.
 
-**Attributes**:
+* **agent_card**([AgentCard](../../openjiuwen.core/single_agent/single_agent.md#class-agentcard)): Agent card.
+* **system_prompt**(str): System prompt.
+* **tools**(list[ToolCard | BuiltinToolSpec], optional): Tool list. Default: `[]`.
+* **mcps**(list[McpServerConfig], optional): MCP server configs. Default: `[]`.
+* **model**(TeamModelConfig, optional): Model config. Default: `None`.
+* **rails**(list[RailSpec], optional): Guardrail configs. Default: `None`.
+* **skills**(list[str], optional): Skill list. Default: `None`.
+* **workspace**(WorkspaceSpec, optional): Workspace config. Default: `None`.
+* **sys_operation**(SysOperationSpec, optional): System operation config. Default: `None`.
+* **language**(str, optional): Language. Default: `None`.
+* **prompt_mode**(str, optional): Prompt mode. Default: `None`.
+* **enable_task_loop**(bool, optional): Enable task loop. Default: `False`.
+* **max_iterations**(int, optional): Max iterations. Default: `None`.
+* **factory_name**(str, optional): Factory name. Default: `None`.
+* **factory_kwargs**(dict[str, Any], optional): Factory kwargs. Default: `{}`.
 
-- **agent_card** ([AgentCard](../../openjiuwen.core/single_agent/single_agent.md#class-openjiuwencoresingle_agentagentcard)): Agent card.
-- **system_prompt** (str): System prompt.
-- **tools** (list[[ToolCard](../../openjiuwen.core/foundation/tool/tool.md#class-toolcard)]): Tool list. Default: `[]`.
-- **mcps** (list[McpServerConfig]): MCP server configuration list. Default: `[]`.
-- **model** (TeamModelConfig, optional): Model configuration. Default: `None`.
-- **rails** (list[[RailSpec](#class-openjiuwenagent_teamsschemarailspec)], optional): Guardrail configuration list. Default: `None`.
-- **skills** (list[str], optional): Skill list. Default: `None`.
+## class TeamModelConfig
+
+Model configuration for a team role.
+
+* **model_client_config**(ModelClientConfig): Model client config.
+* **model_request_config**(ModelRequestConfig, optional): Model request config. Default: `None`.

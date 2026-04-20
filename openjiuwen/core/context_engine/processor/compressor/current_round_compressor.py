@@ -807,9 +807,8 @@ class CurrentRoundCompressor(ContextProcessor):
         updated = False
         start_idx = last_user_idx + 1
         if end_idx >= start_idx:
-            if isinstance(context_messages[end_idx], AssistantMessage) and context_messages[end_idx].tool_calls:
-                end_idx -= 1
-        if end_idx >= start_idx:
+            end_idx = self._protect_tool_call_boundary(context_messages, start_idx, end_idx)
+        if end_idx > start_idx:
             messages_to_compress = context_messages[start_idx:end_idx + 1]
             compressed_msg = await self.compress(
                 messages_to_compress, context, context_messages, end_idx, current_query_idx=last_user_idx
@@ -832,6 +831,55 @@ class CurrentRoundCompressor(ContextProcessor):
                 )
                 updated = True
         return context_messages if updated else None
+
+    @staticmethod
+    def _protect_tool_call_boundary(
+            messages: List[BaseMessage],
+            start_idx: int,
+            end_idx: int,
+    ) -> int:
+        """
+        Avoid splitting assistant tool calls from their tool results.
+
+        Compression replaces the selected span with a memory block. If the span
+        contains an AssistantMessage with tool_calls but any matching ToolMessage
+        is kept outside the span, the next model request would contain orphan
+        tool results. In that case, keep the whole tool-call exchange raw by
+        ending compression before the assistant message.
+        """
+        if end_idx < start_idx:
+            return end_idx
+
+        protected_end_idx = end_idx
+        tail_tool_ids = {
+            getattr(message, "tool_call_id", None)
+            for message in messages[end_idx + 1:]
+            if isinstance(message, ToolMessage) and getattr(message, "tool_call_id", None)
+        }
+        if not tail_tool_ids:
+            if isinstance(messages[end_idx], AssistantMessage) and messages[end_idx].tool_calls:
+                return end_idx - 1
+            return end_idx
+
+        for idx in range(start_idx, end_idx + 1):
+            message = messages[idx]
+            if not isinstance(message, AssistantMessage) or not message.tool_calls:
+                continue
+            tool_call_ids = {
+                getattr(tool_call, "id", None)
+                for tool_call in message.tool_calls
+                if getattr(tool_call, "id", None)
+            }
+            if tool_call_ids & tail_tool_ids:
+                protected_end_idx = min(protected_end_idx, idx - 1)
+
+        if (
+                protected_end_idx == end_idx
+                and isinstance(messages[end_idx], AssistantMessage)
+                and messages[end_idx].tool_calls
+        ):
+            protected_end_idx = end_idx - 1
+        return protected_end_idx
 
     async def compress(
             self,

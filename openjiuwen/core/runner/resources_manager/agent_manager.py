@@ -3,13 +3,23 @@
 from typing import Callable, Optional, Union, TYPE_CHECKING
 
 from openjiuwen.core.runner.resources_manager.base import AgentProvider
-from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
 from openjiuwen.core.runner.drunner.server_adapter.agent_adapter import AgentAdapter
 from openjiuwen.core.runner.runner_config import get_runner_config
 from openjiuwen.core.runner.resources_manager.abstract_manager import AbstractManager
 
 if TYPE_CHECKING:
+    from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
     from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent
+
+
+def _is_remote_agent(agent) -> bool:
+    try:
+        from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
+    except ModuleNotFoundError as exc:
+        if exc.name != "a2a":
+            raise
+        return False
+    return isinstance(agent, RemoteAgent)
 
 
 class AgentMgr(AbstractManager['BaseAgent']):
@@ -17,11 +27,11 @@ class AgentMgr(AbstractManager['BaseAgent']):
 
     def __init__(self):
         super().__init__()
-        self._remote_agents: dict[str, "AgentAdapter" | RemoteAgent] = {}
+        self._remote_agents: dict[str, "AgentAdapter" | "RemoteAgent"] = {}
 
-    def add_agent(self, agent_id: str, agent: Union[AgentProvider, RemoteAgent]) -> None:
+    def add_agent(self, agent_id: str, agent: Union[AgentProvider, "RemoteAgent"]) -> None:
         if get_runner_config().distributed_mode:
-            if not isinstance(agent, RemoteAgent):
+            if not _is_remote_agent(agent):
                 from openjiuwen.core.runner.drunner.server_adapter.agent_adapter import AgentAdapter
                 mq_agent_adapter = AgentAdapter(agent_id)
                 mq_agent_adapter.start()
@@ -42,7 +52,7 @@ class AgentMgr(AbstractManager['BaseAgent']):
         self._remote_agents.pop(agent_id, None)
         return self._unregister_resource_provider(agent_id)
 
-    async def get_agent(self, agent_id: str) -> Optional[Union['BaseAgent', RemoteAgent]]:
+    async def get_agent(self, agent_id: str) -> Optional[Union['BaseAgent', "RemoteAgent"]]:
         agent = self._remote_agents.get(agent_id, None)
         if not agent:
             agent = await self._get_resource(agent_id)

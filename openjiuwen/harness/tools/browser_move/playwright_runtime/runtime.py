@@ -6,31 +6,48 @@
 
 from __future__ import annotations
 
-import contextvars
-import uuid
+import json
+import re
 from typing import Any, Dict, Optional
 
-from openjiuwen.core.foundation.tool import McpServerConfig, tool
+from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail
 
 from ..controllers import ActionController, BaseController
-from .agents import build_main_agent
+from .browser_tools import ensure_browser_runtime_client_patch
 from .config import BrowserRunGuardrails
-from .service import BrowserService
+from .service import BrowserService, BrowserTaskProgressState, MAX_ITERATION_MESSAGE
 
-_ctx_parent_session_id: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "playwright_runtime_parent_session_id",
-    default="",
+_BROWSER_PROGRESS_STATE_KEY = "__browser_subagent_progress_state__"
+_BROWSER_PROGRESS_TASK_KEY = "__browser_subagent_last_task__"
+_BROWSER_PROGRESS_SECTION_NAME = "browser_progress_continuation"
+_BROWSER_PROGRESS_FORMAT_SECTION_NAME = "browser_progress_format"
+_BROWSER_PROGRESS_TAG_RE = re.compile(
+    r"<browser_progress>\s*(\{.*?\})\s*</browser_progress>",
+    re.DOTALL | re.IGNORECASE,
 )
-_ctx_parent_request_id: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "playwright_runtime_parent_request_id",
-    default="",
-)
+_BROWSER_PROGRESS_FORMAT_GUIDANCE = {
+    "en": (
+        "When you stop and answer without another browser tool call, append exactly one "
+        "<browser_progress>{...}</browser_progress> JSON block. "
+        "Use status=completed only when the requested browser outcome is evidenced. "
+        "Include compact fields: status, completed_steps, remaining_steps, next_step, "
+        "completion_evidence, missing_requirements."
+    ),
+    "cn": (
+        "当您暂停并回答问题，且未调用其他浏览器工具时，请在后面接上且仅接一个 "
+        "<browser_progress>{...}</browser_progress> JSON 块。"
+        "仅在请求的浏览器结果得到验证时才使用 status=completed。 "
+        "包含以下紧凑字段：status、completed_steps、remaining_steps、next_step、"
+        "completion_evidence、missing_requirements。"
+    ),
+}
 
 
 class BrowserAgentRuntime:
-    """Runtime that wires main agent + browser backend tool contract."""
+    """Runtime kernel for browser lifecycle and deterministic helper actions."""
 
     def __init__(
         self,
@@ -41,6 +58,7 @@ class BrowserAgentRuntime:
         mcp_cfg: McpServerConfig,
         guardrails: BrowserRunGuardrails,
     ) -> None:
+        ensure_browser_runtime_client_patch()
         self._service = BrowserService(
             provider=provider,
             api_key=api_key,
@@ -49,28 +67,14 @@ class BrowserAgentRuntime:
             mcp_cfg=mcp_cfg,
             guardrails=guardrails,
         )
-        self._browser_tool = None
         self._browser_custom_action_tool = None
         self._browser_list_actions_tool = None
-        self._main_agent = None
         self._controller: BaseController = ActionController()
         self._code_executor = None
 
     @property
     def service(self) -> BrowserService:
         return self._service
-
-    @property
-    def main_agent(self) -> Any:
-        return self._main_agent
-
-    @main_agent.setter
-    def main_agent(self, value: Any) -> None:
-        self._main_agent = value
-
-    @property
-    def browser_tool(self) -> Any:
-        return self._browser_tool
 
     @property
     def browser_custom_action_tool(self) -> Any:
@@ -90,7 +94,7 @@ class BrowserAgentRuntime:
 
     @staticmethod
     def _register_runtime_tool(tool_obj: Any, *, tool_name: str) -> None:
-        add_result = Runner.resource_mgr.add_tool(tool_obj, tag="agent.playwright.main_runtime")
+        add_result = Runner.resource_mgr.add_tool(tool_obj, tag="agent.playwright.runtime")
         if add_result is None or getattr(add_result, "is_ok", lambda: False)():
             return
         error_value = getattr(add_result, "value", add_result)
@@ -116,142 +120,48 @@ class BrowserAgentRuntime:
             "error": None,
         }
 
-    async def ensure_started(self) -> None:
-        await self._service.ensure_started()
-        if self._browser_tool is not None:
+    async def ensure_runtime_ready(self) -> None:
+        await self._service.ensure_runtime_ready()
+        if self._code_executor is not None:
             return
-        # Build a direct code executor — calls browser_run_code on the Playwright MCP
-        # client without going through an LLM worker. Look up the client dynamically so
-        # we survive service restarts that recreate the underlying subprocess.
-        _playwright_server_id = (self._service.mcp_cfg.server_id or "").strip() or getattr(
+        playwright_server_id = (self._service.mcp_cfg.server_id or "").strip() or getattr(
             self._service.mcp_cfg, "server_name", ""
         )
 
         async def _direct_code_executor(js_code: str):
             from playwright_runtime.browser_tools import get_registered_client
-            client = get_registered_client(_playwright_server_id)
+
+            client = get_registered_client(playwright_server_id)
             if client is None:
                 raise RuntimeError(
-                    f"Playwright MCP client not found (server_id={_playwright_server_id!r})"
+                    f"Playwright MCP client not found (server_id={playwright_server_id!r})"
                 )
             return await client.call_tool("browser_run_code", {"code": js_code})
 
         self._code_executor = _direct_code_executor
         self._controller.bind_code_executor(_direct_code_executor)
         self._controller.register_builtin_actions()
-        action_details = self._controller.describe_actions()
-        action_summary_lines: list[str] = []
-        for action_name in sorted(action_details.keys()):
-            spec = action_details.get(action_name, {})
-            summary = str(spec.get("summary", "")).strip() or "No summary."
-            when_to_use = str(spec.get("when_to_use", "")).strip()
-            if when_to_use:
-                action_summary_lines.append(f"- {action_name}: {summary} Use when: {when_to_use}")
-            else:
-                action_summary_lines.append(f"- {action_name}: {summary}")
-        action_summary_text = "\n".join(action_summary_lines) if action_summary_lines else "- (none)"
 
-        @tool(
-            name="browser_run_task",
-            description=(
-                "Run a browser task in a sticky logical session. "
-                "Prefer one comprehensive task per request instead of many tiny retries. "
-                "Use a long timeout and do not pass timeout_s below the configured default; "
-                "omit timeout_s to use the default long timeout. "
-                "Returns JSON with ok/session_id/final/page/screenshot/error/attempt/failure_summary."
-            ),
+    async def ensure_started(self) -> None:
+        await self.ensure_runtime_ready()
+        await self._service.ensure_started()
+        if self._browser_custom_action_tool is not None:
+            return
+        from .runtime_tools import BrowserCustomActionTool, BrowserListActionsTool
+
+        self._browser_custom_action_tool = BrowserCustomActionTool(self, language="en")
+        self._browser_list_actions_tool = BrowserListActionsTool(self, language="en")
+        self._register_runtime_tool(
+            self._browser_custom_action_tool,
+            tool_name="browser_custom_action",
         )
-        async def browser_run_task(
-            task: str,
-            session_id: str = "",
-            request_id: str = "",
-            timeout_s: int = 180,
-        ) -> Dict[str, Any]:
-            effective_session_id = (session_id or "").strip() or _ctx_parent_session_id.get()
-            effective_request_id = (request_id or "").strip() or _ctx_parent_request_id.get()
-            result = await self._service.run_task(
-                task=task,
-                session_id=effective_session_id,
-                request_id=effective_request_id,
-                timeout_s=timeout_s,
-            )
-
-            # Strip base64 screenshot from LLM context — the data URL can be 100K+
-            # tokens and blows up the context window. The frontend reads the full
-            # result separately; the main agent only needs ok/final/page/error.
-            screenshot = result.get("screenshot")
-            if isinstance(screenshot, str) and screenshot.startswith("data:"):
-                result = {**result, "screenshot": "[screenshot saved]"}
-            return result
-
-        @tool(
-            name="browser_custom_action",
-            description=(
-                "Run a registered custom browser action by name. "
-                "Use this for higher-level actions such as drag-and-drop helpers. "
-                "For browser_get_element_coordinates provide at least element_source (element_target optional); "
-                "for browser_drag_and_drop provide element_source + element_target. "
-                "Or use (coord_source_x + coord_source_y + coord_target_x + coord_target_y). "
-                "Aliases source/target and source_x/source_y/target_x/target_y are accepted.\n"
-                "Current registered actions:\n"
-                f"{action_summary_text}\n"
-                "If uncertain about params, call browser_list_custom_actions first and use its details."
-            ),
-        )
-        async def browser_custom_action(
-            action: str,
-            session_id: str = "",
-            request_id: str = "",
-            params: Optional[Dict[str, Any]] = None,
-        ) -> Dict[str, Any]:
-            effective_session_id = (session_id or "").strip() or _ctx_parent_session_id.get()
-            effective_request_id = (request_id or "").strip() or _ctx_parent_request_id.get()
-            self._controller.bind_runtime(self)
-            self._controller.bind_code_executor(_direct_code_executor)
-            return await self._controller.run_action(
-                action=action,
-                session_id=effective_session_id,
-                request_id=effective_request_id,
-                **(params or {}),
-            )
-
-        @tool(
-            name="browser_list_custom_actions",
-            description=(
-                "List available custom actions and detailed parameter guidance "
-                "for browser_custom_action."
-            ),
-        )
-        async def browser_list_custom_actions() -> Dict[str, Any]:
-            return {
-                "ok": True,
-                "actions": self._controller.list_actions(),
-                "details": self._controller.describe_actions(),
-            }
-
-        self._browser_tool = browser_run_task
-        self._browser_custom_action_tool = browser_custom_action
-        self._browser_list_actions_tool = browser_list_custom_actions
-        self._main_agent = build_main_agent(
-            provider=self._service.provider,
-            api_key=self._service.api_key,
-            api_base=self._service.api_base,
-            model_name=self._service.model_name,
-            browser_tool_card=self._browser_tool.card,
-            custom_action_tool_card=self._browser_custom_action_tool.card,
-            list_actions_tool_card=self._browser_list_actions_tool.card,
-            artifacts_subdir=self._service.artifacts_subdir,
-        )
-        self._register_runtime_tool(self._browser_tool, tool_name="browser_run_task")
-        self._register_runtime_tool(self._browser_custom_action_tool, tool_name="browser_custom_action")
         self._register_runtime_tool(
             self._browser_list_actions_tool,
             tool_name="browser_list_custom_actions",
         )
 
-        # Give the worker agent direct access to controller actions so it can call
-        # browser_custom_action (e.g. drag-and-drop, coordinates) within its own
-        # iteration rather than requiring a round-trip through the main agent.
+        # Legacy browser_run_task compatibility: let the worker agent call
+        # deterministic controller helpers without introducing another planner.
         if self._service.browser_agent is not None:
             self._service.browser_agent.ability_manager.add(
                 self._browser_custom_action_tool.card
@@ -275,43 +185,40 @@ class BrowserAgentRuntime:
             timeout_s=timeout_s,
         )
 
-    async def handle_request(
+    async def run_custom_action(
         self,
         *,
-        query: str,
+        action: str,
         session_id: str = "",
         request_id: str = "",
+        params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        await self.ensure_started()
-        if self._main_agent is None:
-            raise RuntimeError("BrowserAgentRuntime main_agent is not initialized")
+        await self.ensure_runtime_ready()
+        self._controller.bind_runtime(self)
+        if self._code_executor is not None:
+            self._controller.bind_code_executor(self._code_executor)
+        return await self._controller.run_action(
+            action=action,
+            session_id=session_id,
+            request_id=request_id,
+            **(params or {}),
+        )
 
-        effective_session_id = (session_id or "").strip() or f"browser-{uuid.uuid4().hex}"
-        effective_request_id = (request_id or "").strip() or uuid.uuid4().hex
-        token_session = _ctx_parent_session_id.set(effective_session_id)
-        token_request = _ctx_parent_request_id.set(effective_request_id)
-        try:
-            result = await Runner.run_agent(
-                self._main_agent,
-                {
-                    "query": query,
-                    "conversation_id": effective_session_id,
-                    "request_id": effective_request_id,
-                },
-            )
-        finally:
-            _ctx_parent_session_id.reset(token_session)
-            _ctx_parent_request_id.reset(token_request)
-
-        output = result.get("output") if isinstance(result, dict) else result
-        final = str(output or "")
-        is_error = isinstance(result, dict) and str(result.get("result_type", "")).lower() == "error"
+    async def list_actions(self) -> Dict[str, Any]:
         return {
-            "ok": not is_error,
-            "session_id": effective_session_id,
-            "request_id": effective_request_id,
-            "final": final,
-            "error": final if is_error else None,
+            "ok": True,
+            "actions": self._controller.list_actions(),
+            "details": self._controller.describe_actions(),
+        }
+
+    async def runtime_health(self) -> Dict[str, Any]:
+        return {
+            "ok": bool(self._service.connection_healthy),
+            "started": bool(self._service.started),
+            "last_heartbeat_ok": self._service.last_heartbeat_ok,
+            "provider": self._service.provider,
+            "api_base": self._service.api_base,
+            "model_name": self._service.model_name,
         }
 
     async def shutdown(self) -> None:
@@ -319,15 +226,272 @@ class BrowserAgentRuntime:
 
 
 class BrowserRuntimeRail(AgentRail):
-    """Rail that triggers BrowserAgentRuntime.ensure_started() before the first invoke.
-
-    Attach this to the browser_move sub-agent so tools are registered before
-    the agent's ReActAgent tries to call them.
-    """
+    """Rail that makes direct browser sessions resumable and completion-aware."""
 
     def __init__(self, runtime: BrowserAgentRuntime) -> None:
         super().__init__()
         self._runtime = runtime
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
-        await self._runtime.ensure_started()
+        await self._runtime.ensure_runtime_ready()
+        self._ensure_browser_mcp_ability(ctx)
+        session = getattr(ctx, "session", None)
+        if session is None:
+            return
+        self._hydrate_service_progress_from_session(session)
+        query = getattr(getattr(ctx, "inputs", None), "query", None)
+        task_text = str(query or "").strip()
+        if task_text:
+            session.update_state({_BROWSER_PROGRESS_TASK_KEY: task_text})
+
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        session = getattr(ctx, "session", None)
+        builder = getattr(ctx.agent, "system_prompt_builder", None)
+        if session is None or builder is None:
+            return
+
+        builder.add_section(
+            PromptSection(
+                name=_BROWSER_PROGRESS_FORMAT_SECTION_NAME,
+                content=_BROWSER_PROGRESS_FORMAT_GUIDANCE,
+                priority=84,
+            )
+        )
+
+        progress_state = self._load_progress_state(session)
+        if progress_state.is_empty():
+            builder.remove_section(_BROWSER_PROGRESS_SECTION_NAME)
+            return
+
+        progress_context = BrowserService.build_progress_context(progress_state)
+        if not progress_context:
+            builder.remove_section(_BROWSER_PROGRESS_SECTION_NAME)
+            return
+
+        continuation_text_en = (
+            f"{progress_context}\n"
+            "Use this stored browser progress as continuation context. "
+            "Avoid repeating completed actions unless recovery requires it."
+        )
+        continuation_text_cn = (
+            f"{progress_context}\n"
+            "将此存储的浏览器进度用作延续上下文。"
+            "除非恢复操作有此需求，否则请避免重复已完成的操作。"
+        )
+        builder.add_section(
+            PromptSection(
+                name=_BROWSER_PROGRESS_SECTION_NAME,
+                content={
+                    "en": continuation_text_en,
+                    "cn": continuation_text_cn,
+                },
+                priority=83,
+            )
+        )
+
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        session = getattr(ctx, "session", None)
+        if session is None:
+            return
+        tool_name = str(getattr(getattr(ctx, "inputs", None), "tool_name", "") or "").strip()
+        if not self._is_browser_progress_tool(tool_name):
+            return
+        tool_result = self._normalize_tool_result(
+            getattr(getattr(ctx, "inputs", None), "tool_result", None)
+        )
+        session_id = session.get_session_id()
+        self._runtime.service.record_tool_progress(
+            session_id=session_id,
+            request_id="",
+            tool_name=tool_name,
+            tool_result=tool_result,
+        )
+        self._persist_service_progress_to_session(session)
+
+    async def after_invoke(self, ctx: AgentCallbackContext) -> None:
+        session = getattr(ctx, "session", None)
+        result = getattr(getattr(ctx, "inputs", None), "result", None)
+        if session is None or not isinstance(result, dict):
+            return
+
+        session_id = session.get_session_id()
+        self._hydrate_service_progress_from_session(session)
+        output_text = str(result.get("output") or "")
+        clean_output, progress_payload = self._extract_progress_payload(output_text)
+        if clean_output != output_text:
+            result["output"] = clean_output
+
+        if progress_payload is not None:
+            parsed_progress = self._build_progress_result(progress_payload, clean_output)
+            self._runtime.service.record_worker_progress(
+                session_id=session_id,
+                request_id="",
+                parsed=parsed_progress,
+            )
+            progress_state = self._runtime.service.get_progress_state(session_id)
+            exported = self._runtime.service.export_progress_state(session_id)
+            if self._runtime.service.should_treat_as_completed(parsed_progress):
+                result["result_type"] = "answer"
+                result["progress_state"] = exported
+                self._clear_progress_state(session)
+                return
+
+            failure_summary = self._runtime.service.build_failure_summary(
+                task=self._load_task_text(session),
+                error=str(parsed_progress.get("error") or "browser_task_incomplete"),
+                page_url=progress_state.last_page_url if progress_state is not None else "",
+                page_title=progress_state.last_page_title if progress_state is not None else "",
+                final=clean_output,
+                screenshot=progress_state.last_screenshot if progress_state is not None else None,
+                attempt=1,
+                progress_state=progress_state,
+            )
+            result["result_type"] = "error"
+            result["failure_summary"] = failure_summary
+            result["progress_state"] = exported
+            result["output"] = (
+                failure_summary if not clean_output else f"{clean_output}\n\n{failure_summary}"
+            )
+            self._persist_service_progress_to_session(session)
+            return
+
+        if self._is_max_iteration_result(result):
+            progress_state = self._runtime.service.get_progress_state(session_id)
+            failure_summary = self._runtime.service.build_failure_summary(
+                task=self._load_task_text(session),
+                error="max_iterations_reached",
+                page_url=progress_state.last_page_url if progress_state is not None else "",
+                page_title=progress_state.last_page_title if progress_state is not None else "",
+                final=clean_output or output_text,
+                screenshot=progress_state.last_screenshot if progress_state is not None else None,
+                attempt=1,
+                progress_state=progress_state,
+            )
+            result["failure_summary"] = failure_summary
+            result["progress_state"] = self._runtime.service.export_progress_state(session_id)
+            result["output"] = failure_summary
+            self._persist_service_progress_to_session(session)
+            return
+
+        if str(result.get("result_type", "")).lower() == "answer":
+            self._clear_progress_state(session)
+            return
+
+        exported = self._runtime.service.export_progress_state(session_id)
+        if exported is not None:
+            result["progress_state"] = exported
+            self._persist_service_progress_to_session(session)
+
+    @staticmethod
+    def _normalize_tool_result(tool_result: Any) -> Any:
+        if hasattr(tool_result, "data") and hasattr(tool_result, "success"):
+            data = getattr(tool_result, "data", None)
+            if data is not None:
+                return data
+            error = str(getattr(tool_result, "error", "") or "").strip()
+            if error:
+                return {"ok": False, "error": error}
+        return tool_result
+
+    @staticmethod
+    def _is_browser_progress_tool(tool_name: str) -> bool:
+        name = (tool_name or "").strip().lower()
+        if not name:
+            return False
+        if name in {
+            "browser_cancel_run",
+            "browser_clear_cancel",
+            "browser_list_custom_actions",
+            "browser_runtime_health",
+        }:
+            return False
+        return name.startswith("browser_") or ".browser_" in name
+
+    @staticmethod
+    def _extract_progress_payload(output_text: str) -> tuple[str, Optional[Dict[str, Any]]]:
+        text = str(output_text or "")
+        match = _BROWSER_PROGRESS_TAG_RE.search(text)
+        if match is None:
+            return text, None
+        payload_text = match.group(1).strip()
+        try:
+            payload = json.loads(payload_text)
+        except json.JSONDecodeError:
+            return text, None
+        cleaned = _BROWSER_PROGRESS_TAG_RE.sub("", text, count=1).strip()
+        return cleaned, payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _build_progress_result(progress_payload: Dict[str, Any], clean_output: str) -> Dict[str, Any]:
+        status = str(progress_payload.get("status") or "").strip().lower() or "partial"
+        return {
+            "ok": status == "completed",
+            "status": status,
+            "progress": progress_payload,
+            "final": clean_output,
+            "error": None if status == "completed" else "browser_task_incomplete",
+        }
+
+    @staticmethod
+    def _is_max_iteration_result(result: Dict[str, Any]) -> bool:
+        output = str(result.get("output") or "").strip()
+        result_type = str(result.get("result_type") or "").strip().lower()
+        return result_type == "error" and MAX_ITERATION_MESSAGE.lower() in output.lower()
+
+    @staticmethod
+    def _load_task_text(session: Any) -> str:
+        if session is None:
+            return ""
+        return str(session.get_state(_BROWSER_PROGRESS_TASK_KEY) or "").strip()
+
+    @staticmethod
+    def _load_progress_state(session: Any) -> BrowserTaskProgressState:
+        if session is None:
+            return BrowserTaskProgressState()
+        return BrowserTaskProgressState.from_dict(session.get_state(_BROWSER_PROGRESS_STATE_KEY))
+
+    def _hydrate_service_progress_from_session(self, session: Any) -> BrowserTaskProgressState:
+        session_id = session.get_session_id()
+        progress_state = self._load_progress_state(session)
+        if progress_state.is_empty():
+            self._runtime.service.clear_progress_state(session_id)
+            return progress_state
+        self._runtime.service.set_progress_state(session_id, progress_state)
+        return progress_state
+
+    def _persist_service_progress_to_session(self, session: Any) -> None:
+        if session is None:
+            return
+        session_id = session.get_session_id()
+        exported = self._runtime.service.export_progress_state(session_id)
+        progress_state = self._runtime.service.get_progress_state(session_id)
+        session.update_state(
+            {
+                _BROWSER_PROGRESS_STATE_KEY: (
+                    exported
+                    if isinstance(exported, dict) and exported
+                    else progress_state.to_dict()
+                    if progress_state is not None and not progress_state.is_empty()
+                    else {}
+                )
+            }
+        )
+
+    def _clear_progress_state(self, session: Any) -> None:
+        if session is None:
+            return
+        session_id = session.get_session_id()
+        self._runtime.service.clear_progress_state(session_id)
+        session.update_state(
+            {
+                _BROWSER_PROGRESS_STATE_KEY: {},
+                _BROWSER_PROGRESS_TASK_KEY: "",
+            }
+        )
+
+    def _ensure_browser_mcp_ability(self, ctx: AgentCallbackContext) -> None:
+        agent = getattr(ctx, "agent", None)
+        ability_manager = getattr(agent, "ability_manager", None)
+        if ability_manager is None:
+            return
+        ability_manager.add(self._runtime.service.mcp_cfg)

@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any, List, Optional
 from os import PathLike
@@ -24,6 +23,7 @@ from openjiuwen.harness.rails import (
     SubagentRail,
     TaskPlanningRail,
 )
+from openjiuwen.harness.schema.agent_mode import AgentMode
 from openjiuwen.harness.schema.config import (
     AudioModelConfig,
     DeepAgentConfig,
@@ -33,6 +33,12 @@ from openjiuwen.harness.schema.config import (
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.prompts.sections.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
+from openjiuwen.harness.tools.web_tools import is_free_search_enabled
+
+
+def _is_disabled_free_search_tool(tool: Tool | ToolCard) -> bool:
+    card = tool.card if isinstance(tool, Tool) else tool
+    return card.name == "free_search" and not is_free_search_enabled()
 
 
 def _normalize_tools(
@@ -43,6 +49,8 @@ def _normalize_tools(
     tool_instances: List[Tool] = []
 
     for tool in tools or []:
+        if _is_disabled_free_search_tool(tool):
+            continue
         if isinstance(tool, Tool):
             tool_instances.append(tool)
             normalized_cards.append(tool.card)
@@ -148,6 +156,7 @@ def create_deep_agent(
     audio_model_config: Optional[AudioModelConfig] = None,
     enable_task_planning: bool = False,
     restrict_to_work_dir: bool = True,
+    default_mode: AgentMode = AgentMode.AUTO,
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create and configure a DeepAgent instance.
@@ -186,7 +195,8 @@ def create_deep_agent(
             tools registered by DeepAgent rails.
         enable_task_planning: Enable task_planning_rail.
         restrict_to_work_dir: If True, restrict file access to workspace directory.
-            If False, allow access to any path including system root
+            If False, allow access to any path including system root.
+        default_mode: Initial agent mode (``AgentMode.AUTO`` or ``AgentMode.PLAN``).
         **config_kwargs: Extra fields forwarded to
             DeepAgentConfig.
 
@@ -223,19 +233,12 @@ def create_deep_agent(
     else:
         workspace_obj = workspace
 
-    # Pre-calculate workspace root path for per-agent isolation
-    if workspace_obj is not None:
-        agent_id = card.id or "default"
-        base_path = Path(workspace_obj.root_path)
-        new_base = f"{agent_id}_workspace"
-        workspace_obj.root_path = str(base_path / new_base)
-
     if not isinstance(sys_operation, SysOperation):
         sysop_card = SysOperationCard(
                 id=f"{card.name}_{card.id}",
                 mode=OperationMode.LOCAL,
                 work_config=LocalWorkConfig(
-                    work_dir=workspace_obj.root_path if restrict_to_work_dir else Path.cwd().anchor
+                    restrict_to_sandbox=restrict_to_work_dir,
                 ),
             )
         add_result = Runner.resource_mgr.add_sys_operation(sysop_card)
@@ -264,6 +267,7 @@ def create_deep_agent(
         audio_model_config=audio_model_config,
         enable_async_subagent=enable_async_subagent,
         add_general_purpose_agent=add_general_purpose_agent,
+        default_mode=default_mode,
     )
 
     # Forward extra kwargs to config fields
@@ -297,9 +301,22 @@ def create_deep_agent(
         return any(issubclass(t, rail_cls) for t in user_provided_rail_types)
 
     def _make_skill_rail() -> SkillUseRail:
+        skills_dirs: list[str] = []
         skills_base = workspace_obj.get_node_path("skills")
-        skills_dir = [str(skills_base / s) for s in (skills or [])] if skills_base else []
-        return SkillUseRail(skills_dir=skills_dir, skill_mode="all")
+        if skills_base:
+            skills_dirs.append(str(skills_base))
+        # Aggregate skills from each team workspace mounted under
+        # ``.team/{team_id}``; the team mount is a symlink to the shared
+        # workspace root, so the team-shared skills live at
+        # ``{target}/skills``. Paths are added even when they do not yet
+        # exist — SkillUseRail skips missing directories at refresh time.
+        for _team_id, target_path in workspace_obj.list_team_links():
+            skills_dirs.append(str(Path(target_path) / "skills"))
+        return SkillUseRail(
+            skills_dir=skills_dirs,
+            skill_mode="all",
+            enabled_skills=skills,
+        )
 
     default_rails = [
         (SecurityRail, True, lambda: SecurityRail()),

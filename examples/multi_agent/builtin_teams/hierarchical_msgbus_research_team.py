@@ -36,15 +36,15 @@ from openjiuwen.core.session.session import Session
 # ============================================================================
 
 model_client_config = ModelClientConfig(
-    client_id="jk0009",
-    client_provider="OpenAI",
-    api_key="jntqX_0W58WyYNiCBhWuaEswGOMZOzAfa8f-dnQ2svyqb6zQy5NLTgyuhwpZdS-Sn3zFlJvMYjEvKesDcnx1Sw",
-    api_base="https://api.modelarts-maas.com/v2",
+    client_id="your client id",
+    client_provider="your client provider",
+    api_key="your api key",
+    api_base="your api base",
     verify_ssl=False
 )
 
 model_request_config = ModelRequestConfig(
-    model="z-ai/glm-4.7",
+    model="your model",
     temperature=0.7,
 )
 

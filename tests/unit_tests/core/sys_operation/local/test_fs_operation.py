@@ -18,8 +18,10 @@ from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, Local
 
 @pytest.fixture
 def work_dir():
-    # Create a temporary directory for tests
-    temp_dir = tempfile.mkdtemp()
+    # Create a temporary directory for tests.
+    # realpath resolves macOS /var -> /private/var symlink so the path
+    # matches what SysOperation path security checks resolve to.
+    temp_dir = os.path.realpath(tempfile.mkdtemp())
     yield temp_dir
     # Cleanup after tests
     shutil.rmtree(temp_dir)
@@ -27,10 +29,16 @@ def work_dir():
 
 @pytest_asyncio.fixture(name="sys_op")
 async def sys_op_fixture(work_dir):
+    from openjiuwen.core.sys_operation.cwd import init_cwd
+    init_cwd(work_dir)
+
     await Runner.start()
     try:
         card_id = "test_fs_op"
-        card = SysOperationCard(id=card_id, mode=OperationMode.LOCAL, work_config=LocalWorkConfig(work_dir=work_dir))
+        card = SysOperationCard(
+            id=card_id, mode=OperationMode.LOCAL,
+            work_config=LocalWorkConfig(sandbox_root=[work_dir], restrict_to_sandbox=True),
+        )
         add_res = Runner.resource_mgr.add_sys_operation(card)
         assert add_res.is_ok()
         op = Runner.resource_mgr.get_sys_operation(card_id)

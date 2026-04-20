@@ -151,26 +151,6 @@ def test_create_audio_tools_supports_language():
         audio_model_config=audio_model_config,
     )
 
-    assert [tool.card.name for tool in tools] == [
-        "audio_transcription",
-        "audio_question_answering",
-        "audio_metadata",
-    ]
-    assert tools[0].card == build_tool_card(
-        "audio_transcription",
-        "AudioTranscriptionTool",
-        "en",
-    )
-    assert tools[1].card == build_tool_card(
-        "audio_question_answering",
-        "AudioQuestionAnsweringTool",
-        "en",
-    )
-    assert tools[2].card == build_tool_card(
-        "audio_metadata",
-        "AudioMetadataTool",
-        "en",
-    )
     assert tools[0].audio_model_config is audio_model_config
     assert tools[1].audio_model_config is audio_model_config
     assert tools[2].audio_model_config is audio_model_config

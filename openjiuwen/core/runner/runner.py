@@ -1,12 +1,16 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+import asyncio
+from contextlib import contextmanager
 from typing import (
     Any,
     AsyncIterator,
     Optional,
     Union,
 )
+
+import anyio
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -19,7 +23,6 @@ from openjiuwen.core.multi_agent import (
 from openjiuwen.core.runner.callback import AsyncCallbackFramework
 from openjiuwen.core.runner.drunner.dmessage_queue.dsubscription.reply_topic_subscription import ReplyTopicSubscription
 from openjiuwen.core.runner.drunner.dmessage_queue.message_queue_factory import MessageQueueFactory
-from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
 from openjiuwen.core.runner.message_queue_base import LocalMessageQueue
 from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMgr
 from openjiuwen.core.runner.runner_config import (
@@ -33,7 +36,6 @@ from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.agent_team import create_agent_team_session
 from openjiuwen.core.session.stream import BaseStreamMode
 from openjiuwen.core.runner.spawn import (
-    Message,
     MessageType,
     SpawnAgentConfig,
     SpawnConfig,
@@ -90,6 +92,10 @@ class _RunnerImpl:
         self.system_reply_sub: ReplyTopicSubscription | None = None
         self._distribute_message_queue = None
         self._callback_framework = AsyncCallbackFramework()
+        self._root_task_group = None
+        self._root_task_group_owner = None
+        self._root_task_group_ready = None
+        self._root_task_group_stop = None
 
     @property
     def resource_mgr(self) -> ResourceMgr:
@@ -110,6 +116,104 @@ class _RunnerImpl:
     def callback_framework(self) -> AsyncCallbackFramework:
         """Get the callback framework for asynchronous callbacks."""
         return self._callback_framework
+
+    @staticmethod
+    def _is_remote_agent(agent_instance: Any) -> bool:
+        try:
+            from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
+        except ModuleNotFoundError as exc:
+            if exc.name != "a2a":
+                raise
+            return False
+        return isinstance(agent_instance, RemoteAgent)
+
+    def get_root_task_group(self):
+        """Get the runner-owned root task group, if Runner has been started."""
+        return self._root_task_group
+
+    async def _root_task_group_owner_loop(
+        self,
+        ready: asyncio.Event,
+        stop: asyncio.Event,
+    ) -> None:
+        try:
+            async with anyio.create_task_group() as task_group:
+                self._root_task_group = task_group
+                ready.set()
+                await stop.wait()
+                task_group.cancel_scope.cancel()
+        finally:
+            self._root_task_group = None
+            ready.set()
+
+    async def _ensure_root_task_group(self) -> None:
+        if self._root_task_group is not None and self._root_task_group_owner is not None:
+            return
+        # Import the manager so lower layers can schedule via manager.create_task().
+        from openjiuwen.core.common.task_manager.manager import get_task_manager
+
+        get_task_manager()
+        self._root_task_group_ready = asyncio.Event()
+        self._root_task_group_stop = asyncio.Event()
+        self._root_task_group_owner = asyncio.create_task(
+            self._root_task_group_owner_loop(
+                self._root_task_group_ready,
+                self._root_task_group_stop,
+            )
+        )
+        await self._root_task_group_ready.wait()
+        if self._root_task_group is None and self._root_task_group_owner.done():
+            await self._root_task_group_owner
+
+    async def _close_root_task_group(self) -> None:
+        if self._root_task_group_owner is None:
+            return
+        from openjiuwen.core.common.task_manager.manager import get_task_manager
+
+        owner = self._root_task_group_owner
+        try:
+            await get_task_manager().cancel_all()
+            if self._root_task_group_stop is not None:
+                self._root_task_group_stop.set()
+            if self._root_task_group is not None:
+                self._root_task_group.cancel_scope.cancel()
+            with anyio.move_on_after(5, shield=True):
+                await owner
+            if not owner.done():
+                owner.cancel()
+                try:
+                    with anyio.move_on_after(1, shield=True):
+                        await owner
+                except asyncio.CancelledError:
+                    pass
+        except Exception as e:
+            logger.warning(
+                "Failed to close runner root task group",
+                event_type=LogEventType.RUNNER_STOP,
+                runner_id=self._runner_id,
+                exception=e,
+            )
+        finally:
+            self._root_task_group = None
+            self._root_task_group_owner = None
+            self._root_task_group_ready = None
+            self._root_task_group_stop = None
+
+    @contextmanager
+    def _root_task_group_scope(self):
+        if self._root_task_group is None:
+            yield
+            return
+        from openjiuwen.core.common.task_manager.context import get_task_group, reset_task_group, set_task_group
+
+        if get_task_group() is not None:
+            yield
+            return
+        token = set_task_group(self._root_task_group)
+        try:
+            yield
+        finally:
+            reset_task_group(token)
 
     def set_config(self, config: RunnerConfig):
         """Set the runner configuration with provided config object.
@@ -132,67 +236,75 @@ class _RunnerImpl:
         """Start the runner and its associated components, such as message queue."""
         result = True
         logger.info("Begin to start runner", event_type=LogEventType.RUNNER_START, runner_id=self._runner_id)
+        await self._ensure_root_task_group()
 
-        # Initialize checkpointer if configured
-        checkpointer_config = get_runner_config().checkpointer_config
-        if checkpointer_config is not None:
-            logger.info(f"Begin to initializing checkpointer with type: {checkpointer_config.type}",
-                        event_type=LogEventType.RUNNER_START, runner_id=self._runner_id)
-            try:
-                # Lazy import checkpointer providers based on type
-                if checkpointer_config.type == "redis":
+        try:
+            with self._root_task_group_scope():
+                # Initialize checkpointer if configured
+                checkpointer_config = get_runner_config().checkpointer_config
+                if checkpointer_config is not None:
+                    logger.info(f"Begin to initializing checkpointer with type: {checkpointer_config.type}",
+                                event_type=LogEventType.RUNNER_START, runner_id=self._runner_id)
                     try:
-                        # Import Redis checkpointer provider to ensure it's registered
-                        from openjiuwen.extensions.checkpointer.redis import checkpointer as _  # noqa: F401
-                    except ImportError as e:
-                        logger.error(f"Redis checkpointer not available. "
-                                     f"Please install redis dependencies",
+                        # Lazy import checkpointer providers based on type
+                        if checkpointer_config.type == "redis":
+                            try:
+                                # Import Redis checkpointer provider to ensure it's registered
+                                from openjiuwen.extensions.checkpointer.redis import checkpointer as _  # noqa: F401
+                            except ImportError as e:
+                                logger.error("Redis checkpointer not available. "
+                                             "Please install redis dependencies",
+                                             event_type=LogEventType.RUNNER_START,
+                                             runner_id=self._runner_id, exception=e)
+                                raise
+
+                        checkpointer = await CheckpointerFactory.create(checkpointer_config)
+                        CheckpointerFactory.set_default_checkpointer(checkpointer)
+                        logger.info(f"Succeed to initializing checkpointer with type: {checkpointer_config.type}",
+                                    event_type=LogEventType.RUNNER_START, runner_id=self._runner_id)
+                    except Exception as e:
+                        logger.error(f"Failed to initializing checkpointer with type: {checkpointer_config.type}",
+                                     event_type=LogEventType.RUNNER_START, runner_id=self._runner_id, exception=e)
+                        logger.error("Failed to start runner",
                                      event_type=LogEventType.RUNNER_START, runner_id=self._runner_id, exception=e)
                         raise
 
-                checkpointer = await CheckpointerFactory.create(checkpointer_config)
-                CheckpointerFactory.set_default_checkpointer(checkpointer)
-                logger.info(f"Succeed to initializing checkpointer with type: {checkpointer_config.type}",
-                            event_type=LogEventType.RUNNER_START, runner_id=self._runner_id)
-            except Exception as e:
-                logger.error(f"Failed to initializing checkpointer with type: {checkpointer_config.type}",
-                             event_type=LogEventType.RUNNER_START, runner_id=self._runner_id, exception=e)
-                logger.error(f"Failed to start runner",
-                             event_type=LogEventType.RUNNER_START, runner_id=self._runner_id, exception=e)
-                raise
-
-        if get_runner_config().distributed_mode:
-            # start dmq
-            self._distribute_message_queue = MessageQueueFactory.create(
-                get_runner_config().distributed_config.message_queue_config)
-            self._distribute_message_queue.start()
-            # start reply topic sub
-            self.system_reply_sub = ReplyTopicSubscription(self._distribute_message_queue)
-            self.system_reply_sub.activate()
-            result = await self._message_queue.start()
-        if result:
-            logger.info(f"Succeed to start runner",
-                        event_type=LogEventType.RUNNER_START, runner_id=self._runner_id)
-        else:
-            logger.error(f"Failed to start runner, message queue start failed",
-                         event_type=LogEventType.RUNNER_START, runner_id=self._runner_id)
-        return result
+                if get_runner_config().distributed_mode:
+                    # start dmq
+                    self._distribute_message_queue = MessageQueueFactory.create(
+                        get_runner_config().distributed_config.message_queue_config)
+                    self._distribute_message_queue.start()
+                    # start reply topic sub
+                    self.system_reply_sub = ReplyTopicSubscription(self._distribute_message_queue)
+                    self.system_reply_sub.activate()
+                    result = await self._message_queue.start()
+                if result:
+                    logger.info("Succeed to start runner",
+                                event_type=LogEventType.RUNNER_START, runner_id=self._runner_id)
+                else:
+                    logger.error("Failed to start runner, message queue start failed",
+                                 event_type=LogEventType.RUNNER_START, runner_id=self._runner_id)
+                return result
+        except Exception:
+            await self._close_root_task_group()
+            raise
 
     async def stop(self):
         """Stop the runner and clean up resources."""
         logger.info("Begin to stop runner", event_type=LogEventType.RUNNER_STOP, runner_id=self._runner_id)
         try:
-            if get_runner_config().distributed_mode:
-                # 1. Stop ReplyTopicSubscription, clean up collector
-                if self.system_reply_sub:
-                    await self.system_reply_sub.deactivate()
-                    self.system_reply_sub = None
-                # 2. Stop MQ
-                if self._distribute_message_queue:
-                    await self._distribute_message_queue.stop()
-                    self._distribute_message_queue = None
+            with self._root_task_group_scope():
+                if get_runner_config().distributed_mode:
+                    # 1. Stop ReplyTopicSubscription, clean up collector
+                    if self.system_reply_sub:
+                        await self.system_reply_sub.deactivate()
+                        self.system_reply_sub = None
+                    # 2. Stop MQ
+                    if self._distribute_message_queue:
+                        await self._distribute_message_queue.stop()
+                        self._distribute_message_queue = None
 
-            result = await self._message_queue.stop()
+                result = await self._message_queue.stop()
             logger.info("Succeed to stop runner", event_type=LogEventType.RUNNER_STOP, runner_id=self._runner_id)
             return result
         except Exception as e:
@@ -201,6 +313,7 @@ class _RunnerImpl:
             return False
         finally:
             await self._resource_manager.release()
+            await self._close_root_task_group()
 
     async def run_workflow(self,
                            workflow: str | Workflow,
@@ -219,8 +332,9 @@ class _RunnerImpl:
             context: model context
             envs: Environment variables or configuration overrides,
         """
-        workflow_instance, workflow_session = await self._prepare_workflow(workflow, session)
-        return await workflow_instance.invoke(inputs, session=workflow_session, context=context)
+        with self._root_task_group_scope():
+            workflow_instance, workflow_session = await self._prepare_workflow(workflow, session)
+            return await workflow_instance.invoke(inputs, session=workflow_session, context=context)
 
     async def run_workflow_streaming(self,
                                      workflow: str | Workflow,
@@ -241,10 +355,11 @@ class _RunnerImpl:
             stream_modes: Types of streaming data to output
             envs: Environment variables or configuration overrides
         """
-        workflow_instance, workflow_session = await self._prepare_workflow(workflow, session)
-        async for chunk in workflow_instance.stream(inputs, session=workflow_session,
-                                                    stream_modes=stream_modes, context=context):
-            yield chunk
+        with self._root_task_group_scope():
+            workflow_instance, workflow_session = await self._prepare_workflow(workflow, session)
+            async for chunk in workflow_instance.stream(inputs, session=workflow_session,
+                                                        stream_modes=stream_modes, context=context):
+                yield chunk
 
     async def run_agent(self,
                         agent: str | BaseAgent | LegacyBaseAgent,
@@ -264,16 +379,17 @@ class _RunnerImpl:
             context: model context
             envs: Environment variables or configuration overrides
         """
-        agent_instance, agent_session = await self._prepare_agent(agent, inputs, session)
-        if isinstance(agent_instance, RemoteAgent):
-            res = await agent_instance.invoke(inputs)
-        elif isinstance(agent_instance, LegacyBaseAgent):
-            # ControllerAgent handles its own session lifecycle
-            res = await agent_instance.invoke(inputs, session=None)
-        else:
-            res = await agent_instance.invoke(inputs, agent_session)
-            await agent_session.post_run()
-        return res
+        with self._root_task_group_scope():
+            agent_instance, agent_session = await self._prepare_agent(agent, inputs, session)
+            if self._is_remote_agent(agent_instance):
+                res = await agent_instance.invoke(inputs)
+            elif isinstance(agent_instance, LegacyBaseAgent):
+                # ControllerAgent handles its own session lifecycle
+                res = await agent_instance.invoke(inputs, session=None)
+            else:
+                res = await agent_instance.invoke(inputs, agent_session)
+                await agent_session.post_run()
+            return res
 
     async def run_agent_streaming(self,
                                   agent: str | BaseAgent | LegacyBaseAgent,
@@ -294,21 +410,22 @@ class _RunnerImpl:
                stream_modes: Types of streaming data to output
                envs: Environment variables or configuration override
         """
-        agent_instance, agent_session = await self._prepare_agent(agent, inputs, session)
-        if isinstance(agent_instance, RemoteAgent):
-            async for chunk in agent_instance.stream(inputs):
-                yield chunk
-        elif isinstance(agent_instance, LegacyBaseAgent):
-            # ControllerAgent handles its own session lifecycle
-            async for chunk in agent_instance.stream(inputs, session=None):
-                yield chunk
-        else:
-            async for chunk in agent_instance.stream(inputs, session=agent_session):
-                yield chunk
-            await agent_session.post_run()
+        with self._root_task_group_scope():
+            agent_instance, agent_session = await self._prepare_agent(agent, inputs, session)
+            if self._is_remote_agent(agent_instance):
+                async for chunk in agent_instance.stream(inputs):
+                    yield chunk
+            elif isinstance(agent_instance, LegacyBaseAgent):
+                # ControllerAgent handles its own session lifecycle
+                async for chunk in agent_instance.stream(inputs, session=None):
+                    yield chunk
+            else:
+                async for chunk in agent_instance.stream(inputs, session=agent_session):
+                    yield chunk
+                await agent_session.post_run()
 
     async def run_agent_team(self,
-                             agent_team: Union[str, 'BaseTeam'],
+                             agent_team: Union[str, 'BaseTeam', BaseAgent],
                              inputs: Any,
                              *,
                              session: Optional[str | AgentTeamSession] = None,
@@ -318,25 +435,32 @@ class _RunnerImpl:
         """
         Execute a team of agents with given inputs.
 
+        TeamAgent (a BaseAgent subclass) is also accepted; pass it directly
+        instead of using run_agent to get proper AgentTeamSession lifecycle.
+
         Args:
-            agent_team: AgentTeam name or instance to execute
+            agent_team: AgentTeam name, BaseTeam instance, or TeamAgent instance
             inputs: Input data for the agent team
             session: Existing session ID or Session instance for context persistence
             context: model contex
             envs: Environment variables or configuration overrides
         """
-        agent_team_instance = await self._prepare_agent_team(agent_team)
-        agent_team_session = self._create_agent_team_session(agent_team_instance, session)
-        await agent_team_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
-        agent_team_instance.runtime.bind_team_session(agent_team_session)
-        try:
-            return await agent_team_instance.invoke(inputs, session=agent_team_session)
-        finally:
-            agent_team_instance.runtime.unbind_team_session(agent_team_session.get_session_id())
-            await agent_team_session.post_run()
+        with self._root_task_group_scope():
+            agent_team_instance = await self._prepare_agent_team(agent_team)
+            agent_team_session = self._create_agent_team_session(agent_team_instance, session)
+            await agent_team_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
+            team_runtime = getattr(agent_team_instance, "runtime", None)
+            if team_runtime is not None:
+                team_runtime.bind_team_session(agent_team_session)
+            try:
+                return await agent_team_instance.invoke(inputs, session=agent_team_session)
+            finally:
+                if team_runtime is not None:
+                    team_runtime.unbind_team_session(agent_team_session.get_session_id())
+                await agent_team_session.post_run()
 
     async def run_agent_team_streaming(self,
-                                       agent_team: Union[str, 'BaseTeam'],
+                                       agent_team: Union[str, 'BaseTeam', BaseAgent],
                                        inputs: Any,
                                        *,
                                        session: Optional[str | AgentTeamSession] = None,
@@ -347,24 +471,32 @@ class _RunnerImpl:
         """
         Execute a team of agents with streaming output support.
 
+        TeamAgent (a BaseAgent subclass) is also accepted; pass it directly
+        instead of using run_agent_streaming to get proper AgentTeamSession
+        lifecycle and checkpointing.
+
         Args:
-            agent_team: AgentTeam name or instance to execute
+            agent_team: AgentTeam name, BaseTeam instance, or TeamAgent instance
             inputs: Input data for the agent team
             session: Existing session ID or Session instance for context persistence
             context: model context
             stream_modes: Types of streaming data to output
             envs: Environment variables or configuration overrides
         """
-        agent_team_instance = await self._prepare_agent_team(agent_team)
-        agent_team_session = self._create_agent_team_session(agent_team_instance, session)
-        await agent_team_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
-        agent_team_instance.runtime.bind_team_session(agent_team_session)
-        try:
-            async for chunk in agent_team_instance.stream(inputs, session=agent_team_session):
-                yield chunk
-        finally:
-            agent_team_instance.runtime.unbind_team_session(agent_team_session.get_session_id())
-            await agent_team_session.post_run()
+        with self._root_task_group_scope():
+            agent_team_instance = await self._prepare_agent_team(agent_team)
+            agent_team_session = self._create_agent_team_session(agent_team_instance, session)
+            await agent_team_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
+            team_runtime = getattr(agent_team_instance, "runtime", None)
+            if team_runtime is not None:
+                team_runtime.bind_team_session(agent_team_session)
+            try:
+                async for chunk in agent_team_instance.stream(inputs, session=agent_team_session):
+                    yield chunk
+            finally:
+                if team_runtime is not None:
+                    team_runtime.unbind_team_session(agent_team_session.get_session_id())
+                await agent_team_session.post_run()
 
     async def release(self, session_id: str):
         """
@@ -398,7 +530,7 @@ class _RunnerImpl:
             if isinstance(agent, str):
                 agent_instance = await self._resource_manager.get_agent(agent_id=agent)
                 if agent_instance is None:
-                    raise build_error(StatusCode.RUNNER_RUN_AGENT_ERROR, agent_id=agent, reason="agent not exist")
+                    raise build_error(StatusCode.RUNNER_RUN_AGENT_ERROR, agent=agent, reason="agent not exist")
                 await session.pre_run(inputs=inputs)
                 return agent_instance, session
             await session.pre_run(inputs=inputs)
@@ -408,8 +540,8 @@ class _RunnerImpl:
         if isinstance(agent, str):
             agent_instance = await self._resource_manager.get_agent(agent_id=agent)
             if agent_instance is None:
-                raise build_error(StatusCode.RUNNER_RUN_AGENT_ERROR, agent_id=agent, reason="agent not exist")
-            if isinstance(agent_instance, RemoteAgent):
+                raise build_error(StatusCode.RUNNER_RUN_AGENT_ERROR, agent=agent, reason="agent not exist")
+            if self._is_remote_agent(agent_instance):
                 if self._AGENT_CONVERSATION_ID not in inputs:
                     inputs[self._AGENT_CONVERSATION_ID] = session_id
                 return agent_instance, None
@@ -630,6 +762,11 @@ class Runner:
     """Get the callback framework for asynchronous callbacks."""
     
     # Methods
+    @classmethod
+    def get_root_task_group(cls):
+        """Get the runner-owned root task group."""
+        return GLOBAL_RUNNER.get_root_task_group()
+
     @classmethod
     def set_config(cls, config: RunnerConfig) -> None:
         """Set the runner configuration with provided config object.
@@ -853,18 +990,21 @@ class Runner:
     @classmethod
     async def run_agent_team(
         cls,
-        agent_team: Union[str, 'BaseTeam'],
+        agent_team: Union[str, 'BaseTeam', BaseAgent],
         inputs: Any,
         *,
-            session: Optional[str | AgentTeamSession] = None,
+        session: Optional[str | AgentTeamSession] = None,
         context: Optional[ModelContext] = None,
         envs: Optional[dict[str, Any]] = None
     ) -> Any:
         """
         Execute a team of agents with given inputs.
 
+        TeamAgent (a BaseAgent subclass) is also accepted; pass it directly
+        instead of using run_agent to get proper AgentTeamSession lifecycle.
+
         Args:
-            agent_team: AgentTeam name or instance to execute
+            agent_team: AgentTeam name, BaseTeam instance, or TeamAgent instance
             inputs: Input data for the agent team
             session: Existing session ID or Session instance for context persistence
             context: model context
@@ -877,14 +1017,14 @@ class Runner:
             context=context,
             envs=envs
         )
-    
+
     @classmethod
     async def run_agent_team_streaming(
         cls,
-        agent_team: Union[str, 'BaseTeam'],
+        agent_team: Union[str, 'BaseTeam', BaseAgent],
         inputs: Any,
         *,
-            session: Optional[str | AgentTeamSession] = None,
+        session: Optional[str | AgentTeamSession] = None,
         context: Optional[ModelContext] = None,
         stream_modes: Optional[list[BaseStreamMode]] = None,
         envs: Optional[dict[str, Any]] = None,
@@ -892,8 +1032,12 @@ class Runner:
         """
         Execute a team of agents with streaming output support.
 
+        TeamAgent (a BaseAgent subclass) is also accepted; pass it directly
+        instead of using run_agent_streaming to get proper AgentTeamSession
+        lifecycle and checkpointing.
+
         Args:
-            agent_team: AgentTeam name or instance to execute
+            agent_team: AgentTeam name, BaseTeam instance, or TeamAgent instance
             inputs: Input data for the agent team
             session: Existing session ID or Session instance for context persistence
             context: model context

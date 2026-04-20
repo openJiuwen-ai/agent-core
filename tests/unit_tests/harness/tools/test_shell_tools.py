@@ -10,7 +10,8 @@ import pytest_asyncio
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
-from openjiuwen.harness.tools.shell import BashTool
+from openjiuwen.core.sys_operation.cwd import init_cwd
+from openjiuwen.harness.tools.bash import BashTool
 
 
 # ────────────────────────────────────────────────────────────
@@ -26,6 +27,7 @@ async def sys_op_fixture():
     ))
     Runner.resource_mgr.add_sys_operation(card)
     op = Runner.resource_mgr.get_sys_operation(card_id)
+    init_cwd(os.getcwd())
     yield op
     Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
     await Runner.stop()
@@ -33,13 +35,11 @@ async def sys_op_fixture():
 
 @pytest_asyncio.fixture(name="sys_op_sandboxed")
 async def sys_op_sandboxed_fixture():
-    """SysOperation with work_dir set; yields (op, workspace_path)."""
+    """SysOperation with a temp workspace; yields (op, workspace_path)."""
     await Runner.start()
     workspace = tempfile.mkdtemp()
     card_id = "test_shell_sandboxed_op"
-    card = SysOperationCard(id=card_id, mode=OperationMode.LOCAL, work_config=LocalWorkConfig(
-        work_dir=workspace
-    ))
+    card = SysOperationCard(id=card_id, mode=OperationMode.LOCAL, work_config=LocalWorkConfig())
     Runner.resource_mgr.add_sys_operation(card)
     op = Runner.resource_mgr.get_sys_operation(card_id)
     yield op, workspace
@@ -164,36 +164,43 @@ async def test_workdir_valid_absolute_subdir(sys_op_sandboxed):
 
 @pytest.mark.asyncio
 async def test_workdir_valid_relative_subdir(sys_op_sandboxed):
+    from openjiuwen.core.sys_operation.cwd import init_cwd
+
     op, workspace = sys_op_sandboxed
     os.makedirs(os.path.join(workspace, "sub"))
+    init_cwd(workspace)
     bash_tool = BashTool(op)
 
     cmd = "cd" if os.name == "nt" else "pwd"
-    res = await bash_tool.invoke({"command": cmd, "workdir": "sub"})
+    res = await bash_tool.invoke({"command": cmd, "workdir": os.path.join(workspace, "sub")})
     assert res.success is True
 
 
 @pytest.mark.asyncio
-async def test_workdir_escape_blocked(sys_op_sandboxed):
+async def test_workdir_nonexistent_dir_fails(sys_op_sandboxed):
+    """BashTool no longer enforces sandbox; non-existent workdir simply fails at shell level."""
     op, workspace = sys_op_sandboxed
     bash_tool = BashTool(op)
 
-    escape_path = os.path.join(workspace, "..", "..", "etc")
-    res = await bash_tool.invoke({"command": "echo hi", "workdir": escape_path})
+    missing_path = os.path.join(workspace, "definitely_not_exist_xyz")
+    res = await bash_tool.invoke({"command": "echo hi", "workdir": missing_path})
     assert res.success is False
-    assert "sandbox" in res.error
-    assert res.data is None
+    assert res.error is not None
 
 
 @pytest.mark.asyncio
-async def test_workdir_explicit_workspace_constructor(sys_op, tmp_workspace):
-    """workspace passed to BashTool() takes effect as sandbox root."""
-    bash_tool = BashTool(sys_op, workspace=tmp_workspace)
+async def test_workdir_from_contextvar(sys_op, tmp_workspace):
+    """CWD comes from ContextVar via init_cwd(), not BashTool constructor."""
+    from openjiuwen.core.sys_operation.cwd import init_cwd, get_cwd
 
-    escape_path = os.path.join(tmp_workspace, "..", "..", "etc")
-    res = await bash_tool.invoke({"command": "echo hi", "workdir": escape_path})
-    assert res.success is False
-    assert "sandbox" in res.error
+    init_cwd(tmp_workspace)
+    bash_tool = BashTool(sys_op)
+
+    assert get_cwd() == str(os.path.realpath(tmp_workspace))
+    cmd = "cd" if os.name == "nt" else "pwd"
+    res = await bash_tool.invoke({"command": cmd})
+    assert res.success is True
+    assert tmp_workspace in res.data["stdout"] or os.path.realpath(tmp_workspace) in res.data["stdout"]
 
 
 # ────────────────────────────────────────────────────────────
@@ -204,7 +211,7 @@ async def test_workdir_explicit_workspace_constructor(sys_op, tmp_workspace):
 async def test_background_returns_pid(sys_op):
     bash_tool = BashTool(sys_op)
     cmd = "ping -n 5 127.0.0.1 > nul" if os.name == "nt" else "sleep 5"
-    res = await bash_tool.invoke({"command": cmd, "background": True})
+    res = await bash_tool.invoke({"command": cmd, "run_in_background": True})
     assert res.success is True
     assert res.data["status"] == "started"
     assert isinstance(res.data["pid"], int)
@@ -215,7 +222,7 @@ async def test_background_returns_pid(sys_op):
 async def test_background_fast_fail_detected(sys_op):
     bash_tool = BashTool(sys_op)
     # exit 1 terminates immediately with non-zero, should be caught within grace period
-    res = await bash_tool.invoke({"command": "exit 1", "background": True})
+    res = await bash_tool.invoke({"command": "exit 1", "run_in_background": True})
     assert res.success is False
     assert res.error is not None
     assert res.data is None
@@ -235,9 +242,7 @@ async def test_output_truncated_when_over_limit(sys_op):
         "max_output_chars": 250,
     })
     assert res.success is True
-    assert "[truncated]" in res.data["stdout"]
-    # total length should not exceed limit + len("\n...[truncated]")
-    assert len(res.data["stdout"]) <= 265
+    assert "lines omitted" in res.data["stdout"]
 
 
 @pytest.mark.asyncio

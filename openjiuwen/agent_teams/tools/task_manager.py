@@ -13,21 +13,25 @@ from typing import (
 )
 
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.tools.status import (
+from openjiuwen.agent_teams.schema.status import (
+    is_valid_transition,
     MemberMode,
+    TASK_TRANSITIONS,
     TaskStatus,
+)
+from openjiuwen.agent_teams.schema.task import (
+    TaskCreateResult,
+    TaskDetail,
+    TaskListResult,
+    TaskOpResult,
+    TaskSummary,
 )
 from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
     TeamTaskBase,
     TeamTaskDependencyBase,
 )
-from openjiuwen.agent_teams.tools.status import (
-    is_valid_transition,
-    TASK_TRANSITIONS,
-    TaskStatus,
-)
-from openjiuwen.agent_teams.tools.team_events import (
+from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     TaskCancelledEvent,
     TaskClaimedEvent,
@@ -37,7 +41,7 @@ from openjiuwen.agent_teams.tools.team_events import (
     TaskUpdatedEvent,
     TeamTopic,
 )
-from openjiuwen.agent_teams.tools.context import get_session_id
+from openjiuwen.agent_teams.spawn.context import get_session_id
 from openjiuwen.core.common.logging import team_logger
 
 
@@ -49,53 +53,49 @@ class TeamTaskManager:
 
     Attributes:
         db: Team database instance
-        team_id: Team identifier
-        member_id: Current member identifier
+        team_name: Team identifier
+        member_name: Current member identifier
         messager: Messager instance for event publishing
     """
 
-    def __init__(self, team_id: str, member_id: str, db: TeamDatabase, messager: Messager):
+    def __init__(self, team_name: str, member_name: str, db: TeamDatabase, messager: Messager):
         """Initialize task manager.
 
         Args:
             db: Team database instance.
-            team_id: Team identifier.
-            member_id: Current member identifier.
+            team_name: Team identifier.
+            member_name: Current member identifier.
             messager: Messager instance for event publishing.
         """
         self.db = db
-        self.team_id = team_id
-        self.member_id = member_id
+        self.team_name = team_name
+        self.member_name = member_name
         self.messager = messager
 
     async def add_batch(
         self,
         tasks: List[dict]
-    ) -> List[TeamTaskBase]:
-        """Add multiple tasks to the team in batch
+    ) -> List[TaskCreateResult]:
+        """Add multiple tasks to the team in batch.
 
-        Creates multiple tasks in a single operation for efficiency.
-        Each task in the list is a dictionary with keys:
-        - title: Task title (required)
-        - content: Task content (required)
-        - task_id: Optional custom task ID (auto-generated if not provided)
-        - dependencies: Optional list of task IDs this task depends on
+        Creates multiple tasks in a single operation for efficiency. Each
+        task in the list is a dictionary with keys ``title``, ``content``,
+        optional ``task_id`` and ``dependencies``. Invalid specs (missing
+        title/content) are skipped silently.
 
         Args:
-            tasks: List of task dictionaries
+            tasks: List of task dictionaries.
 
         Returns:
-            List of TeamTask objects created (successful tasks only)
-
-        Example:
-            tasks = [
-                {"title": "Task 1", "content": "First task"},
-                {"title": "Task 2", "content": "Second task", "dependencies": ["task1_id"]},
-                {"title": "Task 3", "content": "Third task"}
-            ]
-            created_tasks = task_manager.add_batch(tasks)
+            List of ``TaskCreateResult`` — one per successfully created
+            task. Failed specs (missing fields, creation errors) are
+            omitted so callers can still treat the return value as a
+            list of created tasks. Because ``TaskCreateResult`` delegates
+            attribute lookups to the wrapped task, existing call sites
+            that iterate and read ``.task_id`` / ``.title`` work
+            unchanged.
         """
-        created_tasks = []
+        created_tasks: List[TaskCreateResult] = []
         for task_spec in tasks:
             title = task_spec.get("title")
             content = task_spec.get("content")
@@ -106,14 +106,18 @@ class TeamTaskManager:
                 team_logger.warning(f"Skipping invalid task: {task_spec}")
                 continue
 
-            task = await self.add(
+            result = await self.add(
                 title=title,
                 content=content,
                 task_id=task_id,
                 dependencies=dependencies
             )
-            if task:
-                created_tasks.append(task)
+            if result.ok:
+                created_tasks.append(result)
+            else:
+                team_logger.warning(
+                    f"Batch add skipped task {task_id or title!r}: {result.reason}"
+                )
 
         team_logger.info(f"Batch added {len(created_tasks)} tasks")
         return created_tasks
@@ -124,27 +128,23 @@ class TeamTaskManager:
         content: str,
         task_id: Optional[str] = None,
         dependencies: Optional[List[str]] = None
-    ) -> Optional[TeamTaskBase]:
-        """Add a task to the team
+    ) -> TaskCreateResult:
+        """Add a task to the team.
 
         Creates a task in the team_task table and optionally adds
         task dependencies to the team_task_dependency table.
 
         Args:
-            title: Task title
-            content: Task content
-            task_id: Optional custom task ID (auto-generated if not provided)
-            dependencies: List of task IDs this task depends on
+            title: Task title.
+            content: Task content.
+            task_id: Optional custom task ID (auto-generated if not provided).
+            dependencies: List of task IDs this task depends on.
 
         Returns:
-            TeamTask object if successful, None otherwise
-
-        Example:
-            task = task_manager.add(
-                title="Analyze data",
-                content="Analyze the sales data for Q4",
-                dependencies=["task1", "task2"]
-            )
+            ``TaskCreateResult`` — on success ``result.task`` carries the
+            created task (and attribute access like ``result.task_id``
+            / ``result.title`` transparently delegates to it); on
+            failure ``result.reason`` holds the specific cause.
         """
         if task_id is None:
             task_id = str(uuid.uuid4())
@@ -158,15 +158,16 @@ class TeamTaskManager:
         # Create task
         success = await self.db.create_task(
             task_id=task_id,
-            team_id=self.team_id,
+            team_name=self.team_name,
             title=title,
             content=content,
             status=status
         )
 
         if not success:
-            team_logger.error(f"Failed to create task {task_id}")
-            return None
+            return TaskCreateResult.fail(
+                f"Failed to create task {task_id} (likely a task_id collision)"
+            )
 
         # Add dependencies if provided
         if dependencies:
@@ -174,16 +175,16 @@ class TeamTaskManager:
                 await self.db.add_task_dependency(
                     task_id=task_id,
                     depends_on_task_id=dep_task_id,
-                    team_id=self.team_id
+                    team_name=self.team_name
                 )
             team_logger.debug(f"Added task {task_id} with dependencies: {dependencies}")
 
         # Publish task created event
         try:
             await self.messager.publish(
-                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_id),
+                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
                 message=EventMessage.from_event(TaskCreatedEvent(
-                    team_id=self.team_id,
+                    team_name=self.team_name,
                     task_id=task_id,
                     status=status
                 )),
@@ -192,14 +193,14 @@ class TeamTaskManager:
         except Exception as e:
             team_logger.error(f"Failed to publish task created event for {task_id}: {e}")
 
-        return TeamTaskBase(
+        return TaskCreateResult.success(TeamTaskBase(
             task_id=task_id,
-            team_id=self.team_id,
+            team_name=self.team_name,
             title=title,
             content=content,
             status=status,
-            assignee=None
-        )
+            assignee=None,
+        ))
 
     async def add_with_priority(
         self,
@@ -208,7 +209,7 @@ class TeamTaskManager:
         task_id: Optional[str] = None,
         dependencies: Optional[List[str]] = None,
         dependent_task_ids: Optional[List[str]] = None
-    ) -> Optional[TeamTaskBase]:
+    ) -> TaskCreateResult:
         """Add a task with bidirectional dependency support (prioritized task)
 
         This method allows creating a task that can:
@@ -229,23 +230,9 @@ class TeamTaskManager:
             dependent_task_ids: List of existing task IDs that should depend on the new task
 
         Returns:
-            TeamTask object if successful, None otherwise (e.g., circular dependency detected)
-
-        Example:
-            # High priority task - existing tasks wait for this task to complete
-            task = task_manager.add_with_priority(
-                title="Fix critical bug",
-                content="Fix critical security issue",
-                dependent_task_ids=["task1", "task2"]  # task1, task2 now wait for this task
-            )
-
-            # Insert task between other tasks - depends on A, B waits for this task
-            task = task_manager.add_with_priority(
-                title="Verify fix",
-                content="Verify the fix works",
-                dependencies=["taskA"],  # This task depends on taskA
-                dependent_task_ids=["taskB"]  # taskB waits for this task
-            )
+            ``TaskCreateResult`` describing the outcome. On failure
+            ``result.reason`` typically points at a circular dependency
+            or a conflicting task_id.
         """
         if task_id is None:
             task_id = str(uuid.uuid4())
@@ -260,7 +247,7 @@ class TeamTaskManager:
         # Use database method for atomic operation with cycle detection
         success = await self.db.add_task_with_bidirectional_dependencies(
             task_id=task_id,
-            team_id=self.team_id,
+            team_name=self.team_name,
             title=title,
             content=content,
             status=status,
@@ -269,15 +256,17 @@ class TeamTaskManager:
         )
 
         if not success:
-            team_logger.error(f"Failed to create prioritized task {task_id} (possibly circular dependency)")
-            return None
+            return TaskCreateResult.fail(
+                f"Failed to create prioritized task {task_id} "
+                f"(circular dependency, missing dependent task, or task_id collision)"
+            )
 
         # Publish task created event
         try:
             await self.messager.publish(
-                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_id),
+                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
                 message=EventMessage.from_event(TaskCreatedEvent(
-                    team_id=self.team_id,
+                    team_name=self.team_name,
                     task_id=task_id,
                     status=status
                 )),
@@ -286,21 +275,21 @@ class TeamTaskManager:
         except Exception as e:
             team_logger.error(f"Failed to publish task created event for {task_id}: {e}")
 
-        return TeamTaskBase(
+        return TaskCreateResult.success(TeamTaskBase(
             task_id=task_id,
-            team_id=self.team_id,
+            team_name=self.team_name,
             title=title,
             content=content,
             status=status,
-            assignee=None
-        )
+            assignee=None,
+        ))
 
     async def add_as_top_priority(
         self,
         title: str,
         content: str,
         task_id: Optional[str] = None
-    ) -> Optional[TeamTaskBase]:
+    ) -> TaskCreateResult:
         """Add a task as top priority (blocks all existing pending/blockable tasks)
 
         This method creates a new task and makes all existing tasks that can be blocked
@@ -313,19 +302,12 @@ class TeamTaskManager:
         This operation is atomic and prevents circular dependencies.
 
         Args:
-            title: Task title
-            content: Task content
-            task_id: Optional custom task ID (auto-generated if not provided)
+            title: Task title.
+            content: Task content.
+            task_id: Optional custom task ID (auto-generated if not provided).
 
         Returns:
-            TeamTask object if successful, None otherwise (e.g., circular dependency detected)
-
-        Example:
-            # Insert an urgent task that all pending tasks must wait for
-            urgent_task = task_manager.add_as_top_priority(
-                title="Fix critical bug",
-                content="Fix critical security issue immediately"
-            )
+            ``TaskCreateResult`` describing the outcome.
         """
         if task_id is None:
             task_id = str(uuid.uuid4())
@@ -342,7 +324,7 @@ class TeamTaskManager:
         # Use database method for atomic operation with cycle detection
         success = await self.db.add_task_with_bidirectional_dependencies(
             task_id=task_id,
-            team_id=self.team_id,
+            team_name=self.team_name,
             title=title,
             content=content,
             status=status,
@@ -351,8 +333,10 @@ class TeamTaskManager:
         )
 
         if not success:
-            team_logger.error(f"Failed to create top priority task {task_id} (possibly circular dependency)")
-            return None
+            return TaskCreateResult.fail(
+                f"Failed to create top priority task {task_id} "
+                f"(circular dependency or task_id collision)"
+            )
 
         team_logger.info(
             f"Added top priority task {task_id}, blocking {len(dependent_task_ids)} existing tasks"
@@ -361,9 +345,9 @@ class TeamTaskManager:
         # Publish task created event
         try:
             await self.messager.publish(
-                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_id),
+                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
                 message=EventMessage.from_event(TaskCreatedEvent(
-                    team_id=self.team_id,
+                    team_name=self.team_name,
                     task_id=task_id,
                     status=status
                 )),
@@ -372,13 +356,72 @@ class TeamTaskManager:
         except Exception as e:
             team_logger.error(f"Failed to publish task created event for {task_id}: {e}")
 
-        return TeamTaskBase(
+        return TaskCreateResult.success(TeamTaskBase(
             task_id=task_id,
-            team_id=self.team_id,
+            team_name=self.team_name,
             title=title,
             content=content,
             status=status,
-            assignee=None
+            assignee=None,
+        ))
+
+    async def list_tasks_with_deps(self, status: Optional[str] = None) -> TaskListResult:
+        """List tasks with blocked_by info (summary view, no content).
+
+        Returns a lightweight task list where each entry includes unresolved
+        dependency IDs. Suitable for list/claimable actions.
+
+        Args:
+            status: Optional status filter.
+
+        Returns:
+            TaskListResult containing task summaries with dependency info.
+        """
+        tasks = await self.list_tasks(status=status)
+        summaries = []
+        for task in tasks:
+            deps = await self.get_dependencies(task.task_id)
+            unresolved = [d.depends_on_task_id for d in deps if not d.resolved]
+            summaries.append(TaskSummary(
+                task_id=task.task_id,
+                title=task.title,
+                status=task.status,
+                assignee=task.assignee,
+                blocked_by=unresolved,
+            ))
+        return TaskListResult(tasks=summaries, count=len(summaries))
+
+    async def get_task_detail(self, task_id: str) -> Optional[TaskDetail]:
+        """Get single task with full detail including dependency info.
+
+        Returns complete task information with both upstream (blocked_by)
+        and downstream (blocks) dependency relationships.
+
+        Args:
+            task_id: Task identifier.
+
+        Returns:
+            TaskDetail if found, None otherwise.
+        """
+        task = await self.get(task_id=task_id)
+        if not task:
+            return None
+
+        deps = await self.get_dependencies(task_id)
+        blocked_by = [d.depends_on_task_id for d in deps if not d.resolved]
+
+        downstream = await self.db.get_tasks_depending_on(task_id)
+        blocks = [t.task_id for t in downstream]
+
+        return TaskDetail(
+            task_id=task.task_id,
+            title=task.title,
+            content=task.content,
+            status=task.status,
+            assignee=task.assignee,
+            blocked_by=blocked_by,
+            blocks=blocks,
+            updated_at=task.updated_at,
         )
 
     async def get(self, task_id: str) -> Optional[TeamTaskBase]:
@@ -392,106 +435,212 @@ class TeamTaskManager:
         """
         return await self.db.get_task(task_id)
 
-    async def claim(self, task_id: str) -> bool:
+    async def assign(self, task_id: str, assignee: str) -> TaskOpResult:
+        """Assign a task to a member and mark it as claimed (Leader only).
+
+        Atomically sets the assignee and transitions the task to ``CLAIMED``
+        so leader-driven assignment is symmetric with a member self-claim.
+        Idempotent when the task is already claimed by ``assignee``. Fails
+        when the task is currently held by a different member; the caller
+        must reset the task first (see ``reset``) for true reassignment.
+        Sends a notification message to the assigned member's mailbox on
+        success.
+
+        Args:
+            task_id: Task identifier.
+            assignee: Member ID to assign.
+
+        Returns:
+            ``TaskOpResult.success()`` on assign (or idempotent re-assign);
+            ``TaskOpResult.fail(reason)`` with the specific failure cause
+            otherwise.
+        """
+        task = await self.get(task_id)
+        if not task:
+            return TaskOpResult.fail(f"Task {task_id} not found")
+
+        # Idempotent re-assign: same member, status already claimed → no-op success.
+        if task.assignee == assignee and task.status == TaskStatus.CLAIMED.value:
+            team_logger.debug(f"Task {task_id} already assigned to {assignee}; no-op")
+            return TaskOpResult.success()
+
+        if task.assignee and task.assignee != assignee:
+            return TaskOpResult.fail(
+                f"Task {task_id} is already claimed by {task.assignee}; "
+                f"reset the task before reassigning to {assignee}"
+            )
+
+        success = await self.db.assign_task(task_id, assignee)
+        if not success:
+            return TaskOpResult.fail(
+                f"Database rejected assign for task {task_id} "
+                f"(invalid state transition from {task.status})"
+            )
+
+        await self.messager.publish(
+            topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
+            message=EventMessage.from_event(TaskClaimedEvent(
+                team_name=self.team_name,
+                task_id=task_id,
+                member_name=assignee,
+            )),
+        )
+        team_logger.info(f"Task {task_id} assigned to {assignee}, notification sent")
+        return TaskOpResult.success()
+
+    async def add_dependencies(
+        self, task_id: str, depends_on_ids: List[str]
+    ) -> TaskOpResult:
+        """Add dependencies to an existing task and refresh its status.
+
+        For each new dependency, adds the dependency edge. Then checks
+        whether the task should be blocked (has unresolved deps) or
+        unblocked (all deps resolved).
+
+        Args:
+            task_id: Task to add dependencies to.
+            depends_on_ids: Task IDs that this task should depend on.
+
+        Returns:
+            ``TaskOpResult`` describing the outcome.
+        """
+        task = await self.get(task_id)
+        if not task:
+            return TaskOpResult.fail(f"Task {task_id} not found")
+
+        for dep_id in depends_on_ids:
+            await self.db.add_task_dependency(
+                task_id=task_id,
+                depends_on_task_id=dep_id,
+                team_name=self.team_name,
+            )
+
+        # Refresh: if task has unresolved deps, it should be blocked
+        unresolved = await self.db.get_unresolved_dependencies_count(task_id)
+        if unresolved > 0 and task.status == TaskStatus.PENDING.value:
+            await self.db.update_task_status(task_id, TaskStatus.BLOCKED.value)
+            team_logger.info(f"Task {task_id} blocked ({unresolved} unresolved deps)")
+        elif unresolved == 0 and task.status == TaskStatus.BLOCKED.value:
+            await self.db.update_task_status(task_id, TaskStatus.PENDING.value)
+            team_logger.info(f"Task {task_id} unblocked (all deps resolved)")
+
+        return TaskOpResult.success()
+
+    async def claim(self, task_id: str) -> TaskOpResult:
         """Claim a task for the current member.
 
         Args:
             task_id: Task identifier.
+
+        Returns:
+            ``TaskOpResult`` carrying the specific failure reason on error
+            so the caller (typically a team tool) can pass it through to
+            the LLM instead of dropping it to the log sink.
         """
-        member_id = self.member_id
+        member_name = self.member_name
         task = await self.get(task_id)
         if not task:
-            team_logger.error(f"Task {task_id} not found")
-            return False
+            return TaskOpResult.fail(f"Task {task_id} not found")
 
-        member = await self.db.get_member(member_id)
+        member = await self.db.get_member(member_name, self.team_name)
         if not member:
-            team_logger.error(f"Member {member_id} not found")
-            return False
+            return TaskOpResult.fail(
+                f"Member {member_name} not found in team {self.team_name}"
+            )
 
-        # Validate state transition
+        # Idempotent re-claim: if the caller already owns this task, succeed silently.
+        if task.assignee == member_name and task.status == TaskStatus.CLAIMED.value:
+            team_logger.debug(f"Task {task_id} already claimed by {member_name}; no-op")
+            return TaskOpResult.success()
+
+        # Claim conflict must be reported before the state-transition check —
+        # otherwise a CLAIMED task held by someone else surfaces as the
+        # misleading "invalid claimed → claimed transition" error.
+        if task.assignee:
+            return TaskOpResult.fail(
+                f"Task {task_id} is already claimed by {task.assignee}, "
+                f"{member_name} cannot claim it"
+            )
+
+        # Validate state transition (blocks e.g. COMPLETED/CANCELLED/BLOCKED claims).
         if not is_valid_transition(
             TaskStatus(task.status),
             TaskStatus.CLAIMED,
             TASK_TRANSITIONS
         ):
-            team_logger.error(
-                f"Invalid state transition for task {task_id}: "
-                f"{task.status} -> {TaskStatus.CLAIMED.value}"
+            return TaskOpResult.fail(
+                f"Task {task_id} cannot be claimed from status "
+                f"'{task.status}' (only pending tasks are claimable)"
             )
-            return False
-
-        # Check if task is already claimed
-        if task.assignee:
-            team_logger.warning(f"Task {task_id} is already claimed by {task.assignee}")
-            return False
 
         # Claim task
-        success = await self.db.claim_task(task_id, member_id)
-        if success:
-            team_logger.info(f"Task {task_id} claimed by member {member_id}")
+        success = await self.db.claim_task(task_id, member_name)
+        if not success:
+            return TaskOpResult.fail(
+                f"Database rejected claim for task {task_id} "
+                f"(likely a concurrent claim race)"
+            )
 
-            # Publish task claimed event
-            try:
-                await self.messager.publish(
-                    topic_id=TeamTopic.TASK.build(get_session_id(), self.team_id),
-                    message=EventMessage.from_event(TaskClaimedEvent(
-                        team_id=self.team_id,
-                        task_id=task_id,
-                        member_id=member_id
-                    )),
-                )
-                team_logger.debug(f"Task claimed event published: {task_id}")
-            except Exception as e:
-                team_logger.error(f"Failed to publish task claimed event for {task_id}: {e}")
+        team_logger.info(f"Task {task_id} claimed by member {member_name}")
 
-            return True
+        try:
+            await self.messager.publish(
+                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
+                message=EventMessage.from_event(TaskClaimedEvent(
+                    team_name=self.team_name,
+                    task_id=task_id,
+                    member_name=member_name
+                )),
+            )
+            team_logger.debug(f"Task claimed event published: {task_id}")
+        except Exception as e:
+            team_logger.error(f"Failed to publish task claimed event for {task_id}: {e}")
 
-        return False
+        return TaskOpResult.success()
 
-    async def complete(self, task_id: str) -> bool:
-        """Complete a task
+    async def complete(self, task_id: str) -> TaskOpResult:
+        """Complete a task.
 
         Updates task status to 'completed' and unblocks dependent tasks.
         This operation is atomic to prevent race conditions.
 
         Args:
-            task_id: Task identifier
+            task_id: Task identifier.
 
         Returns:
-            True if successful, False otherwise
-
-        Example:
-            success = task_manager.complete(task_id="task123")
+            ``TaskOpResult`` describing the outcome.
         """
         # Get member to check mode
-        member = await self.db.get_member(self.member_id)
+        member = await self.db.get_member(self.member_name, self.team_name)
         if not member:
-            team_logger.error(f"Member {self.member_id} not found")
-            return False
+            return TaskOpResult.fail(
+                f"Member {self.member_name} not found in team {self.team_name}"
+            )
 
         # Check if member is in PLAN_MODE
         if member.mode == MemberMode.PLAN_MODE.value:
-            # Get task to check status
             task = await self.db.get_task(task_id)
             if not task:
-                team_logger.error(f"Task {task_id} not found")
-                return False
+                return TaskOpResult.fail(f"Task {task_id} not found")
 
             # PLAN_MODE members can only complete PLAN_APPROVED tasks
             if task.status != TaskStatus.PLAN_APPROVED.value:
-                team_logger.error(
-                    f"PLAN_MODE member cannot complete task {task_id} with status {task.status}, "
-                    f"only PLAN_APPROVED tasks can be completed"
+                return TaskOpResult.fail(
+                    f"PLAN_MODE member cannot complete task {task_id} in status "
+                    f"'{task.status}'; only plan_approved tasks can be completed"
                 )
-                return False
 
         # Complete task atomically - this handles state validation, dependency resolution,
         # and unblocking dependent tasks in a single transaction to prevent race conditions
         result = await self.db.complete_task(task_id)
         if not result:
-            team_logger.error(f"Failed to complete task {task_id}")
-            return False
+            current = await self.db.get_task(task_id)
+            if current is None:
+                return TaskOpResult.fail(f"Task {task_id} not found")
+            return TaskOpResult.fail(
+                f"Task {task_id} cannot be completed from status "
+                f"'{current.status}' (must be claimed or plan_approved)"
+            )
 
         # Extract completed task info and unblocked tasks
         completed_task = result.get("task")
@@ -502,11 +651,11 @@ class TeamTaskManager:
         # Publish task completed event
         try:
             await self.messager.publish(
-                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_id),
+                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
                 message=EventMessage.from_event(TaskCompletedEvent(
-                    team_id=self.team_id,
+                    team_name=self.team_name,
                     task_id=task_id,
-                    member_id=completed_task.assignee
+                    member_name=completed_task.assignee
                 )),
             )
             team_logger.debug(f"Task completed event published: {task_id}")
@@ -517,9 +666,9 @@ class TeamTaskManager:
         for unblocked_task in unblocked_tasks:
             try:
                 await self.messager.publish(
-                    topic_id=TeamTopic.TASK.build(get_session_id(), self.team_id),
+                    topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
                     message=EventMessage.from_event(TaskUnblockedEvent(
-                        team_id=self.team_id,
+                        team_name=self.team_name,
                         task_id=unblocked_task.task_id
                     )),
                 )
@@ -530,7 +679,7 @@ class TeamTaskManager:
         if unblocked_tasks:
             team_logger.info(f"Unblocked {len(unblocked_tasks)} tasks after completing {task_id}")
 
-        return True
+        return TaskOpResult.success()
 
     async def cancel(self, task_id: str) -> Optional[TeamTaskBase]:
         """Cancel a task
@@ -552,9 +701,9 @@ class TeamTaskManager:
             # Publish task cancelled event
             try:
                 await self.messager.publish(
-                    topic_id=TeamTopic.TASK.build(get_session_id(), self.team_id),
+                    topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
                     message=EventMessage.from_event(TaskCancelledEvent(
-                        team_id=self.team_id,
+                        team_name=self.team_name,
                         task_id=task_id
                     )),
                 )
@@ -574,19 +723,19 @@ class TeamTaskManager:
             List of cancelled TeamTask objects
         """
         # Cancel all tasks atomically
-        cancelled_tasks = await self.db.cancel_all_tasks(self.team_id)
+        cancelled_tasks = await self.db.cancel_all_tasks(self.team_name)
 
         if not cancelled_tasks:
-            team_logger.info(f"No tasks to cancel in team {self.team_id}")
+            team_logger.info(f"No tasks to cancel in team {self.team_name}")
             return []
 
         # Publish task cancelled event for each cancelled task
         for task in cancelled_tasks:
             try:
                 await self.messager.publish(
-                    topic_id=TeamTopic.TASK.build(get_session_id(), self.team_id),
+                    topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
                     message=EventMessage.from_event(TaskCancelledEvent(
-                        team_id=self.team_id,
+                        team_name=self.team_name,
                         task_id=task.task_id
                     )),
                 )
@@ -612,7 +761,7 @@ class TeamTaskManager:
             # Get all tasks
             all_tasks = task_manager.list_tasks()
         """
-        return await self.db.get_team_tasks(self.team_id, status)
+        return await self.db.get_team_tasks(self.team_name, status)
 
     async def get_dependencies(self, task_id: str) -> List[TeamTaskDependencyBase]:
         """Get task dependencies
@@ -635,61 +784,56 @@ class TeamTaskManager:
         """
         return await self.list_tasks(status=TaskStatus.PENDING.value)
 
-    async def get_tasks_by_assignee(self, member_id: str, status: Optional[str] = None) -> List[TeamTaskBase]:
+    async def get_tasks_by_assignee(self, member_name: str, status: Optional[str] = None) -> List[TeamTaskBase]:
         """Get tasks assigned to a specific member
 
         Args:
-            member_id: Member identifier who is assigned tasks
+            member_name: Member identifier who is assigned tasks
             status: Optional status filter
 
         Returns:
             List of Task objects assigned to the member
         """
-        return await self.db.get_tasks_by_assignee(self.team_id, member_id, status)
+        return await self.db.get_tasks_by_assignee(self.team_name, member_name, status)
 
     async def update_task(
         self,
         task_id: str,
         title: Optional[str] = None,
         content: Optional[str] = None
-    ) -> bool:
-        """Update task content
+    ) -> TaskOpResult:
+        """Update task title / content.
 
-        Updates task title and/or content. Publishes TASK_UPDATED event on success.
+        Publishes ``TASK_UPDATED`` on success. Does not bump the task's
+        ``updated_at`` column — that timestamp tracks status transitions
+        only.
 
         Args:
-            task_id: Task identifier
-            title: Optional new title
-            content: Optional new content
+            task_id: Task identifier.
+            title: Optional new title.
+            content: Optional new content.
 
         Returns:
-            True if successful, False otherwise
-
-        Example:
-            success = task_manager.update_task(
-                task_id="task123",
-                title="Updated title",
-                content="Updated content"
-            )
+            ``TaskOpResult`` describing the outcome.
         """
         task = await self.get(task_id)
         if not task:
-            team_logger.error(f"Task {task_id} not found")
-            return False
+            return TaskOpResult.fail(f"Task {task_id} not found")
 
-        # Update task in database
         success = await self.db.update_task(task_id, title=title, content=content)
         if not success:
-            return False
+            return TaskOpResult.fail(
+                f"Task {task_id} cannot be edited while in status '{task.status}'; "
+                f"content updates are only allowed on pending / blocked tasks"
+            )
 
         team_logger.info(f"Task {task_id} updated")
 
-        # Publish task updated event
         try:
             await self.messager.publish(
-                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_id),
+                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
                 message=EventMessage.from_event(TaskUpdatedEvent(
-                    team_id=self.team_id,
+                    team_name=self.team_name,
                     task_id=task_id
                 )),
             )
@@ -697,46 +841,52 @@ class TeamTaskManager:
         except Exception as e:
             team_logger.error(f"Failed to publish task updated event for {task_id}: {e}")
 
-        return True
+        return TaskOpResult.success()
 
-    async def reset(self, task_id: str) -> bool:
-        """Reset a task from CLAIMED to PENDING and clear assignee
+    async def reset(self, task_id: str) -> TaskOpResult:
+        """Reset a claimed task back to PENDING and clear assignee.
 
-        This method resets a claimed task back to pending status and clears
-        assignee field. Useful for re-assigning task to other members.
+        Useful for re-assigning a task to another member.
 
         Args:
-            task_id: Task identifier
+            task_id: Task identifier.
 
         Returns:
-            True if successful, False otherwise
-
-        Example:
-            success = task_manager.reset(task_id="task123")
+            ``TaskOpResult`` describing the outcome.
         """
+        existing = await self.db.get_task(task_id)
+        if not existing:
+            return TaskOpResult.fail(f"Task {task_id} not found")
+
         result = await self.db.reset_task(task_id)
-        if result:
-            team_logger.info(f"Task {task_id} reset successfully")
-            return True
-        return False
+        if not result:
+            return TaskOpResult.fail(
+                f"Task {task_id} cannot be reset from status '{existing.status}'; "
+                f"only claimed tasks can be reset"
+            )
+        team_logger.info(f"Task {task_id} reset successfully")
+        return TaskOpResult.success()
 
-    async def approve_plan(self, task_id: str) -> bool:
-        """Approve a task plan for PLAN_MODE members
+    async def approve_plan(self, task_id: str) -> TaskOpResult:
+        """Approve a task plan for PLAN_MODE members.
 
-        This method transitions a task from CLAIMED to PLAN_APPROVED.
-        Only team leader can call this method.
+        Transitions a task from CLAIMED to PLAN_APPROVED. Leader only.
 
         Args:
-            task_id: Task identifier
+            task_id: Task identifier.
 
         Returns:
-            True if successful, False otherwise
-
-        Example:
-            success = task_manager.approve_plan(task_id="task123")
+            ``TaskOpResult`` describing the outcome.
         """
+        existing = await self.db.get_task(task_id)
+        if not existing:
+            return TaskOpResult.fail(f"Task {task_id} not found")
+
         task = await self.db.approve_plan_task(task_id)
-        if task:
-            team_logger.info(f"Task {task_id} approved successfully")
-            return True
-        return False
+        if not task:
+            return TaskOpResult.fail(
+                f"Task {task_id} cannot be plan-approved from status "
+                f"'{existing.status}'; only claimed tasks can be approved"
+            )
+        team_logger.info(f"Task {task_id} approved successfully")
+        return TaskOpResult.success()

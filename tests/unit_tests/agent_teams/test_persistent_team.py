@@ -17,7 +17,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamMemberSpec,
     TeamRole,
 )
-from openjiuwen.agent_teams.tools.context import (
+from openjiuwen.agent_teams.spawn.context import (
     reset_session_id,
     set_session_id,
 )
@@ -26,13 +26,13 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
-from openjiuwen.agent_teams.tools.status import (
+from openjiuwen.agent_teams.schema.status import (
     is_valid_transition,
     MEMBER_TRANSITIONS,
     MemberStatus,
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
-from openjiuwen.agent_teams.tools.team_events import (
+from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     TeamEvent,
     TeamStandbyEvent,
@@ -123,17 +123,17 @@ class TestCoordinatorLoopPauseResume:
 class TestTeamStandbyEvent:
 
     def test_standby_event_serialization(self):
-        event = TeamStandbyEvent(team_id="test_team")
+        event = TeamStandbyEvent(team_name="test_team")
         msg = EventMessage.from_event(event)
         assert msg.event_type == TeamEvent.STANDBY
         logger.info("Standby event type: {}", msg.event_type)
 
     def test_standby_event_deserialization(self):
-        event = TeamStandbyEvent(team_id="test_team")
+        event = TeamStandbyEvent(team_name="test_team")
         msg = EventMessage.from_event(event)
         payload = msg.get_payload()
         assert isinstance(payload, TeamStandbyEvent)
-        assert payload.team_id == "test_team"
+        assert payload.team_name == "test_team"
 
 
 # ========== MemberStatus READY self-transition ==========
@@ -155,15 +155,14 @@ class TestPersistentTeamBuildTeam:
     async def persistent_team(self, db, message_bus):
         predefined = [
             TeamMemberSpec(
-                member_id="dev-1",
-                name="Developer",
-                persona="Backend dev",
-                domain="backend",
+            member_name="dev-1",
+            display_name="Developer",
+            persona="Backend dev",
             ),
         ]
         return TeamBackend(
-            team_id="persistent_team",
-            member_id="leader1",
+            team_name="persistent_team",
+            member_name="leader1",
             is_leader=True,
             db=db,
             messager=message_bus,
@@ -173,14 +172,13 @@ class TestPersistentTeamBuildTeam:
     @pytest.mark.asyncio
     async def test_build_team_persistent_members_unstarted(self, persistent_team, db):
         await persistent_team.build_team(
-            name="Persistent Team",
+            display_name="Persistent Team",
             desc="A persistent team",
-            prompt="prompt",
-            leader_name="Leader",
+            leader_display_name="Leader",
             leader_desc="PM",
         )
 
-        dev = await db.get_member("dev-1")
+        dev = await db.get_member("dev-1", "persistent_team")
         assert dev.status == MemberStatus.UNSTARTED.value
         logger.info("Persistent team member status after build: {}", dev.status)
 
@@ -188,21 +186,20 @@ class TestPersistentTeamBuildTeam:
     async def test_persistent_team_member_can_go_ready_then_ready(self, persistent_team, db):
         """Verify READY -> READY transition works for persistent team resume."""
         await persistent_team.build_team(
-            name="Persistent Team",
+            display_name="Persistent Team",
             desc="desc",
-            prompt="prompt",
-            leader_name="Leader",
+            leader_display_name="Leader",
             leader_desc="PM",
         )
         # Simulate member starting up
-        await db.update_member_status("dev-1", MemberStatus.READY.value)
-        dev = await db.get_member("dev-1")
+        await db.update_member_status("dev-1", "persistent_team", MemberStatus.READY.value)
+        dev = await db.get_member("dev-1", "persistent_team")
         assert dev.status == MemberStatus.READY.value
 
         # Simulate persistent team resume (READY -> READY)
-        success = await db.update_member_status("dev-1", MemberStatus.READY.value)
+        success = await db.update_member_status("dev-1", "persistent_team", MemberStatus.READY.value)
         assert success
-        dev = await db.get_member("dev-1")
+        dev = await db.get_member("dev-1", "persistent_team")
         assert dev.status == MemberStatus.READY.value
 
 
@@ -228,7 +225,7 @@ class TestResumeForNewSession:
     async def test_new_session_creates_dynamic_tables(self, db_file):
         database, config = db_file
         team_id = "persistent_team"
-        await database.create_team(team_id=team_id, name="PT", leader_member_id="leader1")
+        await database.create_team(team_name=team_id, display_name="PT", leader_member_name="leader1")
 
         # Switch session
         token = set_session_id("session_2")
@@ -237,7 +234,7 @@ class TestResumeForNewSession:
             # Verify team still exists (static table)
             team = await database.get_team(team_id)
             assert team is not None
-            assert team.name == "PT"
-            logger.info("Team persists across sessions: {}", team.name)
+            assert team.display_name == "PT"
+            logger.info("Team persists across sessions: {}", team.display_name)
         finally:
             reset_session_id(token)

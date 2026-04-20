@@ -10,6 +10,7 @@ All built-in tools register via ``ToolMetadataProvider`` implementations.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Dict, List, Optional
 
 from openjiuwen.core.foundation.tool.base import ToolCard
@@ -23,6 +24,9 @@ from openjiuwen.harness.prompts.sections.tools.ask_user import (
 )
 from openjiuwen.harness.prompts.sections.tools.bash import (
     BashMetadataProvider,
+)
+from openjiuwen.harness.prompts.sections.tools.powershell import (
+    PowerShellMetadataProvider,
 )
 from openjiuwen.harness.prompts.sections.tools.audio import (
     AudioMetadataMetadataProvider,
@@ -57,6 +61,9 @@ from openjiuwen.harness.prompts.sections.tools.session_tools import (
     SessionsSpawnMetadataProvider,
     SessionsCancelMetadataProvider,
 )
+from openjiuwen.harness.prompts.sections.tools.skill_tool import (
+    SkillToolMetadataProvider,
+)
 from openjiuwen.harness.prompts.sections.tools.todo import (
     TodoCreateMetadataProvider,
     TodoListMetadataProvider,
@@ -69,6 +76,9 @@ from openjiuwen.harness.prompts.sections.tools.vision import (
     ImageOCRMetadataProvider,
     VisualQuestionAnsweringMetadataProvider,
 )
+from openjiuwen.harness.prompts.sections.tools.lsp_tool import (
+    LspToolMetadataProvider,
+)
 from openjiuwen.harness.prompts.sections.tools.task_tool import (
     TaskMetadataProvider,
 )
@@ -77,6 +87,11 @@ from openjiuwen.harness.prompts.sections.tools.web_tools import (
     PaidSearchMetadataProvider,
     FetchWebpageMetadataProvider,
 )
+from openjiuwen.harness.prompts.sections.tools.agent_mode import (
+    SwitchModeMetadataProvider,
+    EnterPlanModeMetadataProvider,
+    ExitPlanModeMetadataProvider,
+)
 
 # ---------------------------------------------------------------------------
 # Provider registry
@@ -84,6 +99,7 @@ from openjiuwen.harness.prompts.sections.tools.web_tools import (
 _PROVIDERS: List[ToolMetadataProvider] = [
     AskUserMetadataProvider(),
     BashMetadataProvider(),
+    PowerShellMetadataProvider(),
     AudioTranscriptionMetadataProvider(),
     AudioQuestionAnsweringMetadataProvider(),
     AudioMetadataMetadataProvider(),
@@ -101,6 +117,7 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     SessionsListMetadataProvider(),
     SessionsSpawnMetadataProvider(),
     SessionsCancelMetadataProvider(),
+    SkillToolMetadataProvider(),
     TodoCreateMetadataProvider(),
     TodoListMetadataProvider(),
     TodoModifyMetadataProvider(),
@@ -108,9 +125,13 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     VisualQuestionAnsweringMetadataProvider(),
     VideoUnderstandingMetadataProvider(),
     TaskMetadataProvider(),
+    LspToolMetadataProvider(),
     FreeSearchMetadataProvider(),
     PaidSearchMetadataProvider(),
     FetchWebpageMetadataProvider(),
+    SwitchModeMetadataProvider(),
+    EnterPlanModeMetadataProvider(),
+    ExitPlanModeMetadataProvider(),
 ]
 
 _REGISTRY: Dict[str, ToolMetadataProvider] = {
@@ -150,14 +171,18 @@ def build_tool_card(
     tool_id: str,
     language: str = "cn",
     format_args: Optional[Dict[str, str]] = None,
+    agent_id: Optional[str] = None,
 ) -> ToolCard:
     """统一建卡函数。工具类不再自己拼 ToolCard。
 
     Args:
         name: 工具名称。
-        tool_id: 工具 ID。
+        tool_id: 工具 ID 前缀。
         language: 语言（'cn' 或 'en'）。
         format_args: 可选的格式化参数字典，用于填充描述中的占位符。
+        agent_id: 可选的 agent ID，用于生成唯一的工具 ID。
+            如果提供，最终的 tool_id 为 f"{tool_id}_{agent_id}"；
+            如果不提供，使用 uuid 生成唯一后缀。
 
     Returns:
         配置好的 ToolCard 实例。
@@ -168,8 +193,10 @@ def build_tool_card(
     if format_args:
         description = description.format(**format_args)
 
+    final_tool_id = f"{tool_id}_{agent_id}" if agent_id else f"{tool_id}_{uuid.uuid4().hex}"
+
     return ToolCard(
-        id=tool_id,
+        id=final_tool_id,
         name=name,
         description=description,
         input_params=get_tool_input_params(name, language),

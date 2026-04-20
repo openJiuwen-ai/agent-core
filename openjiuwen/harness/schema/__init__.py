@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """DeepAgent schema definitions."""
 
+from openjiuwen.harness.schema.agent_mode import AgentMode
 from openjiuwen.harness.schema.config import (
     AudioModelConfig,
     DeepAgentConfig,
@@ -16,6 +17,7 @@ from openjiuwen.harness.schema.loop_event import (
 )
 from openjiuwen.harness.schema.state import (
     DeepAgentState,
+    PlanModeState,
 )
 from openjiuwen.harness.schema.task import (
     TaskItem,
@@ -24,6 +26,7 @@ from openjiuwen.harness.schema.task import (
 )
 
 __all__ = [
+    "AgentMode",
     "DeepAgentConfig",
     "AudioModelConfig",
     "VisionModelConfig",
@@ -33,6 +36,7 @@ __all__ = [
     "create_loop_event",
     "default_event_priority",
     "DeepAgentState",
+    "PlanModeState",
     "TaskItem",
     "TaskPlan",
     "TaskStatus",

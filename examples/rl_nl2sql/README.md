@@ -1,9 +1,9 @@
-NL2SQL 强化学习示例
+﻿NL2SQL 强化学习示例
 ===================
 
 请先阅读仓库文档 **[ReactAgent 强化学习](../../docs/zh/2.开发指南/高阶用法/ReactAgent强化学习.md)**，其中说明了详细的 **verl**、**vLLM / vllm-ascend**、OpenYuanrong 等环境与依赖部署，以及通用训练流程。
 
-本示例基于 Spider NL2SQL 数据集，利用 openjiuwen 的 `agentrl` 模块提供一个自然言语转化为SQL语句的ReactAgent。
+本示例基于 Spider NL2SQL 数据集，利用 openjiuwen 的 `openjiuwen.agent_evolving.agent_rl` 模块提供一个自然言语转化为SQL语句的ReactAgent。
 
 目录结构
 --------
@@ -14,7 +14,7 @@ NL2SQL 强化学习示例
 - `tools.py`：`execute_sql` 工具，直接在 SQLite 上执行 SQL，并返回详细结果 / 错误信息，供模型调试和纠错。
 - `sql_eval.py`：SQL 执行匹配逻辑（执行 gold / pred 两条 SQL，比较结果集是否等价）。
 - `reward.py`：奖励函数，调用 `sql_eval` 做执行结果匹配，等价记 1 分，否则 0 分。
-- `train.py`：训练入口，配置 `RLConfig`，注册 reward / tool / task_data_fn，启动 `RLOptimizer.train()`开启训练。
+- `train.py`：训练入口，配置 `RLConfig`，注册 reward / tool / task_data_fn，创建 `OfflineRLOptimizer` 并调用 `train()` 开启训练。
 
 运行步骤
 --------
@@ -93,6 +93,8 @@ export HCCL_EXEC_TIMEOUT=3600
 export HCCL_CONNECT_TIMEOUT=3600
 export HCCL_IF_BASE_PORT=48890
 export TASK_QUEUE_ENABLE=1
+export VLLM_ASCEND_ENABLE_NZ=0
+export VLLM_USE_V1=1
    ```
 
 启动训练：

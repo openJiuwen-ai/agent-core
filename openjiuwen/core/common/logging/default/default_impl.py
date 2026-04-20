@@ -159,6 +159,9 @@ class ContextFilter(logging.Filter):
         # Get trace_id from context variable (adapted for async environments)
         record.trace_id = get_session_id()
 
+        from openjiuwen.core.common.logging.utils import get_member_id
+        record.member_id = get_member_id()
+
         # Set log type, special handling for performance type
         record.log_type = resolve_log_type_label(self.log_type)
 

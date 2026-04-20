@@ -1,6 +1,138 @@
 # openjiuwen.agent_teams
 
-## function openjiuwen.agent_teams.create_agent_team
+`openjiuwen.agent_teams` provides multi-agent team orchestration. Use `TeamAgentSpec.model_validate()` to load from config, then `build()` to create a `TeamAgent`.
+
+## class TeamAgentSpec
+
+JSON-serializable specification for constructing a TeamAgent. Composes per-role DeepAgentSpecs with team-level configuration.
+
+* **agents**(dict[str, [DeepAgentSpec](./agent_teams.md#class-deepagentspec)]): Per-role DeepAgentSpec configs. Must contain `"leader"` key; `"teammate"` is optional and falls back to leader config.
+* **team_name**(str, optional): Team name. Default: `agent_team`.
+* **lifecycle**(str, optional): Team lifecycle — `temporary` (disband after completion) or `persistent` (retain across sessions). Default: `temporary`.
+* **teammate_mode**(str, optional): Teammate execution mode — `build_mode` (complete tasks directly) or `plan_mode` (require leader approval). Default: `build_mode`.
+* **spawn_mode**(str, optional): How teammates are launched — `process` (subprocess) or `inprocess` (same event loop). Default: `process`.
+* **leader**([LeaderSpec](./agent_teams.md#class-leaderspec), optional): Leader identity config. Default: `LeaderSpec()`.
+* **predefined_members**(list[[TeamMemberSpec](./agent_teams.md#class-teammemberspec)], optional): Pre-configured members. When provided, leader skips `spawn_member` tool. Default: `[]`.
+* **transport**([TransportSpec](./agent_teams.md#class-transportspec), optional): Transport layer config. Default: `None`.
+* **storage**([StorageSpec](./agent_teams.md#class-storagespec), optional): Storage layer config. Default: `None`.
+* **worktree**(WorktreeConfig, optional): Worktree isolation config for team members. Default: `None`.
+* **workspace**(TeamWorkspaceConfig, optional): Shared workspace config for team members. Default: `None`.
+* **metadata**(dict[str, Any], optional): Additional metadata. Default: `{}`.
+
+### model_validate
+
+```python
+model_validate(data: dict) -> TeamAgentSpec
+```
+
+Parse from dict/JSON. Inherited from Pydantic BaseModel.
+
+**Parameters:**
+
+* **data**(dict): Config dict, typically loaded from YAML/JSON file.
+
+**Returns:**
+
+**TeamAgentSpec**: Parsed specification instance.
+
+**Example:**
+
+```python
+>>> import yaml
+>>> from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
+>>> 
+>>> with open("config.yaml") as f:
+...     cfg = yaml.safe_load(f)
+>>> 
+>>> spec = TeamAgentSpec.model_validate(cfg)
+```
+
+### build
+
+```python
+build() -> TeamAgent
+```
+
+Materialize the configured TeamAgent instance.
+
+**Returns:**
+
+**TeamAgent**: A configured leader instance ready for execution.
+
+**Example:**
+
+```python
+>>> from openjiuwen.core.runner.runner import Runner
+>>> 
+>>> await Runner.start()
+>>> leader = spec.build()
+>>> 
+>>> async for chunk in Runner.run_agent_team_streaming(leader, inputs={"query": "hello"}):
+...     print(chunk)
+```
+
+## class DeepAgentSpec
+
+JSON-serializable configuration for a single DeepAgent. Used in `TeamAgentSpec.agents` dict.
+
+* **model**(TeamModelConfig, optional): LLM model config. Default: `None`.
+* **card**([AgentCard](../openjiuwen.core/single_agent/single_agent.md#class-agentcard), optional): Agent identity card. Default: `None`.
+* **system_prompt**(str, optional): Custom system prompt. Default: `None`.
+* **tools**(list[ToolCard | BuiltinToolSpec], optional): Tool list. Default: `None`.
+* **mcps**(list[McpServerConfig], optional): MCP server configs. Default: `None`.
+* **subagents**(list[SubAgentSpec], optional): Sub-agent configs. Default: `None`.
+* **rails**(list[RailSpec], optional): Guardrail configs. Default: `None`.
+* **enable_task_loop**(bool, optional): Enable task iteration loop. Default: `False`.
+* **enable_async_subagent**(bool, optional): Enable async subagent execution. Default: `False`.
+* **add_general_purpose_agent**(bool, optional): Add general-purpose subagent. Default: `False`.
+* **max_iterations**(int, optional): Max loop iterations. Default: `15`.
+* **workspace**(WorkspaceSpec, optional): Workspace config. Default: `None`.
+* **skills**(list[str], optional): Skill names. Default: `None`.
+* **sys_operation**(SysOperationSpec, optional): System operation config. Default: `None`.
+* **language**(str, optional): Language (`cn` or `en`). Default: `None`.
+* **prompt_mode**(str, optional): Prompt mode. Default: `None`.
+* **vision_model**(VisionModelSpec, optional): Vision model config. Default: `None`.
+* **audio_model**(AudioModelSpec, optional): Audio model config. Default: `None`.
+* **enable_task_planning**(bool, optional): Enable task planning rail. Default: `False`.
+* **restrict_to_sandbox**(bool, optional): Restrict file operations to sandbox. Default: `False`.
+* **auto_create_workspace**(bool, optional): Auto-create workspace directory. Default: `True`.
+* **completion_timeout**(float, optional): Timeout in seconds. Default: `600.0`.
+* **progressive_tool**(ProgressiveToolSpec, optional): Progressive tool loading config. Default: `None`.
+* **approval_required_tools**(list[str], optional): Tool names requiring leader approval (teammates only). Default: `None`.
+
+## class LeaderSpec
+
+Leader identity configuration.
+
+* **member_name**(str, optional): Member identifier. Default: `team_leader`.
+* **display_name**(str, optional): Display name. Default: `Team Leader`.
+* **persona**(str, optional): Persona description. Default: `天才项目管理专家`.
+
+## class TeamMemberSpec
+
+Pre-defined team member. Used in `TeamAgentSpec.predefined_members`.
+
+* **member_name**(str): Member identifier.
+* **display_name**(str): Display name.
+* **role_type**(TeamRole, optional): `leader` or `teammate`. Default: `teammate`.
+* **persona**(str): Persona description.
+* **prompt_hint**(str, optional): Initial prompt hint. Default: `None`.
+
+## class TransportSpec
+
+Transport layer configuration.
+
+* **type**(str): Backend type — `inprocess` or `pyzmq`.
+* **params**(dict, optional): Backend-specific parameters. Default: `{}`.
+
+## class StorageSpec
+
+Storage layer configuration.
+
+* **type**(str): Storage type — `sqlite` or `memory`.
+* **params**(dict, optional): Storage-specific parameters. Default: `{}`.
+
+## function create_agent_team
 
 ```python
 create_agent_team(
@@ -8,34 +140,38 @@ create_agent_team(
     *,
     team_name: str = "agent_team",
     lifecycle: str = "temporary",
-    teammate_mode: str = "plan_mode",
+    teammate_mode: str = "build_mode",
+    spawn_mode: str = "process",
     leader: Optional[LeaderSpec] = None,
     predefined_members: list[TeamMemberSpec] | None = None,
     transport: Optional[TransportSpec] = None,
     storage: Optional[StorageSpec] = None,
+    worktree: Optional[WorktreeConfig] = None,
     metadata: Optional[dict] = None,
 ) -> TeamAgent
 ```
 
-Creates and configures a team Leader.
+Convenience function that constructs a `TeamAgentSpec` and calls `build()`. Equivalent to `TeamAgentSpec(...).build()`.
 
-**Parameters**:
+**Parameters:**
 
-- **agents** (dict[str, [DeepAgentSpec](#class-openjiuwenagent_teamsdeepagentspec)]): Role-based [DeepAgentSpec](#class-openjiuwenagent_teamsdeepagentspec) configuration. Must contain the `"leader"` key; `"teammate"` is optional.
-- **team_name** (str, optional): Team name. Default: `agent_team`.
-- **lifecycle** (str, optional): Team lifecycle mode, either `temporary` or `persistent`. Default: `temporary`.
-- **teammate_mode** (str, optional): Default execution mode for teammates, either `plan_mode` or `build_mode`. Default: `plan_mode`.
-- **leader** ([LeaderSpec](#class-openjiuwenagent_teamsleaderspec), optional): Leader identity configuration. Default: `None`.
-- **predefined_members** (list[TeamMemberSpec] | None, optional): Pre-configured team members. When provided, leader skips `spawn_member` and `build_team` registers all members automatically. Default: `None`.
-- **transport** ([TransportSpec](#class-openjiuwenagent_teamstransportspec), optional): Transport layer configuration. Default: `None`.
-- **storage** ([StorageSpec](#class-openjiuwenagent_teamsstoragespec), optional): Storage layer configuration. Default: `None`.
-- **metadata** (dict, optional): Additional metadata. Default: `None`.
+* **agents**(dict[str, [DeepAgentSpec](./agent_teams.md#class-deepagentspec)]): Per-role DeepAgentSpec configs. Must contain `"leader"` key.
+* **team_name**(str, optional): Team name. Default: `agent_team`.
+* **lifecycle**(str, optional): `temporary` or `persistent`. Default: `temporary`.
+* **teammate_mode**(str, optional): `build_mode` or `plan_mode`. Default: `build_mode`.
+* **spawn_mode**(str, optional): `process` or `inprocess`. Default: `process`.
+* **leader**([LeaderSpec](./agent_teams.md#class-leaderspec), optional): Leader identity. Default: `None`.
+* **predefined_members**(list[[TeamMemberSpec](./agent_teams.md#class-teammemberspec)], optional): Pre-configured members. Default: `None`.
+* **transport**([TransportSpec](./agent_teams.md#class-transportspec), optional): Transport config. Default: `None`.
+* **storage**([StorageSpec](./agent_teams.md#class-storagespec), optional): Storage config. Default: `None`.
+* **worktree**(WorktreeConfig, optional): Worktree isolation. Default: `None`.
+* **metadata**(dict, optional): Metadata. Default: `None`.
 
-**Returns**:
+**Returns:**
 
-**TeamAgent**: A configured Leader instance.
+**TeamAgent**: A configured leader instance.
 
-## function openjiuwen.agent_teams.resume_persistent_team
+## function resume_persistent_team
 
 ```python
 async resume_persistent_team(
@@ -46,98 +182,11 @@ async resume_persistent_team(
 
 Resume a persistent team in a new session.
 
-Creates a fresh session, initializes new dynamic tables for tasks and messages, and returns the same agent ready for a new `invoke()` / `stream()` call.
+**Parameters:**
 
-**Parameters**:
+* **agent**(TeamAgent): A persistent-team leader that has completed at least one round.
+* **new_session_id**(str): Session ID for the new round.
 
-- **agent** (TeamAgent): A configured persistent-team leader that has completed at least one round.
-- **new_session_id** (str): Session ID for the new round.
-
-**Returns**:
+**Returns:**
 
 **TeamAgent**: The same leader instance, ready for the next round.
-
-## class openjiuwen.agent_teams.DeepAgentSpec
-
-JSON-serializable configuration used to construct a `DeepAgent`.
-
-**Attributes**:
-
-- **model** ([TeamModelConfig](./schema/deep_agent_spec.md#openjiuwenagent_teamsteammodelconfig), optional): Model configuration. Default: `None`.
-- **card** ([AgentCard](../openjiuwen.core/single_agent/single_agent.md#class-openjiuwencoresingle_agentagentcard), optional): Agent card. Default: `None`.
-- **system_prompt** (str, optional): System prompt. Default: `None`.
-- **tools** (list[[ToolCard](../openjiuwen.core/foundation/tool/tool.md#class-toolcard)], optional): Tool list. Default: `None`.
-- **mcps** (list[McpServerConfig], optional): MCP server configuration list. Default: `None`.
-- **subagents** (list[[SubAgentSpec](./schema/schema.md#class-openjiuwenagent_teamsschemasubagentspec)], optional): Sub-agent configuration list. Default: `None`.
-- **rails** (list[[RailSpec](./schema/schema.md#class-openjiuwenagent_teamsschemarailspec)], optional): Guardrail configuration list. Default: `None`.
-- **stop_condition** ([StopConditionSpec](./schema/schema.md#class-openjiuwenagent_teamsschemastopconditionspec), optional): Stop condition configuration. Default: `None`.
-- **enable_task_loop** (bool): Whether to enable the task loop. Default: `False`.
-- **max_iterations** (int): Maximum number of iterations. Default: `15`.
-- **workspace** ([WorkspaceSpec](./schema/schema.md#class-openjiuwenagent_teamsschemaworkspacespec), optional): Workspace configuration. Default: `None`.
-- **skills** (list[str], optional): Skill list. Default: `None`.
-- **sys_operation** ([SysOperationSpec](./schema/schema.md#class-openjiuwenagent_teamsschemasysoperationspec), optional): System operation configuration. Default: `None`.
-- **language** (str, optional): Language setting. Default: `None`.
-- **prompt_mode** (str, optional): Prompt mode. Default: `None`.
-- **vision_model** ([VisionModelSpec](./schema/schema.md#class-openjiuwenagent_teamsschemavisionmodelspec), optional): Vision model configuration. Default: `None`.
-- **audio_model** ([AudioModelSpec](./schema/schema.md#class-openjiuwenagent_teamsschemaaudiomodelspec), optional): Audio model configuration. Default: `None`.
-- **enable_task_planning** (bool): Whether to enable task planning. Default: `False`.
-- **completion_timeout** (float): Completion timeout in seconds. Default: `600.0`.
-- **progressive_tool** ([ProgressiveToolSpec](./schema/schema.md#class-openjiuwenagent_teamsschemaprogressivetoolspec), optional): Progressive tool exposure configuration. Default: `None`.
-
-## class openjiuwen.agent_teams.TransportSpec
-
-Pluggable transport layer configuration.
-
-**Attributes**:
-
-- **type** (str): Backend type, such as `"pyzmq"`.
-- **params** (dict, optional): Backend parameters. Default: `{}`.
-
-## class openjiuwen.agent_teams.StorageSpec
-
-Pluggable storage layer configuration.
-
-**Attributes**:
-
-- **type** (str): Storage type, such as `"sqlite"`.
-- **params** (dict): Storage parameters. Default: `{}`.
-
-## class openjiuwen.agent_teams.LeaderSpec
-
-Leader identity configuration.
-
-**Attributes**:
-
-- **member_id** (str, optional): Member ID. Default: `team_leader`.
-- **name** (str, optional): Name. Default: `TeamLeader`.
-- **persona** (str, optional): Persona. Default: `Genius project management expert`.
-- **domain** (str, optional): Domain. Default: `project_management`.
-
-## class openjiuwen.agent_teams.MessagerTransportConfig
-
-Message transport configuration.
-
-**Attributes**:
-
-- **backend** (str, optional): Backend type. Default: `team_runtime`.
-- **team_id** (str, optional): Team ID. Default: `default`.
-- **node_id** (str, optional): Node ID. Default: `None`.
-- **direct_addr** (str, optional): Direct communication address. Default: `None`.
-- **pubsub_publish_addr** (str, optional): Publish address. Default: `None`.
-- **pubsub_subscribe_addr** (str, optional): Subscribe address. Default: `None`.
-- **listen_addrs** (list[str], optional): List of listen addresses. Default: `[]`.
-- **bootstrap_peers** (list[[MessagerPeerConfig](#class-openjiuwenagent_teamsmessagerpeerconfig)], optional): Bootstrap peer list. Default: `[]`.
-- **known_peers** (list[[MessagerPeerConfig](#class-openjiuwenagent_teamsmessagerpeerconfig)], optional): Known peer list. Default: `[]`.
-- **request_timeout** (float, optional): Request timeout in seconds. Default: `10.0`.
-- **metadata** (dict[str, Any], optional): Metadata dictionary. Default: `{}`.
-
-## class openjiuwen.agent_teams.MessagerPeerConfig
-
-Metadata for a node in the message transport layer.
-
-**Attributes**:
-
-- **agent_id** (str): Agent ID.
-- **peer_id** (str, optional): Peer ID. Default: `None`.
-- **addrs** (list[str]): Address list. Default: `[]`.
-- **metadata** (dict[str, Any]): Metadata dictionary. Default: `{}`.

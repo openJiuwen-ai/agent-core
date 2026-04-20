@@ -39,14 +39,14 @@ SKILL_RAIL_LIST_SKILL_SYSTEM_PROMPT: Dict[str, str] = {
 # All-mode header / instruction (bilingual)
 # ---------------------------------------------------------------------------
 SKILL_RAIL_ALL_MODE_HEADER_CN = (
-    "你是一个配备了技能的智能体，用于解决任务。\n"
-    "在执行之前，请使用 read_file 阅读相关的 SKILL.md。\n\n"
+    "# 技能\n\n"
+    "执行前先用 read_file 阅读相关 SKILL.md。\n\n"
     "可用技能：\n"
 )
 
 SKILL_RAIL_ALL_MODE_HEADER_EN = (
-    "You are an agent equipped with skills to solve tasks.\n"
-    "Before execution, read the relevant SKILL.md using read_file.\n\n"
+    "# Skills\n\n"
+    "Read the relevant SKILL.md using read_file before execution.\n\n"
     "Available skills:\n"
 )
 
@@ -56,17 +56,11 @@ SKILL_RAIL_ALL_MODE_HEADER: Dict[str, str] = {
 }
 
 SKILL_RAIL_ALL_MODE_INSTRUCTION_CN = (
-    "\n指令：\n"
-    "通过先阅读 SKILL.md 来选择最相关的技能。\n"
-    "需要时使用 code 执行 Python 或 JavaScript。\n"
-    "需要时使用 bash 执行 shell 命令。"
+    "\n选择最相关的技能，先阅读其 SKILL.md 再执行。"
 )
 
 SKILL_RAIL_ALL_MODE_INSTRUCTION_EN = (
-    "\nInstruction:\n"
-    "Select the most relevant skill by reading its SKILL.md first.\n"
-    "Use code to execute Python or JavaScript when needed.\n"
-    "Use bash to execute shell commands when needed."
+    "\nSelect the most relevant skill by reading its SKILL.md first."
 )
 
 SKILL_RAIL_ALL_MODE_INSTRUCTION: Dict[str, str] = {
@@ -77,26 +71,16 @@ SKILL_RAIL_ALL_MODE_INSTRUCTION: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 # Auto-list mode prompt (bilingual)
 # ---------------------------------------------------------------------------
-SKILL_RAIL_AUTO_LIST_MODE_PROMPT_CN = """
-你是一个配备了技能的智能体，用于解决任务。
-在执行之前，请使用 read_file 阅读相关的 SKILL.md。
+SKILL_RAIL_AUTO_LIST_MODE_PROMPT_CN = """# 技能
 
-指令：
-当你需要决定哪个技能与当前任务相关时，请先调用 list_skill 工具。
-然后在使用技能之前阅读最相关的 SKILL.md。
-需要时使用 code 执行 Python 或 JavaScript。
-需要时使用 bash 执行 shell 命令。
+需要时先调用 list_skill 查看可用技能，再用 read_file 读取相关 SKILL.md 后执行。
+需要时使用 code 执行 Python 或 JavaScript，使用 bash 执行 shell 命令。
 """
 
-SKILL_RAIL_AUTO_LIST_MODE_PROMPT_EN = """
-You are an agent equipped with skills to solve tasks.
-Before execution, read the relevant SKILL.md using read_file.
+SKILL_RAIL_AUTO_LIST_MODE_PROMPT_EN = """# Skills
 
-Instruction:
-When you need to decide which skill is relevant to the current task, call the list_skill tool first.
-Then read the most relevant SKILL.md before using the skill.
-Use code to execute Python or JavaScript when needed.
-Use bash to execute shell commands when needed.
+When needed, call list_skill first to see available skills, then read the relevant SKILL.md with read_file before execution.
+Use code for Python or JavaScript snippets when needed, and use bash for shell commands.
 """
 
 SKILL_RAIL_AUTO_LIST_MODE_PROMPT: Dict[str, str] = {
@@ -107,22 +91,14 @@ SKILL_RAIL_AUTO_LIST_MODE_PROMPT: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 # No-skill fallback prompt (bilingual)
 # ---------------------------------------------------------------------------
-SKILL_RAIL_NO_SKILL_PROMPT_CN = """
-你是一个配备了技能的智能体，用于解决任务。
-当技能信息可用时，请使用 read_file 阅读相关的 SKILL.md。
-需要时使用 code 执行 Python 或 JavaScript。
-需要时使用 bash 执行 shell 命令。
+SKILL_RAIL_NO_SKILL_PROMPT_CN = """# 技能
 
-当前任务没有选择任何技能。
+当前任务没有选择任何技能。如有技能信息可用，请用 read_file 阅读相关 SKILL.md。
 """
 
-SKILL_RAIL_NO_SKILL_PROMPT_EN = """
-You are an agent equipped with skills to solve tasks.
-Before execution, read the relevant SKILL.md using read_file when skill information is available.
-Use code to execute Python or JavaScript when needed.
-Use bash to execute shell commands when needed.
+SKILL_RAIL_NO_SKILL_PROMPT_EN = """# Skills
 
-No skill was selected for this task.
+No skill was selected for this task. When skill information is available, read the relevant SKILL.md using read_file.
 """
 
 SKILL_RAIL_NO_SKILL_PROMPT: Dict[str, str] = {
@@ -139,12 +115,12 @@ def build_skill_line(
     index: int,
     skill_name: str,
     description: str,
-    skill_md_path: str,
+    skill_md_path: Optional[str] = None,
 ) -> str:
     """Build one rendered skill line."""
     return (
-        f"{index}. **{skill_name}**: {description}\n"
-        f"   Path: {skill_md_path}"
+        f"{index}. {skill_name}: {description}"
+        + (f"\n   Path: {skill_md_path}" if skill_md_path else "")
     )
 
 
@@ -201,5 +177,5 @@ def build_skills_section(
     return PromptSection(
         name=SectionName.SKILLS,
         content={language: content},
-        priority=90,
+        priority=40,
     )

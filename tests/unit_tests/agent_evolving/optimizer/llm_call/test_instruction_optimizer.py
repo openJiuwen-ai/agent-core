@@ -2,11 +2,14 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Tests for InstructionOptimizer - prompt optimization with LLM calls."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from openjiuwen.agent_evolving.dataset import Case, EvaluatedCase
+from openjiuwen.agent_evolving.signal.from_eval import from_evaluated_case
+from openjiuwen.agent_evolving.signal.base import EvolutionCategory, EvolutionSignal
 from openjiuwen.agent_evolving.optimizer.llm_call.instruction_optimizer import InstructionOptimizer
 from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
 
@@ -31,6 +34,23 @@ def make_evaluated_case(case_id="case1", score=0.0, answer=None):
     """Factory for creating evaluated cases."""
     case = Case(inputs={"query": "test question"}, label={"answer": "expected answer"}, case_id=case_id)
     return EvaluatedCase(case=case, answer=answer or {"output": "wrong"}, score=score, reason="incorrect")
+
+
+def make_signal(signal_type="evaluated", score=0.0) -> EvolutionSignal:
+    """Factory for creating EvolutionSignal."""
+    return EvolutionSignal(
+        signal_type=signal_type,
+        evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
+        section="Troubleshooting",
+        excerpt=f"score={score:.2f}",
+        context={
+            "question": "test question",
+            "label": "expected answer",
+            "answer": "wrong",
+            "reason": "incorrect",
+            "score": score,
+        },
+    )
 
 
 def make_instruction_optimizer():
@@ -64,7 +84,7 @@ class TestInstructionOptimizerBackward:
         optimizer, _ = make_instruction_optimizer()
         optimizer.bind({})
         with pytest.raises(Exception):
-            optimizer.backward([])
+            asyncio.run(optimizer.backward([]))
 
     @staticmethod
     def test_backward_skips_missing_operator():
@@ -82,7 +102,9 @@ class TestInstructionOptimizerBackward:
         mock_model.invoke.return_value.content = "Gradient text"
         op = make_mock_operator("op1")
         optimizer.bind({"op1": op})
-        optimizer.backward([])  # Use public API
+        # Use a bad signal (score=0.0) to trigger LLM gradient generation
+        signals = [make_signal(score=0.0)]
+        asyncio.run(optimizer.backward(signals))
         # Verify gradient was set via parameters
         params = optimizer.parameters()
         assert "op1" in params
@@ -120,19 +142,21 @@ class TestInstructionOptimizerBadCasesBehavior:
 
     @staticmethod
     def test_backward_with_mixed_scores():
-        """backward processes cases with different scores."""
+        """backward processes signals with different scores."""
         optimizer, mock_model = make_instruction_optimizer()
         mock_model.invoke.return_value = MagicMock(content="Gradient text")
 
         optimizer.bind({"op1": make_mock_operator("op1")})
 
+        # Convert EvaluatedCase to EvolutionSignal (as SingleDimUpdater does)
         cases = [
             make_evaluated_case("case1", score=0.0),
             make_evaluated_case("case2", score=1.0),
         ]
+        signals = [from_evaluated_case(c) for c in cases]
 
         # backward should complete without error for mixed scores
-        optimizer.backward(cases)
+        asyncio.run(optimizer.backward(signals))
 
 
 class TestInstructionOptimizerFullPipeline:
@@ -140,12 +164,12 @@ class TestInstructionOptimizerFullPipeline:
 
     @staticmethod
     def test_full_pipeline_no_cases():
-        """Full pipeline with empty cases."""
+        """Full pipeline with empty signals."""
         optimizer, mock_model = make_instruction_optimizer()
         mock_model.invoke.return_value.content = "<PROMPT_OPTIMIZED>optimized</PROMPT_OPTIMIZED>"
 
         optimizer.bind({"op1": make_mock_operator("op1")})
-        optimizer.backward([])
+        asyncio.run(optimizer.backward([]))
         result = optimizer.step()
 
         # Should complete without error
@@ -153,13 +177,13 @@ class TestInstructionOptimizerFullPipeline:
 
     @staticmethod
     def test_full_pipeline_with_bad_cases():
-        """Full pipeline with bad cases triggers LLM calls."""
+        """Full pipeline with bad signals triggers LLM calls."""
         optimizer, mock_model = make_instruction_optimizer()
         mock_model.invoke.return_value.content = "<PROMPT_OPTIMIZED>optimized</PROMPT_OPTIMIZED>"
 
         optimizer.bind({"op1": make_mock_operator("op1")})
-        cases = [make_evaluated_case("case1", score=0.0)]
-        optimizer.backward(cases)
+        signals = [from_evaluated_case(make_evaluated_case("case1", score=0.0))]
+        asyncio.run(optimizer.backward(signals))
         result = optimizer.step()
 
         # Should complete without error
@@ -176,7 +200,8 @@ class TestInstructionOptimizerStepPaths:
         mock_model.invoke.return_value.content = "<PROMPT_OPTIMIZED>new sys</PROMPT_OPTIMIZED>"
 
         optimizer.bind({"op1": make_mock_operator("op1")}, targets=["system_prompt"])
-        optimizer.backward([])
+        # Pass a bad signal so LLM gradient generation is triggered
+        asyncio.run(optimizer.backward([make_signal(score=0.0)]))
         result = optimizer.step()
 
         assert result is not None
@@ -189,7 +214,8 @@ class TestInstructionOptimizerStepPaths:
         mock_model.invoke.return_value.content = "<PROMPT_OPTIMIZED>new usr</PROMPT_OPTIMIZED>"
 
         optimizer.bind({"op1": make_mock_operator("op1")}, targets=["user_prompt"])
-        optimizer.backward([])
+        # Pass a bad signal so LLM gradient generation is triggered
+        asyncio.run(optimizer.backward([make_signal(score=0.0)]))
         result = optimizer.step()
 
         assert result is not None
@@ -201,7 +227,7 @@ class TestInstructionOptimizerStepPaths:
         optimizer, _ = make_instruction_optimizer()
         optimizer.bind({"op1": make_mock_operator("op1")}, targets=["system_prompt"])
         # Forward without bad cases means no gradient is generated, so step returns None
-        optimizer.backward([])
+        asyncio.run(optimizer.backward([]))
 
         result = optimizer.step()
 

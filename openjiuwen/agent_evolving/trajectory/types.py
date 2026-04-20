@@ -1,53 +1,120 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""
-Trajectory-related type definitions: Trajectory, TrajectoryStep, ExecutionSpec.
-"""
+"""Trajectory data model."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Literal
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple, Union, Literal
 
 
-# --- Common update types ---
+# --- Common types ---
+StepKind = Literal["llm", "tool"]
+CostInfo = Dict[str, int]  # {"input_tokens": N, "output_tokens": M}
 UpdateKey = Tuple[str, str]  # (operator_id, target)
 Updates = Dict[UpdateKey, Any]
 
-# --- Step types ---
-StepKind = Literal["llm", "tool", "memory", "workflow", "agent"]
 
+# =============================================================================
+# StepDetail Union Types
+# =============================================================================
 
-@dataclass(frozen=True)
-class ExecutionSpec:
-    """Single execution configuration."""
-    case_id: str
-    execution_id: str
-    seed: Optional[int] = None
-    tags: Optional[Dict[str, Any]] = None
+@dataclass
+class LLMCallDetail:
+    """Complete LLM call execution data."""
+
+    model: str
+    messages: List[Dict[str, Any]]
+    response: Optional[Dict[str, Any]] = None
+    tools: Optional[List[Dict[str, Any]]] = None
+    usage: Optional[Dict[str, Any]] = None
 
 
 @dataclass
-class TrajectoryStep:
-    """Single step in execution."""
-    kind: StepKind
-    operator_id: Optional[str]
-    agent_id: Optional[str]
-    role: Optional[str]
-    node_id: Optional[str]
-    inputs: Any
-    outputs: Any
-    error: Optional[Dict[str, Any]]
-    start_time_ms: Optional[int]
-    end_time_ms: Optional[int]
-    meta: Dict[str, Any]
+class ToolCallDetail:
+    """Complete tool call execution data."""
 
+    tool_name: str
+    call_args: Any = None
+    call_result: Any = None
+    tool_description: Optional[str] = None
+    tool_schema: Optional[Dict[str, Any]] = None
+    tool_call_id: Optional[str] = None
+    """Tool call ID for script artifact tracking. Defaults to None."""
+
+
+StepDetail = Union[LLMCallDetail, ToolCallDetail]
+
+
+# =============================================================================
+# TrajectoryStep
+# =============================================================================
+
+@dataclass
+class TrajectoryStep:
+    """Single step in execution.
+
+    Field categories:
+    - Core execution facts: kind, error, timestamps
+    - Structured detail: detail (LLMCallDetail | ToolCallDetail | None)
+    - Post-injection: reward, log_probs, token_ids (filled after creation)
+    - Extension: meta (operator_id, invoke relationships, etc.)
+    """
+
+    kind: StepKind
+    error: Optional[Dict[str, Any]] = None
+    start_time_ms: Optional[int] = None
+    end_time_ms: Optional[int] = None
+
+    detail: Optional[StepDetail] = None
+    """Structured step data.
+
+    LLM steps: LLMCallDetail with full messages/response/tools
+    Tool steps: ToolCallDetail with args/result + augmented schema
+    Other steps: detail=None, I/O in meta as backup
+    """
+
+    reward: Optional[float] = None
+    """Scalar reward from PRM or SignalDetector."""
+
+    log_probs: Optional[List[float]] = None
+    """Token log probabilities. Only for kind='llm'."""
+
+    token_ids: Optional[List[int]] = None
+    """Response token IDs. Only for kind='llm'."""
+
+    meta: Dict[str, Any] = field(default_factory=dict)
+    """Extension metadata including:
+    - operator_id: disambiguated from span
+    - agent_id: agent identifier when available
+    - inputs/outputs: backup for non-LLM/Tool steps
+    - span_name: original span.name for debugging
+    - invoke_id, parent_invoke_id, child_invokes: invoke relationships
+    """
+
+
+# =============================================================================
+# Trajectory
+# =============================================================================
 
 @dataclass
 class Trajectory:
     """Complete execution trajectory."""
-    case_id: str
+
     execution_id: str
-    trace_id: Optional[str]
+    """Unique identifier for this execution."""
+
     steps: List[TrajectoryStep]
-    edges: Optional[List[Tuple[int, int]]] = None
+    """Ordered list of execution steps."""
+
+    source: str = "offline"
+    """Execution source: 'online' (deepagents) | 'offline' (trainer)"""
+
+    case_id: Optional[str] = None
+    """Offline: dataset case identifier. Online: None."""
+
+    session_id: Optional[str] = None
+    """Online: conversation session ID. Offline: can reuse case_id or None."""
+
+    cost: Optional[CostInfo] = None
+    """Aggregated cost metrics: input_tokens, output_tokens."""

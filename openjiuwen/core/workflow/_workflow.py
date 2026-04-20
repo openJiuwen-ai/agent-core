@@ -247,19 +247,19 @@ class BaseWorkflow:
         if not src_comp_id:
             raise build_error(StatusCode.WORKFLOW_CONDITION_EDGE_INVALID, src_comp_id=src_comp_id,
                               reason="src_comp_id cannot be empty or None",
-                              workflow=self._workflow_config.card.str())
+                              workflow=self._workflow_config.card.to_str())
         if not isinstance(src_comp_id, str):
             raise build_error(StatusCode.WORKFLOW_CONDITION_EDGE_INVALID, src_comp_id=src_comp_id,
                               reason=f"src_comp_id must be a string, got {type(src_comp_id).__name__}",
-                              workflow=self._workflow_config.card.str())
+                              workflow=self._workflow_config.card.to_str())
         if not router:
             raise build_error(StatusCode.WORKFLOW_CONDITION_EDGE_INVALID, src_comp_id=src_comp_id,
                               reason="router function is required for conditional edges",
-                              workflow=self._workflow_config.card.str())
+                              workflow=self._workflow_config.card.to_str())
         elif not isinstance(router, Callable):
             raise build_error(StatusCode.WORKFLOW_CONDITION_EDGE_INVALID, src_comp_id=src_comp_id,
                               reason=f"router must be a callable function, got {type(router).__name__}",
-                              workflow=self._workflow_config.card.str())
+                              workflow=self._workflow_config.card.to_str())
         if isinstance(router, BranchRouter):
             router.set_session(self._session)
             self._graph.add_conditional_edges(source_node_id=src_comp_id, router=router)
@@ -288,8 +288,8 @@ class BaseWorkflow:
                 raise build_error(StatusCode.WORKFLOW_COMPILE_ERROR,
                                   reason=f"workflow nesting hierarchy is too big, must <= "
                                          f"{main_workflow_config.workflow_max_nesting_depth}",
-                                  workflow=main_workflow_config.card.str() if main_workflow_config
-                                  else self._workflow_config.card.str())
+                                  workflow=main_workflow_config.card.to_str() if main_workflow_config
+                                  else self._workflow_config.card.to_str())
         self._session.set_session(session)
         try:
             return self._graph.compile(session, context=context)
@@ -443,18 +443,18 @@ class BaseWorkflow:
         """validate component id"""
         if not comp_id:
             raise build_error(StatusCode.WORKFLOW_COMPONENT_ID_INVALID, comp_id=comp_id, reason="is None or empty",
-                              workflow=self._workflow_config.card.str())
+                              workflow=self._workflow_config.card.to_str())
         if not isinstance(comp_id, str):
             raise build_error(StatusCode.WORKFLOW_COMPONENT_ID_INVALID, comp_id=comp_id, reason="type is not string",
-                              workflow=self._workflow_config.card.str())
+                              workflow=self._workflow_config.card.to_str())
         if len(comp_id) > 100:
             raise build_error(StatusCode.WORKFLOW_COMPONENT_ID_INVALID, comp_id=comp_id,
-                              reason="length must not between [1, 100]", workflow=self._workflow_config.card.str())
+                              reason="length must not between [1, 100]", workflow=self._workflow_config.card.to_str())
         if not re.match(r'^[A-Za-z0-9_-]+$', comp_id):
             raise build_error(StatusCode.WORKFLOW_COMPONENT_ID_INVALID, comp_id=comp_id,
                               reason="only support letters (a–z, A–Z), "
                                      "digits (0–9), underscores (_) or hyphens (-)",
-                              workflow=self._workflow_config.card.str())
+                              workflow=self._workflow_config.card.to_str())
 
     def _validate_comp_ability(self, comp_id: str, abilities, wait_for_all):
         if abilities is None:
@@ -466,31 +466,31 @@ class BaseWorkflow:
                 if not wait_for_all:
                     raise build_error(StatusCode.WORKFLOW_COMPONENT_ABILITY_INVALID, comp_id=comp_id,
                                       reason="stream components (TRANSFORM/COLLECT) must set 'wait_for_all' to True",
-                                      workflow=self._workflow_config.card.str())
+                                      workflow=self._workflow_config.card.to_str())
 
     def _validate_edge(self, src_comp_id: Union[str, list[str]], target_comp_id: str, error_code):
         if not src_comp_id:
             raise build_error(error_code, src_comp_id=src_comp_id,
                               target_comp_id=target_comp_id, reason="src_comp_id cannot be empty or None",
-                              workflow=self._workflow_config.card.str())
+                              workflow=self._workflow_config.card.to_str())
         if isinstance(src_comp_id, list):
             for idx, comp_id in enumerate(src_comp_id):
                 if not comp_id:
                     raise build_error(error_code, src_comp_id=src_comp_id,
                                       target_comp_id=target_comp_id,
                                       reason="src_comp_id list contains empty or None value at index {idx}",
-                                      workflow=self._workflow_config.card.str())
+                                      workflow=self._workflow_config.card.to_str())
                 if not isinstance(comp_id, str):
                     raise build_error(error_code, src_comp_id=src_comp_id,
                                       target_comp_id=target_comp_id,
                                       reason="src_comp_id list contains non-string value at index {idx}: "
                                              f"{type(comp_id).__name__}",
-                                      workflow=self._workflow_config.card.str())
+                                      workflow=self._workflow_config.card.to_str())
         elif not isinstance(src_comp_id, str):
             raise build_error(error_code, src_comp_id=src_comp_id,
                               target_comp_id=target_comp_id,
                               reason=f"src_comp_id must be a string or list[string], got {type(src_comp_id).__name__}",
-                              workflow=self._workflow_config.card.str())
+                              workflow=self._workflow_config.card.to_str())
 
     def _validate_schemas(self, comp_id, inputs_schema: dict | Transformer = None,
                           outputs_schema: dict | Transformer = None,
@@ -506,7 +506,7 @@ class BaseWorkflow:
                         comp_id=comp_id,
                         reason=f"duplicate key both exist in inputs_schema with stream_inputs_schema, "
                                f"key={key}",
-                        workflow=self._workflow_config.card.str()
+                        workflow=self._workflow_config.card.to_str()
                     )
         if isinstance(outputs_schema, dict) and isinstance(stream_outputs_schema, dict):
             flatten_outputs_schema = flatten_dict(outputs_schema)
