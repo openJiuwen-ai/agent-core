@@ -141,16 +141,6 @@ make test TESTFLAGS="-m \"level0 or level1\" tests/unit_tests/agent_teams/"
 - 涉及 rails 工具注入时，断言工具 schema 或透出列表，而不是耦合具体注册
   顺序。
 
-## 用例分级
-
-所有 562 个用例已用 `@pytest.mark.level0` / `@pytest.mark.level1` 标注。参考
-`docs/test_design.md` 的分级原则：
-
-- **Level 0**（194 个）：默认构造 + 主正向路径。PR gate 必须全绿。
-- **Level 1**（368 个）：参数组合、异常分支、并发/生命周期边界、schema 兼容。
-
-运行筛选见上文"用例分级与筛选"。
-
 ## 常见陷阱
 
 - 修改 `openjiuwen/agent_teams/tools/database.py` 的 schema 时，必须
