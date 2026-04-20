@@ -40,3 +40,18 @@
 | [ListFilesResult](./sys_operation/result.md) | List files result. |
 | [ListDirsResult](./sys_operation/result.md) | List directories result. |
 | [SearchFilesResult](./sys_operation/result.md) | Search files result. |
+
+## Sandbox Mode
+
+Sandbox mode is a runtime mode of SysOperation that routes filesystem, Shell, and code execution capabilities to an isolated environment.
+
+**Sandbox API Documentation**:
+
+| CLASS | DESCRIPTION |
+|-------|-------------|
+| [sandbox_config](./sys_operation/sandbox/sandbox_config.md) | Sandbox configuration classes |
+| [sandbox_registry](./sys_operation/sandbox/sandbox_registry.md) | Sandbox registry |
+| [gateway](./sys_operation/sandbox/gateway/gateway.md) | Sandbox gateway |
+| [gateway_client](./sys_operation/sandbox/gateway/gateway_client.md) | Sandbox gateway client |
+| [launchers/base](./sys_operation/sandbox/launchers/base.md) | Sandbox launcher base class |
+| [providers/base_provider](./sys_operation/sandbox/providers/base_provider.md) | Sandbox provider base class |
