@@ -55,6 +55,7 @@
     - [Checkpointer Checkpoint Mechanism](2.Development%20Guide/Advanced%20Usage/Checkpointer%20Checkpoint%20Mechanism.md)
     - [Async Callback Framework](2.Development%20Guide/Advanced%20Usage/Async%20Callback%20Framework.md)
     - [Security Guardrail](2.Development%20Guide/Advanced%20Usage/Security%20Guardrail.md)
+    - [MCP Tool](2.Development%20Guide/Advanced%20Usage/MCP%20Tool.md)
   - [API Docs](2.Development%20Guide/API%20Docs/README.md)
     - [openjiuwen.harness](2.Development%20Guide/API%20Docs/openjiuwen.harness.README.md)
       - [deep_agent](2.Development%20Guide/API%20Docs/openjiuwen.harness/deep_agent.md)
