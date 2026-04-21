@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import (
     Any,
     Callable,
+    Literal,
     Optional,
 )
 
@@ -133,6 +134,14 @@ class TeamAgentSpec(BaseModel):
     spawn_mode: str = "process"
     leader: LeaderSpec = LeaderSpec()
     predefined_members: list[TeamMemberSpec] = []
+    team_mode: Literal["default", "predefined", "hybrid"] | None = None
+    """Team operating mode.
+
+    ``None`` (default) derives the mode automatically: "predefined" when
+    ``predefined_members`` is non-empty, "default" otherwise. Set
+    explicitly to "hybrid" to keep predefined members while still
+    allowing ``spawn_member`` calls during execution.
+    """
     transport: Optional[TransportSpec] = None
     storage: Optional[StorageSpec] = None
     worktree: Optional[WorktreeConfig] = None

@@ -4,6 +4,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from openjiuwen.agent_teams import paths
 
 

@@ -300,7 +300,7 @@ class TestPredefinedTeamPrompt:
         prompt = build_system_prompt(
             role=TeamRole.LEADER,
             persona="PM",
-            predefined_team=True,
+            team_mode="predefined",
         )
         logger.info("Predefined prompt length: {}", len(prompt))
 
@@ -314,10 +314,23 @@ class TestPredefinedTeamPrompt:
         prompt = build_system_prompt(
             role=TeamRole.LEADER,
             persona="PM",
-            predefined_team=False,
+            team_mode="default",
         )
 
         assert "预定义团队模式" not in prompt
+
+    @pytest.mark.level1
+    def test_hybrid_prompt_includes_hybrid_mode(self):
+        from openjiuwen.agent_teams.agent.policy import build_system_prompt
+
+        prompt = build_system_prompt(
+            role=TeamRole.LEADER,
+            persona="PM",
+            team_mode="hybrid",
+        )
+
+        assert "混合团队模式" in prompt
+        assert "spawn_member" in prompt
 
     @pytest.mark.level1
     def test_predefined_workflow_not_applied_to_teammate(self):
@@ -326,7 +339,7 @@ class TestPredefinedTeamPrompt:
         prompt = build_system_prompt(
             role=TeamRole.TEAMMATE,
             persona="Dev",
-            predefined_team=True,
+            team_mode="predefined",
         )
 
         assert "预定义团队模式" not in prompt

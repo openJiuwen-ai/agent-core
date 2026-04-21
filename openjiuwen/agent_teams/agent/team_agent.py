@@ -66,6 +66,17 @@ from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.prompts import resolve_language as _resolve_language
 
 
+def _resolve_team_mode(spec: TeamAgentSpec) -> str:
+    """Return the effective team mode for the given spec.
+
+    Honors an explicit ``spec.team_mode``; otherwise derives from
+    ``predefined_members`` for backwards compatibility.
+    """
+    if spec.team_mode is not None:
+        return spec.team_mode
+    return "predefined" if spec.predefined_members else "default"
+
+
 class TeamAgent(BaseAgent):
     """One implementation that can act as leader or teammate.
 
@@ -541,7 +552,7 @@ class TeamAgent(BaseAgent):
                 lifecycle=spec.lifecycle,
                 teammate_mode=spec.teammate_mode,
                 language=resolved_language,
-                predefined_team=bool(spec.predefined_members),
+                team_mode=_resolve_team_mode(spec),
                 base_prompt=agent_spec.system_prompt,
                 team_workspace_mount=team_workspace_mount,
                 team_workspace_path=team_workspace_path,
@@ -656,7 +667,7 @@ class TeamAgent(BaseAgent):
         # (teammates run in separate processes).
         agent_team.register_cleanup_path(str(team_home(team_name)))
 
-        exclude = {"spawn_member"} if spec.predefined_members else None
+        exclude = {"spawn_member"} if _resolve_team_mode(spec) == "predefined" else None
         lang = (ctx.team_spec.metadata.get("lang") if ctx.team_spec else None) or "cn"
         team_tools = create_team_tools(
             role=ctx.role.value,

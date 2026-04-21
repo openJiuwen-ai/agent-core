@@ -186,22 +186,34 @@ def build_team_role_section(
     )
 
 
+_WORKFLOW_TEMPLATES: dict[str, str] = {
+    "default": "leader_workflow",
+    "predefined": "leader_workflow_predefined",
+    "hybrid": "leader_workflow_hybrid",
+}
+
+
 def build_team_workflow_section(
     *,
     role: TeamRole,
-    predefined_team: bool,
+    team_mode: str = "default",
     language: str = "cn",
 ) -> Optional[PromptSection]:
     """Build the workflow section (LEADER only).
 
+    Args:
+        role: LEADER or TEAMMATE.
+        team_mode: Workflow variant — "default", "predefined", or "hybrid".
+        language: Prompt language.
+
     Returns:
-        PromptSection wrapping ``leader_workflow.md`` (or the predefined
-        variant) under an H1 heading; ``None`` for non-leader roles.
+        PromptSection wrapping the matching ``leader_workflow_*.md``
+        under an H1 heading; ``None`` for non-leader roles.
     """
     if role != TeamRole.LEADER:
         return None
     labels = _labels_for(language)
-    template_name = "leader_workflow_predefined" if predefined_team else "leader_workflow"
+    template_name = _WORKFLOW_TEMPLATES.get(team_mode, "leader_workflow")
     workflow_text = load_template(template_name, language).content.strip()
     body = f"{labels['workflow_heading']}\n\n{workflow_text}\n"
     return PromptSection(
@@ -423,7 +435,7 @@ class TeamRail(DeepAgentRail):
         lifecycle: str = "temporary",
         teammate_mode: str = "build_mode",
         language: str = "cn",
-        predefined_team: bool = False,
+        team_mode: str = "default",
         base_prompt: str | None = None,
         team_workspace_mount: str | None = None,
         team_workspace_path: str | None = None,
@@ -444,7 +456,7 @@ class TeamRail(DeepAgentRail):
             member_name=member_name,
             lifecycle=lifecycle,
             teammate_mode=teammate_mode,
-            predefined_team=predefined_team,
+            team_mode=team_mode,
             base_prompt=base_prompt,
         )
 
@@ -506,7 +518,7 @@ class TeamRail(DeepAgentRail):
         member_name: str | None,
         lifecycle: str,
         teammate_mode: str,
-        predefined_team: bool,
+        team_mode: str,
         base_prompt: str | None,
     ) -> list[PromptSection]:
         """Construct the never-changing sections once at rail init time."""
@@ -519,7 +531,7 @@ class TeamRail(DeepAgentRail):
             ),
             build_team_workflow_section(
                 role=role,
-                predefined_team=predefined_team,
+                team_mode=team_mode,
                 language=self._language,
             ),
             build_team_lifecycle_section(

@@ -2,6 +2,8 @@
 """Tests for role-based tool registration."""
 from __future__ import annotations
 
+import pytest
+
 from openjiuwen.agent_teams import create_agent_team
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 from openjiuwen.agent_teams.schema.blueprint import (

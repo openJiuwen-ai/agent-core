@@ -70,7 +70,7 @@ class TestTeamWorkflowSection:
     def test_leader_workflow(self):
         section = build_team_workflow_section(
             role=TeamRole.LEADER,
-            predefined_team=False,
+            team_mode="default",
             language="cn",
         )
         assert section is not None
@@ -83,17 +83,29 @@ class TestTeamWorkflowSection:
     def test_leader_workflow_predefined(self):
         section = build_team_workflow_section(
             role=TeamRole.LEADER,
-            predefined_team=True,
+            team_mode="predefined",
             language="cn",
         )
         content = section.render("cn")
         assert "预定义团队模式" in content
 
     @pytest.mark.level0
+    def test_leader_workflow_hybrid(self):
+        section = build_team_workflow_section(
+            role=TeamRole.LEADER,
+            team_mode="hybrid",
+            language="cn",
+        )
+        assert section is not None
+        content = section.render("cn")
+        assert "混合团队模式" in content
+        assert "spawn_member" in content
+
+    @pytest.mark.level0
     def test_teammate_returns_none(self):
         section = build_team_workflow_section(
             role=TeamRole.TEAMMATE,
-            predefined_team=False,
+            team_mode="default",
             language="cn",
         )
         assert section is None
@@ -352,7 +364,7 @@ class TestTeamRailStaticSections:
             member_name="leader1",
             lifecycle="temporary",
             language="cn",
-            predefined_team=False,
+            team_mode="default",
             base_prompt="Stay sharp",
         )
         rail.init(agent)
@@ -383,7 +395,7 @@ class TestTeamRailStaticSections:
             member_name="dev1",
             lifecycle="temporary",
             language="cn",
-            predefined_team=False,
+            team_mode="default",
             base_prompt=None,
         )
         rail.init(agent)
