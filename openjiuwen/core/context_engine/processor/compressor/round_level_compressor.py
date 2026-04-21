@@ -170,7 +170,8 @@ class RoundLevelCompressor(ContextProcessor):
         **kwargs,
     ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
         all_messages = context.get_messages() + messages_to_add
-        if self._count_context_window_tokens(
+        force = kwargs.get("force", False)
+        if not force and self._count_context_window_tokens(
             system_messages=kwargs.get("system_messages"),
             context_messages=all_messages,
             tools=kwargs.get("tools"),
@@ -184,6 +185,7 @@ class RoundLevelCompressor(ContextProcessor):
             system_messages=kwargs.get("system_messages"),
             tools=kwargs.get("tools"),
             keep_recent=self._keep_recent_messages,
+            force=force,
         )
         if compressed_messages == all_messages:
             return None, messages_to_add
@@ -251,9 +253,10 @@ class RoundLevelCompressor(ContextProcessor):
         system_messages: Optional[List[BaseMessage]],
         tools: Optional[List[ToolInfo]],
         keep_recent: int,
+        force: bool = False,
     ) -> List[BaseMessage]:
         working = list(context_messages)
-        if self._is_under_context_window_budget(system_messages, working, tools, context):
+        if not force and self._is_under_context_window_budget(system_messages, working, tools, context):
             return working
 
         recursive_updated = await self._run_recursive_compression(

@@ -1,5 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import asyncio
 import uuid
 from typing import List, Optional, Tuple, Dict, Any
 
@@ -30,6 +31,9 @@ feel free to call reload_original_context_messages:
 Storage types: "in_memory" (session cache).
 """
 _CONTEXT_MESSAGE_ID_KEY = "context_message_id"
+_ACTIVE_COMPRESSION_RESULT_BUSY = "busy"
+_ACTIVE_COMPRESSION_RESULT_COMPRESSED = "compressed"
+_ACTIVE_COMPRESSION_RESULT_NOOP = "noop"
 
 
 class SessionModelContext(ModelContext):
@@ -58,6 +62,8 @@ class SessionModelContext(ModelContext):
         self._default_dialogue_round = config.default_window_round_num
         self._token_counter = token_counter
         self._processors = processors
+        self._processor_lock = asyncio.Lock()
+        self._active_compression_in_progress = False
         self._kv_cache_manager = KVCacheManager(session_id) if config.enable_kv_cache_release else None
         self._offload_message_buffer = OffloadMessageBuffer()
         self._offload_message_buffer.set_sys_operation(sys_operation)
@@ -117,27 +123,69 @@ class SessionModelContext(ModelContext):
             messages: BaseMessage | List[BaseMessage],
             **kwargs
     ) -> List[BaseMessage]:
-        # Inject sys_operation if not provided
-        kwargs.setdefault("sys_operation", self._sys_operation)
         self._validate_and_init_messages(messages)
         messages_to_add = messages if isinstance(messages, list) else [messages]
         messages_to_add = self._ensure_context_message_ids(messages_to_add)
+        kwargs.setdefault("sys_operation", self._sys_operation)
         if self._token_counter:
             for msg in messages_to_add:
                 self._raw_total_tokens += self._token_counter.count_messages([msg])
 
-        for processor in self._processors:
-            try:
-                if await processor.trigger_add_messages(self, messages_to_add, **kwargs):
-                    logger.info(f"trigger context processor {processor.processor_type()} on ADD")
-                    event, messages_to_add = await processor.on_add_messages(self, messages_to_add, **kwargs)
-            except Exception as e:
-                logger.warning(
-                    f"Failed to process ADD messages by using processor {processor.processor_type()},"
-                    f"reason: {str(e)}"
+        # Active compaction wins the lock, so concurrent appends bypass passive processors and only enqueue messages.
+        if self._active_compression_in_progress and self._processor_lock.locked():
+            logger.info("skip passive compression because active compression is already in progress")
+            self._message_buffer.add_back(messages_to_add)
+            return messages_to_add
+
+        async with self._processor_lock:
+            _, messages_to_add = await self._run_add_processors(
+                messages_to_add,
+                force=False,
+                processor_types=None,
+                **kwargs,
+            )
+            self._message_buffer.add_back(messages_to_add)
+            return messages_to_add
+
+    async def compress_context(
+            self,
+            processor_types: List[str] = None,
+            **kwargs,
+    ) -> str:
+        if self._processor_lock.locked():
+            logger.info("skip active compression because passive compression is already in progress")
+            return _ACTIVE_COMPRESSION_RESULT_BUSY
+
+        await self._processor_lock.acquire()
+        try:
+            self._active_compression_in_progress = True
+            kwargs.setdefault("sys_operation", self._sys_operation)
+            processors = self._select_processors(processor_types=processor_types, compression_only=True)
+            if not processors:
+                logger.info(
+                    "skip active compression because no matching compression processor is available; "
+                    "possible reasons: no compression processor is registered on this context, "
+                    "or requested processor_types do not overlap with registered compression processors; "
+                    f"requested={processor_types}, "
+                    f"registered={[processor.processor_type() for processor in self._processors]}"
                 )
-        self._message_buffer.add_back(messages_to_add)
-        return messages_to_add
+                return _ACTIVE_COMPRESSION_RESULT_NOOP
+
+            changed, _ = await self._run_add_processors(
+                [],
+                force=True,
+                processor_types=processor_types,
+                compression_only=True,
+                **kwargs,
+            )
+            if changed:
+                logger.info("active compression finished and changed context messages")
+                return _ACTIVE_COMPRESSION_RESULT_COMPRESSED
+            logger.info("active compression finished without changing context messages")
+            return _ACTIVE_COMPRESSION_RESULT_NOOP
+        finally:
+            self._active_compression_in_progress = False
+            self._processor_lock.release()
 
     def pop_messages(self, size: int = 1, with_history: bool = True) -> List[BaseMessage]:
         if size is not None and size < 0:
@@ -382,6 +430,73 @@ class SessionModelContext(ModelContext):
 
     def token_counter(self) -> TokenCounter:
         return self._token_counter
+
+    async def _run_add_processors(
+            self,
+            messages_to_add: List[BaseMessage],
+            *,
+            force: bool,
+            processor_types: List[str] = None,
+            compression_only: bool = False,
+            **kwargs,
+    ) -> Tuple[bool, List[BaseMessage]]:
+        processors = self._select_processors(
+            processor_types=processor_types,
+            compression_only=compression_only,
+        )
+        changed = False
+        for processor in processors:
+            try:
+                should_run = force or await processor.trigger_add_messages(self, messages_to_add, **kwargs)
+                if should_run:
+                    logger.info(
+                        f"{'force trigger' if force else 'trigger'} "
+                        f"context processor {processor.processor_type()} on ADD"
+                    )
+                    _, messages_to_add = await processor.on_add_messages(
+                        self,
+                        messages_to_add,
+                        force=force,
+                        **kwargs,
+                    )
+                    changed = True
+            except Exception as e:
+                logger.warning(
+                    f"Failed to process ADD messages by using processor {processor.processor_type()},"
+                    f"reason: {str(e)}"
+                )
+        return changed, messages_to_add
+
+    def _select_processors(
+            self,
+            *,
+            processor_types: List[str] = None,
+            compression_only: bool = False,
+    ) -> List[ContextProcessor]:
+        processors = list(self._processors or [])
+        if processor_types is not None:
+            processor_types = set(processor_types)
+            processors = [
+                processor for processor in processors
+                if processor.processor_type() in processor_types
+            ]
+        if compression_only:
+            processors = [
+                processor for processor in processors
+                if self._is_compression_processor(processor)
+            ]
+        return processors
+
+    @staticmethod
+    def _is_compression_processor(processor: ContextProcessor) -> bool:
+        processor_type = processor.processor_type().lower()
+        module_name = processor.__class__.__module__.lower()
+        return (
+            "compressor" in processor_type
+            or "compact" in processor_type
+            or ".processor.compressor." in module_name
+        )
+
 
     def reloader_tool(self) -> Tool:
         @tool(card=self._reloader_tool_card)
