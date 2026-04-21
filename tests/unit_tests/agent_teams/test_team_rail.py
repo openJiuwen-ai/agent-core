@@ -80,7 +80,7 @@ class TestTeamWorkflowSection:
         assert "spawn_member" in content
 
     @pytest.mark.level0
-    def test_leader_predefined_override(self):
+    def test_leader_workflow_predefined(self):
         section = build_team_workflow_section(
             role=TeamRole.LEADER,
             predefined_team=True,

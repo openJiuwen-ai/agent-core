@@ -19,7 +19,7 @@ Markdown 模板是团队 Agent 的行为契约。Python 侧只做装配（`polic
 | `leader_policy.md` | `role == LEADER` | `role_policy` | Leader 的核心理念、职责、决策原则、响应节奏、任务状态流转 |
 | `teammate_policy.md` | `role == TEAMMATE` | `role_policy` | Teammate 的自主规划/领取/协作规范、通信协议、代码/文件协作约定 |
 | `leader_workflow.md` | Leader 且 **非** 预定义团队 | `workflow_section` | 常规 Leader 工作流：建队 → 建任务 → spawn 成员 → 广播启动 → 等通知 |
-| `leader_predefined_override.md` | Leader 且 `predefined_team=True` | `workflow_section` | 预定义团队覆盖版：禁止 `spawn_member`，成员已预先注册 |
+| `leader_workflow_predefined.md` | Leader 且 `predefined_team=True` | `workflow_section` | 预定义团队工作流：禁止 `spawn_member`，成员已预先注册 |
 | `lifecycle_persistent.md` | Leader 且 `lifecycle="persistent"` | `lifecycle_section` | 长期团队收尾语义（完成任务后待命，不解散） |
 | `lifecycle_temporary.md` | Leader 且 `lifecycle="temporary"`（默认） | `lifecycle_section` | 临时团队收尾语义（shutdown → clean_team） |
 

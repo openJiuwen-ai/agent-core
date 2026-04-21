@@ -113,7 +113,7 @@ def _build_team_policy(
 
     workflow_section = ""
     if role == TeamRole.LEADER:
-        workflow_name = "leader_predefined_override" if predefined_team else "leader_workflow"
+        workflow_name = "leader_workflow_predefined" if predefined_team else "leader_workflow"
         workflow_section = load_template(workflow_name, language).content
 
     lifecycle_section = ""

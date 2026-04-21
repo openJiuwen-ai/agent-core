@@ -320,7 +320,7 @@ class TestPredefinedTeamPrompt:
         assert "预定义团队模式" not in prompt
 
     @pytest.mark.level1
-    def test_predefined_override_not_applied_to_teammate(self):
+    def test_predefined_workflow_not_applied_to_teammate(self):
         from openjiuwen.agent_teams.agent.policy import build_system_prompt
 
         prompt = build_system_prompt(

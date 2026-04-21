@@ -196,12 +196,12 @@ def build_team_workflow_section(
 
     Returns:
         PromptSection wrapping ``leader_workflow.md`` (or the predefined
-        override) under an H1 heading; ``None`` for non-leader roles.
+        variant) under an H1 heading; ``None`` for non-leader roles.
     """
     if role != TeamRole.LEADER:
         return None
     labels = _labels_for(language)
-    template_name = "leader_predefined_override" if predefined_team else "leader_workflow"
+    template_name = "leader_workflow_predefined" if predefined_team else "leader_workflow"
     workflow_text = load_template(template_name, language).content.strip()
     body = f"{labels['workflow_heading']}\n\n{workflow_text}\n"
     return PromptSection(
