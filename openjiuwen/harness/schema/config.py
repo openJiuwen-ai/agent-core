@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from openjiuwen.core.foundation.llm.model import Model
 
@@ -200,6 +200,7 @@ class DeepAgentConfig:
     audio_model_config: Optional[AudioModelConfig] = None
     rails: Optional[List[AgentRail]] = None
     enable_plan_mode: bool = False
+    model_selection: Optional[Dict[Model, str]] = None
 
     # Progressive tool exposure config
     progressive_tool_enabled: bool = False

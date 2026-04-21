@@ -68,6 +68,7 @@ from openjiuwen.harness.prompts.sections.tools.todo import (
     TodoCreateMetadataProvider,
     TodoListMetadataProvider,
     TodoModifyMetadataProvider,
+    TodoGetMetadataProvider,
 )
 from openjiuwen.harness.prompts.sections.tools.video_understanding import (
     VideoUnderstandingMetadataProvider,
@@ -121,6 +122,7 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     TodoCreateMetadataProvider(),
     TodoListMetadataProvider(),
     TodoModifyMetadataProvider(),
+    TodoGetMetadataProvider(),
     ImageOCRMetadataProvider(),
     VisualQuestionAnsweringMetadataProvider(),
     VideoUnderstandingMetadataProvider(),

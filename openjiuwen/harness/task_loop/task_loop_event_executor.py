@@ -111,9 +111,9 @@ class TaskLoopEventExecutor(TaskExecutor):
         plan_task = self._get_plan_task(state, task_id)
         if plan_task:
             query = (
-                f"{plan_task.title}: {plan_task.description}"
+                f"{plan_task.content}: {plan_task.description}"
                 if plan_task.description
-                else plan_task.title
+                else plan_task.content
             )
 
         cid = session.get_session_id()
@@ -251,7 +251,7 @@ class TaskLoopEventExecutor(TaskExecutor):
 
             # Mark failed in TaskPlan
             if self._get_plan_task(state, task_id):
-                state.task_plan.mark_failed(task_id, str(exc))
+                state.task_plan.mark_cancelled(task_id, str(exc))
 
             payload = ControllerOutputPayload(
                 type=EventType.TASK_FAILED,
@@ -310,7 +310,7 @@ class TaskLoopEventExecutor(TaskExecutor):
         """
         state = self._get_state(session)
         if self._get_plan_task(state, task_id):
-            state.task_plan.mark_failed(task_id, "cancelled")
+            state.task_plan.mark_cancelled(task_id, "cancelled")
         coordinator = self._deep_agent.loop_coordinator
         if coordinator:
             coordinator.request_abort()
