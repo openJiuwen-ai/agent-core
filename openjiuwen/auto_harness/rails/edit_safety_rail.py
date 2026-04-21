@@ -10,6 +10,13 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from openjiuwen.auto_harness.infra.edit_scope import (
+    is_allowed_repo_edit_path,
+    normalize_repo_path,
+)
+from openjiuwen.core.foundation.llm import (
+    ToolMessage,
+)
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ToolCallInputs,
@@ -37,6 +44,38 @@ class EditSafetyRail(DeepAgentRail):
         self._max_files = max_files
         self._edited_files: set[str] = set()
 
+    async def before_tool_call(
+        self,
+        ctx: AgentCallbackContext,
+    ) -> None:
+        """Hard-block writes outside the allowed repo scope."""
+        inputs = ctx.inputs
+        if not isinstance(inputs, ToolCallInputs):
+            return
+        if inputs.tool_name not in _WRITE_TOOLS:
+            return
+
+        args = inputs.tool_args or {}
+        file_path: str = args.get("file_path", "")
+        if not file_path:
+            return
+
+        normalized = normalize_repo_path(file_path)
+        if is_allowed_repo_edit_path(file_path):
+            return
+
+        logger.warning(
+            "Blocked out-of-scope write: %s",
+            normalized or file_path,
+        )
+        self._reject_tool(
+            ctx,
+            "Out-of-scope edit blocked. Only "
+            "`openjiuwen/harness/**`, `openjiuwen/core/**`, "
+            "`tests/**`, `examples/**`, `docs/en/**`, and `docs/zh/**` may be modified. "
+            f"Rejected path: '{normalized or file_path}'.",
+        )
+
     async def after_tool_call(
         self,
         ctx: AgentCallbackContext,
@@ -54,7 +93,8 @@ class EditSafetyRail(DeepAgentRail):
             return
 
         # -- Atomic change tracking -----------------------
-        self._edited_files.add(file_path)
+        normalized = normalize_repo_path(file_path)
+        self._edited_files.add(normalized or file_path)
         count = len(self._edited_files)
         if count > self._max_files:
             logger.warning(
@@ -111,3 +151,18 @@ class EditSafetyRail(DeepAgentRail):
             logger.debug(
                 "ruff not found, skipping check",
             )
+
+    @staticmethod
+    def _reject_tool(
+        ctx: AgentCallbackContext,
+        error_msg: str,
+    ) -> None:
+        """Hard-block a tool call using the shared rail contract."""
+        tool_call = ctx.inputs.tool_call
+        tool_call_id = tool_call.id if tool_call else ""
+        ctx.extra["_skip_tool"] = True
+        ctx.inputs.tool_result = {"error": error_msg}
+        ctx.inputs.tool_msg = ToolMessage(
+            content=error_msg,
+            tool_call_id=tool_call_id,
+        )

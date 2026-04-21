@@ -543,6 +543,7 @@ async def _run_auto_harness(
             client_provider=cli_cfg.provider,
             api_key=cli_cfg.api_key,
             api_base=cli_cfg.api_base,
+            timeout=config.model_timeout_secs,
             verify_ssl=False,
         ),
         model_config=ModelRequestConfig(

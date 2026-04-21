@@ -15,6 +15,7 @@ from openjiuwen.auto_harness.agents import (
     create_commit_agent,
     create_learnings_agent,
     create_plan_agent,
+    create_pr_draft_agent,
     create_select_pipeline_agent,
 )
 from openjiuwen.auto_harness.rails.context_rail import (
@@ -34,6 +35,9 @@ from openjiuwen.core.single_agent.rail.base import (
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.cli.rails.tool_tracker import (
     ToolTrackingRail,
+)
+from openjiuwen.harness.rails import (
+    TaskPlanningRail,
 )
 from openjiuwen.harness.rails.lsp_rail import (
     LspRail,
@@ -108,6 +112,17 @@ def test_create_auto_harness_agent_includes_tool_tracker():
     }
     assert "commit" not in skill_rails[0].enabled_skills
     assert "evolve" not in skill_rails[0].enabled_skills
+    task_planning_rails = [
+        rail for rail in rails
+        if isinstance(rail, TaskPlanningRail)
+    ]
+    assert len(task_planning_rails) == 1
+    assert (
+        task_planning_rails[0].enable_progress_repeat
+        is True
+    )
+    assert captured["enable_task_loop"] is True
+    assert captured["enable_task_planning"] is True
     assert captured["enable_async_subagent"] is True
     subagents = captured["subagents"]
     assert any(
@@ -194,6 +209,12 @@ def test_create_commit_agent_only_exposes_commit_skills():
         "communicate",
     }
     assert "implement" not in skill_rails[0].enabled_skills
+    assert not any(
+        isinstance(rail, TaskPlanningRail)
+        for rail in captured["rails"]
+    )
+    assert captured["enable_task_loop"] is False
+    assert captured["enable_task_planning"] is False
 
 
 @pytest.mark.asyncio
@@ -379,3 +400,34 @@ def test_create_select_pipeline_agent_uses_selector_skill():
         for path in skill_rails[0].skills_dir
     )
     assert "select_pipeline" in skill_rails[0].enabled_skills
+
+
+def test_create_pr_draft_agent_uses_communicate_skill_only():
+    """PR draft agent 只应暴露 communicate skill。"""
+    captured = {}
+
+    def _fake_create_deep_agent(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    with patch(
+        "openjiuwen.auto_harness.agents.factory.create_deep_agent",
+        side_effect=_fake_create_deep_agent,
+    ):
+        create_pr_draft_agent(
+            AutoHarnessConfig(
+                model=MagicMock(),
+                workspace="/repo/default",
+            ),
+            workspace_override="/repo/worktrees/task-1",
+        )
+
+    skill_rails = [
+        rail for rail in captured["rails"]
+        if isinstance(rail, SkillUseRail)
+    ]
+    assert len(skill_rails) == 1
+    assert set(skill_rails[0].enabled_skills) == {
+        "communicate",
+    }
+    assert captured.get("tools") is None

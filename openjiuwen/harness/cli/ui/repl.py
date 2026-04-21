@@ -409,6 +409,7 @@ async def _subcmd_run(
                 client_provider=cfg.provider,
                 api_key=cfg.api_key,
                 api_base=cfg.api_base,
+                timeout=config.model_timeout_secs,
                 verify_ssl=False,
             ),
             model_config=ModelRequestConfig(

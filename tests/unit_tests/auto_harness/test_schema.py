@@ -114,6 +114,7 @@ class TestAutoHarnessConfig:
         assert cfg.data_dir == ""
         assert cfg.local_repo == ""
         assert cfg.session_budget_secs == 3600.0
+        assert cfg.model_timeout_secs == 300.0
         assert cfg.max_tasks_per_session == 3
         assert cfg.git_remote == ""
         assert cfg.fork_owner == ""
@@ -285,6 +286,7 @@ class TestLoadFromDict:
                 "session_secs": 600,
                 "cost_limit_usd": 5.0,
                 "task_timeout_secs": 300,
+                "model_timeout_secs": 240,
                 "max_tasks_per_session": 2,
             },
         }
@@ -292,6 +294,7 @@ class TestLoadFromDict:
         assert cfg.session_budget_secs == 600
         assert cfg.cost_limit_usd == 5.0
         assert cfg.task_timeout_secs == 300
+        assert cfg.model_timeout_secs == 240
         assert cfg.max_tasks_per_session == 2
 
     def test_extensions_section(self):

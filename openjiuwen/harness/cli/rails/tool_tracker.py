@@ -24,6 +24,42 @@ class ToolTrackingRail(AgentRail):
 
     priority = 5  # very low — run after everything else
 
+    @staticmethod
+    def _build_tool_result_payload(
+        tool_name: str,
+        tool_result: Any,
+    ) -> dict[str, Any]:
+        """Build the UI payload for a completed tool call."""
+        payload: dict[str, Any] = {
+            "tool_result": str(tool_result)
+            if tool_result is not None
+            else "",
+        }
+        if tool_name != "read_file" or tool_result is None:
+            return payload
+
+        data = getattr(tool_result, "data", None)
+        if not isinstance(data, dict):
+            return payload
+
+        content = data.get("content")
+        if content is not None:
+            if isinstance(content, bytes):
+                payload["tool_result"] = content.decode(
+                    "utf-8", errors="replace"
+                )
+            else:
+                payload["tool_result"] = str(content)
+
+        line_count = data.get("line_count")
+        if line_count is not None:
+            try:
+                payload["line_count"] = int(line_count)
+            except (TypeError, ValueError):
+                pass
+
+        return payload
+
     async def before_tool_call(self, ctx: Any) -> None:
         """Write a ``tool_call`` chunk when a tool starts."""
         session = ctx.session
@@ -77,9 +113,9 @@ class ToolTrackingRail(AgentRail):
                 payload={
                     "tool_name": tool_name,
                     "tool_args": tool_args,
-                    "tool_result": str(tool_result)
-                    if tool_result is not None
-                    else "",
+                    **self._build_tool_result_payload(
+                        tool_name, tool_result
+                    ),
                 },
             )
         )

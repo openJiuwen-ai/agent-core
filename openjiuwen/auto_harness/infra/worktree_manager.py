@@ -99,6 +99,141 @@ class WorktreeManager:
             )
         return self._config.cache_repo_dir
 
+    def _is_managed_worktree_path(
+        self, worktree_path: str
+    ) -> bool:
+        """Return whether a worktree lives under auto-harness root."""
+        root = Path(
+            self._config.worktrees_dir
+        ).resolve(strict=False)
+        candidate = Path(worktree_path).resolve(
+            strict=False
+        )
+        try:
+            candidate.relative_to(root)
+            return True
+        except ValueError:
+            return False
+
+    async def _list_worktrees(
+        self, base: str
+    ) -> list[dict[str, str]]:
+        """Return parsed ``git worktree list --porcelain`` entries."""
+        code, out = await _run_git(
+            "worktree",
+            "list",
+            "--porcelain",
+            cwd=base,
+            env=self._git_env,
+        )
+        if code != 0:
+            raise RuntimeError(
+                f"worktree list failed: {out}"
+            )
+
+        entries: list[dict[str, str]] = []
+        current: dict[str, str] = {}
+        for line in out.splitlines():
+            if not line:
+                if current:
+                    entries.append(current)
+                    current = {}
+                continue
+            if line.startswith("worktree "):
+                if current:
+                    entries.append(current)
+                current = {
+                    "path": line.removeprefix(
+                        "worktree "
+                    )
+                }
+                continue
+            if line.startswith("branch "):
+                current["branch"] = (
+                    line.removeprefix("branch ")
+                )
+        if current:
+            entries.append(current)
+        return entries
+
+    async def _drop_existing_branch(
+        self, *, base: str, branch_name: str
+    ) -> None:
+        """Delete stale auto-harness branch/worktree before recreate."""
+        code, out = await _run_git(
+            "worktree",
+            "prune",
+            cwd=base,
+            env=self._git_env,
+        )
+        if code != 0:
+            raise RuntimeError(
+                f"worktree prune failed: {out}"
+            )
+
+        code, _ = await _run_git(
+            "show-ref",
+            "--verify",
+            "--quiet",
+            f"refs/heads/{branch_name}",
+            cwd=base,
+            env=self._git_env,
+        )
+        if code != 0:
+            return
+
+        branch_ref = f"refs/heads/{branch_name}"
+        for entry in await self._list_worktrees(base):
+            if entry.get("branch") != branch_ref:
+                continue
+            worktree_path = entry.get("path", "")
+            if not worktree_path:
+                continue
+            if not self._is_managed_worktree_path(
+                worktree_path
+            ):
+                raise RuntimeError(
+                    "existing auto-harness branch is "
+                    "checked out in unmanaged worktree: "
+                    f"{worktree_path}"
+                )
+            code, out = await _run_git(
+                "worktree",
+                "remove",
+                "--force",
+                worktree_path,
+                cwd=base,
+                env=self._git_env,
+            )
+            if code != 0:
+                raise RuntimeError(
+                    "failed to remove existing "
+                    "managed worktree for branch "
+                    f"{branch_name}: {out}"
+                )
+            logger.info(
+                "Removed stale worktree for branch %s: %s",
+                branch_name,
+                worktree_path,
+            )
+
+        code, out = await _run_git(
+            "branch",
+            "-D",
+            branch_name,
+            cwd=base,
+            env=self._git_env,
+        )
+        if code != 0:
+            raise RuntimeError(
+                "failed to delete existing branch "
+                f"{branch_name}: {out}"
+            )
+        logger.info(
+            "Deleted stale auto-harness branch: %s",
+            branch_name,
+        )
+
     async def _ensure_base_repo(self) -> str:
         """确保基础仓库存在并已 fetch。
 
@@ -193,6 +328,10 @@ class WorktreeManager:
 
         base_branch = (
             self._config.git_base_branch or "develop"
+        )
+
+        await self._drop_existing_branch(
+            base=base, branch_name=branch_name
         )
 
         code, out = await _run_git(

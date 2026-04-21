@@ -36,6 +36,8 @@ class TaskRuntime:
     preexisting_dirty_files: list[str]
     task_agent: Any
     commit_agent: Any
+    task_session: Any = None
+    fix_agent: Any = None
 
 
 @dataclass

@@ -47,6 +47,28 @@ class TestBuildGitAuthEnv:
 
 class TestGitOperations:
     @pytest.mark.asyncio
+    async def test_git_helper_preserves_leading_space_in_stdout(self):
+        git = GitOperations(workspace="/tmp/worktree")
+
+        proc = AsyncMock()
+        proc.communicate.return_value = (
+            b" M openjiuwen/auto_harness/schema.py\n",
+            b"",
+        )
+        proc.returncode = 0
+
+        with patch(
+            "openjiuwen.auto_harness.infra.git_operations.asyncio.create_subprocess_exec",
+            return_value=proc,
+        ):
+            code, out = await git._git(
+                "status", "--porcelain"
+            )
+
+        assert code == 0
+        assert out == " M openjiuwen/auto_harness/schema.py"
+
+    @pytest.mark.asyncio
     async def test_push_uses_task_scoped_auth_env(self):
         git = GitOperations(
             workspace="/tmp/worktree",
@@ -120,7 +142,7 @@ class TestGitOperations:
         result = await git.status_porcelain()
 
         assert result == (
-            "M openjiuwen/auto_harness/schema.py\n"
+            " M openjiuwen/auto_harness/schema.py\n"
             "?? tests/unit_tests/auto_harness/test_schema.py"
         )
         git._git.assert_awaited_once_with(
@@ -152,4 +174,29 @@ class TestGitOperations:
             "--stat",
             "--format=fuller",
             "-1",
+        )
+
+    @pytest.mark.asyncio
+    async def test_diff_name_only_returns_normalized_unique_paths(self):
+        git = GitOperations(workspace="/tmp/worktree")
+
+        git._git = AsyncMock(
+            return_value=(
+                0,
+                "openjiuwen\\core\\foo.py\n"
+                "tests/unit_tests/test_foo.py\n"
+                "openjiuwen\\core\\foo.py",
+            )
+        )
+
+        result = await git.diff_name_only("HEAD")
+
+        assert result == [
+            "openjiuwen/core/foo.py",
+            "tests/unit_tests/test_foo.py",
+        ]
+        git._git.assert_awaited_once_with(
+            "diff",
+            "--name-only",
+            "HEAD",
         )

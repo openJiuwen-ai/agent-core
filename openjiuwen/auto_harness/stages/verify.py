@@ -282,7 +282,10 @@ class VerifyStage(TaskStage):
             fix_task, chunk_queue, fix_done = _start_fix_loop(
                 config=ctx.orchestrator.config,
                 task=ctx.task,
-                agent=ctx.runtime.task_agent,
+                agent=(
+                    ctx.runtime.fix_agent
+                    or ctx.runtime.task_agent
+                ),
                 git=ctx.orchestrator.git,
                 ci_gate=ctx.orchestrator.ci_gate,
                 fix_loop_ctrl=ctx.orchestrator.fix_loop,

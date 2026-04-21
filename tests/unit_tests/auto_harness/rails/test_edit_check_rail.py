@@ -37,6 +37,53 @@ class _FakeProc:
 
 
 class TestEditSafetyRail(IsolatedAsyncioTestCase):
+    async def test_blocks_out_of_scope_write(self):
+        rail = EditSafetyRail()
+        ctx = _FakeCtx(
+            inputs=ToolCallInputs(
+                tool_name="write_file",
+                tool_args={
+                    "file_path": "openjiuwen/auto_harness/schema.py",
+                },
+            ),
+        )
+
+        await rail.before_tool_call(ctx)
+
+        assert ctx.extra["_skip_tool"] is True
+        assert "Out-of-scope edit blocked" in ctx.inputs.tool_result["error"]
+        assert "openjiuwen/auto_harness/schema.py" in ctx.inputs.tool_result["error"]
+
+    async def test_allows_in_scope_write(self):
+        rail = EditSafetyRail()
+        ctx = _FakeCtx(
+            inputs=ToolCallInputs(
+                tool_name="write_file",
+                tool_args={
+                    "file_path": "openjiuwen/harness/cli/ui/renderer.py",
+                },
+            ),
+        )
+
+        await rail.before_tool_call(ctx)
+
+        assert "_skip_tool" not in ctx.extra
+
+    async def test_allows_source_readme_markdown(self):
+        rail = EditSafetyRail()
+        ctx = _FakeCtx(
+            inputs=ToolCallInputs(
+                tool_name="edit_file",
+                tool_args={
+                    "file_path": "openjiuwen/harness/cli/README.md",
+                },
+            ),
+        )
+
+        await rail.before_tool_call(ctx)
+
+        assert "_skip_tool" not in ctx.extra
+
     async def test_pushes_steering_on_ruff_failure(self):
         rail = EditSafetyRail()
         ctx = _FakeCtx(

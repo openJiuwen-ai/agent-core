@@ -155,6 +155,7 @@ def format_tool_result(
     tool_args: Optional[
         Union[str, Dict[str, Any]]
     ] = None,
+    tool_meta: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Format a tool result into a concise summary.
 
@@ -170,7 +171,9 @@ def format_tool_result(
         return "Done"
 
     if tool_name in ("read_file",):
-        lines = _count_text_lines(tool_result)
+        lines = _extract_tool_result_line_count(
+            tool_result, tool_meta
+        )
         return f"Read {lines} lines"
 
     if tool_name in ("write_file",):
@@ -260,6 +263,21 @@ def format_write_preview(tool_result: str) -> str:
 def _count_text_lines(text: str) -> int:
     """Count rendered text lines without undercounting single-line content."""
     return len(text.splitlines())
+
+
+def _extract_tool_result_line_count(
+    tool_result: str,
+    tool_meta: Optional[Dict[str, Any]],
+) -> int:
+    """Prefer structured line counts over re-counting rendered text."""
+    if isinstance(tool_meta, dict):
+        line_count = tool_meta.get("line_count")
+        if line_count is not None:
+            try:
+                return int(line_count)
+            except (TypeError, ValueError):
+                pass
+    return _count_text_lines(tool_result)
 
 
 def _short_path(path: str) -> str:

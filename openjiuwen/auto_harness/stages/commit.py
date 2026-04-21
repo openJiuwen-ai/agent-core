@@ -15,6 +15,7 @@ from openjiuwen.auto_harness.infra.commit_scope import (
     derive_legacy_related_test_files,
     extract_verify_related_files,
     is_allowed_documentation_file,
+    is_allowed_repo_edit_path,
     is_derived_test_file,
     is_documentation_file,
 )
@@ -69,6 +70,8 @@ def _derive_allowed_files(
     for path in facts.task_declared_files:
         if path not in edited_set:
             continue
+        if not is_allowed_repo_edit_path(path):
+            continue
         if is_documentation_file(path):
             if is_allowed_documentation_file(path):
                 allowed.add(path)
@@ -77,17 +80,24 @@ def _derive_allowed_files(
     for path in facts.derived_test_files:
         if path not in edited_set:
             continue
+        if not is_allowed_repo_edit_path(path):
+            continue
         if is_derived_test_file(
             facts.task_declared_files,
             path,
         ):
             allowed.add(path)
     for path in facts.legacy_related_test_files:
-        if path in edited_set:
+        if (
+            path in edited_set
+            and is_allowed_repo_edit_path(path)
+        ):
             allowed.add(path)
     if not facts.task_declared_files:
         allowed = set()
         for path in edited_set:
+            if not is_allowed_repo_edit_path(path):
+                continue
             if not is_documentation_file(path):
                 allowed.add(path)
                 continue
