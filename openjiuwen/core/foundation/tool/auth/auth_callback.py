@@ -36,10 +36,14 @@ class SSLAuthStrategy(AuthStrategy):
 
     async def authenticate(self, auth_config: ToolAuthConfig, **kwargs) -> ToolAuthResult:
         try:
+            url = auth_config.config.get("url", "")
+            # Default to True if url is not provided to maintain backward compatibility
+            url_is_https = url.lower().startswith("https://") if url else True
             ssl_verify, ssl_cert = SslUtils.get_ssl_config(
                 auth_config.config.get("verify_switch_env", "SSL_VERIFY"),
                 auth_config.config.get("ssl_cert_env", "SSL_CERT"),
                 ["false"],
+                url_is_https=url_is_https
             )
             if ssl_verify:
                 ssl_context = SslUtils.create_strict_ssl_context(ssl_cert)
