@@ -3,11 +3,24 @@
 """Tests for Workspace link management (.team/ and .worktree/ symlinks)."""
 
 import os
+import sys
+from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
-from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
+from openjiuwen.harness.workspace.workspace import (
+    ERROR_PRIVILEGE_NOT_HELD,
+    Workspace,
+    WorkspaceNode,
+)
 from tests.test_logger import logger
+
+
+WINDOWS_ONLY = pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="Windows-specific link behavior is only valid on Windows.",
+)
 
 
 @pytest.fixture
@@ -43,17 +56,17 @@ class TestWorkspaceNodeEnum:
 
 
 class TestLinkTeam:
-    def test_creates_symlink(self, workspace, team_workspace_dir):
+    def test_creates_directory_link(self, workspace, team_workspace_dir):
         link = workspace.link_team("team_abc", team_workspace_dir)
-        assert link.is_symlink()
+        assert workspace._is_directory_link(link)
         assert str(link.resolve()) == os.path.realpath(team_workspace_dir)
-        logger.info("link_team created symlink at %s", link)
+        logger.info("link_team created directory link at %s", link)
 
     def test_idempotent(self, workspace, team_workspace_dir):
         workspace.link_team("team_abc", team_workspace_dir)
         workspace.link_team("team_abc", team_workspace_dir)
         link = os.path.join(workspace.root_path, ".team", "team_abc")
-        assert os.path.islink(link)
+        assert workspace._is_directory_link(Path(link))
 
     def test_multiple_teams(self, workspace, tmp_path):
         for tid in ("team_1", "team_2", "team_3"):
@@ -79,17 +92,17 @@ class TestUnlinkTeam:
 
 
 class TestLinkWorktree:
-    def test_creates_symlink(self, workspace, worktree_dir):
+    def test_creates_directory_link(self, workspace, worktree_dir):
         link = workspace.link_worktree("feat-x", worktree_dir)
-        assert link.is_symlink()
+        assert workspace._is_directory_link(link)
         assert str(link.resolve()) == os.path.realpath(worktree_dir)
-        logger.info("link_worktree created symlink at %s", link)
+        logger.info("link_worktree created directory link at %s", link)
 
     def test_idempotent(self, workspace, worktree_dir):
         workspace.link_worktree("feat-x", worktree_dir)
         workspace.link_worktree("feat-x", worktree_dir)
         link = os.path.join(workspace.root_path, ".worktree", "feat-x")
-        assert os.path.islink(link)
+        assert workspace._is_directory_link(Path(link))
 
 
 class TestUnlinkWorktree:
@@ -126,3 +139,43 @@ class TestListLinks:
         assert slug == "feat-x"
         assert target == os.path.realpath(worktree_dir)
         logger.info("Worktree link resolves to %s", target)
+
+    @WINDOWS_ONLY
+    def test_list_team_links_includes_windows_directory_links(self, workspace, tmp_path, monkeypatch):
+        target_dir = tmp_path / "team-target"
+        target_dir.mkdir()
+        junction_path = os.path.join(workspace.root_path, ".team", "team_junction")
+        os.makedirs(junction_path)
+        regular_path = os.path.join(workspace.root_path, ".team", "team_regular")
+        os.makedirs(regular_path)
+
+        def fake_is_directory_link(entry):
+            return entry.name == "team_junction"
+
+        monkeypatch.setattr(workspace, "_is_directory_link", fake_is_directory_link)
+        monkeypatch.setattr(Path, "resolve", lambda self: target_dir if self.name == "team_junction" else self)
+
+        assert workspace.list_team_links() == [("team_junction", os.path.realpath(target_dir))]
+
+
+class TestWindowsFallback:
+    @WINDOWS_ONLY
+    def test_create_directory_link_falls_back_to_junction_on_windows_1314(self, workspace, monkeypatch):
+        calls = []
+
+        def fake_symlink(*args, **kwargs):
+            error = OSError("missing privilege")
+            error.winerror = ERROR_PRIVILEGE_NOT_HELD
+            raise error
+
+        def fake_create_windows_junction(target_path, link_path):
+            calls.append((target_path, link_path))
+
+        monkeypatch.setattr(os, "symlink", fake_symlink)
+        monkeypatch.setattr(os, "name", "nt", raising=False)
+        monkeypatch.setattr(workspace, "_create_windows_junction", fake_create_windows_junction)
+
+        link_path = Path(workspace.root_path) / ".team" / "team_abc"
+        workspace._create_directory_link("C:\\target", link_path)
+
+        assert calls == [("C:\\target", str(link_path))]

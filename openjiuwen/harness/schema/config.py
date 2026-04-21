@@ -189,6 +189,7 @@ class DeepAgentConfig:
     mcps: Optional[List[McpServerConfig]] = None
     workspace: Optional[Workspace] = None
     skills: Optional[Union[str, List[str]]] = None
+    enable_skill_discovery: bool = False
     backend: Optional[Any] = None
     sys_operation: Optional[SysOperation] = None
     auto_create_workspace: bool = True

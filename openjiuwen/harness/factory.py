@@ -314,14 +314,13 @@ def create_deep_agent(
             skills_dirs.append(str(Path(target_path) / "skills"))
         return SkillUseRail(
             skills_dir=skills_dirs,
-            skill_mode="all",
-            enabled_skills=skills,
+            skill_mode="all"
         )
 
     default_rails = [
         (SecurityRail, True, lambda: SecurityRail()),
         (TaskPlanningRail, enable_task_planning, lambda: TaskPlanningRail()),
-        (SkillUseRail, bool(skills), _make_skill_rail),
+        (SkillUseRail, bool(skills) or config.enable_skill_discovery, _make_skill_rail),
         (SessionRail, bool(subagents) and enable_async_subagent, lambda: SessionRail()),
         (SubagentRail, bool(subagents) and not enable_async_subagent, lambda: SubagentRail()),
     ]
