@@ -16,6 +16,7 @@ from openjiuwen.agent_teams.agent.coordinator import (
     InnerEventMessage,
     InnerEventType,
 )
+from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.schema.events import MessageEvent, TeamEvent
 from openjiuwen.agent_teams.schema.status import MemberStatus, TaskStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
@@ -315,29 +316,33 @@ class EventDispatcher:
         target_id = payload.get("member_name", "")
         event_type = event.event_type
         if event_type == TeamEvent.MEMBER_SPAWNED:
-            text = f"[成员事件] 成员 {target_id} 已上线"
+            text = t("dispatcher.member_online", target_id=target_id)
         elif event_type == TeamEvent.MEMBER_RESTARTED:
             restart_count = payload.get("restart_count", 1)
-            text = f"[成员事件] 成员 {target_id} 已重启 (第{restart_count}次)"
+            text = t("dispatcher.member_restarted", target_id=target_id, restart_count=restart_count)
         elif event_type == TeamEvent.MEMBER_STATUS_CHANGED:
             old_status = payload.get("old_status")
             new_status = payload.get("new_status")
-            text = (
-                f"[成员事件] 成员 {target_id} 状态变更: "
-                f"{old_status} → {new_status}"
+            text = t(
+                "dispatcher.member_status_changed",
+                target_id=target_id,
+                old_status=old_status,
+                new_status=new_status,
             )
             await self._nudge_idle_member_with_stale_claims(
                 target_id, old_status, new_status,
             )
         elif event_type == TeamEvent.MEMBER_EXECUTION_CHANGED:
-            text = (
-                f"[成员事件] 成员 {target_id} 执行状态变更: "
-                f"{payload.get('old_status')} → {payload.get('new_status')}"
+            text = t(
+                "dispatcher.member_execution_changed",
+                target_id=target_id,
+                old_status=payload.get("old_status"),
+                new_status=payload.get("new_status"),
             )
         elif event_type == TeamEvent.MEMBER_SHUTDOWN:
-            text = f"[成员事件] 成员 {target_id} 已关闭"
+            text = t("dispatcher.member_shutdown", target_id=target_id)
         elif event_type == TeamEvent.MEMBER_CANCELED:
-            text = f"[成员事件] 成员 {target_id} 已取消"
+            text = t("dispatcher.member_canceled", target_id=target_id)
         else:
             return
 
@@ -397,7 +402,7 @@ class EventDispatcher:
             self._last_stale_nudge[task.task_id] = now
 
         lines = [
-            f"检测到你已认领且超过 10 分钟未完成的任务（共 {len(stale)} 个），请继续推进："
+            t("dispatcher.stale_claim_header", count=len(stale))
         ]
         for task in stale:
             lines.append(f"- [{task.task_id}] {task.title}: {task.content}")
@@ -513,12 +518,13 @@ class EventDispatcher:
         Includes message_id so the agent can call mark_message_read,
         and distinguishes direct vs broadcast messages.
         """
-        msg_type = "广播消息" if msg.broadcast else "单播消息"
-        return (
-            f"[收到{msg_type}] message_id={msg.message_id}, "
-            f"来自: {msg.from_member_name}\n"
-            f"内容: {msg.content}\n"
-            f"提示: 如果对方在提问或等待回复，请务必通过 send_message 工具回复 {msg.from_member_name}"
+        msg_type = t("dispatcher.msg_type_broadcast") if msg.broadcast else t("dispatcher.msg_type_direct")
+        return t(
+            "dispatcher.msg_received",
+            msg_type=msg_type,
+            message_id=msg.message_id,
+            sender=msg.from_member_name,
+            content=msg.content,
         )
 
     # ------------------------------------------------------------------
@@ -553,35 +559,20 @@ class EventDispatcher:
             if not incomplete:
                 lifecycle = host.lifecycle
                 if lifecycle == "persistent":
-                    prompt = (
-                        "所有任务已完成。请汇总本轮工作成果。"
-                        "团队继续保持运行，等待新的任务指令。"
-                    )
+                    prompt = t("dispatcher.all_done_persistent")
                 else:
-                    prompt = (
-                        "所有任务已完成。请汇总团队工作成果，"
-                        "然后依次调用 shutdown_member 关闭所有成员，"
-                        "等待所有成员状态转为 shutdown 后，"
-                        "调用 clean_team 解散团队。"
-                    )
+                    prompt = t("dispatcher.all_done_temporary")
                 await host.deliver_input(prompt)
                 return
-            lines = [
-                "当前任务看板如下，请审查：\n"
-                "- 是否需要调整任务（增删、修改、调整依赖）\n"
-                "- 就绪任务是否需要指派给 teammate\n"
-                "- 整体进度是否符合预期",
-            ]
+            lines = [t("dispatcher.leader_task_board")]
         else:
-            claimable = [t for t in incomplete if t.status == "pending" and not t.assignee]
+            claimable = [task for task in incomplete if task.status == "pending" and not task.assignee]
             if not claimable and not incomplete:
                 return
-            lines = [
-                "当前任务列表如下：\n- 请认领适合你领域的待领取任务\n- 了解相关任务的执行者，必要时与他们协调配合",
-            ]
+            lines = [t("dispatcher.teammate_task_list")]
 
         for task in incomplete:
-            assignee = f" → {task.assignee}" if task.assignee else " (待领取)"
+            assignee = f" → {task.assignee}" if task.assignee else t("dispatcher.task_unassigned_marker")
             lines.append(f"- [{task.task_id}] [{task.status}] {task.title}: {task.content}{assignee}")
 
         await host.deliver_input("\n".join(lines))
@@ -642,9 +633,11 @@ class EventDispatcher:
 
     @staticmethod
     def _format_stale_claim_nudge(task) -> str:
-        return (
-            f"[催促] 你已认领的任务 [{task.task_id}] {task.title} "
-            f"已超过 10 mins 仍未完成，请继续推进：{task.content}"
+        return t(
+            "dispatcher.stale_claim_self",
+            task_id=task.task_id,
+            title=task.title,
+            content=task.content,
         )
 
     async def _self_nudge_stale_claim(self, task) -> None:
@@ -715,11 +708,7 @@ class EventDispatcher:
         for task in fresh:
             self._last_pending_nudge[task.task_id] = now
 
-        lines = [
-            "[催促建议] 以下任务已长时间处于 pending 状态未被认领，"
-            "请评估每个任务最适合哪位成员，并通过 send_message 工具点名"
-            "对方让其使用 claim_task 认领："
-        ]
+        lines = [t("dispatcher.stale_pending_header")]
         for task in fresh:
             lines.append(f"- [{task.task_id}] {task.title}: {task.content}")
         content = "\n".join(lines)

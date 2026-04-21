@@ -19,6 +19,7 @@ from pydantic import (
     Field,
 )
 
+from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import (
     TeamLifecycle,
@@ -117,7 +118,7 @@ class LeaderSpec(BaseModel):
 
     member_name: str = "team_leader"
     display_name: str = "Team Leader"
-    persona: str = "天才项目管理专家"
+    persona: str = Field(default_factory=lambda: t("blueprint.default_persona"))
 
 
 class TeamAgentSpec(BaseModel):

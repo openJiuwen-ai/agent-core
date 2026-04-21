@@ -20,6 +20,7 @@ from typing import (
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
 
+from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.team import MemberOpResult, TeamMemberSpec
 from openjiuwen.agent_teams.tools.database import (
@@ -438,7 +439,7 @@ class TeamBackend:
         # Note: execution_status is managed by member process internally
         # Team leader only sets member status and notifies member via message and event
         msg_id = await self.message_manager.send_message(
-            content="当前任务已全部完成，请结束流程",
+            content=t("team.shutdown_request_content"),
             to_member_name=member_name,
         )
         if not msg_id:
@@ -507,7 +508,7 @@ class TeamBackend:
             team_logger.info(f"Reset {reset_count} tasks from member {member_name}")
 
         success = await self.message_manager.send_message(
-            content="当前任务有变动，请停止执行当前任务，重新尝试认领合适任务", to_member_name=member_name)
+            content=t("team.cancel_request_content"), to_member_name=member_name)
         if not success:
             team_logger.error(f"Failed to send cancel request message to member {member_name}")
             return False
