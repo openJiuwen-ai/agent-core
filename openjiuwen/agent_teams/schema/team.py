@@ -72,6 +72,7 @@ class TeamSpec(BaseModel):
     team_name: str
     display_name: str
     leader_member_name: Optional[str] = None
+    language: Optional[str] = None
     metadata: dict = Field(default_factory=dict)
 
 

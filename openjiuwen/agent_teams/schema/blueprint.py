@@ -150,6 +150,14 @@ class TeamAgentSpec(BaseModel):
     workspace: Optional[TeamWorkspaceConfig] = None
     """Optional shared workspace config for team members."""
     metadata: dict[str, Any] = {}
+    language: Optional[str] = None
+    """Preferred language for prompts and tool descriptions ("cn" or "en").
+
+    Propagated to every per-role ``DeepAgentSpec`` (when the role spec does
+    not set its own language) and recorded on ``TeamSpec`` so team tools
+    can pick up the same locale.  Resolved to the nearest supported language
+    at ``build()`` time via ``resolve_language()``.
+    """
 
     agent_customizer: Optional[Callable[..., None]] = Field(
         default=None, exclude=True,
@@ -167,15 +175,22 @@ class TeamAgentSpec(BaseModel):
         from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
         from openjiuwen.agent_teams.schema.team import TeamRole, TeamSpec
         from openjiuwen.agent_teams.tools.database import DatabaseConfig as _DatabaseConfig
+        from openjiuwen.harness.prompts import resolve_language
 
         leader_agent = self.agents.get("leader")
         if leader_agent is None:
             raise ValueError("agents dict must contain a 'leader' key")
 
+        resolved_language = resolve_language(self.language)
+        for role_spec in self.agents.values():
+            if role_spec.language is None:
+                role_spec.language = resolved_language
+
         team_spec = TeamSpec(
             team_name=self.team_name,
             display_name=self.team_name,
             leader_member_name=self.leader.member_name,
+            language=resolved_language,
         )
 
         messager_config = self.transport.build() if self.transport else None

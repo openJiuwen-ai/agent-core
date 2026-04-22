@@ -668,7 +668,7 @@ class TeamAgent(BaseAgent):
         agent_team.register_cleanup_path(str(team_home(team_name)))
 
         exclude = {"spawn_member"} if _resolve_team_mode(spec) == "predefined" else None
-        lang = (ctx.team_spec.metadata.get("lang") if ctx.team_spec else None) or "cn"
+        lang = _resolve_language(ctx.team_spec.language if ctx.team_spec else None)
         team_tools = create_team_tools(
             role=ctx.role.value,
             agent_team=agent_team,
