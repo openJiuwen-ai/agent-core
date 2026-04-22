@@ -3,12 +3,11 @@
 
 from __future__ import annotations
 
-import re
 import time
 from typing import (
+    TYPE_CHECKING,
     Protocol,
     runtime_checkable,
-    TYPE_CHECKING,
 )
 
 from openjiuwen.agent_teams.agent.coordinator import (
@@ -17,6 +16,7 @@ from openjiuwen.agent_teams.agent.coordinator import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.i18n import t
+from openjiuwen.agent_teams.interaction import UserInbox, parse_mention
 from openjiuwen.agent_teams.schema.events import MessageEvent, TeamEvent
 from openjiuwen.agent_teams.schema.status import MemberStatus, TaskStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
@@ -38,68 +38,88 @@ class DispatcherHost(Protocol):
 
     @property
     def role(self) -> TeamRole:
+        """Return the current team role."""
         ...
 
     @property
     def lifecycle(self) -> str:
+        """Return the team lifecycle mode."""
         ...
 
     @property
     def member_name(self) -> str | None:
+        """Return the current member_name, or None if unassigned."""
         ...
 
     @property
     def message_manager(self) -> TeamMessageManager | None:
+        """Return the bound message manager, or None if not configured."""
         ...
 
     @property
     def task_manager(self) -> TeamTaskManager | None:
+        """Return the bound task manager, or None if not configured."""
         ...
 
     @property
     def team_spec(self) -> TeamSpec | None:
+        """Return the bound team spec, or None if not configured."""
         ...
 
     async def has_team_member(self, member_name: str) -> bool:
+        """Check whether a team member exists in the backend."""
         ...
 
     def is_agent_ready(self) -> bool:
+        """Return whether the agent has been fully initialized."""
         ...
 
     def is_agent_running(self) -> bool:
+        """Return whether the agent is in an active round."""
         ...
 
     def has_in_flight_round(self) -> bool:
+        """Return whether an agent round is scheduled and not yet finalized."""
         ...
 
     def has_pending_interrupt(self) -> bool:
+        """Return whether an unresolved tool interrupt is pending."""
         ...
 
     async def start_agent(self, content: str) -> None:
+        """Start a new agent round with the given content."""
         ...
 
     async def follow_up(self, content: str) -> None:
+        """Feed content to the currently running agent."""
         ...
 
     async def cancel_agent(self) -> None:
+        """Cancel the running agent task."""
         ...
 
     async def shutdown_self(self) -> None:
+        """Force-shutdown this agent in response to team dissolution."""
         ...
 
     async def pause_polls(self) -> None:
+        """Pause periodic polling in the coordination loop."""
         ...
 
     async def resume_polls(self) -> None:
+        """Resume periodic polling in the coordination loop."""
         ...
 
     async def steer(self, content: str) -> None:
+        """Steer instruction into the running agent."""
         ...
 
     async def deliver_input(self, content: str, *, use_steer: bool = True) -> None:
+        """Guarantee that content reaches the DeepAgent regardless of state."""
         ...
 
     async def resume_interrupt(self, user_input) -> None:
+        """Resume a pending HITL interrupt with structured input."""
         ...
 
 
@@ -185,11 +205,13 @@ class EventDispatcher:
             # defense in depth on top of the sender_id self-filter.
             if host.role == TeamRole.LEADER:
                 team_logger.debug(
-                    "[{}] ignoring TEAM_CLEANED on leader path", member_name,
+                    "[{}] ignoring TEAM_CLEANED on leader path",
+                    member_name,
                 )
                 return
             team_logger.info(
-                "[{}] received TEAM_CLEANED, shutting down coordination", member_name,
+                "[{}] received TEAM_CLEANED, shutting down coordination",
+                member_name,
             )
             await host.shutdown_self()
             return
@@ -220,8 +242,6 @@ class EventDispatcher:
             team_logger.debug("task trigger detected, nudging idle agent: member_name={}", member_name)
             await self._nudge_idle_agent(member_name)
 
-    _MENTION_RE = re.compile(r"^@(\S+)\s+([\s\S]+)$")
-
     async def _handle_inner_event(self, event: InnerEventMessage) -> None:
         """Handle local inner events (user input, polling)."""
         host = self._host
@@ -230,7 +250,7 @@ class EventDispatcher:
         if event.event_type == InnerEventType.USER_INPUT:
             content = event.payload.get("content", "")
 
-            mention = await self._parse_mention(content)
+            mention = await self._resolve_mention(content)
             if mention is not None:
                 target, body = mention
                 await self._send_user_direct_message(target, body)
@@ -260,28 +280,29 @@ class EventDispatcher:
     # User @mention helpers
     # ------------------------------------------------------------------
 
-    async def _parse_mention(self, content: str) -> tuple[str, str] | None:
-        """Parse ``@member_name message`` from user input.
+    async def _resolve_mention(self, content: str) -> tuple[str, str] | None:
+        """Parse ``@member_name message`` and validate the target exists.
 
-        Returns (member_name, message_body) when the target member exists
-        in the database, otherwise None (falls through to normal path).
+        Returns ``(target, body)`` only when the target is a real roster
+        member, otherwise ``None`` so the caller falls through to the
+        default (leader) delivery path.
         """
-        m = self._MENTION_RE.match(content)
-        if m is None:
+        parsed = parse_mention(content)
+        if parsed is None:
             return None
-        target, body = m.group(1), m.group(2)
+        target, body = parsed
         if not await self._host.has_team_member(target):
             team_logger.warning("@mention target '{}' not found in database, falling through", target)
             return None
         return target, body
 
     async def _send_user_direct_message(self, to_member_name: str, content: str) -> None:
-        """Write a user→member direct message via the existing message manager."""
+        """Write a user→member direct message via the user inbox."""
         mm = self._host.message_manager
         if mm is None:
             team_logger.warning("message_manager unavailable, cannot send user direct message")
             return
-        msg_id = await mm.send_message(content, to_member_name, from_member_name="user")
+        msg_id = await UserInbox(mm).direct(to_member_name, content)
         team_logger.info("user direct message sent to {}: {}", to_member_name, msg_id)
 
     # ------------------------------------------------------------------
@@ -330,7 +351,9 @@ class EventDispatcher:
                 new_status=new_status,
             )
             await self._nudge_idle_member_with_stale_claims(
-                target_id, old_status, new_status,
+                target_id,
+                old_status,
+                new_status,
             )
         elif event_type == TeamEvent.MEMBER_EXECUTION_CHANGED:
             text = t(
@@ -348,9 +371,7 @@ class EventDispatcher:
 
         team_logger.debug(text)
 
-    _IDLE_NUDGE_STATUSES = frozenset(
-        {MemberStatus.READY.value, MemberStatus.ERROR.value}
-    )
+    _IDLE_NUDGE_STATUSES = frozenset({MemberStatus.READY.value, MemberStatus.ERROR.value})
 
     async def _nudge_idle_member_with_stale_claims(
         self,
@@ -377,7 +398,8 @@ class EventDispatcher:
             return
 
         claimed = await task_manager.get_tasks_by_assignee(
-            target_id, status=TaskStatus.CLAIMED.value,
+            target_id,
+            status=TaskStatus.CLAIMED.value,
         )
         if not claimed:
             return
@@ -401,15 +423,15 @@ class EventDispatcher:
         for task in stale:
             self._last_stale_nudge[task.task_id] = now
 
-        lines = [
-            t("dispatcher.stale_claim_header", count=len(stale))
-        ]
+        lines = [t("dispatcher.stale_claim_header", count=len(stale))]
         for task in stale:
             lines.append(f"- [{task.task_id}] {task.title}: {task.content}")
         await message_manager.send_message("\n".join(lines), target_id)
         team_logger.info(
             "[leader] nudged {} about {} stale claimed task(s) after status → {}",
-            target_id, len(stale), new_status,
+            target_id,
+            len(stale),
+            new_status,
         )
 
     # ------------------------------------------------------------------
@@ -596,10 +618,7 @@ class EventDispatcher:
         claimed = await task_manager.list_tasks(status=TaskStatus.CLAIMED.value)
         own_name = host.member_name
         is_leader = host.role == TeamRole.LEADER
-        relevant = [
-            t for t in claimed
-            if t.assignee and (t.assignee == own_name or is_leader)
-        ]
+        relevant = [t for t in claimed if t.assignee and (t.assignee == own_name or is_leader)]
 
         current_ids = {t.task_id for t in relevant}
         for tid in [k for k in self._last_stale_nudge if k not in current_ids]:
@@ -646,7 +665,9 @@ class EventDispatcher:
         content = self._format_stale_claim_nudge(task)
         await host.deliver_input(content)
         team_logger.info(
-            "[{}] self-nudged stale claimed task {}", host.member_name, task.task_id,
+            "[{}] self-nudged stale claimed task {}",
+            host.member_name,
+            task.task_id,
         )
 
     async def _leader_nudge_stale_claim(self, task) -> None:
@@ -658,7 +679,8 @@ class EventDispatcher:
         await host.message_manager.send_message(content, task.assignee)
         team_logger.info(
             "[leader] nudged {} about stale claimed task {}",
-            task.assignee, task.task_id,
+            task.assignee,
+            task.task_id,
         )
 
     async def _check_stale_pending_tasks(self) -> None:
@@ -685,8 +707,7 @@ class EventDispatcher:
         now = time.time()
         threshold_ms = self._STALE_PENDING_SECONDS * 1000
         stale_ids = {
-            t.task_id for t in pending
-            if t.updated_at is not None and (now * 1000 - t.updated_at) >= threshold_ms
+            t.task_id for t in pending if t.updated_at is not None and (now * 1000 - t.updated_at) >= threshold_ms
         }
 
         # GC throttle entries for tasks no longer pending/stale.
@@ -715,5 +736,6 @@ class EventDispatcher:
 
         await host.deliver_input(content)
         team_logger.info(
-            "[leader] self-prompted about {} stale pending task(s)", len(fresh),
+            "[leader] self-prompted about {} stale pending task(s)",
+            len(fresh),
         )

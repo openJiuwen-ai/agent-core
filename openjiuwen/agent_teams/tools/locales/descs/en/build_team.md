@@ -4,6 +4,15 @@ Assemble a team and register yourself as Leader. Call as soon as you have a goal
 build_team → create_task → spawn_member → send_message(to="*").
 No other team tool may be called before build_team.
 
+## HITT (Human in the Team)
+Passing `enable_hitt=true` registers the reserved `human_agent` member as a first-class teammate, equal in standing with you and the teammates. Use it when the user signals participation intent ("I'll join", "count me in", "I'll take that one"). Once HITT is on:
+
+- `human_agent` only has `send_message`, but can be assigned tasks via `update_task`;
+- Once `human_agent` has claimed a task, you cannot cancel or reassign it — only `send_message` nudges are allowed;
+- Direct conversation with `human_agent` **must** go through `send_message(to="human_agent", ...)`; plain text is invisible to the human member.
+
+HITT is decided once at build_team; you cannot add the human_agent member after the team is built.
+
 ## Task Design Principles
 - Describe goals, not steps: content should contain goals, acceptance criteria, and constraints — not specific operations
 - Single owner: each task may only be claimed by one teammate who owns delivery

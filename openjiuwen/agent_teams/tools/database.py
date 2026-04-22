@@ -29,9 +29,9 @@ from sqlalchemy.exc import (
     OperationalError,
 )
 from sqlalchemy.ext.asyncio import (
-    async_sessionmaker,
     AsyncEngine,
     AsyncSession,
+    async_sessionmaker,
     create_async_engine,
 )
 from sqlalchemy.pool import AsyncAdaptedQueuePool, StaticPool
@@ -39,28 +39,28 @@ from sqlmodel import SQLModel
 
 from openjiuwen.agent_teams.schema.status import (
     EXECUTION_TRANSITIONS,
-    ExecutionStatus,
-    is_valid_transition,
     MEMBER_TRANSITIONS,
+    TASK_TRANSITIONS,
+    ExecutionStatus,
     MemberMode,
     MemberStatus,
-    TASK_TRANSITIONS,
     TaskStatus,
+    is_valid_transition,
 )
 from openjiuwen.agent_teams.spawn.context import get_session_id
 from openjiuwen.agent_teams.tools.models import (
+    TEAM_DYNAMIC_TABLE_PREFIXES,
+    TEAM_STATIC_TABLES_TO_CLEAR,
+    Team,
+    TeamMember,
+    TeamMessageBase,
+    TeamTaskBase,
+    TeamTaskDependencyBase,
     _clear_session_model_cache,
     _get_message_model,
     _get_message_read_status_model,
     _get_task_dependency_model,
     _get_task_model,
-    Team,
-    TeamMember,
-    TEAM_DYNAMIC_TABLE_PREFIXES,
-    TeamMessageBase,
-    TEAM_STATIC_TABLES_TO_CLEAR,
-    TeamTaskBase,
-    TeamTaskDependencyBase,
 )
 from openjiuwen.core.common.logging import team_logger
 
@@ -68,6 +68,7 @@ from openjiuwen.core.common.logging import team_logger
 # ----------------- Database Configuration -----------------
 class DatabaseType:
     """Supported database types"""
+
     SQLITE = "sqlite"
     POSTGRESQL = "postgresql"
     MYSQL = "mysql"
@@ -75,6 +76,7 @@ class DatabaseType:
 
 class DatabaseConfig(BaseModel):
     """Database configuration class"""
+
     db_type: str = DatabaseType.SQLITE
     connection_string: str = ""
     db_timeout: int = 30
@@ -185,6 +187,7 @@ class TeamDatabase:
             # first_connect fires exactly once and WAL is set for the
             # lifetime of the engine.
             if self.config.db_enable_wal and not in_memory:
+
                 @event.listens_for(self.engine.sync_engine, "first_connect")
                 def set_sqlite_wal(dbapi_connection, connection_record):
                     cursor = dbapi_connection.cursor()
@@ -214,16 +217,14 @@ class TeamDatabase:
                 pool_recycle=1800,
             )
         else:
-            raise NotImplementedError(
-                f"Database type {self.config.db_type} not yet implemented"
-            )
+            raise NotImplementedError(f"Database type {self.config.db_type} not yet implemented")
 
         # Create session factory
         self.session_local = async_sessionmaker(
             bind=self.engine,
             class_=AsyncSession,
             expire_on_commit=False,
-            autoflush=False
+            autoflush=False,
         )
 
         # Create base tables (only Team and TeamMember)
@@ -372,8 +373,14 @@ class TeamDatabase:
             await self.initialize()
 
     # ----------------- Team Operations -----------------
-    async def create_team(self, team_name: str, display_name: str, leader_member_name: str,
-                          desc: Optional[str] = None, prompt: Optional[str] = None) -> bool:
+    async def create_team(
+        self,
+        team_name: str,
+        display_name: str,
+        leader_member_name: str,
+        desc: Optional[str] = None,
+        prompt: Optional[str] = None,
+    ) -> bool:
         """Create a new team"""
         await self._ensure_initialized()
         async with self.session_local() as session:
@@ -456,9 +463,7 @@ class TeamDatabase:
         """
         await self._ensure_initialized()
         async with self.session_local() as session:
-            result = await session.execute(
-                select(Team.updated_at).where(Team.team_name == team_name)
-            )
+            result = await session.execute(select(Team.updated_at).where(Team.team_name == team_name))
             value = result.scalar_one_or_none()
             return int(value) if value is not None else 0
 
@@ -508,10 +513,7 @@ class TeamDatabase:
         await self._ensure_initialized()
         async with self.session_local() as session:
             result = await session.execute(
-                select(TeamMember).where(
-                    TeamMember.member_name == member_name,
-                    TeamMember.team_name == team_name
-                )
+                select(TeamMember).where(TeamMember.member_name == member_name, TeamMember.team_name == team_name)
             )
             return result.scalar_one_or_none()
 
@@ -547,22 +549,22 @@ class TeamDatabase:
         await self._ensure_initialized()
         async with self.session_local() as session:
             result = await session.execute(
-                select(func.max(TeamMember.updated_at)).where(
-                    TeamMember.team_name == team_name
-                )
+                select(func.max(TeamMember.updated_at)).where(TeamMember.team_name == team_name)
             )
             value = result.scalar_one_or_none()
             return int(value) if value is not None else 0
 
-    async def update_member_status(self, member_name: str, team_name: str, status: str) -> bool:
+    async def update_member_status(
+        self,
+        member_name: str,
+        team_name: str,
+        status: str,
+    ) -> bool:
         """Update member status"""
         await self._ensure_initialized()
         async with self.session_local() as session:
             result = await session.execute(
-                select(TeamMember).where(
-                    TeamMember.member_name == member_name,
-                    TeamMember.team_name == team_name
-                )
+                select(TeamMember).where(TeamMember.member_name == member_name, TeamMember.team_name == team_name)
             )
             member = result.scalar_one_or_none()
             if not member:
@@ -573,12 +575,9 @@ class TeamDatabase:
             if not is_valid_transition(
                 MemberStatus(member.status),
                 MemberStatus(status),
-                MEMBER_TRANSITIONS
+                MEMBER_TRANSITIONS,
             ):
-                team_logger.error(
-                    f"Invalid state transition for member {member_name}: "
-                    f"{member.status} -> {status}"
-                )
+                team_logger.error(f"Invalid state transition for member {member_name}: {member.status} -> {status}")
                 return False
 
             member.status = status
@@ -586,15 +585,17 @@ class TeamDatabase:
             team_logger.debug(f"Member {member_name} status updated to {status}")
             return True
 
-    async def update_member_execution_status(self, member_name: str, team_name: str, execution_status: str) -> bool:
+    async def update_member_execution_status(
+        self,
+        member_name: str,
+        team_name: str,
+        execution_status: str,
+    ) -> bool:
         """Update member execution status"""
         await self._ensure_initialized()
         async with self.session_local() as session:
             result = await session.execute(
-                select(TeamMember).where(
-                    TeamMember.member_name == member_name,
-                    TeamMember.team_name == team_name
-                )
+                select(TeamMember).where(TeamMember.member_name == member_name, TeamMember.team_name == team_name)
             )
             member = result.scalar_one_or_none()
             if not member:
@@ -605,7 +606,7 @@ class TeamDatabase:
             if not is_valid_transition(
                 ExecutionStatus(member.execution_status),
                 ExecutionStatus(execution_status),
-                EXECUTION_TRANSITIONS
+                EXECUTION_TRANSITIONS,
             ):
                 team_logger.error(
                     f"Invalid state transition for member {member_name}: "
@@ -625,7 +626,7 @@ class TeamDatabase:
         team_name: str,
         title: str,
         content: str,
-        status: str
+        status: str,
     ) -> bool:
         """Create a new team task"""
         await self._ensure_initialized()
@@ -654,9 +655,7 @@ class TeamDatabase:
         await self._ensure_initialized()
         team_task_model = _get_task_model()
         async with self.session_local() as session:
-            result = await session.execute(
-                select(team_task_model).where(team_task_model.task_id == task_id)
-            )
+            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             return result.scalar_one_or_none()
 
     async def get_team_tasks(self, team_name: str, status: Optional[str] = None) -> List[TeamTaskBase]:
@@ -670,8 +669,9 @@ class TeamDatabase:
             result = await session.execute(query)
             return result.scalars().all()
 
-    async def get_tasks_by_assignee(self, team_name: str, assignee_id: str, status: Optional[str] = None
-                                    ) -> List[TeamTaskBase]:
+    async def get_tasks_by_assignee(
+        self, team_name: str, assignee_id: str, status: Optional[str] = None
+    ) -> List[TeamTaskBase]:
         """Get tasks assigned to a specific member, optionally filtered by status
 
         Args:
@@ -686,8 +686,7 @@ class TeamDatabase:
         team_task_model = _get_task_model()
         async with self.session_local() as session:
             query = select(team_task_model).where(
-                team_task_model.team_name == team_name,
-                team_task_model.assignee == assignee_id
+                team_task_model.team_name == team_name, team_task_model.assignee == assignee_id
             )
             if status:
                 query = query.where(team_task_model.status == status)
@@ -713,9 +712,7 @@ class TeamDatabase:
         await self._ensure_initialized()
         team_task_model = _get_task_model()
         async with self.session_local() as session:
-            result = await session.execute(
-                select(team_task_model).where(team_task_model.task_id == task_id)
-            )
+            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
                 team_logger.error(f"Task {task_id} not found")
@@ -726,11 +723,10 @@ class TeamDatabase:
             if not is_valid_transition(
                 TaskStatus(task.status),
                 TaskStatus.CLAIMED,
-                TASK_TRANSITIONS
+                TASK_TRANSITIONS,
             ):
                 team_logger.error(
-                    f"Invalid state transition for task {task_id}: "
-                    f"{task.status} -> {TaskStatus.CLAIMED.value}"
+                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.CLAIMED.value}"
                 )
                 return False
             task.assignee = member_name
@@ -745,9 +741,7 @@ class TeamDatabase:
         await self._ensure_initialized()
         team_task_model = _get_task_model()
         async with self.session_local() as session:
-            result = await session.execute(
-                select(team_task_model).where(team_task_model.task_id == task_id)
-            )
+            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
                 team_logger.error(f"Task {task_id} not found")
@@ -757,19 +751,16 @@ class TeamDatabase:
             # otherwise trip the state-transition check as "claimed → claimed",
             # which hides the real reason.
             if task.assignee:
-                team_logger.warning(
-                    f"Task {task_id} is already claimed by member {task.assignee}"
-                )
+                team_logger.warning(f"Task {task_id} is already claimed by member {task.assignee}")
                 return False
 
             if not is_valid_transition(
                 TaskStatus(task.status),
                 TaskStatus.CLAIMED,
-                TASK_TRANSITIONS
+                TASK_TRANSITIONS,
             ):
                 team_logger.error(
-                    f"Invalid state transition for task {task_id}: "
-                    f"{task.status} -> {TaskStatus.CLAIMED.value}"
+                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.CLAIMED.value}"
                 )
                 return False
 
@@ -796,9 +787,7 @@ class TeamDatabase:
         await self._ensure_initialized()
         team_task_model = _get_task_model()
         async with self.session_local() as session:
-            result = await session.execute(
-                select(team_task_model).where(team_task_model.task_id == task_id)
-            )
+            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
                 team_logger.error(f"Task {task_id} not found")
@@ -807,8 +796,7 @@ class TeamDatabase:
             # Only allow resetting CLAIMED tasks
             if task.status != TaskStatus.CLAIMED.value:
                 team_logger.error(
-                    f"Cannot reset task {task_id} with status {task.status}, "
-                    f"only CLAIMED tasks can be reset"
+                    f"Cannot reset task {task_id} with status {task.status}, only CLAIMED tasks can be reset"
                 )
                 return None
 
@@ -816,11 +804,10 @@ class TeamDatabase:
             if not is_valid_transition(
                 TaskStatus(task.status),
                 TaskStatus.PENDING,
-                TASK_TRANSITIONS
+                TASK_TRANSITIONS,
             ):
                 team_logger.error(
-                    f"Invalid state transition for task {task_id}: "
-                    f"{task.status} -> {TaskStatus.PENDING.value}"
+                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.PENDING.value}"
                 )
                 return None
 
@@ -848,9 +835,7 @@ class TeamDatabase:
         await self._ensure_initialized()
         team_task_model = _get_task_model()
         async with self.session_local() as session:
-            result = await session.execute(
-                select(team_task_model).where(team_task_model.task_id == task_id)
-            )
+            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
                 team_logger.error(f"Task {task_id} not found")
@@ -860,11 +845,10 @@ class TeamDatabase:
             if not is_valid_transition(
                 TaskStatus(task.status),
                 TaskStatus.PLAN_APPROVED,
-                TASK_TRANSITIONS
+                TASK_TRANSITIONS,
             ):
                 team_logger.error(
-                    f"Invalid state transition for task {task_id}: "
-                    f"{task.status} -> {TaskStatus.PLAN_APPROVED.value}"
+                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.PLAN_APPROVED.value}"
                 )
                 return None
 
@@ -881,9 +865,7 @@ class TeamDatabase:
         team_task_model = _get_task_model()
         task_dependency_model = _get_task_dependency_model()
         async with self.session_local() as session:
-            result = await session.execute(
-                select(team_task_model).where(team_task_model.task_id == task_id)
-            )
+            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
                 team_logger.error(f"Task {task_id} not found")
@@ -893,12 +875,9 @@ class TeamDatabase:
             if not is_valid_transition(
                 TaskStatus(task.status),
                 TaskStatus(status),
-                TASK_TRANSITIONS
+                TASK_TRANSITIONS,
             ):
-                team_logger.error(
-                    f"Invalid state transition for task {task_id}: "
-                    f"{task.status} -> {status}"
-                )
+                team_logger.error(f"Invalid state transition for task {task_id}: {task.status} -> {status}")
                 return False
 
             now = self.get_current_time()
@@ -911,10 +890,11 @@ class TeamDatabase:
                 team_logger.info(f"Task {task_id} completed at {now}")
 
                 dep_update_result = await session.execute(
-                    update(task_dependency_model).where(
-                        task_dependency_model.depends_on_task_id == task_id,
-                        task_dependency_model.resolved.is_(False)
-                    ).values(resolved=True)
+                    update(task_dependency_model)
+                    .where(
+                        task_dependency_model.depends_on_task_id == task_id, task_dependency_model.resolved.is_(False)
+                    )
+                    .values(resolved=True)
                 )
                 resolved_count = dep_update_result.rowcount or 0
                 if resolved_count > 0:
@@ -924,7 +904,12 @@ class TeamDatabase:
             team_logger.info(f"Task {task_id} status updated to {status}")
             return True
 
-    async def update_task(self, task_id: str, title: Optional[str] = None, content: Optional[str] = None) -> bool:
+    async def update_task(
+        self,
+        task_id: str,
+        title: Optional[str] = None,
+        content: Optional[str] = None,
+    ) -> bool:
         """Update task content (title, content, etc.)
 
         Args:
@@ -938,9 +923,7 @@ class TeamDatabase:
         await self._ensure_initialized()
         team_task_model = _get_task_model()
         async with self.session_local() as session:
-            result = await session.execute(
-                select(team_task_model).where(team_task_model.task_id == task_id)
-            )
+            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
                 team_logger.error(f"Task {task_id} not found")
@@ -965,7 +948,12 @@ class TeamDatabase:
 
             return True
 
-    async def add_task_dependency(self, task_id: str, depends_on_task_id: str, team_name: str) -> bool:
+    async def add_task_dependency(
+        self,
+        task_id: str,
+        depends_on_task_id: str,
+        team_name: str,
+    ) -> bool:
         """Add a task dependency"""
         await self._ensure_initialized()
         task_dependency_model = _get_task_dependency_model()
@@ -974,7 +962,7 @@ class TeamDatabase:
                 dependency = task_dependency_model(
                     task_id=task_id,
                     depends_on_task_id=depends_on_task_id,
-                    team_name=team_name
+                    team_name=team_name,
                 )
                 session.add(dependency)
                 await session.commit()
@@ -986,11 +974,7 @@ class TeamDatabase:
                 return True
 
     async def _check_circular_dependency(
-        self,
-        session,
-        task_id: str,
-        target_task_id: str,
-        visited: Optional[set] = None
+        self, session, task_id: str, target_task_id: str, visited: Optional[set] = None
     ) -> bool:
         """Check if adding a dependency from task_id to target_task_id would create a cycle
 
@@ -1020,17 +1004,13 @@ class TeamDatabase:
         # Get all tasks that target_task_id depends on
         task_dependency_model = _get_task_dependency_model()
         result = await session.execute(
-            select(task_dependency_model).where(
-                task_dependency_model.task_id == target_task_id
-            )
+            select(task_dependency_model).where(task_dependency_model.task_id == target_task_id)
         )
         dependencies = result.scalars().all()
 
         # Recursively check each dependency
         for dep in dependencies:
-            if await self._check_circular_dependency(
-                session, task_id, dep.depends_on_task_id, visited
-            ):
+            if await self._check_circular_dependency(session, task_id, dep.depends_on_task_id, visited):
                 return True
 
         return False
@@ -1044,7 +1024,7 @@ class TeamDatabase:
         status: str,
         *,
         dependencies: Optional[List[str]] = None,
-        dependent_task_ids: Optional[List[str]] = None
+        dependent_task_ids: Optional[List[str]] = None,
     ) -> bool:
         """Create a task with bidirectional dependencies (insert into task dependency chain)
 
@@ -1077,16 +1057,12 @@ class TeamDatabase:
                     for dep_id in dependencies:
                         # Check if dep_id (or its transitive dependencies) leads back to task_id
                         result = await session.execute(
-                            select(task_dependency_model).where(
-                                task_dependency_model.task_id == dep_id
-                            )
+                            select(task_dependency_model).where(task_dependency_model.task_id == dep_id)
                         )
                         dep_tasks = result.scalars().all()
 
                         for dep_task in dep_tasks:
-                            if await self._check_circular_dependency(
-                                session, task_id, dep_task.depends_on_task_id
-                            ):
+                            if await self._check_circular_dependency(session, task_id, dep_task.depends_on_task_id):
                                 team_logger.error(
                                     f"Circular dependency detected: {task_id} -> {dep_id} -> "
                                     f"... -> {dep_task.depends_on_task_id}"
@@ -1098,12 +1074,8 @@ class TeamDatabase:
                 if dependent_task_ids and dependencies:
                     for dependent_id in dependent_task_ids:
                         for new_dep in dependencies:
-                            if await self._check_circular_dependency(
-                                session, dependent_id, new_dep
-                            ):
-                                team_logger.error(
-                                    f"Circular dependency detected via dependent {dependent_id}"
-                                )
+                            if await self._check_circular_dependency(session, dependent_id, new_dep):
+                                team_logger.error(f"Circular dependency detected via dependent {dependent_id}")
                                 await session.rollback()
                                 return False
 
@@ -1126,7 +1098,7 @@ class TeamDatabase:
                         dependency = task_dependency_model(
                             task_id=task_id,
                             depends_on_task_id=dep_id,
-                            team_name=team_name
+                            team_name=team_name,
                         )
                         session.add(dependency)
 
@@ -1145,8 +1117,12 @@ class TeamDatabase:
                             return False
 
                         # Check if dependent task is in terminal status (cannot add new dependency)
-                        if dep_task.status in [TaskStatus.COMPLETED.value, TaskStatus.CANCELLED.value,
-                                               TaskStatus.CLAIMED.value, TaskStatus.PLAN_APPROVED.value]:
+                        if dep_task.status in [
+                            TaskStatus.COMPLETED.value,
+                            TaskStatus.CANCELLED.value,
+                            TaskStatus.CLAIMED.value,
+                            TaskStatus.PLAN_APPROVED.value,
+                        ]:
                             team_logger.error(
                                 f"Cannot add dependency to {dependent_id} in terminal or executing "
                                 f"status: {dep_task.status}"
@@ -1158,7 +1134,7 @@ class TeamDatabase:
                         dependency = task_dependency_model(
                             task_id=dependent_id,
                             depends_on_task_id=task_id,
-                            team_name=team_name
+                            team_name=team_name,
                         )
                         session.add(dependency)
 
@@ -1210,8 +1186,7 @@ class TeamDatabase:
         async with self.session_local() as session:
             result = await session.execute(
                 select(task_dependency_model).where(
-                    task_dependency_model.task_id == task_id,
-                    task_dependency_model.resolved.is_(False)
+                    task_dependency_model.task_id == task_id, task_dependency_model.resolved.is_(False)
                 )
             )
             return len(result.scalars().all())
@@ -1231,9 +1206,7 @@ class TeamDatabase:
         async with self.session_local() as session:
             # Query dependencies where depends_on_task_id matches
             result = await session.execute(
-                select(task_dependency_model).where(
-                    task_dependency_model.depends_on_task_id == depends_on_task_id
-                )
+                select(task_dependency_model).where(task_dependency_model.depends_on_task_id == depends_on_task_id)
             )
             deps = result.scalars().all()
 
@@ -1254,9 +1227,7 @@ class TeamDatabase:
         await self._ensure_initialized()
         team_task_model = _get_task_model()
         async with self.session_local() as session:
-            result = await session.execute(
-                select(team_task_model).where(team_task_model.task_id == task_id)
-            )
+            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
                 team_logger.debug(f"Task {task_id} not found for deletion")
@@ -1285,9 +1256,7 @@ class TeamDatabase:
         team_task_model = _get_task_model()
         async with self.session_local() as session:
             # Get task with write lock
-            result = await session.execute(
-                select(team_task_model).where(team_task_model.task_id == task_id)
-            )
+            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
                 team_logger.error(f"Task {task_id} not found")
@@ -1297,11 +1266,10 @@ class TeamDatabase:
             if not is_valid_transition(
                 TaskStatus(task.status),
                 TaskStatus.CANCELLED,
-                TASK_TRANSITIONS
+                TASK_TRANSITIONS,
             ):
                 team_logger.error(
-                    f"Invalid state transition for task {task_id}: "
-                    f"{task.status} -> {TaskStatus.CANCELLED.value}"
+                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.CANCELLED.value}"
                 )
                 return None
 
@@ -1313,7 +1281,11 @@ class TeamDatabase:
 
             return task
 
-    async def cancel_all_tasks(self, team_name: str) -> List[TeamTaskBase]:
+    async def cancel_all_tasks(
+        self,
+        team_name: str,
+        skip_assignees: Optional[set[str]] = None,
+    ) -> List[TeamTaskBase]:
         """Cancel all non-cancelled and non-completed tasks for a team atomically
 
         This method performs bulk cancellation in a single transaction to prevent
@@ -1322,19 +1294,21 @@ class TeamDatabase:
 
         Args:
             team_name: Team identifier
+            skip_assignees: Member names whose claimed tasks must be
+                preserved (used to honor the HITT human_agent lock).
 
         Returns:
             List of cancelled task models (empty if no tasks to cancel)
         """
         await self._ensure_initialized()
         team_task_model = _get_task_model()
+        skip_assignees = skip_assignees or set()
         async with self.session_local() as session:
             # Get all tasks for this team that are NOT cancelled or completed
             skip_statuses = [TaskStatus.CANCELLED.value, TaskStatus.COMPLETED.value]
             result = await session.execute(
                 select(team_task_model).where(
-                    team_task_model.team_name == team_name,
-                    ~team_task_model.status.in_(skip_statuses)
+                    team_task_model.team_name == team_name, ~team_task_model.status.in_(skip_statuses)
                 )
             )
             tasks = result.scalars().all()
@@ -1348,11 +1322,14 @@ class TeamDatabase:
 
             # Cancel each task (all in same transaction)
             for task in tasks:
+                if task.assignee in skip_assignees:
+                    team_logger.debug(f"Skipping task {task.task_id}: assignee '{task.assignee}' in skip_assignees")
+                    continue
                 # Validate state transition one more time (defense in depth)
                 if not is_valid_transition(
                     TaskStatus(task.status),
                     TaskStatus.CANCELLED,
-                    TASK_TRANSITIONS
+                    TASK_TRANSITIONS,
                 ):
                     team_logger.debug(
                         f"Skipping task {task.task_id}: invalid state transition "
@@ -1367,9 +1344,7 @@ class TeamDatabase:
 
             await session.commit()
 
-            team_logger.info(
-                f"Cancelled {len(cancelled_tasks)} tasks for team {team_name}"
-            )
+            team_logger.info(f"Cancelled {len(cancelled_tasks)} tasks for team {team_name}")
 
             return cancelled_tasks
 
@@ -1396,9 +1371,7 @@ class TeamDatabase:
         task_dependency_model = _get_task_dependency_model()
         async with self.session_local() as session:
             # Get task with write lock
-            result = await session.execute(
-                select(team_task_model).where(team_task_model.task_id == task_id)
-            )
+            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
                 team_logger.error(f"Task {task_id} not found")
@@ -1413,11 +1386,10 @@ class TeamDatabase:
             if not is_valid_transition(
                 TaskStatus(task.status),
                 TaskStatus.COMPLETED,
-                TASK_TRANSITIONS
+                TASK_TRANSITIONS,
             ):
                 team_logger.error(
-                    f"Invalid state transition for task {task_id}: "
-                    f"{task.status} -> {TaskStatus.COMPLETED.value}"
+                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.COMPLETED.value}"
                 )
                 return None
 
@@ -1429,10 +1401,9 @@ class TeamDatabase:
 
             # Resolve all dependencies that depend on this task
             dep_update_result = await session.execute(
-                update(task_dependency_model).where(
-                    task_dependency_model.depends_on_task_id == task_id,
-                    task_dependency_model.resolved.is_(False)
-                ).values(resolved=True)
+                update(task_dependency_model)
+                .where(task_dependency_model.depends_on_task_id == task_id, task_dependency_model.resolved.is_(False))
+                .values(resolved=True)
             )
             resolved_count = dep_update_result.rowcount or 0
             if resolved_count > 0:
@@ -1441,9 +1412,7 @@ class TeamDatabase:
             # Unblock tasks whose all dependencies are now resolved
             # Get all tasks that depend on the completed task
             dependent_result = await session.execute(
-                select(task_dependency_model).where(
-                    task_dependency_model.depends_on_task_id == task_id
-                )
+                select(task_dependency_model).where(task_dependency_model.depends_on_task_id == task_id)
             )
             dependent_deps = dependent_result.scalars().all()
 
@@ -1464,8 +1433,7 @@ class TeamDatabase:
                 # Check if all dependencies are resolved
                 unresolved_result = await session.execute(
                     select(task_dependency_model).where(
-                        task_dependency_model.task_id == dep.task_id,
-                        task_dependency_model.resolved.is_(False)
+                        task_dependency_model.task_id == dep.task_id, task_dependency_model.resolved.is_(False)
                     )
                 )
                 unresolved_count = len(unresolved_result.scalars().all())
@@ -1475,9 +1443,7 @@ class TeamDatabase:
                     dependent_task.status = TaskStatus.PENDING.value
                     dependent_task.updated_at = now
                     unblocked_tasks.append(dependent_task)
-                    team_logger.info(
-                        f"Task {dep.task_id} unblocked (from BLOCKED to PENDING)"
-                    )
+                    team_logger.info(f"Task {dep.task_id} unblocked (from BLOCKED to PENDING)")
 
             await session.commit()
             team_logger.info(f"Task {task_id} completion committed, unblocked {len(unblocked_tasks)} tasks")
@@ -1507,8 +1473,7 @@ class TeamDatabase:
             # Get all blocked tasks for the team
             result = await session.execute(
                 select(team_task_model).where(
-                    team_task_model.team_name == team_name,
-                    team_task_model.status == TaskStatus.BLOCKED.value
+                    team_task_model.team_name == team_name, team_task_model.status == TaskStatus.BLOCKED.value
                 )
             )
             blocked_tasks = result.scalars().all()
@@ -1519,8 +1484,7 @@ class TeamDatabase:
                 # Check if all dependencies are resolved
                 deps_result = await session.execute(
                     select(task_dependency_model).where(
-                        task_dependency_model.task_id == task.task_id,
-                        task_dependency_model.resolved.is_(False)
+                        task_dependency_model.task_id == task.task_id, task_dependency_model.resolved.is_(False)
                     )
                 )
                 unresolved_deps = deps_result.scalars().all()
@@ -1566,9 +1530,7 @@ class TeamDatabase:
         await self._ensure_initialized()
         message_model = _get_message_model()
         async with self.session_local() as session:
-            result = await session.execute(
-                select(message_model).where(message_model.message_id == message_id)
-            )
+            result = await session.execute(select(message_model).where(message_model.message_id == message_id))
             return result.scalar_one_or_none()
 
     async def create_message(
@@ -1579,9 +1541,18 @@ class TeamDatabase:
         content: str,
         *,
         to_member_name: Optional[str] = None,
-        broadcast: bool = False
+        broadcast: bool = False,
+        is_read: bool = False,
     ) -> bool:
-        """Create a new team message"""
+        """Create a new team message.
+
+        Args:
+            is_read: Initial read flag for direct messages. Used to mark
+                messages addressed to members with no live consumer (e.g.
+                the HITT human_agent) as already read so mailbox polling
+                does not keep re-firing on them. Ignored for broadcasts,
+                whose per-member read state lives in MessageReadStatus.
+        """
         await self._ensure_initialized()
         message_model = _get_message_model()
         for attempt in range(_DB_RETRY_ATTEMPTS):
@@ -1597,7 +1568,7 @@ class TeamDatabase:
                         broadcast=broadcast,
                         # Broadcast rows must leave is_read NULL — per-member
                         # read state lives in MessageReadStatus instead.
-                        is_read=None if broadcast else False,
+                        is_read=None if broadcast else is_read,
                     )
                     session.add(message)
                     await session.commit()
@@ -1610,13 +1581,15 @@ class TeamDatabase:
                 except OperationalError as e:
                     await session.rollback()
                     if attempt < _DB_RETRY_ATTEMPTS - 1:
-                        delay = _DB_RETRY_BASE_DELAY * (2 ** attempt)
+                        delay = _DB_RETRY_BASE_DELAY * (2**attempt)
                         team_logger.warning(
-                            f"Database locked on create_message (attempt {attempt + 1}), retrying in {delay}s")
+                            f"Database locked on create_message (attempt {attempt + 1}), retrying in {delay}s"
+                        )
                         await asyncio.sleep(delay)
                     else:
                         team_logger.error(
-                            f"Failed to create message {message_id} after {_DB_RETRY_ATTEMPTS} attempts: {e}")
+                            f"Failed to create message {message_id} after {_DB_RETRY_ATTEMPTS} attempts: {e}"
+                        )
                         return False
         return False
 
@@ -1625,7 +1598,7 @@ class TeamDatabase:
         team_name: str,
         to_member_name: str,
         unread_only: bool = False,
-        from_member_name: Optional[str] = None
+        from_member_name: Optional[str] = None,
     ) -> List[TeamMessageBase]:
         """Get direct (point-to-point) messages for a specific member
 
@@ -1645,7 +1618,7 @@ class TeamDatabase:
             query = select(message_model).where(
                 message_model.team_name == team_name,
                 message_model.to_member_name == to_member_name,
-                message_model.broadcast.is_(False)
+                message_model.broadcast.is_(False),
             )
 
             if from_member_name is not None:
@@ -1665,7 +1638,7 @@ class TeamDatabase:
         team_name: str,
         member_name: str,
         unread_only: bool = False,
-        from_member_name: Optional[str] = None
+        from_member_name: Optional[str] = None,
     ) -> List[TeamMessageBase]:
         """Get broadcast messages for a specific member, with read status
 
@@ -1708,16 +1681,9 @@ class TeamDatabase:
             if not unread_only:
                 return list(rows)
 
-            return [
-                row for row in rows
-                if read_status is None or row.timestamp > read_status.read_at
-            ]
+            return [row for row in rows if read_status is None or row.timestamp > read_status.read_at]
 
-    async def get_team_messages(
-        self,
-        team_name: str,
-        broadcast: Optional[bool] = None
-    ) -> List[TeamMessageBase]:
+    async def get_team_messages(self, team_name: str, broadcast: Optional[bool] = None) -> List[TeamMessageBase]:
         """Get all messages for a team (without read status)
 
         Args:
@@ -1755,9 +1721,7 @@ class TeamDatabase:
         read_status_model = _get_message_read_status_model()
         async with self.session_local() as session:
             # Verify message exists
-            result = await session.execute(
-                select(message_model).where(message_model.message_id == message_id)
-            )
+            result = await session.execute(select(message_model).where(message_model.message_id == message_id))
             message = result.scalar_one_or_none()
             if not message:
                 team_logger.error(f"Message {message_id} not found")
@@ -1770,14 +1734,13 @@ class TeamDatabase:
             # nonsensical and rejected.
             if member_name == "user":
                 if message.broadcast:
-                    team_logger.error(
-                        f"'user' pseudo-member cannot read broadcast message {message_id}"
-                    )
+                    team_logger.error(f"'user' pseudo-member cannot read broadcast message {message_id}")
                     return False
             else:
                 result = await session.execute(
-                    select(TeamMember).where(TeamMember.member_name == member_name,
-                                             TeamMember.team_name == message.team_name)
+                    select(TeamMember).where(
+                        TeamMember.member_name == member_name, TeamMember.team_name == message.team_name
+                    )
                 )
                 member = result.scalar_one_or_none()
                 if not member:

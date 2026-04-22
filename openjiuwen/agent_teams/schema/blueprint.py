@@ -5,9 +5,11 @@ DeepAgent-scoped specs live in ``deep_agent_spec``.  This module
 re-exports them so existing ``from …blueprint import DeepAgentSpec``
 keeps working.
 """
+
 from __future__ import annotations
 
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     Literal,
@@ -19,15 +21,28 @@ from pydantic import (
     Field,
 )
 
+from openjiuwen.agent_teams.constants import (
+    DEFAULT_LEADER_MEMBER_NAME,
+    HUMAN_AGENT_MEMBER_NAME,
+    RESERVED_MEMBER_NAMES,
+)
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import (
     TeamLifecycle,
     TeamMemberSpec,
+    TeamRole,
+    TeamRuntimeContext,
+    TeamSpec,
 )
 from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
 from openjiuwen.agent_teams.worktree.models import WorktreeConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+if TYPE_CHECKING:
+    # Resolved for type-checkers only; the runtime import lives in ``build()``
+    # below to sidestep the blueprint <-> team_agent module import cycle.
+    from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 
 # ---------------------------------------------------------------------------
 # Transport / Storage registries (pluggable team infrastructure)
@@ -78,10 +93,7 @@ class TransportSpec(BaseModel):
         _ensure_builtin_infra_registered()
         config_cls = _TRANSPORT_REGISTRY.get(self.type)
         if config_cls is None:
-            raise ValueError(
-                f"Unknown transport type '{self.type}'. "
-                f"Registered types: {list(_TRANSPORT_REGISTRY)}"
-            )
+            raise ValueError(f"Unknown transport type '{self.type}'. Registered types: {list(_TRANSPORT_REGISTRY)}")
         merged = {"backend": self.type, **self.params}
         return config_cls.model_validate(merged)
 
@@ -100,10 +112,7 @@ class StorageSpec(BaseModel):
         _ensure_builtin_infra_registered()
         config_cls = _STORAGE_REGISTRY.get(self.type)
         if config_cls is None:
-            raise ValueError(
-                f"Unknown storage type '{self.type}'. "
-                f"Registered types: {list(_STORAGE_REGISTRY)}"
-            )
+            raise ValueError(f"Unknown storage type '{self.type}'. Registered types: {list(_STORAGE_REGISTRY)}")
         merged = {"db_type": self.type, **self.params}
         return config_cls.model_validate(merged)
 
@@ -150,6 +159,18 @@ class TeamAgentSpec(BaseModel):
     workspace: Optional[TeamWorkspaceConfig] = None
     """Optional shared workspace config for team members."""
     metadata: dict[str, Any] = {}
+    enable_hitt: bool = False
+    """Enable Human-in-the-Team mode.
+
+    When True, the runtime auto-registers a reserved ``human_agent``
+    member alongside the declared roster. The human_agent is a first-
+    class team member that the leader can assign tasks to via
+    ``update_task``; it only has access to ``send_message`` and never
+    goes through spawn / startup lifecycle. Setting this to True is
+    also exposed to the leader as a ``build_team(enable_hitt=...)``
+    tool parameter so the leader can turn HITT on dynamically when
+    the user expresses intent to join the team.
+    """
     language: Optional[str] = None
     """Preferred language for prompts and tool descriptions ("cn" or "en").
 
@@ -160,7 +181,8 @@ class TeamAgentSpec(BaseModel):
     """
 
     agent_customizer: Optional[Callable[..., None]] = Field(
-        default=None, exclude=True,
+        default=None,
+        exclude=True,
     )
     """Optional callback invoked on each member's DeepAgent after creation.
 
@@ -171,15 +193,16 @@ class TeamAgentSpec(BaseModel):
 
     def build(self) -> "TeamAgent":
         """Materialize a configured TeamAgent from this spec."""
-        from openjiuwen.agent_teams.agent.team_agent import TeamAgent
-        from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
-        from openjiuwen.agent_teams.schema.team import TeamRole, TeamSpec
+        from openjiuwen.agent_teams.agent.team_agent import TeamAgent as _TeamAgent
         from openjiuwen.agent_teams.tools.database import DatabaseConfig as _DatabaseConfig
         from openjiuwen.harness.prompts import resolve_language
 
         leader_agent = self.agents.get("leader")
         if leader_agent is None:
             raise ValueError("agents dict must contain a 'leader' key")
+
+        self._validate_reserved_names()
+        self._inject_human_agent_if_enabled()
 
         resolved_language = resolve_language(self.language)
         for role_spec in self.agents.values():
@@ -197,6 +220,7 @@ class TeamAgentSpec(BaseModel):
         db_config = self.storage.build() if self.storage else _DatabaseConfig()
         if db_config.db_type == "sqlite" and not db_config.connection_string:
             from openjiuwen.agent_teams.paths import get_agent_teams_home
+
             db_config.connection_string = str(get_agent_teams_home() / "team.db")
 
         leader_card_id = f"{self.team_name}_{self.leader.member_name}"
@@ -215,9 +239,55 @@ class TeamAgentSpec(BaseModel):
             db_config=db_config,
         )
 
-        agent = TeamAgent(leader_card)
+        agent = _TeamAgent(leader_card)
         agent.configure(self, context)
         return agent
+
+    def _validate_reserved_names(self) -> None:
+        """Reject user-declared members that collide with reserved names.
+
+        ``human_agent`` and ``user`` are owned by the runtime and must
+        never collide with user-declared identities. ``team_leader`` is
+        the default leader name so the leader itself is allowed to use
+        it, but a teammate must not — otherwise two members would share
+        a name in the roster.
+        """
+        # Leader may keep the default ``team_leader`` but cannot claim
+        # the user/human_agent identities.
+        leader_forbidden = RESERVED_MEMBER_NAMES - {DEFAULT_LEADER_MEMBER_NAME}
+        if self.leader.member_name in leader_forbidden:
+            raise ValueError(f"LeaderSpec.member_name '{self.leader.member_name}' is reserved; pick a different name")
+        for member in self.predefined_members:
+            # A HITT-auto-injected human_agent is legal here; anything
+            # else under a reserved name is not.
+            if member.role_type == TeamRole.HUMAN_AGENT:
+                continue
+            if member.member_name in RESERVED_MEMBER_NAMES:
+                raise ValueError(
+                    f"predefined member '{member.member_name}' uses a "
+                    f"reserved name (reserved: "
+                    f"{sorted(RESERVED_MEMBER_NAMES)})"
+                )
+
+    def _inject_human_agent_if_enabled(self) -> None:
+        """Append the reserved human_agent member when HITT is on.
+
+        Idempotent: if a human_agent slot already exists (e.g. Spec was
+        built twice) we leave it alone.
+        """
+        if not self.enable_hitt:
+            return
+        for member in self.predefined_members:
+            if member.member_name == HUMAN_AGENT_MEMBER_NAME:
+                return
+        self.predefined_members.append(
+            TeamMemberSpec(
+                member_name=HUMAN_AGENT_MEMBER_NAME,
+                display_name=t("hitt.human_agent_display_name"),
+                role_type=TeamRole.HUMAN_AGENT,
+                persona=t("hitt.human_agent_default_persona"),
+            )
+        )
 
 
 __all__ = [

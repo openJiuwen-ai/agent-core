@@ -21,13 +21,13 @@ from pydantic import BaseModel
 
 from openjiuwen.agent_teams.schema.status import (
     EXECUTION_TRANSITIONS,
-    ExecutionStatus,
-    is_valid_transition,
     MEMBER_TRANSITIONS,
+    TASK_TRANSITIONS,
+    ExecutionStatus,
     MemberMode,
     MemberStatus,
-    TASK_TRANSITIONS,
     TaskStatus,
+    is_valid_transition,
 )
 from openjiuwen.agent_teams.tools.models import (
     Team,
@@ -35,10 +35,10 @@ from openjiuwen.agent_teams.tools.models import (
 )
 from openjiuwen.core.common.logging import team_logger
 
-
 # ---------------------------------------------------------------------------
 # Config model (registered in StorageSpec registry as "memory")
 # ---------------------------------------------------------------------------
+
 
 class MemoryDatabaseConfig(BaseModel):
     """Minimal config to select the in-memory storage backend."""
@@ -54,6 +54,7 @@ class MemoryDatabaseConfig(BaseModel):
 # SQLAlchemy table metadata.  We create plain subclasses stripped of
 # table bindings so they can be instantiated as pure data objects.
 # ---------------------------------------------------------------------------
+
 
 class _MemTask:
     """Plain task record.
@@ -146,6 +147,7 @@ class _MemReadStatus:
 # ---------------------------------------------------------------------------
 # InMemoryTeamDatabase
 # ---------------------------------------------------------------------------
+
 
 class InMemoryTeamDatabase:
     """Drop-in replacement for TeamDatabase backed by plain dicts/lists.
@@ -252,9 +254,7 @@ class InMemoryTeamDatabase:
             self._tasks = {k: v for k, v in self._tasks.items() if v.team_name != team_name}
             self._task_deps = [d for d in self._task_deps if d.team_name != team_name]
             self._messages = [m for m in self._messages if m.team_name != team_name]
-            self._read_status = {
-                k: v for k, v in self._read_status.items() if v.team_name != team_name
-            }
+            self._read_status = {k: v for k, v in self._read_status.items() if v.team_name != team_name}
             team_logger.info(f"Team {team_name} deleted")
             return True
 
@@ -343,15 +343,24 @@ class InMemoryTeamDatabase:
     # =====================================================================
 
     async def create_task(
-        self, task_id: str, team_name: str, title: str, content: str, status: str
+        self,
+        task_id: str,
+        team_name: str,
+        title: str,
+        content: str,
+        status: str,
     ) -> bool:
         async with self._lock:
             if task_id in self._tasks:
                 team_logger.error(f"Task {task_id} already exists")
                 return False
             self._tasks[task_id] = _MemTask(
-                task_id=task_id, team_name=team_name, title=title, content=content,
-                status=status, updated_at=self.get_current_time(),
+                task_id=task_id,
+                team_name=team_name,
+                title=title,
+                content=content,
+                status=status,
+                updated_at=self.get_current_time(),
             )
             team_logger.info(f"Task {task_id} created")
             return True
@@ -383,13 +392,12 @@ class InMemoryTeamDatabase:
             # a task already held by another member does not masquerade as an
             # "invalid claimed → claimed transition" error.
             if task.assignee:
-                team_logger.warning(
-                    f"Task {task_id} is already claimed by member {task.assignee}"
-                )
+                team_logger.warning(f"Task {task_id} is already claimed by member {task.assignee}")
                 return False
             if not is_valid_transition(TaskStatus(task.status), TaskStatus.CLAIMED, TASK_TRANSITIONS):
                 team_logger.error(
-                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.CLAIMED.value}")
+                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.CLAIMED.value}"
+                )
                 return False
             task.status = TaskStatus.CLAIMED.value
             task.assignee = member_name
@@ -410,7 +418,8 @@ class InMemoryTeamDatabase:
                 return None
             if not is_valid_transition(TaskStatus(task.status), TaskStatus.PENDING, TASK_TRANSITIONS):
                 team_logger.error(
-                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.PENDING.value}")
+                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.PENDING.value}"
+                )
                 return None
             task.status = TaskStatus.PENDING.value
             task.assignee = None
@@ -480,7 +489,10 @@ class InMemoryTeamDatabase:
             return True
 
     def _check_circular_dependency_sync(
-        self, task_id: str, target_task_id: str, visited: Optional[set] = None
+        self,
+        task_id: str,
+        target_task_id: str,
+        visited: Optional[set] = None,
     ) -> bool:
         """Synchronous DFS cycle check (called under lock)."""
         if visited is None:
@@ -536,15 +548,23 @@ class InMemoryTeamDatabase:
                 return False
             now = self.get_current_time()
             self._tasks[task_id] = _MemTask(
-                task_id=task_id, team_name=team_name, title=title, content=content,
-                status=status, updated_at=now,
+                task_id=task_id,
+                team_name=team_name,
+                title=title,
+                content=content,
+                status=status,
+                updated_at=now,
             )
 
             # 3. New task depends on existing tasks
             if dependencies:
                 for dep_id in dependencies:
                     self._task_deps.append(
-                        _MemTaskDep(task_id=task_id, depends_on_task_id=dep_id, team_name=team_name)
+                        _MemTaskDep(
+                            task_id=task_id,
+                            depends_on_task_id=dep_id,
+                            team_name=team_name,
+                        )
                     )
 
             # 4. Existing tasks depend on new task
@@ -556,15 +576,16 @@ class InMemoryTeamDatabase:
                         # Rollback: remove created task and deps
                         del self._tasks[task_id]
                         self._task_deps = [
-                            d for d in self._task_deps
+                            d
+                            for d in self._task_deps
                             if not (d.depends_on_task_id == task_id and d.task_id in (dependent_task_ids or []))
                         ]
                         return False
                     if dep_task.status in (
-                            TaskStatus.COMPLETED.value,
-                            TaskStatus.CANCELLED.value,
-                            TaskStatus.CLAIMED.value,
-                            TaskStatus.PLAN_APPROVED.value,
+                        TaskStatus.COMPLETED.value,
+                        TaskStatus.CANCELLED.value,
+                        TaskStatus.CLAIMED.value,
+                        TaskStatus.PLAN_APPROVED.value,
                     ):
                         team_logger.error(
                             f"Cannot add dependency to {dependent_id} in terminal "
@@ -573,7 +594,11 @@ class InMemoryTeamDatabase:
                         del self._tasks[task_id]
                         return False
                     self._task_deps.append(
-                        _MemTaskDep(task_id=dependent_id, depends_on_task_id=task_id, team_name=team_name)
+                        _MemTaskDep(
+                            task_id=dependent_id,
+                            depends_on_task_id=task_id,
+                            team_name=team_name,
+                        )
                     )
                     if dep_task.status == TaskStatus.PENDING.value:
                         dep_task.status = TaskStatus.BLOCKED.value
@@ -610,20 +635,28 @@ class InMemoryTeamDatabase:
                 return None
             if not is_valid_transition(TaskStatus(task.status), TaskStatus.CANCELLED, TASK_TRANSITIONS):
                 team_logger.error(
-                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.CANCELLED.value}")
+                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.CANCELLED.value}"
+                )
                 return None
             task.status = TaskStatus.CANCELLED.value
             task.updated_at = self.get_current_time()
             team_logger.info(f"Task {task_id} cancelled")
             return task
 
-    async def cancel_all_tasks(self, team_name: str) -> List[_MemTask]:
+    async def cancel_all_tasks(
+        self,
+        team_name: str,
+        skip_assignees: Optional[set[str]] = None,
+    ) -> List[_MemTask]:
         async with self._lock:
             skip = {TaskStatus.CANCELLED.value, TaskStatus.COMPLETED.value}
+            skip_assignees = skip_assignees or set()
             cancelled = []
             now = self.get_current_time()
             for task in self._tasks.values():
                 if task.team_name != team_name or task.status in skip:
+                    continue
+                if task.assignee in skip_assignees:
                     continue
                 if not is_valid_transition(TaskStatus(task.status), TaskStatus.CANCELLED, TASK_TRANSITIONS):
                     continue
@@ -643,7 +676,8 @@ class InMemoryTeamDatabase:
                 return {"task": task, "unblocked_tasks": []}
             if not is_valid_transition(TaskStatus(task.status), TaskStatus.COMPLETED, TASK_TRANSITIONS):
                 team_logger.error(
-                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.COMPLETED.value}")
+                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.COMPLETED.value}"
+                )
                 return None
 
             now = self.get_current_time()
@@ -709,6 +743,7 @@ class InMemoryTeamDatabase:
         *,
         to_member_name: Optional[str] = None,
         broadcast: bool = False,
+        is_read: bool = False,
     ) -> bool:
         async with self._lock:
             for m in self._messages:
@@ -726,7 +761,7 @@ class InMemoryTeamDatabase:
                     broadcast=broadcast,
                     # Broadcast rows leave is_read NULL — per-member read
                     # state lives in _MemReadStatus instead.
-                    is_read=None if broadcast else False,
+                    is_read=None if broadcast else is_read,
                 )
             )
             team_logger.debug(f"Message {message_id} created")
@@ -740,7 +775,8 @@ class InMemoryTeamDatabase:
         from_member_name: Optional[str] = None,
     ) -> List[_MemMessage]:
         result = [
-            m for m in self._messages
+            m
+            for m in self._messages
             if m.team_name == team_name and m.to_member_name == to_member_name and not m.broadcast
         ]
         if from_member_name is not None:
@@ -758,8 +794,7 @@ class InMemoryTeamDatabase:
         from_member_name: Optional[str] = None,
     ) -> List[_MemMessage]:
         result = [
-            m for m in self._messages
-            if m.team_name == team_name and m.broadcast and m.from_member_name != member_name
+            m for m in self._messages if m.team_name == team_name and m.broadcast and m.from_member_name != member_name
         ]
         if from_member_name is not None:
             result = [m for m in result if m.from_member_name == from_member_name]
@@ -773,9 +808,7 @@ class InMemoryTeamDatabase:
             return result
         return [m for m in result if m.timestamp > rs.read_at]
 
-    async def get_team_messages(
-        self, team_name: str, broadcast: Optional[bool] = None
-    ) -> List[_MemMessage]:
+    async def get_team_messages(self, team_name: str, broadcast: Optional[bool] = None) -> List[_MemMessage]:
         result = [m for m in self._messages if m.team_name == team_name]
         if broadcast is not None:
             result = [m for m in result if m.broadcast == broadcast]
@@ -801,7 +834,9 @@ class InMemoryTeamDatabase:
                 rs = self._read_status.get(key)
                 if rs is None:
                     self._read_status[key] = _MemReadStatus(
-                        member_name=member_name, team_name=msg.team_name, read_at=msg.timestamp,
+                        member_name=member_name,
+                        team_name=msg.team_name,
+                        read_at=msg.timestamp,
                     )
                 else:
                     rs.read_at = msg.timestamp

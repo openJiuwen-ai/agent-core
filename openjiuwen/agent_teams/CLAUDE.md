@@ -23,12 +23,14 @@
 ```
 agent_teams/
 ├── __init__.py          # 公开 API 聚合导出
+├── constants.py         # 保留名（user/team_leader/human_agent）集中定义
 ├── factory.py           # create_agent_team / resume_persistent_team 便利函数
 ├── i18n.py              # 运行时中/英文字符串（仅装运行时 hard-coded 串）
 ├── paths.py             # 文件系统布局单一真相源
 ├── schema/              # 全部数据模型（Spec / Context / Event / Status / Task）
 ├── agent/               # 核心运行时（TeamAgent 本体 + 装配链）
-├── tools/               # 团队工具（Leader / Teammate 可调用的原子操作）
+├── interaction/         # 外部交互入口（UserInbox / HumanAgentInbox / @ 路由）
+├── tools/               # 团队工具（Leader / Teammate / Human Agent 可调用的原子操作）
 ├── messager/            # 消息传输层（inprocess / pyzmq）
 ├── spawn/               # 成员启动（process / inprocess）
 ├── monitor/             # 团队运行态监控
@@ -110,6 +112,31 @@ Messager 是点对点 + broadcast 的统一抽象，**任何直接新建 socket 
 ### team_workspace/ — 共享工作空间
 
 跨成员的文件共享区，支持锁 / 版本 / 冲突策略。独立于 worktree：**worktree 管代码隔离，workspace 管产物协同**。
+
+### interaction/ — 外部交互入口
+
+| 文件 | 作用 |
+|---|---|
+| `router.py` | `parse_mention(raw) -> (target, body) \| None` 纯函数；`is_reserved_name(name)` 校验保留名 |
+| `user_inbox.py` | `UserInbox`：user 侧显式 API。`broadcast` / `direct` / `deliver_to_leader` |
+| `human_agent_inbox.py` | `HumanAgentInbox`：human_agent 对外发声，仅在 HITT 启用时可用；非 HITT 调用抛 `HumanAgentNotEnabledError` |
+
+旧的 `@xxx body` 解析从 `agent/dispatcher.py` 移到这里——dispatcher 只保留调用点。新增的 `TeamAgent.broadcast()` 和 `TeamAgent.human_agent_say()` 都走这一层。
+
+### HITT（Human in the Team）
+
+开启方式：
+
+- **静态**：`TeamAgentSpec.enable_hitt=True`，build() 时自动注册 human_agent 成员。
+- **动态**：leader 通过 `build_team(enable_hitt=true)` 工具在建团时启用。
+
+运行约束（代码层 + Prompt 层双重保证）：
+
+1. `human_agent` 是保留成员名，常量在 `constants.RESERVED_MEMBER_NAMES`。预定义成员不允许撞保留名。
+2. human_agent 直接 READY，不进入 UNSTARTED/BUSY/SHUTDOWN 流程；唯一工具是 `send_message`。
+3. 一旦 `task.assignee == "human_agent"` 且状态 CLAIMED，`UpdateTaskTool` 拒绝 reassign 和 cancel；批量 cancel 链路也跳过。
+4. 发送给 human_agent 的点对点消息 `is_read=True`；广播后 human_agent 的 `read_at` 立即跟进。
+5. TeamRail 注入 `team_hitt` section（priority=12），按 role 分别给 leader/teammate/human_agent 下达角色特定的行为约束。
 
 ### worktree/ — Git worktree 隔离
 

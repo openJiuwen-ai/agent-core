@@ -21,7 +21,6 @@ from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.single_agent.prompts.builder import SystemPromptBuilder
 from tests.test_logger import logger
 
-
 # ---------------------------------------------------------------------------
 # Section builders
 # ---------------------------------------------------------------------------
@@ -195,10 +194,13 @@ class TestTeamInfoSection:
     def test_empty_returns_none(self):
         assert build_team_info_section(team_info=None, language="cn") is None
         assert build_team_info_section(team_info={}, language="cn") is None
-        assert build_team_info_section(
-            team_info={"unrelated": "value"},
-            language="cn",
-        ) is None
+        assert (
+            build_team_info_section(
+                team_info={"unrelated": "value"},
+                language="cn",
+            )
+            is None
+        )
 
     @pytest.mark.level1
     def test_team_workspace_mount_appended(self):
@@ -258,11 +260,14 @@ class TestTeamMembersSection:
 
     @pytest.mark.level1
     def test_empty_returns_none(self):
-        assert build_team_members_section(
-            team_members=None,
-            self_member_name="x",
-            language="cn",
-        ) is None
+        assert (
+            build_team_members_section(
+                team_members=None,
+                self_member_name="x",
+                language="cn",
+            )
+            is None
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +341,10 @@ class _FakeTeamBackend:
     async def list_members(self):
         self.list_members_calls += 1
         return list(self._members)
+
+    def hitt_enabled(self) -> bool:
+        """TeamRail probes this; fake teams never enable HITT."""
+        return False
 
     # -- Mutators used by tests ----------------------------------------------
 

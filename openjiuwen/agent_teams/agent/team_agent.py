@@ -22,17 +22,16 @@ from openjiuwen.agent_teams.agent.coordinator import (
 from openjiuwen.agent_teams.agent.member import TeamMember
 from openjiuwen.agent_teams.agent.policy import role_policy
 from openjiuwen.agent_teams.agent.team_rail import TeamRail
+from openjiuwen.agent_teams.messager import (
+    Messager,
+    create_messager,
+)
 from openjiuwen.agent_teams.paths import (
     independent_member_workspace,
     team_home,
 )
-from openjiuwen.agent_teams.messager import (
-    create_messager,
-    Messager,
-)
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import SysOperationSpec
-from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberStatus,
@@ -49,19 +48,20 @@ from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.runner.spawn.agent_config import (
-    serialize_runner_config,
     SpawnAgentConfig,
     SpawnAgentKind,
+    serialize_runner_config,
 )
 from openjiuwen.core.runner.spawn.process_manager import (
     SpawnConfig,
     SpawnedProcessHandle,
 )
-from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.agent_team import Session as AgentTeamSession
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.single_agent.rail.base import AgentRail
+from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.prompts import resolve_language as _resolve_language
 
@@ -283,7 +283,8 @@ class TeamAgent(BaseAgent):
             preview = content if isinstance(content, str) else type(content).__name__
             team_logger.info(
                 "[{}] queueing input for next round (transition window): {:.60}",
-                self._member_name() or "?", str(preview),
+                self._member_name() or "?",
+                str(preview),
             )
             self._pending_inputs.append(content)
             return
@@ -387,7 +388,10 @@ class TeamAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _resolve_agent_spec(
-        self, spec: TeamAgentSpec, role: TeamRole, member_name: Optional[str] = None
+        self,
+        spec: TeamAgentSpec,
+        role: TeamRole,
+        member_name: Optional[str] = None,
     ):
         """Return the DeepAgentSpec for the given member/role, falling back appropriately.
 
@@ -420,10 +424,13 @@ class TeamAgent(BaseAgent):
 
         if ctx.role == TeamRole.LEADER:
             from openjiuwen.agent_teams.agent.model_allocator import ModelAllocator
+
             self._model_allocator = ModelAllocator(spec)
 
     def _create_workspace_manager(
-        self, spec: TeamAgentSpec, ctx: TeamRuntimeContext,
+        self,
+        spec: TeamAgentSpec,
+        ctx: TeamRuntimeContext,
     ) -> "TeamWorkspaceManager":
         """Create TeamWorkspaceManager and ensure the workspace directory exists.
 
@@ -523,24 +530,24 @@ class TeamAgent(BaseAgent):
             mode=OperationMode.LOCAL,
             work_config=LocalWorkConfig(shell_allowlist=None),
         )
-        build_spec = agent_spec.model_copy(update={
-            "card": self.card,
-            "model": model_config,
-            "workspace": ws_spec,
-            "sys_operation": sys_operation_spec,
-            "tools": merged_tools,
-            "enable_skill_discovery": True,
-            "enable_task_loop": True,
-        })
+        build_spec = agent_spec.model_copy(
+            update={
+                "card": self.card,
+                "model": model_config,
+                "workspace": ws_spec,
+                "sys_operation": sys_operation_spec,
+                "tools": merged_tools,
+                "enable_skill_discovery": True,
+                "enable_task_loop": True,
+            }
+        )
         self._deep_agent = build_spec.build()
 
         # Decompose team policy into ordered PromptSections via TeamRail.
         team_workspace_mount: str | None = None
         team_workspace_path: str | None = None
         if self._workspace_manager:
-            resolved_team_name = (
-                (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
-            )
+            resolved_team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
             team_workspace_mount = f".team/{resolved_team_name}/"
             team_workspace_path = self._workspace_manager.workspace_path
 
@@ -561,6 +568,7 @@ class TeamAgent(BaseAgent):
         )
 
         from openjiuwen.agent_teams.agent.rails import FirstIterationGate
+
         self._first_iter_gate = FirstIterationGate()
         self._deep_agent.add_rail(self._first_iter_gate)
 
@@ -569,6 +577,7 @@ class TeamAgent(BaseAgent):
         # discover team-shared skills.
         if self._workspace_manager:
             from openjiuwen.agent_teams.team_workspace.rails import TeamWorkspaceRail
+
             self._deep_agent.add_rail(
                 TeamWorkspaceRail(self._workspace_manager, member_name or ""),
             )
@@ -576,6 +585,7 @@ class TeamAgent(BaseAgent):
         is_coordinated_teammate = ctx.role == TeamRole.TEAMMATE and ctx.team_spec
         if is_coordinated_teammate and self._team_backend and self._messager:
             from openjiuwen.agent_teams.agent.rails import TeamToolApprovalRail
+
             approval_tools = agent_spec.approval_required_tools or []
             if approval_tools:
                 self._deep_agent.add_rail(
@@ -595,7 +605,9 @@ class TeamAgent(BaseAgent):
                 spec.agent_customizer(self._deep_agent, member_name, ctx.role.value)
             except Exception as exc:
                 team_logger.warning(
-                    "[{}] agent_customizer failed: {}", self._member_name() or "?", exc
+                    "[{}] agent_customizer failed: {}",
+                    self._member_name() or "?",
+                    exc,
                 )
 
         # Teammate: member already exists in DB, create TeamMember now.
@@ -611,6 +623,7 @@ class TeamAgent(BaseAgent):
             )
 
         from openjiuwen.agent_teams.agent.dispatcher import EventDispatcher
+
         self._dispatcher = EventDispatcher(self)
         self._coordination_loop = CoordinatorLoop(
             role=ctx.role,
@@ -628,17 +641,15 @@ class TeamAgent(BaseAgent):
         messager: Messager,
     ) -> List[ToolCard]:
         """Register role-appropriate team tools driven by permission sets."""
+        from openjiuwen.agent_teams.schema.status import MemberMode
         from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
         from openjiuwen.agent_teams.tools.team_tools import create_team_tools
-        from openjiuwen.agent_teams.schema.status import MemberMode
 
         team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or "default"
         db = get_shared_db(ctx.db_config)
 
         is_leader = ctx.role == TeamRole.LEADER
-        current_member_name = ctx.member_name or (
-            ctx.team_spec.leader_member_name if ctx.team_spec else ""
-        )
+        current_member_name = ctx.member_name or (ctx.team_spec.leader_member_name if ctx.team_spec else "")
 
         agent_team = TeamBackend(
             team_name=team_name,
@@ -680,8 +691,8 @@ class TeamAgent(BaseAgent):
         )
         # Workspace metadata tool (lock management, version history).
         if self._workspace_manager:
-            from openjiuwen.agent_teams.tools.locales import make_translator
             from openjiuwen.agent_teams.team_workspace.tools import WorkspaceMetaTool
+            from openjiuwen.agent_teams.tools.locales import make_translator
 
             ws_t = make_translator(lang)
             team_tools.append(WorkspaceMetaTool(self._workspace_manager, ws_t))
@@ -698,6 +709,7 @@ class TeamAgent(BaseAgent):
             # Eagerly create session state holder so asyncio.gather
             # tool calls share the same mutable object.
             from openjiuwen.agent_teams.worktree.session import init_session_state
+
             init_session_state()
 
         # Only in-process teammates share one global resource manager.
@@ -762,6 +774,43 @@ class TeamAgent(BaseAgent):
         finally:
             await self._finalize_round()
 
+    async def broadcast(self, content: str) -> Optional[str]:
+        """Post a user-originated broadcast to the whole team.
+
+        Leader wakes up as a broadcast recipient like any other member;
+        teammates see the announcement through their mailbox sweep. The
+        sender is the "user" pseudo-member so recipients can distinguish
+        external directives from leader-issued broadcasts.
+
+        Returns the broadcast message id on success.
+        """
+        from openjiuwen.agent_teams.interaction import UserInbox
+
+        if self._team_backend is None:
+            raise RuntimeError("TeamAgent.broadcast requires a configured team backend")
+        return await UserInbox(self._team_backend.message_manager).broadcast(content)
+
+    async def human_agent_say(
+        self,
+        content: str,
+        to: Optional[str] = None,
+    ) -> Optional[str]:
+        """Speak as the reserved ``human_agent`` member.
+
+        Available only when HITT is enabled on this team. Maps to a
+        ``send_message`` (point-to-point when ``to`` is provided, a
+        broadcast otherwise) so the human collaborator's speech flows
+        through the same message bus as teammate traffic.
+        """
+        from openjiuwen.agent_teams.interaction import HumanAgentInbox
+
+        if self._team_backend is None:
+            raise RuntimeError("TeamAgent.human_agent_say requires a configured team backend")
+        return await HumanAgentInbox(
+            self._team_backend,
+            self._team_backend.message_manager,
+        ).send(content, to=to)
+
     async def stream(self, inputs, session=None, stream_modes=None):
         """Stream via CoordinatorLoop-driven rounds.
 
@@ -794,8 +843,7 @@ class TeamAgent(BaseAgent):
         * temporary → fully stop coordination, mark SHUTDOWN.
         """
         shutdown_requested = (
-            self._team_member is not None
-            and await self._team_member.status() == MemberStatus.SHUTDOWN_REQUESTED
+            self._team_member is not None and await self._team_member.status() == MemberStatus.SHUTDOWN_REQUESTED
         )
         if self.lifecycle == "persistent" and not shutdown_requested:
             await self._pause_coordination()
@@ -834,8 +882,10 @@ class TeamAgent(BaseAgent):
         self._session_id = session.get_session_id() if session else None
         if self._session_id:
             from openjiuwen.agent_teams.spawn.context import set_session_id
+
             set_session_id(self._session_id)
         from openjiuwen.core.common.logging.utils import set_member_id
+
         set_member_id(member_name)
         if session is not None:
             if isinstance(session, AgentTeamSession):
@@ -871,12 +921,9 @@ class TeamAgent(BaseAgent):
                 # for everyone but never reached clean_team. Finalize the
                 # cleanup ourselves so the leader doesn't restart corpses
                 # and so the same team_name can be re-built cleanly.
-                if non_leader_members and all(
-                    m.status == MemberStatus.SHUTDOWN.value for m in non_leader_members
-                ):
+                if non_leader_members and all(m.status == MemberStatus.SHUTDOWN.value for m in non_leader_members):
                     team_logger.warning(
-                        "[{}] team {} found with all teammates in SHUTDOWN — "
-                        "finalizing prior incomplete cleanup",
+                        "[{}] team {} found with all teammates in SHUTDOWN — finalizing prior incomplete cleanup",
                         self._member_name() or "?",
                         self._team_backend.team_name,
                     )
@@ -962,6 +1009,7 @@ class TeamAgent(BaseAgent):
                 TeamTopic,
             )
             from openjiuwen.agent_teams.spawn.context import get_session_id
+
             team_name = self._team_name()
             if team_name:
                 try:
@@ -1016,8 +1064,8 @@ class TeamAgent(BaseAgent):
         """Subscribe to all TeamTopic channels on the transport."""
         if not self._messager or not self._coordination_loop:
             return
-        from openjiuwen.agent_teams.spawn.context import get_session_id
         from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
+        from openjiuwen.agent_teams.spawn.context import get_session_id
 
         local_member_name = self._member_name() or ""
 
@@ -1101,7 +1149,8 @@ class TeamAgent(BaseAgent):
             except Exception as e:
                 team_logger.debug(
                     "[{}] post-clean status update failed (expected): {}",
-                    member_name, e,
+                    member_name,
+                    e,
                 )
         self._close_stream()
 
@@ -1181,10 +1230,7 @@ class TeamAgent(BaseAgent):
             # SHUTDOWN_REQUESTED — the state machine forbids
             # SHUTDOWN_REQUESTED → READY, and ``_finalize_round`` will
             # transition it to SHUTDOWN once the round loop unwinds.
-            if (
-                self._team_member is None
-                or await self._team_member.status() != MemberStatus.SHUTDOWN_REQUESTED
-            ):
+            if self._team_member is None or await self._team_member.status() != MemberStatus.SHUTDOWN_REQUESTED:
                 await self._update_status(MemberStatus.READY)
         except BaseException as e:
             team_logger.error("Failed to execute deep agent, {}", e, exc_info=True)
@@ -1205,10 +1251,7 @@ class TeamAgent(BaseAgent):
                 if len(drained) == 1:
                     combined = drained[0]
                 else:
-                    combined = "\n\n---\n\n".join(
-                        item if isinstance(item, str) else str(item)
-                        for item in drained
-                    )
+                    combined = "\n\n---\n\n".join(item if isinstance(item, str) else str(item) for item in drained)
                 await self._start_agent(combined)
             else:
                 await self._wake_mailbox_if_interrupt_cleared()
@@ -1232,7 +1275,9 @@ class TeamAgent(BaseAgent):
             self._streaming_active = True
             try:
                 async for chunk in Runner.run_agent_streaming(
-                    self._deep_agent, inputs, session=self._session_id
+                    self._deep_agent,
+                    inputs,
+                    session=self._session_id,
                 ):
                     if self._stream_queue is not None:
                         await self._stream_queue.put(chunk)
@@ -1494,6 +1539,7 @@ class TeamAgent(BaseAgent):
         if not json_str:
             return None
         from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
+
         return TeamModelConfig.model_validate_json(json_str)
 
     async def spawn_teammate(
@@ -1557,8 +1603,11 @@ class TeamAgent(BaseAgent):
         team_logger.warning("Teammate {} detected as unhealthy, initiating restart", member_name)
         await self._cleanup_teammate(member_name)
         if self._team_backend:
-            await self._team_backend.db.update_member_status(member_name, self._team_name(),
-                                                             MemberStatus.RESTARTING.value)
+            await self._team_backend.db.update_member_status(
+                member_name,
+                self._team_name(),
+                MemberStatus.RESTARTING.value,
+            )
         await self._restart_teammate(member_name)
 
     async def _cleanup_teammate(self, member_name: str) -> None:
@@ -1607,7 +1656,7 @@ class TeamAgent(BaseAgent):
             except Exception as e:
                 team_logger.error("Restart attempt {} for {} failed: {}", attempt, member_name, e)
                 if attempt < max_retries:
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
 
         # All retries exhausted
         if self._team_backend:
@@ -1618,20 +1667,23 @@ class TeamAgent(BaseAgent):
         """Publish MemberRestartedEvent on the team topic."""
         if not self._messager or not self._team_backend:
             return
-        from openjiuwen.agent_teams.spawn.context import get_session_id
         from openjiuwen.agent_teams.schema.events import (
             EventMessage,
             MemberRestartedEvent,
             TeamTopic,
         )
+        from openjiuwen.agent_teams.spawn.context import get_session_id
+
         try:
             await self._messager.publish(
                 topic_id=TeamTopic.TEAM.build(get_session_id(), self._team_backend.team_name),
-                message=EventMessage.from_event(MemberRestartedEvent(
-                    team_name=self._team_backend.team_name,
-                    member_name=member_name,
-                    restart_count=restart_count,
-                )),
+                message=EventMessage.from_event(
+                    MemberRestartedEvent(
+                        team_name=self._team_backend.team_name,
+                        member_name=member_name,
+                        restart_count=restart_count,
+                    )
+                ),
             )
         except Exception as e:
             team_logger.error("Failed to publish restart event for {}: {}", member_name, e)
@@ -1647,6 +1699,7 @@ class TeamAgent(BaseAgent):
             session: The new session to attach to.
         """
         from openjiuwen.agent_teams.spawn.context import set_session_id
+
         self._session_id = session.get_session_id()
         set_session_id(self._session_id)
         self._team_session = session if isinstance(session, AgentTeamSession) else None
@@ -1678,7 +1731,9 @@ class TeamAgent(BaseAgent):
             if member.member_name == leader_member_name:
                 continue
             await self._team_backend.db.update_member_status(
-                member.member_name, self._team_name(), MemberStatus.RESTARTING.value,
+                member.member_name,
+                self._team_name(),
+                MemberStatus.RESTARTING.value,
             )
             if await self._restart_teammate(member.member_name):
                 restarted.append(member.member_name)
@@ -1691,11 +1746,13 @@ class TeamAgent(BaseAgent):
 
     def _persist_leader_config(self, session) -> None:
         """Persist leader's spec + context to session state for recovery."""
-        session.update_state({
-            "spec": self._spec.model_dump(mode="json"),
-            "context": self._ctx.model_dump(mode="json"),
-            "team_name": self._team_name(),
-        })
+        session.update_state(
+            {
+                "spec": self._spec.model_dump(mode="json"),
+                "context": self._ctx.model_dump(mode="json"),
+                "team_name": self._team_name(),
+            }
+        )
 
     @classmethod
     def recover_from_session(cls, session) -> "TeamAgent":

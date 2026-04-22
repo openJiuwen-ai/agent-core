@@ -1,5 +1,6 @@
 # coding: utf-8
 """Tests for TeamAgent coordination lifecycle wiring."""
+
 from __future__ import annotations
 
 import asyncio
@@ -11,21 +12,15 @@ from unittest.mock import (
 
 import pytest
 
+from openjiuwen.agent_teams.agent.coordinator import InnerEventType
 from openjiuwen.agent_teams.agent.team_agent import (
     TeamAgent,
 )
-from openjiuwen.agent_teams.agent.coordinator import InnerEventType
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
     LeaderSpec,
     TeamAgentSpec,
 )
-from openjiuwen.agent_teams.schema.team import (
-    TeamRole,
-    TeamRuntimeContext,
-    TeamSpec,
-)
-from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     MemberStatusChangedEvent,
@@ -33,6 +28,12 @@ from openjiuwen.agent_teams.schema.events import (
     TeamCleanedEvent,
     ToolApprovalResultEvent,
 )
+from openjiuwen.agent_teams.schema.team import (
+    TeamRole,
+    TeamRuntimeContext,
+    TeamSpec,
+)
+from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.schema.agent_card import (
     AgentCard,
@@ -64,7 +65,9 @@ def _make_leader() -> TeamAgent:
     )
     agent = TeamAgent(
         AgentCard(
-            id="t1", name="leader", description="test",
+            id="t1",
+            name="leader",
+            description="test",
         ),
     )
     agent.configure(spec, context)
@@ -113,12 +116,14 @@ async def test_wake_feeds_messages_to_agent():
 
     await agent._start_coordination(session=None)
 
-    event = EventMessage.from_event(MessageEvent(
-        team_name="test-team",
-        message_id="msg-1",
-        from_member_name="dev-1",
-        to_member_name="leader-1",
-    ))
+    event = EventMessage.from_event(
+        MessageEvent(
+            team_name="test-team",
+            message_id="msg-1",
+            from_member_name="dev-1",
+            to_member_name="leader-1",
+        )
+    )
     await agent.coordination_loop.enqueue(event)
     await asyncio.sleep(0.1)
 
@@ -129,6 +134,7 @@ async def test_wake_feeds_messages_to_agent():
 # ------------------------------------------------------------------
 # @mention direct message tests
 # ------------------------------------------------------------------
+
 
 def _make_leader_with_teammate() -> TeamAgent:
     """Create a leader with a mocked get_team_member for @mention tests."""
@@ -178,7 +184,9 @@ async def test_mention_routes_direct_message():
     await agent._stop_coordination()
 
     agent._message_manager.send_message.assert_called_once_with(
-        "请完成这个任务", "dev-1", from_member_name="user",
+        content="请完成这个任务",
+        to_member_name="dev-1",
+        from_member_name="user",
     )
     agent._start_agent.assert_not_called()
 
@@ -247,23 +255,29 @@ async def test_tool_approval_event_resumes_interrupt():
     team_spec = TeamSpec(
         team_name="test-team",
         display_name="test-team",
-        leader_member_name="leader-1")
+        leader_member_name="leader-1",
+    )
     spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="test-team")
     ctx = TeamRuntimeContext(
-        role=TeamRole.TEAMMATE, member_name="dev-1", persona="dev", team_spec=team_spec,
+        role=TeamRole.TEAMMATE,
+        member_name="dev-1",
+        persona="dev",
+        team_spec=team_spec,
     )
     agent = TeamAgent(AgentCard(id="dev-1", name="dev", description="test"))
     agent.configure(spec, ctx)
     agent.resume_interrupt = AsyncMock()
 
-    event = EventMessage.from_event(ToolApprovalResultEvent(
-        team_name="test-team",
-        member_name="dev-1",
-        tool_call_id="call-1",
-        approved=True,
-        feedback="ok",
-        auto_confirm=True,
-    ))
+    event = EventMessage.from_event(
+        ToolApprovalResultEvent(
+            team_name="test-team",
+            member_name="dev-1",
+            tool_call_id="call-1",
+            approved=True,
+            feedback="ok",
+            auto_confirm=True,
+        )
+    )
     await agent._dispatcher.dispatch(event)
 
     agent.resume_interrupt.assert_awaited_once()
@@ -341,16 +355,19 @@ async def test_member_ready_with_claimed_task_triggers_nudge():
     agent._message_manager = MagicMock()
     agent._message_manager.send_message = AsyncMock(return_value="msg-1")
 
-    event = EventMessage.from_event(MemberStatusChangedEvent(
-        team_name="test-team",
-        member_name="dev-1",
-        old_status="busy",
-        new_status="ready",
-    ))
+    event = EventMessage.from_event(
+        MemberStatusChangedEvent(
+            team_name="test-team",
+            member_name="dev-1",
+            old_status="busy",
+            new_status="ready",
+        )
+    )
     await agent._dispatcher._handle_leader_member_event(event)
 
     agent._task_manager.get_tasks_by_assignee.assert_awaited_once_with(
-        "dev-1", status="claimed",
+        "dev-1",
+        status="claimed",
     )
     agent._message_manager.send_message.assert_awaited_once()
     content, to_member_name = agent._message_manager.send_message.await_args.args
@@ -375,12 +392,14 @@ async def test_member_error_with_claimed_task_triggers_nudge():
     agent._message_manager = MagicMock()
     agent._message_manager.send_message = AsyncMock(return_value="msg-2")
 
-    event = EventMessage.from_event(MemberStatusChangedEvent(
-        team_name="test-team",
-        member_name="dev-1",
-        old_status="busy",
-        new_status="error",
-    ))
+    event = EventMessage.from_event(
+        MemberStatusChangedEvent(
+            team_name="test-team",
+            member_name="dev-1",
+            old_status="busy",
+            new_status="error",
+        )
+    )
     await agent._dispatcher._handle_leader_member_event(event)
 
     agent._message_manager.send_message.assert_awaited_once()
@@ -396,12 +415,14 @@ async def test_member_ready_without_claimed_task_skips_nudge():
     agent._message_manager = MagicMock()
     agent._message_manager.send_message = AsyncMock()
 
-    event = EventMessage.from_event(MemberStatusChangedEvent(
-        team_name="test-team",
-        member_name="dev-1",
-        old_status="busy",
-        new_status="ready",
-    ))
+    event = EventMessage.from_event(
+        MemberStatusChangedEvent(
+            team_name="test-team",
+            member_name="dev-1",
+            old_status="busy",
+            new_status="ready",
+        )
+    )
     await agent._dispatcher._handle_leader_member_event(event)
 
     agent._message_manager.send_message.assert_not_called()
@@ -417,12 +438,14 @@ async def test_member_status_unchanged_skips_nudge():
     agent._message_manager = MagicMock()
     agent._message_manager.send_message = AsyncMock()
 
-    event = EventMessage.from_event(MemberStatusChangedEvent(
-        team_name="test-team",
-        member_name="dev-1",
-        old_status="ready",
-        new_status="ready",
-    ))
+    event = EventMessage.from_event(
+        MemberStatusChangedEvent(
+            team_name="test-team",
+            member_name="dev-1",
+            old_status="ready",
+            new_status="ready",
+        )
+    )
     await agent._dispatcher._handle_leader_member_event(event)
 
     agent._task_manager.get_tasks_by_assignee.assert_not_called()

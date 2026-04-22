@@ -10,44 +10,45 @@ import asyncio
 import shutil
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Awaitable,
     Callable,
     List,
     Optional,
-    TYPE_CHECKING,
 )
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
 
+from openjiuwen.agent_teams.constants import HUMAN_AGENT_MEMBER_NAME
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.schema.team import MemberOpResult, TeamMemberSpec
-from openjiuwen.agent_teams.tools.database import (
-    TeamDatabase,
-    Team,
-    TeamMember,
-)
-from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
-from openjiuwen.agent_teams.schema.status import (
-    ExecutionStatus,
-    MemberStatus,
-    MemberMode,
-    TaskStatus,
-)
-from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     MemberCanceledEvent,
     MemberShutdownEvent,
     MemberSpawnedEvent,
     PlanApprovalEvent,
-    ToolApprovalResultEvent,
     TeamCleanedEvent,
     TeamCreatedEvent,
     TeamTopic,
+    ToolApprovalResultEvent,
 )
+from openjiuwen.agent_teams.schema.status import (
+    ExecutionStatus,
+    MemberMode,
+    MemberStatus,
+    TaskStatus,
+)
+from openjiuwen.agent_teams.schema.team import MemberOpResult, TeamMemberSpec, TeamRole
 from openjiuwen.agent_teams.spawn.context import get_session_id
+from openjiuwen.agent_teams.tools.database import (
+    Team,
+    TeamDatabase,
+    TeamMember,
+)
+from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
+from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
@@ -101,6 +102,11 @@ class TeamBackend:
 
         self.task_manager = TeamTaskManager(self.team_name, member_name, self.db, messager)
         self.message_manager = TeamMessageManager(self.team_name, member_name, self.db, messager)
+        # Flipped on when the reserved human_agent member is registered,
+        # whether declared in predefined_members or activated dynamically
+        # via ``build_team(enable_hitt=True)``. Runtime entry points read
+        # this to gate human_agent-only paths.
+        self._hitt_enabled: bool = any(m.role_type == TeamRole.HUMAN_AGENT for m in self.predefined_members)
 
         # Filesystem paths to remove when the team is cleaned.
         # Populated by the hosting TeamAgent once the actual (possibly
@@ -148,8 +154,13 @@ class TeamBackend:
                 team_logger.error(f"Failed to remove path {target}: {e}")
 
     async def spawn_member(
-        self, member_name: str, display_name: str, agent_card: AgentCard, *,
-        desc: Optional[str] = None, prompt: Optional[str] = None,
+        self,
+        member_name: str,
+        display_name: str,
+        agent_card: AgentCard,
+        *,
+        desc: Optional[str] = None,
+        prompt: Optional[str] = None,
         status: MemberStatus = MemberStatus.UNSTARTED,
         execution_status: ExecutionStatus = ExecutionStatus.IDLE,
         mode: MemberMode = MemberMode.BUILD_MODE,
@@ -178,9 +189,7 @@ class TeamBackend:
         """
         existing = await self.db.get_member(member_name, self.team_name)
         if existing is not None:
-            return MemberOpResult.fail(
-                f"Member {member_name} already exists in team {self.team_name}"
-            )
+            return MemberOpResult.fail(f"Member {member_name} already exists in team {self.team_name}")
 
         success = await self.db.create_member(
             member_name=member_name,
@@ -195,10 +204,7 @@ class TeamBackend:
             model_config_json=member_model.model_dump_json() if member_model else None,
         )
         if not success:
-            return MemberOpResult.fail(
-                f"Database rejected create_member for {member_name} "
-                f"in team {self.team_name}"
-            )
+            return MemberOpResult.fail(f"Database rejected create_member for {member_name} in team {self.team_name}")
 
         team_logger.info(f"Member {member_name} created successfully")
         return MemberOpResult.success()
@@ -230,10 +236,12 @@ class TeamBackend:
             try:
                 await self.messager.publish(
                     topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
-                    message=EventMessage.from_event(MemberSpawnedEvent(
-                        team_name=self.team_name,
-                        member_name=member_name,
-                    )),
+                    message=EventMessage.from_event(
+                        MemberSpawnedEvent(
+                            team_name=self.team_name,
+                            member_name=member_name,
+                        )
+                    ),
                 )
                 team_logger.debug(f"Member spawned event published: {member_name}")
             except Exception as e:
@@ -276,8 +284,7 @@ class TeamBackend:
         if approved:
             # Approve member's claimed tasks (CLAIMED -> PLAN_APPROVED)
             claimed_tasks = await self.task_manager.get_tasks_by_assignee(
-                member_name=member_name,
-                status=TaskStatus.CLAIMED.value
+                member_name=member_name, status=TaskStatus.CLAIMED.value
             )
             approved_count = 0
             for task in claimed_tasks:
@@ -289,7 +296,8 @@ class TeamBackend:
 
             content = (
                 f"Your plan has been APPROVED. {approved_count} task(s) are now approved for completion."
-                f"Feedback: {feedback}" if feedback
+                f"Feedback: {feedback}"
+                if feedback
                 else f"Your plan has been APPROVED. {approved_count} task(s) are now approved for completion."
             )
         else:
@@ -312,11 +320,13 @@ class TeamBackend:
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
-                message=EventMessage.from_event(PlanApprovalEvent(
-                    team_name=self.team_name,
-                    member_name=member_name,
-                    approved=approved
-                )),
+                message=EventMessage.from_event(
+                    PlanApprovalEvent(
+                        team_name=self.team_name,
+                        member_name=member_name,
+                        approved=approved,
+                    )
+                ),
             )
             team_logger.debug(f"Plan approval event published for member: {member_name}")
         except Exception as e:
@@ -342,14 +352,16 @@ class TeamBackend:
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
-                message=EventMessage.from_event(ToolApprovalResultEvent(
-                    team_name=self.team_name,
-                    member_name=member_name,
-                    tool_call_id=tool_call_id,
-                    approved=approved,
-                    feedback=feedback or "",
-                    auto_confirm=auto_confirm,
-                )),
+                message=EventMessage.from_event(
+                    ToolApprovalResultEvent(
+                        team_name=self.team_name,
+                        member_name=member_name,
+                        tool_call_id=tool_call_id,
+                        approved=approved,
+                        feedback=feedback or "",
+                        auto_confirm=auto_confirm,
+                    )
+                ),
             )
             team_logger.debug(
                 "Tool approval result event published for member {}, tool_call_id={}",
@@ -397,9 +409,7 @@ class TeamBackend:
         # Check if member exists in database
         member_data = await self.db.get_member(member_name, self.team_name)
         if not member_data:
-            return MemberOpResult.fail(
-                f"Member {member_name} not found in team {self.team_name}"
-            )
+            return MemberOpResult.fail(f"Member {member_name} not found in team {self.team_name}")
 
         current_status = MemberStatus(member_data.status)
 
@@ -414,15 +424,12 @@ class TeamBackend:
 
         # Validate state transition
         from openjiuwen.agent_teams.schema.status import (
-            is_valid_transition,
             MEMBER_TRANSITIONS,
+            is_valid_transition,
         )
 
         if not is_valid_transition(current_status, MemberStatus.SHUTDOWN_REQUESTED, MEMBER_TRANSITIONS):
-            return MemberOpResult.fail(
-                f"Member {member_name} cannot shut down from status "
-                f"'{current_status.value}'"
-            )
+            return MemberOpResult.fail(f"Member {member_name} cannot shut down from status '{current_status.value}'")
 
         team_logger.info(
             f"Shutting down member {member_name}: {current_status.value} -> {MemberStatus.SHUTDOWN_REQUESTED.value}"
@@ -432,9 +439,7 @@ class TeamBackend:
         # Update member status in database (team management layer)
         success = await self.db.update_member_status(member_name, self.team_name, MemberStatus.SHUTDOWN_REQUESTED.value)
         if not success:
-            return MemberOpResult.fail(
-                f"Database rejected status update for member {member_name}"
-            )
+            return MemberOpResult.fail(f"Database rejected status update for member {member_name}")
 
         # Note: execution_status is managed by member process internally
         # Team leader only sets member status and notifies member via message and event
@@ -449,11 +454,13 @@ class TeamBackend:
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
-                message=EventMessage.from_event(MemberShutdownEvent(
-                    team_name=self.team_name,
-                    member_name=member_name,
-                    force=force
-                )),
+                message=EventMessage.from_event(
+                    MemberShutdownEvent(
+                        team_name=self.team_name,
+                        member_name=member_name,
+                        force=force,
+                    )
+                ),
             )
             team_logger.debug(f"Member shutdown event published: {member_name}")
         except Exception as e:
@@ -488,15 +495,15 @@ class TeamBackend:
         # Only send cancel event if member is busy
         if current_status != MemberStatus.BUSY:
             team_logger.info(
-                f"Member {member_name} is not busy (status: {current_status.value}), no need to cancel execution")
+                f"Member {member_name} is not busy (status: {current_status.value}), no need to cancel execution"
+            )
             return True
 
         team_logger.info(f"Cancelling execution for member {member_name}")
 
         # Reset all CLAIMED tasks assigned to this member
         claimed_tasks = await self.task_manager.get_tasks_by_assignee(
-            member_name=member_name,
-            status=TaskStatus.CLAIMED.value
+            member_name=member_name, status=TaskStatus.CLAIMED.value
         )
         reset_count = 0
         for task in claimed_tasks:
@@ -508,7 +515,8 @@ class TeamBackend:
             team_logger.info(f"Reset {reset_count} tasks from member {member_name}")
 
         success = await self.message_manager.send_message(
-            content=t("team.cancel_request_content"), to_member_name=member_name)
+            content=t("team.cancel_request_content"), to_member_name=member_name
+        )
         if not success:
             team_logger.error(f"Failed to send cancel request message to member {member_name}")
             return False
@@ -517,10 +525,7 @@ class TeamBackend:
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
-                message=EventMessage.from_event(MemberCanceledEvent(
-                    team_name=self.team_name,
-                    member_name=member_name
-                )),
+                message=EventMessage.from_event(MemberCanceledEvent(team_name=self.team_name, member_name=member_name)),
             )
             team_logger.debug(f"Member canceled event published: {member_name}")
         except Exception as e:
@@ -713,13 +718,21 @@ class TeamBackend:
         team_logger.info(f"Task {task_id} cancelled successfully")
         return True
 
-    async def cancel_all_tasks(self) -> int:
+    async def cancel_all_tasks(
+        self,
+        skip_assignees: Optional[set[str]] = None,
+    ) -> int:
         """Cancel all tasks in team atomically
 
         Cancels all non-cancelled and non-completed tasks in a single transaction.
         After cancellation, sends a broadcast message to all team members.
 
         The cancel operation is atomic at the database level via task_manager.cancel_all_tasks().
+
+        Args:
+            skip_assignees: Member names whose claimed tasks must NOT be
+                cancelled. Used to honor HITT's "human_agent-locked"
+                guarantee even during batch cancels.
 
         Returns:
             Number of tasks cancelled
@@ -729,7 +742,9 @@ class TeamBackend:
             # count = 5
         """
         # Cancel all tasks atomically
-        cancelled_tasks = await self.task_manager.cancel_all_tasks()
+        cancelled_tasks = await self.task_manager.cancel_all_tasks(
+            skip_assignees=skip_assignees,
+        )
 
         if not cancelled_tasks:
             team_logger.info(f"No tasks to cancel in team {self.team_name}")
@@ -743,8 +758,12 @@ class TeamBackend:
         return len(cancelled_tasks)
 
     async def build_team(
-        self, display_name: str, desc: str,
-        leader_display_name: str, leader_desc: str,
+        self,
+        display_name: str,
+        desc: str,
+        leader_display_name: str,
+        leader_desc: str,
+        enable_hitt: bool = False,
     ):
         """Create a team and register the leader as a member.
 
@@ -756,14 +775,19 @@ class TeamBackend:
             desc: Team goal, scope, and directives.
             leader_display_name: Human-readable display label for the leader member.
             leader_desc: Persona description of the leader member.
+            enable_hitt: When True, also registers the reserved
+                ``human_agent`` member so the human collaborator joins
+                as a first-class teammate.
         """
         # Create team in database
         team_name = self.team_name
         leader_member_name = self.member_name
-        success = await self.db.create_team(team_name=team_name,
-                                            display_name=display_name,
-                                            leader_member_name=leader_member_name,
-                                            desc=desc)
+        success = await self.db.create_team(
+            team_name=team_name,
+            display_name=display_name,
+            leader_member_name=leader_member_name,
+            desc=desc,
+        )
 
         if not success:
             raise RuntimeError(f"Failed to create team {team_name}")
@@ -785,8 +809,12 @@ class TeamBackend:
             mode=MemberMode.BUILD_MODE,
         )
 
-        # Register predefined teammates (UNSTARTED, launched later via broadcast)
+        # Register predefined teammates (UNSTARTED, launched later via broadcast).
+        # The reserved human_agent is filtered out and handled by
+        # ``_spawn_human_agent`` so it never enters the startup loop.
         for member_spec in self.predefined_members:
+            if member_spec.role_type == TeamRole.HUMAN_AGENT:
+                continue
             member_card_id = f"{team_name}_{member_spec.member_name}"
             member_card = AgentCard(
                 id=member_card_id,
@@ -806,20 +834,91 @@ class TeamBackend:
                 member_model=allocated,
             )
 
+        # HITT: register human_agent as a first-class, always-ready member.
+        # The flag wins over missing specs; a predefined spec wins over the
+        # default persona so callers can customize persona text.
+        human_spec = next(
+            (m for m in self.predefined_members if m.role_type == TeamRole.HUMAN_AGENT),
+            None,
+        )
+        if enable_hitt or human_spec is not None:
+            await self._spawn_human_agent(team_name, human_spec)
+
         # Publish team created event
         session_id = get_session_id()
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TEAM.build(session_id, team_name),
-                message=EventMessage.from_event(TeamCreatedEvent(
-                    team_name=team_name,
-                    display_name=display_name,
-                    leader_member_name=leader_member_name,
-                    created=TeamDatabase.get_current_time()
-                )),
+                message=EventMessage.from_event(
+                    TeamCreatedEvent(
+                        team_name=team_name,
+                        display_name=display_name,
+                        leader_member_name=leader_member_name,
+                        created=TeamDatabase.get_current_time(),
+                    )
+                ),
             )
             team_logger.debug(f"Team created event published: {team_name}")
         except Exception as e:
             team_logger.error(f"Failed to publish team created event for {team_name}: {e}")
 
         team_logger.info(f"Team {team_name} created successfully")
+
+    async def _spawn_human_agent(
+        self,
+        team_name: str,
+        spec: Optional[TeamMemberSpec],
+    ) -> None:
+        """Register the reserved human_agent as a READY team member.
+
+        human_agent is a shell member: no DeepAgent process, no startup
+        callback, no execution lifecycle. It exists purely so the leader
+        and teammates see a peer they can send_message to and assign
+        tasks to. Keeps status fixed at READY so the startup sweep
+        (which targets UNSTARTED) never touches it.
+        """
+        display_name = spec.display_name if spec else t("hitt.human_agent_display_name")
+        persona = spec.persona if spec else t("hitt.human_agent_default_persona")
+        prompt = spec.prompt_hint if spec else None
+
+        member_card = AgentCard(
+            id=f"{team_name}_{HUMAN_AGENT_MEMBER_NAME}",
+            name=display_name,
+            description=persona,
+        )
+        result = await self.spawn_member(
+            member_name=HUMAN_AGENT_MEMBER_NAME,
+            display_name=display_name,
+            agent_card=member_card,
+            desc=persona,
+            prompt=prompt,
+            status=MemberStatus.READY,
+            execution_status=ExecutionStatus.IDLE,
+            mode=MemberMode.BUILD_MODE,
+        )
+        if not result.ok:
+            team_logger.warning(f"Failed to register human_agent for team {team_name}: {result.reason}")
+            return
+
+        self._hitt_enabled = True
+        try:
+            await self.messager.publish(
+                topic_id=TeamTopic.TEAM.build(get_session_id(), team_name),
+                message=EventMessage.from_event(
+                    MemberSpawnedEvent(
+                        team_name=team_name,
+                        member_name=HUMAN_AGENT_MEMBER_NAME,
+                    )
+                ),
+            )
+        except Exception as e:
+            team_logger.error(f"Failed to publish human_agent spawned event: {e}")
+
+    def hitt_enabled(self) -> bool:
+        """Whether the reserved human_agent member is registered.
+
+        Checked by runtime entry points (e.g. ``TeamAgent.human_agent_say``)
+        to fail fast when the caller tries to act as human_agent on a
+        non-HITT team.
+        """
+        return self._hitt_enabled

@@ -7,6 +7,7 @@ This module provides tool wrappers for agent team functionality,
 exposing team management, member management, task management,
 and messaging capabilities as tools for agents to use.
 """
+
 import json
 from abc import ABC
 from functools import wraps
@@ -23,9 +24,10 @@ from typing import (
 
 from pydantic import PrivateAttr
 
+from openjiuwen.agent_teams.constants import HUMAN_AGENT_MEMBER_NAME
+from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
-from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.agent_teams.tools.team import (
     TeamBackend,
@@ -86,20 +88,20 @@ class TeamTool(Tool, ABC):
 
 # Tools that only the leader can use
 LEADER_ONLY_TOOLS: Set[str] = {
-    "build_team",              # Create a new team
-    "clean_team",              # Clean up a team
-    "spawn_member",            # Create a new team member
-    "shutdown_member",         # Shutdown a team member
-    "approve_plan",            # Approve or reject a member's plan
-    "approve_tool",            # Approve or reject a teammate tool call
-    "create_task",             # Create tasks (batch / with deps)
-    "update_task",             # Update task content / cancel tasks
-    "list_members",            # List all members
+    "build_team",  # Create a new team
+    "clean_team",  # Clean up a team
+    "spawn_member",  # Create a new team member
+    "shutdown_member",  # Shutdown a team member
+    "approve_plan",  # Approve or reject a member's plan
+    "approve_tool",  # Approve or reject a teammate tool call
+    "create_task",  # Create tasks (batch / with deps)
+    "update_task",  # Update task content / cancel tasks
+    "list_members",  # List all members
 }
 
 # Tools that only members can use
 MEMBER_ONLY_TOOLS: Set[str] = {
-    "claim_task",              # Claim or complete a task
+    "claim_task",  # Claim or complete a task
     # Worktree tools — members work in isolated worktrees
     # "enter_worktree",          # Enter an isolated git worktree
     # "exit_worktree",           # Exit the current worktree session
@@ -110,11 +112,10 @@ SHARED_TOOLS: Set[str] = {
     # Query tools
     # "get_team_info",           # Get team information
     # "get_member",              # Get member information
-
-    "view_task",              # View tasks (unified - supports get/list/claimable)
+    "view_task",  # View tasks (unified - supports get/list/claimable)
     # Messaging tools
-    "send_message",            # Send a message (point-to-point or broadcast)
-    "workspace_meta",          # Workspace lock management and version history
+    "send_message",  # Send a message (point-to-point or broadcast)
+    "workspace_meta",  # Workspace lock management and version history
 }
 
 # All tools available to leader
@@ -123,15 +124,28 @@ LEADER_TOOLS: Set[str] = LEADER_ONLY_TOOLS | SHARED_TOOLS
 # All tools available to members
 MEMBER_TOOLS: Set[str] = MEMBER_ONLY_TOOLS | SHARED_TOOLS
 
+# Tools available to the reserved ``human_agent`` role. The human
+# collaborator only needs to talk — no task claim, no team management,
+# no introspection tools. Keeping the surface minimal also makes the
+# model's mental model clear: human_agent is a voice, not a scheduler.
+HUMAN_AGENT_TOOLS: Set[str] = {
+    "send_message",
+}
+
 
 # ========== Team Management ==========
+
 
 class BuildTeamTool(TeamTool):
     """Create a new team"""
 
     def __init__(self, team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="team.build_team", name="build_team", description=t("build_team"))
+            ToolCard(
+                id="team.build_team",
+                name="build_team",
+                description=t("build_team"),
+            )
         )
         self.team = team
         self.db = team.db
@@ -146,6 +160,11 @@ class BuildTeamTool(TeamTool):
                     "description": t("build_team", "leader_display_name"),
                 },
                 "leader_desc": {"type": "string", "description": t("build_team", "leader_desc")},
+                "enable_hitt": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": t("build_team", "enable_hitt"),
+                },
             },
             "required": ["display_name", "team_desc", "leader_display_name", "leader_desc"],
         }
@@ -153,11 +172,13 @@ class BuildTeamTool(TeamTool):
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         display_name = inputs.get("display_name")
         leader_display_name = inputs["leader_display_name"]
+        enable_hitt = bool(inputs.get("enable_hitt", False))
         await self.team.build_team(
             display_name=display_name,
             desc=inputs.get("team_desc"),
             leader_display_name=leader_display_name,
             leader_desc=inputs["leader_desc"],
+            enable_hitt=enable_hitt,
         )
         return ToolOutput(
             success=True,
@@ -166,6 +187,7 @@ class BuildTeamTool(TeamTool):
                 "display_name": display_name,
                 "leader_member_name": self.team.member_name,
                 "leader_display_name": leader_display_name,
+                "enable_hitt": enable_hitt,
             },
         )
 
@@ -173,11 +195,13 @@ class BuildTeamTool(TeamTool):
         if not output.success:
             return output.error or "Failed to build team"
         d = output.data or {}
+        hitt_note = " [human_agent registered]" if d.get("enable_hitt") else ""
         return (
             f"Team created: team_name={d.get('team_name')} "
             f"display_name={d.get('display_name')} "
             f"leader_member_name={d.get('leader_member_name')} "
             f"leader_display_name={d.get('leader_display_name')}"
+            f"{hitt_note}"
         )
 
 
@@ -186,14 +210,14 @@ class CleanTeamTool(TeamTool):
 
     def __init__(self, team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="team.clean_team", name="clean_team", description=t("clean_team"))
+            ToolCard(
+                id="team.clean_team",
+                name="clean_team",
+                description=t("clean_team"),
+            )
         )
         self.team = team
-        self.card.input_params = {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
+        self.card.input_params = {"type": "object", "properties": {}, "required": []}
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         try:
@@ -217,15 +241,23 @@ class CleanTeamTool(TeamTool):
 
 # ========== Member Management ==========
 
+
 class SpawnMemberTool(TeamTool):
     """Create a new team member"""
 
     def __init__(
-        self, team: TeamBackend, t: Translator, *,
+        self,
+        team: TeamBackend,
+        t: Translator,
+        *,
         model_config_allocator: Optional[Callable[[], Optional[str]]] = None,
     ):
         super().__init__(
-            ToolCard(id="team.spawn_member", name="spawn_member", description=t("spawn_member"))
+            ToolCard(
+                id="team.spawn_member",
+                name="spawn_member",
+                description=t("spawn_member"),
+            )
         )
         self.team = team
         self._allocate_model_config = model_config_allocator
@@ -247,8 +279,8 @@ class SpawnMemberTool(TeamTool):
         }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
-        from openjiuwen.core.single_agent.schema.agent_card import AgentCard
         from openjiuwen.agent_teams.schema.status import MemberMode
+        from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
         member_name = inputs.get("member_name")
         display_name = inputs.get("display_name")
@@ -287,7 +319,11 @@ class ShutdownMemberTool(TeamTool):
 
     def __init__(self, team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="team.shutdown_member", name="shutdown_member", description=t("shutdown_member"))
+            ToolCard(
+                id="team.shutdown_member",
+                name="shutdown_member",
+                description=t("shutdown_member"),
+            )
         )
         self.team = team
         self.card.input_params = {
@@ -325,7 +361,11 @@ class ApprovePlanTool(TeamTool):
 
     def __init__(self, team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="team.approve_plan", name="approve_plan", description=t("approve_plan"))
+            ToolCard(
+                id="team.approve_plan",
+                name="approve_plan",
+                description=t("approve_plan"),
+            )
         )
         self.team = team
         self.card.input_params = {
@@ -368,7 +408,11 @@ class ApproveToolCallTool(TeamTool):
 
     def __init__(self, team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="team.approve_tool", name="approve_tool", description=t("approve_tool"))
+            ToolCard(
+                id="team.approve_tool",
+                name="approve_tool",
+                description=t("approve_tool"),
+            )
         )
         self.team = team
         self.card.input_params = {
@@ -409,8 +453,7 @@ class ApproveToolCallTool(TeamTool):
         d = output.data
         decision = "approved" if d["approved"] else "rejected"
         return (
-            f"Tool call {decision}: tool_call_id={d['tool_call_id']} "
-            f"member_name={d['member_name']} decision={decision}"
+            f"Tool call {decision}: tool_call_id={d['tool_call_id']} member_name={d['member_name']} decision={decision}"
         )
 
 
@@ -419,20 +462,19 @@ class ListMembersTool(TeamTool):
 
     def __init__(self, team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="team.list_members", name="list_members", description=t("list_members"))
+            ToolCard(
+                id="team.list_members",
+                name="list_members",
+                description=t("list_members"),
+            )
         )
         self.team = team
-        self.card.input_params = {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
+        self.card.input_params = {"type": "object", "properties": {}, "required": []}
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         members = await self.team.list_members()
         return ToolOutput(
-            success=True,
-            data={"members": [member.model_dump() for member in members], "count": len(members)}
+            success=True, data={"members": [member.model_dump() for member in members], "count": len(members)}
         )
 
     def map_result(self, output: ToolOutput) -> str:
@@ -442,13 +484,13 @@ class ListMembersTool(TeamTool):
         if not members:
             return "No members"
         lines = [
-            f"member_name={m['member_name']} display_name={m['display_name']} status={m['status']}"
-            for m in members
+            f"member_name={m['member_name']} display_name={m['display_name']} status={m['status']}" for m in members
         ]
         return "\n".join(lines)
 
 
 # ========== Task Management ==========
+
 
 class TaskCreateTool(TeamTool):
     """Create team tasks (Leader only).
@@ -459,7 +501,11 @@ class TaskCreateTool(TeamTool):
 
     def __init__(self, agent_team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="team.create_task", name="create_task", description=t("create_task"))
+            ToolCard(
+                id="team.create_task",
+                name="create_task",
+                description=t("create_task"),
+            )
         )
         self.task_manager = agent_team.task_manager
 
@@ -540,19 +586,23 @@ class TaskCreateTool(TeamTool):
         failures: list[dict] = []
         for spec in tasks:
             if not spec.get("title") or not spec.get("content"):
-                failures.append({
-                    "spec": self._spec_label(spec),
-                    "reason": "missing required title/content",
-                })
+                failures.append(
+                    {
+                        "spec": self._spec_label(spec),
+                        "reason": "missing required title/content",
+                    }
+                )
                 continue
             result = await self._create_one(spec)
             if result.ok:
                 created.append(result.task)
             else:
-                failures.append({
-                    "spec": self._spec_label(spec),
-                    "reason": result.reason,
-                })
+                failures.append(
+                    {
+                        "spec": self._spec_label(spec),
+                        "reason": result.reason,
+                    }
+                )
 
         if not created and failures:
             joined = "; ".join(f"{f['spec']}: {f['reason']}" for f in failures)
@@ -595,7 +645,11 @@ class ViewTaskToolV2(TeamTool):
 
     def __init__(self, task_manager: TeamTaskManager, t: Translator):
         super().__init__(
-            ToolCard(id="team.view_task", name="view_task", description=t("view_task"))
+            ToolCard(
+                id="team.view_task",
+                name="view_task",
+                description=t("view_task"),
+            )
         )
         self.task_manager = task_manager
         self.card.input_params = {
@@ -677,10 +731,15 @@ class UpdateTaskTool(TeamTool):
 
     def __init__(self, agent_team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="team.update_task", name="update_task", description=t("update_task"))
+            ToolCard(
+                id="team.update_task",
+                name="update_task",
+                description=t("update_task"),
+            )
         )
         self.agent_team = agent_team
         self.task_manager = agent_team.task_manager
+        self.t = t
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -702,20 +761,50 @@ class UpdateTaskTool(TeamTool):
             "required": ["task_id"],
         }
 
+    @staticmethod
+    def _is_cancellable_assignee(assignee: str | None) -> bool:
+        """Whether an assignee owns an execution process the team can cancel.
+
+        The human_agent is a first-class team member but runs no background
+        process — cancel operations must skip it, otherwise the backend would
+        attempt to stop something that never existed.
+        """
+        return bool(assignee) and assignee != HUMAN_AGENT_MEMBER_NAME
+
     async def _cancel_member_if_claimed(self, task_id: str) -> None:
-        """Cancel the assignee if task is currently claimed."""
+        """Cancel the assignee if task is currently claimed.
+
+        Skips the human_agent: it owns no execution process to cancel.
+        """
         task = await self.task_manager.get(task_id)
-        if task and task.status == TaskStatus.CLAIMED.value and task.assignee:
+        if not task or task.status != TaskStatus.CLAIMED.value:
+            return
+        if self._is_cancellable_assignee(task.assignee):
             await self.agent_team.cancel_member(member_name=task.assignee)
 
     async def _cancel_claimed_members(self) -> None:
-        """Cancel all members who have claimed tasks."""
+        """Cancel all members who have claimed tasks.
+
+        Skips the human_agent so a batch cancel does not try to cancel a
+        member that has no execution process.
+        """
         claimed_tasks = await self.task_manager.list_tasks(status=TaskStatus.CLAIMED.value)
         cancelled: set[str] = set()
         for task in claimed_tasks:
-            if task.assignee and task.assignee not in cancelled:
-                await self.agent_team.cancel_member(member_name=task.assignee)
-                cancelled.add(task.assignee)
+            if task.assignee in cancelled or not self._is_cancellable_assignee(task.assignee):
+                continue
+            await self.agent_team.cancel_member(member_name=task.assignee)
+            cancelled.add(task.assignee)
+
+    @staticmethod
+    def _is_human_agent_locked(task) -> bool:
+        """Whether a task is held by the human_agent and thus leader-immutable.
+
+        Leader may not cancel or reassign such tasks — the human collaborator
+        is the only party who can release them (by completing or by the team
+        being cleaned). Leader's only recourse is to send_message nudges.
+        """
+        return task.assignee == HUMAN_AGENT_MEMBER_NAME and task.status == TaskStatus.CLAIMED.value
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         task_id = inputs.get("task_id")
@@ -731,7 +820,9 @@ class UpdateTaskTool(TeamTool):
         # cancel_all: task_id="*" + status="cancelled"
         if task_id == "*" and status == "cancelled":
             await self._cancel_claimed_members()
-            count = await self.agent_team.cancel_all_tasks()
+            count = await self.agent_team.cancel_all_tasks(
+                skip_assignees={HUMAN_AGENT_MEMBER_NAME},
+            )
             return ToolOutput(success=True, data={"cancelled_count": count})
 
         task = await self.task_manager.get(task_id)
@@ -740,6 +831,15 @@ class UpdateTaskTool(TeamTool):
 
         # Cancel single task
         if status == "cancelled":
+            if self._is_human_agent_locked(task):
+                return ToolOutput(
+                    success=False,
+                    error=self.t(
+                        "update_task",
+                        "error_human_agent_locked_cancel",
+                        task_id=task_id,
+                    ),
+                )
             await self._cancel_member_if_claimed(task_id)
             success = await self.agent_team.cancel_task(task_id=task_id)
             if not success:
@@ -766,6 +866,16 @@ class UpdateTaskTool(TeamTool):
         # PENDING, then assign to the new member. Same-member is idempotent.
         if assignee:
             if task.assignee and task.assignee != assignee:
+                if self._is_human_agent_locked(task):
+                    return ToolOutput(
+                        success=False,
+                        error=self.t(
+                            "update_task",
+                            "error_human_agent_locked_reassign",
+                            task_id=task_id,
+                            new_assignee=assignee,
+                        ),
+                    )
                 await self.agent_team.cancel_member(member_name=task.assignee)
                 reset_result = await self.task_manager.reset(task_id)
                 if not reset_result.ok:
@@ -789,14 +899,18 @@ class UpdateTaskTool(TeamTool):
             updated.append("blocked_by")
 
         if not updated:
-            return ToolOutput(success=False, error="No update specified — "
-                                                   "provide status, title, content, assignee, or add_blocked_by")
+            return ToolOutput(
+                success=False, error="No update specified — provide status, title, content, assignee, or add_blocked_by"
+            )
 
-        return ToolOutput(success=True, data={
-            "task_id": task_id,
-            "status": "updated",
-            "updated_fields": updated,
-        })
+        return ToolOutput(
+            success=True,
+            data={
+                "task_id": task_id,
+                "status": "updated",
+                "updated_fields": updated,
+            },
+        )
 
     def map_result(self, output: ToolOutput) -> str:
         if not output.success:
@@ -812,7 +926,11 @@ class ClaimTaskTool(TeamTool):
 
     def __init__(self, task_manager: TeamTaskManager, t: Translator):
         super().__init__(
-            ToolCard(id="team.claim_task", name="claim_task", description=t("claim_task"))
+            ToolCard(
+                id="team.claim_task",
+                name="claim_task",
+                description=t("claim_task"),
+            )
         )
         self.task_manager = task_manager
         self.card.input_params = {
@@ -851,11 +969,14 @@ class ClaimTaskTool(TeamTool):
         else:
             return ToolOutput(success=False, error=f"Invalid status: {status}")
 
-        return ToolOutput(success=True, data={
-            "task_id": task_id,
-            "updated_fields": ["status"],
-            "status_change": status_change,
-        })
+        return ToolOutput(
+            success=True,
+            data={
+                "task_id": task_id,
+                "updated_fields": ["status"],
+                "status_change": status_change,
+            },
+        )
 
     def map_result(self, output: ToolOutput) -> str:
         """Map claim_task result with behavior guidance on completion."""
@@ -871,6 +992,7 @@ class ClaimTaskTool(TeamTool):
 
 # ========== Messaging ==========
 
+
 class SendMessageTool(TeamTool):
     """Send a message to team members (point-to-point or broadcast)."""
 
@@ -882,7 +1004,11 @@ class SendMessageTool(TeamTool):
         on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
     ):
         super().__init__(
-            ToolCard(id="team.send_message", name="send_message", description=t("send_message"))
+            ToolCard(
+                id="team.send_message",
+                name="send_message",
+                description=t("send_message"),
+            )
         )
         self.message_manager = message_manager
         self._team = team
@@ -894,7 +1020,7 @@ class SendMessageTool(TeamTool):
                 "content": {"type": "string", "description": t("send_message", "content")},
                 "summary": {"type": "string", "description": t("send_message", "summary")},
             },
-            "required": ["to", "content"]
+            "required": ["to", "content"],
         }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
@@ -920,11 +1046,14 @@ class SendMessageTool(TeamTool):
         msg_id = await self.message_manager.broadcast_message(content=content)
         if not msg_id:
             return ToolOutput(success=False, error="Failed to broadcast message")
-        return ToolOutput(success=True, data={
-            "type": "broadcast",
-            "from": self.message_manager.member_name,
-            "summary": summary or None,
-        })
+        return ToolOutput(
+            success=True,
+            data={
+                "type": "broadcast",
+                "from": self.message_manager.member_name,
+                "summary": summary or None,
+            },
+        )
 
     async def _send(self, to: str, content: str, summary: str) -> ToolOutput:
         # "user" is the pseudo-member representing the human caller; skip
@@ -937,12 +1066,15 @@ class SendMessageTool(TeamTool):
         msg_id = await self.message_manager.send_message(content=content, to_member_name=to)
         if not msg_id:
             return ToolOutput(success=False, error=f"Failed to send message to '{to}'")
-        return ToolOutput(success=True, data={
-            "type": "message",
-            "from": self.message_manager.member_name,
-            "to": to,
-            "summary": summary or None,
-        })
+        return ToolOutput(
+            success=True,
+            data={
+                "type": "message",
+                "from": self.message_manager.member_name,
+                "to": to,
+                "summary": summary or None,
+            },
+        )
 
     async def _auto_start_members(self) -> None:
         """Auto-start unstarted members if leader with startup callback."""
@@ -1011,11 +1143,19 @@ def create_team_tools(
         "claim_task": ClaimTaskTool(task_mgr, t),
         # Messaging
         "send_message": SendMessageTool(
-            msg_mgr, t, team=agent_team, on_teammate_created=on_teammate_created,
+            msg_mgr,
+            t,
+            team=agent_team,
+            on_teammate_created=on_teammate_created,
         ),
     }
 
-    allowed = LEADER_TOOLS if role == "leader" else MEMBER_TOOLS
+    if role == "human_agent":
+        allowed = HUMAN_AGENT_TOOLS
+    elif role == "leader":
+        allowed = LEADER_TOOLS
+    else:
+        allowed = MEMBER_TOOLS
     # approve_plan / approve_tool only make sense in plan_mode — teammates
     # submit plans and intercepted tool calls go to the leader for sign-off.
     # build_mode has no such workflow, so keep the leader's toolset clean.
@@ -1023,10 +1163,7 @@ def create_team_tools(
         allowed = allowed - {"approve_plan", "approve_tool"}
     if exclude_tools:
         allowed = allowed - exclude_tools
-    tools = [
-        tool for name, tool in all_tools.items()
-        if name in allowed
-    ]
+    tools = [tool for name, tool in all_tools.items() if name in allowed]
 
     for tool in tools:
         _wrap_invoke_with_logging(tool)

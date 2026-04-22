@@ -1,5 +1,6 @@
 # coding: utf-8
 """Team-level schemas."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -46,10 +47,18 @@ class TeamLifecycle(str, Enum):
 
 
 class TeamRole(str, Enum):
-    """Supported team roles."""
+    """Supported team roles.
+
+    ``HUMAN_AGENT`` is a first-class member representing a human
+    collaborator. It shares equal standing with leader and teammate in
+    the model's mental model, but its runtime footprint differs:
+    it owns no DeepAgent process, only the ``send_message`` tool,
+    and stays in ``READY`` until the team is cleaned.
+    """
 
     LEADER = "leader"
     TEAMMATE = "teammate"
+    HUMAN_AGENT = "human_agent"
 
 
 class TeamMemberSpec(BaseModel):

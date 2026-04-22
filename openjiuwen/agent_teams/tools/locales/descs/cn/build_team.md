@@ -4,6 +4,15 @@
 build_team → create_task → spawn_member → send_message(to="*")。
 build_team 之前不能调用任何其他团队工具。
 
+## HITT（Human in the Team）
+参数 `enable_hitt=true` 会把保留成员 `human_agent` 注册为一等 teammate，与你和 teammate 平级。适用场景：user 明确表达「我也要加入团队 / 我来负责 X / 这一步我来做」等参与意图。启用后：
+
+- human_agent 只能用 send_message，但能被 update_task 指派任务；
+- 一旦 human_agent 认领了任务，你不能 cancel 或 reassign，只能 send_message 催促；
+- 与 human_agent 的定向沟通**必须**走 `send_message(to="human_agent", ...)`，不要用 plain text。
+
+HITT 只能在 build_team 一次决定；团队建立后不能再追加 human_agent。
+
 ## 任务设计原则
 - 描述目标，不描述步骤：content 写目标、验收标准、技术约束，不写具体操作
 - 单人认领：每个任务只允许一个 teammate 认领并负责交付

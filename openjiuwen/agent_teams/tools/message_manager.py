@@ -12,11 +12,8 @@ from typing import (
     Optional,
 )
 
+from openjiuwen.agent_teams.constants import HUMAN_AGENT_MEMBER_NAME
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.tools.database import (
-    TeamDatabase,
-    TeamMessageBase
-)
 from openjiuwen.agent_teams.schema.events import (
     BroadcastEvent,
     EventMessage,
@@ -24,6 +21,7 @@ from openjiuwen.agent_teams.schema.events import (
     TeamTopic,
 )
 from openjiuwen.agent_teams.spawn.context import get_session_id
+from openjiuwen.agent_teams.tools.database import TeamDatabase, TeamMessageBase
 from openjiuwen.core.common.logging import team_logger
 
 
@@ -69,6 +67,10 @@ class TeamMessageManager:
         """
         sender = from_member_name or self.member_name
         message_id = str(uuid.uuid4())
+        # HITT: human_agent has no background consumer polling its mailbox,
+        # so mark messages addressed to it as read on write. Without this
+        # the dispatcher's unread sweep would keep re-firing forever.
+        auto_read = to_member_name == HUMAN_AGENT_MEMBER_NAME
 
         success = await self.db.create_message(
             message_id=message_id,
@@ -77,6 +79,7 @@ class TeamMessageManager:
             content=content,
             to_member_name=to_member_name,
             broadcast=False,
+            is_read=auto_read,
         )
         if not success:
             team_logger.error(f"Failed to create message {message_id}")
@@ -85,12 +88,14 @@ class TeamMessageManager:
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.MESSAGE.build(get_session_id(), self.team_name),
-                message=EventMessage.from_event(MessageEvent(
-                    message_id=message_id,
-                    team_name=self.team_name,
-                    from_member_name=sender,
-                    to_member_name=to_member_name,
-                )),
+                message=EventMessage.from_event(
+                    MessageEvent(
+                        message_id=message_id,
+                        team_name=self.team_name,
+                        from_member_name=sender,
+                        to_member_name=to_member_name,
+                    )
+                ),
             )
             team_logger.debug(f"Message event published: {message_id}")
         except Exception as e:
@@ -99,18 +104,25 @@ class TeamMessageManager:
         team_logger.debug(f"Message sent from {sender} to {to_member_name}: {message_id}")
         return message_id
 
-    async def broadcast_message(self, content: str) -> Optional[str]:
+    async def broadcast_message(
+        self,
+        content: str,
+        from_member_name: str | None = None,
+    ) -> Optional[str]:
         """Send a broadcast message.
 
         Args:
             content: Message content.
+            from_member_name: Override sender ID. Defaults to
+                ``self.member_name``.
         """
+        sender = from_member_name or self.member_name
         message_id = str(uuid.uuid4())
 
         success = await self.db.create_message(
             message_id=message_id,
             team_name=self.team_name,
-            from_member_name=self.member_name,
+            from_member_name=sender,
             content=content,
             to_member_name=None,
             broadcast=True,
@@ -122,24 +134,37 @@ class TeamMessageManager:
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.MESSAGE.build(get_session_id(), self.team_name),
-                message=EventMessage.from_event(BroadcastEvent(
-                    message_id=message_id,
-                    team_name=self.team_name,
-                    from_member_name=self.member_name,
-                )),
+                message=EventMessage.from_event(
+                    BroadcastEvent(
+                        message_id=message_id,
+                        team_name=self.team_name,
+                        from_member_name=sender,
+                    )
+                ),
             )
             team_logger.debug(f"Broadcast event published: {message_id}")
         except Exception as e:
             team_logger.error(f"Failed to publish broadcast event for {message_id}: {e}")
 
-        team_logger.debug(f"Broadcast message sent from {self.member_name}: {message_id}")
+        # HITT: advance human_agent's broadcast read watermark immediately
+        # so it never sits on an unread backlog. Swallowing the error keeps
+        # the broadcast itself unaffected if the member isn't registered.
+        try:
+            await self.db.mark_message_read(
+                message_id=message_id,
+                member_name=HUMAN_AGENT_MEMBER_NAME,
+            )
+        except Exception as e:
+            team_logger.debug(f"Auto-mark-read for human_agent on broadcast {message_id} skipped: {e}")
+
+        team_logger.debug(f"Broadcast message sent from {sender}: {message_id}")
         return message_id
 
     async def get_messages(
         self,
         to_member_name: str,
         unread_only: bool = False,
-        from_member_name: Optional[str] = None
+        from_member_name: Optional[str] = None,
     ) -> List[TeamMessageBase]:
         """Get direct (point-to-point) messages for a member
 
@@ -165,14 +190,14 @@ class TeamMessageManager:
             team_name=self.team_name,
             to_member_name=to_member_name,
             unread_only=unread_only,
-            from_member_name=from_member_name
+            from_member_name=from_member_name,
         )
 
     async def get_broadcast_messages(
         self,
         member_name: str,
         unread_only: bool = False,
-        from_member_name: Optional[str] = None
+        from_member_name: Optional[str] = None,
     ) -> List[TeamMessageBase]:
         """Get broadcast messages for a member, with read status
 
@@ -198,7 +223,7 @@ class TeamMessageManager:
             team_name=self.team_name,
             member_name=member_name,
             unread_only=unread_only,
-            from_member_name=from_member_name
+            from_member_name=from_member_name,
         )
 
     async def get_team_messages(self, team_name: str) -> List[TeamMessageBase]:

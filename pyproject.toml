@@ -154,6 +154,18 @@ addopts = ["-v", "--html=report/index.html", "--self-contained-html"]
 line-length = 120
 target-version = "py311"
 
+[tool.ruff.format]
+# Respect magic trailing commas: when a call/signature/collection ends with `,`,
+# keep it multi-line even if it fits within line-length. This is the team's
+# explicit "force multi-line" signal.
+skip-magic-trailing-comma = false
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+# Format code blocks inside docstrings (```python ... ```); length inherits line-length.
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
+
 [tool.pylint.MAIN]
 ignore-paths = ["^(examples|tests)/.*"]
 load-plugins = ["pylint.extensions.bad_builtin"]
