@@ -1194,10 +1194,15 @@ class GlobTool(Tool):
         return str(pathlib.Path(get_cwd()).expanduser().resolve())
 
     def _relativize_paths(self, paths: List[str], base_path: str) -> List[str]:
+        # FsOperation.search_files resolves symlinks internally (via Path.resolve),
+        # so returned file paths may live under e.g. /private/var on macOS while
+        # the caller-supplied base_path is /var. Normalize the base to real path
+        # so os.path.relpath does not produce "../../../" against a symlinked root.
+        resolved_base = str(pathlib.Path(base_path).resolve())
         relative_paths: List[str] = []
         for item in paths:
             try:
-                relative_paths.append(os.path.relpath(item, base_path))
+                relative_paths.append(os.path.relpath(item, resolved_base))
             except ValueError:
                 relative_paths.append(item)
         return relative_paths
