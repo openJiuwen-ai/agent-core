@@ -29,6 +29,7 @@ from openjiuwen.core.workflow import WorkflowExecutionState, WorkflowOutput
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, AssistantMessage, ToolMessage, Model
 from openjiuwen.core.memory.long_term_memory import LongTermMemory
 from openjiuwen.core.foundation.llm import ToolCall
+from openjiuwen.core.foundation.llm.schema.tool_call_delta import serialize_tool_call_delta
 
 
 @dataclass
@@ -758,6 +759,22 @@ class LLMController(BaseController):
                     accumulated_chunk = chunk
                 else:
                     accumulated_chunk = accumulated_chunk + chunk
+                # Stream output for tool_calls delta
+                if chunk.tool_calls:
+                    await session.write_stream(
+                        OutputSchema(
+                            type="tool_calls.delta",
+                            index=stream_index,
+                            payload={
+                                "tool_calls": [
+                                    serialize_tool_call_delta(tc)
+                                    for tc in chunk.tool_calls
+                                ],
+                                "source": "llm_stream",
+                            },
+                        )
+                    )
+                    stream_index += 1
 
                 # Stream output for reasoning content
                 if chunk.reasoning_content:

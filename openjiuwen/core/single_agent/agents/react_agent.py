@@ -19,6 +19,7 @@ from pydantic import Field, BaseModel
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.user_config import UserConfig
+from openjiuwen.core.foundation.llm.schema.tool_call_delta import serialize_tool_call_delta
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
@@ -762,6 +763,19 @@ class ReActAgent(BaseAgent):
                     type="llm_output",
                     index=chunk_index,
                     payload={"content": chunk.content, "result_type": "answer"},
+                ))
+                chunk_index += 1
+            if chunk.tool_calls:
+                await session.write_stream(OutputSchema(
+                    type="tool_calls.delta",
+                    index=chunk_index,
+                    payload={
+                        "tool_calls": [
+                            serialize_tool_call_delta(tc)
+                            for tc in chunk.tool_calls
+                        ],
+                        "result_type": "answer",
+                    },
                 ))
                 chunk_index += 1
 
