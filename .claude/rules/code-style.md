@@ -23,8 +23,10 @@ alwaysApply: false
 
 ## Logging
 
-- Do not use `print()` in library code; use project logging (`from openjiuwen.core.common.logging import get_logger`).
-- Prefer `logger.opt(...)` over `logger.debug(f"...")` for structured logging.
+- Do not use `print()` in library code. Import named loggers from
+  `openjiuwen.core.common.logging` (`agent_logger`, `workflow_logger`,
+  `llm_logger`, ...).
+- Full rules: see `.claude/rules/logging.md`.
 
 ## Naming Conventions
 
