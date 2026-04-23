@@ -74,6 +74,7 @@ chromadb = ["chromadb>=1.5.4", "opentelemetry-proto>=1.33.0", "protobuf>=5.0,<7.
 obs = ["aioboto3>=11.0.0"]
 zmq = ["pyzmq>=26.0.0", "tornado>=6.1"]
 sandbox = ["agent-sandbox>=0.0.26"]
+mem0 = ["mem0ai>=1.0.0"]
 
 all-mq = ["openjiuwen[pulsar]"]
 all-storage = ["openjiuwen[sqlite,mysql,gaussdb,redis,elasticsearch,obs]"]
