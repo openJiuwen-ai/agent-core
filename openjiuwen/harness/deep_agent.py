@@ -66,12 +66,13 @@ from openjiuwen.harness.task_loop.task_loop_controller import (
 )
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
 from openjiuwen.harness.tools.session_tools import SessionToolkit
-from openjiuwen.harness.tools.web_tools import is_free_search_enabled
+from openjiuwen.harness.tools.web_tools import is_free_search_enabled, is_paid_search_enabled
 
 if TYPE_CHECKING:
     from openjiuwen.core.controller.modules.event_queue import (
         EventQueue,
     )
+    from openjiuwen.harness.schema.config import SubAgentConfig
 
 from openjiuwen.harness.prompts import (
     resolve_language,
@@ -151,15 +152,22 @@ class DeepAgent(BaseAgent):
 
     @staticmethod
     def _filter_disabled_tools(config: DeepAgentConfig) -> None:
-        if config.tools is None or is_free_search_enabled():
+        if config.tools is None:
+            return
+        disabled_tool_names: set[str] = set()
+        if not is_free_search_enabled():
+            disabled_tool_names.add("free_search")
+        if not is_paid_search_enabled():
+            disabled_tool_names.add("paid_search")
+        if not disabled_tool_names:
             return
         config.tools = [
             card for card in config.tools
-            if not (isinstance(card, ToolCard) and card.name == "free_search")
+            if not (isinstance(card, ToolCard) and card.name in disabled_tool_names)
         ]
 
     def _unregister_tool_resource(self, card: ToolCard) -> None:
-        if card.name != "free_search":
+        if card.name not in {"free_search", "paid_search"}:
             return
         if not getattr(card, "id", None):
             return
@@ -187,7 +195,7 @@ class DeepAgent(BaseAgent):
                 )
 
     def _ensure_builtin_tool_resource(self, card: ToolCard, config: DeepAgentConfig) -> None:
-        if card.name != "free_search":
+        if card.name not in {"free_search", "paid_search"}:
             return
         existing_tool = Runner.resource_mgr.get_tool(card.id)
         if existing_tool is not None:
@@ -199,9 +207,10 @@ class DeepAgent(BaseAgent):
                 )
             return
 
-        from openjiuwen.harness.tools.web_tools import WebFreeSearchTool
+        from openjiuwen.harness.tools.web_tools import WebFreeSearchTool, WebPaidSearchTool
 
-        tool = WebFreeSearchTool(language=resolve_language(config.language), card=card)
+        tool_cls = WebPaidSearchTool if card.name == "paid_search" else WebFreeSearchTool
+        tool = tool_cls(language=resolve_language(config.language), card=card)
         result = Runner.resource_mgr.add_tool(tool, tag=self.card.id)
         if result.is_err():
             logger.warning(
@@ -346,6 +355,7 @@ class DeepAgent(BaseAgent):
                 self.ability_manager.remove(name)
             self.ability_manager.add(card)
             self._ensure_builtin_tool_resource(card, config)
+        self.ability_manager.reorder_tools(list(new_by_name))
 
     def _hot_reload_system_prompt(self, config: DeepAgentConfig) -> None:
         """Rebuild the SystemPromptBuilder and update both agents during hot-reconfigure.

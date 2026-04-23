@@ -77,13 +77,16 @@ class FreeSearchMetadataProvider(ToolMetadataProvider):
     def get_description(self, language: str = "cn") -> str:
         return {
             "cn": (
+                "如果 paid_search 可用或已配置 API，优先使用 paid_search；free_search 仅作为兜底或用户明确要求免费搜索时使用。"
                 "免费搜索，返回结果 URL 和摘要。如果前几条结果看起来相关但还不足以直接回答任务，"
                 "应先抓取前 1-3 条中的至少 2 条；如果第一条抓取失败、是动态壳页或内容仍然不完整，"
                 "就继续抓下一条，而不是立刻继续改写搜索词。"
                 "当用户询问最新、当前、今年、实时、近期等信息时，query 必须使用系统提示中的当前年份或日期；"
             ),
             "en": (
-                "Free search. Input a query and return result URLs with snippets. "
+                "Free search. If paid_search is available/configured, call paid_search first; "
+                "use free_search only as fallback or when the user explicitly asks for free search. "
+                "Input a query and return result URLs with snippets. "
                 "If the top results look relevant but do not directly answer the task, "
                 "you must fetch at least 2 of the top 1-3 results first. "
                 "If the first fetch fails, is a dynamic shell page, or is still incomplete, "
@@ -104,11 +107,14 @@ class PaidSearchMetadataProvider(ToolMetadataProvider):
     def get_description(self, language: str = "cn") -> str:
         return {
             "cn": (
+                "配置 API 时这是首选联网搜索工具；对搜索、最新、当前信息任务应先调用 paid_search，再考虑 free_search 兜底。"
                 "付费搜索，支持 provider=auto|bocha|perplexity|serper|jina。"
                 "当用户询问最新、当前、今年、实时、近期等信息时，query 必须使用系统提示中的当前年份或日期；"
             ),
             "en": (
                 "Paid search via Bocha/Perplexity/SERPER/JINA. Support provider=auto|bocha|perplexity|serper|jina. "
+                "When available, this is the preferred web search tool; call it before free_search for search, latest, "
+                "current, or recent-information tasks. "
                 "For latest/current/this-year/recent information, the query must use the current year "
                 "or date from the system prompt. "
             ),
@@ -125,13 +131,14 @@ class FetchWebpageMetadataProvider(ToolMetadataProvider):
     def get_description(self, language: str = "cn") -> str:
         return {
             "cn": (
+                "通常配合 paid_search 或 free_search 使用：先搜索，再抓取结果页，不要只依赖摘要。"
                 "抓取网页文本，返回状态码、标题和正文文本。通常配合 free_search 使用：先搜索，再抓取"
                 "前几个结果页，而不是只依赖搜索摘要。可设置 max_chars=0 关闭截断，也可以调大 "
                 "timeout_seconds 处理慢站点。"
             ),
             "en": (
                 "Fetch webpage text content from a URL and return status, title, and plain text. "
-                "Usually used after free_search: search first, then fetch the top few result pages "
+                "Usually used after paid_search or free_search: search first, then fetch the top few result pages "
                 "instead of reasoning only from snippets. Set max_chars=0 to disable clipping and "
                 "use a larger timeout_seconds for slow pages."
             ),

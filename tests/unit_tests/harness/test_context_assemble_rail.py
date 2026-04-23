@@ -209,6 +209,7 @@ def test_build_tools_content():
     mock_manager = Mock()
     mock_manager.list.return_value = [
         ToolCard(name="free_search", description="verbose desc"),
+        ToolCard(name="paid_search", description="paid verbose desc"),
         ToolCard(name="read_file", description="read"),
         ToolCard(name="write_file", description="write"),
         ToolCard(name="edit_file", description="edit"),
@@ -236,6 +237,8 @@ def test_build_tools_content():
     # Valid cn
     cn = build_tools_content(mock_manager, "cn")
     assert cn is not None
+    assert "- paid_search:" in cn
+    assert cn.index("- paid_search:") < cn.index("- free_search:")
     assert "# 可用工具\n" in cn
     assert "- free_search: 免费搜索（DuckDuckGo 等）" in cn
     assert "- read_file / write_file / edit_file: 文件读写编辑" in cn
@@ -260,7 +263,9 @@ def test_build_tools_content():
     en = build_tools_content(mock_manager, "en")
     assert en is not None
     assert "# Available Tools\n" in en
+    assert "- paid_search: Paid web search (preferred when configured)" in en
     assert "- free_search: Free web search" in en
+    assert en.index("- paid_search:") < en.index("- free_search:")
     assert "- read_file / write_file / edit_file: Read, write, and edit files" in en
     assert "- bash: Run shell commands" in en
     assert "- code: Run Python or JavaScript code" in en

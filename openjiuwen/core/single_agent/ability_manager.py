@@ -348,6 +348,21 @@ class AbilityManager:
         else:
             return None
 
+    def reorder_tools(self, ordered_names: List[str]) -> None:
+        """Reorder registered tools to match the given preferred name order."""
+        if not ordered_names or not self._tools:
+            return
+        preferred = [name for name in ordered_names if name in self._tools]
+        if not preferred:
+            return
+        reordered: Dict[str, ToolCard] = {}
+        for name in preferred:
+            reordered[name] = self._tools[name]
+        for name, card in self._tools.items():
+            if name not in reordered:
+                reordered[name] = card
+        self._tools = reordered
+
     def get(self, name: str) -> Optional[Ability]:
         """Get an ability Card by name
 
@@ -380,6 +395,28 @@ class AbilityManager:
         abilities.extend(self._mcp_servers.values())
         return abilities
 
+    @staticmethod
+    def _prioritize_paid_search(
+            tool_items: List[Tuple[str, ToolCard]]
+    ) -> List[Tuple[str, ToolCard]]:
+        """Keep paid_search ahead of free_search when both tools are exposed."""
+        names = [name for name, _ in tool_items]
+        if "paid_search" not in names or "free_search" not in names:
+            return tool_items
+        paid_index = names.index("paid_search")
+        free_index = names.index("free_search")
+        if paid_index < free_index:
+            return tool_items
+
+        reordered = list(tool_items)
+        paid_item = reordered.pop(paid_index)
+        free_index = next(
+            index for index, (name, _) in enumerate(reordered)
+            if name == "free_search"
+        )
+        reordered.insert(free_index, paid_item)
+        return reordered
+
     async def list_tool_info(
             self,
             names: Optional[List[str]] = None,
@@ -397,7 +434,7 @@ class AbilityManager:
         tool_infos: List[ToolInfo] = []
 
         # Convert ToolCards to ToolInfo
-        for name, tool_card in self._tools.items():
+        for name, tool_card in self._prioritize_paid_search(list(self._tools.items())):
             if names is None or name in names:
                 id_in_tool_card = tool_card.id
                 if not self._is_tool_in_mcp_server(id_in_tool_card):
