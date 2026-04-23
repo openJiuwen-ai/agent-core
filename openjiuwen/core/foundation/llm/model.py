@@ -117,10 +117,10 @@ class Model:
             client = get_client_registry().get_client(client_provider, "llm", model_config=self.model_config,
                                                       model_client_config=client_config)
         except ValueError as e:
-            supported_types = [name for name in get_client_registry().list_clients() if name.startswith("llm_")]
+            supported_types = [name[4:] for name in get_client_registry().list_clients() if name.startswith("llm_")]
             raise build_error(
-                StatusCode.MODEL_SERVICE_CONFIG_ERROR,
-                error_msg=f"Unsupported client_type: '{client_provider}', Supported types: {supported_types}"
+                StatusCode.MODEL_PROVIDER_INVALID,
+                error_msg=f"Unsupported client_provider: '{client_provider}', Supported types: {supported_types}"
             )
         return client
 
