@@ -24,7 +24,6 @@ from typing import (
 
 from pydantic import PrivateAttr
 
-from openjiuwen.agent_teams.constants import HUMAN_AGENT_MEMBER_NAME
 from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
@@ -761,20 +760,20 @@ class UpdateTaskTool(TeamTool):
             "required": ["task_id"],
         }
 
-    @staticmethod
-    def _is_cancellable_assignee(assignee: str | None) -> bool:
+    def _is_cancellable_assignee(self, assignee: str | None) -> bool:
         """Whether an assignee owns an execution process the team can cancel.
 
-        The human_agent is a first-class team member but runs no background
-        process — cancel operations must skip it, otherwise the backend would
-        attempt to stop something that never existed.
+        Human-agent members are first-class team members but run no
+        background process — cancel operations must skip all of them,
+        otherwise the backend would try to stop something that never
+        existed.
         """
-        return bool(assignee) and assignee != HUMAN_AGENT_MEMBER_NAME
+        return bool(assignee) and not self.agent_team.is_human_agent(assignee)
 
     async def _cancel_member_if_claimed(self, task_id: str) -> None:
         """Cancel the assignee if task is currently claimed.
 
-        Skips the human_agent: it owns no execution process to cancel.
+        Skips human-agent members: they own no execution process to cancel.
         """
         task = await self.task_manager.get(task_id)
         if not task or task.status != TaskStatus.CLAIMED.value:
@@ -785,8 +784,8 @@ class UpdateTaskTool(TeamTool):
     async def _cancel_claimed_members(self) -> None:
         """Cancel all members who have claimed tasks.
 
-        Skips the human_agent so a batch cancel does not try to cancel a
-        member that has no execution process.
+        Skips human-agent members so a batch cancel does not try to
+        cancel a member that has no execution process.
         """
         claimed_tasks = await self.task_manager.list_tasks(status=TaskStatus.CLAIMED.value)
         cancelled: set[str] = set()
@@ -796,15 +795,18 @@ class UpdateTaskTool(TeamTool):
             await self.agent_team.cancel_member(member_name=task.assignee)
             cancelled.add(task.assignee)
 
-    @staticmethod
-    def _is_human_agent_locked(task) -> bool:
-        """Whether a task is held by the human_agent and thus leader-immutable.
+    def _is_human_agent_locked(self, task) -> bool:
+        """Whether a task is held by a human-agent member and therefore
+        leader-immutable.
 
-        Leader may not cancel or reassign such tasks — the human collaborator
-        is the only party who can release them (by completing or by the team
-        being cleaned). Leader's only recourse is to send_message nudges.
+        The leader may not cancel or reassign such tasks — only the human
+        collaborator can release them (by completing, or by the team
+        being cleaned). The leader's only recourse is send_message nudges.
         """
-        return task.assignee == HUMAN_AGENT_MEMBER_NAME and task.status == TaskStatus.CLAIMED.value
+        return (
+            self.agent_team.is_human_agent(task.assignee)
+            and task.status == TaskStatus.CLAIMED.value
+        )
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         task_id = inputs.get("task_id")
@@ -820,9 +822,11 @@ class UpdateTaskTool(TeamTool):
         # cancel_all: task_id="*" + status="cancelled"
         if task_id == "*" and status == "cancelled":
             await self._cancel_claimed_members()
-            count = await self.agent_team.cancel_all_tasks(
-                skip_assignees={HUMAN_AGENT_MEMBER_NAME},
-            )
+            # Preserve every human-agent-claimed task in a single batch
+            # cancel. Passing an empty set is fine — the backend treats
+            # None and empty uniformly.
+            skip = set(self.agent_team.human_agent_names())
+            count = await self.agent_team.cancel_all_tasks(skip_assignees=skip or None)
             return ToolOutput(success=True, data={"cancelled_count": count})
 
         task = await self.task_manager.get(task_id)

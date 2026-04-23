@@ -346,6 +346,10 @@ class _FakeTeamBackend:
         """TeamRail probes this; fake teams never enable HITT."""
         return False
 
+    def human_agent_names(self) -> frozenset[str]:
+        """TeamRail snapshots the roster here; fake teams are empty."""
+        return frozenset()
+
     # -- Mutators used by tests ----------------------------------------------
 
     def set_team(self, team: _StubTeam | None, mtime: int) -> None:

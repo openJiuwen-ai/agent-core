@@ -12,6 +12,7 @@ from openjiuwen.agent_teams.factory import create_agent_team, resume_persistent_
 from openjiuwen.agent_teams.interaction import (
     HumanAgentInbox,
     HumanAgentNotEnabledError,
+    UnknownHumanAgentError,
     UserInbox,
     is_reserved_name,
     parse_mention,
@@ -48,6 +49,7 @@ __all__ = [
     "HUMAN_AGENT_MEMBER_NAME",
     "HumanAgentInbox",
     "HumanAgentNotEnabledError",
+    "UnknownHumanAgentError",
     "LeaderSpec",
     "RESERVED_MEMBER_NAMES",
     "StorageSpec",

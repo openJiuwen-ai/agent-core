@@ -20,6 +20,7 @@ literals scattered across methods.
 from openjiuwen.agent_teams.interaction.human_agent_inbox import (
     HumanAgentInbox,
     HumanAgentNotEnabledError,
+    UnknownHumanAgentError,
 )
 from openjiuwen.agent_teams.interaction.router import (
     is_reserved_name,
@@ -32,6 +33,7 @@ from openjiuwen.agent_teams.interaction.user_inbox import (
 __all__ = [
     "HumanAgentInbox",
     "HumanAgentNotEnabledError",
+    "UnknownHumanAgentError",
     "UserInbox",
     "is_reserved_name",
     "parse_mention",

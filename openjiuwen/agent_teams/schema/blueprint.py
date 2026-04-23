@@ -270,16 +270,19 @@ class TeamAgentSpec(BaseModel):
                 )
 
     def _inject_human_agent_if_enabled(self) -> None:
-        """Append the reserved human_agent member when HITT is on.
+        """Ensure at least one human-agent member exists when HITT is on.
 
-        Idempotent: if a human_agent slot already exists (e.g. Spec was
-        built twice) we leave it alone.
+        ``enable_hitt=True`` is a convenience that bootstraps a single
+        default ``human_agent`` member. If the caller already declared
+        one or more members with ``role_type=HUMAN_AGENT`` (including
+        under custom names), nothing is added — the explicit roster
+        wins and multi-human teams work out of the box.
+        Idempotent across repeated ``build()`` calls.
         """
         if not self.enable_hitt:
             return
-        for member in self.predefined_members:
-            if member.member_name == HUMAN_AGENT_MEMBER_NAME:
-                return
+        if any(m.role_type == TeamRole.HUMAN_AGENT for m in self.predefined_members):
+            return
         self.predefined_members.append(
             TeamMemberSpec(
                 member_name=HUMAN_AGENT_MEMBER_NAME,

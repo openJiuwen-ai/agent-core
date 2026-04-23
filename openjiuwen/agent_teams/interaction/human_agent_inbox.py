@@ -27,53 +27,95 @@ if TYPE_CHECKING:
 
 
 class HumanAgentNotEnabledError(RuntimeError):
-    """Raised when someone tries to act as human_agent on a non-HITT team."""
+    """Raised when a caller tries to speak as a human agent on a
+    team that has no human-agent member registered at all."""
+
+
+class UnknownHumanAgentError(RuntimeError):
+    """Raised when ``sender`` is not a registered human-agent member.
+
+    Distinct from ``HumanAgentNotEnabledError``: the team has HITT on,
+    but the specific sender the caller picked does not exist.
+    """
 
 
 class HumanAgentInbox:
-    """Route human_agent speech onto the team's message bus.
+    """Route human-agent speech onto the team's message bus.
 
-    Holds a reference to ``TeamBackend`` so the entry points can
-    check ``hitt_enabled()`` before writing — calls on a non-HITT
-    team raise ``HumanAgentNotEnabledError`` instead of silently
-    injecting a rogue ``human_agent`` identity.
+    Holds a reference to ``TeamBackend`` so the entry points can verify
+    the team has at least one human agent registered and that the
+    chosen ``sender`` is one of them. Unregistered senders raise
+    ``UnknownHumanAgentError`` instead of silently injecting a rogue
+    identity into the message log.
     """
 
     def __init__(self, team: "TeamBackend", message_manager: "TeamMessageManager"):
         self._team = team
         self._mm = message_manager
 
-    def _ensure_enabled(self) -> None:
-        if not self._team.hitt_enabled():
-            raise HumanAgentNotEnabledError(
-                "human_agent is not registered on this team; "
-                "create the team with enable_hitt=True or call "
-                "build_team(enable_hitt=True)"
-            )
+    def _resolve_sender(self, sender: Optional[str]) -> str:
+        """Pick a sender and verify it is a registered human-agent member.
 
-    async def send(self, body: str, to: Optional[str] = None) -> Optional[str]:
-        """Post a message as ``human_agent``.
+        Defaults to the first registered human agent when ``sender`` is
+        omitted so single-human teams keep the minimal call form
+        ``inbox.send(body)`` working.
+        """
+        names = self._team.human_agent_names()
+        if not names:
+            raise HumanAgentNotEnabledError(
+                "No human-agent member is registered on this team; "
+                "create the team with enable_hitt=True or declare "
+                "TeamMemberSpec(role_type=TeamRole.HUMAN_AGENT, ...) "
+                "entries in predefined_members"
+            )
+        if sender is None:
+            # Deterministic default: the reserved name if present,
+            # otherwise the lexicographically first registered one.
+            if HUMAN_AGENT_MEMBER_NAME in names:
+                return HUMAN_AGENT_MEMBER_NAME
+            return sorted(names)[0]
+        if sender not in names:
+            raise UnknownHumanAgentError(
+                f"'{sender}' is not a registered human-agent member; "
+                f"registered members: {sorted(names)}"
+            )
+        return sender
+
+    async def send(
+        self,
+        body: str,
+        to: Optional[str] = None,
+        *,
+        sender: Optional[str] = None,
+    ) -> Optional[str]:
+        """Post a message as a human-agent member.
 
         Args:
             body: Message content.
             to: Target member name. ``None`` broadcasts; otherwise
                 writes a point-to-point message.
+            sender: Member name of the human agent speaking. Optional
+                on single-human teams; required when the team declares
+                multiple human-agent members.
         """
-        self._ensure_enabled()
-        team_logger.debug(f"HumanAgentInbox: sending as human_agent, to={to or '*'}")
+        resolved_sender = self._resolve_sender(sender)
+        team_logger.debug(
+            "HumanAgentInbox: sending as %s, to=%s", resolved_sender, to or "*"
+        )
         if to is None:
             return await self._mm.broadcast_message(
                 content=body,
-                from_member_name=HUMAN_AGENT_MEMBER_NAME,
+                from_member_name=resolved_sender,
             )
         return await self._mm.send_message(
             content=body,
             to_member_name=to,
-            from_member_name=HUMAN_AGENT_MEMBER_NAME,
+            from_member_name=resolved_sender,
         )
 
 
 __all__ = [
     "HumanAgentInbox",
     "HumanAgentNotEnabledError",
+    "UnknownHumanAgentError",
 ]

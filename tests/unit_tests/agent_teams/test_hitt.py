@@ -307,7 +307,7 @@ async def test_cancel_task_owned_by_human_agent_is_refused(built_team, db):
     tool = UpdateTaskTool(built_team, make_translator("cn"))
     out = await tool.invoke({"task_id": "t-1", "status": "cancelled"})
     assert out.success is False
-    assert "human_agent" in out.error
+    assert "人类成员" in out.error
     # Task itself must still be claimed by human_agent.
     task = await built_team.task_manager.get("t-1")
     assert task.status == TaskStatus.CLAIMED.value
@@ -324,7 +324,7 @@ async def test_reassign_task_owned_by_human_agent_is_refused(built_team, db):
     tool = UpdateTaskTool(built_team, make_translator("cn"))
     out = await tool.invoke({"task_id": "t-2", "assignee": "other-member"})
     assert out.success is False
-    assert "human_agent" in out.error
+    assert "人类成员" in out.error
     task = await built_team.task_manager.get("t-2")
     assert task.assignee == HUMAN_AGENT_MEMBER_NAME
 
@@ -485,16 +485,205 @@ async def test_human_agent_inbox_sends_as_human_agent(built_team, db):
 
 
 # ---------------------------------------------------------------------------
+# Multiple human-agent members
+# ---------------------------------------------------------------------------
+
+
+def _multi_human_spec() -> TeamAgentSpec:
+    """Two distinct human members declared via predefined_members."""
+    agents = {"leader": DeepAgentSpec()}
+    return TeamAgentSpec(
+        agents=agents,
+        team_name="multi_hitt_team",
+        predefined_members=[
+            TeamMemberSpec(
+                member_name="human_designer",
+                display_name="Designer",
+                role_type=TeamRole.HUMAN_AGENT,
+                persona="Visual designer",
+            ),
+            TeamMemberSpec(
+                member_name="human_pm",
+                display_name="Product Manager",
+                role_type=TeamRole.HUMAN_AGENT,
+                persona="PM",
+            ),
+        ],
+    )
+
+
+@pytest.mark.level0
+def test_multi_human_spec_validates():
+    """Multiple role=HUMAN_AGENT members with custom names pass validation."""
+    spec = _multi_human_spec()
+    spec._validate_reserved_names()  # must not raise
+
+
+@pytest.mark.level0
+def test_enable_hitt_does_not_reinject_when_declared():
+    """enable_hitt=True must not add the default human_agent if the caller
+    already supplied one or more role=HUMAN_AGENT members."""
+    spec = _multi_human_spec()
+    spec.enable_hitt = True
+    before = {m.member_name for m in spec.predefined_members}
+    spec._inject_human_agent_if_enabled()
+    after = {m.member_name for m in spec.predefined_members}
+    assert after == before
+    # The default "human_agent" must NOT appear alongside the two customs.
+    assert HUMAN_AGENT_MEMBER_NAME not in after
+
+
+@pytest_asyncio.fixture
+async def multi_human_backend(db, messager):
+    backend = TeamBackend(
+        team_name="multi_hitt_team",
+        member_name="team_leader",
+        is_leader=True,
+        db=db,
+        messager=messager,
+        predefined_members=[
+            TeamMemberSpec(
+                member_name="human_designer",
+                display_name="Designer",
+                role_type=TeamRole.HUMAN_AGENT,
+                persona="Visual designer",
+            ),
+            TeamMemberSpec(
+                member_name="human_pm",
+                display_name="PM",
+                role_type=TeamRole.HUMAN_AGENT,
+                persona="Product",
+            ),
+        ],
+    )
+    await backend.build_team(
+        display_name="Multi",
+        desc="t",
+        leader_display_name="Leader",
+        leader_desc="p",
+    )
+    yield backend
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_team_registers_every_declared_human_member(
+    multi_human_backend, db
+):
+    assert multi_human_backend.hitt_enabled() is True
+    assert multi_human_backend.is_human_agent("human_designer") is True
+    assert multi_human_backend.is_human_agent("human_pm") is True
+    assert multi_human_backend.is_human_agent("team_leader") is False
+    # Both must be persisted as READY members.
+    for name in ("human_designer", "human_pm"):
+        member = await db.get_member(name, "multi_hitt_team")
+        assert member is not None
+        assert member.status == MemberStatus.READY.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_direct_message_auto_read_for_every_human_member(
+    multi_human_backend, db
+):
+    """send_message to any of the declared human members must auto-mark-read."""
+    mm = multi_human_backend.message_manager
+    for name in ("human_designer", "human_pm"):
+        msg_id = await mm.send_message(content=f"hi {name}", to_member_name=name)
+        assert msg_id is not None
+        messages = await mm.get_messages(to_member_name=name)
+        assert any(m.is_read for m in messages if m.to_member_name == name)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_broadcast_auto_marks_read_for_every_human_member(
+    multi_human_backend,
+):
+    """Broadcast advances every human member's read watermark."""
+    mm = multi_human_backend.message_manager
+    msg_id = await mm.broadcast_message(content="hello team")
+    assert msg_id is not None
+    for name in ("human_designer", "human_pm"):
+        unread = await mm.get_broadcast_messages(member_name=name, unread_only=True)
+        assert unread == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_task_lock_per_human_member(multi_human_backend, db):
+    """Each human member locks its own tasks; unrelated tasks stay mutable."""
+    from openjiuwen.agent_teams.tools.locales import make_translator
+    from openjiuwen.agent_teams.tools.team_tools import UpdateTaskTool
+
+    await _create_and_assign(multi_human_backend, db, "t-designer", "human_designer")
+    await _create_and_assign(multi_human_backend, db, "t-pm", "human_pm")
+    tool = UpdateTaskTool(multi_human_backend, make_translator("en"))
+
+    out_designer = await tool.invoke({"task_id": "t-designer", "status": "cancelled"})
+    assert out_designer.success is False
+    out_pm = await tool.invoke({"task_id": "t-pm", "assignee": "team_leader"})
+    assert out_pm.success is False
+
+    designer_task = await multi_human_backend.task_manager.get("t-designer")
+    pm_task = await multi_human_backend.task_manager.get("t-pm")
+    assert designer_task.assignee == "human_designer"
+    assert pm_task.assignee == "human_pm"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_cancel_all_preserves_all_human_members(multi_human_backend, db):
+    """Batch cancel must preserve tasks held by ANY human member."""
+    from openjiuwen.agent_teams.tools.locales import make_translator
+    from openjiuwen.agent_teams.tools.team_tools import UpdateTaskTool
+
+    await _create_and_assign(multi_human_backend, db, "t-designer", "human_designer")
+    await _create_and_assign(multi_human_backend, db, "t-pm", "human_pm")
+    await multi_human_backend.task_manager.add(title="open", content="c", task_id="t-open")
+
+    tool = UpdateTaskTool(multi_human_backend, make_translator("en"))
+    out = await tool.invoke({"task_id": "*", "status": "cancelled"})
+    assert out.success is True
+
+    assert (await multi_human_backend.task_manager.get("t-designer")).status == TaskStatus.CLAIMED.value
+    assert (await multi_human_backend.task_manager.get("t-pm")).status == TaskStatus.CLAIMED.value
+    assert (await multi_human_backend.task_manager.get("t-open")).status == TaskStatus.CANCELLED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_human_agent_inbox_requires_sender_on_multi_team(multi_human_backend):
+    """Omitting sender is fine (defaults to first registered), but bogus
+    senders must raise UnknownHumanAgentError."""
+    from openjiuwen.agent_teams.interaction import UnknownHumanAgentError
+
+    inbox = HumanAgentInbox(multi_human_backend, multi_human_backend.message_manager)
+    with pytest.raises(UnknownHumanAgentError):
+        await inbox.send("spoofing", to="team_leader", sender="ghost")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_human_agent_inbox_posts_under_chosen_sender(multi_human_backend):
+    """Explicit sender lets the caller speak as a specific human member."""
+    inbox = HumanAgentInbox(multi_human_backend, multi_human_backend.message_manager)
+    await inbox.send("ok", to="team_leader", sender="human_pm")
+    stored = await multi_human_backend.message_manager.get_messages(to_member_name="team_leader")
+    assert any(m.from_member_name == "human_pm" for m in stored)
+
+
+# ---------------------------------------------------------------------------
 # Rail HITT section
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.level0
-def test_hitt_section_none_when_disabled():
+def test_hitt_section_none_when_no_human_members():
     assert (
         build_team_hitt_section(
             role=TeamRole.LEADER,
-            hitt_enabled=False,
+            human_agent_names=[],
             language="cn",
         )
         is None
@@ -505,12 +694,12 @@ def test_hitt_section_none_when_disabled():
 def test_hitt_section_leader_mentions_lock_rules():
     section = build_team_hitt_section(
         role=TeamRole.LEADER,
-        hitt_enabled=True,
+        human_agent_names=[HUMAN_AGENT_MEMBER_NAME],
         language="cn",
     )
     assert section is not None
     body = section.content["cn"]
-    assert "human_agent" in body
+    assert HUMAN_AGENT_MEMBER_NAME in body
     # Must spell out the ban on plain-text + the cancel/reassign lock.
     assert "send_message" in body
     assert "不能" in body or "禁止" in body
@@ -520,13 +709,42 @@ def test_hitt_section_leader_mentions_lock_rules():
 def test_hitt_section_human_agent_describes_constrained_tools():
     section = build_team_hitt_section(
         role=TeamRole.HUMAN_AGENT,
-        hitt_enabled=True,
+        human_agent_names=[HUMAN_AGENT_MEMBER_NAME],
         language="en",
+        self_member_name=HUMAN_AGENT_MEMBER_NAME,
     )
     assert section is not None
     body = section.content["en"]
     assert "send_message" in body
     assert "claim_task" in body or "do not" in body.lower()
+
+
+@pytest.mark.level0
+def test_hitt_section_leader_lists_every_human_member():
+    """Leader must see every registered human member name inline."""
+    section = build_team_hitt_section(
+        role=TeamRole.LEADER,
+        human_agent_names=["human_designer", "human_pm"],
+        language="cn",
+    )
+    assert section is not None
+    body = section.content["cn"]
+    assert "human_designer" in body
+    assert "human_pm" in body
+
+
+@pytest.mark.level0
+def test_hitt_section_human_agent_tells_self_apart():
+    """Human-agent prompt names itself out of the roster."""
+    section = build_team_hitt_section(
+        role=TeamRole.HUMAN_AGENT,
+        human_agent_names=["human_designer", "human_pm"],
+        language="cn",
+        self_member_name="human_pm",
+    )
+    assert section is not None
+    body = section.content["cn"]
+    assert "human_pm" in body
 
 
 # ---------------------------------------------------------------------------

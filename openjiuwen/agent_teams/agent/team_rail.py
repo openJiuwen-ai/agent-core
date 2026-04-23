@@ -343,112 +343,171 @@ def build_team_info_section(
     )
 
 
-_HITT_SECTIONS_CN: dict[TeamRole, str] = {
-    TeamRole.LEADER: (
+def _format_human_agent_roster(names: list[str], language: str) -> str:
+    """Render the list of human-agent member names for inline prompts."""
+    quoted = ", ".join(f"`{n}`" for n in names)
+    if language == "cn":
+        return f"注册的人类成员：{quoted}"
+    return f"Registered human members: {quoted}"
+
+
+def _hitt_section_leader_cn(names: list[str]) -> str:
+    roster = _format_human_agent_roster(names, "cn")
+    return (
         "# HITT — 人类成员协作规则\n\n"
-        "团队内注册了保留成员 `human_agent`，它是真实人类操作者的代理，与"
-        "你和其它 teammate 平等。你必须以下列规则与之相处：\n\n"
-        "1. **禁止** 用 plain text 向 `human_agent` 发问或对话——所有定向"
-        '沟通必须调用 `send_message(to="human_agent", ...)`，你的纯文本'
-        "输出对方是看不到的。\n"
-        '2. 可以通过 `update_task(task_id=..., assignee="human_agent")` '
-        "把需要人类判断或操作的任务指派给它。\n"
-        "3. 一旦 `human_agent` 认领了任务（assignee=human_agent 且 "
-        "status=claimed），你 **不能** 取消（update_task status=cancelled）"
-        "也 **不能** 改派（update_task assignee=<他人>），即使团队因人类没"
-        "及时响应而停滞也必须保持停滞，只能用 `send_message` 催促。\n"
-        "4. `human_agent` 始终是 ready 状态，不会进入 busy 或 shutdown，"
-        "所以不要对它调用 `shutdown_member` / `spawn_member`。\n"
-        "5. 如果 user 表达了 “我也要加入团队” 之类的加入意图，且团队尚未"
-        "创建，请在 `build_team` 时把 `enable_hitt=true`；若团队已建立且"
-        "未启用 HITT，告知 user 需要重建团队。\n"
-    ),
-    TeamRole.TEAMMATE: (
+        f"{roster}。他们是真实人类操作者的代理，与你和其它 teammate 平等。"
+        "所有 role=human_agent 的成员都适用下列规则：\n\n"
+        "1. **禁止** 用 plain text 向任何人类成员发问或对话——所有定向"
+        '沟通必须调用 `send_message(to="<human_member_name>", ...)`，你的'
+        "纯文本输出对方是看不到的。\n"
+        "2. 可以通过 `update_task(task_id=..., assignee=\"<human_member_name>\")` "
+        "把需要特定人类判断或操作的任务指派给对应成员。\n"
+        "3. 一旦某个人类成员认领了任务（status=claimed），你 **不能** 取消"
+        "（update_task status=cancelled）也 **不能** 改派（update_task "
+        "assignee=<他人>），即使团队因人类没及时响应而停滞也必须保持停滞，"
+        "只能用 `send_message` 催促对应人类成员。\n"
+        "4. 每个人类成员始终是 ready 状态，不会进入 busy 或 shutdown，"
+        "所以不要对它们调用 `shutdown_member` / `spawn_member`。\n"
+        "5. 如果 user 表达了“我也要加入团队”之类的加入意图，且团队尚未"
+        "创建，请在 `build_team` 时把 `enable_hitt=true`；若需要多个不同"
+        "人类成员，通过 `predefined_members` 传入 role=human_agent 的 spec。\n"
+    )
+
+
+def _hitt_section_teammate_cn(names: list[str]) -> str:
+    roster = _format_human_agent_roster(names, "cn")
+    return (
         "# HITT — 与人类成员协作\n\n"
-        "团队里可能存在保留成员 `human_agent`（真实人类）。把它视作普通"
-        'teammate：与它交流一律通过 `send_message(to="human_agent", ...)`，'
-        "不要假设它会自动看到你的 plain text。它可能拥有你无法完成的决策"
-        "权或操作能力。\n"
-    ),
-    TeamRole.HUMAN_AGENT: (
-        "# HITT — 你是 human_agent\n\n"
+        f"团队里存在下列人类成员（真实人类）：{roster}。把他们视作普通 "
+        "teammate：与他们交流一律通过 `send_message(to=<对应名字>, ...)`，"
+        "不要假设他们会自动看到你的 plain text。他们可能拥有你无法完成的"
+        "决策权或操作能力。\n"
+    )
+
+
+def _hitt_section_human_agent_cn(names: list[str], self_name: str | None) -> str:
+    roster = _format_human_agent_roster(names, "cn")
+    peers = ""
+    if self_name:
+        peers = f"你的 member_name 是 `{self_name}`。\n"
+    return (
+        "# HITT — 你是团队里的人类成员\n\n"
+        f"{roster}。\n"
+        f"{peers}"
         "你是团队里真实人类操作者的代理，与 leader、teammate 平等。\n"
         "- 你只能通过 `send_message` 与团队交互；没有 `claim_task`、"
         "`update_task`、`spawn_member` 等工具。\n"
         "- Leader 通过 `update_task` 把任务指派给你后，你需要以对话方式"
         "与团队沟通进展；完成后通过 `send_message` 告知 leader。\n"
-        "- 你的消息一律标记为已读，不会堆积未读。\n"
-    ),
-}
+        "- 发送给你的消息一律自动标记已读，不会堆积未读。\n"
+    )
 
-_HITT_SECTIONS_EN: dict[TeamRole, str] = {
-    TeamRole.LEADER: (
-        "# HITT — Collaborating with the Human Member\n\n"
-        "A reserved member `human_agent` is registered on this team. It "
-        "represents a real human operator and stands on equal footing with "
-        "you and the other teammates. Follow these rules strictly:\n\n"
-        "1. You **must not** address `human_agent` via plain text — every "
-        "direct exchange must go through "
-        '`send_message(to="human_agent", ...)`. Your plain text output is '
-        "not visible to the human member.\n"
-        '2. Use `update_task(task_id=..., assignee="human_agent")` to '
-        "assign tasks that require human judgement or action.\n"
-        "3. Once `human_agent` has claimed a task "
-        "(assignee=human_agent, status=claimed) you **cannot** cancel it "
-        "(`update_task status=cancelled`) and **cannot** reassign it "
-        "(`update_task assignee=<someone>`). Even if the team stalls while "
-        "waiting for the human, it must stall — only `send_message` nudges "
-        "are allowed.\n"
-        "4. `human_agent` stays READY forever. Never call `shutdown_member` "
-        "or `spawn_member` on it.\n"
-        '5. If the user signals intent to join the team (e.g. "I want to '
-        'join"), and the team has not been created yet, call '
-        "`build_team` with `enable_hitt=true`. If the team already exists "
-        "without HITT, explain that the team must be rebuilt.\n"
-    ),
-    TeamRole.TEAMMATE: (
-        "# HITT — Working with the Human Member\n\n"
-        "The team may include a reserved member `human_agent` (a real "
-        "human). Treat it as an ordinary teammate: every direct exchange "
-        'must use `send_message(to="human_agent", ...)`. Do not assume '
-        "your plain text is visible to the human member; they may hold "
-        "decisions or privileges that you cannot execute.\n"
-    ),
-    TeamRole.HUMAN_AGENT: (
-        "# HITT — You are human_agent\n\n"
-        "You represent the human operator on this team, equal in standing "
-        "with the leader and teammates.\n"
-        "- Your only tool is `send_message`; you do not have `claim_task`, "
-        "`update_task`, `spawn_member`, etc.\n"
-        "- When the leader assigns you a task via `update_task`, reply and "
-        "coordinate through `send_message`. Announce completion through "
-        "`send_message` too.\n"
-        "- Every message addressed to you is auto-marked-read; there is no "
-        "unread backlog on your side.\n"
-    ),
-}
+
+def _hitt_section_leader_en(names: list[str]) -> str:
+    roster = _format_human_agent_roster(names, "en")
+    return (
+        "# HITT — Collaborating with Human Members\n\n"
+        f"{roster}. They represent real human operators and stand on "
+        "equal footing with you and the other teammates. The following "
+        "rules apply to every member whose role is `human_agent`:\n\n"
+        "1. You **must not** address a human member via plain text — "
+        "every direct exchange must go through "
+        '`send_message(to="<human_member_name>", ...)`. Your plain text '
+        "output is not visible to human members.\n"
+        "2. Use `update_task(task_id=..., "
+        'assignee="<human_member_name>")` to assign tasks that require a '
+        "specific human's judgement or action.\n"
+        "3. Once a human member claims a task (status=claimed) you "
+        "**cannot** cancel it (`update_task status=cancelled`) and "
+        "**cannot** reassign it (`update_task assignee=<someone>`). Even "
+        "if the team stalls waiting for that human, it must stall — only "
+        "`send_message` nudges to the specific human are allowed.\n"
+        "4. Every human member stays READY forever; never call "
+        "`shutdown_member` or `spawn_member` on them.\n"
+        '5. If the user signals intent to join the team (e.g. "I want '
+        'to join") and the team has not been created yet, call '
+        "`build_team` with `enable_hitt=true`. If multiple distinct "
+        "human members are needed, pass them via `predefined_members` "
+        "as TeamMemberSpec entries with role=human_agent.\n"
+    )
+
+
+def _hitt_section_teammate_en(names: list[str]) -> str:
+    roster = _format_human_agent_roster(names, "en")
+    return (
+        "# HITT — Working with Human Members\n\n"
+        f"The team includes the following human members (real humans): "
+        f"{roster}. Treat each of them as an ordinary teammate: every "
+        "direct exchange must use `send_message(to=<their_name>, ...)`. "
+        "Do not assume your plain text is visible to a human member; "
+        "they may hold decisions or privileges you cannot execute.\n"
+    )
+
+
+def _hitt_section_human_agent_en(names: list[str], self_name: str | None) -> str:
+    roster = _format_human_agent_roster(names, "en")
+    peers = ""
+    if self_name:
+        peers = f"Your member_name is `{self_name}`.\n"
+    return (
+        "# HITT — You are a human member\n\n"
+        f"{roster}.\n"
+        f"{peers}"
+        "You represent the human operator on this team, equal in "
+        "standing with the leader and teammates.\n"
+        "- Your only tool is `send_message`; you do not have "
+        "`claim_task`, `update_task`, `spawn_member`, etc.\n"
+        "- When the leader assigns you a task via `update_task`, reply "
+        "and coordinate through `send_message`. Announce completion "
+        "through `send_message` too.\n"
+        "- Every message addressed to you is auto-marked-read; there is "
+        "no unread backlog on your side.\n"
+    )
 
 
 def build_team_hitt_section(
     *,
     role: TeamRole,
-    hitt_enabled: bool,
+    human_agent_names: "list[str] | frozenset[str] | set[str] | None" = None,
     language: str = "cn",
+    self_member_name: str | None = None,
 ) -> Optional[PromptSection]:
     """Build the HITT collaboration-rules section.
 
-    Returns a non-None section only when the team has a registered
-    human_agent member. The text is role-specific so leaders get the
-    full contract (cannot cancel/reassign), teammates get the "talk to
-    it via send_message" reminder, and human_agent itself sees its own
-    constrained toolbelt described.
+    Returns a non-None section only when at least one human-agent
+    member is registered. Text is role-specific and enumerates every
+    registered human member inline so leaders and teammates can see
+    exactly whom to address via ``send_message``.
+
+    Args:
+        role: The role whose prompt this section targets.
+        human_agent_names: Member names of every registered human
+            agent. Empty/None means no human members → no section.
+        language: "cn" or "en".
+        self_member_name: The current member's own name, used to tell
+            a human-agent reader which entry in the roster is itself.
     """
-    if not hitt_enabled:
+    if not human_agent_names:
         return None
-    table = _HITT_SECTIONS_CN if language == "cn" else _HITT_SECTIONS_EN
-    body = table.get(role)
-    if not body:
-        return None
+    names = sorted(human_agent_names)
+    if language == "cn":
+        if role == TeamRole.LEADER:
+            body = _hitt_section_leader_cn(names)
+        elif role == TeamRole.TEAMMATE:
+            body = _hitt_section_teammate_cn(names)
+        elif role == TeamRole.HUMAN_AGENT:
+            body = _hitt_section_human_agent_cn(names, self_member_name)
+        else:
+            return None
+    else:
+        if role == TeamRole.LEADER:
+            body = _hitt_section_leader_en(names)
+        elif role == TeamRole.TEAMMATE:
+            body = _hitt_section_teammate_en(names)
+        elif role == TeamRole.HUMAN_AGENT:
+            body = _hitt_section_human_agent_en(names, self_member_name)
+        else:
+            return None
     return PromptSection(
         name=TeamSectionName.HITT,
         content={language: body},
@@ -553,10 +612,12 @@ class TeamRail(DeepAgentRail):
         self._team_workspace_path = team_workspace_path
         self.system_prompt_builder = None
 
-        # Static sections built once and reused on every call. HITT is
-        # derived from the backend — it cannot be None when a team has
-        # registered human_agent, so we fail loud rather than silently
-        # skipping the section.
+        # Static sections built once and reused on every call. The HITT
+        # section receives the roster snapshot captured at rail-init
+        # time; dynamic additions to the human-agent set (rare — only
+        # the build_team path adds them) take effect on the next rail
+        # rebuild.
+        human_names: list[str] = sorted(team_backend.human_agent_names()) if team_backend else []
         self._static_sections: list[PromptSection] = self._build_static_sections(
             role=role,
             persona=persona,
@@ -565,7 +626,7 @@ class TeamRail(DeepAgentRail):
             teammate_mode=teammate_mode,
             team_mode=team_mode,
             base_prompt=base_prompt,
-            hitt_enabled=bool(team_backend and team_backend.hitt_enabled()),
+            human_agent_names=human_names,
         )
 
         # Dynamic section caches: keyed on table-level mtime probes so
@@ -628,7 +689,7 @@ class TeamRail(DeepAgentRail):
         teammate_mode: str,
         team_mode: str,
         base_prompt: str | None,
-        hitt_enabled: bool,
+        human_agent_names: list[str],
     ) -> list[PromptSection]:
         """Construct the never-changing sections once at rail init time."""
         builders = [
@@ -640,8 +701,9 @@ class TeamRail(DeepAgentRail):
             ),
             build_team_hitt_section(
                 role=role,
-                hitt_enabled=hitt_enabled,
+                human_agent_names=human_agent_names,
                 language=self._language,
+                self_member_name=member_name,
             ),
             build_team_workflow_section(
                 role=role,

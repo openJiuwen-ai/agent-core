@@ -134,14 +134,14 @@ STRINGS: dict[str, str] = {
         "Task IDs to add as new dependencies (this task will be blocked until those tasks complete)"
     ),
     "update_task.error_human_agent_locked_cancel": (
-        "Task {task_id} is claimed by human_agent; tasks held by the "
-        "human member cannot be cancelled. Use send_message to coordinate "
-        "with the human instead"
+        "Task {task_id} is claimed by a human member; this task cannot "
+        "be cancelled. Use send_message to coordinate with that human "
+        "member instead"
     ),
     "update_task.error_human_agent_locked_reassign": (
-        "Task {task_id} is claimed by human_agent; it cannot be "
-        "reassigned to {new_assignee}. Tasks locked by the human member "
-        "must be completed by the human"
+        "Task {task_id} is claimed by a human member; it cannot be "
+        "reassigned to {new_assignee}. Tasks locked by a human member "
+        "must be completed by that human"
     ),
     # ===== claim_task =========================================================
     # claim_task._desc lives in descs/en/claim_task.md

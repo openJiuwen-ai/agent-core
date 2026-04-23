@@ -101,12 +101,21 @@ class TeamBackend:
         self._allocate_model_config = model_config_allocator
 
         self.task_manager = TeamTaskManager(self.team_name, member_name, self.db, messager)
-        self.message_manager = TeamMessageManager(self.team_name, member_name, self.db, messager)
-        # Flipped on when the reserved human_agent member is registered,
-        # whether declared in predefined_members or activated dynamically
-        # via ``build_team(enable_hitt=True)``. Runtime entry points read
-        # this to gate human_agent-only paths.
-        self._hitt_enabled: bool = any(m.role_type == TeamRole.HUMAN_AGENT for m in self.predefined_members)
+        # Roster of human-collaborator members. Shared by reference with
+        # TeamMessageManager below so auto-read and similar HITT hooks
+        # can consult a single source of truth without wiring a back
+        # reference to this backend. Seeded from predefined_members so
+        # restart paths reconstruct the set without replaying spawn.
+        self._human_agent_names: set[str] = {
+            m.member_name for m in self.predefined_members if m.role_type == TeamRole.HUMAN_AGENT
+        }
+        self.message_manager = TeamMessageManager(
+            self.team_name,
+            member_name,
+            self.db,
+            messager,
+            human_agent_names=self._human_agent_names,
+        )
 
         # Filesystem paths to remove when the team is cleaned.
         # Populated by the hosting TeamAgent once the actual (possibly
@@ -810,8 +819,8 @@ class TeamBackend:
         )
 
         # Register predefined teammates (UNSTARTED, launched later via broadcast).
-        # The reserved human_agent is filtered out and handled by
-        # ``_spawn_human_agent`` so it never enters the startup loop.
+        # Human agents are filtered out and handled by
+        # ``_spawn_human_agents`` so they never enter the startup loop.
         for member_spec in self.predefined_members:
             if member_spec.role_type == TeamRole.HUMAN_AGENT:
                 continue
@@ -834,14 +843,13 @@ class TeamBackend:
                 member_model=allocated,
             )
 
-        # HITT: register human_agent as a first-class, always-ready member.
-        # The flag wins over missing specs; a predefined spec wins over the
-        # default persona so callers can customize persona text.
-        human_spec = next(
-            (m for m in self.predefined_members if m.role_type == TeamRole.HUMAN_AGENT),
-            None,
-        )
-        if enable_hitt or human_spec is not None:
+        # HITT: register every declared human member; when enable_hitt is
+        # True but the caller declared no human specs, seed a single
+        # default ``human_agent`` for backward compatibility.
+        human_specs = [m for m in self.predefined_members if m.role_type == TeamRole.HUMAN_AGENT]
+        if not human_specs and enable_hitt:
+            human_specs = [None]
+        for human_spec in human_specs:
             await self._spawn_human_agent(team_name, human_spec)
 
         # Publish team created event
@@ -869,25 +877,28 @@ class TeamBackend:
         team_name: str,
         spec: Optional[TeamMemberSpec],
     ) -> None:
-        """Register the reserved human_agent as a READY team member.
+        """Register a human-agent member as a READY team member.
 
-        human_agent is a shell member: no DeepAgent process, no startup
-        callback, no execution lifecycle. It exists purely so the leader
+        Human agents are shell members: no DeepAgent process, no startup
+        callback, no execution lifecycle. They exist purely so the leader
         and teammates see a peer they can send_message to and assign
-        tasks to. Keeps status fixed at READY so the startup sweep
-        (which targets UNSTARTED) never touches it.
+        tasks to. Status stays at READY so the startup sweep (which
+        targets UNSTARTED) never touches them. When ``spec`` is None the
+        default ``human_agent`` identity is used (the single-human
+        backward-compatible path triggered by ``enable_hitt=True``).
         """
+        member_name = spec.member_name if spec else HUMAN_AGENT_MEMBER_NAME
         display_name = spec.display_name if spec else t("hitt.human_agent_display_name")
         persona = spec.persona if spec else t("hitt.human_agent_default_persona")
         prompt = spec.prompt_hint if spec else None
 
         member_card = AgentCard(
-            id=f"{team_name}_{HUMAN_AGENT_MEMBER_NAME}",
+            id=f"{team_name}_{member_name}",
             name=display_name,
             description=persona,
         )
         result = await self.spawn_member(
-            member_name=HUMAN_AGENT_MEMBER_NAME,
+            member_name=member_name,
             display_name=display_name,
             agent_card=member_card,
             desc=persona,
@@ -897,28 +908,43 @@ class TeamBackend:
             mode=MemberMode.BUILD_MODE,
         )
         if not result.ok:
-            team_logger.warning(f"Failed to register human_agent for team {team_name}: {result.reason}")
+            team_logger.warning(
+                f"Failed to register human agent '{member_name}' for team {team_name}: {result.reason}"
+            )
             return
 
-        self._hitt_enabled = True
+        # Mutate the shared set in place so TeamMessageManager (which
+        # holds the same reference) observes the registration without
+        # extra wiring.
+        self._human_agent_names.add(member_name)
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TEAM.build(get_session_id(), team_name),
                 message=EventMessage.from_event(
                     MemberSpawnedEvent(
                         team_name=team_name,
-                        member_name=HUMAN_AGENT_MEMBER_NAME,
+                        member_name=member_name,
                     )
                 ),
             )
         except Exception as e:
-            team_logger.error(f"Failed to publish human_agent spawned event: {e}")
+            team_logger.error(f"Failed to publish human agent spawned event for {member_name}: {e}")
+
+    def is_human_agent(self, member_name: Optional[str]) -> bool:
+        """Whether ``member_name`` is a registered human-agent member."""
+        if not member_name:
+            return False
+        return member_name in self._human_agent_names
+
+    def human_agent_names(self) -> frozenset[str]:
+        """Snapshot of currently registered human-agent member names."""
+        return frozenset(self._human_agent_names)
 
     def hitt_enabled(self) -> bool:
-        """Whether the reserved human_agent member is registered.
+        """Whether the team has at least one registered human-agent member.
 
         Checked by runtime entry points (e.g. ``TeamAgent.human_agent_say``)
-        to fail fast when the caller tries to act as human_agent on a
+        to fail fast when the caller tries to act as a human_agent on a
         non-HITT team.
         """
-        return self._hitt_enabled
+        return bool(self._human_agent_names)

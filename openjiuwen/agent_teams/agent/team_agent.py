@@ -794,13 +794,24 @@ class TeamAgent(BaseAgent):
         self,
         content: str,
         to: Optional[str] = None,
+        *,
+        sender: Optional[str] = None,
     ) -> Optional[str]:
-        """Speak as the reserved ``human_agent`` member.
+        """Speak as a registered human-agent member.
 
         Available only when HITT is enabled on this team. Maps to a
         ``send_message`` (point-to-point when ``to`` is provided, a
         broadcast otherwise) so the human collaborator's speech flows
         through the same message bus as teammate traffic.
+
+        Args:
+            content: Message body.
+            to: Optional recipient member name; None broadcasts.
+            sender: Optional speaker name. Omit on single-human teams
+                to use the default; required when the team declares
+                multiple human-agent members. Raises
+                ``UnknownHumanAgentError`` if ``sender`` is not a
+                registered human-agent member.
         """
         from openjiuwen.agent_teams.interaction import HumanAgentInbox
 
@@ -809,7 +820,7 @@ class TeamAgent(BaseAgent):
         return await HumanAgentInbox(
             self._team_backend,
             self._team_backend.message_manager,
-        ).send(content, to=to)
+        ).send(content, to=to, sender=sender)
 
     async def stream(self, inputs, session=None, stream_modes=None):
         """Stream via CoordinatorLoop-driven rounds.
