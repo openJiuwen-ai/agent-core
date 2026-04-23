@@ -490,7 +490,7 @@ class DeepAgentSpec(BaseModel):
             mcps=self.mcps,
             subagents=subagents,
             rails=rails,
-            enable_task_loop=self.enable_task_loop,
+            enable_task_loop=True,
             enable_async_subagent=self.enable_async_subagent,
             add_general_purpose_agent=self.add_general_purpose_agent,
             max_iterations=self.max_iterations,

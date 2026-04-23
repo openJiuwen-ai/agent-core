@@ -6,12 +6,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 import traceback
 from typing import (
     Any,
     Dict,
     List,
     Optional,
+    Tuple,
 )
 
 from openjiuwen.agent_teams.agent.coordinator import (
@@ -43,6 +45,8 @@ from openjiuwen.agent_teams.schema.team import (
     TeamSpec,
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.foundation.tool.base import Tool
@@ -75,6 +79,51 @@ def _resolve_team_mode(spec: TeamAgentSpec) -> str:
     if spec.team_mode is not None:
         return spec.team_mode
     return "predefined" if spec.predefined_members else "default"
+
+
+_MAX_RETRY_ATTEMPTS = 10
+_RETRYABLE_ERROR_CODES = {181001}
+_RETRY_QUERY = "刚才有异常状况，继续执行"
+_TASK_FAILED_PAYLOAD_TYPE = "task_failed"
+_ERROR_CODE_PATTERN = re.compile(r"^\[(\d+)\]")
+
+
+def _detect_task_failed(chunk: Any) -> Optional[Tuple[Optional[int], str]]:
+    """Detect a TASK_FAILED chunk emitted by the task-loop executor.
+
+    The task-loop executor wraps a BaseError into
+    ``ControllerOutputChunk(payload.type='task_failed',
+    data=[TextDataFrame(text='[code] message')])``. BaseError's ``__str__``
+    guarantees the leading ``[code]`` prefix so the error code can be parsed
+    out of the text reliably.
+
+    Args:
+        chunk: Stream chunk produced by ``Runner.run_agent_streaming``.
+
+    Returns:
+        ``(error_code, error_text)`` when the chunk is a TASK_FAILED frame;
+        ``error_code`` is ``None`` if the text lacks the ``[code]`` prefix
+        (treated as non-retryable). Returns ``None`` for non-error chunks.
+    """
+    payload = getattr(chunk, "payload", None)
+    if payload is None:
+        return None
+    if getattr(payload, "type", None) != _TASK_FAILED_PAYLOAD_TYPE:
+        return None
+
+    text = ""
+    data = getattr(payload, "data", None) or []
+    if data:
+        text = getattr(data[0], "text", "") or ""
+
+    code: Optional[int] = None
+    match = _ERROR_CODE_PATTERN.match(text)
+    if match:
+        try:
+            code = int(match.group(1))
+        except ValueError:
+            code = None
+    return code, text
 
 
 class TeamAgent(BaseAgent):
@@ -1269,6 +1318,101 @@ class TeamAgent(BaseAgent):
                 if self._team_member and await self._team_member.status() == MemberStatus.SHUTDOWN_REQUESTED:
                     self._close_stream()
 
+    async def _stream_one_round(
+        self,
+        query: Any,
+    ) -> Optional[Tuple[Optional[int], str]]:
+        """Pump exactly one streaming round of the inner DeepAgent.
+
+        Forwards non-error chunks to ``self._stream_queue``. Once a TASK_FAILED
+        frame appears, every subsequent frame (the blank answer chunk plus the
+        END_FRAME from ``session.close_stream``) is swallowed so the downstream
+        queue only sees coherent rounds.
+
+        Args:
+            query: Query string / payload for this round.
+
+        Returns:
+            ``None`` if the round completed without a TASK_FAILED frame.
+            Otherwise ``(error_code, error_text)``; ``error_code`` is ``None``
+            when the frame text lacks the ``[code]`` prefix.
+        """
+        inputs = {"query": query}
+        error_seen = False
+        error_code: Optional[int] = None
+        error_text: str = ""
+        self._streaming_active = True
+        try:
+            async for chunk in Runner.run_agent_streaming(
+                self._deep_agent,
+                inputs,
+                session=self._session_id,
+            ):
+                if error_seen:
+                    continue
+                detected = _detect_task_failed(chunk)
+                if detected is not None:
+                    error_seen = True
+                    error_code, error_text = detected
+                    continue
+                if self._stream_queue is not None:
+                    await self._stream_queue.put(chunk)
+        finally:
+            self._streaming_active = False
+
+        if not error_seen:
+            return None
+        return error_code, error_text
+
+    async def _run_retrying_stream(
+        self,
+        initial_query: Any,
+    ) -> None:
+        """Drive ``_stream_one_round`` with the 181001 retry policy.
+
+        Retries up to ``_MAX_RETRY_ATTEMPTS`` times when the round fails with
+        a retryable code, substituting ``_RETRY_QUERY`` on each retry. Any
+        non-retryable code or exhausted retries raise AGENT_TEAM_EXECUTION_ERROR
+        so the caller's ``except Exception`` can flip the status to FAILED.
+        """
+        current_query: Any = initial_query
+        attempt = 0
+        while True:
+            outcome = await self._stream_one_round(current_query)
+            if outcome is None:
+                return
+
+            error_code, error_text = outcome
+            if (
+                error_code in _RETRYABLE_ERROR_CODES
+                and attempt < _MAX_RETRY_ATTEMPTS
+            ):
+                attempt += 1
+                team_logger.warning(
+                    "DeepAgent round transient error "
+                    "(code=%s, attempt=%d/%d): %s",
+                    error_code,
+                    attempt,
+                    _MAX_RETRY_ATTEMPTS,
+                    error_text,
+                )
+                current_query = _RETRY_QUERY
+                continue
+
+            team_logger.error(
+                "DeepAgent round failed (code=%s, attempts=%d): %s",
+                error_code,
+                attempt,
+                error_text,
+            )
+            raise build_error(
+                StatusCode.AGENT_TEAM_EXECUTION_ERROR,
+                error_msg=(
+                    f"streaming task failed after {attempt} retries, "
+                    f"last error code={error_code}: {error_text}"
+                ),
+            )
+
     async def _execute_round(
         self,
         message: Any,
@@ -1282,18 +1426,7 @@ class TeamAgent(BaseAgent):
         await self._update_execution(ExecutionStatus.STARTING)
         await self._update_execution(ExecutionStatus.RUNNING)
         try:
-            inputs = {"query": message}
-            self._streaming_active = True
-            try:
-                async for chunk in Runner.run_agent_streaming(
-                    self._deep_agent,
-                    inputs,
-                    session=self._session_id,
-                ):
-                    if self._stream_queue is not None:
-                        await self._stream_queue.put(chunk)
-            finally:
-                self._streaming_active = False
+            await self._run_retrying_stream(message)
             await self._update_execution(ExecutionStatus.COMPLETING)
             await self._update_execution(ExecutionStatus.COMPLETED)
         except asyncio.CancelledError:
