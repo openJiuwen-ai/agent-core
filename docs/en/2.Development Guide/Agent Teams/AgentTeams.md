@@ -16,7 +16,7 @@ AgentTeams is a multi-agent collaboration framework that completes complex tasks
 
 ### Architecture Components
 - **Transport**: Handles inter-agent message delivery (supports `inprocess` and `pyzmq`)
-- **Storage**: Persists team state, task lists, and messages (supports `sqlite` and `memory`)
+- **Storage**: Persists team state, task lists, and messages (supports `sqlite`, `postgresql`, and `memory`)
 
 ## Quick Start
 
@@ -93,6 +93,27 @@ leader:
   display_name: Team Leader
   persona: Project management expert
 ```
+
+### Storage Configuration (SQLite / PostgreSQL)
+
+```yaml
+# SQLite (local file)
+storage:
+  type: sqlite
+  params:
+    connection_string: ./team_data/team.db
+
+# PostgreSQL (recommended for distributed deployment)
+storage:
+  type: postgresql
+  params:
+    connection_string: postgresql+asyncpg://user:password@host:5432/agent_team
+```
+
+Notes:
+- PostgreSQL uses the same `connection_string` field;
+- Ensure the PostgreSQL service is running and reachable before startup;
+- If you install optional extras, include the `postgres` extra (`asyncpg`).
 
 ## Configuration Details
 

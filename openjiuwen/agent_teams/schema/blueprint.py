@@ -58,6 +58,7 @@ def _ensure_builtin_infra_registered() -> None:
         from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 
         _STORAGE_REGISTRY["sqlite"] = DatabaseConfig
+        _STORAGE_REGISTRY["postgresql"] = DatabaseConfig
         _STORAGE_REGISTRY["memory"] = MemoryDatabaseConfig
 
 
