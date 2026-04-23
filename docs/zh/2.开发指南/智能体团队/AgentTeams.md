@@ -125,14 +125,17 @@ async for chunk in Runner.run_agent_team_streaming(
 ### 交互模式
 
 ```python
-# 启动后台流式任务
-stream_task = asyncio.create_task(
-    Runner.run_agent_team_streaming(
+# run_agent_team_streaming() 返回异步迭代器，
+# 不能直接传给 create_task()，需要先包装成协程。
+async def consume_stream():
+    async for chunk in Runner.run_agent_team_streaming(
         agent_team=leader,
         inputs={"query": "初始任务"},
         session="session_id",
-    )
-)
+    ):
+        print(chunk, end="", flush=True)
+
+stream_task = asyncio.create_task(consume_stream())
 
 # 发送后续输入
 await leader.interact("补充指令")
