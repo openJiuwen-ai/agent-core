@@ -8,9 +8,8 @@ import wave
 from pathlib import Path
 
 from openjiuwen.core.runner import Runner
-from openjiuwen.harness.prompts.sections.tools import build_tool_card
 from openjiuwen.harness.schema.config import AudioModelConfig
-from openjiuwen.harness.tools.audio import (
+from openjiuwen.harness.tools import (
     AudioMetadataTool,
     AudioQuestionAnsweringTool,
     AudioTranscriptionTool,
@@ -47,7 +46,7 @@ def test_audio_transcription_tool_transcribes_local_audio(
         return "hello from audio"
 
     monkeypatch.setattr(
-        "openjiuwen.harness.tools.audio._invoke_audio_transcription",
+        "openjiuwen.harness.tools.multimodal.audio._invoke_audio_transcription",
         fake_invoke_audio_transcription,
     )
 
@@ -88,7 +87,7 @@ def test_audio_question_answering_tool_returns_answer_and_duration(
         return "A person says hello.", 1.0
 
     monkeypatch.setattr(
-        "openjiuwen.harness.tools.audio._invoke_audio_question_answering",
+        "openjiuwen.harness.tools.multimodal.audio._invoke_audio_question_answering",
         fake_invoke_audio_question_answering,
     )
 

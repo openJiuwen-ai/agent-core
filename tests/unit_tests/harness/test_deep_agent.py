@@ -43,8 +43,7 @@ from openjiuwen.harness.subagents.research_agent import (
 )
 from openjiuwen.harness.task_loop.task_loop_event_handler import TaskLoopEventHandler
 from openjiuwen.harness.task_loop.loop_coordinator import LoopCoordinator
-from openjiuwen.harness.tools.task_tool import create_task_tool
-from openjiuwen.harness.tools.web_tools import WebFreeSearchTool
+from openjiuwen.harness.tools import WebFreeSearchTool
 
 
 def _create_dummy_model() -> Model:

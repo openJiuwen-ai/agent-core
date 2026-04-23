@@ -126,6 +126,63 @@ class TestTeamDatabaseInit:
             if database.engine:
                 await database.close()
 
+    @pytest.mark.asyncio
+    async def test_postgresql_initialize_uses_asyncpg_engine(self, monkeypatch):
+        """Test PostgreSQL initialization uses asyncpg DSN and pool settings."""
+        captured: dict = {}
+
+        class _FakeConn:
+            async def run_sync(self, _fn, *args, **kwargs):
+                return None
+
+        class _FakeBeginCtx:
+            async def __aenter__(self):
+                return _FakeConn()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        class _FakeEngine:
+            def begin(self):
+                return _FakeBeginCtx()
+
+            async def dispose(self):
+                return None
+
+        def _fake_create_async_engine(url, **kwargs):
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+            return _FakeEngine()
+
+        async def _fake_create_cur_session_tables(self):
+            return None
+
+        monkeypatch.setattr(
+            "openjiuwen.agent_teams.tools.database.create_async_engine",
+            _fake_create_async_engine,
+        )
+        monkeypatch.setattr(
+            TeamDatabase,
+            "create_cur_session_tables",
+            _fake_create_cur_session_tables,
+        )
+
+        config = DatabaseConfig(
+            db_type=DatabaseType.POSTGRESQL,
+            connection_string="postgresql://user:pass@localhost:5432/team_db",
+        )
+        database = TeamDatabase(config)
+        try:
+            await database.initialize()
+            assert database._initialized is True
+            assert captured["url"] == "postgresql+asyncpg://user:pass@localhost:5432/team_db"
+            assert captured["kwargs"]["pool_size"] == 10
+            assert captured["kwargs"]["max_overflow"] == 20
+            assert captured["kwargs"]["pool_pre_ping"] is True
+            assert captured["kwargs"]["pool_recycle"] == 1800
+        finally:
+            await database.close()
+
 
 class TestTeamOperations:
     """Test team CRUD operations"""

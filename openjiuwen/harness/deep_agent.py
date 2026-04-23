@@ -65,8 +65,7 @@ from openjiuwen.harness.task_loop.task_loop_controller import (
     TaskLoopController,
 )
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
-from openjiuwen.harness.tools.session_tools import SessionToolkit
-from openjiuwen.harness.tools.web_tools import is_free_search_enabled, is_paid_search_enabled
+from openjiuwen.harness.tools import SessionToolkit, is_free_search_enabled, is_paid_search_enabled
 
 if TYPE_CHECKING:
     from openjiuwen.core.controller.modules.event_queue import (
@@ -207,7 +206,7 @@ class DeepAgent(BaseAgent):
                 )
             return
 
-        from openjiuwen.harness.tools.web_tools import WebFreeSearchTool, WebPaidSearchTool
+        from openjiuwen.harness.tools import WebFreeSearchTool, WebPaidSearchTool
 
         tool_cls = WebPaidSearchTool if card.name == "paid_search" else WebFreeSearchTool
         tool = tool_cls(language=resolve_language(config.language), card=card)
@@ -1183,7 +1182,7 @@ class DeepAgent(BaseAgent):
             Resolved ``Path`` to the plan Markdown file, or ``None`` if
             no slug has been set or the workspace is unavailable.
         """
-        from openjiuwen.harness.tools.agent_mode_tools import resolve_plan_file_path
+        from openjiuwen.harness.tools import resolve_plan_file_path
 
         state = self.load_state(session)
         slug = state.plan_mode.plan_slug

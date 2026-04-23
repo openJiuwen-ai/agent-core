@@ -124,7 +124,8 @@ class TeamDatabase:
 
     async def _initialize_locked(self) -> None:
         """Actual initialization body; must run under ``_init_lock``."""
-        if self.config.db_type == DatabaseType.SQLITE:
+        db_type = self.config.db_type
+        if db_type == DatabaseType.SQLITE:
             conn_str = self.config.connection_string
             in_memory = conn_str == ":memory:"
             if not in_memory:
@@ -189,6 +190,29 @@ class TeamDatabase:
                     cursor = dbapi_connection.cursor()
                     cursor.execute("PRAGMA journal_mode=WAL")
                     cursor.close()
+        elif db_type == DatabaseType.POSTGRESQL:
+            conn_str = self.config.connection_string.strip()
+            if not conn_str:
+                raise ValueError("PostgreSQL requires a non-empty connection_string")
+            if conn_str.startswith("postgres://"):
+                conn_str = f"postgresql://{conn_str.removeprefix('postgres://')}"
+            if conn_str.startswith("postgresql://"):
+                conn_str = f"postgresql+asyncpg://{conn_str.removeprefix('postgresql://')}"
+            if not conn_str.startswith("postgresql+asyncpg://"):
+                raise ValueError(
+                    "PostgreSQL connection_string must use postgresql+asyncpg:// scheme"
+                )
+
+            # Use queue pool settings suitable for distributed deployments.
+            self.engine = create_async_engine(
+                conn_str,
+                echo=False,
+                future=True,
+                pool_size=10,
+                max_overflow=20,
+                pool_pre_ping=True,
+                pool_recycle=1800,
+            )
         else:
             raise NotImplementedError(
                 f"Database type {self.config.db_type} not yet implemented"

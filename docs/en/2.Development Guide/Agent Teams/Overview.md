@@ -17,7 +17,7 @@ AgentTeams is a Leader-Teammate collaboration framework that completes complex t
 ## Architecture Components
 
 - **Transport**: Handles inter-agent message delivery (supports `inprocess` and `pyzmq`)
-- **Storage**: Persists team state, task lists, and messages (supports `sqlite` and `memory`)
+- **Storage**: Persists team state, task lists, and messages (supports `sqlite`, `postgresql`, and `memory`)
 
 # Team Lifecycle
 

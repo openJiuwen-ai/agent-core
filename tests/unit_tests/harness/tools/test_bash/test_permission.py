@@ -2,12 +2,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import re
 
-import pytest
-
-from openjiuwen.harness.tools.bash._permission import (
+from openjiuwen.harness.tools.shell.bash._permission import (
     PermissionConfig,
     PermissionMode,
-    PermissionResult,
     check_permission,
 )
 

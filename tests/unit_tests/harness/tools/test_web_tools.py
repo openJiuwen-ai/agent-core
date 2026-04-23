@@ -6,15 +6,15 @@ import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.harness.tools.web_tools import (
+from openjiuwen.harness.tools import (
     WebFetchWebpageTool,
     WebFreeSearchTool,
     WebPaidSearchTool,
-    _http_request,
     create_web_tools,
     is_free_search_enabled,
     is_paid_search_enabled,
 )
+from openjiuwen.harness.tools.web_tools import _http_request
 
 
 class TestWebFreeSearchTool:

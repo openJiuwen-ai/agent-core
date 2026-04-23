@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from openjiuwen.core.session.agent import Session
     from openjiuwen.harness.deep_agent import DeepAgent
 
-from openjiuwen.harness.tools.session_tools import SESSION_SPAWN_TASK_TYPE
+from openjiuwen.harness.tools import SESSION_SPAWN_TASK_TYPE
 
 
 class SessionSpawnExecutor(TaskExecutor):

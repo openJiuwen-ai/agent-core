@@ -11,7 +11,7 @@ import pytest
 
 from openjiuwen.core.common.exception.errors import FrameworkError
 from openjiuwen.core.session.agent import Session
-from openjiuwen.harness.tools.session_tools import (
+from openjiuwen.harness.tools import (
     SESSION_SPAWN_TASK_TYPE,
     SessionToolkit,
     SessionsCancelTool,

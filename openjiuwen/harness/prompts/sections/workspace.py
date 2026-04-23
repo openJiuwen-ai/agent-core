@@ -9,6 +9,7 @@ from openjiuwen.harness.prompts.workspace_content.workspace_header import (
     WORKSPACE_HEADER,
     DIRECTORY_DESCRIPTIONS,
 )
+from openjiuwen.harness.prompts.sections import SectionName
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +203,7 @@ async def build_workspace_section(
     content = await build_workspace_content(sys_operation, workspace, language)
 
     return PromptSection(
-        name="workspace",
+        name=SectionName.WORKSPACE,
         content={language: content},
         priority=70,
     )

@@ -14,10 +14,12 @@ from bs4 import BeautifulSoup
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.retrieval.common.document import Document
-from openjiuwen.core.retrieval.indexing.processor.parser.web_page_parser import (
+from openjiuwen.core.retrieval.indexing.processor.parser.html_file_parser import (
     _parse_html,
     _extract_title,
     _get_text_from_soup,
+)
+from openjiuwen.core.retrieval.indexing.processor.parser.web_page_parser import (
     _is_wechat_article_url,
     WebPageParser,
 )

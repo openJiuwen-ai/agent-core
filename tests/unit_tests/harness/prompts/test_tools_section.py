@@ -3,7 +3,7 @@
 """Unit tests for build_tools_section factory."""
 from __future__ import annotations
 
-from openjiuwen.harness.prompts.sections.tools import build_tools_section
+from openjiuwen.harness.prompts.tools import build_tools_section
 
 
 class TestBuildToolsSection:

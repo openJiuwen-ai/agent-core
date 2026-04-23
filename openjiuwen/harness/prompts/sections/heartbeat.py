@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import Optional, Dict
 
 from openjiuwen.harness.prompts import PromptSection
+from openjiuwen.harness.prompts.sections import SectionName
 
 
 HEARTBEAT_SYSTEM_PROMPT_CN = """
@@ -89,7 +90,7 @@ def build_heartbeat_section(
         heartbeat_section = "（无心跳内容）" if language == "cn" else "(No heartbeat content)"
 
     return PromptSection(
-        name="heartbeat",
+        name=SectionName.HEARTBEAT,
         content={language: prompt_content.format(heartbeat_section=heartbeat_section)},
         priority=80,
     )

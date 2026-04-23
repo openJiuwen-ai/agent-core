@@ -129,7 +129,7 @@ Transport layer configuration.
 
 Storage layer configuration.
 
-* **type**(str): Storage type — `sqlite` or `memory`.
+* **type**(str): Storage type — `sqlite`, `postgresql`, or `memory`.
 * **params**(dict, optional): Storage-specific parameters. Default: `{}`.
 
 ## function create_agent_team

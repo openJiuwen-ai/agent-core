@@ -32,8 +32,8 @@ from openjiuwen.harness.schema.config import (
 )
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.harness.prompts import resolve_language
-from openjiuwen.harness.prompts.sections.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
-from openjiuwen.harness.tools.web_tools import is_free_search_enabled
+from openjiuwen.harness.prompts.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
+from openjiuwen.harness.tools import is_free_search_enabled
 
 
 def _is_disabled_free_search_tool(tool: Tool | ToolCard) -> bool:

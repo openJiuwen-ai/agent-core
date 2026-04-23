@@ -6,6 +6,7 @@ from openjiuwen.core.retrieval.indexing.processor.parser.auto_link_parser import
 from openjiuwen.core.retrieval.indexing.processor.parser.auto_parser import AutoParser
 from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 from openjiuwen.core.retrieval.indexing.processor.parser.excel_parser import ExcelParser
+from openjiuwen.core.retrieval.indexing.processor.parser.html_file_parser import HTMLFileParser
 from openjiuwen.core.retrieval.indexing.processor.parser.json_parser import JSONParser
 from openjiuwen.core.retrieval.indexing.processor.parser.pdf_parser import PDFParser
 from openjiuwen.core.retrieval.indexing.processor.parser.txt_md_parser import TxtMdParser
@@ -25,6 +26,7 @@ __all__ = [
     "AutoLinkParser",
     "AutoParser",
     "ExcelParser",
+    "HTMLFileParser",
     "Parser",
     "JSONParser",
     "PDFParser",

@@ -24,7 +24,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.core.sys_operation.cwd import get_cwd
-from openjiuwen.harness.prompts.sections.tools import build_tool_card
+from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
 # Device files that would block indefinitely or produce infinite output.

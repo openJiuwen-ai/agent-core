@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Dict
 
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
+from openjiuwen.harness.prompts.sections import SectionName
 
 # ---------------------------------------------------------------------------
 # Completion-signal guidance
@@ -32,8 +33,6 @@ _PROMISE_GUIDANCE: Dict[str, str] = {
     ),
 }
 
-_COMPLETION_SIGNAL_SECTION_NAME = "completion_signal"
-# priority 85: after identity (10), before todo (90)
 _COMPLETION_SIGNAL_PRIORITY = 85
 
 
@@ -53,7 +52,7 @@ def build_completion_signal_section(
     """
     template = _PROMISE_GUIDANCE.get(language, _PROMISE_GUIDANCE["cn"])
     return PromptSection(
-        name=_COMPLETION_SIGNAL_SECTION_NAME,
+        name=SectionName.COMPLETION_SIGNAL,
         content={language: template.format(promise=completion_promise)},
         priority=_COMPLETION_SIGNAL_PRIORITY,
     )

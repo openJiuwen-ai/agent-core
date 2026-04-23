@@ -71,7 +71,7 @@ def test_create_vision_tools_register_and_invoke(monkeypatch):
         return "The image text says HELLO WORLD.", "mock-model"
 
     monkeypatch.setattr(
-        "openjiuwen.harness.tools.vision._call_vision_model",
+        "openjiuwen.harness.tools.multimodal.vision._call_vision_model",
         fake_call_vision_model,
     )
 

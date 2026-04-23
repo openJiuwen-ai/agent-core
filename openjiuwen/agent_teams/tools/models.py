@@ -11,6 +11,7 @@ Configuration: DatabaseType, DatabaseConfig.
 import copy
 from typing import Dict, Optional, cast
 
+from sqlalchemy import BigInteger
 from sqlmodel import SQLModel, Field
 from sqlmodel.main import SQLModelMetaclass
 
@@ -39,10 +40,10 @@ class Team(SQLModel, table=True):
     leader_member_name: str = Field(nullable=False)
     desc: Optional[str] = Field(default=None, nullable=True)
     prompt: Optional[str] = Field(default=None, nullable=True)
-    created: int = Field(nullable=False)
+    created: int = Field(sa_type=BigInteger, nullable=False)
     # Bumped on every roster-affecting write so consumers (e.g. TeamRail
     # prompt cache) can probe a single column for change detection.
-    updated_at: Optional[int] = Field(default=None, nullable=True)
+    updated_at: Optional[int] = Field(default=None, sa_type=BigInteger, nullable=True)
 
 
 class TeamMember(SQLModel, table=True):
@@ -62,7 +63,7 @@ class TeamMember(SQLModel, table=True):
     # Set on roster mutations only (create_member).  Status / execution
     # status updates intentionally do NOT bump this column because they
     # do not change how the # 成员关系 prompt section is rendered.
-    updated_at: Optional[int] = Field(default=None, nullable=True)
+    updated_at: Optional[int] = Field(default=None, sa_type=BigInteger, nullable=True)
 
 
 # ============== Dynamic Table Base Classes (abstract) ==============
@@ -86,7 +87,7 @@ class TeamTaskBase(SQLModel):
     content: str = Field(nullable=False)
     status: str = Field(nullable=False, index=True)
     assignee: Optional[str] = Field(default=None, nullable=True, index=True)
-    updated_at: Optional[int] = Field(default=None, nullable=True, index=True)
+    updated_at: Optional[int] = Field(default=None, sa_type=BigInteger, nullable=True, index=True)
 
     def brief(self) -> dict:
         """Return a lightweight summary (id + title + status) for write-op responses."""
@@ -110,7 +111,7 @@ class TeamMessageBase(SQLModel):
     from_member_name: str = Field(nullable=False)
     to_member_name: Optional[str] = Field(default=None, nullable=True, index=True)
     content: str = Field(nullable=False)
-    timestamp: int = Field(nullable=False, index=True)
+    timestamp: int = Field(sa_type=BigInteger, nullable=False, index=True)
     broadcast: bool = Field(nullable=False, index=True)
     # Read state for direct (point-to-point) messages only.  Broadcast rows
     # carry NULL here because per-recipient read state for broadcasts lives
@@ -130,7 +131,7 @@ class MessageReadStatusBase(SQLModel):
 
     member_name: str = Field(primary_key=True)
     team_name: str = Field(primary_key=True, foreign_key="team_info.team_name", ondelete="CASCADE")
-    read_at: Optional[int] = Field(default=None, nullable=True, index=True)
+    read_at: Optional[int] = Field(default=None, sa_type=BigInteger, nullable=True, index=True)
 
 
 # ============== Dynamic Model Caches & Factories ==============

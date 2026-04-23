@@ -14,9 +14,9 @@ from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.core.memory.external.provider import MemoryProvider
+from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.external_memory import (
     build_external_memory_section,
-    EXTERNAL_MEMORY_SECTION_NAME,
 )
 
 EXTERNAL_MEMORY_PREFETCH_SECTION = "external_memory_prefetch"
@@ -91,7 +91,7 @@ class ExternalMemoryRail(DeepAgentRail):
         
         # Remove prompt sections
         if self.system_prompt_builder is not None:
-            self.system_prompt_builder.remove_section(EXTERNAL_MEMORY_SECTION_NAME)
+            self.system_prompt_builder.remove_section(SectionName.EXTERNAL_MEMORY)
             self.system_prompt_builder.remove_section(EXTERNAL_MEMORY_PREFETCH_SECTION)
             self.system_prompt_builder = None
         

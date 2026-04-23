@@ -1,10 +1,8 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-import os
 from pathlib import Path
 import tempfile
 import shutil
-from typing import List
 
 import pytest
 import pytest_asyncio
@@ -12,8 +10,7 @@ import pytest_asyncio
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
-from openjiuwen.harness.tools import CodeTool
-from openjiuwen.harness.tools.skill_tool import SkillTool
+from openjiuwen.harness.tools import SkillTool
 
 
 @pytest.fixture

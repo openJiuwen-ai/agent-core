@@ -31,8 +31,7 @@ from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.agent_mode import build_plan_mode_section
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.config import SubAgentConfig
-from openjiuwen.harness.tools.agent_mode_tools import SwitchModeTool, EnterPlanModeTool, ExitPlanModeTool
-from openjiuwen.harness.tools.task_tool import create_task_tool
+from openjiuwen.harness.tools import SwitchModeTool, EnterPlanModeTool, ExitPlanModeTool, create_task_tool
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
