@@ -8,11 +8,28 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.retrieval.indexing.processor.parser.web_page_parser import WebPageParser
+from openjiuwen.core.retrieval.indexing.processor.parser.web_page_parser import (
+    WebPageParser,
+    HTTP_URL_PATTERN,
+    WECHAT_MP_URL_PATTERN
+)
 
 
 class TestWebPageParser:
     """WebPageParser tests"""
+
+    @staticmethod
+    def test_http_url_pattern():
+        assert HTTP_URL_PATTERN.match("https://example.com/path")
+        assert HTTP_URL_PATTERN.match("HTTP://X.Y/z")
+        assert not HTTP_URL_PATTERN.match("ftp://example.com")
+        assert not HTTP_URL_PATTERN.match("not-a-url")
+
+    @staticmethod
+    def test_wechat_mp_url_pattern():
+        assert WECHAT_MP_URL_PATTERN.match("https://mp.weixin.qq.com/s/abc123")
+        assert WECHAT_MP_URL_PATTERN.match("http://foo.weixin.qq.com/s?x=1")
+        assert not WECHAT_MP_URL_PATTERN.match("https://example.com/article")
 
     @staticmethod
     def test_supports_http_url_not_wechat():
