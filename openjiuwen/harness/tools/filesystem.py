@@ -663,11 +663,13 @@ class WriteFileTool(Tool):
 
     MAX_FILE_SIZE: int = 1 * 1024 * 1024 * 1024  # 1 GiB
 
-    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
+    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None,
+                 workspace_path: Optional[str] = None):
         super().__init__(
             build_tool_card("write_file", "WriteFileTool", language, agent_id=agent_id))
         self.operation = operation
         self._agent_id = agent_id or "default"
+        self._workspace_path = workspace_path
 
     @staticmethod
     def _detect_encoding(raw: bytes) -> str:
@@ -775,10 +777,8 @@ class WriteFileTool(Tool):
             except OSError:
                 _FILE_READ_REGISTRY.pop(path, None)
 
-        _history_path = os.path.join(
-            str(pathlib.Path(get_cwd()).expanduser().resolve()),
-            ".agent_history", f"file_ops_{self._agent_id}.json",
-        )
+        _base_dir = self._workspace_path or str(pathlib.Path(get_cwd()).expanduser().resolve())
+        _history_path = os.path.join(_base_dir, ".agent_history", f"file_ops_{self._agent_id}.json")
         await _append_op_history(_history_path, path, "write", old_content, content)
 
         return ToolOutput(
@@ -819,10 +819,12 @@ class EditFileTool(Tool):
     _STRAIGHT_TO_CURLY: dict = str.maketrans({'"': '\u201c', '\u201c': '"', '\u201d': '"',
                                                "'": '\u2018', '\u2018': "'", '\u2019': "'"})
 
-    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
+    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None,
+                 workspace_path: Optional[str] = None):
         super().__init__(build_tool_card("edit_file", "EditFileTool", language, agent_id=agent_id))
         self.operation = operation
         self._agent_id = agent_id or "default"
+        self._workspace_path = workspace_path
 
     # ------------------------------------------------------------------
     # Static helpers
@@ -1183,10 +1185,8 @@ class EditFileTool(Tool):
         except OSError:
             _FILE_READ_REGISTRY.pop(file_path, None)
 
-        _history_path = os.path.join(
-            str(pathlib.Path(get_cwd()).expanduser().resolve()),
-            ".agent_history", f"file_ops_{self._agent_id}.json",
-        )
+        _base_dir = self._workspace_path or str(pathlib.Path(get_cwd()).expanduser().resolve())
+        _history_path = os.path.join(_base_dir, ".agent_history", f"file_ops_{self._agent_id}.json")
         await _append_op_history(_history_path, file_path, "edit", content, new_content)
 
         return ToolOutput(
