@@ -1142,9 +1142,10 @@ class DeepAgent(BaseAgent):
         """
         state = self.load_state(session)
         if state.plan_mode.mode == mode:
-            return
-        if mode == "plan":
             state.plan_mode.pre_plan_mode = state.plan_mode.mode
+            logger.info("[DeepAgent] mode in state is the same, no need to switch, mode: {}".format(mode))
+            return
+        state.plan_mode.pre_plan_mode = state.plan_mode.mode
         state.plan_mode.mode = mode
         self.save_state(session, state)
 
@@ -1158,7 +1159,7 @@ class DeepAgent(BaseAgent):
             session: Current session.
         """
         state = self.load_state(session)
-        state.plan_mode.mode = state.plan_mode.pre_plan_mode or "auto"
+        state.plan_mode.mode = state.plan_mode.pre_plan_mode or "normal"
         state.plan_mode.pre_plan_mode = None
         self.save_state(session, state)
 

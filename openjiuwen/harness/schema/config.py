@@ -213,7 +213,7 @@ class DeepAgentConfig:
     progressive_tool_max_loaded_tools: int = 12
 
     # Plan mode config
-    default_mode: AgentMode = AgentMode.AUTO
+    default_mode: AgentMode = AgentMode.NORMAL
 
 
 @dataclass

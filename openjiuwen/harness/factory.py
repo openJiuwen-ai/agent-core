@@ -156,7 +156,7 @@ def create_deep_agent(
     audio_model_config: Optional[AudioModelConfig] = None,
     enable_task_planning: bool = False,
     restrict_to_work_dir: bool = True,
-    default_mode: AgentMode = AgentMode.AUTO,
+    default_mode: AgentMode = AgentMode.NORMAL,
     model_selection: Optional[Dict[Model, str]] = None,
     **config_kwargs: Any,
 ) -> DeepAgent:
@@ -197,7 +197,7 @@ def create_deep_agent(
         enable_task_planning: Enable task_planning_rail.
         restrict_to_work_dir: If True, restrict file access to workspace directory.
             If False, allow access to any path including system root.
-        default_mode: Initial agent mode (``AgentMode.AUTO`` or ``AgentMode.PLAN``).
+        default_mode: Initial agent mode (``AgentMode.NORMAL`` or ``AgentMode.PLAN``).
         model_selection: Optional model selection config for TaskPlanningRail.
             Dict mapping Model instance to description string. When provided along with
             enable_task_planning, TaskPlanningRail will be configured with model selection,

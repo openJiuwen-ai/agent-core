@@ -272,6 +272,7 @@ def create_code_agent(
         sys_operation=sys_operation,
         language=resolved_language,
         prompt_mode=prompt_mode,
+        enable_task_planning=True,
         **config_kwargs,
     )
 
