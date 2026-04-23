@@ -11,7 +11,7 @@ from pydantic import TypeAdapter
 from openjiuwen.core.common.logging import tool_logger as logger
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import SysOperation
-from openjiuwen.harness.prompts.sections.tools import build_tool_card
+from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.lsp_tool._formatter import format_result
 from openjiuwen.harness.tools.lsp_tool._schemas import LspOperation, LspToolInput

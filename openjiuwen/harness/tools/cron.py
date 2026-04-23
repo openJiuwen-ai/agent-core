@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
-from openjiuwen.harness.prompts.sections.tools import build_tool_card
+from openjiuwen.harness.prompts.tools import build_tool_card
 
 
 @dataclass(frozen=True)

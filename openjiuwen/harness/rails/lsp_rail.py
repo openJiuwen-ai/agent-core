@@ -74,7 +74,7 @@ class LspRail(DeepAgentRail):
             agent: The DeepAgent instance to register tools on.
         """
         from openjiuwen.harness.deep_agent import DeepAgent
-        from openjiuwen.harness.tools.lsp_tool import LspTool
+        from openjiuwen.harness.tools import LspTool
 
         # 类型检查：仅在 DeepAgent 上生效
         if not (

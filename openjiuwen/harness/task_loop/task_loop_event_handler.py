@@ -30,7 +30,7 @@ from openjiuwen.harness.task_loop.task_loop_event_executor import (
 from openjiuwen.harness.task_loop.loop_queues import (
     LoopQueues,
 )
-from openjiuwen.harness.tools.session_tools import SESSION_SPAWN_TASK_TYPE
+from openjiuwen.harness.tools import SESSION_SPAWN_TASK_TYPE
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import (

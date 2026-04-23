@@ -10,11 +10,11 @@ from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.auto_harness.experience.experience_store import (
     ExperienceStore,
 )
-from openjiuwen.harness.prompts.sections.tools import (
+from openjiuwen.harness.prompts.tools import (
     build_tool_card,
     register_tool_provider,
 )
-from openjiuwen.harness.prompts.sections.tools.base import (
+from openjiuwen.harness.prompts.tools.base import (
     ToolMetadataProvider,
 )
 from openjiuwen.harness.tools.base_tool import ToolOutput

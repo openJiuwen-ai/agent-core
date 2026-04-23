@@ -23,7 +23,7 @@ from openjiuwen.harness import Workspace
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts.builder import PromptSection, SystemPromptBuilder
 from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
-from openjiuwen.harness.tools.list_skill import ListSkillTool
+from openjiuwen.harness.tools import ListSkillTool
 
 
 class _DummyResponse:

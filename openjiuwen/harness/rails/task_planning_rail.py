@@ -25,7 +25,7 @@ from openjiuwen.harness.schema.task import (
     TodoItem,
     TodoStatus,
 )
-from openjiuwen.harness.tools.todo import TodoTool
+from openjiuwen.harness.tools import TodoTool
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
 
@@ -77,11 +77,11 @@ class TaskPlanningRail(DeepAgentRail):
     def init(self, agent) -> None:
         """Register todo tools on the agent."""
         from openjiuwen.harness.deep_agent import DeepAgent
-        from openjiuwen.harness.tools.todo import (
+        from openjiuwen.harness.tools import (
             TodoCreateTool,
             TodoListTool,
-            TodoGetTool,
             TodoModifyTool,
+            TodoGetTool,
         )
 
         if not (

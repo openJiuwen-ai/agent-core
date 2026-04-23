@@ -3,16 +3,14 @@
 """External memory prompt section constants and helpers."""
 
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
-
-EXTERNAL_MEMORY_SECTION_NAME = "external_memory"
-EXTERNAL_MEMORY_PREFETCH_SECTION = "external_memory_prefetch"
+from openjiuwen.harness.prompts.sections import SectionName
 
 
 def build_external_memory_section(prompt_block: str, language: str = "cn") -> PromptSection | None:
     if not prompt_block:
         return None
     return PromptSection(
-        name=EXTERNAL_MEMORY_SECTION_NAME,
+        name=SectionName.EXTERNAL_MEMORY,
         content={language: prompt_block},
         priority=55,
     )

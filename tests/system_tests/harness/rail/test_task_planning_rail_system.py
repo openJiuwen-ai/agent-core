@@ -21,8 +21,7 @@ from openjiuwen.core.sys_operation import OperationMode, SysOperationCard
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
 from openjiuwen.harness.schema.config import DeepAgentConfig
-from openjiuwen.harness.schema.task import ModelUsageRecord
-from openjiuwen.harness.tools.todo import TodoItem, TodoStatus
+from openjiuwen.harness.schema import ModelUsageRecord, TodoItem, TodoStatus
 from openjiuwen.harness.workspace.workspace import Workspace
 
 logger = logging.getLogger(__name__)

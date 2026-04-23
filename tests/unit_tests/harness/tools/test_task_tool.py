@@ -16,7 +16,7 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.config import DeepAgentConfig, SubAgentConfig
-from openjiuwen.harness.tools.task_tool import TaskTool, create_task_tool
+from openjiuwen.harness.tools import TaskTool, create_task_tool
 
 
 def _create_dummy_model() -> Model:

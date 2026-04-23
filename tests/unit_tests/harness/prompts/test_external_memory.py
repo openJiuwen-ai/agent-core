@@ -6,9 +6,9 @@ from __future__ import annotations
 
 import pytest
 
+from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.external_memory import (
     build_external_memory_section,
-    EXTERNAL_MEMORY_SECTION_NAME,
 )
 
 
@@ -21,7 +21,7 @@ class TestBuildExternalMemorySection:
         section = build_external_memory_section(prompt_block, language="en")
 
         assert section is not None
-        assert section.name == EXTERNAL_MEMORY_SECTION_NAME
+        assert section.name == SectionName.EXTERNAL_MEMORY
         assert section.content.get("en") == prompt_block
         assert section.priority == 55
 

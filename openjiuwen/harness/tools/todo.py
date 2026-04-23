@@ -12,7 +12,7 @@ from openjiuwen.core.common.logging import tool_logger, LogEventType
 from openjiuwen.core.foundation.tool import Tool, ToolCard, Input, Output
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.sys_operation import SysOperation
-from openjiuwen.harness.prompts.sections.tools import build_tool_card
+from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.schema.task import (
     STATUS_ICONS,
     TodoItem,

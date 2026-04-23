@@ -504,7 +504,7 @@ class TestDeepAgentSessionRailCancelMock(TestDeepAgentE2E):
     @staticmethod
     def _patch_spawn_task_ids(fixed_hexes: list[str]):
         """Wrap SessionsSpawnTool.invoke: first uuid4() per call is fixed (no prod / path hacks)."""
-        from openjiuwen.harness.tools import session_tools as st
+        from openjiuwen.harness.tools.agent_control import session_tools as st
 
         real_invoke = st.SessionsSpawnTool.invoke
         pending = list(fixed_hexes)

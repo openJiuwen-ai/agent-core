@@ -64,7 +64,7 @@ def _patch_init_deps(agent, *, workspace_root="/workspace"):
     mock_tool.card = MagicMock(id="lsp-tool-id", name="lsp")
     loop = asyncio.new_event_loop()
     try:
-        with patch("openjiuwen.harness.tools.lsp_tool.LspTool") as MockLspTool, \
+        with patch("openjiuwen.harness.tools.LspTool") as MockLspTool, \
              patch("openjiuwen.core.runner.runner.Runner") as MockRunner, \
              patch("openjiuwen.harness.lsp.initialize_lsp", new_callable=AsyncMock), \
              patch("openjiuwen.harness.deep_agent.DeepAgent", _FakeDeepAgent), \
@@ -190,7 +190,7 @@ class TestLspRailInitMethod:
         plain_agent = MagicMock()
         plain_agent.deep_config = MagicMock()
         # DeepAgent is NOT patched to _FakeDeepAgent here, so isinstance fails
-        with patch("openjiuwen.harness.tools.lsp_tool.LspTool") as MockLspTool:
+        with patch("openjiuwen.harness.tools.LspTool") as MockLspTool:
             rail.init(plain_agent)
         MockLspTool.assert_not_called()
         assert rail._initialized is False
@@ -199,7 +199,7 @@ class TestLspRailInitMethod:
         rail = LspRail()
         agent = _make_agent()
         agent.deep_config = None
-        with patch("openjiuwen.harness.tools.lsp_tool.LspTool") as MockLspTool, \
+        with patch("openjiuwen.harness.tools.LspTool") as MockLspTool, \
              patch("openjiuwen.harness.deep_agent.DeepAgent", _FakeDeepAgent):
             rail.init(agent)
         MockLspTool.assert_not_called()
@@ -230,7 +230,7 @@ class TestLspRailCwdResolution:
             captured["opts"] = opts
 
         try:
-            with patch("openjiuwen.harness.tools.lsp_tool.LspTool") as MockLspTool, \
+            with patch("openjiuwen.harness.tools.LspTool") as MockLspTool, \
                  patch("openjiuwen.core.runner.runner.Runner"), \
                  patch("openjiuwen.harness.lsp.initialize_lsp", side_effect=_fake_init), \
                  patch("openjiuwen.harness.deep_agent.DeepAgent", _FakeDeepAgent), \

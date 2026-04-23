@@ -8,7 +8,7 @@ from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt import InterruptRequest
 from openjiuwen.core.single_agent.rail import AgentCallbackContext
-from openjiuwen.harness.prompts.sections.tools import build_tool_card
+from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails.interrupt.interrupt_base import BaseInterruptRail, InterruptDecision
 

@@ -1,8 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-import pytest
 
-from openjiuwen.harness.tools.bash._output import truncate_output
+from openjiuwen.harness.tools.shell.bash._output import truncate_output
 
 
 class TestTruncateOutput:

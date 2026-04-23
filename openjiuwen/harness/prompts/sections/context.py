@@ -18,6 +18,7 @@ from openjiuwen.harness.prompts.workspace_content.workspace_header import (
     CONTEXT_FILES,
 )
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
+from openjiuwen.harness.prompts.sections import SectionName
 
 if TYPE_CHECKING:
     from openjiuwen.harness.prompts.builder import PromptSection
@@ -241,7 +242,7 @@ async def build_context_section(
     )
 
     return PromptSection(
-        name="context",
+        name=SectionName.CONTEXT,
         content={language: content},
         priority=80,
     )
@@ -529,7 +530,7 @@ def build_tools_section(
         return None
 
     return PromptSection(
-        name="tools",
+        name=SectionName.TOOLS,
         content={language: content},
         priority=30,
     )

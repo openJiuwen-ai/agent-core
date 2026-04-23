@@ -12,14 +12,15 @@ import pytest_asyncio
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.core.sys_operation.cwd import get_cwd, set_cwd
-from openjiuwen.harness.prompts.sections.tools.filesystem import (
+from openjiuwen.harness.prompts.tools.filesystem import (
     get_glob_input_params,
     get_grep_input_params,
 )
-from openjiuwen.harness.tools.filesystem import (
+from openjiuwen.harness.tools import (
     ReadFileTool, WriteFileTool, EditFileTool,
-    GlobTool, ListDirTool, GrepTool, _FILE_READ_REGISTRY,
+    GlobTool, ListDirTool, GrepTool,
 )
+from openjiuwen.harness.tools.filesystem import _FILE_READ_REGISTRY
 
 
 @pytest.fixture
