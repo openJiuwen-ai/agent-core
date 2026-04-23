@@ -296,11 +296,15 @@ class SkillUseRail(DeepAgentRail):
         self._owned_tool_names.clear()
         self._owned_tool_ids.clear()
 
-    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
-        """Prepare skills before invoke."""
+    async def refresh_skill_prompt(self, ctx: AgentCallbackContext) -> None:
+        """Regenerate the skills system prompt"""
         _ = ctx
         await self._prepare_skills()
         await self._fetch_evolution_texts()
+
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Prepare skills before invoke."""
+        await self.refresh_skill_prompt(ctx)
 
     async def _fetch_evolution_texts(self) -> None:
         """Fetch and cache evolution experience texts from EvolutionStore."""
