@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.core.common.logging import logger
+from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.foundation.llm import ModelRequestConfig
 from openjiuwen.core.context_engine import (
@@ -29,6 +30,7 @@ from openjiuwen.harness.schema.state import (
     _SESSION_RUNTIME_ATTR,
     _SESSION_STATE_KEY,
 )
+from openjiuwen.harness.prompts.sections.reload import build_reload_section
 
 
 class ContextProcessorRail(DeepAgentRail):
@@ -82,6 +84,9 @@ class ContextProcessorRail(DeepAgentRail):
             self._session_memory_config = session_memory
         if self._session_memory_config is not None:
             self._session_memory_mgr = SessionMemoryManager(self._session_memory_config)
+
+        self._system_prompt_builder = None
+        self._all_processors: List[Tuple[str, BaseModel]] = []
 
     @staticmethod
     def _merge_config_with_overrides(
@@ -257,6 +262,10 @@ class ContextProcessorRail(DeepAgentRail):
 
         config.context_processors = all_processors
 
+        self._all_processors = all_processors
+
+        self._system_prompt_builder = getattr(agent, "system_prompt_builder", None)
+
     def uninit(self, agent) -> None:
         """Clear context processors and shutdown session memory manager."""
         if self._session_memory_mgr is not None:
@@ -266,11 +275,17 @@ class ContextProcessorRail(DeepAgentRail):
         if config is not None:
             config.context_processors = []
 
+
+        if self._system_prompt_builder is not None:
+            self._system_prompt_builder.remove_section("offload")
+        self._all_processors = []
+
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         await self.fix_incomplete_tool_context(ctx)
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         self._refresh_task_state_runtime(ctx)
+        await self._maybe_inject_offload_section()
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         self._refresh_task_state_runtime(ctx)
@@ -421,3 +436,20 @@ class ContextProcessorRail(DeepAgentRail):
         except Exception as e:
             import traceback
             logger.warning("Failed to fix incomplete tool context: %s\n%s", e, traceback.format_exc())
+
+    # ============================================================================
+    # Offload Section Injection
+    # ============================================================================
+
+    async def _maybe_inject_offload_section(self) -> None:
+        """Inject offload section if processors are configured."""
+        if not self._all_processors:
+            if self._system_prompt_builder is not None:
+                self._system_prompt_builder.remove_section("offload")
+            return
+
+        if self._system_prompt_builder is None:
+            return
+
+        lang = self._system_prompt_builder.language or "cn"
+        self._system_prompt_builder.add_section(build_reload_section(lang))

@@ -38,8 +38,6 @@ class ContextAssembleRail(DeepAgentRail):
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section("workspace")
             self.system_prompt_builder.remove_section("context")
-        self.system_prompt_builder = None
-        self._ability_manager = None
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject workspace directory structure and context files into messages before model call."""

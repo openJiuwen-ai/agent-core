@@ -1005,3 +1005,220 @@ async def test_ensure_json_arguments_with_nested_dict():
     assert result == '{"outer": {"inner": [1, 2, 3]}}'
 
 
+# =============================================================================
+# Offload Section Injection Tests
+# =============================================================================
+
+class _MockSystemPromptBuilder:
+    """Mock SystemPromptBuilder for testing offload section injection."""
+
+    def __init__(self, language: str = "cn") -> None:
+        self.language = language
+        self.added_sections = []
+        self.removed_sections = []
+
+    def add_section(self, section) -> None:
+        self.added_sections.append(section)
+
+    def remove_section(self, section_name: str) -> None:
+        self.removed_sections.append(section_name)
+
+    def has_section(self, name: str) -> bool:
+        return any(s.name == name for s in self.added_sections)
+
+
+@pytest.mark.asyncio
+async def test_offload_section_injected_when_preset_enabled(tmp_path: Path):
+    """offload section should be injected when preset=True."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+
+    rail = ContextProcessorRail(preset=True)
+    await agent.register_rail(rail)
+    await agent.ensure_initialized()
+
+    mock_builder = _MockSystemPromptBuilder(language="cn")
+    rail._system_prompt_builder = mock_builder
+
+    await rail._maybe_inject_offload_section()
+
+    assert mock_builder.has_section("offload")
+    assert len(mock_builder.removed_sections) == 0
+
+
+@pytest.mark.asyncio
+async def test_offload_section_not_injected_when_no_processors(tmp_path: Path):
+    """offload section should be removed when no processors configured."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+
+    rail = ContextProcessorRail(preset=False, processors=None)
+    await agent.register_rail(rail)
+    await agent.ensure_initialized()
+
+    mock_builder = _MockSystemPromptBuilder(language="cn")
+    rail._system_prompt_builder = mock_builder
+
+    await rail._maybe_inject_offload_section()
+
+    assert not mock_builder.has_section("offload")
+    assert "offload" in mock_builder.removed_sections
+
+
+@pytest.mark.asyncio
+async def test_offload_section_injected_when_user_processors_exist(tmp_path: Path):
+    """offload section should be injected when user processors are configured."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+
+    rail = ContextProcessorRail(
+        preset=False,
+        processors=[("CustomProcessor", DialogueCompressorConfig(messages_threshold=25))]
+    )
+    await agent.register_rail(rail)
+    await agent.ensure_initialized()
+
+    mock_builder = _MockSystemPromptBuilder(language="cn")
+    rail._system_prompt_builder = mock_builder
+
+    await rail._maybe_inject_offload_section()
+
+    assert mock_builder.has_section("offload")
+
+
+@pytest.mark.asyncio
+async def test_offload_section_uses_correct_language_cn(tmp_path: Path):
+    """offload section should use Chinese hint when language is cn."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+
+    rail = ContextProcessorRail(preset=True)
+    await agent.register_rail(rail)
+    await agent.ensure_initialized()
+
+    mock_builder = _MockSystemPromptBuilder(language="cn")
+    rail._system_prompt_builder = mock_builder
+
+    await rail._maybe_inject_offload_section()
+
+    assert mock_builder.has_section("offload")
+    offload_section = next(s for s in mock_builder.added_sections if s.name == "offload")
+    assert "cn" in offload_section.content
+    assert "上下文压缩" in offload_section.content["cn"]
+
+
+@pytest.mark.asyncio
+async def test_offload_section_uses_correct_language_en(tmp_path: Path):
+    """offload section should use English hint when language is en."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+
+    rail = ContextProcessorRail(preset=True)
+    await agent.register_rail(rail)
+    await agent.ensure_initialized()
+
+    mock_builder = _MockSystemPromptBuilder(language="en")
+    rail._system_prompt_builder = mock_builder
+
+    await rail._maybe_inject_offload_section()
+
+    assert mock_builder.has_section("offload")
+    offload_section = next(s for s in mock_builder.added_sections if s.name == "offload")
+    assert "en" in offload_section.content
+    assert "Context Compression" in offload_section.content["en"]
+
+
+@pytest.mark.asyncio
+async def test_offload_section_not_injected_when_builder_is_none(tmp_path: Path):
+    """offload section should not be injected when system_prompt_builder is None."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+
+    rail = ContextProcessorRail(preset=True)
+    await agent.register_rail(rail)
+    await agent.ensure_initialized()
+
+    rail._system_prompt_builder = None
+
+    await rail._maybe_inject_offload_section()
+
+
+@pytest.mark.asyncio
+async def test_offload_section_priority(tmp_path: Path):
+    """offload section should have priority of 90."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+
+    rail = ContextProcessorRail(preset=True)
+    await agent.register_rail(rail)
+    await agent.ensure_initialized()
+
+    mock_builder = _MockSystemPromptBuilder(language="cn")
+    rail._system_prompt_builder = mock_builder
+
+    await rail._maybe_inject_offload_section()
+
+    assert mock_builder.has_section("offload")
+    offload_section = next(s for s in mock_builder.added_sections if s.name == "offload")
+    assert offload_section.priority == 90
+
+
+@pytest.mark.asyncio
+async def test_uninit_removes_offload_section(tmp_path: Path):
+    """uninit should remove offload section from system_prompt_builder."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+
+    rail = ContextProcessorRail(preset=True)
+    await agent.register_rail(rail)
+    await agent.ensure_initialized()
+
+    mock_builder = _MockSystemPromptBuilder(language="cn")
+    rail._system_prompt_builder = mock_builder
+
+    await rail._maybe_inject_offload_section()
+    assert mock_builder.has_section("offload")
+
+    rail.uninit(agent)
+
+    assert "offload" in mock_builder.removed_sections
+    assert rail._all_processors == []
+
+
+@pytest.mark.asyncio
+async def test_before_model_call_injects_offload_section(tmp_path: Path):
+    """before_model_call should call _maybe_inject_offload_section."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+
+    rail = ContextProcessorRail(preset=True)
+    await agent.register_rail(rail)
+    await agent.ensure_initialized()
+
+    mock_builder = _MockSystemPromptBuilder(language="cn")
+    rail._system_prompt_builder = mock_builder
+
+    mock_session = Mock()
+    mock_session.get_state.return_value = {"iteration": 1}
+    setattr(mock_session, "_session_runtime", None)
+
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=ModelCallInputs(messages=[]),
+        session=mock_session,
+    )
+
+    await rail.before_model_call(ctx)
+
+    assert mock_builder.has_section("offload")
+
+
