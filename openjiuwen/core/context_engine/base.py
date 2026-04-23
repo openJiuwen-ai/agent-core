@@ -256,8 +256,6 @@ class ContextStats(BaseModel):
     assistant_message_tokens: int = 0
     tool_message_tokens: int = 0
     tool_tokens: int = 0
-    single_messages_token: int = 0
-    raw_total_tokens: int = 0
 
 
 class ContextWindow(BaseModel):

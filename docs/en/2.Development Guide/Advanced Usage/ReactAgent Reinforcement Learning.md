@@ -1,6 +1,6 @@
-# ReactAgent Reinforcement Learning
+﻿# ReactAgent Reinforcement Learning
 
-The `openjiuwen.dev_tools.agentrl` module provides reinforcement learning training capabilities based on the VERL reinforcement learning framework and the OpenYuanrong distributed computing engine. This tutorial walks through detailed training environment setup and briefly explains how to use this module to train a ReactAgent that solves math problems with a calculator tool.
+The `openjiuwen.agent_evolving.agent_rl` module provides reinforcement learning training capabilities based on the VERL reinforcement learning framework and the OpenYuanrong distributed computing engine. This tutorial walks through detailed training environment setup and briefly explains how to use this module to train a ReactAgent that solves math problems with a calculator tool.
 
 ## Environment Setup
 
@@ -98,7 +98,7 @@ Reinforcement learning training mainly includes the following steps:
 2. **Define Reward Function**: Implement and register a reward function to compute rewards based on Agent output and ground truth.
 3. **Register Tools**: Provide callable tools for the Agent (e.g., a calculator tool for simple expression evaluation and equation solving).
 4. **Prepare Data**: Implement `task_data_fn` to convert dataset rows into Agent input format.
-5. **Start Training**: Create `RLOptimizer`, configure it, and call `train()` to start training.
+5. **Start Training**: Create `OfflineRLOptimizer`, configure it, and call `train()` to start training.
 
 ## Configuration
 
@@ -107,8 +107,8 @@ Reinforcement learning training mainly includes the following steps:
 `RLConfig` is the top-level configuration for reinforcement learning training, including training, Rollout, runtime, and persistence sub-configurations:
 
 ```python
-from openjiuwen.dev_tools.agentrl import RLConfig
-from openjiuwen.dev_tools.agentrl.config.schemas import (
+from openjiuwen.agent_evolving.agent_rl import RLConfig
+from openjiuwen.agent_evolving.agent_rl.config import (
     AdaConfig,
     AgentRuntimeConfig,
     PersistenceConfig,
@@ -276,7 +276,7 @@ def task_data_fn(task_sample: dict) -> dict:
 The reward function receives `RolloutMessage` and computes rewards based on the Agent's dialogue trajectory and output. The return value must include `reward_list` and `global_reward`:
 
 ```python
-from openjiuwen.dev_tools.agentrl.coordinator.schemas import RolloutMessage
+from openjiuwen.agent_evolving.agent_rl.schemas import RolloutMessage
 
 def calc_reward(msg: RolloutMessage) -> dict:
     """Return 1.0 if answer is correct, otherwise 0.0."""
@@ -305,14 +305,14 @@ def calc_reward(msg: RolloutMessage) -> dict:
 
 ## Starting Training
 
-After assembling the above configuration and functions, create `RLOptimizer` and start training:
+After assembling the above configuration and functions, create `OfflineRLOptimizer` and start training:
 
 ```python
 from openjiuwen.core.common.logging import logger
-from openjiuwen.dev_tools.agentrl import RLConfig, RLOptimizer
+from openjiuwen.agent_evolving.agent_rl import RLConfig, OfflineRLOptimizer
 
 def main():
-    optimizer = RLOptimizer(config)
+    optimizer = OfflineRLOptimizer(config)
     optimizer.register_reward(calc_reward, name="calc_reward")
     optimizer.set_tools([calculator])
     optimizer.set_task_data_fn(task_data_fn)
@@ -345,4 +345,4 @@ if __name__ == "__main__":
 
 See the [complete examples/rl_calculator example](../../../../examples/rl_calculator/README.md) in the repository to run training. Logs will print the model path, data paths, algorithm, epoch, and related information; if TensorBoard is enabled, load it locally to view training curves.
 
-For more API and configuration details, see the [agentrl module documentation](../API%20Docs/openjiuwen.dev_tools/agentrl.README.md).
+For more API and configuration details, see the [agent_rl module documentation](../API%20Docs/openjiuwen.agent_evolving/agent_rl/agent_rl.README.md).

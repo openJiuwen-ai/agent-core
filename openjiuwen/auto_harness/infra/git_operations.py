@@ -85,7 +85,7 @@ class GitOperations:
         )
         stdout, _ = await proc.communicate()
         output = stdout.decode("utf-8", errors="replace")
-        return proc.returncode or 0, output.strip()
+        return proc.returncode or 0, output.rstrip()
 
     async def create_branch(
         self, branch_name: str
@@ -167,12 +167,29 @@ class GitOperations:
         _, out = await self._git(*args)
         return out.strip()
 
+    async def diff_name_only(
+        self,
+        revision: str = "HEAD",
+    ) -> List[str]:
+        """Return ``git diff --name-only <revision>`` as normalized paths."""
+        _, out = await self._git(
+            "diff",
+            "--name-only",
+            revision,
+        )
+        files: List[str] = []
+        for line in out.splitlines():
+            normalized = line.strip().replace("\\", "/")
+            if normalized:
+                files.append(normalized)
+        return list(dict.fromkeys(files))
+
     async def status_porcelain(self) -> str:
         """Return raw git status --porcelain output."""
         _, out = await self._git(
             "status", "--porcelain", "--untracked-files=all"
         )
-        return out.strip()
+        return out.rstrip()
 
     async def show_last_commit_stat(self) -> str:
         """Return a compact summary of the latest commit."""

@@ -123,9 +123,9 @@ class Tool(metaclass=_ToolMeta):
             metadata purposes throughout the tool's lifecycle.
         """
         if card is None:
-            raise build_error(StatusCode.TOOP_CARD_INVALID, card=card, reason="card is None")
+            raise build_error(StatusCode.TOOL_CARD_INVALID, card=card, reason="card is None")
         if not card.id:
-            raise build_error(StatusCode.TOOP_CARD_INVALID, card=card, reason="card is is None or empty")
+            raise build_error(StatusCode.TOOL_CARD_INVALID, card=card, reason="card is is None or empty")
         self._card = card
 
     @property

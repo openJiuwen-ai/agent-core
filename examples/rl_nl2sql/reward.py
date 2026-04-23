@@ -15,7 +15,7 @@ import tempfile
 from sql_eval import eval_exec_match
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.dev_tools.agentrl.coordinator.schemas import RolloutMessage
+from openjiuwen.agent_evolving.agent_rl.schemas import RolloutMessage
 
 SPIDER_DATA_DIR = os.environ.get("SPIDER_DATA_DIR")
 

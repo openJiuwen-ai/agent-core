@@ -18,16 +18,15 @@ class PlanModeState:
     """Plan mode session-scoped state.
 
     Attributes:
-        mode: Current agent mode — ``"auto"`` or ``"plan"``.
-        pre_plan_mode: Mode that was active before entering plan mode;
-            restored when exiting.
+        mode: Current agent mode — ``"normal"`` or ``"plan"``.
+        pre_plan_mode: Mode that was active before.
         plan_slug: Short identifier for the active plan file
             (e.g. ``"gleaming-brewing-phoenix"``).  The absolute path is
             derived at runtime via ``resolve_plan_file_path()``.
     """
 
-    mode: str = "auto"
-    pre_plan_mode: str | None = None
+    mode: str = "normal"
+    pre_plan_mode: str = "normal"
     plan_slug: str | None = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -56,7 +55,7 @@ class PlanModeState:
         if not data:
             return cls()
         return cls(
-            mode=data.get("mode", "auto"),
+            mode=data.get("mode", "normal"),
             pre_plan_mode=data.get("pre_plan_mode"),
             plan_slug=data.get("plan_slug"),
         )

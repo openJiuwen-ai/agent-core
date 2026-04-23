@@ -16,6 +16,7 @@ from openjiuwen.harness.prompts.sections.tools.base import (
 
 # ── tool description (injected as the tool-level system prompt) ──
 
+
 DESCRIPTION: Dict[str, str] = {
     "cn": (
         "执行 Shell 命令并返回输出。\n"
@@ -253,7 +254,8 @@ def get_bash_input_params(language: str = "cn") -> Dict[str, Any]:
         "type": "object",
         "properties": {
             "command": {"type": "string", "description": p["command"][lang]},
-            "timeout": {"type": "integer", "description": p["timeout"][lang]},
+            "timeout": {
+                "type": "integer", "description": p["timeout"][lang]},
             "description": {"type": "string", "description": p["description"][lang]},
             "run_in_background": {"type": "boolean", "description": p["run_in_background"][lang]},
             "workdir": {"type": "string", "description": p["workdir"][lang]},

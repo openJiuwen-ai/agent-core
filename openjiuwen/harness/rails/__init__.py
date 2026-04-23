@@ -21,6 +21,8 @@ from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
 from openjiuwen.harness.rails.session_rail import SessionRail
 from openjiuwen.harness.rails.memory_rail import MemoryRail
 from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
+from openjiuwen.harness.rails.verification_rail import VerificationRail
+from openjiuwen.harness.rails.verification_contract_rail import VerificationContractRail
 
 __all__ = [
     "DeepAgentRail",
@@ -41,4 +43,6 @@ __all__ = [
     "MemoryRail",
     "LspRail",
     "AgentModeRail",
+    "VerificationRail",
+    "VerificationContractRail"
 ]

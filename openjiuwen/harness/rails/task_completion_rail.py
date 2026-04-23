@@ -69,6 +69,8 @@ class TaskCompletionRail(DeepAgentRail):
         self,
         task_instruction: Optional[str] = None,
         completion_promise: Optional[str] = None,
+        required_confirmations: int = 1,
+        allow_promise_details: bool = False,
         max_rounds: Optional[int] = None,
         timeout_seconds: Optional[float] = None,
         evaluators: Optional[
@@ -78,6 +80,10 @@ class TaskCompletionRail(DeepAgentRail):
         super().__init__()
         self.task_instruction = task_instruction
         self.completion_promise = completion_promise
+        self.required_confirmations = max(
+            1, int(required_confirmations)
+        )
+        self.allow_promise_details = allow_promise_details
         self.max_rounds = max_rounds
         self.timeout_seconds = timeout_seconds
         self._extra_evaluators: List[StopConditionEvaluator] = (
@@ -105,7 +111,8 @@ class TaskCompletionRail(DeepAgentRail):
         if self.completion_promise is not None:
             result.append(
                 CompletionPromiseEvaluator(
-                    self.completion_promise
+                    self.completion_promise,
+                    required_confirmations=self.required_confirmations,
                 )
             )
         result.extend(self._extra_evaluators)
@@ -171,13 +178,20 @@ class TaskCompletionRail(DeepAgentRail):
         content = self._extract_output(ctx)
         if not content:
             return
-        match = PROMISE_TAG_PATTERN.search(content)
-        if match is None:
+        promise_block = extract_promise_block(content)
+        if promise_block is None:
             return
-        matched = _normalize(match.group(1))
+        matched = _normalize(promise_block)
         expected = _normalize(self.completion_promise)
         if matched != expected:
-            return
+            if not self.allow_promise_details:
+                return
+            if not promise_matches(
+                promise_block,
+                self.completion_promise,
+            ):
+                return
+            matched = expected
         logger.info(
             "TaskCompletionRail: promise fulfilled: %r",
             matched,
@@ -215,4 +229,35 @@ def _normalize(text: str) -> str:
     return " ".join(text.split())
 
 
-__all__ = ["TaskCompletionRail"]
+def extract_promise_block(text: str) -> Optional[str]:
+    """Extract the first promise block body from text."""
+    if not text:
+        return None
+    match = PROMISE_TAG_PATTERN.search(text)
+    if match is None:
+        return None
+    return match.group(1).strip()
+
+
+def promise_matches(block: str, expected: str) -> bool:
+    """Return True when a promise block starts with expected."""
+    if not block or not expected:
+        return False
+    expected_norm = _normalize(expected)
+    block_lines = [
+        line.strip()
+        for line in block.splitlines()
+        if line.strip()
+    ]
+    first_line = block_lines[0] if block_lines else block.strip()
+    first_norm = _normalize(first_line)
+    if first_norm == expected_norm:
+        return True
+    return first_norm.startswith(f"{expected_norm} ")
+
+
+__all__ = [
+    "TaskCompletionRail",
+    "extract_promise_block",
+    "promise_matches",
+]

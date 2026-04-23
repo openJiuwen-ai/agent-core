@@ -61,7 +61,6 @@ class SandboxGateway:
         self._store = InMemorySandboxStore()
 
         self._register_builtin_launchers()
-        self._register_builtin_providers()
 
     @staticmethod
     def _register_builtin_launchers():
@@ -69,12 +68,6 @@ class SandboxGateway:
         from openjiuwen.core.sys_operation.sandbox.launchers.pre_deployment_launcher import PreDeploymentLauncher
 
         SandboxRegistry.register_launcher("pre_deploy", PreDeploymentLauncher)
-
-    @staticmethod
-    def _register_builtin_providers():
-        """Import provider modules to trigger @SandboxRegistry.provider registration."""
-        import openjiuwen.extensions.sys_operation.sandbox.providers.aio  # noqa: F401
-        import openjiuwen.extensions.sys_operation.sandbox.providers.jiuwenbox  # noqa: F401
 
     @classmethod
     def get_instance(

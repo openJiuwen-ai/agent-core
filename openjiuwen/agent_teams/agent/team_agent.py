@@ -517,6 +517,7 @@ class TeamAgent(BaseAgent):
             "workspace": ws_spec,
             "sys_operation": sys_operation_spec,
             "tools": merged_tools,
+            "enable_skill_discovery": True,
             "enable_task_loop": True,
         })
         self._deep_agent = build_spec.build()

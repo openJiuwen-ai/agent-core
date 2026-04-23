@@ -9,6 +9,7 @@ from openjiuwen.auto_harness.agents.factory import (
     create_eval_agent,
     create_learnings_agent,
     create_plan_agent,
+    create_pr_draft_agent,
     create_select_pipeline_agent,
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     "create_eval_agent",
     "create_learnings_agent",
     "create_plan_agent",
+    "create_pr_draft_agent",
     "create_select_pipeline_agent",
 ]

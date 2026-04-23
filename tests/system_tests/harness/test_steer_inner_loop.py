@@ -30,7 +30,7 @@ from openjiuwen.core.single_agent.rail.base import (
 )
 from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.schema.task import (
-    TaskItem,
+    TodoItem,
     TaskPlan,
 )
 from tests.unit_tests.fixtures.mock_llm import (
@@ -122,14 +122,14 @@ def _seed_plan(session: Session) -> TaskPlan:
     plan = TaskPlan(
         goal="test steering injection",
         tasks=[
-            TaskItem(
+            TodoItem(
                 id="t1",
-                title="step-1",
+                content="step-1",
                 description="执行第一步操作",
             ),
-            TaskItem(
+            TodoItem(
                 id="t2",
-                title="step-2",
+                content="step-2",
                 description="执行第二步操作",
                 depends_on=["t1"],
             ),

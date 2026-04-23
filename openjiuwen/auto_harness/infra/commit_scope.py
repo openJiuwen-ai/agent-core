@@ -7,11 +7,13 @@ from __future__ import annotations
 import re
 from pathlib import PurePosixPath
 
+from openjiuwen.auto_harness.infra.edit_scope import (
+    is_allowed_repo_edit_path,
+)
 
 _TEST_FILE_RE = re.compile(
     r"(tests/(?:unit_tests|system_tests)/[^\s:'\"]+\.py)"
 )
-_DOC_DIRS = ("docs/en/", "docs/zh/")
 
 
 def is_documentation_file(path: str) -> bool:
@@ -21,9 +23,11 @@ def is_documentation_file(path: str) -> bool:
 
 
 def is_allowed_documentation_file(path: str) -> bool:
-    """Return whether a documentation file follows the bilingual docs layout."""
-    normalized = path.strip().replace("\\", "/")
-    return any(normalized.startswith(prefix) for prefix in _DOC_DIRS)
+    """Return whether a documentation file is inside the allowed docs layout."""
+    return (
+        is_documentation_file(path)
+        and is_allowed_repo_edit_path(path)
+    )
 
 
 def derive_test_files(

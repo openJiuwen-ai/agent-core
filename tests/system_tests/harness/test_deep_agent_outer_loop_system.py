@@ -21,9 +21,9 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.config import DeepAgentConfig
 from openjiuwen.harness.schema.task import (
-    TaskItem,
+    TodoItem,
     TaskPlan,
-    TaskStatus,
+    TodoStatus,
 )
 
 
@@ -92,14 +92,14 @@ class TestDeepAgentOuterLoopSystem(unittest.IsolatedAsyncioTestCase):
         plan = TaskPlan(
             goal="验证外循环能力",
             tasks=[
-                TaskItem(
+                TodoItem(
                     id="t1",
-                    title="step-1",
+                    content="step-1",
                     description="first planned step",
                 ),
-                TaskItem(
+                TodoItem(
                     id="t2",
-                    title="step-2",
+                    content="step-2",
                     description="second planned step",
                     depends_on=["t1"],
                 ),
@@ -189,8 +189,8 @@ class TestDeepAgentOuterLoopSystem(unittest.IsolatedAsyncioTestCase):
         plan = TaskPlan.from_dict(persisted.get("task_plan"))
         self.assertEqual(plan.goal, seeded.goal)
         self.assertEqual(len(plan.tasks), 2)
-        self.assertEqual(plan.tasks[0].status, TaskStatus.COMPLETED)
-        self.assertEqual(plan.tasks[1].status, TaskStatus.COMPLETED)
+        self.assertEqual(plan.tasks[0].status, TodoStatus.COMPLETED)
+        self.assertEqual(plan.tasks[1].status, TodoStatus.COMPLETED)
 
     @pytest.mark.asyncio
     async def test_multiple_follow_ups_consumed_in_order(self):
@@ -201,7 +201,7 @@ class TestDeepAgentOuterLoopSystem(unittest.IsolatedAsyncioTestCase):
         plan = TaskPlan(
             goal="fifo-test",
             tasks=[
-                TaskItem(id="t1", title="step-1"),
+                TodoItem(id="t1", content="step-1"),
             ],
         )
         session.update_state(
@@ -289,7 +289,7 @@ class TestDeepAgentOuterLoopSystem(unittest.IsolatedAsyncioTestCase):
         plan = TaskPlan(
             goal="persist-test",
             tasks=[
-                TaskItem(id="t1", title="step-1"),
+                TodoItem(id="t1", content="step-1"),
             ],
         )
         session.update_state(

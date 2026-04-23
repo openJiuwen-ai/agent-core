@@ -18,3 +18,4 @@ class SectionName:
     MEMORY = "memory"
     SESSION_TOOLS = "session_tools"
     MODE_INSTRUCTIONS = "mode_instructions"
+    VERIFICATION_CONTRACT = "verification_contract"

@@ -8,6 +8,7 @@ import pytest
 
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.processor.compressor.current_round_compressor import (
+    CurrentRoundCompressor,
     CurrentRoundCompressorConfig,
 )
 from openjiuwen.core.context_engine.schema.messages import OffloadUserMessage, OffloadAssistantMessage, \
@@ -260,4 +261,73 @@ class TestCurrentRoundCompressor:
             assert len(result) >= 3
             # Model.invoke should NOT be called when last message is UserMessage
             mock_model.invoke.assert_not_called()
+
+    @staticmethod
+    def test_protect_tool_call_boundary_excludes_assistant_with_matching_tail_tool_result():
+        messages = [
+            UserMessage(content="question"),
+            AssistantMessage(content="safe-prefix-1"),
+            AssistantMessage(content="safe-prefix-2"),
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["tc-1"], ["tool_a"])),
+            ToolMessage(content="tool result", tool_call_id="tc-1"),
+        ]
+
+        protected_end_idx = CurrentRoundCompressor._protect_tool_call_boundary(messages, 1, 3)
+
+        assert protected_end_idx == 2
+
+    @staticmethod
+    def test_protect_tool_call_boundary_excludes_trailing_assistant_with_tool_calls_without_tail_tool():
+        messages = [
+            UserMessage(content="question"),
+            AssistantMessage(content="safe-prefix"),
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["tc-1"], ["tool_a"])),
+        ]
+
+        protected_end_idx = CurrentRoundCompressor._protect_tool_call_boundary(messages, 1, 2)
+
+        assert protected_end_idx == 1
+
+    @pytest.mark.asyncio
+    async def test_multi_compress_keeps_tool_call_and_tool_result_raw_while_compressing_safe_prefix(self):
+        with patch(
+            "openjiuwen.core.context_engine.processor.compressor.current_round_compressor.Model",
+            MagicMock(return_value=MagicMock()),
+        ):
+            compressor = CurrentRoundCompressor(
+                CurrentRoundCompressorConfig(
+                    tokens_threshold=100,
+                    min_selected_tokens_for_compression=1,
+                    summary_merge_min_blocks=3,
+                )
+            )
+
+        context_messages = [
+            UserMessage(content="question"),
+            AssistantMessage(content="safe-prefix-1"),
+            AssistantMessage(content="safe-prefix-2"),
+            AssistantMessage(content="", tool_calls=create_tool_call_list(["tc-1"], ["tool_a"])),
+            ToolMessage(content="tool result", tool_call_id="tc-1"),
+            AssistantMessage(content="final answer"),
+        ]
+        compressed_message = UserMessage(content="[CURRENT_ROUND_MEMORY_BLOCK]\ncompressed")
+
+        compressor.compress = AsyncMock(return_value=compressed_message)
+        compressor.compress_ = AsyncMock(return_value=None)
+        compressor._collect_prior_summary_indices = MagicMock(return_value=[])
+
+        updated_messages = await compressor.multi_compress(
+            context_messages=context_messages,
+            last_user_idx=0,
+            end_idx=3,
+            context=MagicMock(),
+        )
+
+        compressor.compress.assert_awaited_once()
+        assert updated_messages is not None
+        assert updated_messages[1] is compressed_message
+        assert isinstance(updated_messages[2], AssistantMessage)
+        assert updated_messages[2].tool_calls[0].id == "tc-1"
+        assert isinstance(updated_messages[3], ToolMessage)
+        assert updated_messages[3].tool_call_id == "tc-1"
 

@@ -7,9 +7,8 @@
 - **Agent Tuning (tune)**:
   - Used to combine `Optimizer + Evaluator + Trainer` into a repeatable training process.
   - Suitable for automated evaluation and iteration of prompt parameters (system/user prompt, etc.) when there is a case dataset.
-- **Agent Reinforcement Learning (agentrl)**:
-  - RL training extension based on verl, supporting multi-turn rollout orchestration, parallel execution, and structured trajectory collection.
-  - Provides high-level entry point `RLOptimizer` for simplified RL training pipeline configuration and execution.
+- **Agent reinforcement learning (`agent_rl`)**:
+  - Implemented under [`openjiuwen.agent_evolving.agent_rl`](./openjiuwen.agent_evolving/agent_rl/agent_rl.README.md) (VERL-based RL training). `dev_tools` only links the documentation entry from the API index.
 - **Agent Builder (agent_builder)**:
   - Builds LLM Agents and workflow Agents from natural language (clarification, design, DL/DSL conversion).
   - Module overview: [agent_builder](./openjiuwen.dev_tools/agent_builder.README.md); package API: [agent_builder.md](./openjiuwen.dev_tools/agent_builder/agent_builder.md). Sidebar: [SUMMARY.md](../../SUMMARY.md) → `openjiuwen.dev_tools` → `agent_builder`.
@@ -24,5 +23,5 @@
 |--------|-------------|
 | [prompt_builder](./openjiuwen.dev_tools/prompt_builder.README.md) | Prompt building and optimization tools. |
 | [tune](./openjiuwen.dev_tools/tune.README.md) | Agent tuning tools. |
-| [agentrl](./openjiuwen.dev_tools/agentrl.README.md) | RL training extension based on verl. |
+| [agent_rl](./openjiuwen.agent_evolving/agent_rl/agent_rl.README.md) | RL training extension based on verl (package: `openjiuwen.agent_evolving.agent_rl`). |
 | [agent_builder](./openjiuwen.dev_tools/agent_builder.README.md) | Agent Builder (NL → LLM Agent / workflow) development toolkit. |

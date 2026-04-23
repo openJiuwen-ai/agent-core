@@ -801,7 +801,7 @@ class StatusCode(Enum):
 
     # 2. Foundation - Tool Definition and Execution 182000 - 182999
     # 0. basic tool
-    TOOP_CARD_INVALID = (182000, "card is invalid, card={card}, error='{reason}'")
+    TOOL_CARD_INVALID = (182000, "card is invalid, card={card}, error='{reason}'")
     TOOL_STREAM_NOT_SUPPORTED = (182010, "stream is not support, card={card}")
     TOOL_INVOKE_NOT_SUPPORTED = (182011, "invoke is not support, card={card}")
     TOOL_EXECUTION_ERROR = (182012, "tool execution error, too card={card}, reason={reason}")

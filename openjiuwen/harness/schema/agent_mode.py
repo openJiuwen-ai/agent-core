@@ -12,11 +12,11 @@ class AgentMode(str, Enum):
     Attributes:
         PLAN: Read-only planning mode — LLM explores codebase and writes a
             plan file before any modifications are made.
-        AUTO: Normal execution mode (default).
+        NORMAL: Normal execution mode (default).
     """
 
     PLAN = "plan"
-    AUTO = "auto"
+    NORMAL = "normal"
 
 
 __all__ = ["AgentMode"]

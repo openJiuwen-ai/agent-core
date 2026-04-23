@@ -426,6 +426,7 @@ class DeepAgentSpec(BaseModel):
     max_iterations: int = 15
     workspace: Optional[WorkspaceSpec] = None
     skills: Optional[list[str]] = None
+    enable_skill_discovery: bool = False
     sys_operation: Optional[SysOperationSpec] = None
     language: Optional[str] = None
     prompt_mode: Optional[str] = None
@@ -495,6 +496,7 @@ class DeepAgentSpec(BaseModel):
             max_iterations=self.max_iterations,
             workspace=workspace,
             skills=self.skills,
+            enable_skill_discovery=self.enable_skill_discovery,
             sys_operation=sys_operation,
             language=self.language,
             prompt_mode=self.prompt_mode,

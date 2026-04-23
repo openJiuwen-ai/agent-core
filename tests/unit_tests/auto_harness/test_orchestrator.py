@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from unittest import IsolatedAsyncioTestCase
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from openjiuwen.auto_harness.orchestrator import (
     AutoHarnessOrchestrator,
@@ -17,6 +17,7 @@ from openjiuwen.auto_harness.pipelines import (
 )
 from openjiuwen.auto_harness.pipelines.meta_evolve_pipeline.meta_evolve_task_pipeline import (
     PRTaskPipeline,
+    prepare_task_runtime,
 )
 from openjiuwen.auto_harness.schema import (
     AutoHarnessConfig,
@@ -297,6 +298,81 @@ class TestOrchestratorRunSession(
             )
 
     @patch(f"{_LEARNINGS_STAGE_MOD}.run_learnings", new=_noop_agen)
+    async def test_plan_stage_keeps_only_first_planned_task(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as d:
+            orch = self._make_orchestrator(d)
+            orch.worktree_mgr.prepare_readonly_snapshot = (
+                AsyncMock(return_value=f"{d}/worktrees/assess")
+            )
+            orch.worktree_mgr.cleanup = AsyncMock()
+
+            async def _fake_assess_stream(
+                config, experience_store,
+            ):
+                del config, experience_store
+                yield OutputSchema(
+                    type="llm_output",
+                    index=0,
+                    payload={"content": "# Report"},
+                )
+
+            async def _fake_plan_stream(
+                config, assessment, experience_store,
+            ):
+                del config, assessment, experience_store
+                yield OutputSchema(
+                    type="llm_output",
+                    index=0,
+                    payload={
+                        "content": (
+                            "```json\n"
+                            "["
+                            '{"topic":"t1"},'
+                            '{"topic":"t2"}'
+                            "]\n```"
+                        )
+                    },
+                )
+
+            seen_topics = []
+
+            async def _fake_isolated(_orch, task):
+                seen_topics.append(task.topic)
+                orch._results.append(
+                    CycleResult(success=True, summary=task.topic),
+                )
+                return
+                yield  # noqa: RET504
+
+            with patch(
+                f"{_ASSESS_STAGE_MOD}.run_assess_stream",
+                new=_fake_assess_stream,
+            ), patch(
+                f"{_PLAN_STAGE_MOD}.run_plan_stream",
+                new=_fake_plan_stream,
+            ), patch.object(
+                PRTaskPipeline,
+                "run_isolated_stream",
+                new=_fake_isolated,
+            ):
+                chunks = await _collect(
+                    orch.run_session_stream(tasks=None)
+                )
+
+            assert seen_topics == ["t1"]
+            message_chunks = [
+                c.payload["content"]
+                for c in chunks
+                if getattr(c, "type", "") == "message"
+            ]
+            assert (
+                "规划阶段只保留最高优先级的 1 个任务"
+                in message_chunks
+            )
+
+    @patch(f"{_LEARNINGS_STAGE_MOD}.run_learnings", new=_noop_agen)
     async def test_caps_tasks(self):
         with tempfile.TemporaryDirectory() as d:
             orch = self._make_orchestrator(d)
@@ -325,6 +401,101 @@ class TestOrchestratorRunSession(
 
 
 class TestTaskPipeline(IsolatedAsyncioTestCase):
+    async def test_prepare_task_runtime_creates_task_session_and_fix_agent(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = AutoHarnessConfig(data_dir=d)
+            orch = AutoHarnessOrchestrator(
+                cfg, agent=None,
+            )
+            orch.experience_store.search = AsyncMock(
+                return_value=[]
+            )
+            orch.worktree_mgr.prepare = AsyncMock(
+                return_value=f"{d}/worktrees/task-1"
+            )
+            orch.git.set_workspace = Mock()
+            orch.ci_gate.set_workspace = Mock()
+            orch.git.list_dirty_files = AsyncMock(
+                return_value=["openjiuwen/harness/tools/filesystem.py"]
+            )
+
+            task_agent = type(
+                "_TaskAgent",
+                (),
+                {"card": object()},
+            )()
+            fix_agent = object()
+            commit_agent = object()
+            task_session = object()
+
+            with patch(
+                "openjiuwen.auto_harness.agents.create_auto_harness_agent",
+                side_effect=[task_agent, fix_agent],
+            ) as create_task_agent, patch(
+                "openjiuwen.auto_harness.agents.create_commit_agent",
+                return_value=commit_agent,
+            ) as create_commit_agent, patch(
+                "openjiuwen.core.session.agent.create_agent_session",
+                return_value=task_session,
+            ) as create_agent_session:
+                runtime = await prepare_task_runtime(
+                    orch,
+                    OptimizationTask(topic="task-1"),
+                )
+
+            assert runtime.task_agent is task_agent
+            assert runtime.fix_agent is fix_agent
+            assert runtime.commit_agent is commit_agent
+            assert runtime.task_session is task_session
+            assert runtime.preexisting_dirty_files == [
+                "openjiuwen/harness/tools/filesystem.py"
+            ]
+
+            first_call = create_task_agent.call_args_list[0]
+            assert (
+                first_call.kwargs["workspace_override"]
+                == f"{d}/worktrees/task-1"
+            )
+            assert "enable_task_loop" not in first_call.kwargs
+            edit_safety_rail = first_call.kwargs[
+                "edit_safety_rail"
+            ]
+            assert edit_safety_rail is runtime.edit_safety_rail
+
+            second_call = create_task_agent.call_args_list[1]
+            assert (
+                second_call.kwargs["workspace_override"]
+                == f"{d}/worktrees/task-1"
+            )
+            assert (
+                second_call.kwargs["edit_safety_rail"]
+                is edit_safety_rail
+            )
+            assert (
+                second_call.kwargs["enable_task_loop"]
+                is False
+            )
+            assert (
+                second_call.kwargs["enable_task_planning"]
+                is False
+            )
+            assert (
+                second_call.kwargs["enable_progress_repeat"]
+                is False
+            )
+
+            create_commit_agent.assert_called_once_with(
+                orch.config,
+                workspace_override=f"{d}/worktrees/task-1",
+            )
+            create_agent_session.assert_called_once_with(
+                session_id="auto-harness-task-1",
+                card=task_agent.card,
+                close_stream_on_post_run=False,
+            )
+
     async def test_timeout_handling(self):
         with tempfile.TemporaryDirectory() as d:
             cfg = AutoHarnessConfig(

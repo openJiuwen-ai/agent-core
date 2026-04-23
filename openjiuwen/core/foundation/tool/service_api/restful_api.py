@@ -216,6 +216,8 @@ class RestfulApi(Tool):
                 config={
                     "verify_switch_env": self._RESTFUL_SSL_VERIFY,
                     "ssl_cert_env": self._RESTFUL_SSL_CERT,
+                    "url": self._url,
+
                 },
                 tool_type="restful_api",
                 tool_id=self.card.id,

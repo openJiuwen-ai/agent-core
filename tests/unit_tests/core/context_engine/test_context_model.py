@@ -522,11 +522,11 @@ class TestModelContext:
         stat = context.statistic()
         assert stat.total_dialogues == 0
 
-        # Only user messages -> 0 rounds (no closing assistant)
+        # Only user messages -> 1 incomplete round under the new semantics
         context = await self.create_context()
         await context.add_messages([UserMessage(content="u1"), UserMessage(content="u2")])
         stat = context.statistic()
-        assert stat.total_dialogues == 0
+        assert stat.total_dialogues == 1
 
         # One complete round: user + assistant (no tool_calls)
         context = await self.create_context()
@@ -978,7 +978,7 @@ class TestModelContext:
 
         await context.add_messages(messages)
         window = await context.get_context_window(dialogue_round=2)
-        assert window.context_messages == dialogues[-2] + dialogues[-1]
+        assert window.context_messages == dialogues[0][-1:] + dialogues[-2] + dialogues[-1]
         await context.clear_messages()
 
         await context.add_messages(messages)

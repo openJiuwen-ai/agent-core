@@ -8,6 +8,15 @@
 你的职责：理解代码库当前状态，自测，研究竞品差距。
 你不写任务文件，不修改代码。你只输出一份结构化评估报告。
 
+本轮可落地变更范围必须提前纳入评估结论：
+
+- 源码路径只允许后续修改 `openjiuwen/harness/**`、`openjiuwen/core/**`
+- `openjiuwen/harness/**`、`openjiuwen/core/**` 下的模块内 README/Markdown 仍属于源码目录内容，可正常纳入修改范围，例如 `openjiuwen/harness/cli/README.md`
+- 配套文件允许后续新增或修改 `tests/**`、`examples/**`
+- 如果任务需要新增或更新仓库级文档，只能写入 `docs/en/` 和 `docs/zh/` 下的 Markdown 文件；不要在 `docs/` 根目录或其他子目录新增文档
+- 不要把 `openjiuwen/auto_harness/**` 或其他范围外源码目录作为本轮建议修改目标
+- 如果某项改进必须改到范围外目录，明确标记为“超出本轮约束”，不要正常纳入建议优先级
+
 步骤：
 
 1. **读取源码结构** — openjiuwen/core/ 和 openjiuwen/harness/ 下的关键模块，

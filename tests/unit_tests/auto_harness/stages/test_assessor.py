@@ -115,6 +115,14 @@ class TestAssessWithAgent(
                 )
         assert "Python 检查策略建议" in query
         assert "使用 staged files 运行 make check" in query
+        assert "`openjiuwen/harness/**`" in query
+        assert "`openjiuwen/core/**`" in query
+        assert "`openjiuwen/harness/cli/README.md`" in query
+        assert "`tests/**`" in query
+        assert "`examples/**`" in query
+        assert "`docs/en/`" in query
+        assert "`docs/zh/`" in query
+        assert "`openjiuwen/auto_harness/**`" in query
 
     @patch(
         "openjiuwen.auto_harness.agents"

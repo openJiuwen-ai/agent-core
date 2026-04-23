@@ -20,9 +20,11 @@ from openjiuwen.harness.schema.state import (
     PlanModeState,
 )
 from openjiuwen.harness.schema.task import (
-    TaskItem,
+    ModelUsageRecord,
+    STATUS_ICONS,
     TaskPlan,
-    TaskStatus,
+    TodoItem,
+    TodoStatus,
 )
 
 __all__ = [
@@ -37,7 +39,9 @@ __all__ = [
     "default_event_priority",
     "DeepAgentState",
     "PlanModeState",
-    "TaskItem",
+    "ModelUsageRecord",
+    "STATUS_ICONS",
     "TaskPlan",
-    "TaskStatus",
+    "TodoItem",
+    "TodoStatus",
 ]

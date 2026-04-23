@@ -276,7 +276,7 @@
 | MODEL_CLIENT_CONFIG_INVALID | 181005 | 模型客户端配置无效。 | 检查客户端配置参数。 |
 | | **Tool Definition and Execution (182000 - 182999)** | | |
 | | **基础Tool (182000 - 182099)** | | |
-| TOOP_CARD_INVALID | 182000 | 工具卡片无效。 | 检查ToolCard配置的必需字段。 |
+| TOOL_CARD_INVALID | 182000 | 工具卡片无效。 | 检查ToolCard配置的必需字段。 |
 | TOOL_STREAM_NOT_SUPPORTED | 182010 | 工具不支持流式。 | 使用invoke方法代替stream。 |
 | TOOL_INVOKE_NOT_SUPPORTED | 182011 | 工具不支持invoke。 | 检查工具实现。 |
 | TOOL_EXECUTION_ERROR | 182012 | 工具执行错误。 | 根据错误信息排查工具逻辑。 |

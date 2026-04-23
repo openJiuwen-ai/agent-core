@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
+from openjiuwen.core.foundation.llm import Model
 from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.prompts.sections import SectionName
 
@@ -100,6 +101,105 @@ PROGRESS_REMINDER_USER_PROMPT: Dict[str, str] = {
     "en": PROGRESS_REMINDER_USER_PROMPT_EN,
 }
 
+# ---------------------------------------------------------------------------
+# Model selection prompt (bilingual) - appended to todo section when configured
+# ---------------------------------------------------------------------------
+MODEL_SELECTION_PROMPT_CN = """
+## 模型选择策略
+
+当前可用模型：
+{model_list}
+
+每个模型 ID 由用户配置，对应一个具体的模型实例及其描述。描述说明了该模型的能力特点和适用场景，
+是你选择模型的主要依据。目标是：在保证任务质量的前提下，为每个子任务选择最合适的模型，控制整体 token 成本。
+
+### 选择原则
+创建子任务时，阅读每个模型的描述，根据任务复杂度为 selected_model_id 字段选择合适的模型 ID：
+- 描述中标注"适合简单任务"、"成本低"、"速度快"等的模型 → 用于翻译、摘要、格式转换等无需深度推理的任务
+- 描述中标注"适合复杂任务"、"推理能力强"、"效果好"等的模型 → 用于代码生成、逻辑分析、策略规划等任务
+- 不填则使用 Agent 默认模型
+
+### 执行质量保障
+若某个子任务执行结果质量不佳（输出不准确、逻辑错误、未达到预期目标），
+应通过 todo_modify 工具将该任务的 selected_model_id 修改为描述更强的模型 ID，然后重新执行该任务。
+不要在低质量结果上继续推进后续依赖任务。
+"""
+
+MODEL_SELECTION_PROMPT_EN = """
+## Model Selection Strategy
+
+Available models:
+{model_list}
+
+Each model ID is configured by the user and maps to a specific model instance with a description.
+The description explains the model's capability and best-fit scenarios — use it as the primary basis
+for selection. The goal is to pick the most appropriate model for each subtask to maintain quality
+while keeping overall token cost in check.
+
+### Selection Principles
+When creating subtasks, read each model's description and assign an appropriate model ID to selected_model_id:
+- Models described as "suitable for simple tasks", "low cost", "fast" → use for translation, summarization,
+  format conversion, and other tasks that don't require deep reasoning
+- Models described as "suitable for complex tasks", "strong reasoning", "high quality" → use for code
+  generation, logical analysis, strategic planning, etc.
+- Omit to use the agent's default model
+
+### Quality Assurance
+If a subtask produces poor results (inaccurate output, logical errors, unmet objectives),
+use todo_modify to update that task's selected_model_id to a model with a stronger description,
+then re-execute the task. Do not proceed with downstream tasks that depend on low-quality results.
+"""
+
+NO_MODEL_SELECTION_PROMPT_CN = """
+## 模型选择说明
+
+当前未配置可选模型列表。创建和更新任务时，**不要使用 selected_model_id 字段**。
+所有任务将使用 Agent 默认模型执行。
+"""
+
+NO_MODEL_SELECTION_PROMPT_EN = """
+## Model Selection Note
+
+No model selection list is configured. When creating or updating tasks, **do NOT use the selected_model_id field**.
+All tasks will be executed using the Agent's default model.
+"""
+
+MODEL_SELECTION_PROMPT: Dict[str, str] = {
+    "cn": MODEL_SELECTION_PROMPT_CN,
+    "en": MODEL_SELECTION_PROMPT_EN,
+}
+
+NO_MODEL_SELECTION_PROMPT: Dict[str, str] = {
+    "cn": NO_MODEL_SELECTION_PROMPT_CN,
+    "en": NO_MODEL_SELECTION_PROMPT_EN,
+}
+
+
+def build_model_selection_prompt(
+    language: str = "cn",
+    model_selection: Optional[Dict] = None,
+) -> str:
+    """Build the model selection guidance prompt.
+
+    Args:
+        language: 'cn' or 'en'.
+        model_selection: Dict mapping Model instance to description string.
+            Model's client_id (from model_client_config) is used as model_id.
+
+    Returns:
+        Model selection prompt string, or empty string if not configured.
+    """
+    if not model_selection:
+        return ""
+    model_list_lines = []
+    for model, description in model_selection.items():
+        if isinstance(model, Model):
+            model_id = model.model_client_config.client_id
+            model_list_lines.append(f" -selected_model_id: {model_id}: {description}")
+    model_list = "\n".join(model_list_lines)
+    template = MODEL_SELECTION_PROMPT.get(language, MODEL_SELECTION_PROMPT["cn"])
+    return template.format(model_list=model_list)
+
 
 def build_todo_system_prompt(language: str = "cn") -> str:
     """Get the todo system prompt for the given language.
@@ -131,16 +231,25 @@ def build_progress_reminder_user_prompt(language: str = "cn",
     return prompt_template.format(tasks=tasks, in_progress_task=in_progress_task)
 
 
-def build_todo_section(language: str = "cn") -> Optional["PromptSection"]:
+def build_todo_section(language: str = "cn", model_selection: Optional[Dict] = None) -> Optional["PromptSection"]:
     """Build a PromptSection for todo system prompt.
 
     Args:
         language: 'cn' or 'en'.
+        model_selection: Optional model selection config from DeepAgentConfig.
+            When provided, model selection guidance is appended to the prompt.
+            When not provided, a warning is appended that selected_model_id should NOT be used.
 
     Returns:
         A PromptSection instance for todo.
     """
     content = build_todo_system_prompt(language)
+    model_content = build_model_selection_prompt(language, model_selection)
+    if model_content:
+        content = content + model_content
+    else:
+        no_model_content = NO_MODEL_SELECTION_PROMPT.get(language, NO_MODEL_SELECTION_PROMPT["cn"])
+        content = content + no_model_content
 
     return PromptSection(
         name=SectionName.TODO,

@@ -62,5 +62,11 @@ tools:
 ## 约束
 
 - **只读**: 不得修改任何文件
+- 评估结论和后续建议必须遵守本轮变更范围：
+  源码只允许 `openjiuwen/harness/**`、`openjiuwen/core/**`；
+  这两个源码目录下的模块内 `README.md` / Markdown 也允许修改，例如 `openjiuwen/harness/cli/README.md`；
+  配套文件只允许 `tests/**`、`examples/**`；
+  仓库级文档只允许 `docs/en/`、`docs/zh/` 下的 Markdown 文件
+- 不要把 `openjiuwen/auto_harness/**` 或其他范围外源码目录当作本轮默认改动目标
 - 使用 `experience_search` 查询历史经验，避免重复评估
 - 评估报告长度控制在 2000-5000 字符

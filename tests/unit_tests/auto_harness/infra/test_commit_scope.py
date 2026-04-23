@@ -6,6 +6,7 @@ from openjiuwen.auto_harness.infra.commit_scope import (
     derive_legacy_related_test_files,
     derive_test_files,
     extract_verify_related_files,
+    is_allowed_documentation_file,
     is_derived_test_file,
 )
 
@@ -66,3 +67,15 @@ def test_derive_legacy_related_test_files_requires_edit_and_reference():
     assert result == [
         "tests/unit_tests/auto_harness/test_schema.py"
     ]
+
+
+def test_is_allowed_documentation_file_limits_docs_layout():
+    assert is_allowed_documentation_file(
+        "docs/en/guide.md"
+    )
+    assert not is_allowed_documentation_file(
+        "docs/auto-harness-agent-design.md"
+    )
+    assert not is_allowed_documentation_file(
+        "README.md"
+    )

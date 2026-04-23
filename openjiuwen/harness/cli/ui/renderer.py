@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
@@ -40,10 +41,13 @@ def _write_terminal(text: str) -> None:
     """Write *text* directly to the terminal (stdout).
 
     This is intentional CLI user-facing output, not
-    diagnostic logging.  Uses low-level ``os.write``
-    to file descriptor 1 (stdout).
+    diagnostic logging. Uses the active stdout encoding
+    while writing directly to file descriptor 1.
     """
-    os.write(1, text.encode())
+    stdout = sys.stdout
+    encoding = stdout.encoding or "utf-8"
+    errors = stdout.errors or "strict"
+    os.write(1, text.encode(encoding, errors=errors))
 
 # Chunk type constants (aligned with SDK OutputSchema.type)
 CHUNK_LLM_OUTPUT = "llm_output"
@@ -223,7 +227,7 @@ def _render_tool_result(
             return todo_items
 
     summary = format_tool_result(
-        tool_name, tool_result, tool_args
+        tool_name, tool_result, tool_args, payload
     )
     if summary:
         console.print(f"[dim]  ⎿  {summary}[/dim]")

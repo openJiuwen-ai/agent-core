@@ -162,13 +162,13 @@ _EXIT_PLAN_WITH_CONTENT_PREFIX = {
 
 
 _SWITCH_MODE_INVALID_MSG = {
-    "en": "Invalid mode '{mode}'. Supported modes: auto, plan.",
-    "cn": "无效模式 '{mode}'。支持模式：auto、plan。",
+    "en": "Invalid mode '{mode}'. Supported modes: plan, normal.",
+    "cn": "无效模式 '{mode}'。支持模式：normal、plan。",
 }
 
-_SWITCH_MODE_TO_AUTO_MSG = {
-    "en": "Switched mode to auto.",
-    "cn": "已切换为 auto 模式。",
+_SWITCH_MODE_TO_NORMAL_MSG = {
+    "en": "Switched mode to normal.",
+    "cn": "已切换为 normal 模式。",
 }
 
 _SWITCH_MODE_TO_PLAN_MSG = {
@@ -202,11 +202,11 @@ class SwitchModeInput:
 
 
 class SwitchModeTool(Tool):
-    """Switch session runtime mode between auto and plan.
+    """Switch session runtime mode between normal and plan.
 
     Behavior:
     - ``plan``: switch to plan mode and ensure a plan file exists.
-    - ``auto``: switch back to auto mode.
+    - ``normal``: switch back to normal mode.
     """
 
     def __init__(self, agent_ref: "DeepAgent", language: str = "cn") -> None:
@@ -225,7 +225,7 @@ class SwitchModeTool(Tool):
         raw_mode = (parsed.mode or "").strip().lower()
         lang = "en" if self._language == "en" else "cn"
 
-        if raw_mode not in (AgentMode.AUTO.value, AgentMode.PLAN.value):
+        if raw_mode not in (AgentMode.PLAN.value, AgentMode.NORMAL.value):
             return _SWITCH_MODE_INVALID_MSG[lang].format(mode=raw_mode)
 
         session = kwargs.get("session")
@@ -235,8 +235,8 @@ class SwitchModeTool(Tool):
             agent.switch_mode(session, AgentMode.PLAN.value)
             return _SWITCH_MODE_TO_PLAN_MSG[lang]
 
-        agent.switch_mode(session, AgentMode.AUTO.value)
-        return _SWITCH_MODE_TO_AUTO_MSG[lang]
+        agent.switch_mode(session, AgentMode.NORMAL.value)
+        return _SWITCH_MODE_TO_NORMAL_MSG[lang]
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         pass

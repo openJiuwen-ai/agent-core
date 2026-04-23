@@ -12,12 +12,18 @@ from openjiuwen.harness.subagents.research_agent import (
     build_research_agent_config,
     create_research_agent,
 )
+from openjiuwen.harness.subagents.verification_agent import (
+    build_verification_agent_config,
+    create_verification_agent,
+)
 
 __all__ = [
     "build_browser_agent_config",
     "build_code_agent_config",
     "build_research_agent_config",
+    "build_verification_agent_config",
     "create_browser_agent",
-    "create_research_agent",
     "create_code_agent",
+    "create_research_agent",
+    "create_verification_agent",
 ]

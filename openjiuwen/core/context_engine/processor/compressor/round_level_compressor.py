@@ -170,7 +170,8 @@ class RoundLevelCompressor(ContextProcessor):
         **kwargs,
     ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
         all_messages = context.get_messages() + messages_to_add
-        if self._count_context_window_tokens(
+        force = kwargs.get("force", False)
+        if not force and self._count_context_window_tokens(
             system_messages=kwargs.get("system_messages"),
             context_messages=all_messages,
             tools=kwargs.get("tools"),
@@ -184,6 +185,7 @@ class RoundLevelCompressor(ContextProcessor):
             system_messages=kwargs.get("system_messages"),
             tools=kwargs.get("tools"),
             keep_recent=self._keep_recent_messages,
+            force=force,
         )
         if compressed_messages == all_messages:
             return None, messages_to_add
@@ -208,7 +210,7 @@ class RoundLevelCompressor(ContextProcessor):
                 tools=context_window.tools,
                 context=context,
             )
-            > self._target_total_tokens
+            > self._trigger_total_tokens
         )
 
     async def on_get_context_window(
@@ -235,6 +237,8 @@ class RoundLevelCompressor(ContextProcessor):
         )
         original_context_len = len(context_window.context_messages)
         context_window.context_messages = compressed_messages
+        
+        context.set_messages(compressed_messages)
         event = ContextEvent(
             event_type=self.processor_type(),
             messages_to_modify=list(range(original_context_len)),
@@ -249,9 +253,10 @@ class RoundLevelCompressor(ContextProcessor):
         system_messages: Optional[List[BaseMessage]],
         tools: Optional[List[ToolInfo]],
         keep_recent: int,
+        force: bool = False,
     ) -> List[BaseMessage]:
         working = list(context_messages)
-        if self._is_under_context_window_budget(system_messages, working, tools, context):
+        if not force and self._is_under_context_window_budget(system_messages, working, tools, context):
             return working
 
         recursive_updated = await self._run_recursive_compression(
@@ -405,6 +410,11 @@ class RoundLevelCompressor(ContextProcessor):
                 cursor += 1
                 continue
 
+            protected_end_idx = self._protect_tool_call_boundary(messages, start_idx, end_idx)
+            if protected_end_idx != end_idx and protected_end_idx <= start_idx:
+                break
+            end_idx = protected_end_idx
+
             targets.append(
                 _CompressTarget(
                     block_id=f"block_{block_no}",
@@ -419,6 +429,46 @@ class RoundLevelCompressor(ContextProcessor):
             block_no += 1
             cursor = end_idx + 1
         return targets
+
+    @staticmethod
+    def _protect_tool_call_boundary(
+        messages: List[BaseMessage],
+        start_idx: int,
+        end_idx: int,
+    ) -> int:
+        if end_idx < start_idx:
+            return end_idx
+
+        protected_end_idx = end_idx
+        tail_tool_ids = {
+            getattr(message, "tool_call_id", None)
+            for message in messages[end_idx + 1:]
+            if isinstance(message, ToolMessage) and getattr(message, "tool_call_id", None)
+        }
+        if not tail_tool_ids:
+            if isinstance(messages[end_idx], AssistantMessage) and messages[end_idx].tool_calls:
+                return end_idx - 1
+            return end_idx
+
+        for idx in range(start_idx, end_idx + 1):
+            message = messages[idx]
+            if not isinstance(message, AssistantMessage) or not message.tool_calls:
+                continue
+            tool_call_ids = {
+                getattr(tool_call, "id", None)
+                for tool_call in message.tool_calls
+                if getattr(tool_call, "id", None)
+            }
+            if tool_call_ids & tail_tool_ids:
+                protected_end_idx = min(protected_end_idx, idx - 1)
+
+        if (
+            protected_end_idx == end_idx
+            and isinstance(messages[end_idx], AssistantMessage)
+            and messages[end_idx].tool_calls
+        ):
+            protected_end_idx = end_idx - 1
+        return protected_end_idx
 
     def _find_l0_block_end(
         self,

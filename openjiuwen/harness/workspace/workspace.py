@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import stat
+import subprocess
+import sys
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
@@ -10,6 +13,13 @@ from typing import Any, Dict, List, Union
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
+
+try:
+    import winerror
+except ImportError:  # pragma: no cover - unavailable outside Windows
+    ERROR_PRIVILEGE_NOT_HELD = 1314
+else:
+    ERROR_PRIVILEGE_NOT_HELD = winerror.ERROR_PRIVILEGE_NOT_HELD
 
 
 # =============================================================================
@@ -188,6 +198,46 @@ class Workspace:
         link_dir.mkdir(parents=True, exist_ok=True)
         return link_dir
 
+    def _create_directory_link(self, target_path: str, link_path: Path) -> None:
+        """Create a directory link, falling back to a junction on Windows."""
+        try:
+            os.symlink(target_path, str(link_path), target_is_directory=True)
+        except OSError as exc:
+            if sys.platform != "win32" or getattr(exc, "winerror", None) != ERROR_PRIVILEGE_NOT_HELD:
+                raise
+            self._create_windows_junction(target_path, str(link_path))
+
+    @staticmethod
+    def _create_windows_junction(target_path: str, link_path: str) -> None:
+        """Create a directory junction using ``mklink /J`` on Windows."""
+        cmd_path = os.path.join(
+            os.environ.get("SystemRoot", r"C:\Windows"),
+            "System32",
+            "cmd.exe",
+        )
+        result = subprocess.run(
+            [cmd_path, "/c", "mklink", "/J", link_path, target_path],
+            capture_output=True,
+            text=True,
+            check=False,
+            shell=False,
+        )
+        if result.returncode != 0:
+            error_output = result.stderr.strip() or result.stdout.strip()
+            raise OSError(f"Failed to create junction {link_path} -> {target_path}: {error_output}")
+
+    def _remove_directory_link(self, link: Path) -> bool:
+        """Remove a directory symlink or junction."""
+        if link.is_symlink():
+            link.unlink()
+            return True
+
+        if self._is_directory_link(link):
+            link.rmdir()
+            return True
+
+        return False
+
     def link_team(self, team_id: str, target_path: str) -> Path:
         """Create .team/{team_id} symlink pointing to a team workspace.
 
@@ -201,7 +251,7 @@ class Workspace:
         link_dir = self._ensure_link_dir(self.TEAM_LINKS_DIR)
         link = link_dir / team_id
         if not link.exists():
-            os.symlink(target_path, str(link), target_is_directory=True)
+            self._create_directory_link(target_path, link)
         return link
 
     def unlink_team(self, team_id: str) -> bool:
@@ -214,10 +264,7 @@ class Workspace:
             True if the symlink was removed, False if it didn't exist.
         """
         link = Path(self.root_path) / self.TEAM_LINKS_DIR / team_id
-        if link.is_symlink():
-            link.unlink()
-            return True
-        return False
+        return self._remove_directory_link(link)
 
     def link_worktree(self, slug: str, target_path: str) -> Path:
         """Create .worktree/{slug} symlink pointing to a git worktree.
@@ -232,7 +279,7 @@ class Workspace:
         link_dir = self._ensure_link_dir(self.WORKTREE_LINKS_DIR)
         link = link_dir / slug
         if not link.exists():
-            os.symlink(target_path, str(link), target_is_directory=True)
+            self._create_directory_link(target_path, link)
         return link
 
     def unlink_worktree(self, slug: str) -> bool:
@@ -245,10 +292,7 @@ class Workspace:
             True if the symlink was removed, False if it didn't exist.
         """
         link = Path(self.root_path) / self.WORKTREE_LINKS_DIR / slug
-        if link.is_symlink():
-            link.unlink()
-            return True
-        return False
+        return self._remove_directory_link(link)
 
     def list_team_links(self) -> list[tuple[str, str]]:
         """List all .team/ symlinks.
@@ -280,10 +324,32 @@ class Workspace:
             return []
         result = []
         for entry in sorted(link_dir.iterdir()):
-            if entry.is_symlink():
+            if self._is_directory_link(entry):
                 target = str(entry.resolve())
                 result.append((entry.name, target))
         return result
+
+    @staticmethod
+    def _is_directory_link(entry: Path) -> bool:
+        """Return True when the entry is a directory link.
+
+        On Windows, directory links may be exposed as junctions instead of
+        symlinks when symlink privilege is unavailable. Those links are
+        reparse points, but ``Path.is_symlink()`` may return False.
+        """
+        if entry.is_symlink():
+            return True
+
+        if sys.platform != "win32" or not entry.is_dir():
+            return False
+
+        try:
+            entry_stat = entry.lstat()
+        except OSError:
+            return False
+
+        file_attributes = getattr(entry_stat, "st_file_attributes", 0)
+        return bool(file_attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
 
     @classmethod
     def get_default_directory(cls, language: str = "cn") -> List[DirectoryNode]:

@@ -147,10 +147,18 @@ class CompletionPromiseEvaluator(StopConditionEvaluator):
         promise: Expected promise string.
     """
 
-    def __init__(self, promise: str) -> None:
+    def __init__(
+        self,
+        promise: str,
+        required_confirmations: int = 1,
+    ) -> None:
         self._promise = promise
         self._fulfilled: bool = False
         self._matched_text: str = ""
+        self._required_confirmations = max(
+            1, int(required_confirmations)
+        )
+        self._confirmation_count = 0
 
     def notify_fulfilled(self, matched_text: str) -> None:
         """Mark the promise as fulfilled.
@@ -158,8 +166,22 @@ class CompletionPromiseEvaluator(StopConditionEvaluator):
         Args:
             matched_text: The normalised text matched from output.
         """
-        self._fulfilled = True
+        self._confirmation_count += 1
+        self._fulfilled = (
+            self._confirmation_count
+            >= self._required_confirmations
+        )
         self._matched_text = matched_text
+
+    def notify_absent(self) -> None:
+        """Record that the expected promise was not present.
+
+        Confirmation counts are consecutive: any absent promise
+        breaks the streak and requires starting confirmation over.
+        """
+        self._confirmation_count = 0
+        self._fulfilled = False
+        self._matched_text = ""
 
     def should_stop(self, ctx: StopEvaluationContext) -> bool:  # noqa: ARG002
         """Return True when the promise flag is set."""
@@ -169,16 +191,36 @@ class CompletionPromiseEvaluator(StopConditionEvaluator):
     def reset(self) -> None:
         self._fulfilled = False
         self._matched_text = ""
+        self._confirmation_count = 0
 
     def get_state(self) -> Optional[Dict[str, Any]]:
         return {
             "fulfilled": self._fulfilled,
             "matched_text": self._matched_text,
+            "required_confirmations": self._required_confirmations,
+            "confirmation_count": self._confirmation_count,
         }
 
     def load_state(self, data: Dict[str, Any]) -> None:
         self._fulfilled = bool(data.get("fulfilled", False))
         self._matched_text = str(data.get("matched_text", ""))
+        self._required_confirmations = max(
+            1,
+            int(
+                data.get(
+                    "required_confirmations",
+                    self._required_confirmations,
+                )
+            ),
+        )
+        self._confirmation_count = max(
+            0,
+            int(data.get("confirmation_count", 0)),
+        )
+        self._fulfilled = (
+            self._confirmation_count
+            >= self._required_confirmations
+        ) or self._fulfilled
 
 
 class CustomPredicateEvaluator(StopConditionEvaluator):

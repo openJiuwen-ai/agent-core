@@ -239,7 +239,8 @@ class TestAuthCallbacks:
         mock_ssl_utils.get_ssl_config.assert_called_once_with(
             "RESTFUL_SSL_VERIFY",
             "RESTFUL_SSL_CERT",
-            ["false"]
+            ["false"],
+            url_is_https=True
         )
     
     @staticmethod

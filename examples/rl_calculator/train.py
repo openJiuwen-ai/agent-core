@@ -29,8 +29,8 @@ from reward import calc_reward
 from tools import calculator
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.dev_tools.agentrl import RLConfig, RLOptimizer
-from openjiuwen.dev_tools.agentrl.config.schemas import (
+from openjiuwen.agent_evolving.agent_rl import RLConfig, OfflineRLOptimizer
+from openjiuwen.agent_evolving.agent_rl.config.offline_config import (
     AgentRuntimeConfig,
     PersistenceConfig,
     RolloutConfig,
@@ -70,8 +70,8 @@ config = RLConfig(
         whole_trajectory=False,
         logger=["tensorboard"],
         val_before_train=False,
-        save_path="~/checkpoint/calx",
-        micro_batch_size_per_gpu=4,
+        save_path="./checkpoint/calx",
+        micro_batch_size_per_gpu=2,
     ),
     rollout=RolloutConfig(
         rollout_n=4,
@@ -101,7 +101,7 @@ config = RLConfig(
 
 
 def main():
-    optimizer = RLOptimizer(config)
+    optimizer = OfflineRLOptimizer(config)
     optimizer.register_reward(calc_reward, name="calc_reward")
     optimizer.set_tools([calculator])
     optimizer.set_task_data_fn(task_data_fn)

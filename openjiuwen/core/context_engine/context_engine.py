@@ -128,6 +128,51 @@ class ContextEngine:
         full_context_id = f"{session_id}_{context_id}"
         return self._context_pool.get(full_context_id, None)
 
+    async def compress_context(
+            self,
+            context_id: str = "default_context_id",
+            session: Session = None,
+            *,
+            session_id: str = None,
+            processor_types: List[str] = None,
+            **kwargs,
+    ) -> str:
+        """
+        Actively run registered compression processors for an existing context.
+
+        Args:
+            context_id: Target context identifier.
+            session: Optional session object used to resolve session_id.
+            session_id: Optional explicit session identifier. If both `session`
+                        and `session_id` are provided, `session` takes precedence.
+            processor_types: Optional compression processor allowlist.
+            **kwargs: Extra arguments forwarded to the processor hook.
+
+        Returns:
+            Compression result code:
+            - ``"busy"``: passive compression is already in progress.
+            - ``"compressed"``: active compression ran and changed context.
+            - ``"noop"``: active compression ran but nothing changed, or no
+              compression processor is registered.
+        """
+        resolved_session_id = session.get_session_id() if session else (session_id or "default_session_id")
+        context = self.get_context(context_id=context_id, session_id=resolved_session_id)
+        if context is None:
+            raise build_error(
+                StatusCode.CONTEXT_EXECUTION_ERROR,
+                error_msg=f"cannot find context '{context_id}' in session '{resolved_session_id}'"
+            )
+        if not hasattr(context, "compress_context"):
+            raise build_error(
+                StatusCode.CONTEXT_EXECUTION_ERROR,
+                error_msg=f"context '{context_id}' does not support active compression"
+            )
+        return await context.compress_context(
+            processor_types=processor_types,
+            sys_operation=self._sys_operation,
+            **kwargs,
+        )
+
     async def clear_context(
             self,
             context_id: str = None,

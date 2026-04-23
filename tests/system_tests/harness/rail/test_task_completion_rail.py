@@ -31,7 +31,7 @@ from openjiuwen.core.single_agent.rail.base import (
 )
 from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
-from openjiuwen.harness.schema.task import TaskItem, TaskPlan
+from openjiuwen.harness.schema.task import TodoItem, TaskPlan
 from tests.unit_tests.fixtures.mock_llm import (
     MockLLMModel,
     create_text_response,
@@ -70,7 +70,7 @@ def _build_mock_model(mock_llm: MockLLMModel) -> Model:
 def _seed_plan(session: Session, n: int) -> None:
     """Inject a linear n-task plan into session state."""
     tasks = [
-        TaskItem(id=f"t{i}", title=f"step-{i}")
+        TodoItem(id=f"t{i}", content=f"step-{i}")
         for i in range(1, n + 1)
     ]
     # Chain tasks sequentially (each depends on the previous)

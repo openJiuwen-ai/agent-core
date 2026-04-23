@@ -48,7 +48,10 @@ class MicroCompactProcessor(ContextProcessor):
         **kwargs: Any,
     ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
         all_messages = context.get_messages() + messages_to_add
-        indices_to_clear = self._collect_flat_indices_for_compact(all_messages)
+        indices_to_clear = self._collect_flat_indices_for_compact(
+            all_messages,
+            force=kwargs.get("force", False),
+        )
 
         if not indices_to_clear:
             return None, messages_to_add
@@ -97,12 +100,18 @@ class MicroCompactProcessor(ContextProcessor):
     def _collect_flat_indices_for_compact(
         self,
         messages: List[BaseMessage],
+        *,
+        force: bool = False,
     ) -> List[int]:
         grouped = self._collect_compactable_indices_by_tool(messages)
         result = []
         for indices in grouped.values():
-            if len(indices) > self._config.trigger_threshold + self._config.keep_recent_per_tool:
-                result.extend(indices[: self._config.keep_recent_per_tool])
+            threshold = self._config.keep_recent_per_tool if force else (
+                self._config.trigger_threshold + self._config.keep_recent_per_tool
+            )
+            if len(indices) > threshold:
+                result.extend(indices[:-self._config.keep_recent_per_tool] if self._config.keep_recent_per_tool
+                              else indices)
         return result
 
     def load_state(self, state: Dict[str, Any]) -> None:

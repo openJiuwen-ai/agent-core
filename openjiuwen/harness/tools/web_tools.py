@@ -15,6 +15,7 @@ from typing import Any, AsyncIterator, Dict, Optional
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 import requests
+import urllib3
 from bs4 import BeautifulSoup
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -85,8 +86,16 @@ _FREE_SEARCH_DEBUG_DIR_ENV = "FREE_SEARCH_DEBUG_DIR"
 _FREE_SEARCH_DDG_ENABLED_ENV = "FREE_SEARCH_DDG_ENABLED"
 _FREE_SEARCH_BING_ENABLED_ENV = "FREE_SEARCH_BING_ENABLED"
 _FREE_SEARCH_PROXY_URL_ENV = "FREE_SEARCH_PROXY_URL"
+_FREE_SEARCH_SSL_VERIFY_ENV = "FREE_SEARCH_SSL_VERIFY"
+_FREE_SEARCH_DDG_URL_ENV = "FREE_SEARCH_DDG_URL"
+_PAID_SEARCH_API_KEY_ENVS = (
+    "BOCHA_API_KEY",
+    "PERPLEXITY_API_KEY",
+    "SERPER_API_KEY",
+    "JINA_API_KEY",
+)
 _FREE_SEARCH_DEFAULT_NO_PROXY = (
-    "127.0.0.1,.huawei.com,localhost,local,.local,10.155.97.247,.myhuaweicloud.coms"
+    "127.0.0.1,.huawei.com,localhost,local,.local,10.155.97.247,.myhuaweicloud.com, api.openai.rnd.huawei.com"
 )
 _FETCH_WEBPAGE_DEFAULT_MAX_CHARS = 20000
 _FETCH_WEBPAGE_DEFAULT_TIMEOUT_SECONDS = 45
@@ -98,6 +107,30 @@ _MOJIBAKE_MARKERS = ("mojibake", "Ã", "Â", "â", "ï¿½")
 def _get_free_search_proxy_url() -> str:
     """Return the configured proxy URL used by web search/fetch tools."""
     return str(os.environ.get(_FREE_SEARCH_PROXY_URL_ENV, "") or "").strip()
+
+
+def _env_bool(name: str, default: bool = True) -> bool:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on", "enabled"}
+
+
+def _free_search_ssl_verify() -> bool:
+    return _env_bool(_FREE_SEARCH_SSL_VERIFY_ENV, default=False)
+
+
+def _disable_insecure_request_warning() -> None:
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+def _duckduckgo_search_url(query: str) -> str:
+    base_url = (
+        os.environ.get(_FREE_SEARCH_DDG_URL_ENV, "https://html.duckduckgo.com/html/")
+        or "https://html.duckduckgo.com/html/"
+    ).strip()
+    separator = "&" if "?" in base_url else "?"
+    return f"{base_url.rstrip('?&')}{separator}q={quote_plus(query)}"
 
 
 def _no_proxy_entries() -> list[str]:
@@ -138,6 +171,10 @@ def _http_request(method: str, url: str, **kwargs) -> requests.Response:
     """Try normal request first; retry without env proxies on ProxyError."""
     method_up = method.upper()
     explicit_proxy = _apply_free_search_proxy(url, kwargs)
+    if "verify" not in kwargs:
+        kwargs["verify"] = _free_search_ssl_verify()
+        if kwargs["verify"] is False:
+            _disable_insecure_request_warning()
     try:
         if method_up == "GET":
             return requests.get(url, **kwargs)
@@ -380,9 +417,14 @@ def _env_flag(name: str, default: bool = True) -> bool:
 def is_free_search_enabled() -> bool:
     """Whether at least one free-search backend is enabled."""
     return (
-        _env_flag(_FREE_SEARCH_DDG_ENABLED_ENV, default=True)
-        or _env_flag(_FREE_SEARCH_BING_ENABLED_ENV, default=True)
+        _env_flag(_FREE_SEARCH_DDG_ENABLED_ENV, default=False)
+        or _env_flag(_FREE_SEARCH_BING_ENABLED_ENV, default=False)
     )
+
+
+def is_paid_search_enabled() -> bool:
+    """Whether at least one paid-search provider API key is configured."""
+    return any(str(os.environ.get(key, "") or "").strip() for key in _PAID_SEARCH_API_KEY_ENVS)
 
 
 def _search_request_headers(query: str) -> dict[str, str]:
@@ -581,7 +623,7 @@ class WebFreeSearchTool(Tool):
     @staticmethod
     def _search_duckduckgo_sync(query: str, max_results: int, timeout_seconds: int) -> list[dict[str, str]]:
         """Search DuckDuckGo HTML endpoint and parse results synchronously."""
-        url = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
+        url = _duckduckgo_search_url(query)
         response = _http_request("GET", url, headers=_search_request_headers(query), timeout=timeout_seconds)
         if WebFreeSearchTool._is_ddg_challenge_page(response.status_code, response.text):
             raise build_error(
@@ -816,14 +858,14 @@ class WebFreeSearchTool(Tool):
         best_rows: list[dict[str, str]] = []
 
         engines: list[tuple[str, Any]] = []
-        if _env_flag(_FREE_SEARCH_DDG_ENABLED_ENV, default=True):
+        if _env_flag(_FREE_SEARCH_DDG_ENABLED_ENV, default=False):
             engines.extend(
                 [
                     ("duckduckgo", WebFreeSearchTool._search_duckduckgo_sync),
                     ("duckduckgo-jina", WebFreeSearchTool._search_duckduckgo_via_jina_sync),
                 ]
             )
-        if _env_flag(_FREE_SEARCH_BING_ENABLED_ENV, default=True):
+        if _env_flag(_FREE_SEARCH_BING_ENABLED_ENV, default=False):
             engines.append(("bing", WebFreeSearchTool._search_bing_sync))
 
         if not engines:
@@ -1001,8 +1043,13 @@ class WebFreeSearchTool(Tool):
 class WebPaidSearchTool(Tool):
     """Paid search via Bocha/Perplexity/SERPER/JINA. Support provider=auto|bocha|perplexity|serper|jina."""
 
-    def __init__(self, language: str = "cn", agent_id: Optional[str] = None):
-        super().__init__(build_tool_card("paid_search", "WebPaidSearchTool", language, agent_id=agent_id))
+    def __init__(
+        self,
+        language: str = "cn",
+        agent_id: Optional[str] = None,
+        card: Optional[ToolCard] = None,
+    ):
+        super().__init__(card or build_tool_card("paid_search", "WebPaidSearchTool", language, agent_id=agent_id))
 
     @staticmethod
     def _jina_search_sync(query: str, timeout_seconds: int) -> dict[str, Any]:
@@ -1511,15 +1558,15 @@ def create_web_tools(
     language: str = "cn",
     agent_id: Optional[str] = None,
     include_free_search: bool = True,
-    include_paid_search: bool = False,
+    include_paid_search: bool = True,
     include_fetch_webpage: bool = True,
 ) -> list[Tool]:
-    """Create web tools, omitting free_search when all free engines are disabled."""
+    """Create web tools, preferring configured paid search over free search."""
     tools: list[Tool] = []
+    if include_paid_search and is_paid_search_enabled():
+        tools.append(WebPaidSearchTool(language=language, agent_id=agent_id))
     if include_free_search and is_free_search_enabled():
         tools.append(WebFreeSearchTool(language=language, agent_id=agent_id))
-    if include_paid_search:
-        tools.append(WebPaidSearchTool(language=language, agent_id=agent_id))
     if include_fetch_webpage:
         tools.append(WebFetchWebpageTool(language=language, agent_id=agent_id))
     return tools

@@ -61,6 +61,18 @@ from openjiuwen.agent_evolving.trajectory import (
 # updater
 from openjiuwen.agent_evolving.updater import Updater, SingleDimUpdater, MultiDimUpdater
 
+# agent_rl
+from openjiuwen.agent_evolving.agent_rl import (
+    RLConfig,
+    OfflineRLOptimizer,
+    OnlineRLOptimizer,
+    RewardRegistry,
+    RLTask,
+    Rollout,
+    RolloutMessage,
+    RolloutWithReward,
+)
+
 # signal
 from openjiuwen.agent_evolving.signal import (
     ConversationSignalDetector,
@@ -126,6 +138,17 @@ _UPDATER = [
     "MultiDimUpdater",
 ]
 
+_AGENT_RL = [
+    "RLConfig",
+    "OfflineRLOptimizer",
+    "OnlineRLOptimizer",
+    "RewardRegistry",
+    "RLTask",
+    "Rollout",
+    "RolloutMessage",
+    "RolloutWithReward",
+]
+
 _SIGNAL = [
     "ConversationSignalDetector",
     "SignalDetector",
@@ -146,5 +169,6 @@ __all__ = (
     + _TRAINER
     + _TRAJECTORY
     + _UPDATER
+    + _AGENT_RL
     + _SIGNAL
 )

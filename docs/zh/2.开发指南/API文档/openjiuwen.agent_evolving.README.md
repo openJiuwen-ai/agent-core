@@ -21,5 +21,6 @@
 | [checkpointing](openjiuwen.agent_evolving/checkpointing.md) | 检查点与恢复（EvolveCheckpoint、FileCheckpointStore、CheckpointManager） |
 | [optimizer](openjiuwen.agent_evolving/optimizer.md) | 优化器（BaseOptimizer、TextualParameter、InstructionOptimizer） |
 | [evaluator](openjiuwen.agent_evolving/evaluator.md) | 评估接口与指标（BaseEvaluator、DefaultEvaluator、MetricEvaluator、Metric） |
+| [agent_rl](openjiuwen.agent_evolving/agent_rl/agent_rl.README.md) | 基于 VERL 的 RL 训练（`RLConfig`、`OfflineRLOptimizer`、rollout 编排、奖励注册等） |
 
 与自演进配合使用的**原子算子**见 [openjiuwen.core.operator](openjiuwen.core/operator.README.md)（Operator、LLMCallOperator、ToolCallOperator、MemoryCallOperator）。

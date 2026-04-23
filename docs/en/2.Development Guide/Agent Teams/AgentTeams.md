@@ -123,14 +123,17 @@ async for chunk in Runner.run_agent_team_streaming(
 ### Interactive Mode
 
 ```python
-# Start background streaming task
-stream_task = asyncio.create_task(
-    Runner.run_agent_team_streaming(
+# run_agent_team_streaming() returns an async iterator,
+# so wrap the consumer in a coroutine before create_task().
+async def consume_stream():
+    async for chunk in Runner.run_agent_team_streaming(
         agent_team=leader,
         inputs={"query": "Initial task"},
         session="session_id",
-    )
-)
+    ):
+        print(chunk, end="", flush=True)
+
+stream_task = asyncio.create_task(consume_stream())
 
 # Send follow-up input
 await leader.interact("Additional instruction")

@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Dict
 from os import PathLike
 
 from openjiuwen.core.common.logging import logger
@@ -156,7 +156,8 @@ def create_deep_agent(
     audio_model_config: Optional[AudioModelConfig] = None,
     enable_task_planning: bool = False,
     restrict_to_work_dir: bool = True,
-    default_mode: AgentMode = AgentMode.AUTO,
+    default_mode: AgentMode = AgentMode.NORMAL,
+    model_selection: Optional[Dict[Model, str]] = None,
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create and configure a DeepAgent instance.
@@ -196,7 +197,11 @@ def create_deep_agent(
         enable_task_planning: Enable task_planning_rail.
         restrict_to_work_dir: If True, restrict file access to workspace directory.
             If False, allow access to any path including system root.
-        default_mode: Initial agent mode (``AgentMode.AUTO`` or ``AgentMode.PLAN``).
+        default_mode: Initial agent mode (``AgentMode.NORMAL`` or ``AgentMode.PLAN``).
+        model_selection: Optional model selection config for TaskPlanningRail.
+            Dict mapping Model instance to description string. When provided along with
+            enable_task_planning, TaskPlanningRail will be configured with model selection,
+            allowing different models to be used for different subtasks.
         **config_kwargs: Extra fields forwarded to
             DeepAgentConfig.
 
@@ -314,14 +319,16 @@ def create_deep_agent(
             skills_dirs.append(str(Path(target_path) / "skills"))
         return SkillUseRail(
             skills_dir=skills_dirs,
-            skill_mode="all",
-            enabled_skills=skills,
+            skill_mode="all"
         )
+
+    def _make_task_planning_rail() -> TaskPlanningRail:
+        return TaskPlanningRail(model_selection=model_selection)
 
     default_rails = [
         (SecurityRail, True, lambda: SecurityRail()),
-        (TaskPlanningRail, enable_task_planning, lambda: TaskPlanningRail()),
-        (SkillUseRail, bool(skills), _make_skill_rail),
+        (TaskPlanningRail, enable_task_planning, _make_task_planning_rail),
+        (SkillUseRail, bool(skills) or config.enable_skill_discovery, _make_skill_rail),
         (SessionRail, bool(subagents) and enable_async_subagent, lambda: SessionRail()),
         (SubagentRail, bool(subagents) and not enable_async_subagent, lambda: SubagentRail()),
     ]

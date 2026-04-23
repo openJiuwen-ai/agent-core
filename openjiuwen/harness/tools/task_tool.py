@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING, Any, AsyncIterator, List, Optional
+from typing import TYPE_CHECKING, AsyncIterator, List, Optional
 
 
 if TYPE_CHECKING:
@@ -49,7 +49,8 @@ class TaskTool(Tool):
     @staticmethod
     def _build_sub_session_id(parent_session_id: str, subagent_type: str) -> str:
         normalized_type = str(subagent_type or "").strip()
-        if normalized_type == "browser_agent":
+        if normalized_type in ("browser_agent", "verification_agent"):
+            # Deterministic ID so the session can be resumed on a FAIL → fix → re-verify loop.
             return f"{parent_session_id}_sub_{normalized_type}"
         return f"{parent_session_id}_sub_{normalized_type}_{uuid.uuid4().hex[:8]}"
 
