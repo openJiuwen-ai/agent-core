@@ -84,7 +84,7 @@ def test_mount_into_workspace_falls_back_to_junction_on_windows_1314(monkeypatch
         }
     ]
 
-
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction fallback only applies on Windows")
 @pytest.mark.level0
 def test_mount_into_workspace_reraises_non_1314_symlink_error(monkeypatch, tmp_path):
     manager = _make_manager(tmp_path)

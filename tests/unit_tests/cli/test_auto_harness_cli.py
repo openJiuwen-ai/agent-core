@@ -36,14 +36,39 @@ def _install_renderer_stubs(fake_render):
     }
 
 
+def _make_fake_repo(parent: Path, name: str) -> Path:
+    """Create a directory that passes ``_looks_like_repo_root``.
+
+    Mirrors the four conditions in
+    ``openjiuwen.auto_harness.schema._looks_like_repo_root``: a directory
+    containing ``.git/``, ``pyproject.toml``, and ``openjiuwen/``. Used
+    to make tests deterministic regardless of the invoking cwd.
+    """
+    repo = parent / name
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    (repo / "pyproject.toml").write_text(
+        "[project]\nname='fake'\n",
+        encoding="utf-8",
+    )
+    (repo / "openjiuwen").mkdir()
+    return repo
+
+
 class TestAutoHarnessCli:
     """验证 Click 版 auto-harness run 的全流程入口。"""
 
     @pytest.mark.asyncio
     async def test_run_without_manual_tasks_uses_full_session(
-        self, tmp_path,
+        self, tmp_path, monkeypatch,
     ) -> None:
         """未传 task 时应传 tasks=None 给 orchestrator。"""
+        # workspace_hint (tmp_path) is not a repo root, so detection must
+        # fall back to cwd. Stage a fake repo and chdir into it so the
+        # assertion is independent of where pytest was launched.
+        fake_cwd_repo = _make_fake_repo(tmp_path, "cwd_repo")
+        monkeypatch.chdir(fake_cwd_repo)
+
         captured_config = None
         received_tasks = "NOT_SET"
 
@@ -107,10 +132,10 @@ class TestAutoHarnessCli:
             == "分析差距 claude-code"
         )
         assert captured_config.local_repo == str(
-            Path.cwd().resolve()
+            fake_cwd_repo.resolve()
         )
         assert captured_config.workspace == str(
-            Path.cwd().resolve()
+            fake_cwd_repo.resolve()
         )
         assert captured_config.data_dir == str(
             (tmp_path / "auto_harness").resolve()
@@ -119,19 +144,17 @@ class TestAutoHarnessCli:
 
     @pytest.mark.asyncio
     async def test_run_with_detected_local_repo_sets_workspace(
-        self, tmp_path,
+        self, tmp_path, monkeypatch,
     ) -> None:
         """探测到 local_repo 时，workspace 也应切到仓库根。"""
         captured_config = None
 
-        repo = tmp_path / "agent-core"
-        repo.mkdir()
-        (repo / ".git").mkdir()
-        (repo / "pyproject.toml").write_text(
-            "[project]\nname='x'\n",
-            encoding="utf-8",
-        )
-        (repo / "openjiuwen").mkdir()
+        repo = _make_fake_repo(tmp_path, "agent-core")
+        # chdir to a non-repo directory so detection is driven by
+        # workspace_hint (tmp_path/agent-core), not the ambient cwd.
+        neutral_cwd = tmp_path / "cwd"
+        neutral_cwd.mkdir()
+        monkeypatch.chdir(neutral_cwd)
 
         def _capture_create(config):
             nonlocal captured_config
@@ -195,9 +218,15 @@ class TestAutoHarnessCli:
 
     @pytest.mark.asyncio
     async def test_run_assess_invokes_github_cli_preflight(
-        self, tmp_path,
+        self, tmp_path, monkeypatch,
     ) -> None:
         """Assess stage should run GitHub CLI preflight first."""
+        # Isolate from the invoking cwd so repo detection cannot drag in
+        # unrelated state from the host project.
+        neutral_cwd = tmp_path / "cwd"
+        neutral_cwd.mkdir()
+        monkeypatch.chdir(neutral_cwd)
+
         preflight_called = False
 
         async def _fake_render(stream, _console):
