@@ -6,11 +6,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
+import traceback
 from typing import (
     Any,
     Dict,
     List,
     Optional,
+    Tuple,
 )
 
 from openjiuwen.agent_teams.agent.coordinator import (
@@ -43,6 +46,8 @@ from openjiuwen.agent_teams.schema.team import (
     TeamSpec,
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.foundation.tool.base import Tool
@@ -63,6 +68,62 @@ from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.prompts import resolve_language as _resolve_language
+
+
+def _resolve_team_mode(spec: TeamAgentSpec) -> str:
+    """Return the effective team mode for the given spec.
+
+    Honors an explicit ``spec.team_mode``; otherwise derives from
+    ``predefined_members`` for backwards compatibility.
+    """
+    if spec.team_mode is not None:
+        return spec.team_mode
+    return "predefined" if spec.predefined_members else "default"
+
+
+_MAX_RETRY_ATTEMPTS = 10
+_RETRYABLE_ERROR_CODES = {181001}
+_RETRY_QUERY = "刚才有异常状况，继续执行"
+_TASK_FAILED_PAYLOAD_TYPE = "task_failed"
+_ERROR_CODE_PATTERN = re.compile(r"^\[(\d+)\]")
+
+
+def _detect_task_failed(chunk: Any) -> Optional[Tuple[Optional[int], str]]:
+    """Detect a TASK_FAILED chunk emitted by the task-loop executor.
+
+    The task-loop executor wraps a BaseError into
+    ``ControllerOutputChunk(payload.type='task_failed',
+    data=[TextDataFrame(text='[code] message')])``. BaseError's ``__str__``
+    guarantees the leading ``[code]`` prefix so the error code can be parsed
+    out of the text reliably.
+
+    Args:
+        chunk: Stream chunk produced by ``Runner.run_agent_streaming``.
+
+    Returns:
+        ``(error_code, error_text)`` when the chunk is a TASK_FAILED frame;
+        ``error_code`` is ``None`` if the text lacks the ``[code]`` prefix
+        (treated as non-retryable). Returns ``None`` for non-error chunks.
+    """
+    payload = getattr(chunk, "payload", None)
+    if payload is None:
+        return None
+    if getattr(payload, "type", None) != _TASK_FAILED_PAYLOAD_TYPE:
+        return None
+
+    text = ""
+    data = getattr(payload, "data", None) or []
+    if data:
+        text = getattr(data[0], "text", "") or ""
+
+    code: Optional[int] = None
+    match = _ERROR_CODE_PATTERN.match(text)
+    if match:
+        try:
+            code = int(match.group(1))
+        except ValueError:
+            code = None
+    return code, text
 
 
 class TeamAgent(BaseAgent):
@@ -388,6 +449,17 @@ class TeamAgent(BaseAgent):
             return spec.agents[member_name]
         return spec.agents.get(role.value) or spec.agents.get("teammate") or spec.agents["leader"]
 
+    def attach_model_allocator(self, allocator: "ModelAllocator") -> None:
+        """Pre-attach a model allocator built outside ``configure``.
+
+        ``TeamAgentSpec.build()`` constructs the allocator before runtime
+        context assembly so it can pre-allocate the leader's model from
+        the pool. Calling this before ``configure`` lets ``_setup_infra``
+        reuse the same rotation state instead of constructing a fresh
+        instance and double-counting allocations.
+        """
+        self._model_allocator = allocator
+
     def _setup_infra(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> None:
         """Phase 1: set spec/context, create messager, workspace manager, register team tools."""
         self._spec = spec
@@ -404,11 +476,19 @@ class TeamAgent(BaseAgent):
         if spec.workspace and spec.workspace.enabled:
             self._workspace_manager = self._create_workspace_manager(spec, ctx)
 
-        self._tool_cards = self._register_team_tools(spec, ctx, self._messager)
+        # Build the allocator only when build() didn't pre-attach one.
+        # The pre-attached path keeps a single rotation state across
+        # leader pre-allocation (in build()) and teammate spawns; the
+        # fallback covers direct ``configure()`` callers (recovery,
+        # tests) that bypass build().
+        if ctx.role == TeamRole.LEADER and self._model_allocator is None:
+            from openjiuwen.agent_teams.agent.model_allocator import (
+                build_model_allocator,
+            )
 
-        if ctx.role == TeamRole.LEADER:
-            from openjiuwen.agent_teams.agent.model_allocator import ModelAllocator
-            self._model_allocator = ModelAllocator(spec)
+            self._model_allocator = build_model_allocator(spec, ctx.team_spec)
+
+        self._tool_cards = self._register_team_tools(spec, ctx, self._messager)
 
     def _create_workspace_manager(
         self, spec: TeamAgentSpec, ctx: TeamRuntimeContext,
@@ -636,6 +716,7 @@ class TeamAgent(BaseAgent):
             teammate_mode=MemberMode(spec.teammate_mode),
             predefined_members=spec.predefined_members or None,
             model_config_allocator=self._model_allocator.allocate if self._model_allocator else None,
+            leader_model=ctx.member_model if is_leader else None,
         )
         self._team_backend = agent_team
         self._task_manager = agent_team.task_manager
@@ -1190,16 +1271,65 @@ class TeamAgent(BaseAgent):
         await self._update_execution(ExecutionStatus.STARTING)
         await self._update_execution(ExecutionStatus.RUNNING)
         try:
-            inputs = {"query": message}
-            self._streaming_active = True
-            try:
-                async for chunk in Runner.run_agent_streaming(
-                    self._deep_agent, inputs, session=self._session_id
+            current_query: Any = message
+            attempt = 0
+            while True:
+                inputs = {"query": current_query}
+                error_seen = False
+                error_code: Optional[int] = None
+                error_text: str = ""
+                self._streaming_active = True
+                try:
+                    async for chunk in Runner.run_agent_streaming(
+                        self._deep_agent, inputs, session=self._session_id
+                    ):
+                        # Once a TASK_FAILED frame is seen, suppress every
+                        # trailing frame (blank answer + END_FRAME) so the
+                        # downstream queue never sees a truncated round.
+                        if error_seen:
+                            continue
+                        detected = _detect_task_failed(chunk)
+                        if detected is not None:
+                            error_seen = True
+                            error_code, error_text = detected
+                            continue
+                        if self._stream_queue is not None:
+                            await self._stream_queue.put(chunk)
+                finally:
+                    self._streaming_active = False
+
+                if not error_seen:
+                    break
+
+                if (
+                    error_code in _RETRYABLE_ERROR_CODES
+                    and attempt < _MAX_RETRY_ATTEMPTS
                 ):
-                    if self._stream_queue is not None:
-                        await self._stream_queue.put(chunk)
-            finally:
-                self._streaming_active = False
+                    attempt += 1
+                    team_logger.warning(
+                        "DeepAgent round transient error "
+                        "(code=%s, attempt=%d/%d): %s",
+                        error_code,
+                        attempt,
+                        _MAX_RETRY_ATTEMPTS,
+                        error_text,
+                    )
+                    current_query = _RETRY_QUERY
+                    continue
+
+                team_logger.error(
+                    "DeepAgent round failed (code=%s, attempts=%d): %s",
+                    error_code,
+                    attempt,
+                    error_text,
+                )
+                raise build_error(
+                    StatusCode.AGENT_TEAM_EXECUTION_ERROR,
+                    error_msg=(
+                        f"streaming task failed after {attempt} retries, "
+                        f"last error code={error_code}: {error_text}"
+                    ),
+                )
             await self._update_execution(ExecutionStatus.COMPLETING)
             await self._update_execution(ExecutionStatus.COMPLETED)
         except asyncio.CancelledError:
