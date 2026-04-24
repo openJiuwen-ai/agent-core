@@ -34,5 +34,13 @@ class McpClient(BaseClient):
     async def get_tool_info(self, tool_name: str, *, timeout: float = NO_TIMEOUT) -> Optional[Any]:
         pass
 
+    @abstractmethod
+    async def list_resources(self, *, timeout: float = NO_TIMEOUT) -> List[Any]:
+        pass
+
+    @abstractmethod
+    async def read_resource(self, uri: str, *, timeout: float = NO_TIMEOUT) -> Any:
+        pass
+
     async def close(self) -> bool:
         return await self.disconnect()

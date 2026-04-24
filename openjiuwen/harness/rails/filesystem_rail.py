@@ -23,9 +23,10 @@ class FileSystemRail(DeepAgentRail):
 
     priority = 100
 
-    def __init__(self) -> None:
+    def __init__(self, *, with_code_tool: bool = False) -> None:
         super().__init__()
         self.tools = None
+        self._with_code_tool = with_code_tool
 
     def init(self, agent) -> None:
         lang = agent.system_prompt_builder.language
@@ -38,7 +39,6 @@ class FileSystemRail(DeepAgentRail):
         list_dir_tool = ListDirTool(self.sys_operation, lang, agent_id)
         grep_tool = GrepTool(self.sys_operation, lang, agent_id)
         bash_tool = BashTool(self.sys_operation, lang, agent_id=agent_id)
-        code_tool = CodeTool(self.sys_operation, lang, agent_id)
 
         self.tools = [
             read_tool,
@@ -48,8 +48,10 @@ class FileSystemRail(DeepAgentRail):
             list_dir_tool,
             grep_tool,
             bash_tool,
-            code_tool,
         ]
+
+        if self._with_code_tool:
+            self.tools.append(CodeTool(self.sys_operation, lang, agent_id))
 
         Runner.resource_mgr.add_tool(self.tools)
 

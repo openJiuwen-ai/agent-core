@@ -1099,6 +1099,29 @@ class ResourceMgr:
         self._inner_validate_resource_id(server_id, "mcp server")
         return self._resource_registry.tool().get_mcp_tool_ids(server_id)
 
+    def _get_mcp_client(self, server_id: str) -> Optional[Any]:
+        """Get the McpClient instance for a registered server."""
+        self._inner_validate_resource_id(server_id, "mcp server")
+        return self._resource_registry.tool().get_mcp_client(server_id)
+
+    async def list_mcp_resources(self, server_id: str) -> list:
+        """List resources exposed by the given MCP server."""
+        self._inner_validate_resource_id(server_id, "mcp server")
+        client = self._resource_registry.tool().get_mcp_client(server_id)
+        if client is None:
+            raise build_error(StatusCode.RESOURCE_MCP_TOOL_GET_ERROR,
+                              server_id=server_id, reason="server not found")
+        return await client.list_resources()
+
+    async def read_mcp_resource(self, server_id: str, uri: str) -> Any:
+        """Read a resource by URI from the given MCP server."""
+        self._inner_validate_resource_id(server_id, "mcp server")
+        client = self._resource_registry.tool().get_mcp_client(server_id)
+        if client is None:
+            raise build_error(StatusCode.RESOURCE_MCP_TOOL_GET_ERROR,
+                              server_id=server_id, reason="server not found")
+        return await client.read_resource(uri)
+
     def get_resource_by_tag(self,
                             tag: Tag) -> Optional[list[BaseCard]]:
         """

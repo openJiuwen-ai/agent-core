@@ -57,14 +57,41 @@ def test_filesystem_rail_registers_base_tools(tmp_path):
                 "list_files",
                 "grep",
                 "bash",
-                "code",
             }
             assert expected_cards.issubset(set(agent.ability_manager.cards))
+            assert "code" not in agent.ability_manager.cards
             assert "audio_transcription" not in agent.ability_manager.cards
             assert "audio_question_answering" not in agent.ability_manager.cards
             assert "audio_metadata" not in agent.ability_manager.cards
             assert "image_ocr" not in agent.ability_manager.cards
             assert "visual_question_answering" not in agent.ability_manager.cards
+        finally:
+            rail.uninit(agent)
+            Runner.resource_mgr.remove_sys_operation(sys_operation_id=card.id)
+            await Runner.stop()
+
+    asyncio.run(_run())
+
+
+def test_filesystem_rail_with_code_tool(tmp_path):
+    async def _run():
+        await Runner.start()
+        try:
+            card = SysOperationCard(
+                id="test_filesystem_rail_with_code_tool",
+                mode=OperationMode.LOCAL,
+                work_config=LocalWorkConfig(work_dir=str(tmp_path)),
+            )
+            Runner.resource_mgr.add_sys_operation(card)
+            sys_operation = Runner.resource_mgr.get_sys_operation(card.id)
+
+            rail = FileSystemRail(with_code_tool=True)
+            rail.set_sys_operation(sys_operation)
+            agent = _Agent()
+
+            rail.init(agent)
+
+            assert "code" in agent.ability_manager.cards
         finally:
             rail.uninit(agent)
             Runner.resource_mgr.remove_sys_operation(sys_operation_id=card.id)

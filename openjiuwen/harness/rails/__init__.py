@@ -23,6 +23,7 @@ from openjiuwen.harness.rails.memory_rail import MemoryRail
 from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
 from openjiuwen.harness.rails.verification_rail import VerificationRail
 from openjiuwen.harness.rails.verification_contract_rail import VerificationContractRail
+from openjiuwen.harness.rails.mcp_rail import McpRail
 
 __all__ = [
     "DeepAgentRail",
@@ -45,5 +46,6 @@ __all__ = [
     "LspRail",
     "AgentModeRail",
     "VerificationRail",
-    "VerificationContractRail"
+    "VerificationContractRail",
+    "McpRail",
 ]

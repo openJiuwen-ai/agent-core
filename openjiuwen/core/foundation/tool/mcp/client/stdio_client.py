@@ -127,3 +127,25 @@ class StdioClient(McpClient):
                 return tool
         logger.warning(f"Tool '{tool_name}' not found via Stdio")
         return None
+
+    async def list_resources(self, *, timeout: float = NO_TIMEOUT) -> List[Any]:
+        """List available resources via Stdio"""
+        if not self._session:
+            raise RuntimeError("Not connected to Stdio server")
+        try:
+            response = await self._session.list_resources()
+            return response.resources
+        except Exception as e:
+            logger.error(f"Failed to list resources via Stdio: {e}")
+            raise
+
+    async def read_resource(self, uri: str, *, timeout: float = NO_TIMEOUT) -> Any:
+        """Read a resource by URI via Stdio"""
+        if not self._session:
+            raise RuntimeError("Not connected to Stdio server")
+        try:
+            response = await self._session.read_resource(uri)
+            return response.contents
+        except Exception as e:
+            logger.error(f"Failed to read resource '{uri}' via Stdio: {e}")
+            raise

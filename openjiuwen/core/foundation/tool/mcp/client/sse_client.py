@@ -152,3 +152,25 @@ class SseClient(McpClient):
                 return tool
         logger.warning(f"Tool '{tool_name}' not found via SSE")
         return None
+
+    async def list_resources(self, *, timeout: float = NO_TIMEOUT) -> List[Any]:
+        """List available resources via SSE"""
+        if not self._session:
+            raise RuntimeError("Not connected to SSE server")
+        try:
+            response = await self._session.list_resources()
+            return response.resources
+        except Exception as e:
+            logger.error(f"Failed to list resources via SSE: {e}")
+            raise
+
+    async def read_resource(self, uri: str, *, timeout: float = NO_TIMEOUT) -> Any:
+        """Read a resource by URI via SSE"""
+        if not self._session:
+            raise RuntimeError("Not connected to SSE server")
+        try:
+            response = await self._session.read_resource(uri)
+            return response.contents
+        except Exception as e:
+            logger.error(f"Failed to read resource '{uri}' via SSE: {e}")
+            raise

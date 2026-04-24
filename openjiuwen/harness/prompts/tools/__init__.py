@@ -93,6 +93,10 @@ from openjiuwen.harness.prompts.tools.agent_mode import (
     EnterPlanModeMetadataProvider,
     ExitPlanModeMetadataProvider,
 )
+from openjiuwen.harness.prompts.tools.mcp import (
+    ListMcpResourcesMetadataProvider,
+    ReadMcpResourceMetadataProvider,
+)
 
 # ---------------------------------------------------------------------------
 # Provider registry
@@ -134,6 +138,8 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     SwitchModeMetadataProvider(),
     EnterPlanModeMetadataProvider(),
     ExitPlanModeMetadataProvider(),
+    ListMcpResourcesMetadataProvider(),
+    ReadMcpResourceMetadataProvider(),
 ]
 
 _REGISTRY: Dict[str, ToolMetadataProvider] = {
