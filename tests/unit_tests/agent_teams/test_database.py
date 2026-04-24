@@ -18,6 +18,7 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
+from openjiuwen.agent_teams.tools.models import _sanitize_session_id_for_table
 from openjiuwen.core.single_agent import AgentCard
 
 
@@ -2518,14 +2519,16 @@ class TestRuntimeCleanup:
 
             deleted_tables, cleared_tables = await database.cleanup_all_runtime_state()
 
-            assert "team_task_cleanup_session_a" in deleted_tables
-            assert "team_task_cleanup_session_b" in deleted_tables
-            assert "team_task_dependency_cleanup_session_a" in deleted_tables
-            assert "team_task_dependency_cleanup_session_b" in deleted_tables
-            assert "team_message_cleanup_session_a" in deleted_tables
-            assert "team_message_cleanup_session_b" in deleted_tables
-            assert "message_read_status_cleanup_session_a" in deleted_tables
-            assert "message_read_status_cleanup_session_b" in deleted_tables
+            suffix_a = _sanitize_session_id_for_table("cleanup_session_a")
+            suffix_b = _sanitize_session_id_for_table("cleanup_session_b")
+            assert f"team_task_{suffix_a}" in deleted_tables
+            assert f"team_task_{suffix_b}" in deleted_tables
+            assert f"team_task_dependency_{suffix_a}" in deleted_tables
+            assert f"team_task_dependency_{suffix_b}" in deleted_tables
+            assert f"team_message_{suffix_a}" in deleted_tables
+            assert f"team_message_{suffix_b}" in deleted_tables
+            assert f"message_read_status_{suffix_a}" in deleted_tables
+            assert f"message_read_status_{suffix_b}" in deleted_tables
             assert cleared_tables == ["team_info", "team_member"]
 
             async with database.engine.begin() as conn:
@@ -2598,16 +2601,18 @@ class TestRuntimeCleanup:
                     await conn.exec_driver_sql("SELECT COUNT(*) FROM team_member")
                 ).scalar_one()
 
+            suffix_a = _sanitize_session_id_for_table("force_cleanup_a")
+            suffix_b = _sanitize_session_id_for_table("force_cleanup_b")
             assert "team_info" in table_names
             assert "team_member" in table_names
-            assert "team_task_force_cleanup_b" not in table_names
-            assert "team_task_dependency_force_cleanup_b" not in table_names
-            assert "team_message_force_cleanup_b" not in table_names
-            assert "message_read_status_force_cleanup_b" not in table_names
-            assert "team_task_force_cleanup_a" in table_names
-            assert "team_task_dependency_force_cleanup_a" in table_names
-            assert "team_message_force_cleanup_a" in table_names
-            assert "message_read_status_force_cleanup_a" in table_names
+            assert f"team_task_{suffix_b}" not in table_names
+            assert f"team_task_dependency_{suffix_b}" not in table_names
+            assert f"team_message_{suffix_b}" not in table_names
+            assert f"message_read_status_{suffix_b}" not in table_names
+            assert f"team_task_{suffix_a}" in table_names
+            assert f"team_task_dependency_{suffix_a}" in table_names
+            assert f"team_message_{suffix_a}" in table_names
+            assert f"message_read_status_{suffix_a}" in table_names
             assert team_count == 0
             assert member_count == 0
         finally:
