@@ -270,6 +270,22 @@ def create_cron_tools(
                 description=(
                     "Legacy compatibility tool. Create a cron job using flat fields "
                     "(name, cron_expr, timezone, targets, description, wake_offset_seconds)."
+                    "\n\n[CRITICAL: Cron Expression Limits] Standard cron's */X means 'trigger when the field value "
+                    "is divisible by X', NOT 'every X units'. Uniform intervals only work when the cycle unit "
+                    "is divisible by X. Field limits:"
+                    "\n- Minute(0-59): */X only works for X dividing 60: 1/2/3/4/5/6/10/12/15/20/30."
+                    "  Example: */40 triggers at minute 0 and 40 each hour (alternating 40min-20min gaps), "
+                    "NOT every 40 minutes."
+                    "  When user requests 'every 40 minutes', MUST inform user of this limitation first "
+                    "and let user confirm whether to accept uneven intervals, or suggest intervals that divide 60."
+                    "  Do NOT create without user confirmation."
+                    "\n- Hour(0-23): */X only works for X dividing 24: 1/2/3/4/6/8/12."
+                    "  Example: */5 triggers at hours 0/5/10/15/20 (alternating 5h-4h gaps), NOT every 5 hours."
+                    "\n- Day(1-31): */X is unreliable due to varying month lengths."
+                    "\n- Month(1-12): */X only works for X dividing 12: 1/2/3/4/6."
+                    "\n- Weekday(0-6): */X only works for X dividing 7: 1/7."
+                    "\nWhen handling 'every X minutes/hours' requests, always check if X divides the cycle unit. "
+                    "If not, MUST inform user and let user confirm before creating."
                 ),
                 input_params={
                     "type": "object",
@@ -277,7 +293,10 @@ def create_cron_tools(
                         "name": {"type": "string", "description": "任务名称"},
                         "cron_expr": {
                             "type": "string",
-                            "description": "Cron 表达式（分 时 日 月 周）",
+                            "description": (
+                                "Cron表达式。*/X仅当周期能被X整除时间隔均匀。"
+                                "分钟X整除60；小时X整除24；日不可靠。详见工具描述。"
+                            ),
                         },
                         "timezone": {
                             "type": "string",
@@ -292,7 +311,10 @@ def create_cron_tools(
                         },
                         "description": {
                             "type": "string",
-                            "description": "具体任务内容，到点执行时发给助手。不要包含时间/频率",
+                            "description": (
+                                "具体任务内容，到点执行时发给助手。"
+                                "不要包含时间/频率信息（如'每隔40分钟'、'每天9点'）"
+                            ),
                         },
                         "wake_offset_seconds": {
                             "type": "integer",

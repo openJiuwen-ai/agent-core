@@ -1,5 +1,10 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+"""Unit tests for AskUserRail with ReActAgent.
+
+Note: This test file uses ReActAgent. For DeepAgent tests, see
+tests/system_tests/harness/rail/test_deep_agent_ask_user.py.
+"""
 
 import os
 from unittest.mock import patch
@@ -49,7 +54,7 @@ async def test_hitl_ask_user_rail():
 
         mock_llm = MockLLMModel()
         mock_llm.set_responses([
-            create_tool_call_response("ask_user", '{"question": "What is the filename?"}'),
+            create_tool_call_response("ask_user", '{"questions": [{"header": "File", "question": "What is the filename?", "options": [{"label": "file1.txt", "description": "Default"}]}]}'),
             create_text_response("Got it, the filename is user_answer.txt"),
         ])
 
@@ -65,11 +70,12 @@ async def test_hitl_ask_user_rail():
 
             payload = state_list[0].payload.value if hasattr(state_list[0], 'payload') else None
             assert payload is not None, "Payload should not be None"
-            assert hasattr(payload, 'message'), "Payload should have 'message' attribute"
+            assert hasattr(payload, 'questions'), "Payload should have 'questions' attribute"
+            assert hasattr(payload, 'payload_schema'), "Payload should have 'payload_schema' attribute"
 
             from openjiuwen.core.session import InteractiveInput
             interactive_input = InteractiveInput()
-            user_answer = {"answer": "user_answer.txt"}
+            user_answer = {"answers": {"What is the filename?": "user_answer.txt"}}
             interactive_input.update(tool_call_id, user_answer)
 
             result2 = await Runner.run_agent(

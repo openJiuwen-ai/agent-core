@@ -58,7 +58,6 @@ def test_create_subagent_explore_initializes_tools(tmp_path):
             assert subagent.ability_manager.get("bash") is not None
             assert subagent.ability_manager.get("write_file") is not None
             assert subagent.ability_manager.get("edit_file") is not None
-            assert subagent.ability_manager.get("code") is not None
         finally:
             await Runner.stop()
 

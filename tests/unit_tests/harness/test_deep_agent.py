@@ -953,7 +953,7 @@ def test_create_subagent_uses_code_agent_factory(tmp_path) -> None:
     assert call_kwargs["card"].name == "code_agent"
     assert call_kwargs["tools"] is None
     assert call_kwargs["rails"] is None
-    assert call_kwargs["workspace"].root_path.endswith("/sub_session_id")
+    assert Path(call_kwargs["workspace"].root_path).name == "sub_session_id"
 
 
 def test_create_subagent_uses_research_agent_factory(tmp_path) -> None:
@@ -979,7 +979,7 @@ def test_create_subagent_uses_research_agent_factory(tmp_path) -> None:
     assert call_kwargs["card"].name == "research_agent"
     assert call_kwargs["tools"] is None
     assert call_kwargs["rails"] is None
-    assert call_kwargs["workspace"].root_path.endswith("/sub_session_id")
+    assert Path(call_kwargs["workspace"].root_path).name == "sub_session_id"
 
 
 @pytest.mark.asyncio

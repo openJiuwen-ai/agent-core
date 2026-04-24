@@ -65,6 +65,7 @@ from openjiuwen.harness.task_loop.task_loop_controller import (
     TaskLoopController,
 )
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
+from openjiuwen.harness.security.factory import build_permission_interrupt_rail
 from openjiuwen.harness.tools import SessionToolkit, is_free_search_enabled, is_paid_search_enabled
 
 if TYPE_CHECKING:
@@ -402,6 +403,23 @@ class DeepAgent(BaseAgent):
         if config.enable_task_loop:
             self._pending_rails.append(TaskCompletionRail())
 
+        if isinstance(config.permissions, dict) and config.permissions.get("enabled"):
+            ws_root = None
+            if config.workspace is not None:
+                ws_root = Path(config.workspace.root_path).resolve()
+            model_name = None
+            if config.model is not None:
+                model_name = getattr(config.model, "model_name", None)
+            prail = build_permission_interrupt_rail(
+                permissions=config.permissions,
+                llm=config.model,
+                model_name=model_name,
+                host=config.permission_host,
+                workspace_root=ws_root,
+            )
+            if prail is not None:
+                self._pending_rails.append(prail)
+
     def set_react_agent(
         self,
         react_agent: Any,
@@ -696,7 +714,7 @@ class DeepAgent(BaseAgent):
             )
         else:
             workspace = Workspace(
-                root_path=self._deep_config.workspace.root_path + f"/{subsession_id}",
+                root_path=Path(self._deep_config.workspace.root_path) / subsession_id,
                 language=self._deep_config.language
             )
 

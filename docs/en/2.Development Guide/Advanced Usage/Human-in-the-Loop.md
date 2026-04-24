@@ -76,17 +76,37 @@ rail = AskUserRail()
 await agent.register_rail(rail)
 ```
 
+**Multi-Question Mode**:
+
+The `ask_user` tool supports multi-question mode, allowing 1-4 questions to be presented to the user at once, each with 2-4 optional choices. After the interrupt returns, retrieve the question list from the `questions` field in the `state`:
+
+```python
+state_list = result.get("state", [])
+for state in state_list:
+    payload = state.payload
+    tool_call_id = payload.id
+    interrupt_value = payload.value
+    
+    questions = interrupt_value.questions  # Question list
+    for q in questions:
+        print(f"Question: {q['question']}")
+        print(f"Options: {q.get('options', [])}")
+```
+
 **Response Fields**:
 
 Users provide answers through `InteractiveInput`:
 
-- `answer`: The answer provided by the user (required)
+- `answers`: A dictionary mapping question text to answers (required), where the key is the full question text (`question` field value) and the value is the user's answer
 
 **Return Answer**:
 
 ```python
+# Get full question text from questions
+first_question = questions[0]['question']
+
 interactive_input = InteractiveInput()
-interactive_input.update(tool_call_id, {"answer": "user_input.txt"})
+interactive_input.update(tool_call_id, {"answers": {first_question: "user_input.txt"}})
 ```
 
 For a complete example, see [5.2 User Input Collection](#52-user-input-collection).
@@ -603,12 +623,14 @@ async def main():
                 interrupt_value = payload.value
 
                 print(f"\nInterrupt details:")
-                print(f"  Prompt message: {interrupt_value.message}")
+                print(f"  Questions: {json.dumps(interrupt_value.questions, indent=4, ensure_ascii=False)}")
                 print(f"  payload_schema: {json.dumps(interrupt_value.payload_schema, indent=4, ensure_ascii=False)}")
 
-                print("\nUser answer: my_document.txt")
+                # Get full question text from questions
+                first_question = interrupt_value.questions[0]['question']
+                print(f"\nUser answer: my_document.txt")
                 interactive_input = InteractiveInput()
-                interactive_input.update(tool_call_id, {"answer": "my_document.txt"})
+                interactive_input.update(tool_call_id, {"answers": {first_question: "my_document.txt"}})
 
                 print("\n=== Second call: Resume execution ===")
                 result2 = await Runner.run_agent(
@@ -633,15 +655,24 @@ Result type: interrupt
 Interrupt count: 1
 
 Interrupt details:
-  Prompt message: Please input
+  Questions: [
+    {
+        "header": "Filename",
+        "question": "Please enter the filename you want:",
+        "options": [
+            {"label": "file1.txt", "description": "Default file"}
+        ],
+        "multi_select": false
+    }
+]
   payload_schema: {
     "description": "Payload for user input response.",
     "properties": {
-        "answer": {
-            "default": "",
-            "description": "answer",
-            "title": "Answer",
-            "type": "string"
+        "answers": {
+            "additionalProperties": {"type": "string"},
+            "description": "Question text to answer mapping",
+            "title": "Answers",
+            "type": "object"
         }
     },
     "title": "AskUserPayload",

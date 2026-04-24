@@ -221,6 +221,14 @@ class OpenApiClient(McpClient):
             input_params=getattr(tool, "inputSchema", {}),
         )
 
+    async def list_resources(self, *, timeout: float = NO_TIMEOUT) -> List[Any]:
+        """OpenAPI client does not support MCP resources."""
+        return []
+
+    async def read_resource(self, uri: str, *, timeout: float = NO_TIMEOUT) -> Any:
+        """OpenAPI client does not support MCP resources."""
+        return None
+
 
 async def load_conf(file: Union[str, Path]) -> Dict[str, Any]:
     path = Path(file).expanduser().resolve()
