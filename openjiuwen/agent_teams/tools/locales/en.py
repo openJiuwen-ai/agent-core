@@ -55,10 +55,9 @@ STRINGS: dict[str, str] = {
         "and do not repeat the generic workflow"
     ),
     "spawn_member.model_name": (
-        "Optional. When the team is configured with a model_pool and the "
-        "by_model_name allocation strategy, specifies which model-name group "
-        "to draw an endpoint from for this member. Falls back to the member's "
-        "default model config when omitted or when the name is not in the pool"
+        "Optional. Suggested model name for this member "
+        "(e.g. gpt-4, claude-sonnet-4); "
+        "the system picks an appropriate model when omitted"
     ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/en/shutdown_member.md

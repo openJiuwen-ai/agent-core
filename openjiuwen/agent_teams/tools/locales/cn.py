@@ -31,7 +31,7 @@ STRINGS: dict[str, str] = {
     "spawn_member.display_name": "成员的显示名（如「后端开发专家」），仅用于展示，不用于路由",
     "spawn_member.desc": "成员的长期角色画像，包括专业背景、核心专长、优先认领的任务类型、协作风格以及不负责的边界，用于任务匹配和角色定位",
     "spawn_member.prompt": "成员启动时收到的首条指令。用于说明首次启动后的优先关注点、任务选择原则、约束或协作要求；应提供明确方向，不要只写空泛的启动语句，也不要重复通用工作流程",
-    "spawn_member.model_name": "可选。当团队配置了 model_pool 且分配策略为 by_model_name 时，指定从哪个模型名分组里取一条 endpoint 给该成员；未指定或所选名字不在池中时回退到该成员的默认模型配置",
+    "spawn_member.model_name": "可选。建议该成员使用的模型名称（如 gpt-4、claude-sonnet-4 等）；未指定时由系统自动选择合适的模型",
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/cn/shutdown_member.md
     "shutdown_member.member_name": "要请求关闭的成员 member_name（语义化 slug，不是显示名）",
