@@ -1080,6 +1080,11 @@ class TeamAgent(BaseAgent):
         """
         team_logger.info("[{}] coordination pausing (persistent)", self._member_name() or "?")
         await self._drain_agent_task()
+        # Flush allocator counters into the session before it is
+        # released so the next ``recover_from_session`` /
+        # ``resume_for_new_session`` resumes the rotation instead of
+        # restarting at index 0.
+        self._persist_allocator_state()
         # Signal teammates to pause polls
         if self._messager and self.role == TeamRole.LEADER:
             from openjiuwen.agent_teams.schema.events import (
@@ -1108,6 +1113,11 @@ class TeamAgent(BaseAgent):
         """Stop the coordination loop, send sentinel, and unsubscribe."""
         team_logger.info("[{}] coordination stopping", self._member_name() or "?")
         await self._drain_agent_task()
+        # Flush allocator counters before tearing down the session: a
+        # temporary team that nevertheless saw spawns during this round
+        # should still leave a coherent snapshot behind for any tooling
+        # that inspects the session post-mortem.
+        self._persist_allocator_state()
         await self._unsubscribe_transport()
         # Cancel any in-flight teammate-recovery tasks before tearing down
         # the spawn handles they would operate on. Snapshot the set because
@@ -1908,14 +1918,43 @@ class TeamAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _persist_leader_config(self, session) -> None:
-        """Persist leader's spec + context to session state for recovery."""
-        session.update_state(
-            {
-                "spec": self._spec.model_dump(mode="json"),
-                "context": self._ctx.model_dump(mode="json"),
-                "team_name": self._team_name(),
-            }
-        )
+        """Persist leader's spec + context + allocator state for recovery.
+
+        Allocator state rides alongside spec so the rotation counters
+        survive a full-restart. The pool itself is rebuilt from
+        ``team_spec.model_pool`` on recovery — only the volatile
+        counters need persistence. ``model_allocator_state`` is omitted
+        when no pool is configured.
+        """
+        payload: dict[str, Any] = {
+            "spec": self._spec.model_dump(mode="json"),
+            "context": self._ctx.model_dump(mode="json"),
+            "team_name": self._team_name(),
+        }
+        if self._model_allocator is not None:
+            payload["model_allocator_state"] = self._model_allocator.state_dict()
+        session.update_state(payload)
+
+    def _persist_allocator_state(self) -> None:
+        """Flush in-memory allocator counters into the active session.
+
+        Called at end-of-session boundaries (pause / stop) so any
+        rotation that happened during the session is captured before
+        the session reference is dropped. No-op outside the leader,
+        without an allocator, or without an active team session.
+        """
+        if self._team_session is None or self._model_allocator is None:
+            return
+        try:
+            self._team_session.update_state(
+                {"model_allocator_state": self._model_allocator.state_dict()},
+            )
+        except Exception as e:
+            team_logger.error(
+                "[{}] failed to persist allocator state: {}",
+                self._member_name() or "?",
+                e,
+            )
 
     @classmethod
     def recover_from_session(cls, session) -> "TeamAgent":
@@ -1947,6 +1986,12 @@ class TeamAgent(BaseAgent):
         )
         agent = cls(card)
         agent.configure(spec, context)
+        # Restore allocator counters so the rotation continues from
+        # where the previous session left off rather than restarting
+        # at index 0 and re-handing-out the head of the pool.
+        allocator_state = state.get("model_allocator_state")
+        if allocator_state and agent._model_allocator is not None:
+            agent._model_allocator.load_state_dict(allocator_state)
         return agent
 
 

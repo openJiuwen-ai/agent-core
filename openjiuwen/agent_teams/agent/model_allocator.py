@@ -41,10 +41,35 @@ class ModelAllocator(Protocol):
     (round-robin, weighted, least-recently-used, ...). Returning ``None``
     signals "no model available from this allocator" — callers fall back
     to the agent's own model config.
+
+    Allocators must also expose ``state_dict`` / ``load_state_dict`` so
+    rotation counters survive full-restart recovery. The pool itself
+    lives on ``TeamSpec`` and is rebuilt from there on recovery; only
+    the volatile counters need to ride along inside the session.
     """
 
     def allocate(self) -> Optional["TeamModelConfig"]:
         """Return the next allocated model config, or None when unavailable."""
+        ...
+
+    def state_dict(self) -> dict:
+        """Return a JSON-friendly snapshot of allocator counters.
+
+        The returned dict must round-trip through ``json.dumps`` /
+        ``json.loads`` and through ``load_state_dict`` of the same
+        allocator class so a freshly-built allocator can resume the
+        previous rotation.
+        """
+        ...
+
+    def load_state_dict(self, state: dict) -> None:
+        """Restore counters previously produced by ``state_dict``.
+
+        Implementations should be defensive: tolerate missing keys
+        (resume from zero), unknown keys (ignore), and pool-composition
+        changes between save and load (skip stale group entries, leave
+        new ones at zero).
+        """
         ...
 
 
@@ -73,6 +98,17 @@ class RoundRobinModelAllocator:
         entry = self._pool[self._index % len(self._pool)]
         self._index += 1
         return entry.to_team_model_config()
+
+    def state_dict(self) -> dict:
+        """Snapshot the rotation counter for session persistence."""
+        return {"index": self._index}
+
+    def load_state_dict(self, state: dict) -> None:
+        """Restore the rotation counter from a previous snapshot."""
+        try:
+            self._index = int(state.get("index", 0))
+        except (TypeError, ValueError):
+            self._index = 0
 
 
 class ByModelNameAllocator:
@@ -118,6 +154,36 @@ class ByModelNameAllocator:
         idx = self._inner_indexes[name] % len(group)
         self._inner_indexes[name] += 1
         return group[idx].to_team_model_config()
+
+    def state_dict(self) -> dict:
+        """Snapshot outer + per-group counters for session persistence."""
+        return {
+            "name_index": self._name_index,
+            "inner_indexes": dict(self._inner_indexes),
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        """Restore counters from a previous snapshot.
+
+        Tolerates pool-composition changes between save and load:
+        groups absent from the current pool are dropped, and new
+        groups simply stay at zero. Malformed ints reset to zero.
+        """
+        try:
+            self._name_index = int(state.get("name_index", 0))
+        except (TypeError, ValueError):
+            self._name_index = 0
+
+        inner = state.get("inner_indexes") or {}
+        if not isinstance(inner, dict):
+            return
+        for name, raw in inner.items():
+            if name not in self._inner_indexes:
+                continue
+            try:
+                self._inner_indexes[name] = int(raw)
+            except (TypeError, ValueError):
+                self._inner_indexes[name] = 0
 
 
 def build_model_allocator(

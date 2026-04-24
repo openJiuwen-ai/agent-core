@@ -281,3 +281,276 @@ def test_team_agent_spec_propagates_strategy_into_team_spec():
     )
     restored = TeamAgentSpec.model_validate_json(spec.model_dump_json())
     assert restored.model_pool_strategy == "by_model_name"
+
+
+# ---------------------------------------------------------------------------
+# Allocator state_dict / load_state_dict — recovery semantics
+# ---------------------------------------------------------------------------
+
+
+def test_round_robin_state_dict_round_trip_resumes_rotation():
+    pool = _make_pool(3)
+    a = RoundRobinModelAllocator(pool)
+    [a.allocate() for _ in range(2)]
+    snapshot = a.state_dict()
+
+    # Brand-new allocator continues from the snapshot.
+    b = RoundRobinModelAllocator(pool)
+    b.load_state_dict(snapshot)
+    next_after_resume = b.allocate()
+    next_without_resume = RoundRobinModelAllocator(pool).allocate()
+
+    assert next_after_resume.model_request_config.model_name == "m2"
+    assert next_without_resume.model_request_config.model_name == "m0"
+
+
+def test_round_robin_state_dict_round_trips_through_json():
+    import json
+
+    pool = _make_pool(2)
+    a = RoundRobinModelAllocator(pool)
+    a.allocate()
+    encoded = json.dumps(a.state_dict())
+    decoded = json.loads(encoded)
+
+    b = RoundRobinModelAllocator(pool)
+    b.load_state_dict(decoded)
+    assert b.allocate().model_request_config.model_name == "m1"
+
+
+def test_round_robin_load_state_dict_tolerates_missing_or_bad_input():
+    pool = _make_pool(2)
+    a = RoundRobinModelAllocator(pool)
+    a.load_state_dict({})  # missing key
+    assert a.allocate().model_request_config.model_name == "m0"
+
+    a.load_state_dict({"index": "not-an-int"})  # malformed
+    assert a.allocate().model_request_config.model_name == "m0"
+
+
+def test_by_model_name_state_dict_resumes_outer_and_inner_rotation():
+    pool = [
+        _make_named_entry("gpt-4", "a1"),
+        _make_named_entry("gpt-4", "a2"),
+        _make_named_entry("gpt-4", "a3"),
+        _make_named_entry("claude", "c1"),
+        _make_named_entry("claude", "c2"),
+    ]
+    a = ByModelNameAllocator(pool)
+    # Fire 3 rounds: gpt-4/a1, claude/c1, gpt-4/a2.
+    [a.allocate() for _ in range(3)]
+    snapshot = a.state_dict()
+
+    b = ByModelNameAllocator(pool)
+    b.load_state_dict(snapshot)
+    # Continues with claude/c2, then gpt-4/a3, then claude/c1 (wrap).
+    expected = ["claude", "gpt-4", "claude"]
+    expected_bases = ["http://c2", "http://a3", "http://c1"]
+    for name, base in zip(expected, expected_bases):
+        cfg = b.allocate()
+        assert cfg.model_request_config.model_name == name
+        assert cfg.model_client_config.api_base == base
+
+
+def test_by_model_name_load_state_dict_drops_stale_groups_and_seeds_new_ones():
+    initial_pool = [
+        _make_named_entry("gpt-4", "a1"),
+        _make_named_entry("claude", "c1"),
+    ]
+    a = ByModelNameAllocator(initial_pool)
+    [a.allocate() for _ in range(2)]
+    snapshot = a.state_dict()
+    # Snapshot has counters for gpt-4 and claude.
+
+    new_pool = [
+        _make_named_entry("gpt-4", "a1"),
+        _make_named_entry("gpt-4", "a2"),
+        _make_named_entry("gemini", "g1"),  # new name, was not in snapshot
+        # claude removed from new_pool
+    ]
+    b = ByModelNameAllocator(new_pool)
+    b.load_state_dict(snapshot)  # must not raise on stale claude entry
+
+    # gpt-4 inner counter restored to 1 → next gpt-4 pick is a2.
+    # gemini inner counter is fresh (0) → first gemini pick is g1.
+    # name_index restored to 2 → next group is gpt-4 (since names are
+    # [gpt-4, gemini], 2 % 2 == 0).
+    cfg = b.allocate()
+    assert cfg.model_request_config.model_name == "gpt-4"
+    assert cfg.model_client_config.api_base == "http://a2"
+
+
+def test_by_model_name_load_state_dict_tolerates_malformed_input():
+    pool = [
+        _make_named_entry("gpt-4", "a1"),
+        _make_named_entry("claude", "c1"),
+    ]
+    a = ByModelNameAllocator(pool)
+    a.load_state_dict({"name_index": "bogus", "inner_indexes": "not-a-dict"})
+    cfg = a.allocate()
+    assert cfg.model_request_config.model_name == "gpt-4"
+
+
+# ---------------------------------------------------------------------------
+# TeamAgent integration: persist + recover allocator state through session
+# ---------------------------------------------------------------------------
+
+
+class _StubSession:
+    """Minimal stand-in for AgentTeamSession for persistence-only tests.
+
+    Captures every ``update_state`` call into a single dict and replays
+    it on ``get_state``. Mirrors the contract that ``TeamAgent`` relies
+    on without bringing the full session runtime online.
+    """
+
+    def __init__(self) -> None:
+        self.state: dict = {}
+
+    def update_state(self, data: dict) -> None:
+        self.state.update(data)
+
+    def get_state(self, key=None):
+        if key is None:
+            return self.state
+        return self.state.get(key)
+
+
+def _bare_team_agent(allocator):
+    """Build a TeamAgent shell with just the bits persistence reads.
+
+    Skips ``configure`` (and the heavy DeepAgent / DB wiring it
+    triggers) by injecting the spec, runtime context, and allocator
+    directly. Sufficient for exercising the persist + load contract.
+    """
+    from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+    from openjiuwen.agent_teams.schema.team import (
+        TeamRole,
+        TeamRuntimeContext,
+        TeamSpec,
+    )
+    from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+    pool = [
+        _make_named_entry("gpt-4", "a1"),
+        _make_named_entry("gpt-4", "a2"),
+        _make_named_entry("claude", "c1"),
+    ]
+    team_spec = TeamSpec(
+        team_name="t",
+        display_name="t",
+        leader_member_name="leader",
+        model_pool=pool,
+        model_pool_strategy="by_model_name",
+    )
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        team_name="t",
+        model_pool=pool,
+        model_pool_strategy="by_model_name",
+    )
+    ctx = TeamRuntimeContext(
+        role=TeamRole.LEADER,
+        member_name="leader",
+        team_spec=team_spec,
+    )
+    agent = TeamAgent(AgentCard(id="t_leader", name="leader"))
+    agent._spec = spec
+    agent._ctx = ctx
+    agent._model_allocator = allocator
+    return agent
+
+
+def test_persist_leader_config_includes_allocator_state():
+    pool = [
+        _make_named_entry("gpt-4", "a1"),
+        _make_named_entry("claude", "c1"),
+    ]
+    allocator = ByModelNameAllocator(pool)
+    [allocator.allocate() for _ in range(2)]
+
+    agent = _bare_team_agent(allocator)
+    session = _StubSession()
+    agent._persist_leader_config(session)
+
+    assert "model_allocator_state" in session.state
+    snapshot = session.state["model_allocator_state"]
+    assert snapshot["name_index"] == 2
+    assert snapshot["inner_indexes"] == {"gpt-4": 1, "claude": 1}
+
+
+def test_persist_allocator_state_writes_only_allocator_payload():
+    pool = _make_pool(3)
+    allocator = RoundRobinModelAllocator(pool)
+    [allocator.allocate() for _ in range(2)]
+
+    agent = _bare_team_agent(allocator)
+    session = _StubSession()
+    agent._team_session = session
+    agent._persist_allocator_state()
+
+    # Only allocator snapshot, no spec / context overwrite.
+    assert set(session.state) == {"model_allocator_state"}
+    assert session.state["model_allocator_state"] == {"index": 2}
+
+
+def test_persist_allocator_state_no_op_without_session_or_allocator():
+    agent_no_session = _bare_team_agent(RoundRobinModelAllocator(_make_pool(2)))
+    agent_no_session._team_session = None
+    # Should silently no-op, no AttributeError.
+    agent_no_session._persist_allocator_state()
+
+    agent_no_alloc = _bare_team_agent(RoundRobinModelAllocator(_make_pool(2)))
+    agent_no_alloc._model_allocator = None
+    agent_no_alloc._team_session = _StubSession()
+    agent_no_alloc._persist_allocator_state()
+    assert agent_no_alloc._team_session.state == {}
+
+
+def test_persist_leader_config_omits_allocator_state_when_no_pool():
+    from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+    from openjiuwen.agent_teams.schema.team import (
+        TeamRole,
+        TeamRuntimeContext,
+        TeamSpec,
+    )
+    from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+    spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="t")
+    team_spec = TeamSpec(team_name="t", display_name="t")
+    ctx = TeamRuntimeContext(
+        role=TeamRole.LEADER, member_name="leader", team_spec=team_spec,
+    )
+    agent = TeamAgent(AgentCard(id="t_leader", name="leader"))
+    agent._spec = spec
+    agent._ctx = ctx
+    agent._model_allocator = None  # no pool configured
+
+    session = _StubSession()
+    agent._persist_leader_config(session)
+
+    assert "model_allocator_state" not in session.state
+    assert "spec" in session.state and "context" in session.state
+
+
+def test_round_trip_persist_then_load_continues_rotation():
+    pool = [
+        _make_named_entry("gpt-4", "a1"),
+        _make_named_entry("gpt-4", "a2"),
+        _make_named_entry("claude", "c1"),
+    ]
+    # Phase 1: leader allocates twice and persists.
+    allocator = ByModelNameAllocator(pool)
+    [allocator.allocate() for _ in range(2)]
+    agent = _bare_team_agent(allocator)
+    session = _StubSession()
+    agent._persist_leader_config(session)
+
+    # Phase 2: simulate process restart — fresh allocator, load state,
+    # the next allocation must continue, not restart.
+    fresh = ByModelNameAllocator(pool)
+    fresh.load_state_dict(session.state["model_allocator_state"])
+    cfg = fresh.allocate()
+    # After 2 allocations [gpt-4/a1, claude/c1], next is gpt-4/a2.
+    assert cfg.model_request_config.model_name == "gpt-4"
+    assert cfg.model_client_config.api_base == "http://a2"
