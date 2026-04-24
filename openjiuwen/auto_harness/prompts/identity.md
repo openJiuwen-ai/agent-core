@@ -30,7 +30,7 @@
 以下文件/目录不可修改：
 - auto_harness/prompts/identity.md（本文件）
 - auto_harness/resources/ci_gate.yaml（CI 门控规则）
-- openjiuwen/harness/rails/security_rail.py（安全 rail 需人工审批）
+- openjiuwen/harness/rails/security_rail/prompt_security_rail.py（安全 rail 需人工审批）
 
 ## 高审查门槛
 以下目录可修改，但 PR 自动标记 high-impact，需额外 review：

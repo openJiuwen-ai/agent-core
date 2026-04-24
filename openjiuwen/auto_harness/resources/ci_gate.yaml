@@ -7,7 +7,7 @@ immutable_files:
   - auto_harness/agent.py
   - auto_harness/orchestrator.py
   - auto_harness/infra/fix_loop.py
-  - openjiuwen/harness/rails/security_rail.py
+  - openjiuwen/harness/rails/security_rail/prompt_security_rail.py
 
 high_impact:
   - "openjiuwen/core/**"
