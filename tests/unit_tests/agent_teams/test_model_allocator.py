@@ -8,7 +8,10 @@ into ``TeamModelConfig``.
 
 from __future__ import annotations
 
+import pytest
+
 from openjiuwen.agent_teams.agent.model_allocator import (
+    ByModelNameAllocator,
     RoundRobinModelAllocator,
     build_model_allocator,
 )
@@ -27,6 +30,15 @@ def _make_pool(n: int) -> list[ModelPoolEntry]:
         )
         for i in range(n)
     ]
+
+
+def _make_named_entry(name: str, suffix: str) -> ModelPoolEntry:
+    return ModelPoolEntry(
+        model_name=name,
+        api_key=f"k-{suffix}",
+        api_base_url=f"http://{suffix}",
+        api_provider="OpenAI",
+    )
 
 
 def test_round_robin_allocator_rotates_through_pool():
@@ -167,3 +179,105 @@ def test_team_agent_spec_model_pool_round_trips_through_json():
     restored = TeamAgentSpec.model_validate_json(spec.model_dump_json())
     assert len(restored.model_pool) == 3
     assert [e.model_name for e in restored.model_pool] == ["m0", "m1", "m2"]
+
+
+def test_by_model_name_allocator_alternates_groups_in_insertion_order():
+    pool = [
+        _make_named_entry("gpt-4", "a1"),
+        _make_named_entry("gpt-4", "a2"),
+        _make_named_entry("gpt-4", "a3"),
+        _make_named_entry("claude", "c1"),
+        _make_named_entry("claude", "c2"),
+    ]
+    allocator = ByModelNameAllocator(pool)
+    sequence = [allocator.allocate() for _ in range(8)]
+
+    names = [cfg.model_request_config.model_name for cfg in sequence]
+    bases = [cfg.model_client_config.api_base for cfg in sequence]
+
+    # Outer rotation alternates names in insertion order.
+    assert names == [
+        "gpt-4", "claude",
+        "gpt-4", "claude",
+        "gpt-4", "claude",
+        "gpt-4", "claude",
+    ]
+    # Inner rotation walks each group's endpoints independently.
+    assert bases == [
+        "http://a1", "http://c1",
+        "http://a2", "http://c2",
+        "http://a3", "http://c1",  # claude wraps before gpt-4 does
+        "http://a1", "http://c2",
+    ]
+
+
+def test_by_model_name_allocator_handles_empty_pool():
+    allocator = ByModelNameAllocator([])
+    assert allocator.allocate() is None
+
+
+def test_by_model_name_allocator_distributes_evenly_when_groups_uneven():
+    pool = [
+        _make_named_entry("gpt-4", "a1"),
+        _make_named_entry("gpt-4", "a2"),
+        _make_named_entry("gpt-4", "a3"),
+        _make_named_entry("gpt-4", "a4"),
+        _make_named_entry("claude", "c1"),
+    ]
+    allocator = ByModelNameAllocator(pool)
+    counts: dict[str, int] = {"gpt-4": 0, "claude": 0}
+    for _ in range(20):
+        cfg = allocator.allocate()
+        counts[cfg.model_request_config.model_name] += 1
+    # Even split per name, regardless of pool composition.
+    assert counts == {"gpt-4": 10, "claude": 10}
+
+
+def test_build_model_allocator_dispatches_by_strategy():
+    pool = [
+        _make_named_entry("gpt-4", "a1"),
+        _make_named_entry("claude", "c1"),
+    ]
+    spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()})
+
+    rr = TeamSpec(
+        team_name="t",
+        display_name="t",
+        model_pool=pool,
+        model_pool_strategy="round_robin",
+    )
+    assert isinstance(build_model_allocator(spec, rr), RoundRobinModelAllocator)
+
+    bn = TeamSpec(
+        team_name="t",
+        display_name="t",
+        model_pool=pool,
+        model_pool_strategy="by_model_name",
+    )
+    assert isinstance(build_model_allocator(spec, bn), ByModelNameAllocator)
+
+
+def test_build_model_allocator_rejects_unknown_strategy():
+    pool = [_make_named_entry("gpt-4", "a1")]
+    spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()})
+    # ``model_pool_strategy`` is a Literal, so pydantic blocks invalid
+    # values at TeamSpec construction time. Bypass validation to
+    # exercise the factory's own guard.
+    team_spec = TeamSpec.model_construct(
+        team_name="t",
+        display_name="t",
+        model_pool=pool,
+        model_pool_strategy="weighted",
+    )
+    with pytest.raises(ValueError, match="Unknown model_pool_strategy"):
+        build_model_allocator(spec, team_spec)
+
+
+def test_team_agent_spec_propagates_strategy_into_team_spec():
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        model_pool=[_make_named_entry("gpt-4", "a1")],
+        model_pool_strategy="by_model_name",
+    )
+    restored = TeamAgentSpec.model_validate_json(spec.model_dump_json())
+    assert restored.model_pool_strategy == "by_model_name"

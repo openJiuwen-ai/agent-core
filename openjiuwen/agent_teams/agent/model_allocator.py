@@ -1,10 +1,21 @@
 # coding: utf-8
 """Model config allocators for team member spawning.
 
-When ``TeamSpec.model_pool`` is non-empty, ``RoundRobinModelAllocator``
-distributes pool entries across leader and teammates so concurrent calls
-spread across endpoints instead of saturating a single one. When the
-pool is empty (default), no allocator is built — every member resolves
+When ``TeamSpec.model_pool`` is non-empty, an allocator distributes pool
+entries across leader and teammates so concurrent calls spread across
+endpoints instead of saturating a single one. Two strategies ship:
+
+* ``RoundRobinModelAllocator`` — linear rotation through every entry,
+  ignoring ``model_name``. Good for pools where every entry is an
+  interchangeable endpoint of the same logical model.
+* ``ByModelNameAllocator`` — partitions entries by ``model_name`` and
+  rotates over the partitions at the outer level while round-robining
+  endpoints within each partition. Each declared model name receives
+  an equal share of allocations regardless of how many endpoints back
+  it; useful when the pool mixes tiers (cheap vs expensive) and you
+  want fair distribution per tier rather than per raw endpoint.
+
+When the pool is empty no allocator is built — every member resolves
 its model from ``TeamAgentSpec.agents`` via the regular per-agent
 fallback in ``TeamAgent._setup_agent``.
 
@@ -64,6 +75,51 @@ class RoundRobinModelAllocator:
         return entry.to_team_model_config()
 
 
+class ByModelNameAllocator:
+    """Round-robin allocator that groups by ``model_name``.
+
+    Pool entries are partitioned by their ``model_name`` field while
+    preserving insertion order. Each ``allocate`` call:
+
+    1. Picks the next ``model_name`` group in outer round-robin order.
+    2. Returns the next entry from that group's inner round-robin
+       counter, advancing the inner counter for that group only.
+
+    Result: each distinct model name receives an equal share of
+    allocations (1/N where N is the number of distinct names),
+    independent of how many endpoints back each name. Within a group,
+    endpoints rotate in pool order. Compared with
+    ``RoundRobinModelAllocator`` this matters when the pool mixes
+    cheap and expensive models — pure round-robin would over-allocate
+    to whichever name has more entries.
+    """
+
+    def __init__(self, pool: list["ModelPoolEntry"]) -> None:
+        """Initialize from the pool, partitioning entries by model_name."""
+        self._groups: dict[str, list["ModelPoolEntry"]] = {}
+        for entry in pool:
+            self._groups.setdefault(entry.model_name, []).append(entry)
+        self._names: list[str] = list(self._groups.keys())
+        self._name_index = 0
+        self._inner_indexes: dict[str, int] = {name: 0 for name in self._names}
+
+    def allocate(self) -> Optional["TeamModelConfig"]:
+        """Return the next allocated TeamModelConfig.
+
+        Advances the outer name rotation and the inner endpoint
+        rotation of the picked group. Returns ``None`` if the pool was
+        empty at construction time.
+        """
+        if not self._names:
+            return None
+        name = self._names[self._name_index % len(self._names)]
+        self._name_index += 1
+        group = self._groups[name]
+        idx = self._inner_indexes[name] % len(group)
+        self._inner_indexes[name] += 1
+        return group[idx].to_team_model_config()
+
+
 def build_model_allocator(
     spec: "TeamAgentSpec",
     team_spec: "TeamSpec",
@@ -73,24 +129,40 @@ def build_model_allocator(
     Pool-based allocation is only enabled when ``team_spec.model_pool``
     is non-empty. Without a pool the function returns ``None`` so every
     member resolves its model from ``TeamAgentSpec.agents`` as before
-    and behavior matches the legacy code path exactly.
+    and behavior matches the legacy code path exactly. The strategy
+    selected by ``team_spec.model_pool_strategy`` decides which
+    concrete allocator is built.
 
     Args:
         spec: Team agent specification (reserved for future allocator
             policies that need access to per-agent metadata).
-        team_spec: Resolved team identity carrying ``model_pool``.
+        team_spec: Resolved team identity carrying ``model_pool`` and
+            ``model_pool_strategy``.
 
     Returns:
         A ``ModelAllocator`` instance when a pool is configured,
         otherwise ``None``.
+
+    Raises:
+        ValueError: when ``model_pool_strategy`` is not a recognized
+            strategy name.
     """
     del spec  # reserved for future policies that need agent metadata
-    if team_spec.model_pool:
+    if not team_spec.model_pool:
+        return None
+    strategy = team_spec.model_pool_strategy
+    if strategy == "round_robin":
         return RoundRobinModelAllocator(team_spec.model_pool)
-    return None
+    if strategy == "by_model_name":
+        return ByModelNameAllocator(team_spec.model_pool)
+    raise ValueError(
+        f"Unknown model_pool_strategy '{strategy}'; "
+        f"expected one of: round_robin, by_model_name"
+    )
 
 
 __all__ = [
+    "ByModelNameAllocator",
     "ModelAllocator",
     "RoundRobinModelAllocator",
     "build_model_allocator",

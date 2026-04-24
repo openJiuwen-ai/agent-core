@@ -158,6 +158,13 @@ class TeamAgentSpec(BaseModel):
     at ``build()`` time so allocators reachable from runtime context
     see the same pool.
     """
+    model_pool_strategy: Literal["round_robin", "by_model_name"] = "round_robin"
+    """Allocation strategy applied to ``model_pool``.
+
+    Mirrors ``TeamSpec.model_pool_strategy`` and propagates to it at
+    ``build()`` time. See ``TeamSpec.model_pool_strategy`` for the
+    semantics of each option.
+    """
     team_mode: Literal["default", "predefined", "hybrid"] | None = None
     """Team operating mode.
 
@@ -229,6 +236,7 @@ class TeamAgentSpec(BaseModel):
             leader_member_name=self.leader.member_name,
             language=resolved_language,
             model_pool=list(self.model_pool),
+            model_pool_strategy=self.model_pool_strategy,
         )
 
         messager_config = self.transport.build() if self.transport else None

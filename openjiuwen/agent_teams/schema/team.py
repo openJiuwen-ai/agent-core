@@ -6,7 +6,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -165,6 +165,18 @@ class TeamSpec(BaseModel):
     spread across endpoints instead of saturating a single one. When
     empty (default), members fall back to their per-agent model config
     declared in ``TeamAgentSpec.agents`` and behavior is unchanged.
+    """
+    model_pool_strategy: Literal["round_robin", "by_model_name"] = "round_robin"
+    """Allocation strategy applied to ``model_pool`` entries.
+
+    * ``round_robin`` (default): linear rotation across every entry in
+      pool order, ignoring ``model_name``.
+    * ``by_model_name``: rotation that first picks the next distinct
+      ``model_name`` group and then advances the within-group rotation,
+      so each declared model name receives an equal share of allocations
+      regardless of how many endpoints back it. Use when the pool mixes
+      models with different cost / capability tiers and you want fair
+      distribution across tiers rather than across raw endpoints.
     """
 
 
