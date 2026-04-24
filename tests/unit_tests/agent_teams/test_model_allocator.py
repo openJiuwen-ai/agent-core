@@ -1,9 +1,12 @@
 # coding: utf-8
 """Unit tests for model allocator behavior.
 
-Covers ``RoundRobinModelAllocator`` rotation, the ``build_model_allocator``
-factory's pool-vs-no-pool branching, and ``ModelPoolEntry`` materialization
-into ``TeamModelConfig``.
+Covers the two shipped strategies (``RoundRobinModelAllocator``,
+``ByModelNameAllocator``), the ``build_model_allocator`` factory's
+pool-vs-no-pool branching, pool-entry materialization with metadata
+merging, session persistence (``state_dict`` / ``load_state_dict`` with
+pool-digest driven reset), and the positional DB resolver
+``resolve_member_model``.
 """
 
 from __future__ import annotations
@@ -11,10 +14,10 @@ from __future__ import annotations
 import pytest
 
 from openjiuwen.agent_teams.agent.model_allocator import (
+    Allocation,
     ByModelNameAllocator,
     RoundRobinModelAllocator,
     build_model_allocator,
-    model_ref_from_team_model_config,
     resolve_member_model,
 )
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
@@ -43,10 +46,18 @@ def _make_named_entry(name: str, suffix: str) -> ModelPoolEntry:
     )
 
 
+# ---------------------------------------------------------------------------
+# ModelPoolEntry materialization + metadata merge
+# ---------------------------------------------------------------------------
+
+
 def test_round_robin_allocator_rotates_through_pool():
     pool = _make_pool(3)
     allocator = RoundRobinModelAllocator(pool)
-    names = [allocator.allocate().model_request_config.model_name for _ in range(7)]
+    names = [
+        allocator.allocate().to_team_model_config().model_request_config.model_name
+        for _ in range(7)
+    ]
     assert names == ["m0", "m1", "m2", "m0", "m1", "m2", "m0"]
 
 
@@ -58,17 +69,15 @@ def test_round_robin_allocator_returns_none_when_pool_empty():
 
 def test_model_pool_entry_assigns_unique_model_id_per_instance():
     a = ModelPoolEntry(
-        model_name="m",
-        api_key="k",
-        api_base_url="http://x",
-        api_provider="OpenAI",
+        model_name="m", api_key="k", api_base_url="http://x", api_provider="OpenAI",
     )
     b = ModelPoolEntry(
-        model_name="m",
-        api_key="k",
-        api_base_url="http://x",
-        api_provider="OpenAI",
+        model_name="m", api_key="k", api_base_url="http://x", api_provider="OpenAI",
     )
+    # model_id is runtime-only client identity: auto-uuid, per-instance,
+    # not persisted to DB. Distinct instances must get distinct ids so
+    # the foundation resource manager doesn't collapse independent
+    # endpoints onto one cached client.
     assert a.model_id != b.model_id
 
 
@@ -93,25 +102,15 @@ def test_model_pool_entry_metadata_fills_client_and_request_configs():
         api_base_url="http://endpoint",
         api_provider="OpenAI",
         metadata={
-            "client": {
-                "timeout": 30.0,
-                "verify_ssl": False,
-                "max_retries": 5,
-            },
-            "request": {
-                "temperature": 0.2,
-                "top_p": 0.9,
-                "max_tokens": 1024,
-            },
+            "client": {"timeout": 30.0, "verify_ssl": False, "max_retries": 5},
+            "request": {"temperature": 0.2, "top_p": 0.9, "max_tokens": 1024},
         },
     )
     cfg = entry.to_team_model_config()
-
     client = cfg.model_client_config
     assert client.timeout == 30.0
     assert client.verify_ssl is False
     assert client.max_retries == 5
-
     request = cfg.model_request_config
     assert request.temperature == 0.2
     assert request.top_p == 0.9
@@ -125,10 +124,7 @@ def test_model_pool_entry_explicit_fields_override_metadata():
         api_base_url="http://real",
         api_provider="OpenAI",
         metadata={
-            "client": {
-                "api_key": "shadow-key",
-                "api_base": "http://shadow",
-            },
+            "client": {"api_key": "shadow-key", "api_base": "http://shadow"},
             "request": {"model": "shadow-model"},
         },
     )
@@ -149,6 +145,11 @@ def test_model_pool_entry_metadata_extra_keys_are_ignored_by_materialization():
     cfg = entry.to_team_model_config()
     assert cfg.model_client_config.api_key == "k"
     assert cfg.model_request_config.model_name == "m1"
+
+
+# ---------------------------------------------------------------------------
+# Factory + configuration round-trips
+# ---------------------------------------------------------------------------
 
 
 def test_build_model_allocator_returns_round_robin_when_pool_set():
@@ -183,6 +184,34 @@ def test_team_agent_spec_model_pool_round_trips_through_json():
     assert [e.model_name for e in restored.model_pool] == ["m0", "m1", "m2"]
 
 
+# ---------------------------------------------------------------------------
+# Allocation result + allocator behavior
+# ---------------------------------------------------------------------------
+
+
+def test_allocation_to_db_ref_is_name_plus_group_index():
+    entry = _make_named_entry("gpt-4", "a1")
+    alloc = Allocation(entry=entry, group_index=2)
+    assert alloc.to_db_ref() == {"model_name": "gpt-4", "model_index": 2}
+
+
+def test_round_robin_allocation_carries_group_index_within_name():
+    pool = [
+        _make_named_entry("gpt-4", "a1"),
+        _make_named_entry("claude", "c1"),
+        _make_named_entry("gpt-4", "a2"),
+    ]
+    allocator = RoundRobinModelAllocator(pool)
+    # Sequence: gpt-4/a1 (gpt-4 group idx=0), claude/c1 (claude idx=0),
+    # gpt-4/a2 (gpt-4 group idx=1).
+    alloc1 = allocator.allocate()
+    alloc2 = allocator.allocate()
+    alloc3 = allocator.allocate()
+    assert alloc1.to_db_ref() == {"model_name": "gpt-4", "model_index": 0}
+    assert alloc2.to_db_ref() == {"model_name": "claude", "model_index": 0}
+    assert alloc3.to_db_ref() == {"model_name": "gpt-4", "model_index": 1}
+
+
 def test_by_model_name_allocator_rotates_within_named_group():
     pool = [
         _make_named_entry("gpt-4", "a1"),
@@ -192,20 +221,20 @@ def test_by_model_name_allocator_rotates_within_named_group():
     ]
     allocator = ByModelNameAllocator(pool)
 
-    # Three calls for gpt-4 walk a1 → a2 → a3.
     bases = [
-        allocator.allocate(model_name="gpt-4").model_client_config.api_base
+        allocator.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base
         for _ in range(3)
     ]
     assert bases == ["http://a1", "http://a2", "http://a3"]
 
     # Wrap-around in the gpt-4 group.
-    assert allocator.allocate(model_name="gpt-4").model_client_config.api_base == "http://a1"
+    wrap = allocator.allocate(model_name="gpt-4").to_team_model_config()
+    assert wrap.model_client_config.api_base == "http://a1"
 
     # claude has only one endpoint — repeated calls always return c1.
     for _ in range(2):
-        cfg = allocator.allocate(model_name="claude")
-        assert cfg.model_client_config.api_base == "http://c1"
+        alloc = allocator.allocate(model_name="claude")
+        assert alloc.to_team_model_config().model_client_config.api_base == "http://c1"
 
 
 def test_by_model_name_allocator_independent_counters_per_name():
@@ -216,23 +245,23 @@ def test_by_model_name_allocator_independent_counters_per_name():
         _make_named_entry("claude", "c2"),
     ]
     allocator = ByModelNameAllocator(pool)
-
-    # Drive gpt-4 forward without touching claude.
     [allocator.allocate(model_name="gpt-4") for _ in range(5)]
-
-    # claude counter should still be at 0 → first claude call returns c1.
-    assert allocator.allocate(model_name="claude").model_client_config.api_base == "http://c1"
+    first_claude = allocator.allocate(model_name="claude").to_team_model_config()
+    assert first_claude.model_client_config.api_base == "http://c1"
 
 
 def test_by_model_name_allocator_returns_none_for_unknown_or_missing_name():
     pool = [_make_named_entry("gpt-4", "a1")]
     allocator = ByModelNameAllocator(pool)
     assert allocator.allocate(model_name=None) is None
-    assert allocator.allocate() is None  # default arg
+    assert allocator.allocate() is None
     assert allocator.allocate(model_name="") is None
     assert allocator.allocate(model_name="gemini") is None
     # Unknown-name calls must NOT advance any counter.
-    assert allocator.allocate(model_name="gpt-4").model_client_config.api_base == "http://a1"
+    assert (
+        allocator.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base
+        == "http://a1"
+    )
 
 
 def test_by_model_name_allocator_handles_empty_pool():
@@ -247,11 +276,10 @@ def test_round_robin_allocator_ignores_model_name_argument():
         _make_named_entry("claude", "c1"),
     ]
     allocator = RoundRobinModelAllocator(pool)
-    # Despite passing names, rotation walks the pool linearly.
     bases = [
-        allocator.allocate(model_name="claude").model_client_config.api_base,
-        allocator.allocate(model_name="gpt-4").model_client_config.api_base,
-        allocator.allocate(model_name="claude").model_client_config.api_base,
+        allocator.allocate(model_name="claude").to_team_model_config().model_client_config.api_base,
+        allocator.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base,
+        allocator.allocate(model_name="claude").to_team_model_config().model_client_config.api_base,
     ]
     assert bases == ["http://a1", "http://c1", "http://a1"]
 
@@ -264,18 +292,14 @@ def test_build_model_allocator_dispatches_by_strategy():
     spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()})
 
     rr = TeamSpec(
-        team_name="t",
-        display_name="t",
-        model_pool=pool,
-        model_pool_strategy="round_robin",
+        team_name="t", display_name="t",
+        model_pool=pool, model_pool_strategy="round_robin",
     )
     assert isinstance(build_model_allocator(spec, rr), RoundRobinModelAllocator)
 
     bn = TeamSpec(
-        team_name="t",
-        display_name="t",
-        model_pool=pool,
-        model_pool_strategy="by_model_name",
+        team_name="t", display_name="t",
+        model_pool=pool, model_pool_strategy="by_model_name",
     )
     assert isinstance(build_model_allocator(spec, bn), ByModelNameAllocator)
 
@@ -283,14 +307,9 @@ def test_build_model_allocator_dispatches_by_strategy():
 def test_build_model_allocator_rejects_unknown_strategy():
     pool = [_make_named_entry("gpt-4", "a1")]
     spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()})
-    # ``model_pool_strategy`` is a Literal, so pydantic blocks invalid
-    # values at TeamSpec construction time. Bypass validation to
-    # exercise the factory's own guard.
     team_spec = TeamSpec.model_construct(
-        team_name="t",
-        display_name="t",
-        model_pool=pool,
-        model_pool_strategy="weighted",
+        team_name="t", display_name="t",
+        model_pool=pool, model_pool_strategy="weighted",
     )
     with pytest.raises(ValueError, match="Unknown model_pool_strategy"):
         build_model_allocator(spec, team_spec)
@@ -307,7 +326,7 @@ def test_team_agent_spec_propagates_strategy_into_team_spec():
 
 
 # ---------------------------------------------------------------------------
-# Allocator state_dict / load_state_dict — recovery semantics
+# state_dict / load_state_dict + pool-digest driven reset
 # ---------------------------------------------------------------------------
 
 
@@ -317,14 +336,14 @@ def test_round_robin_state_dict_round_trip_resumes_rotation():
     [a.allocate() for _ in range(2)]
     snapshot = a.state_dict()
 
-    # Brand-new allocator continues from the snapshot.
     b = RoundRobinModelAllocator(pool)
     b.load_state_dict(snapshot)
-    next_after_resume = b.allocate()
-    next_without_resume = RoundRobinModelAllocator(pool).allocate()
-
-    assert next_after_resume.model_request_config.model_name == "m2"
-    assert next_without_resume.model_request_config.model_name == "m0"
+    resume_name = b.allocate().to_team_model_config().model_request_config.model_name
+    fresh_name = (
+        RoundRobinModelAllocator(pool).allocate().to_team_model_config().model_request_config.model_name
+    )
+    assert resume_name == "m2"
+    assert fresh_name == "m0"
 
 
 def test_round_robin_state_dict_round_trips_through_json():
@@ -338,17 +357,32 @@ def test_round_robin_state_dict_round_trips_through_json():
 
     b = RoundRobinModelAllocator(pool)
     b.load_state_dict(decoded)
-    assert b.allocate().model_request_config.model_name == "m1"
+    assert b.allocate().to_team_model_config().model_request_config.model_name == "m1"
+
+
+def test_round_robin_load_state_dict_resets_on_pool_digest_change():
+    original_pool = _make_pool(3)
+    a = RoundRobinModelAllocator(original_pool)
+    [a.allocate() for _ in range(2)]  # counter = 2
+    snapshot = a.state_dict()
+
+    # New pool with different composition -> fresh allocator gets a
+    # different digest, load_state_dict must reset index to 0.
+    new_pool = _make_pool(2)  # entries differ
+    b = RoundRobinModelAllocator(new_pool)
+    b.load_state_dict(snapshot)
+    assert b.allocate().to_team_model_config().model_request_config.model_name == "m0"
 
 
 def test_round_robin_load_state_dict_tolerates_missing_or_bad_input():
     pool = _make_pool(2)
     a = RoundRobinModelAllocator(pool)
-    a.load_state_dict({})  # missing key
-    assert a.allocate().model_request_config.model_name == "m0"
+    a.load_state_dict({})
+    assert a.allocate().to_team_model_config().model_request_config.model_name == "m0"
 
-    a.load_state_dict({"index": "not-an-int"})  # malformed
-    assert a.allocate().model_request_config.model_name == "m0"
+    # Matching digest but bogus counter -> counter reset to 0.
+    a.load_state_dict({"index": "not-an-int", "pool_digest": a.state_dict()["pool_digest"]})
+    assert a.allocate().to_team_model_config().model_request_config.model_name == "m0"
 
 
 def test_by_model_name_state_dict_resumes_per_group_rotation():
@@ -360,7 +394,6 @@ def test_by_model_name_state_dict_resumes_per_group_rotation():
         _make_named_entry("claude", "c2"),
     ]
     a = ByModelNameAllocator(pool)
-    # Drive gpt-4 twice (a1, a2) and claude once (c1).
     a.allocate(model_name="gpt-4")
     a.allocate(model_name="gpt-4")
     a.allocate(model_name="claude")
@@ -368,12 +401,18 @@ def test_by_model_name_state_dict_resumes_per_group_rotation():
 
     b = ByModelNameAllocator(pool)
     b.load_state_dict(snapshot)
-    # gpt-4 continues at a3, claude continues at c2.
-    assert b.allocate(model_name="gpt-4").model_client_config.api_base == "http://a3"
-    assert b.allocate(model_name="claude").model_client_config.api_base == "http://c2"
+    assert (
+        b.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base
+        == "http://a3"
+    )
+    assert (
+        b.allocate(model_name="claude").to_team_model_config().model_client_config.api_base
+        == "http://c2"
+    )
 
 
-def test_by_model_name_load_state_dict_drops_stale_groups_and_seeds_new_ones():
+def test_by_model_name_load_state_dict_resets_on_pool_digest_change():
+    """Composition change -> all counters reset, not selectively dropped."""
     initial_pool = [
         _make_named_entry("gpt-4", "a1"),
         _make_named_entry("claude", "c1"),
@@ -385,17 +424,46 @@ def test_by_model_name_load_state_dict_drops_stale_groups_and_seeds_new_ones():
 
     new_pool = [
         _make_named_entry("gpt-4", "a1"),
-        _make_named_entry("gpt-4", "a2"),
-        _make_named_entry("gemini", "g1"),  # new name, was not in snapshot
-        # claude removed from new_pool
+        _make_named_entry("gpt-4", "a2"),  # new endpoint
+        _make_named_entry("gemini", "g1"),
     ]
     b = ByModelNameAllocator(new_pool)
-    b.load_state_dict(snapshot)  # must not raise on stale claude entry
+    b.load_state_dict(snapshot)
+    # Digest mismatch -> counters zeroed. gpt-4 group starts at a1, not a2.
+    assert (
+        b.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base
+        == "http://a1"
+    )
+    assert (
+        b.allocate(model_name="gemini").to_team_model_config().model_client_config.api_base
+        == "http://g1"
+    )
 
-    # gpt-4 counter restored to 1 → next gpt-4 pick is a2.
-    assert b.allocate(model_name="gpt-4").model_client_config.api_base == "http://a2"
-    # gemini counter is fresh (0) → first gemini pick is g1.
-    assert b.allocate(model_name="gemini").model_client_config.api_base == "http://g1"
+
+def test_pool_digest_stable_under_credential_refresh():
+    """Rotating api_key / metadata doesn't bump digest -> counters preserved."""
+    original = ModelPoolEntry(
+        model_name="gpt-4",
+        api_key="OLD",
+        api_base_url="http://x",
+        api_provider="OpenAI",
+    )
+    a = ByModelNameAllocator([original])
+    a.allocate(model_name="gpt-4")
+    snapshot = a.state_dict()
+
+    # Same name + same base_url + new credential -> digest unchanged.
+    refreshed = ModelPoolEntry(
+        model_name="gpt-4",
+        api_key="NEW",
+        api_base_url="http://x",
+        api_provider="OpenAI",
+    )
+    b = ByModelNameAllocator([refreshed])
+    b.load_state_dict(snapshot)
+    # Counter preserved -> next gpt-4 call wraps to a1 (only one entry).
+    cfg = b.allocate(model_name="gpt-4").to_team_model_config()
+    assert cfg.model_client_config.api_key == "NEW"
 
 
 def test_by_model_name_load_state_dict_tolerates_malformed_input():
@@ -404,11 +472,18 @@ def test_by_model_name_load_state_dict_tolerates_malformed_input():
         _make_named_entry("claude", "c1"),
     ]
     a = ByModelNameAllocator(pool)
-    a.load_state_dict({"inner_indexes": "not-a-dict"})
-    assert a.allocate(model_name="gpt-4").model_client_config.api_base == "http://a1"
+    digest = a.state_dict()["pool_digest"]
+    a.load_state_dict({"inner_indexes": "not-a-dict", "pool_digest": digest})
+    assert (
+        a.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base
+        == "http://a1"
+    )
 
-    a.load_state_dict({"inner_indexes": {"gpt-4": "bogus"}})
-    assert a.allocate(model_name="gpt-4").model_client_config.api_base == "http://a1"
+    a.load_state_dict({"inner_indexes": {"gpt-4": "bogus"}, "pool_digest": digest})
+    assert (
+        a.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base
+        == "http://a1"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -417,13 +492,6 @@ def test_by_model_name_load_state_dict_tolerates_malformed_input():
 
 
 class _StubSession:
-    """Minimal stand-in for AgentTeamSession for persistence-only tests.
-
-    Captures every ``update_state`` call into a single dict and replays
-    it on ``get_state``. Mirrors the contract that ``TeamAgent`` relies
-    on without bringing the full session runtime online.
-    """
-
     def __init__(self) -> None:
         self.state: dict = {}
 
@@ -437,12 +505,6 @@ class _StubSession:
 
 
 def _bare_team_agent(allocator):
-    """Build a TeamAgent shell with just the bits persistence reads.
-
-    Skips ``configure`` (and the heavy DeepAgent / DB wiring it
-    triggers) by injecting the spec, runtime context, and allocator
-    directly. Sufficient for exercising the persist + load contract.
-    """
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
     from openjiuwen.agent_teams.schema.team import (
         TeamRole,
@@ -457,22 +519,17 @@ def _bare_team_agent(allocator):
         _make_named_entry("claude", "c1"),
     ]
     team_spec = TeamSpec(
-        team_name="t",
-        display_name="t",
+        team_name="t", display_name="t",
         leader_member_name="leader",
-        model_pool=pool,
-        model_pool_strategy="by_model_name",
+        model_pool=pool, model_pool_strategy="by_model_name",
     )
     spec = TeamAgentSpec(
         agents={"leader": DeepAgentSpec()},
         team_name="t",
-        model_pool=pool,
-        model_pool_strategy="by_model_name",
+        model_pool=pool, model_pool_strategy="by_model_name",
     )
     ctx = TeamRuntimeContext(
-        role=TeamRole.LEADER,
-        member_name="leader",
-        team_spec=team_spec,
+        role=TeamRole.LEADER, member_name="leader", team_spec=team_spec,
     )
     agent = TeamAgent(AgentCard(id="t_leader", name="leader"))
     agent._spec = spec
@@ -496,7 +553,8 @@ def test_persist_leader_config_includes_allocator_state():
 
     assert "model_allocator_state" in session.state
     snapshot = session.state["model_allocator_state"]
-    assert snapshot == {"inner_indexes": {"gpt-4": 1, "claude": 1}}
+    assert snapshot["inner_indexes"] == {"gpt-4": 1, "claude": 1}
+    assert "pool_digest" in snapshot
 
 
 def test_persist_allocator_state_writes_only_allocator_payload():
@@ -509,15 +567,15 @@ def test_persist_allocator_state_writes_only_allocator_payload():
     agent._team_session = session
     agent._persist_allocator_state()
 
-    # Only allocator snapshot, no spec / context overwrite.
     assert set(session.state) == {"model_allocator_state"}
-    assert session.state["model_allocator_state"] == {"index": 2}
+    snapshot = session.state["model_allocator_state"]
+    assert snapshot["index"] == 2
+    assert "pool_digest" in snapshot
 
 
 def test_persist_allocator_state_no_op_without_session_or_allocator():
     agent_no_session = _bare_team_agent(RoundRobinModelAllocator(_make_pool(2)))
     agent_no_session._team_session = None
-    # Should silently no-op, no AttributeError.
     agent_no_session._persist_allocator_state()
 
     agent_no_alloc = _bare_team_agent(RoundRobinModelAllocator(_make_pool(2)))
@@ -544,7 +602,7 @@ def test_persist_leader_config_omits_allocator_state_when_no_pool():
     agent = TeamAgent(AgentCard(id="t_leader", name="leader"))
     agent._spec = spec
     agent._ctx = ctx
-    agent._model_allocator = None  # no pool configured
+    agent._model_allocator = None
 
     session = _StubSession()
     agent._persist_leader_config(session)
@@ -553,35 +611,11 @@ def test_persist_leader_config_omits_allocator_state_when_no_pool():
     assert "spec" in session.state and "context" in session.state
 
 
-def test_round_trip_persist_then_load_continues_rotation():
-    pool = [
-        _make_named_entry("gpt-4", "a1"),
-        _make_named_entry("gpt-4", "a2"),
-        _make_named_entry("claude", "c1"),
-    ]
-    # Phase 1: leader allocates one of each name and persists.
-    allocator = ByModelNameAllocator(pool)
-    allocator.allocate(model_name="gpt-4")  # → a1
-    allocator.allocate(model_name="claude")  # → c1
-    agent = _bare_team_agent(allocator)
-    session = _StubSession()
-    agent._persist_leader_config(session)
-
-    # Phase 2: simulate process restart — fresh allocator, load state,
-    # the next gpt-4 allocation must continue at a2 instead of restarting.
-    fresh = ByModelNameAllocator(pool)
-    fresh.load_state_dict(session.state["model_allocator_state"])
-    cfg = fresh.allocate(model_name="gpt-4")
-    assert cfg.model_request_config.model_name == "gpt-4"
-    assert cfg.model_client_config.api_base == "http://a2"
-
-
 def test_leader_spec_carries_model_name_for_pool_allocation():
     from openjiuwen.agent_teams.schema.blueprint import LeaderSpec
 
     leader = LeaderSpec(model_name="gpt-4")
     assert leader.model_name == "gpt-4"
-    # Round-trips through JSON for spec serialization.
     restored = LeaderSpec.model_validate_json(leader.model_dump_json())
     assert restored.model_name == "gpt-4"
 
@@ -601,151 +635,97 @@ def test_team_member_spec_carries_model_name_for_pool_allocation():
 
 
 # ---------------------------------------------------------------------------
-# DB reference + resolution: pool is the source of truth, DB only references
+# resolve_member_model: positional DB resolution, no allocator mutation
 # ---------------------------------------------------------------------------
 
 
-def test_model_ref_from_team_model_config_extracts_id_and_name():
-    entry = ModelPoolEntry(
-        model_name="gpt-4",
-        api_key="k",
-        api_base_url="http://x",
-        api_provider="OpenAI",
-    )
-    cfg = entry.to_team_model_config()
-    ref = model_ref_from_team_model_config(cfg)
-    assert ref == {"model_id": entry.model_id, "model_name": "gpt-4"}
-
-
-def test_resolve_member_model_returns_pool_entry_by_id():
+def test_resolve_member_model_returns_entry_at_group_index():
     pool = [
         _make_named_entry("gpt-4", "a1"),
         _make_named_entry("gpt-4", "a2"),
         _make_named_entry("claude", "c1"),
     ]
     team_spec = TeamSpec(team_name="t", display_name="t", model_pool=pool)
-    target = pool[1]  # gpt-4/a2
-    cfg = resolve_member_model(
-        team_spec, allocator=None,
-        model_id=target.model_id, model_name=target.model_name,
-    )
+    cfg = resolve_member_model(team_spec, model_name="gpt-4", model_index=1)
     assert cfg is not None
     assert cfg.model_client_config.api_base == "http://a2"
-    assert cfg.model_client_config.api_key == "k-a2"
 
 
 def test_resolve_member_model_picks_up_refreshed_credentials_from_pool():
-    """Pool reflects credential rotation; DB ref points to same id."""
-    original = ModelPoolEntry(
-        model_id="stable-id",
-        model_name="gpt-4",
-        api_key="OLD-KEY",
-        api_base_url="http://old",
-        api_provider="OpenAI",
-    )
-    refreshed = ModelPoolEntry(
-        model_id="stable-id",  # same id, rotated credentials
-        model_name="gpt-4",
-        api_key="NEW-KEY",
-        api_base_url="http://new",
-        api_provider="OpenAI",
-    )
-    # DB stored ref pointing at stable-id when the original was active.
-    ref = model_ref_from_team_model_config(original.to_team_model_config())
-
-    # Session pool now carries the refreshed entry. Resolver pulls
-    # the new credentials, not the frozen-at-spawn ones.
-    team_spec = TeamSpec(team_name="t", display_name="t", model_pool=[refreshed])
-    cfg = resolve_member_model(
-        team_spec, allocator=None,
-        model_id=ref["model_id"], model_name=ref["model_name"],
-    )
+    """Pool reflects credential rotation; DB ref still resolves positionally."""
+    refreshed_pool = [
+        ModelPoolEntry(
+            model_name="gpt-4",
+            api_key="NEW-KEY",
+            api_base_url="http://new",
+            api_provider="OpenAI",
+        ),
+    ]
+    team_spec = TeamSpec(team_name="t", display_name="t", model_pool=refreshed_pool)
+    cfg = resolve_member_model(team_spec, model_name="gpt-4", model_index=0)
     assert cfg.model_client_config.api_key == "NEW-KEY"
     assert cfg.model_client_config.api_base == "http://new"
 
 
-def test_resolve_member_model_falls_back_to_name_when_id_gone():
+def test_resolve_member_model_clamps_out_of_range_index_to_zero():
     pool = [
         _make_named_entry("gpt-4", "a1"),
         _make_named_entry("gpt-4", "a2"),
     ]
-    team_spec = TeamSpec(
-        team_name="t", display_name="t",
-        model_pool=pool, model_pool_strategy="by_model_name",
-    )
-    allocator = ByModelNameAllocator(pool)
-    cfg = resolve_member_model(
-        team_spec, allocator,
-        model_id="vanished-id", model_name="gpt-4",
-    )
-    # Re-allocated via allocator: first gpt-4 endpoint is a1.
+    team_spec = TeamSpec(team_name="t", display_name="t", model_pool=pool)
+    # Group now has 2 entries. Stored index=5 -> clamp to 0 deterministically.
+    cfg = resolve_member_model(team_spec, model_name="gpt-4", model_index=5)
     assert cfg.model_client_config.api_base == "http://a1"
 
 
-def test_resolve_member_model_returns_none_when_pool_lacks_id_and_name():
+def test_resolve_member_model_returns_none_when_name_absent_from_pool():
     pool = [_make_named_entry("gpt-4", "a1")]
     team_spec = TeamSpec(team_name="t", display_name="t", model_pool=pool)
-    allocator = ByModelNameAllocator(pool)
-    # Both id and name absent from pool.
-    cfg = resolve_member_model(
-        team_spec, allocator,
-        model_id="vanished-id", model_name="gemini",
-    )
+    cfg = resolve_member_model(team_spec, model_name="gemini", model_index=0)
     assert cfg is None
 
 
 def test_resolve_member_model_returns_none_without_pool():
-    team_spec = TeamSpec(team_name="t", display_name="t")  # empty pool
-    cfg = resolve_member_model(
-        team_spec, allocator=None,
-        model_id="anything", model_name="gpt-4",
-    )
+    team_spec = TeamSpec(team_name="t", display_name="t")
+    cfg = resolve_member_model(team_spec, model_name="gpt-4", model_index=0)
     assert cfg is None
 
 
-def test_resolve_member_model_id_lookup_does_not_advance_allocator():
-    """Sticky id-lookup must not bump rotation state."""
-    pool = [
-        _make_named_entry("gpt-4", "a1"),
-        _make_named_entry("gpt-4", "a2"),
-    ]
-    team_spec = TeamSpec(
-        team_name="t", display_name="t",
-        model_pool=pool, model_pool_strategy="by_model_name",
-    )
-    allocator = ByModelNameAllocator(pool)
-    pre_state = allocator.state_dict()
-
-    target = pool[1]
-    resolve_member_model(
-        team_spec, allocator,
-        model_id=target.model_id, model_name=target.model_name,
-    )
-    # Counter for gpt-4 must not advance just because we resolved by id.
-    assert allocator.state_dict() == pre_state
-
-
-def test_resolve_member_model_name_fallback_advances_allocator():
-    """Name-fallback path goes through allocate, which DOES advance state."""
-    pool = [
-        _make_named_entry("gpt-4", "a1"),
-        _make_named_entry("gpt-4", "a2"),
-    ]
-    team_spec = TeamSpec(
-        team_name="t", display_name="t",
-        model_pool=pool, model_pool_strategy="by_model_name",
-    )
-    allocator = ByModelNameAllocator(pool)
-    cfg = resolve_member_model(
-        team_spec, allocator,
-        model_id="missing", model_name="gpt-4",
-    )
+def test_resolve_member_model_tolerates_missing_index():
+    pool = [_make_named_entry("gpt-4", "a1")]
+    team_spec = TeamSpec(team_name="t", display_name="t", model_pool=pool)
+    # model_index=None -> clamp to 0.
+    cfg = resolve_member_model(team_spec, model_name="gpt-4", model_index=None)
     assert cfg.model_client_config.api_base == "http://a1"
 
-    # Next reconcile of another vanished member with the same name
-    # should advance to a2 (rotation).
-    cfg2 = resolve_member_model(
-        team_spec, allocator,
-        model_id="also-missing", model_name="gpt-4",
-    )
-    assert cfg2.model_client_config.api_base == "http://a2"
+
+# ---------------------------------------------------------------------------
+# update_model_pool: runtime refresh + counter reset
+# ---------------------------------------------------------------------------
+
+
+def test_update_model_pool_replaces_pool_and_resets_allocator():
+    initial = [
+        _make_named_entry("gpt-4", "a1"),
+        _make_named_entry("gpt-4", "a2"),
+    ]
+    allocator = ByModelNameAllocator(initial)
+    # Advance gpt-4 counter so we can observe the reset.
+    allocator.allocate(model_name="gpt-4")
+    allocator.allocate(model_name="gpt-4")
+
+    agent = _bare_team_agent(allocator)
+    # Stub out persist to avoid session coupling.
+    agent._team_session = None
+
+    replacement = [
+        _make_named_entry("gpt-4", "b1"),  # different endpoint
+        _make_named_entry("claude", "c1"),  # new group
+    ]
+    agent.update_model_pool(replacement)
+
+    # team_spec.model_pool is replaced in place.
+    assert agent._ctx.team_spec.model_pool == replacement
+    # allocator is rebuilt -> counters zeroed against new layout.
+    first_after = agent._model_allocator.allocate(model_name="gpt-4").to_team_model_config()
+    assert first_after.model_client_config.api_base == "http://b1"

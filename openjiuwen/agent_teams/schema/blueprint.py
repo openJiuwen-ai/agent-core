@@ -274,10 +274,13 @@ class TeamAgentSpec(BaseModel):
         from openjiuwen.agent_teams.agent.model_allocator import build_model_allocator
 
         model_allocator = build_model_allocator(self, team_spec)
-        leader_member_model = (
+        leader_allocation = (
             model_allocator.allocate(model_name=self.leader.model_name)
             if team_spec.model_pool
             else None
+        )
+        leader_member_model = (
+            leader_allocation.to_team_model_config() if leader_allocation else None
         )
 
         context = TeamRuntimeContext(
@@ -291,10 +294,12 @@ class TeamAgentSpec(BaseModel):
         )
 
         agent = _TeamAgent(leader_card)
-        # Hand the already-built allocator to the agent before ``configure``
-        # runs so ``_setup_infra`` reuses the same rotation state for
-        # subsequent teammate spawns instead of spawning a fresh instance.
-        agent.attach_model_allocator(model_allocator)
+        # Hand the already-built allocator (and the leader's allocation)
+        # to the agent before ``configure`` runs so ``_setup_infra``
+        # reuses the same rotation state for subsequent teammate spawns
+        # instead of spawning a fresh instance, and so the leader's DB
+        # ref matches what was actually allocated at build time.
+        agent.attach_model_allocator(model_allocator, leader_allocation=leader_allocation)
         agent.configure(self, context)
         return agent
 

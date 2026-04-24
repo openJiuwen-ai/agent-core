@@ -177,6 +177,7 @@ class TeamAgent(BaseAgent):
         self._pending_inputs: list[Any] = []
         self._event_listeners: list = []
         self._model_allocator: Optional["ModelAllocator"] = None
+        self._leader_allocation: Optional["Allocation"] = None
         self._workspace_manager: Optional["TeamWorkspaceManager"] = None
         self._workspace_initialized: bool = False
         self._worktree_manager: Optional["WorktreeManager"] = None
@@ -454,7 +455,40 @@ class TeamAgent(BaseAgent):
             return spec.agents[member_name]
         return spec.agents.get(role.value) or spec.agents.get("teammate") or spec.agents["leader"]
 
-    def attach_model_allocator(self, allocator: "ModelAllocator") -> None:
+    def update_model_pool(self, new_pool: "list[ModelPoolEntry]") -> None:
+        """Replace the team's model pool and reset the allocator.
+
+        Use this when credentials rotate, endpoints migrate, or pool
+        composition changes during a running session. Existing members
+        keep working: their next resolution reads the new pool, picks
+        up refreshed credentials in-place, and re-resolves positionally
+        if their group composition changed. The allocator counters
+        reset so subsequent ``allocate`` calls start fresh against the
+        new layout.
+
+        Persists the new pool + zeroed allocator state to the team
+        session so a subsequent ``recover_from_session`` rehydrates the
+        same view.
+
+        Args:
+            new_pool: Replacement pool entries. Empty list disables the
+                allocator entirely (members fall back to per-agent specs).
+        """
+        if self._ctx is None or self._ctx.team_spec is None:
+            return
+        from openjiuwen.agent_teams.agent.model_allocator import build_model_allocator
+
+        self._ctx.team_spec.model_pool = list(new_pool)
+        self._model_allocator = build_model_allocator(self._spec, self._ctx.team_spec)
+        if self._team_session is not None and self._spec is not None and self.role == TeamRole.LEADER:
+            self._persist_leader_config(self._team_session)
+
+    def attach_model_allocator(
+        self,
+        allocator: "ModelAllocator",
+        *,
+        leader_allocation: Optional["Allocation"] = None,
+    ) -> None:
         """Pre-attach a model allocator built outside ``configure``.
 
         ``TeamAgentSpec.build()`` constructs the allocator before runtime
@@ -462,8 +496,16 @@ class TeamAgent(BaseAgent):
         the pool. Calling this before ``configure`` lets ``_setup_infra``
         reuse the same rotation state instead of constructing a fresh
         instance and double-counting allocations.
+
+        Args:
+            allocator: Already-built allocator instance to reuse.
+            leader_allocation: Pre-allocated leader assignment. The DB
+                ref portion is forwarded to ``TeamBackend`` and persisted
+                on the leader's row so full-restart recovery resolves
+                the leader's model the same way as teammates.
         """
         self._model_allocator = allocator
+        self._leader_allocation = leader_allocation
 
     def _setup_infra(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> None:
         """Phase 1: set spec/context, create messager, workspace manager, register team tools."""
@@ -728,7 +770,7 @@ class TeamAgent(BaseAgent):
             teammate_mode=MemberMode(spec.teammate_mode),
             predefined_members=spec.predefined_members or None,
             model_config_allocator=self._model_allocator.allocate if self._model_allocator else None,
-            leader_model=ctx.member_model if is_leader else None,
+            leader_allocation=self._leader_allocation if is_leader else None,
         )
         self._team_backend = agent_team
         self._task_manager = agent_team.task_manager
@@ -1710,13 +1752,12 @@ class TeamAgent(BaseAgent):
     def _resolve_member_model(self, ref_json: Optional[str]) -> Optional["TeamModelConfig"]:
         """Resolve a member's TeamModelConfig from a stored DB reference.
 
-        The DB only carries a lightweight ``{"model_id", "model_name"}``
+        The DB only carries a ``{"model_name", "model_index"}``
         reference; the live config (credentials, endpoint, request
-        knobs) is rebuilt from ``team_spec.model_pool`` so any pool
-        update propagates on the next teammate spawn / restart. If the
-        original ``model_id`` is no longer in the pool, the resolver
-        re-allocates by ``model_name`` so the member still gets a
-        valid endpoint of the same logical model.
+        knobs) is rebuilt from ``team_spec.model_pool`` so pool updates
+        propagate on the next teammate spawn / restart. Resolution is
+        purely positional — does not advance any allocator counter, so
+        restarts never bias rotation.
         """
         if not ref_json:
             return None
@@ -1741,9 +1782,8 @@ class TeamAgent(BaseAgent):
 
         return resolve_member_model(
             team_spec,
-            self._model_allocator,
-            model_id=ref.get("model_id"),
             model_name=ref.get("model_name"),
+            model_index=ref.get("model_index"),
         )
 
     async def spawn_teammate(

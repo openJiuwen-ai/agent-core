@@ -18,6 +18,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.agent.model_allocator import Allocation
     from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
 
 from openjiuwen.agent_teams.constants import HUMAN_AGENT_MEMBER_NAME
@@ -76,9 +77,9 @@ class TeamBackend:
         teammate_mode: MemberMode = MemberMode.BUILD_MODE,
         predefined_members: list[TeamMemberSpec] | None = None,
         model_config_allocator: Optional[
-            Callable[[Optional[str]], Optional["TeamModelConfig"]]
+            Callable[[Optional[str]], Optional["Allocation"]]
         ] = None,
-        leader_model: Optional["TeamModelConfig"] = None,
+        leader_allocation: Optional["Allocation"] = None,
     ):
         """Initialize agent team manager.
 
@@ -92,15 +93,16 @@ class TeamBackend:
             predefined_members: Pre-configured teammates to register
                 during ``build_team``.
             model_config_allocator: Callback that returns the next
-                ``TeamModelConfig`` for teammate allocation. Receives an
+                ``Allocation`` for teammate allocation. Receives an
                 optional ``model_name`` hint forwarded from the spawn
                 site (predefined member spec or ``spawn_member`` tool
                 argument); ``RoundRobinModelAllocator`` ignores the
                 hint, ``ByModelNameAllocator`` requires it.
-            leader_model: Pre-allocated TeamModelConfig for the leader
-                member. Persisted on the leader's DB row in
-                ``build_team`` so the model assignment is auditable and
-                survives full-restart recovery.
+            leader_allocation: Pre-allocated ``Allocation`` for the
+                leader member. Persisted on the leader's DB row in
+                ``build_team`` as ``{model_name, model_index}`` so the
+                assignment is auditable and survives full-restart
+                recovery via positional lookup against the live pool.
         """
         self.team_name = team_name
         self.member_name = member_name
@@ -110,7 +112,7 @@ class TeamBackend:
         self.teammate_mode = teammate_mode
         self.predefined_members = predefined_members or []
         self._allocate_model_config = model_config_allocator
-        self.leader_model = leader_model
+        self.leader_allocation = leader_allocation
 
         self.task_manager = TeamTaskManager(self.team_name, member_name, self.db, messager)
         # Roster of human-collaborator members. Shared by reference with
@@ -185,7 +187,7 @@ class TeamBackend:
         status: MemberStatus = MemberStatus.UNSTARTED,
         execution_status: ExecutionStatus = ExecutionStatus.IDLE,
         mode: MemberMode = MemberMode.BUILD_MODE,
-        member_model: Optional["TeamModelConfig"] = None,
+        allocation: Optional["Allocation"] = None,
     ) -> MemberOpResult:
         """Create a team member record in the database.
 
@@ -201,7 +203,11 @@ class TeamBackend:
             status: Initial member status.
             execution_status: Initial execution status.
             mode: Member mode (BUILD_MODE or PLAN_MODE).
-            member_model: TeamModelConfig allocated for this member.
+            allocation: Pool allocation for this member; persisted as a
+                ``{model_name, model_index}`` reference so credentials
+                can refresh in-place via the live session pool. ``None``
+                when the team is not configured with a pool, in which
+                case the member uses its per-agent default model.
 
         Returns:
             ``MemberOpResult`` describing the outcome. ``__bool__`` falls
@@ -212,15 +218,11 @@ class TeamBackend:
         if existing is not None:
             return MemberOpResult.fail(f"Member {member_name} already exists in team {self.team_name}")
 
-        model_ref_json: Optional[str] = None
-        if member_model is not None:
-            import json as _json
+        import json as _json
 
-            from openjiuwen.agent_teams.agent.model_allocator import (
-                model_ref_from_team_model_config,
-            )
-
-            model_ref_json = _json.dumps(model_ref_from_team_model_config(member_model))
+        model_ref_json: Optional[str] = (
+            _json.dumps(allocation.to_db_ref()) if allocation is not None else None
+        )
 
         success = await self.db.create_member(
             member_name=member_name,
@@ -838,7 +840,7 @@ class TeamBackend:
             status=MemberStatus.BUSY,
             execution_status=ExecutionStatus.RUNNING,
             mode=MemberMode.BUILD_MODE,
-            member_model=self.leader_model,
+            allocation=self.leader_allocation,
         )
 
         # Register predefined teammates (UNSTARTED, launched later via broadcast).
@@ -853,7 +855,7 @@ class TeamBackend:
                 name=member_spec.display_name,
                 description=member_spec.persona,
             )
-            allocated = (
+            allocation = (
                 self._allocate_model_config(member_spec.model_name)
                 if self._allocate_model_config
                 else None
@@ -867,7 +869,7 @@ class TeamBackend:
                 status=MemberStatus.UNSTARTED,
                 execution_status=ExecutionStatus.IDLE,
                 mode=self.teammate_mode,
-                member_model=allocated,
+                allocation=allocation,
             )
 
         # HITT: register every declared human member; when enable_hitt is

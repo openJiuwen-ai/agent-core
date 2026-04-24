@@ -95,6 +95,19 @@ class ModelPoolEntry(BaseModel):
     entries from the pool and converts them into ``TeamModelConfig`` at
     allocation time so each team member can talk to a different endpoint
     and avoid single-endpoint rate-limit contention.
+
+    Two identifiers play distinct roles:
+
+    * ``model_id`` (auto-uuid): runtime client identity. Wired through to
+      ``ModelClientConfig.client_id`` so the foundation layer's resource
+      manager can dedupe / cache the underlying HTTP client across
+      members that share the same endpoint. Never persisted to the DB
+      and never crosses pool versions — regenerated each time the pool
+      is reloaded from spec.
+    * ``(model_name, group_index)``: semantic persistence identity.
+      Stored in the DB as the member's pool reference; resolved
+      positionally against the live session pool so credential
+      refreshes propagate without re-spawning members.
     """
 
     model_config = ConfigDict(protected_namespaces=())
@@ -105,6 +118,12 @@ class ModelPoolEntry(BaseModel):
     api_provider: str
     description: Optional[str] = None
     model_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    """Process-local client identity for foundation resource manager.
+
+    Auto-generated as a uuid; not persisted to DB, not stable across
+    pool reloads. Use ``metadata`` for any cross-version correlation
+    keys you need to track yourself.
+    """
     metadata: dict = Field(default_factory=dict)
     """Optional extension payload merged into the materialized TeamModelConfig.
 
@@ -117,10 +136,10 @@ class ModelPoolEntry(BaseModel):
       ``temperature``, ``top_p``, ``max_tokens``, ``stop``).
 
     Explicit fields on the pool entry (``api_key``, ``api_base_url``,
-    ``api_provider``, ``model_name``, ``model_id``) always win over the
-    same key under ``client`` / ``request`` — those keys belong on the
-    pool entry itself rather than buried in metadata. Any other top-level
-    keys are free-form and reserved for allocator policies (e.g. weights,
+    ``api_provider``, ``model_name``) always win over the same key under
+    ``client`` / ``request`` — those keys belong on the pool entry
+    itself rather than buried in metadata. Any other top-level keys are
+    free-form and reserved for allocator policies (e.g. weights,
     affinity hints) and are not consumed during materialization.
     """
 

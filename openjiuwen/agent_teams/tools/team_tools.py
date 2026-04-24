@@ -26,7 +26,7 @@ from typing import (
 from pydantic import PrivateAttr
 
 if TYPE_CHECKING:
-    from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
+    from openjiuwen.agent_teams.agent.model_allocator import Allocation
 
 from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.tools.locales import Translator
@@ -254,7 +254,7 @@ class SpawnMemberTool(TeamTool):
         t: Translator,
         *,
         model_config_allocator: Optional[
-            Callable[[Optional[str]], Optional["TeamModelConfig"]]
+            Callable[[Optional[str]], Optional["Allocation"]]
         ] = None,
     ):
         super().__init__(
@@ -298,7 +298,7 @@ class SpawnMemberTool(TeamTool):
         mode = MemberMode(mode_str)
 
         model_name = inputs.get("model_name")
-        member_model = (
+        allocation = (
             self._allocate_model_config(model_name)
             if self._allocate_model_config
             else None
@@ -313,7 +313,7 @@ class SpawnMemberTool(TeamTool):
             desc=desc,
             prompt=inputs.get("prompt"),
             mode=mode,
-            member_model=member_model,
+            allocation=allocation,
         )
         return ToolOutput(
             success=result.ok,
@@ -1121,7 +1121,7 @@ def create_team_tools(
     teammate_mode: str = "build_mode",
     on_teammate_created: Optional[Callable[[str], Awaitable[None]]] = None,
     model_config_allocator: Optional[
-        Callable[[Optional[str]], Optional["TeamModelConfig"]]
+        Callable[[Optional[str]], Optional["Allocation"]]
     ] = None,
     exclude_tools: Optional[Set[str]] = None,
     lang: str = "cn",
@@ -1138,7 +1138,7 @@ def create_team_tools(
             for leader sign-off.
         on_teammate_created: Callback invoked when a teammate is created.
         model_config_allocator: Callback that returns the next
-            ``TeamModelConfig`` for teammate allocation. Receives an
+            ``Allocation`` for teammate allocation. Receives an
             optional ``model_name`` hint forwarded from the spawn site;
             ``RoundRobinModelAllocator`` ignores the hint while
             ``ByModelNameAllocator`` requires it.
