@@ -750,9 +750,13 @@ class WriteFileTool(Tool):
             except OSError:
                 _FILE_READ_REGISTRY.pop(path, None)
 
-        _base_dir = self._workspace_path or str(pathlib.Path(get_cwd()).expanduser().resolve())
-        _history_path = os.path.join(_base_dir, ".agent_history", f"file_ops_{self._agent_id}.json")
-        await _append_op_history(_history_path, path, "write", old_content, content)
+        _session = kwargs.get("session")
+        if _session is not None:
+            _base_dir = self._workspace_path or str(pathlib.Path(get_cwd()).expanduser().resolve())
+            _history_path = os.path.join(
+                _base_dir, ".agent_history", f"file_ops_{self._agent_id}_{_session.get_session_id()}.json"
+            )
+            await _append_op_history(_history_path, path, "write", old_content, content)
 
         return ToolOutput(
             success=True,
@@ -1158,9 +1162,13 @@ class EditFileTool(Tool):
         except OSError:
             _FILE_READ_REGISTRY.pop(file_path, None)
 
-        _base_dir = self._workspace_path or str(pathlib.Path(get_cwd()).expanduser().resolve())
-        _history_path = os.path.join(_base_dir, ".agent_history", f"file_ops_{self._agent_id}.json")
-        await _append_op_history(_history_path, file_path, "edit", content, new_content)
+        _session = kwargs.get("session")
+        if _session is not None:
+            _base_dir = self._workspace_path or str(pathlib.Path(get_cwd()).expanduser().resolve())
+            _history_path = os.path.join(
+                _base_dir, ".agent_history", f"file_ops_{self._agent_id}_{_session.get_session_id()}.json"
+            )
+            await _append_op_history(_history_path, file_path, "edit", content, new_content)
 
         return ToolOutput(
             success=True,
@@ -1409,6 +1417,84 @@ class GrepTool(Tool):
         parts.append(self._shell_quote(path))
         return " ".join(parts)
 
+    def _build_select_string_command(
+            self,
+            *,
+            pattern: str,
+            path: str,
+            glob: Optional[str],
+            output_mode: str,
+            context_before: Optional[int],
+            context_after: Optional[int],
+            context_c: Optional[int],
+            context: Optional[int],
+            case_insensitive: bool,
+    ) -> str:
+        """Build a PowerShell Select-String command as fallback when rg is unavailable on Windows."""
+        sq = self._shell_quote
+
+        # Expand {ts,tsx} brace syntax — PS -like doesn't support it
+        glob_patterns = self._split_glob_patterns(glob)
+        expanded_globs: List[str] = []
+        for p in glob_patterns:
+            m = re.match(r'^(.*)\{([^}]+)\}(.*)$', p)
+            if m:
+                expanded_globs.extend(f"{m.group(1)}{alt}{m.group(3)}" for alt in m.group(2).split(","))
+            else:
+                expanded_globs.append(p)
+
+        # Context lines: -C / context takes priority over -B / -A
+        effective_c = context if context is not None else context_c
+        ctx_b = effective_c if effective_c is not None else (context_before or 0)
+        ctx_a = effective_c if effective_c is not None else (context_after or 0)
+
+        # VCS exclusion regex for -notmatch: (\\|/)(\.git|\.svn|...)(\\|/|$)
+        vcs_alts = "|".join(d.replace(".", r"\.") for d in self.VCS_DIRECTORIES_TO_EXCLUDE)
+        vcs_pat = sq(r"(\\|/)(" + vcs_alts + r")(\\|/|$)")
+
+        # --- Pipeline stages ---
+        pipeline: List[str] = []
+
+        # Stage 1: file enumeration + VCS pruning
+        is_file = os.path.isfile(path)
+        if is_file:
+            pipeline.append(f"Get-Item -LiteralPath {sq(path)}")
+        else:
+            pipeline.append(f"Get-ChildItem -LiteralPath {sq(path)} -Recurse -File")
+            pipeline.append(f"Where-Object {{ $_.FullName -notmatch {vcs_pat} }}")
+
+        # Stage 2: glob filter (skip for single-file input)
+        if expanded_globs and not is_file:
+            conds = " -or ".join(f"$_.Name -like {sq(p)}" for p in expanded_globs)
+            pipeline.append(f"Where-Object {{ {conds} }}")
+
+        # Stage 3: Select-String
+        # Default is case-insensitive; -CaseSensitive enables exact matching
+        cs_flag = " -CaseSensitive" if not case_insensitive else ""
+        ctx_flag = f" -Context {ctx_b},{ctx_a}" if output_mode == "content" and (ctx_b or ctx_a) else ""
+        pipeline.append(f"Select-String -Pattern {sq(pattern)}{cs_flag}{ctx_flag}")
+
+        # Stage 4: output formatting to match rg/grep line format
+        if output_mode == "files_with_matches":
+            pipeline.append("Select-Object -ExpandProperty Path -Unique")
+        elif output_mode == "count":
+            pipeline.append("Group-Object Path | ForEach-Object { \"$($_.Name):$($_.Count)\" }")
+        elif ctx_b or ctx_a:
+            # Manually expand PreContext / PostContext arrays into filepath:linenum:content lines
+            pipeline.append(
+                "ForEach-Object {"
+                " $m=$_; $p=$m.Context.PreContext.Length;"
+                " for($i=0;$i-lt$p;$i++){ \"$($m.Path):$([int]$m.LineNumber-$p+$i):$($m.Context.PreContext[$i])\" };"
+                " \"$($m.Path):$($m.LineNumber):$($m.Line)\";"
+                " for($i=0;$i-lt$m.Context.PostContext.Length;$i++)"
+                "{ \"$($m.Path):$([int]$m.LineNumber+1+$i):$($m.Context.PostContext[$i])\" }"
+                " }"
+            )
+        else:
+            pipeline.append("ForEach-Object { \"$($_.Path):$($_.LineNumber):$($_.Line)\" }")
+
+        return "$ErrorActionPreference='SilentlyContinue'; " + " | ".join(pipeline)
+
     def _build_grep_command(
             self,
             *,
@@ -1606,6 +1692,22 @@ class GrepTool(Tool):
                 case_insensitive=ignore_case,
                 file_type=file_type,
                 multiline=multiline,
+            )
+        elif os.name == "nt":
+            if file_type:
+                return ToolOutput(success=False, error="type filter requires ripgrep (rg) to be installed")
+            if multiline:
+                return ToolOutput(success=False, error="multiline search requires ripgrep (rg) to be installed")
+            cmd = self._build_select_string_command(
+                pattern=str(pattern),
+                path=path,
+                glob=glob,
+                output_mode=output_mode,
+                context_before=context_before,
+                context_after=context_after,
+                context_c=context_c,
+                context=context,
+                case_insensitive=ignore_case,
             )
         else:
             if file_type:
