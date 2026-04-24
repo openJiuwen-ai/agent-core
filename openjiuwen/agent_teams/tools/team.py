@@ -75,7 +75,8 @@ class TeamBackend:
         messager: Messager,
         teammate_mode: MemberMode = MemberMode.BUILD_MODE,
         predefined_members: list[TeamMemberSpec] | None = None,
-        model_config_allocator: Optional[Callable[[], Optional[str]]] = None,
+        model_config_allocator: Optional[Callable[[], Optional["TeamModelConfig"]]] = None,
+        leader_model: Optional["TeamModelConfig"] = None,
     ):
         """Initialize agent team manager.
 
@@ -88,8 +89,12 @@ class TeamBackend:
             teammate_mode: Default execution mode for spawned teammates.
             predefined_members: Pre-configured teammates to register
                 during ``build_team``.
-            model_config_allocator: Callback that returns the next model
-                config JSON string for teammate allocation.
+            model_config_allocator: Callback that returns the next
+                ``TeamModelConfig`` for teammate allocation.
+            leader_model: Pre-allocated TeamModelConfig for the leader
+                member. Persisted on the leader's DB row in
+                ``build_team`` so the model assignment is auditable and
+                survives full-restart recovery.
         """
         self.team_name = team_name
         self.member_name = member_name
@@ -99,6 +104,7 @@ class TeamBackend:
         self.teammate_mode = teammate_mode
         self.predefined_members = predefined_members or []
         self._allocate_model_config = model_config_allocator
+        self.leader_model = leader_model
 
         self.task_manager = TeamTaskManager(self.team_name, member_name, self.db, messager)
         # Roster of human-collaborator members. Shared by reference with
@@ -816,6 +822,7 @@ class TeamBackend:
             status=MemberStatus.BUSY,
             execution_status=ExecutionStatus.RUNNING,
             mode=MemberMode.BUILD_MODE,
+            member_model=self.leader_model,
         )
 
         # Register predefined teammates (UNSTARTED, launched later via broadcast).

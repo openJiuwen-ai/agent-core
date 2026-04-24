@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -75,14 +76,63 @@ class TeamMemberSpec(BaseModel):
     prompt_hint: Optional[str] = None
 
 
+class ModelPoolEntry(BaseModel):
+    """Single LLM endpoint in a team's allocation pool.
+
+    Pool entries describe a usable model endpoint together with the
+    credentials and provider needed to reach it. ``ModelAllocator`` draws
+    entries from the pool and converts them into ``TeamModelConfig`` at
+    allocation time so each team member can talk to a different endpoint
+    and avoid single-endpoint rate-limit contention.
+    """
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    model_name: str
+    api_key: str
+    api_base_url: str
+    api_provider: str
+    description: Optional[str] = None
+    model_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    metadata: dict = Field(default_factory=dict)
+
+    def to_team_model_config(self) -> TeamModelConfig:
+        """Materialize a TeamModelConfig from this pool entry."""
+        from openjiuwen.core.foundation.llm import (
+            ModelClientConfig,
+            ModelRequestConfig,
+        )
+
+        return TeamModelConfig(
+            model_client_config=ModelClientConfig(
+                client_id=self.model_id,
+                client_provider=self.api_provider,
+                api_key=self.api_key,
+                api_base=self.api_base_url,
+            ),
+            model_request_config=ModelRequestConfig(model=self.model_name),
+        )
+
+
 class TeamSpec(BaseModel):
     """Definition of a team and its goal."""
+
+    model_config = ConfigDict(protected_namespaces=())
 
     team_name: str
     display_name: str
     leader_member_name: Optional[str] = None
     language: Optional[str] = None
     metadata: dict = Field(default_factory=dict)
+    model_pool: list[ModelPoolEntry] = Field(default_factory=list)
+    """Optional pool of LLM endpoints shared by every team member.
+
+    When non-empty, ``ModelAllocator`` distributes pool entries across
+    leader and teammates (round-robin by default) so concurrent calls
+    spread across endpoints instead of saturating a single one. When
+    empty (default), members fall back to their per-agent model config
+    declared in ``TeamAgentSpec.agents`` and behavior is unchanged.
+    """
 
 
 class TeamRuntimeContext(BaseModel):
@@ -105,6 +155,7 @@ class TeamRuntimeContext(BaseModel):
 
 
 __all__ = [
+    "ModelPoolEntry",
     "TeamLifecycle",
     "TeamMemberSpec",
     "TeamRole",

@@ -29,6 +29,7 @@ from openjiuwen.agent_teams.constants import (
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import (
+    ModelPoolEntry,
     TeamLifecycle,
     TeamMemberSpec,
     TeamRole,
@@ -137,6 +138,8 @@ class TeamAgentSpec(BaseModel):
     The ``agents`` dict keys correspond to TeamRole values ("leader", "teammate").
     """
 
+    model_config = {"protected_namespaces": ()}
+
     agents: dict[str, DeepAgentSpec]
     team_name: str = "agent_team"
     lifecycle: str = TeamLifecycle.TEMPORARY
@@ -144,6 +147,17 @@ class TeamAgentSpec(BaseModel):
     spawn_mode: str = "process"
     leader: LeaderSpec = LeaderSpec()
     predefined_members: list[TeamMemberSpec] = []
+    model_pool: list[ModelPoolEntry] = []
+    """Optional pool of LLM endpoints shared by every team member.
+
+    When non-empty, ``ModelAllocator`` distributes pool entries across
+    leader and teammates (round-robin by default) so concurrent calls
+    spread across endpoints instead of saturating a single one. When
+    empty (default), members fall back to the per-agent ``model`` declared
+    in ``agents`` and behavior is unchanged. Propagated to ``TeamSpec``
+    at ``build()`` time so allocators reachable from runtime context
+    see the same pool.
+    """
     team_mode: Literal["default", "predefined", "hybrid"] | None = None
     """Team operating mode.
 
@@ -214,6 +228,7 @@ class TeamAgentSpec(BaseModel):
             display_name=self.team_name,
             leader_member_name=self.leader.member_name,
             language=resolved_language,
+            model_pool=list(self.model_pool),
         )
 
         messager_config = self.transport.build() if self.transport else None
@@ -230,6 +245,18 @@ class TeamAgentSpec(BaseModel):
             description=f"Leader of team {self.team_name}",
         )
 
+        # Build the allocator now (rather than inside ``_setup_infra``) so
+        # the leader can draw from the same rotation as teammates: with a
+        # configured pool we pre-allocate the leader's model here and inject
+        # it into the runtime context. Without a pool the legacy
+        # PerAgentModelAllocator returns ``None`` for the leader and the
+        # downstream ``ctx.member_model or agent_spec.model`` fallback in
+        # ``TeamAgent._setup_agent`` keeps behavior unchanged.
+        from openjiuwen.agent_teams.agent.model_allocator import build_model_allocator
+
+        model_allocator = build_model_allocator(self, team_spec)
+        leader_member_model = model_allocator.allocate() if team_spec.model_pool else None
+
         context = TeamRuntimeContext(
             role=TeamRole.LEADER,
             member_name=self.leader.member_name,
@@ -237,9 +264,14 @@ class TeamAgentSpec(BaseModel):
             team_spec=team_spec,
             messager_config=messager_config,
             db_config=db_config,
+            member_model=leader_member_model,
         )
 
         agent = _TeamAgent(leader_card)
+        # Hand the already-built allocator to the agent before ``configure``
+        # runs so ``_setup_infra`` reuses the same rotation state for
+        # subsequent teammate spawns instead of spawning a fresh instance.
+        agent.attach_model_allocator(model_allocator)
         agent.configure(self, context)
         return agent
 

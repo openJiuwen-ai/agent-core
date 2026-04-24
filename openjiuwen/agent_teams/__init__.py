@@ -34,6 +34,7 @@ from openjiuwen.agent_teams.schema.blueprint import (
 )
 from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.agent_teams.schema.team import (
+    ModelPoolEntry,
     TeamLifecycle,
     TeamMemberSpec,
     TeamRole,
@@ -51,6 +52,7 @@ __all__ = [
     "HumanAgentNotEnabledError",
     "UnknownHumanAgentError",
     "LeaderSpec",
+    "ModelPoolEntry",
     "RESERVED_MEMBER_NAMES",
     "StorageSpec",
     "TeamAgentSpec",
