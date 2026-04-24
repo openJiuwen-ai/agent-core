@@ -714,7 +714,7 @@ class DeepAgent(BaseAgent):
             )
         else:
             workspace = Workspace(
-                root_path=self._deep_config.workspace.root_path + f"/{subsession_id}",
+                root_path=Path(self._deep_config.workspace.root_path) / subsession_id,
                 language=self._deep_config.language
             )
 

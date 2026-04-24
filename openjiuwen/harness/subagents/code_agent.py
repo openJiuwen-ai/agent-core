@@ -19,8 +19,7 @@ from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.subagents.plan_agent import build_plan_agent_config
 from openjiuwen.harness.rails.coding_memory_rail import CodingMemoryRail
 from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
-from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRail
-from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
+from openjiuwen.harness.rails import AskUserRail, ConfirmInterruptRail, AgentModeRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
 from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
@@ -242,6 +241,7 @@ def create_code_agent(
             (FileSystemRail, FileSystemRail),
             (AgentModeRail, AgentModeRail),
             (AskUserRail, AskUserRail),
+            (ConfirmInterruptRail, lambda: ConfirmInterruptRail(tool_names=["switch_mode"])),
         ],
     )
 

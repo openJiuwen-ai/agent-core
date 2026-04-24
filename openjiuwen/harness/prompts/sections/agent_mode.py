@@ -77,7 +77,7 @@ Plan 模式已激活。用户希望你先制定计划，不要求执行——你
 - 包含验证部分，描述如何端到端测试变更
 
 ### Phase 5: 结束规划阶段
-在你的 turn 最后，当你对最终 plan 文件满意时，必须调用 exit_plan_mode 工具结束规划阶段。
+在你的 turn 最后，当你对最终 plan 文件满意时，必须调用 exit_plan_mode 工具结束规划阶段，且必须要输出 plan 文件的内容。
 exit_plan_mode 会读取 plan 全文并返回结果给用户，结果中包含完整计划内容。
 
 ## 结束 Turn 的规则（关键）
@@ -168,8 +168,8 @@ Goal: Write the final plan to the plan file (the only file you may edit).
 
 ### Phase 5: End Planning Phase
 At the end of your turn, when you are satisfied with the final plan file, you must call \
-the exit_plan_mode tool to end the planning phase. exit_plan_mode reads the full plan \
-and give user the final result; the result contains the complete plan content.
+the exit_plan_mode tool to end the planning phase. And you must output the content of final plan file. \
+exit_plan_mode reads the full plan and give user the final result; the result contains the complete plan content.
 
 ## Turn Ending Rules (Critical)
 
