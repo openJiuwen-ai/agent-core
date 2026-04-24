@@ -22,6 +22,7 @@ from openjiuwen.agent_teams.schema.blueprint import (
 )
 from openjiuwen.agent_teams.schema.team import (
     TeamRuntimeContext,
+    ModelPoolEntry,
     TeamLifecycle,
     TeamMemberSpec,
     TeamRole,
@@ -32,6 +33,7 @@ from openjiuwen.agent_teams.schema.events import TeamEvent
 __all__ = [
     "DeepAgentSpec",
     "LeaderSpec",
+    "ModelPoolEntry",
     "StorageSpec",
     "TeamAgentSpec",
     "TransportSpec",

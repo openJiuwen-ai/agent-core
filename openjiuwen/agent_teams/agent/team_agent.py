@@ -449,6 +449,17 @@ class TeamAgent(BaseAgent):
             return spec.agents[member_name]
         return spec.agents.get(role.value) or spec.agents.get("teammate") or spec.agents["leader"]
 
+    def attach_model_allocator(self, allocator: "ModelAllocator") -> None:
+        """Pre-attach a model allocator built outside ``configure``.
+
+        ``TeamAgentSpec.build()`` constructs the allocator before runtime
+        context assembly so it can pre-allocate the leader's model from
+        the pool. Calling this before ``configure`` lets ``_setup_infra``
+        reuse the same rotation state instead of constructing a fresh
+        instance and double-counting allocations.
+        """
+        self._model_allocator = allocator
+
     def _setup_infra(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> None:
         """Phase 1: set spec/context, create messager, workspace manager, register team tools."""
         self._spec = spec
@@ -465,11 +476,19 @@ class TeamAgent(BaseAgent):
         if spec.workspace and spec.workspace.enabled:
             self._workspace_manager = self._create_workspace_manager(spec, ctx)
 
-        self._tool_cards = self._register_team_tools(spec, ctx, self._messager)
+        # Build the allocator only when build() didn't pre-attach one.
+        # The pre-attached path keeps a single rotation state across
+        # leader pre-allocation (in build()) and teammate spawns; the
+        # fallback covers direct ``configure()`` callers (recovery,
+        # tests) that bypass build().
+        if ctx.role == TeamRole.LEADER and self._model_allocator is None:
+            from openjiuwen.agent_teams.agent.model_allocator import (
+                build_model_allocator,
+            )
 
-        if ctx.role == TeamRole.LEADER:
-            from openjiuwen.agent_teams.agent.model_allocator import ModelAllocator
-            self._model_allocator = ModelAllocator(spec)
+            self._model_allocator = build_model_allocator(spec, ctx.team_spec)
+
+        self._tool_cards = self._register_team_tools(spec, ctx, self._messager)
 
     def _create_workspace_manager(
         self, spec: TeamAgentSpec, ctx: TeamRuntimeContext,
@@ -697,6 +716,7 @@ class TeamAgent(BaseAgent):
             teammate_mode=MemberMode(spec.teammate_mode),
             predefined_members=spec.predefined_members or None,
             model_config_allocator=self._model_allocator.allocate if self._model_allocator else None,
+            leader_model=ctx.member_model if is_leader else None,
         )
         self._team_backend = agent_team
         self._task_manager = agent_team.task_manager
@@ -1258,10 +1278,10 @@ class TeamAgent(BaseAgent):
                 error_seen = False
                 error_code: Optional[int] = None
                 error_text: str = ""
-            self._streaming_active = True
-            try:
-                async for chunk in Runner.run_agent_streaming(
-                    self._deep_agent, inputs, session=self._session_id
+                self._streaming_active = True
+                try:
+                    async for chunk in Runner.run_agent_streaming(
+                        self._deep_agent, inputs, session=self._session_id
                     ):
                         # Once a TASK_FAILED frame is seen, suppress every
                         # trailing frame (blank answer + END_FRAME) so the
