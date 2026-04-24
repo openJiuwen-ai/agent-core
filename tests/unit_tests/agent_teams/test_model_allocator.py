@@ -72,6 +72,71 @@ def test_model_pool_entry_to_team_model_config_carries_credentials():
     assert cfg.model_request_config.model_name == "m1"
 
 
+def test_model_pool_entry_metadata_fills_client_and_request_configs():
+    entry = ModelPoolEntry(
+        model_name="m1",
+        api_key="secret",
+        api_base_url="http://endpoint",
+        api_provider="OpenAI",
+        metadata={
+            "client": {
+                "timeout": 30.0,
+                "verify_ssl": False,
+                "max_retries": 5,
+            },
+            "request": {
+                "temperature": 0.2,
+                "top_p": 0.9,
+                "max_tokens": 1024,
+            },
+        },
+    )
+    cfg = entry.to_team_model_config()
+
+    client = cfg.model_client_config
+    assert client.timeout == 30.0
+    assert client.verify_ssl is False
+    assert client.max_retries == 5
+
+    request = cfg.model_request_config
+    assert request.temperature == 0.2
+    assert request.top_p == 0.9
+    assert request.max_tokens == 1024
+
+
+def test_model_pool_entry_explicit_fields_override_metadata():
+    entry = ModelPoolEntry(
+        model_name="m1",
+        api_key="real-key",
+        api_base_url="http://real",
+        api_provider="OpenAI",
+        metadata={
+            "client": {
+                "api_key": "shadow-key",
+                "api_base": "http://shadow",
+            },
+            "request": {"model": "shadow-model"},
+        },
+    )
+    cfg = entry.to_team_model_config()
+    assert cfg.model_client_config.api_key == "real-key"
+    assert cfg.model_client_config.api_base == "http://real"
+    assert cfg.model_request_config.model_name == "m1"
+
+
+def test_model_pool_entry_metadata_extra_keys_are_ignored_by_materialization():
+    entry = ModelPoolEntry(
+        model_name="m1",
+        api_key="k",
+        api_base_url="http://x",
+        api_provider="OpenAI",
+        metadata={"weight": 5, "tags": ["fast"]},
+    )
+    cfg = entry.to_team_model_config()
+    assert cfg.model_client_config.api_key == "k"
+    assert cfg.model_request_config.model_name == "m1"
+
+
 def test_build_model_allocator_returns_round_robin_when_pool_set():
     pool = _make_pool(2)
     spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()})

@@ -95,22 +95,55 @@ class ModelPoolEntry(BaseModel):
     description: Optional[str] = None
     model_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     metadata: dict = Field(default_factory=dict)
+    """Optional extension payload merged into the materialized TeamModelConfig.
+
+    Two reserved sub-keys feed ``to_team_model_config``:
+
+    * ``client``: dict merged into ``ModelClientConfig`` (e.g. ``timeout``,
+      ``verify_ssl``, ``ssl_cert``, ``max_retries``, ``custom_headers``,
+      or any provider-specific extras allowed by the client schema).
+    * ``request``: dict merged into ``ModelRequestConfig`` (e.g.
+      ``temperature``, ``top_p``, ``max_tokens``, ``stop``).
+
+    Explicit fields on the pool entry (``api_key``, ``api_base_url``,
+    ``api_provider``, ``model_name``, ``model_id``) always win over the
+    same key under ``client`` / ``request`` — those keys belong on the
+    pool entry itself rather than buried in metadata. Any other top-level
+    keys are free-form and reserved for allocator policies (e.g. weights,
+    affinity hints) and are not consumed during materialization.
+    """
 
     def to_team_model_config(self) -> TeamModelConfig:
-        """Materialize a TeamModelConfig from this pool entry."""
+        """Materialize a TeamModelConfig from this pool entry.
+
+        Reserved ``metadata.client`` and ``metadata.request`` sub-dicts
+        are merged into the corresponding sub-config. Pool-entry fields
+        always override same-named keys in metadata so the explicit
+        column wins over the optional bag.
+        """
         from openjiuwen.core.foundation.llm import (
             ModelClientConfig,
             ModelRequestConfig,
         )
 
+        client_extra = dict(self.metadata.get("client") or {})
+        request_extra = dict(self.metadata.get("request") or {})
+
+        client_kwargs = {
+            **client_extra,
+            "client_id": self.model_id,
+            "client_provider": self.api_provider,
+            "api_key": self.api_key,
+            "api_base": self.api_base_url,
+        }
+        request_kwargs = {
+            **request_extra,
+            "model": self.model_name,
+        }
+
         return TeamModelConfig(
-            model_client_config=ModelClientConfig(
-                client_id=self.model_id,
-                client_provider=self.api_provider,
-                api_key=self.api_key,
-                api_base=self.api_base_url,
-            ),
-            model_request_config=ModelRequestConfig(model=self.model_name),
+            model_client_config=ModelClientConfig(**client_kwargs),
+            model_request_config=ModelRequestConfig(**request_kwargs),
         )
 
 
