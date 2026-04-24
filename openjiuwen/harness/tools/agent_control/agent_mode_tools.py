@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator
 from openjiuwen.core.foundation.tool import Input, Output, Tool
 from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.schema.agent_mode import AgentMode
+from openjiuwen.harness.tools.base_tool import ToolOutput
 
 if TYPE_CHECKING:
     pass
@@ -220,23 +221,39 @@ class SwitchModeTool(Tool):
         self._agent_ref = agent_ref
         self._language = language
 
-    async def invoke(self, inputs: Input, **kwargs: Any) -> str:
+    async def invoke(self, inputs: Input, **kwargs: Any) -> ToolOutput:
+        """Return ``ToolOutput`` so ``ToolMessage`` stays parseable."""
         parsed = SwitchModeInput.model_validate(inputs or {})
         raw_mode = (parsed.mode or "").strip().lower()
         lang = "en" if self._language == "en" else "cn"
 
         if raw_mode not in (AgentMode.PLAN.value, AgentMode.NORMAL.value):
-            return _SWITCH_MODE_INVALID_MSG[lang].format(mode=raw_mode)
+            return ToolOutput(
+                success=False,
+                error=_SWITCH_MODE_INVALID_MSG[lang].format(mode=raw_mode),
+            )
 
         session = kwargs.get("session")
         agent = self._agent_ref
 
         if raw_mode == AgentMode.PLAN.value:
             agent.switch_mode(session, AgentMode.PLAN.value)
-            return _SWITCH_MODE_TO_PLAN_MSG[lang]
+            return ToolOutput(
+                success=True,
+                data={
+                    "current_mode": AgentMode.PLAN.value,
+                    "message": _SWITCH_MODE_TO_PLAN_MSG[lang],
+                },
+            )
 
         agent.switch_mode(session, AgentMode.NORMAL.value)
-        return _SWITCH_MODE_TO_NORMAL_MSG[lang]
+        return ToolOutput(
+            success=True,
+            data={
+                "current_mode": AgentMode.NORMAL.value,
+                "message": _SWITCH_MODE_TO_NORMAL_MSG[lang],
+            },
+        )
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         pass

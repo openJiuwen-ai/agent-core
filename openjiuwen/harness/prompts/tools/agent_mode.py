@@ -155,13 +155,14 @@ class EnterPlanModeMetadataProvider(ToolMetadataProvider):
 # ---------------------------------------------------------------------------
 
 EXIT_PLAN_MODE_DESCRIPTION_CN = (
-    "读取 plan 文件全文并直接返回给用户，结束规划阶段。"
+    "读取 plan 文件全文并直接返回给用户，结束规划阶段，请求用户审批是否要切换到 normal 模式执行。"
     "当你对最终 plan 文件满意时，必须调用此工具结束规划阶段。"
     "tool_result 中包含完整计划内容。"
 )
 
 EXIT_PLAN_MODE_DESCRIPTION_EN = (
     "Read the full plan file and return the plan directly, ending the planning phase. "
+    "Request user approval before switching to normal mode for execution. "
     "Call this when you are satisfied with the final plan. "
     "The tool result contains the complete plan content."
 )
