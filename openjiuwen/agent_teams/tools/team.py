@@ -212,6 +212,16 @@ class TeamBackend:
         if existing is not None:
             return MemberOpResult.fail(f"Member {member_name} already exists in team {self.team_name}")
 
+        model_ref_json: Optional[str] = None
+        if member_model is not None:
+            import json as _json
+
+            from openjiuwen.agent_teams.agent.model_allocator import (
+                model_ref_from_team_model_config,
+            )
+
+            model_ref_json = _json.dumps(model_ref_from_team_model_config(member_model))
+
         success = await self.db.create_member(
             member_name=member_name,
             team_name=self.team_name,
@@ -222,7 +232,7 @@ class TeamBackend:
             execution_status=execution_status,
             mode=mode.value,
             prompt=prompt,
-            model_config_json=member_model.model_dump_json() if member_model else None,
+            model_ref_json=model_ref_json,
         )
         if not success:
             return MemberOpResult.fail(f"Database rejected create_member for {member_name} in team {self.team_name}")

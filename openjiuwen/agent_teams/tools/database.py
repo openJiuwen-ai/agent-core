@@ -480,7 +480,7 @@ class TeamDatabase:
         execution_status: Optional[str] = None,
         mode: str = MemberMode.BUILD_MODE.value,
         prompt: Optional[str] = None,
-        model_config_json: Optional[str] = None,
+        model_ref_json: Optional[str] = None,
     ) -> bool:
         """Create a new team member"""
         await self._ensure_initialized()
@@ -496,7 +496,7 @@ class TeamDatabase:
                     execution_status=execution_status,
                     mode=mode,
                     prompt=prompt,
-                    model_config_json=model_config_json,
+                    model_ref_json=model_ref_json,
                     updated_at=self.get_current_time(),
                 )
                 session.add(member)

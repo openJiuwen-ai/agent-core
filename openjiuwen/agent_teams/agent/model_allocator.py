@@ -192,6 +192,71 @@ class ByModelNameAllocator:
                 self._inner_indexes[name] = 0
 
 
+def model_ref_from_team_model_config(cfg: "TeamModelConfig") -> dict:
+    """Extract a ``{model_id, model_name}`` reference from a materialized config.
+
+    Pool entries seed ``ModelClientConfig.client_id`` from the entry's
+    ``model_id`` and ``ModelRequestConfig.model_name`` from ``model_name``,
+    so a freshly allocated ``TeamModelConfig`` carries enough context to
+    rehydrate via ``resolve_member_model``. Use this at spawn time to
+    persist only a lightweight reference into the DB instead of the full
+    config — credentials and endpoints stay on the live pool in session,
+    and refreshes propagate to all members on next resolution.
+    """
+    return {
+        "model_id": cfg.model_client_config.client_id,
+        "model_name": cfg.model_request_config.model_name,
+    }
+
+
+def resolve_member_model(
+    team_spec: "TeamSpec",
+    allocator: Optional[ModelAllocator],
+    *,
+    model_id: Optional[str],
+    model_name: Optional[str],
+) -> Optional["TeamModelConfig"]:
+    """Resolve a member's model from a stored reference against the live pool.
+
+    Resolution order:
+
+    1. ``model_id`` → exact match in the current pool. Sticky lookup so
+       a member rejoining after a restart picks up any refreshed
+       credentials of the same endpoint without bumping the allocator
+       counter.
+    2. ``model_name`` → ask the allocator for the next endpoint of that
+       name. Triggered when the original ``model_id`` is no longer in
+       the pool (rotated out, key revoked, ...). Honors the configured
+       allocation strategy.
+    3. ``None`` → caller falls back to the per-agent model declared in
+       ``TeamAgentSpec.agents``.
+
+    Args:
+        team_spec: Resolved team identity carrying the current pool.
+        allocator: Live allocator (typically the leader's) used for the
+            name-based fallback path. ``None`` is tolerated and skips
+            step 2.
+        model_id: Reference produced at spawn time via
+            ``model_ref_from_team_model_config``.
+        model_name: Reference produced at spawn time via
+            ``model_ref_from_team_model_config``.
+
+    Returns:
+        A live ``TeamModelConfig`` when the reference can be resolved
+        against the current pool, otherwise ``None``.
+    """
+    pool = team_spec.model_pool
+    if not pool:
+        return None
+    if model_id:
+        for entry in pool:
+            if entry.model_id == model_id:
+                return entry.to_team_model_config()
+    if model_name and allocator is not None:
+        return allocator.allocate(model_name=model_name)
+    return None
+
+
 def build_model_allocator(
     spec: "TeamAgentSpec",
     team_spec: "TeamSpec",
@@ -238,4 +303,6 @@ __all__ = [
     "ModelAllocator",
     "RoundRobinModelAllocator",
     "build_model_allocator",
+    "model_ref_from_team_model_config",
+    "resolve_member_model",
 ]

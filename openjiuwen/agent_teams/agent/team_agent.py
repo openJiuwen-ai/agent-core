@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import re
 import traceback
@@ -1694,7 +1695,7 @@ class TeamAgent(BaseAgent):
             team_logger.error("Teammate {} not found in database", member_name)
             return None
 
-        member_model = self._deserialize_member_model(teammate.model_config_json)
+        member_model = self._resolve_member_model(teammate.model_ref_json)
 
         return TeamRuntimeContext(
             role=TeamRole.TEAMMATE,
@@ -1706,14 +1707,44 @@ class TeamAgent(BaseAgent):
             member_model=member_model,
         )
 
-    @staticmethod
-    def _deserialize_member_model(json_str: Optional[str]) -> Optional["TeamModelConfig"]:
-        """Deserialize model_config_json from DB."""
-        if not json_str:
-            return None
-        from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
+    def _resolve_member_model(self, ref_json: Optional[str]) -> Optional["TeamModelConfig"]:
+        """Resolve a member's TeamModelConfig from a stored DB reference.
 
-        return TeamModelConfig.model_validate_json(json_str)
+        The DB only carries a lightweight ``{"model_id", "model_name"}``
+        reference; the live config (credentials, endpoint, request
+        knobs) is rebuilt from ``team_spec.model_pool`` so any pool
+        update propagates on the next teammate spawn / restart. If the
+        original ``model_id`` is no longer in the pool, the resolver
+        re-allocates by ``model_name`` so the member still gets a
+        valid endpoint of the same logical model.
+        """
+        if not ref_json:
+            return None
+        from openjiuwen.agent_teams.agent.model_allocator import resolve_member_model
+
+        try:
+            ref = json.loads(ref_json)
+        except (json.JSONDecodeError, TypeError) as e:
+            team_logger.warning(
+                "[{}] malformed model_ref_json on DB record; ignoring: {}",
+                self._member_name() or "?",
+                e,
+            )
+            return None
+
+        if not isinstance(ref, dict):
+            return None
+
+        team_spec = self._ctx.team_spec if self._ctx else None
+        if team_spec is None:
+            return None
+
+        return resolve_member_model(
+            team_spec,
+            self._model_allocator,
+            model_id=ref.get("model_id"),
+            model_name=ref.get("model_name"),
+        )
 
     async def spawn_teammate(
         self,

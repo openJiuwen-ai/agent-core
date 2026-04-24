@@ -14,6 +14,8 @@ from openjiuwen.agent_teams.agent.model_allocator import (
     ByModelNameAllocator,
     RoundRobinModelAllocator,
     build_model_allocator,
+    model_ref_from_team_model_config,
+    resolve_member_model,
 )
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
@@ -596,3 +598,154 @@ def test_team_member_spec_carries_model_name_for_pool_allocation():
     assert member.model_name == "claude"
     restored = TeamMemberSpec.model_validate_json(member.model_dump_json())
     assert restored.model_name == "claude"
+
+
+# ---------------------------------------------------------------------------
+# DB reference + resolution: pool is the source of truth, DB only references
+# ---------------------------------------------------------------------------
+
+
+def test_model_ref_from_team_model_config_extracts_id_and_name():
+    entry = ModelPoolEntry(
+        model_name="gpt-4",
+        api_key="k",
+        api_base_url="http://x",
+        api_provider="OpenAI",
+    )
+    cfg = entry.to_team_model_config()
+    ref = model_ref_from_team_model_config(cfg)
+    assert ref == {"model_id": entry.model_id, "model_name": "gpt-4"}
+
+
+def test_resolve_member_model_returns_pool_entry_by_id():
+    pool = [
+        _make_named_entry("gpt-4", "a1"),
+        _make_named_entry("gpt-4", "a2"),
+        _make_named_entry("claude", "c1"),
+    ]
+    team_spec = TeamSpec(team_name="t", display_name="t", model_pool=pool)
+    target = pool[1]  # gpt-4/a2
+    cfg = resolve_member_model(
+        team_spec, allocator=None,
+        model_id=target.model_id, model_name=target.model_name,
+    )
+    assert cfg is not None
+    assert cfg.model_client_config.api_base == "http://a2"
+    assert cfg.model_client_config.api_key == "k-a2"
+
+
+def test_resolve_member_model_picks_up_refreshed_credentials_from_pool():
+    """Pool reflects credential rotation; DB ref points to same id."""
+    original = ModelPoolEntry(
+        model_id="stable-id",
+        model_name="gpt-4",
+        api_key="OLD-KEY",
+        api_base_url="http://old",
+        api_provider="OpenAI",
+    )
+    refreshed = ModelPoolEntry(
+        model_id="stable-id",  # same id, rotated credentials
+        model_name="gpt-4",
+        api_key="NEW-KEY",
+        api_base_url="http://new",
+        api_provider="OpenAI",
+    )
+    # DB stored ref pointing at stable-id when the original was active.
+    ref = model_ref_from_team_model_config(original.to_team_model_config())
+
+    # Session pool now carries the refreshed entry. Resolver pulls
+    # the new credentials, not the frozen-at-spawn ones.
+    team_spec = TeamSpec(team_name="t", display_name="t", model_pool=[refreshed])
+    cfg = resolve_member_model(
+        team_spec, allocator=None,
+        model_id=ref["model_id"], model_name=ref["model_name"],
+    )
+    assert cfg.model_client_config.api_key == "NEW-KEY"
+    assert cfg.model_client_config.api_base == "http://new"
+
+
+def test_resolve_member_model_falls_back_to_name_when_id_gone():
+    pool = [
+        _make_named_entry("gpt-4", "a1"),
+        _make_named_entry("gpt-4", "a2"),
+    ]
+    team_spec = TeamSpec(
+        team_name="t", display_name="t",
+        model_pool=pool, model_pool_strategy="by_model_name",
+    )
+    allocator = ByModelNameAllocator(pool)
+    cfg = resolve_member_model(
+        team_spec, allocator,
+        model_id="vanished-id", model_name="gpt-4",
+    )
+    # Re-allocated via allocator: first gpt-4 endpoint is a1.
+    assert cfg.model_client_config.api_base == "http://a1"
+
+
+def test_resolve_member_model_returns_none_when_pool_lacks_id_and_name():
+    pool = [_make_named_entry("gpt-4", "a1")]
+    team_spec = TeamSpec(team_name="t", display_name="t", model_pool=pool)
+    allocator = ByModelNameAllocator(pool)
+    # Both id and name absent from pool.
+    cfg = resolve_member_model(
+        team_spec, allocator,
+        model_id="vanished-id", model_name="gemini",
+    )
+    assert cfg is None
+
+
+def test_resolve_member_model_returns_none_without_pool():
+    team_spec = TeamSpec(team_name="t", display_name="t")  # empty pool
+    cfg = resolve_member_model(
+        team_spec, allocator=None,
+        model_id="anything", model_name="gpt-4",
+    )
+    assert cfg is None
+
+
+def test_resolve_member_model_id_lookup_does_not_advance_allocator():
+    """Sticky id-lookup must not bump rotation state."""
+    pool = [
+        _make_named_entry("gpt-4", "a1"),
+        _make_named_entry("gpt-4", "a2"),
+    ]
+    team_spec = TeamSpec(
+        team_name="t", display_name="t",
+        model_pool=pool, model_pool_strategy="by_model_name",
+    )
+    allocator = ByModelNameAllocator(pool)
+    pre_state = allocator.state_dict()
+
+    target = pool[1]
+    resolve_member_model(
+        team_spec, allocator,
+        model_id=target.model_id, model_name=target.model_name,
+    )
+    # Counter for gpt-4 must not advance just because we resolved by id.
+    assert allocator.state_dict() == pre_state
+
+
+def test_resolve_member_model_name_fallback_advances_allocator():
+    """Name-fallback path goes through allocate, which DOES advance state."""
+    pool = [
+        _make_named_entry("gpt-4", "a1"),
+        _make_named_entry("gpt-4", "a2"),
+    ]
+    team_spec = TeamSpec(
+        team_name="t", display_name="t",
+        model_pool=pool, model_pool_strategy="by_model_name",
+    )
+    allocator = ByModelNameAllocator(pool)
+    cfg = resolve_member_model(
+        team_spec, allocator,
+        model_id="missing", model_name="gpt-4",
+    )
+    assert cfg.model_client_config.api_base == "http://a1"
+
+    # Next reconcile of another vanished member with the same name
+    # should advance to a2 (rotation).
+    cfg2 = resolve_member_model(
+        team_spec, allocator,
+        model_id="also-missing", model_name="gpt-4",
+    )
+    assert cfg2.model_client_config.api_base == "http://a2"
