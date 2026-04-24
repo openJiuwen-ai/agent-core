@@ -120,9 +120,14 @@ class ModelPoolEntry(BaseModel):
     model_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     """Process-local client identity for foundation resource manager.
 
-    Auto-generated as a uuid; not persisted to DB, not stable across
-    pool reloads. Use ``metadata`` for any cross-version correlation
-    keys you need to track yourself.
+    Auto-generated as a uuid; surfaced as ``ModelClientConfig.client_id``
+    when the entry is materialized. Not persisted to the DB.
+
+    ``inherit_pool_ids`` carries this value across ``update_model_pool``
+    only when the new entry is bit-exact (every other field equal) to
+    an old one — any value change (api_key rotation included) yields a
+    fresh id so a future foundation client cache cannot serve a stale
+    client built against the old config.
     """
     metadata: dict = Field(default_factory=dict)
     """Optional extension payload merged into the materialized TeamModelConfig.
@@ -229,6 +234,74 @@ class TeamRuntimeContext(BaseModel):
     """TeamModelConfig assigned to this member by the allocator."""
 
 
+def _entry_signature(entry: ModelPoolEntry) -> str:
+    """Canonical signature of an entry's full config, excluding ``model_id``.
+
+    Two entries with the same signature describe the same logical
+    endpoint plus the same auth, request knobs, and metadata — i.e.
+    a future foundation client cache could safely serve one client
+    for both. Any difference (api_key rotation included) yields a
+    different signature and forces a fresh ``model_id``.
+    """
+    import json
+
+    payload = entry.model_dump(exclude={"model_id"})
+    return json.dumps(payload, sort_keys=True, default=str)
+
+
+def inherit_pool_ids(
+    current_pool: list[ModelPoolEntry],
+    new_pool: list[ModelPoolEntry],
+) -> list[ModelPoolEntry]:
+    """Carry ``model_id`` from ``current_pool`` into bit-exact entries of ``new_pool``.
+
+    ``ModelPoolEntry.model_id`` surfaces as ``ModelClientConfig.client_id``,
+    which a future foundation client cache may use to dedupe HTTP
+    clients. Preserving it across a pool refresh is only safe when the
+    new entry's full config is identical to the old one — otherwise a
+    cached client built with the old api_key would silently service
+    requests intended to use the new credentials.
+
+    Alignment is therefore by **bit-exact signature**: every field
+    other than ``model_id`` must match. When several entries in either
+    pool share the same signature (e.g., genuine duplicates), they are
+    paired in pool order, one-to-one. New entries that don't have an
+    exact counterpart keep their own auto-generated ``model_id``;
+    removed entries' ids are dropped.
+
+    Side effects:
+
+    * Order doesn't matter — reordered-but-otherwise-identical pools
+      align fully.
+    * Any value change (api_key rotation, base_url migration, timeout
+      tweak, ...) breaks the match for that entry, forcing a fresh id.
+    * Caller-supplied explicit ``model_id`` values are preserved when
+      no signature match exists (no overwrite happens for unmatched
+      new entries).
+
+    Args:
+        current_pool: The pool currently in session.
+        new_pool: The replacement pool.
+
+    Returns:
+        A list parallel to ``new_pool`` with ``model_id`` inherited
+        for bit-exact matches.
+    """
+    old_by_sig: dict[str, list[ModelPoolEntry]] = {}
+    for entry in current_pool:
+        old_by_sig.setdefault(_entry_signature(entry), []).append(entry)
+
+    result: list[ModelPoolEntry] = []
+    for new_entry in new_pool:
+        bucket = old_by_sig.get(_entry_signature(new_entry))
+        if bucket:
+            inherited_id = bucket.pop(0).model_id
+            result.append(new_entry.model_copy(update={"model_id": inherited_id}))
+        else:
+            result.append(new_entry)
+    return result
+
+
 __all__ = [
     "ModelPoolEntry",
     "TeamLifecycle",
@@ -236,4 +309,5 @@ __all__ = [
     "TeamRole",
     "TeamRuntimeContext",
     "TeamSpec",
+    "inherit_pool_ids",
 ]

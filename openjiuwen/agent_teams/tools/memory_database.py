@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """In-memory team database that replaces SQLite for single-process mode.
 
 Implements the same public async interface as TeamDatabase so that

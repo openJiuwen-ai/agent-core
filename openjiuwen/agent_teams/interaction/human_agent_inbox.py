@@ -28,7 +28,8 @@ if TYPE_CHECKING:
 
 class HumanAgentNotEnabledError(RuntimeError):
     """Raised when a caller tries to speak as a human agent on a
-    team that has no human-agent member registered at all."""
+    team that has no human-agent member registered at all.
+    """
 
 
 class UnknownHumanAgentError(RuntimeError):

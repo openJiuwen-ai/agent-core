@@ -466,6 +466,13 @@ class TeamAgent(BaseAgent):
         reset so subsequent ``allocate`` calls start fresh against the
         new layout.
 
+        Runtime ``model_id`` values are carried over from the current
+        pool to matching new entries (matched by
+        ``(model_name, api_base_url)`` and position within that
+        bucket) so the foundation's HTTP client cache stays warm
+        across credential rotations. Truly new endpoints keep their
+        own auto-generated id.
+
         Persists the new pool + zeroed allocator state to the team
         session so a subsequent ``recover_from_session`` rehydrates the
         same view.
@@ -477,8 +484,10 @@ class TeamAgent(BaseAgent):
         if self._ctx is None or self._ctx.team_spec is None:
             return
         from openjiuwen.agent_teams.agent.model_allocator import build_model_allocator
+        from openjiuwen.agent_teams.schema.team import inherit_pool_ids
 
-        self._ctx.team_spec.model_pool = list(new_pool)
+        merged = inherit_pool_ids(self._ctx.team_spec.model_pool, list(new_pool))
+        self._ctx.team_spec.model_pool = merged
         self._model_allocator = build_model_allocator(self._spec, self._ctx.team_spec)
         if self._team_session is not None and self._spec is not None and self.role == TeamRole.LEADER:
             self._persist_leader_config(self._team_session)
@@ -506,6 +515,14 @@ class TeamAgent(BaseAgent):
         """
         self._model_allocator = allocator
         self._leader_allocation = leader_allocation
+
+    def restore_allocator_state(self, state: dict) -> None:
+        """Restore model allocator counters from a persisted state dict.
+
+        No-op when no allocator is attached (e.g. teammate role).
+        """
+        if self._model_allocator is not None:
+            self._model_allocator.load_state_dict(state)
 
     def _setup_infra(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> None:
         """Phase 1: set spec/context, create messager, workspace manager, register team tools."""
@@ -2061,8 +2078,8 @@ class TeamAgent(BaseAgent):
         # where the previous session left off rather than restarting
         # at index 0 and re-handing-out the head of the pool.
         allocator_state = state.get("model_allocator_state")
-        if allocator_state and agent._model_allocator is not None:
-            agent._model_allocator.load_state_dict(allocator_state)
+        if allocator_state:
+            agent.restore_allocator_state(allocator_state)
         return agent
 
 

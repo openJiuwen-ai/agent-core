@@ -710,22 +710,219 @@ def test_update_model_pool_replaces_pool_and_resets_allocator():
         _make_named_entry("gpt-4", "a2"),
     ]
     allocator = ByModelNameAllocator(initial)
-    # Advance gpt-4 counter so we can observe the reset.
     allocator.allocate(model_name="gpt-4")
     allocator.allocate(model_name="gpt-4")
 
     agent = _bare_team_agent(allocator)
-    # Stub out persist to avoid session coupling.
     agent._team_session = None
 
     replacement = [
-        _make_named_entry("gpt-4", "b1"),  # different endpoint
-        _make_named_entry("claude", "c1"),  # new group
+        _make_named_entry("gpt-4", "b1"),  # different endpoint -> no inherit
+        _make_named_entry("claude", "c1"),
     ]
     agent.update_model_pool(replacement)
 
-    # team_spec.model_pool is replaced in place.
-    assert agent._ctx.team_spec.model_pool == replacement
-    # allocator is rebuilt -> counters zeroed against new layout.
+    # Pool replaced (entries inherited or kept their own model_id).
+    assert len(agent._ctx.team_spec.model_pool) == 2
+    assert {e.api_base_url for e in agent._ctx.team_spec.model_pool} == {"http://b1", "http://c1"}
+    # Allocator rebuilt -> counters zeroed against new layout.
     first_after = agent._model_allocator.allocate(model_name="gpt-4").to_team_model_config()
     assert first_after.model_client_config.api_base == "http://b1"
+
+
+# ---------------------------------------------------------------------------
+# inherit_pool_ids: bit-exact signature match preserves model_id
+# ---------------------------------------------------------------------------
+
+
+def test_inherit_pool_ids_preserves_id_for_bit_exact_entry():
+    """No-change refresh inherits model_id (cache stays stable when safe)."""
+    from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+
+    old = ModelPoolEntry(
+        model_name="gpt-4", api_key="K",
+        api_base_url="http://x", api_provider="OpenAI",
+    )
+    new = ModelPoolEntry(
+        model_name="gpt-4", api_key="K",
+        api_base_url="http://x", api_provider="OpenAI",
+    )
+    assert old.model_id != new.model_id  # different uuids before merge
+
+    [merged] = inherit_pool_ids([old], [new])
+    assert merged.model_id == old.model_id
+
+
+def test_inherit_pool_ids_breaks_inheritance_on_credential_rotation():
+    """api_key change yields a fresh model_id so a future cache cannot
+    serve a stale client built against the old credential."""
+    from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+
+    old = ModelPoolEntry(
+        model_name="gpt-4", api_key="OLD",
+        api_base_url="http://x", api_provider="OpenAI",
+    )
+    new = ModelPoolEntry(
+        model_name="gpt-4", api_key="ROTATED",
+        api_base_url="http://x", api_provider="OpenAI",
+    )
+
+    [merged] = inherit_pool_ids([old], [new])
+    assert merged.model_id == new.model_id  # NOT inherited
+    assert merged.api_key == "ROTATED"
+
+
+def test_inherit_pool_ids_breaks_inheritance_on_base_url_migration():
+    from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+
+    old = ModelPoolEntry(
+        model_name="gpt-4", api_key="K",
+        api_base_url="http://old", api_provider="OpenAI",
+    )
+    new = ModelPoolEntry(
+        model_name="gpt-4", api_key="K",
+        api_base_url="http://new", api_provider="OpenAI",
+    )
+    [merged] = inherit_pool_ids([old], [new])
+    assert merged.model_id == new.model_id
+
+
+def test_inherit_pool_ids_breaks_inheritance_on_metadata_change():
+    """Even small config tweaks (timeout) prevent inheritance — they could
+    mean a different client object is needed under a future cache."""
+    from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+
+    old = ModelPoolEntry(
+        model_name="gpt-4", api_key="K",
+        api_base_url="http://x", api_provider="OpenAI",
+        metadata={"client": {"timeout": 30.0}},
+    )
+    new = ModelPoolEntry(
+        model_name="gpt-4", api_key="K",
+        api_base_url="http://x", api_provider="OpenAI",
+        metadata={"client": {"timeout": 60.0}},  # tuned
+    )
+    [merged] = inherit_pool_ids([old], [new])
+    assert merged.model_id == new.model_id
+
+
+def test_inherit_pool_ids_keeps_own_id_for_truly_new_endpoint():
+    from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+
+    old = ModelPoolEntry(
+        model_name="gpt-4", api_key="k",
+        api_base_url="http://a", api_provider="OpenAI",
+    )
+    new = ModelPoolEntry(
+        model_name="claude", api_key="k",
+        api_base_url="http://b", api_provider="OpenAI",
+    )
+    [merged] = inherit_pool_ids([old], [new])
+    assert merged.model_id == new.model_id
+
+
+def test_inherit_pool_ids_signature_match_is_order_independent():
+    """Bit-exact pairs match by signature regardless of pool order."""
+    from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+
+    old = [
+        ModelPoolEntry(model_name="gpt-4", api_key="K1", api_base_url="http://x", api_provider="OpenAI"),
+        ModelPoolEntry(model_name="gpt-4", api_key="K2", api_base_url="http://x", api_provider="OpenAI"),
+    ]
+    # User reorders without changing values.
+    new = [
+        ModelPoolEntry(model_name="gpt-4", api_key="K2", api_base_url="http://x", api_provider="OpenAI"),
+        ModelPoolEntry(model_name="gpt-4", api_key="K1", api_base_url="http://x", api_provider="OpenAI"),
+    ]
+    merged = inherit_pool_ids(old, new)
+    # Each new entry inherits from the old entry with matching signature.
+    assert merged[0].model_id == old[1].model_id  # K2 ↔ K2
+    assert merged[1].model_id == old[0].model_id  # K1 ↔ K1
+
+
+def test_inherit_pool_ids_pairs_one_to_one_when_signatures_collide():
+    """If two old entries are byte-identical, two new identical entries
+    consume them in pool order — no double-mapping."""
+    from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+
+    # Two genuine duplicates (same signature) on each side.
+    old = [
+        ModelPoolEntry(model_name="gpt-4", api_key="K", api_base_url="http://x", api_provider="OpenAI"),
+        ModelPoolEntry(model_name="gpt-4", api_key="K", api_base_url="http://x", api_provider="OpenAI"),
+    ]
+    new = [
+        ModelPoolEntry(model_name="gpt-4", api_key="K", api_base_url="http://x", api_provider="OpenAI"),
+        ModelPoolEntry(model_name="gpt-4", api_key="K", api_base_url="http://x", api_provider="OpenAI"),
+    ]
+    merged = inherit_pool_ids(old, new)
+    inherited = {m.model_id for m in merged}
+    # Both new entries inherited; one mapped to each old entry; no
+    # duplicates (each old consumed once).
+    assert inherited == {old[0].model_id, old[1].model_id}
+
+
+def test_inherit_pool_ids_drops_removed_endpoints():
+    """Removed entries' ids are not transferred anywhere."""
+    from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+
+    old = [
+        ModelPoolEntry(model_name="gpt-4", api_key="K", api_base_url="http://a", api_provider="OpenAI"),
+        ModelPoolEntry(model_name="claude", api_key="K", api_base_url="http://b", api_provider="OpenAI"),
+    ]
+    new = [
+        ModelPoolEntry(model_name="gpt-4", api_key="K", api_base_url="http://a", api_provider="OpenAI"),
+    ]
+    merged = inherit_pool_ids(old, new)
+    assert len(merged) == 1
+    assert merged[0].model_id == old[0].model_id
+
+
+def test_inherit_pool_ids_does_not_mutate_input_lists():
+    from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+
+    old_entry = ModelPoolEntry(
+        model_name="gpt-4", api_key="K", api_base_url="http://x", api_provider="OpenAI",
+    )
+    new_entry = ModelPoolEntry(
+        model_name="gpt-4", api_key="K", api_base_url="http://x", api_provider="OpenAI",
+    )
+    new_entry_id_before = new_entry.model_id
+    inherit_pool_ids([old_entry], [new_entry])
+    assert new_entry.model_id == new_entry_id_before
+
+
+def test_inherit_pool_ids_handles_empty_inputs():
+    from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+
+    assert inherit_pool_ids([], []) == []
+    assert inherit_pool_ids([], [_make_named_entry("gpt-4", "a1")]) != []
+
+
+def test_update_model_pool_preserves_id_only_when_entry_is_unchanged():
+    """End-to-end: pure refresh keeps id; rotation forces new id."""
+    initial = [
+        ModelPoolEntry(model_name="gpt-4", api_key="K", api_base_url="http://x", api_provider="OpenAI"),
+    ]
+    allocator = ByModelNameAllocator(initial)
+    agent = _bare_team_agent(allocator)
+    agent._ctx.team_spec.model_pool = initial
+    agent._team_session = None
+
+    old_id = initial[0].model_id
+
+    # Pure refresh (rebuild the same entry) -> id preserved.
+    same_again = [
+        ModelPoolEntry(model_name="gpt-4", api_key="K", api_base_url="http://x", api_provider="OpenAI"),
+    ]
+    agent.update_model_pool(same_again)
+    assert agent._ctx.team_spec.model_pool[0].model_id == old_id
+
+    # Now rotate the credential -> id MUST change so a future cache
+    # can't serve a client built against the previous api_key.
+    rotated = [
+        ModelPoolEntry(model_name="gpt-4", api_key="ROTATED", api_base_url="http://x", api_provider="OpenAI"),
+    ]
+    agent.update_model_pool(rotated)
+    stored = agent._ctx.team_spec.model_pool[0]
+    assert stored.model_id != old_id
+    assert stored.api_key == "ROTATED"
