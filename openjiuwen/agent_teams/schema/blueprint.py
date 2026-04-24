@@ -126,9 +126,20 @@ class StorageSpec(BaseModel):
 class LeaderSpec(BaseModel):
     """Leader identity specification."""
 
+    model_config = {"protected_namespaces": ()}
+
     member_name: str = "team_leader"
     display_name: str = "Team Leader"
     persona: str = Field(default_factory=lambda: t("blueprint.default_persona"))
+    model_name: Optional[str] = None
+    """Optional pool model_name to allocate from when ``TeamSpec.model_pool``
+    is configured with ``by_model_name`` strategy.
+
+    Forwarded to ``ModelAllocator.allocate`` at ``build()`` time so the
+    leader draws an endpoint from the named group. Ignored by the
+    ``round_robin`` strategy (which always allocates regardless of name).
+    ``None`` (default) means the leader uses its per-agent model.
+    """
 
 
 class TeamAgentSpec(BaseModel):
@@ -263,7 +274,11 @@ class TeamAgentSpec(BaseModel):
         from openjiuwen.agent_teams.agent.model_allocator import build_model_allocator
 
         model_allocator = build_model_allocator(self, team_spec)
-        leader_member_model = model_allocator.allocate() if team_spec.model_pool else None
+        leader_member_model = (
+            model_allocator.allocate(model_name=self.leader.model_name)
+            if team_spec.model_pool
+            else None
+        )
 
         context = TeamRuntimeContext(
             role=TeamRole.LEADER,

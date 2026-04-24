@@ -75,7 +75,9 @@ class TeamBackend:
         messager: Messager,
         teammate_mode: MemberMode = MemberMode.BUILD_MODE,
         predefined_members: list[TeamMemberSpec] | None = None,
-        model_config_allocator: Optional[Callable[[], Optional["TeamModelConfig"]]] = None,
+        model_config_allocator: Optional[
+            Callable[[Optional[str]], Optional["TeamModelConfig"]]
+        ] = None,
         leader_model: Optional["TeamModelConfig"] = None,
     ):
         """Initialize agent team manager.
@@ -90,7 +92,11 @@ class TeamBackend:
             predefined_members: Pre-configured teammates to register
                 during ``build_team``.
             model_config_allocator: Callback that returns the next
-                ``TeamModelConfig`` for teammate allocation.
+                ``TeamModelConfig`` for teammate allocation. Receives an
+                optional ``model_name`` hint forwarded from the spawn
+                site (predefined member spec or ``spawn_member`` tool
+                argument); ``RoundRobinModelAllocator`` ignores the
+                hint, ``ByModelNameAllocator`` requires it.
             leader_model: Pre-allocated TeamModelConfig for the leader
                 member. Persisted on the leader's DB row in
                 ``build_team`` so the model assignment is auditable and
@@ -837,7 +843,11 @@ class TeamBackend:
                 name=member_spec.display_name,
                 description=member_spec.persona,
             )
-            allocated = self._allocate_model_config() if self._allocate_model_config else None
+            allocated = (
+                self._allocate_model_config(member_spec.model_name)
+                if self._allocate_model_config
+                else None
+            )
             await self.spawn_member(
                 member_name=member_spec.member_name,
                 display_name=member_spec.display_name,

@@ -54,6 +54,12 @@ STRINGS: dict[str, str] = {
         "avoid generic startup filler, "
         "and do not repeat the generic workflow"
     ),
+    "spawn_member.model_name": (
+        "Optional. When the team is configured with a model_pool and the "
+        "by_model_name allocation strategy, specifies which model-name group "
+        "to draw an endpoint from for this member. Falls back to the member's "
+        "default model config when omitted or when the name is not in the pool"
+    ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/en/shutdown_member.md
     "shutdown_member.member_name": (

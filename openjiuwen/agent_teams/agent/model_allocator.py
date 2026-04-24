@@ -7,13 +7,13 @@ endpoints instead of saturating a single one. Two strategies ship:
 
 * ``RoundRobinModelAllocator`` — linear rotation through every entry,
   ignoring ``model_name``. Good for pools where every entry is an
-  interchangeable endpoint of the same logical model.
-* ``ByModelNameAllocator`` — partitions entries by ``model_name`` and
-  rotates over the partitions at the outer level while round-robining
-  endpoints within each partition. Each declared model name receives
-  an equal share of allocations regardless of how many endpoints back
-  it; useful when the pool mixes tiers (cheap vs expensive) and you
-  want fair distribution per tier rather than per raw endpoint.
+  interchangeable endpoint of the same logical model. Always allocates.
+* ``ByModelNameAllocator`` — looks up the named group and round-robins
+  within it. The caller must pass ``model_name``; the allocator returns
+  ``None`` when the name is missing or absent from the pool, in which
+  case the caller falls back to its per-agent model. Useful when the
+  pool mixes tiers (cheap vs expensive) and the caller wants explicit
+  control over which tier each member receives.
 
 When the pool is empty no allocator is built — every member resolves
 its model from ``TeamAgentSpec.agents`` via the regular per-agent
@@ -48,8 +48,16 @@ class ModelAllocator(Protocol):
     the volatile counters need to ride along inside the session.
     """
 
-    def allocate(self) -> Optional["TeamModelConfig"]:
-        """Return the next allocated model config, or None when unavailable."""
+    def allocate(self, model_name: Optional[str] = None) -> Optional["TeamModelConfig"]:
+        """Return the next allocated model config, or None when unavailable.
+
+        Args:
+            model_name: Optional model-name hint. Allocators that
+                select by name (``ByModelNameAllocator``) require it
+                and return ``None`` when missing or unknown. Allocators
+                that ignore name (``RoundRobinModelAllocator``) accept
+                it for signature compatibility and discard it.
+        """
         ...
 
     def state_dict(self) -> dict:
@@ -86,13 +94,18 @@ class RoundRobinModelAllocator:
         self._pool = list(pool)
         self._index = 0
 
-    def allocate(self) -> Optional["TeamModelConfig"]:
+    def allocate(self, model_name: Optional[str] = None) -> Optional["TeamModelConfig"]:
         """Return the next pool entry as a TeamModelConfig.
+
+        ``model_name`` is accepted for protocol compatibility but
+        ignored — round-robin is name-agnostic and rotates across
+        every entry in pool order.
 
         Returns:
             The next ``TeamModelConfig`` materialized from the pool, or
             ``None`` if the pool is empty.
         """
+        del model_name  # round-robin is name-agnostic
         if not self._pool:
             return None
         entry = self._pool[self._index % len(self._pool)]
@@ -112,22 +125,22 @@ class RoundRobinModelAllocator:
 
 
 class ByModelNameAllocator:
-    """Round-robin allocator that groups by ``model_name``.
+    """Lookup-by-name allocator with intra-group round-robin.
 
     Pool entries are partitioned by their ``model_name`` field while
-    preserving insertion order. Each ``allocate`` call:
+    preserving insertion order. Each ``allocate(model_name=...)`` call
+    looks up the named group and returns the next endpoint from that
+    group's round-robin counter. The caller is responsible for picking
+    which model name a member should use (via ``LeaderSpec.model_name``,
+    ``TeamMemberSpec.model_name``, or the ``model_name`` parameter on
+    ``spawn_member``).
 
-    1. Picks the next ``model_name`` group in outer round-robin order.
-    2. Returns the next entry from that group's inner round-robin
-       counter, advancing the inner counter for that group only.
-
-    Result: each distinct model name receives an equal share of
-    allocations (1/N where N is the number of distinct names),
-    independent of how many endpoints back each name. Within a group,
-    endpoints rotate in pool order. Compared with
-    ``RoundRobinModelAllocator`` this matters when the pool mixes
-    cheap and expensive models — pure round-robin would over-allocate
-    to whichever name has more entries.
+    Returning ``None`` when the requested name is missing or unknown
+    keeps the fallback chain in ``TeamAgent._setup_agent`` intact: the
+    member then resolves its model from its per-agent spec instead.
+    Compared with ``RoundRobinModelAllocator`` this strategy gives the
+    caller explicit control over which tier each member receives, at
+    the cost of requiring an explicit model_name from every consumer.
     """
 
     def __init__(self, pool: list["ModelPoolEntry"]) -> None:
@@ -135,32 +148,30 @@ class ByModelNameAllocator:
         self._groups: dict[str, list["ModelPoolEntry"]] = {}
         for entry in pool:
             self._groups.setdefault(entry.model_name, []).append(entry)
-        self._names: list[str] = list(self._groups.keys())
-        self._name_index = 0
-        self._inner_indexes: dict[str, int] = {name: 0 for name in self._names}
+        self._inner_indexes: dict[str, int] = {name: 0 for name in self._groups}
 
-    def allocate(self) -> Optional["TeamModelConfig"]:
-        """Return the next allocated TeamModelConfig.
+    def allocate(self, model_name: Optional[str] = None) -> Optional["TeamModelConfig"]:
+        """Return the next entry in the requested name's group.
 
-        Advances the outer name rotation and the inner endpoint
-        rotation of the picked group. Returns ``None`` if the pool was
-        empty at construction time.
+        Args:
+            model_name: Group key to look up. Required — a missing or
+                unknown name yields ``None`` so callers can fall back
+                to their per-agent model.
+
+        Returns:
+            The next ``TeamModelConfig`` from the named group's
+            round-robin rotation, or ``None`` if no group matches.
         """
-        if not self._names:
+        if not model_name or model_name not in self._groups:
             return None
-        name = self._names[self._name_index % len(self._names)]
-        self._name_index += 1
-        group = self._groups[name]
-        idx = self._inner_indexes[name] % len(group)
-        self._inner_indexes[name] += 1
+        group = self._groups[model_name]
+        idx = self._inner_indexes[model_name] % len(group)
+        self._inner_indexes[model_name] += 1
         return group[idx].to_team_model_config()
 
     def state_dict(self) -> dict:
-        """Snapshot outer + per-group counters for session persistence."""
-        return {
-            "name_index": self._name_index,
-            "inner_indexes": dict(self._inner_indexes),
-        }
+        """Snapshot per-group counters for session persistence."""
+        return {"inner_indexes": dict(self._inner_indexes)}
 
     def load_state_dict(self, state: dict) -> None:
         """Restore counters from a previous snapshot.
@@ -169,11 +180,6 @@ class ByModelNameAllocator:
         groups absent from the current pool are dropped, and new
         groups simply stay at zero. Malformed ints reset to zero.
         """
-        try:
-            self._name_index = int(state.get("name_index", 0))
-        except (TypeError, ValueError):
-            self._name_index = 0
-
         inner = state.get("inner_indexes") or {}
         if not isinstance(inner, dict):
             return

@@ -20,9 +20,13 @@ from typing import (
     List,
     Optional,
     Set,
+    TYPE_CHECKING,
 )
 
 from pydantic import PrivateAttr
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
 
 from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.tools.locales import Translator
@@ -249,7 +253,9 @@ class SpawnMemberTool(TeamTool):
         team: TeamBackend,
         t: Translator,
         *,
-        model_config_allocator: Optional[Callable[[], Optional[str]]] = None,
+        model_config_allocator: Optional[
+            Callable[[Optional[str]], Optional["TeamModelConfig"]]
+        ] = None,
     ):
         super().__init__(
             ToolCard(
@@ -273,6 +279,10 @@ class SpawnMemberTool(TeamTool):
                 },
                 "desc": {"type": "string", "description": t("spawn_member", "desc")},
                 "prompt": {"type": "string", "description": t("spawn_member", "prompt")},
+                "model_name": {
+                    "type": "string",
+                    "description": t("spawn_member", "model_name"),
+                },
             },
             "required": ["member_name", "display_name", "desc"],
         }
@@ -287,7 +297,12 @@ class SpawnMemberTool(TeamTool):
         mode_str = self.team.teammate_mode.value
         mode = MemberMode(mode_str)
 
-        member_model = self._allocate_model_config() if self._allocate_model_config else None
+        model_name = inputs.get("model_name")
+        member_model = (
+            self._allocate_model_config(model_name)
+            if self._allocate_model_config
+            else None
+        )
 
         card_id = f"{self.team.team_name}_{member_name}"
         agent_card = AgentCard(id=card_id, name=display_name, description=desc)
@@ -1105,7 +1120,9 @@ def create_team_tools(
     agent_team: TeamBackend,
     teammate_mode: str = "build_mode",
     on_teammate_created: Optional[Callable[[str], Awaitable[None]]] = None,
-    model_config_allocator: Optional[Callable[[], Optional[str]]] = None,
+    model_config_allocator: Optional[
+        Callable[[Optional[str]], Optional["TeamModelConfig"]]
+    ] = None,
     exclude_tools: Optional[Set[str]] = None,
     lang: str = "cn",
 ) -> List[Tool]:
@@ -1120,7 +1137,11 @@ def create_team_tools(
             only mode where teammates submit plans and tool calls can be held
             for leader sign-off.
         on_teammate_created: Callback invoked when a teammate is created.
-        model_config_allocator: Callback that returns the next model config JSON.
+        model_config_allocator: Callback that returns the next
+            ``TeamModelConfig`` for teammate allocation. Receives an
+            optional ``model_name`` hint forwarded from the spawn site;
+            ``RoundRobinModelAllocator`` ignores the hint while
+            ``ByModelNameAllocator`` requires it.
         exclude_tools: Tool names to exclude from the allowed set.
         lang: Locale code ("cn" or "en") for tool descriptions.
     """

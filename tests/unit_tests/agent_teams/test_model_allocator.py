@@ -181,56 +181,77 @@ def test_team_agent_spec_model_pool_round_trips_through_json():
     assert [e.model_name for e in restored.model_pool] == ["m0", "m1", "m2"]
 
 
-def test_by_model_name_allocator_alternates_groups_in_insertion_order():
+def test_by_model_name_allocator_rotates_within_named_group():
     pool = [
         _make_named_entry("gpt-4", "a1"),
         _make_named_entry("gpt-4", "a2"),
         _make_named_entry("gpt-4", "a3"),
+        _make_named_entry("claude", "c1"),
+    ]
+    allocator = ByModelNameAllocator(pool)
+
+    # Three calls for gpt-4 walk a1 → a2 → a3.
+    bases = [
+        allocator.allocate(model_name="gpt-4").model_client_config.api_base
+        for _ in range(3)
+    ]
+    assert bases == ["http://a1", "http://a2", "http://a3"]
+
+    # Wrap-around in the gpt-4 group.
+    assert allocator.allocate(model_name="gpt-4").model_client_config.api_base == "http://a1"
+
+    # claude has only one endpoint — repeated calls always return c1.
+    for _ in range(2):
+        cfg = allocator.allocate(model_name="claude")
+        assert cfg.model_client_config.api_base == "http://c1"
+
+
+def test_by_model_name_allocator_independent_counters_per_name():
+    pool = [
+        _make_named_entry("gpt-4", "a1"),
+        _make_named_entry("gpt-4", "a2"),
         _make_named_entry("claude", "c1"),
         _make_named_entry("claude", "c2"),
     ]
     allocator = ByModelNameAllocator(pool)
-    sequence = [allocator.allocate() for _ in range(8)]
 
-    names = [cfg.model_request_config.model_name for cfg in sequence]
-    bases = [cfg.model_client_config.api_base for cfg in sequence]
+    # Drive gpt-4 forward without touching claude.
+    [allocator.allocate(model_name="gpt-4") for _ in range(5)]
 
-    # Outer rotation alternates names in insertion order.
-    assert names == [
-        "gpt-4", "claude",
-        "gpt-4", "claude",
-        "gpt-4", "claude",
-        "gpt-4", "claude",
-    ]
-    # Inner rotation walks each group's endpoints independently.
-    assert bases == [
-        "http://a1", "http://c1",
-        "http://a2", "http://c2",
-        "http://a3", "http://c1",  # claude wraps before gpt-4 does
-        "http://a1", "http://c2",
-    ]
+    # claude counter should still be at 0 → first claude call returns c1.
+    assert allocator.allocate(model_name="claude").model_client_config.api_base == "http://c1"
+
+
+def test_by_model_name_allocator_returns_none_for_unknown_or_missing_name():
+    pool = [_make_named_entry("gpt-4", "a1")]
+    allocator = ByModelNameAllocator(pool)
+    assert allocator.allocate(model_name=None) is None
+    assert allocator.allocate() is None  # default arg
+    assert allocator.allocate(model_name="") is None
+    assert allocator.allocate(model_name="gemini") is None
+    # Unknown-name calls must NOT advance any counter.
+    assert allocator.allocate(model_name="gpt-4").model_client_config.api_base == "http://a1"
 
 
 def test_by_model_name_allocator_handles_empty_pool():
     allocator = ByModelNameAllocator([])
+    assert allocator.allocate(model_name="gpt-4") is None
     assert allocator.allocate() is None
 
 
-def test_by_model_name_allocator_distributes_evenly_when_groups_uneven():
+def test_round_robin_allocator_ignores_model_name_argument():
     pool = [
         _make_named_entry("gpt-4", "a1"),
-        _make_named_entry("gpt-4", "a2"),
-        _make_named_entry("gpt-4", "a3"),
-        _make_named_entry("gpt-4", "a4"),
         _make_named_entry("claude", "c1"),
     ]
-    allocator = ByModelNameAllocator(pool)
-    counts: dict[str, int] = {"gpt-4": 0, "claude": 0}
-    for _ in range(20):
-        cfg = allocator.allocate()
-        counts[cfg.model_request_config.model_name] += 1
-    # Even split per name, regardless of pool composition.
-    assert counts == {"gpt-4": 10, "claude": 10}
+    allocator = RoundRobinModelAllocator(pool)
+    # Despite passing names, rotation walks the pool linearly.
+    bases = [
+        allocator.allocate(model_name="claude").model_client_config.api_base,
+        allocator.allocate(model_name="gpt-4").model_client_config.api_base,
+        allocator.allocate(model_name="claude").model_client_config.api_base,
+    ]
+    assert bases == ["http://a1", "http://c1", "http://a1"]
 
 
 def test_build_model_allocator_dispatches_by_strategy():
@@ -328,7 +349,7 @@ def test_round_robin_load_state_dict_tolerates_missing_or_bad_input():
     assert a.allocate().model_request_config.model_name == "m0"
 
 
-def test_by_model_name_state_dict_resumes_outer_and_inner_rotation():
+def test_by_model_name_state_dict_resumes_per_group_rotation():
     pool = [
         _make_named_entry("gpt-4", "a1"),
         _make_named_entry("gpt-4", "a2"),
@@ -337,19 +358,17 @@ def test_by_model_name_state_dict_resumes_outer_and_inner_rotation():
         _make_named_entry("claude", "c2"),
     ]
     a = ByModelNameAllocator(pool)
-    # Fire 3 rounds: gpt-4/a1, claude/c1, gpt-4/a2.
-    [a.allocate() for _ in range(3)]
+    # Drive gpt-4 twice (a1, a2) and claude once (c1).
+    a.allocate(model_name="gpt-4")
+    a.allocate(model_name="gpt-4")
+    a.allocate(model_name="claude")
     snapshot = a.state_dict()
 
     b = ByModelNameAllocator(pool)
     b.load_state_dict(snapshot)
-    # Continues with claude/c2, then gpt-4/a3, then claude/c1 (wrap).
-    expected = ["claude", "gpt-4", "claude"]
-    expected_bases = ["http://c2", "http://a3", "http://c1"]
-    for name, base in zip(expected, expected_bases):
-        cfg = b.allocate()
-        assert cfg.model_request_config.model_name == name
-        assert cfg.model_client_config.api_base == base
+    # gpt-4 continues at a3, claude continues at c2.
+    assert b.allocate(model_name="gpt-4").model_client_config.api_base == "http://a3"
+    assert b.allocate(model_name="claude").model_client_config.api_base == "http://c2"
 
 
 def test_by_model_name_load_state_dict_drops_stale_groups_and_seeds_new_ones():
@@ -358,9 +377,9 @@ def test_by_model_name_load_state_dict_drops_stale_groups_and_seeds_new_ones():
         _make_named_entry("claude", "c1"),
     ]
     a = ByModelNameAllocator(initial_pool)
-    [a.allocate() for _ in range(2)]
+    a.allocate(model_name="gpt-4")
+    a.allocate(model_name="claude")
     snapshot = a.state_dict()
-    # Snapshot has counters for gpt-4 and claude.
 
     new_pool = [
         _make_named_entry("gpt-4", "a1"),
@@ -371,13 +390,10 @@ def test_by_model_name_load_state_dict_drops_stale_groups_and_seeds_new_ones():
     b = ByModelNameAllocator(new_pool)
     b.load_state_dict(snapshot)  # must not raise on stale claude entry
 
-    # gpt-4 inner counter restored to 1 → next gpt-4 pick is a2.
-    # gemini inner counter is fresh (0) → first gemini pick is g1.
-    # name_index restored to 2 → next group is gpt-4 (since names are
-    # [gpt-4, gemini], 2 % 2 == 0).
-    cfg = b.allocate()
-    assert cfg.model_request_config.model_name == "gpt-4"
-    assert cfg.model_client_config.api_base == "http://a2"
+    # gpt-4 counter restored to 1 → next gpt-4 pick is a2.
+    assert b.allocate(model_name="gpt-4").model_client_config.api_base == "http://a2"
+    # gemini counter is fresh (0) → first gemini pick is g1.
+    assert b.allocate(model_name="gemini").model_client_config.api_base == "http://g1"
 
 
 def test_by_model_name_load_state_dict_tolerates_malformed_input():
@@ -386,9 +402,11 @@ def test_by_model_name_load_state_dict_tolerates_malformed_input():
         _make_named_entry("claude", "c1"),
     ]
     a = ByModelNameAllocator(pool)
-    a.load_state_dict({"name_index": "bogus", "inner_indexes": "not-a-dict"})
-    cfg = a.allocate()
-    assert cfg.model_request_config.model_name == "gpt-4"
+    a.load_state_dict({"inner_indexes": "not-a-dict"})
+    assert a.allocate(model_name="gpt-4").model_client_config.api_base == "http://a1"
+
+    a.load_state_dict({"inner_indexes": {"gpt-4": "bogus"}})
+    assert a.allocate(model_name="gpt-4").model_client_config.api_base == "http://a1"
 
 
 # ---------------------------------------------------------------------------
@@ -467,7 +485,8 @@ def test_persist_leader_config_includes_allocator_state():
         _make_named_entry("claude", "c1"),
     ]
     allocator = ByModelNameAllocator(pool)
-    [allocator.allocate() for _ in range(2)]
+    allocator.allocate(model_name="gpt-4")
+    allocator.allocate(model_name="claude")
 
     agent = _bare_team_agent(allocator)
     session = _StubSession()
@@ -475,8 +494,7 @@ def test_persist_leader_config_includes_allocator_state():
 
     assert "model_allocator_state" in session.state
     snapshot = session.state["model_allocator_state"]
-    assert snapshot["name_index"] == 2
-    assert snapshot["inner_indexes"] == {"gpt-4": 1, "claude": 1}
+    assert snapshot == {"inner_indexes": {"gpt-4": 1, "claude": 1}}
 
 
 def test_persist_allocator_state_writes_only_allocator_payload():
@@ -539,18 +557,42 @@ def test_round_trip_persist_then_load_continues_rotation():
         _make_named_entry("gpt-4", "a2"),
         _make_named_entry("claude", "c1"),
     ]
-    # Phase 1: leader allocates twice and persists.
+    # Phase 1: leader allocates one of each name and persists.
     allocator = ByModelNameAllocator(pool)
-    [allocator.allocate() for _ in range(2)]
+    allocator.allocate(model_name="gpt-4")  # → a1
+    allocator.allocate(model_name="claude")  # → c1
     agent = _bare_team_agent(allocator)
     session = _StubSession()
     agent._persist_leader_config(session)
 
     # Phase 2: simulate process restart — fresh allocator, load state,
-    # the next allocation must continue, not restart.
+    # the next gpt-4 allocation must continue at a2 instead of restarting.
     fresh = ByModelNameAllocator(pool)
     fresh.load_state_dict(session.state["model_allocator_state"])
-    cfg = fresh.allocate()
-    # After 2 allocations [gpt-4/a1, claude/c1], next is gpt-4/a2.
+    cfg = fresh.allocate(model_name="gpt-4")
     assert cfg.model_request_config.model_name == "gpt-4"
     assert cfg.model_client_config.api_base == "http://a2"
+
+
+def test_leader_spec_carries_model_name_for_pool_allocation():
+    from openjiuwen.agent_teams.schema.blueprint import LeaderSpec
+
+    leader = LeaderSpec(model_name="gpt-4")
+    assert leader.model_name == "gpt-4"
+    # Round-trips through JSON for spec serialization.
+    restored = LeaderSpec.model_validate_json(leader.model_dump_json())
+    assert restored.model_name == "gpt-4"
+
+
+def test_team_member_spec_carries_model_name_for_pool_allocation():
+    from openjiuwen.agent_teams.schema.team import TeamMemberSpec
+
+    member = TeamMemberSpec(
+        member_name="dev1",
+        display_name="Dev 1",
+        persona="backend",
+        model_name="claude",
+    )
+    assert member.model_name == "claude"
+    restored = TeamMemberSpec.model_validate_json(member.model_dump_json())
+    assert restored.model_name == "claude"

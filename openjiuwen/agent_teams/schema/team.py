@@ -69,11 +69,22 @@ class TeamMemberSpec(BaseModel):
     Not a runtime data carrier — spawn/restart paths read from DB directly.
     """
 
+    model_config = ConfigDict(protected_namespaces=())
+
     member_name: str
     display_name: str
     role_type: TeamRole = TeamRole.TEAMMATE
     persona: str
     prompt_hint: Optional[str] = None
+    model_name: Optional[str] = None
+    """Optional pool model_name to allocate from when ``TeamSpec.model_pool``
+    is configured with ``by_model_name`` strategy.
+
+    Forwarded to ``ModelAllocator.allocate`` at ``build_team`` time so
+    this member draws an endpoint from the named group. Ignored by the
+    ``round_robin`` strategy. ``None`` (default) means the member uses
+    its per-agent model (or no allocation when the pool is empty).
+    """
 
 
 class ModelPoolEntry(BaseModel):
