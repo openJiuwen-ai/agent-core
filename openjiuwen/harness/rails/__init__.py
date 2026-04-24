@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """DeepAgent rail definitions."""
-from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRail
+from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRail, AskUserPayload
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
 from openjiuwen.harness.rails.interrupt.interrupt_base import BaseInterruptRail
 from openjiuwen.harness.rails.base import DeepAgentRail
@@ -37,6 +37,7 @@ __all__ = [
     "SubagentRail",
     "SessionRail",
     "AskUserRail",
+    "AskUserPayload",
     "ConfirmInterruptRail",
     "BaseInterruptRail",
     "SecurityRail",

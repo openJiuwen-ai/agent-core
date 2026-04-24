@@ -94,14 +94,14 @@ class TestCodeAgentExecutionModeMock(unittest.IsolatedAsyncioTestCase):
         plan_path.write_text(content, encoding="utf-8")
         return plan_path
 
-    def _resume_answer(self, interrupt_result: dict, answer: str):
+    def _resume_answer(self, interrupt_result: dict, answer: str, question_text: str = "Question"):
         """复用 ask_user 中断恢复逻辑，避免重复 mock 代码。"""
         self.assertEqual(interrupt_result.get("result_type"), "interrupt")
         interrupt_ids = interrupt_result.get("interrupt_ids", [])
         self.assertEqual(len(interrupt_ids), 1)
 
         interactive_input = InteractiveInput()
-        interactive_input.update(interrupt_ids[0], {"answer": answer})
+        interactive_input.update(interrupt_ids[0], {"answers": {question_text: answer}})
         return interactive_input
 
     @pytest.mark.asyncio
@@ -172,7 +172,16 @@ class TestCodeAgentExecutionModeMock(unittest.IsolatedAsyncioTestCase):
             mock_llm.set_responses([
                 create_tool_call_response(
                     "ask_user",
-                    json.dumps({"question": "你希望展示哪个城市？"}, ensure_ascii=False),
+                    json.dumps({
+                        "questions": [{
+                            "header": "城市",
+                            "question": "你希望展示哪个城市？",
+                            "options": [
+                                {"label": "北京", "description": "展示北京城市信息"},
+                                {"label": "上海", "description": "展示上海城市信息"},
+                            ],
+                        }]
+                    }, ensure_ascii=False),
                     tool_call_id="ask_city_1",
                 ),
                 create_text_response("收到你的反馈，计划已更新为展示上海城市信息。"),
@@ -182,7 +191,7 @@ class TestCodeAgentExecutionModeMock(unittest.IsolatedAsyncioTestCase):
                 {"query": "继续完善计划，城市你先问我"},
                 session=self._session,
             )
-            interactive_input = self._resume_answer(first, "上海")
+            interactive_input = self._resume_answer(first, "上海", "你希望展示哪个城市？")
             second = await Runner.run_agent(agent, {"query": interactive_input}, session=self._session)
 
         self.assertEqual(second.get("result_type"), "answer")
@@ -201,7 +210,16 @@ class TestCodeAgentExecutionModeMock(unittest.IsolatedAsyncioTestCase):
             mock_llm.set_responses([
                 create_tool_call_response(
                     "ask_user",
-                    json.dumps({"question": "是否需要天气模块？"}, ensure_ascii=False),
+                    json.dumps({
+                        "questions": [{
+                            "header": "天气",
+                            "question": "是否需要天气模块？",
+                            "options": [
+                                {"label": "需要", "description": "添加天气模块"},
+                                {"label": "不需要", "description": "不添加天气模块"},
+                            ],
+                        }]
+                    }, ensure_ascii=False),
                     tool_call_id="ask_feature_1",
                 ),
                 create_text_response("已记录：需要天气模块。"),
@@ -223,7 +241,7 @@ class TestCodeAgentExecutionModeMock(unittest.IsolatedAsyncioTestCase):
             ])
 
             first = await Runner.run_agent(agent, {"query": "先问我一个问题再继续"}, session=self._session)
-            interactive_input = self._resume_answer(first, "需要")
+            interactive_input = self._resume_answer(first, "需要", "是否需要天气模块？")
             resumed_answer = await Runner.run_agent(agent, {"query": interactive_input}, session=self._session)
             self.assertEqual(resumed_answer.get("result_type"), "answer")
 

@@ -315,20 +315,19 @@ if __name__ == "__main__":
 
 ## class AskUserPayload
 
-用户输入响应的数据结构。
+用户输入响应的数据结构，用于恢复执行时传递用户答案。
 
 **参数**：
 
-* **answer**(str)：用户的回答。默认值：`""`。
+* **answers**(Dict[str, str])：问题文本到答案的映射字典，键为问题的完整文本（`question` 字段值），值为用户的答案。默认值：`{}`。
 
 ## class AskUserRequest
 
-询问用户请求配置。
+询问用户请求配置，继承自 `InterruptRequest`，扩展了 `questions` 字段用于多问题模式。
 
 **参数**：
 
-* **message**(str)：向用户显示的问题。默认值：`"Please input"`。
-* **payload_schema**(dict)：用户输入的数据结构定义。默认值：`AskUserPayload`的JSON Schema。
+* **questions**(List[dict])：向用户展示的问题列表，每个问题包含 header、question、options 等字段。默认值：`[]`。
 
 ## class AskUserRail
 
@@ -341,6 +340,15 @@ class AskUserRail(BaseInterruptRail)
 **参数**：
 
 * **tool_names**(Iterable[str], 可选)：需要拦截的工具名称列表。默认值：`["ask_user"]`。
+
+### 多问题模式
+
+`ask_user` 工具支持多问题模式，可一次性向用户提出1-4个问题，每个问题可带2-4个选项。中断返回的 `InterruptRequest` 中：
+
+* **`questions`**：展示数据，包含完整的问题结构（header、question、options、multi_select、preview等）
+* **`payload_schema`**：用户输入格式定义，描述 `AskUserPayload` 的 JSON Schema（answers 的输入格式）
+
+用户恢复执行时，使用 `answers` 字典提供答案，键为问题文本（`question` 字段值），值为用户选择的答案。
 
 **样例**：
 
@@ -370,10 +378,15 @@ async def main():
     print(f"Result type: {result['result_type']}")
     print(f"Interrupt IDs: {result.get('interrupt_ids', [])}")
 
-    # 3. 用户提供答案
+    # 3. 用户通过questions字段获取问题文本，提供答案
     tool_call_id = result['interrupt_ids'][0]
+    state = result['state'][0]
+    payload = state.payload.value
+    questions = payload.questions  # 问题列表，用于展示给用户
+    first_question = questions[0]['question']  # 获取问题完整文本
+
     interactive_input = InteractiveInput()
-    interactive_input.update(tool_call_id, {"answer": "user_answer.txt"})
+    interactive_input.update(tool_call_id, {"answers": {first_question: "user_answer.txt"}})
 
     # 4. 恢复执行
     result = await agent.invoke(
