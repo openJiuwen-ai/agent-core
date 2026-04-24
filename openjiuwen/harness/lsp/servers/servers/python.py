@@ -30,9 +30,11 @@ def _resolve_pyright_command() -> tuple[str, list[str]] | None:
             [npm_path, "list", "-g", "--depth=0", "pyright"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if result.returncode == 0:
-            lines = result.stdout.splitlines()
+            lines = (result.stdout or "").splitlines()
             # Output format:
             #   C:\Users\...\npm
             #   `-- pyright@1.1.408
@@ -62,7 +64,7 @@ def _resolve_pyright_command() -> tuple[str, list[str]] | None:
         return (raw, ["--stdio"])
 
     try:
-        content = Path(raw).read_text(encoding="utf-8")
+        content = Path(raw).read_text(encoding="utf-8", errors="replace")
     except Exception:
         return None
 

@@ -74,6 +74,7 @@ class TestBuildLspTool:
         assert "prepareCallHierarchy" in op_enum
         assert "incomingCalls" in op_enum
         assert "outgoingCalls" in op_enum
+
         assert len(op_enum) == 8
 
     def test_build_lsp_tool_required_fields(self):

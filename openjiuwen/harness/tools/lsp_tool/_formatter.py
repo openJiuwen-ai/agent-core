@@ -1,4 +1,4 @@
-"""LSP result formatters for the 8 operations."""
+"""LSP result formatters for the 8 navigation operations."""
 
 from __future__ import annotations
 
@@ -199,25 +199,26 @@ def format_incoming_calls(result: list[dict[str, Any]]) -> str:
 
 
 def format_outgoing_calls(result: list[dict[str, Any]]) -> str:
-    """Format outgoing call hierarchy results."""
+    """Format outgoing call hierarchy results.
+
+    Each CallHierarchyOutgoingCall has:
+      - ``to``: CallHierarchyItem — the callee
+      - ``fromRanges``: Range[] — call-site ranges inside the caller
+    """
     if not result:
         return "No outgoing calls found."
-    groups: dict[str, list[dict[str, Any]]] = {}
-    for i in result:
-        uri = i.get("from", {}).get("uri", "")
-        groups.setdefault(format_uri(uri), []).append(i)
     lines = []
-    for path, calls in groups.items():
-        lines.append(f"{path}:")
-        for call in calls:
-            callee = call.get("from", {})
-            ranges = call.get("fromRanges", [])
-            from_line = callee.get("range", {}).get("start", {}).get("line", 0) + 1
-            for r in ranges:
-                r_line = r["start"]["line"] + 1
-                r_char = r["start"]["character"] + 1
-                lines.append(f"  {from_line}: call site {r_line}:{r_char} -> {callee.get('name', '?')}")
-    return "\n".join(lines)
+    for call in result:
+        callee = call.get("to", {})
+        ranges = call.get("fromRanges", [])
+        callee_name = callee.get("name", "?")
+        callee_path = format_uri(callee.get("uri", ""))
+        callee_line = callee.get("range", {}).get("start", {}).get("line", 0) + 1
+        for r in ranges:
+            r_line = r["start"]["line"] + 1
+            r_char = r["start"]["character"] + 1
+            lines.append(f"  call site {r_line}:{r_char} -> {callee_name} ({callee_path}:{callee_line})")
+    return "\n".join(lines) if lines else "No outgoing calls found."
 
 
 def format_result(operation: LspOperation, result: Any) -> str:  # noqa: ANN401
