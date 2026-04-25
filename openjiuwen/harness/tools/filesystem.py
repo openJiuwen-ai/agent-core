@@ -587,24 +587,24 @@ class ReadFileTool(Tool):
         except OSError:
             pass
 
-        previous = self._snapshots.get(key)
-        if previous and mtime_ns and previous.mtime_ns == mtime_ns:
-            await self._record_read_state(
-                file_path=file_path,
-                mtime_ns=mtime_ns,
-                size_bytes=size_bytes,
-                is_partial=user_supplied_limit or offset > 0,
-                rendered_line_count=previous.line_count,
-            )
-            return ToolOutput(
-                success=True,
-                data={
-                    "content": self.FILE_UNCHANGED_STUB,
-                    "file_path": file_path,
-                    "unchanged": True,
-                    "line_count": previous.line_count,
-                },
-            )
+        # previous = self._snapshots.get(key)
+        # if previous and mtime_ns and previous.mtime_ns == mtime_ns:
+        #     await self._record_read_state(
+        #         file_path=file_path,
+        #         mtime_ns=mtime_ns,
+        #         size_bytes=size_bytes,
+        #         is_partial=user_supplied_limit or offset > 0,
+        #         rendered_line_count=previous.line_count,
+        #     )
+        #     return ToolOutput(
+        #         success=True,
+        #         data={
+        #             "content": self.FILE_UNCHANGED_STUB,
+        #             "file_path": file_path,
+        #             "unchanged": True,
+        #             "line_count": previous.line_count,
+        #         },
+        #     )
 
         try:
             if self._is_pdf(file_path):
