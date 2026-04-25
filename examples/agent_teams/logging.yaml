@@ -1,7 +1,7 @@
 logging:
   backend: loguru
   defaults:
-    level: INFO
+    level: DEBUG
     enqueue: true
     catch: false
     backtrace: false
@@ -21,8 +21,9 @@ logging:
         <level>{level: <8}</level> |
         <cyan>{extra[log_type]}</cyan> |
         <yellow>{extra[trace_id]}</yellow> |
+        <white>{extra[member_id]}</white> |
         <blue>{extra[short_path]}:{line}</blue> |
-        <level>{message}</level>
+        {message}
     app_json:
       target: ./logs/jiuwen.log
       level: DEBUG
@@ -31,13 +32,21 @@ logging:
       retention: 14 days
       compression: gz
       encoding: utf-8
-    perf_json:
-      target: ./logs/performance/jiuwen_performance.jsonl
-      level: INFO
-      serialize: true
+      format: >-
+        {time:YYYY-MM-DD HH:mm:ss.SSS} |
+        {process.id} |
+        {level: <8} |
+        {extra[log_type]} |
+        {extra[trace_id]} |
+        {extra[member_id]} |
+        {extra[short_path]}:{line} |
+        {message}
+    detail_json:
+      target: /Users/alan/.openjiuwen/.agent_teams/my_project_team/logs/jiuwen_details.log
+      level: DEBUG
       enqueue: true
-      rotation: 200 MB
-      retention: 7 days
+      rotation: 500 MB
+      retention: 14 days
       compression: gz
       encoding: utf-8
   routes:
@@ -55,10 +64,19 @@ logging:
     "*":
       - console
       - app_json
+      - detail_json
   loggers:
     common:
       level: INFO
     agent:
       level: INFO
+    llm:
+      level: INFO
     team:
       level: DEBUG
+    sys_operation:
+      level: WARN
+    runner:
+      level: WARN
+    session:
+      level: INFO

@@ -56,14 +56,14 @@ model_pool:
       client: *openrouter_client
       request: *default_request
 
-  - model_name: ep-20260306101215-m8krh
-    api_key: "${POOL_GLM47_KEY}"
-    api_base_url: "${POOL_GLM47_BASE}"
-    api_provider: OpenAI
-    description: "GLM-4.7 direct endpoint"
-    metadata:
-      client: *openrouter_client
-      request: *default_request
+#  - model_name: ep-20260306101215-m8krh
+#    api_key: "${POOL_GLM47_KEY}"
+#    api_base_url: "${POOL_GLM47_BASE}"
+#    api_provider: OpenAI
+#    description: "GLM-4.7 direct endpoint"
+#    metadata:
+#      client: *openrouter_client
+#      request: *default_request
   # --- z-ai/glm-5.1 ---
   - model_name: z-ai/glm-5.1
     api_key: "${POOL_GLM51_KEY_1}"
@@ -220,7 +220,7 @@ storage:
 runtime:
   session_id: model_pool_session
   initial_query: >-
-    当前模型池共配置了 8 种模型（glm-5、ep-20260306101215-m8krh、z-ai/glm-5.1、xiaomi/mimo-v2-pro、
+    当前模型池共配置了 6 种模型（z-ai/glm-5.1、xiaomi/mimo-v2-pro、
     minimax/minimax-m2.5、minimax/minimax-m2.7、moonshotai/kimi-k2.6、moonshotai/kimi-k2.5），每种模型都有2个
-    采用 by_model_name 策略均匀分配。请拉起 17 名队员，每人均匀分配所有的模型，
+    采用 by_model_name 策略均匀分配。请拉起 12 名队员，每人均匀分配所有的模型，不用创建任务，不要在成员信息和描述中体现分配的模型名称，直接广播收集大家的回复，所有人单点发送leader禁止广播
     让每位队员报告自己的编号和所使用的模型名称。
