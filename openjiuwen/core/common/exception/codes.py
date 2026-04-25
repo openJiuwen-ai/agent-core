@@ -400,6 +400,7 @@ class StatusCode(Enum):
     AGENT_TEAM_CREATE_RUNTIME_ERROR = (132001, "agent team_create runtime error, reason: {error_msg}")
     AGENT_TEAM_EXECUTION_ERROR = (132002, "agent team execution error, reason: {error_msg}")
     AGENT_TEAM_AGENT_NOT_FOUND = (132003, "agent team agent not found error, reason: {error_msg}")
+    AGENT_TEAM_CONFIG_INVALID = (132004, "agent team config invalid, reason: {reason}")
 
     # =========================
     # DevTools / AgentBuilder 140000 - 140099

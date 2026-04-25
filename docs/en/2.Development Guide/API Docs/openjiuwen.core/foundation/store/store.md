@@ -842,16 +842,64 @@ def openjiuwen.core.foundation.store.create_vector_store(
 ) -> BaseVectorStore | None
 ```
 
-Vector store factory function for creating vector store instances by type.
+Vector-store factory function. Resolution order:
+
+1. **Built-in backends**: `"chroma"`, `"milvus"`, `"gaussvector"` (closed set, always wins).
+2. **Explicit registrations**: implementations registered in-process via `register_vector_store(name, factory)`.
+3. **Entry points**: third-party plugins published under the `openjiuwen.vector_stores` group.
+
+A plugin that fails to load or instantiate is logged at WARNING and returns `None` — a broken plugin cannot crash the factory for the whole application.
 
 **Parameters**:
 
-- `store_type: str`: Storage type, supports `"chroma"`, `"milvus"`, or `"gaussvector"`
-- `**kwargs: Any`: Additional parameters passed to specific storage implementations
+- `store_type: str`: Storage type. In addition to built-ins, may be any name registered via `register_vector_store` or exposed by an installed plugin's entry_points.
+- `**kwargs: Any`: Additional parameters passed verbatim to the backend constructor.
 
 **Returns**:
 
-- `BaseVectorStore | None`: Vector store instance; returns `None` for unsupported types
+- `BaseVectorStore | None`: Vector-store instance, or `None` if no backend matches / plugin loading failed.
+
+---
+
+## function register_vector_store
+
+```python
+def openjiuwen.core.foundation.store.register_vector_store(
+    name: str,
+    factory: Callable[..., BaseVectorStore],
+) -> None
+```
+
+Programmatically register a third-party vector-store implementation in the current process. Useful for **private backends** that are not shipped via PyPI and therefore cannot use the entry_points mechanism. After registration, `create_vector_store(name, ...)` can create instances by name.
+
+**Parameters**:
+
+- `name: str`: Backend identifier to be passed later to `create_vector_store(name, ...)`.
+- `factory: Callable[..., BaseVectorStore]`: Callable accepting `**kwargs` and returning a `BaseVectorStore` (typically the class itself).
+
+**Behavior**:
+
+- Thread-safety: **not thread-safe**. Call during application init, before any worker thread starts.
+- Built-in names (`chroma` / `milvus` / `gaussvector`) cannot be overridden: calling `register_vector_store` with a built-in name has no effect (the built-in always wins in factory resolution).
+
+---
+
+## constant VECTOR_STORE_ENTRY_POINT_GROUP
+
+```python
+VECTOR_STORE_ENTRY_POINT_GROUP = "openjiuwen.vector_stores"
+```
+
+The Python entry_points group name that third-party vector-store plugins must declare. **Stable public constant** — changing this string would break every published plugin.
+
+Plugin authors declare it in their package's `pyproject.toml`:
+
+```toml
+[project.entry-points."openjiuwen.vector_stores"]
+my_backend = "my_package.my_vector_store:MyVectorStore"
+```
+
+After `pip install my-package`, users call `create_vector_store("my_backend", ...)` to obtain an instance. Full authoring guide: [Store Plugin Development](../../../Advanced%20Usage/Store%20Plugin%20Development.md).
 
 ---
 

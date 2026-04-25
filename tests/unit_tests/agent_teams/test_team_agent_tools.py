@@ -2,6 +2,8 @@
 """Tests for role-based tool registration."""
 from __future__ import annotations
 
+import pytest
+
 from openjiuwen.agent_teams import create_agent_team
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 from openjiuwen.agent_teams.schema.blueprint import (
@@ -34,6 +36,7 @@ _PYZMQ_TRANSPORT = TransportSpec(type="pyzmq", params={
 # === Leader gets full tool set ===
 
 
+@pytest.mark.level0
 def test_leader_gets_management_tools():
     """Leader should have team management and
     messaging tools."""
@@ -53,6 +56,7 @@ def test_leader_gets_management_tools():
 # === Teammate gets execution-only tools ===
 
 
+@pytest.mark.level0
 def test_teammate_gets_execution_tools():
     """Teammate should have task execution and
     messaging tools but not management-only tools."""
@@ -93,6 +97,7 @@ def test_teammate_gets_execution_tools():
 # === Manager instances are stored ===
 
 
+@pytest.mark.level1
 def test_task_and_message_managers_are_stored():
     """After configuration, _task_manager and
     _message_manager should be set on the
@@ -106,6 +111,7 @@ def test_task_and_message_managers_are_stored():
     assert leader._message_manager is not None
 
 
+@pytest.mark.level1
 def test_teammate_registers_tool_approval_rail_from_deep_agent_spec():
     """Configured teammate approval tools should attach TeamToolApprovalRail."""
     leader = create_agent_team(

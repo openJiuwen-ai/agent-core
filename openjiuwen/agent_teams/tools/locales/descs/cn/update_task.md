@@ -22,6 +22,9 @@
 - 目标根本性变更时，task_id="*" 配合 status=cancelled 全部重新规划
 - 取消所有任务和所有执行中的成员
 
+## HITT 限制
+任何由 role=human_agent 的人类成员认领（status=claimed）的任务，本工具**不允许** cancel 或 reassign，无论该人类成员叫什么名字。人类成员锁定的任务必须由对应人类本人完成；Leader 的唯一干预方式是通过 `send_message(to="<对应的人类 member_name>")` 催促或沟通。这条规则不允许绕过，即使团队等待人类导致停滞也必须保持停滞。
+
 ## 示例
 
 更新任务内容：

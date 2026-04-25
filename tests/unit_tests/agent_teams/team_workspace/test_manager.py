@@ -26,6 +26,7 @@ def _make_manager(tmp_path, *, config: TeamWorkspaceConfig | None = None) -> Tea
     )
 
 
+@pytest.mark.level0
 def test_mount_into_workspace_uses_symlink(monkeypatch, tmp_path):
     manager = _make_manager(tmp_path)
     workspace_root = tmp_path / "agent-workspace"
@@ -43,7 +44,8 @@ def test_mount_into_workspace_uses_symlink(monkeypatch, tmp_path):
     assert calls == [(manager.workspace_path, expected_link, True)]
 
 
-@pytest.mark.skip(reason="Temporarily skipped in Linux CI due Windows path simulation causing pytest internal errors")
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction fallback only applies on Windows")
+@pytest.mark.level0
 def test_mount_into_workspace_falls_back_to_junction_on_windows_1314(monkeypatch, tmp_path):
     manager = _make_manager(tmp_path)
     workspace_root = tmp_path / "agent-workspace"
@@ -82,7 +84,8 @@ def test_mount_into_workspace_falls_back_to_junction_on_windows_1314(monkeypatch
         }
     ]
 
-
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction fallback only applies on Windows")
+@pytest.mark.level0
 def test_mount_into_workspace_reraises_non_1314_symlink_error(monkeypatch, tmp_path):
     manager = _make_manager(tmp_path)
     workspace_root = tmp_path / "agent-workspace"
@@ -112,6 +115,7 @@ class _GitCallRecorder:
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_initialize_without_version_control_skips_git(monkeypatch, tmp_path):
     recorder = _GitCallRecorder()
     monkeypatch.setattr(
@@ -134,6 +138,7 @@ async def test_initialize_without_version_control_skips_git(monkeypatch, tmp_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_initialize_with_version_control_runs_git_init(monkeypatch, tmp_path):
     recorder = _GitCallRecorder()
     monkeypatch.setattr(
@@ -151,6 +156,7 @@ async def test_initialize_with_version_control_runs_git_init(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_auto_commit_noop_when_version_control_disabled(monkeypatch, tmp_path):
     recorder = _GitCallRecorder()
     monkeypatch.setattr(
@@ -170,6 +176,7 @@ async def test_auto_commit_noop_when_version_control_disabled(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_pull_push_history_noop_when_version_control_disabled(monkeypatch, tmp_path):
     recorder = _GitCallRecorder()
     monkeypatch.setattr(

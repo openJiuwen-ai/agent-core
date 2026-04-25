@@ -11,6 +11,7 @@ from openjiuwen.agent_evolving.checkpointing.types import (
     EvolveCheckpoint,
     PendingChange,
     PendingSkillCreation,
+    PendingTeamSkillCreation,
     EvolutionContext,
 )
 from openjiuwen.agent_evolving.checkpointing.store_file import FileCheckpointStore
@@ -26,6 +27,7 @@ __all__ = [
     "EvolveCheckpoint",
     "PendingChange",
     "PendingSkillCreation",
+    "PendingTeamSkillCreation",
     "EvolutionContext",
     "FileCheckpointStore",
     "EvolutionStore",

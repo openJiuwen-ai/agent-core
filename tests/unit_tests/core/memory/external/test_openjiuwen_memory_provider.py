@@ -191,7 +191,6 @@ class TestInitialize:
             return_value=mock_ltm,
         ):
             await provider.initialize(scope_id="__default__")
-            mock_ltm.set_scope_config.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_initialize_creates_stores_from_config(self, mock_ltm):

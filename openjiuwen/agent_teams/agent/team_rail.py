@@ -23,7 +23,7 @@ Section layout (aligned with ``prompt_design.md``):
 
 from __future__ import annotations
 
-from typing import Any, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional
 
 from openjiuwen.agent_teams.agent.prompts import load_template
 from openjiuwen.agent_teams.agent.team_section_cache import MtimeSectionCache
@@ -40,10 +40,12 @@ if TYPE_CHECKING:
 # Section name constants
 # ---------------------------------------------------------------------------
 
+
 class TeamSectionName:
     """Centralized section names owned by ``TeamRail``."""
 
     ROLE = "team_role"
+    HITT = "team_hitt"
     WORKFLOW = "team_workflow"
     LIFECYCLE = "team_lifecycle"
     PERSONA = "team_persona"
@@ -75,21 +77,14 @@ _LABELS: dict[str, dict[str, str]] = {
         "team_workspace_abs": "绝对路径",
         "members_heading": "# 成员关系",
         "leader_mode_plan": (
-            "团队成员执行模式: plan_mode（成员领取任务后需先提交计划，"
-            "由你通过 approve_plan 审批后才能执行）"
+            "团队成员执行模式: plan_mode（成员领取任务后需先提交计划，由你通过 approve_plan 审批后才能执行）"
         ),
-        "leader_mode_build": (
-            "团队成员执行模式: build_mode（成员领取任务后自主执行并直接完成，"
-            "无需你审批计划）"
-        ),
+        "leader_mode_build": ("团队成员执行模式: build_mode（成员领取任务后自主执行并直接完成，无需你审批计划）"),
         "teammate_mode_plan": (
             "你的执行模式: plan_mode（领取任务后必须先通过 write_plan 提交计划，"
             "等待 leader 通过 approve_plan 审批后才能开始执行）"
         ),
-        "teammate_mode_build": (
-            "你的执行模式: build_mode（领取任务后可自主执行并直接标记完成，"
-            "无需 leader 审批计划）"
-        ),
+        "teammate_mode_build": ("你的执行模式: build_mode（领取任务后可自主执行并直接标记完成，无需 leader 审批计划）"),
     },
     "en": {
         "member_name_line": "Your member_name",
@@ -140,6 +135,7 @@ def _labels_for(language: str) -> dict[str, str]:
 # Section builders
 # ---------------------------------------------------------------------------
 
+
 def build_team_role_section(
     *,
     role: TeamRole,
@@ -166,19 +162,14 @@ def build_team_role_section(
     policy_name = "leader_policy" if role == TeamRole.LEADER else "teammate_policy"
     role_text = load_template(policy_name, language).content.strip()
 
-    member_line = (
-        f"{labels['member_name_line']}: {member_name}\n\n" if member_name else ""
-    )
+    member_line = f"{labels['member_name_line']}: {member_name}\n\n" if member_name else ""
     is_plan_mode = teammate_mode == "plan_mode"
     if role == TeamRole.LEADER:
         mode_label_key = "leader_mode_plan" if is_plan_mode else "leader_mode_build"
     else:
         mode_label_key = "teammate_mode_plan" if is_plan_mode else "teammate_mode_build"
     mode_line = f"{labels[mode_label_key]}\n\n"
-    body = (
-        f"{labels['role_heading']}\n\n"
-        f"{member_line}{mode_line}{role_text}\n"
-    )
+    body = f"{labels['role_heading']}\n\n{member_line}{mode_line}{role_text}\n"
     return PromptSection(
         name=TeamSectionName.ROLE,
         content={language: body},
@@ -186,22 +177,34 @@ def build_team_role_section(
     )
 
 
+_WORKFLOW_TEMPLATES: dict[str, str] = {
+    "default": "leader_workflow",
+    "predefined": "leader_workflow_predefined",
+    "hybrid": "leader_workflow_hybrid",
+}
+
+
 def build_team_workflow_section(
     *,
     role: TeamRole,
-    predefined_team: bool,
+    team_mode: str = "default",
     language: str = "cn",
 ) -> Optional[PromptSection]:
     """Build the workflow section (LEADER only).
 
+    Args:
+        role: LEADER or TEAMMATE.
+        team_mode: Workflow variant — "default", "predefined", or "hybrid".
+        language: Prompt language.
+
     Returns:
-        PromptSection wrapping ``leader_workflow.md`` (or the predefined
-        override) under an H1 heading; ``None`` for non-leader roles.
+        PromptSection wrapping the matching ``leader_workflow_*.md``
+        under an H1 heading; ``None`` for non-leader roles.
     """
     if role != TeamRole.LEADER:
         return None
     labels = _labels_for(language)
-    template_name = "leader_predefined_override" if predefined_team else "leader_workflow"
+    template_name = _WORKFLOW_TEMPLATES.get(team_mode, "leader_workflow")
     workflow_text = load_template(template_name, language).content.strip()
     body = f"{labels['workflow_heading']}\n\n{workflow_text}\n"
     return PromptSection(
@@ -340,6 +343,178 @@ def build_team_info_section(
     )
 
 
+def _format_human_agent_roster(names: list[str], language: str) -> str:
+    """Render the list of human-agent member names for inline prompts."""
+    quoted = ", ".join(f"`{n}`" for n in names)
+    if language == "cn":
+        return f"注册的人类成员：{quoted}"
+    return f"Registered human members: {quoted}"
+
+
+def _hitt_section_leader_cn(names: list[str]) -> str:
+    roster = _format_human_agent_roster(names, "cn")
+    return (
+        "# HITT — 人类成员协作规则\n\n"
+        f"{roster}。他们是真实人类操作者的代理，与你和其它 teammate 平等。"
+        "所有 role=human_agent 的成员都适用下列规则：\n\n"
+        "1. **禁止** 用 plain text 向任何人类成员发问或对话——所有定向"
+        '沟通必须调用 `send_message(to="<human_member_name>", ...)`，你的'
+        "纯文本输出对方是看不到的。\n"
+        "2. 可以通过 `update_task(task_id=..., assignee=\"<human_member_name>\")` "
+        "把需要特定人类判断或操作的任务指派给对应成员。\n"
+        "3. 一旦某个人类成员认领了任务（status=claimed），你 **不能** 取消"
+        "（update_task status=cancelled）也 **不能** 改派（update_task "
+        "assignee=<他人>），即使团队因人类没及时响应而停滞也必须保持停滞，"
+        "只能用 `send_message` 催促对应人类成员。\n"
+        "4. 每个人类成员始终是 ready 状态，不会进入 busy 或 shutdown，"
+        "所以不要对它们调用 `shutdown_member` / `spawn_member`。\n"
+        "5. 如果 user 表达了“我也要加入团队”之类的加入意图，且团队尚未"
+        "创建，请在 `build_team` 时把 `enable_hitt=true`；若需要多个不同"
+        "人类成员，通过 `predefined_members` 传入 role=human_agent 的 spec。\n"
+    )
+
+
+def _hitt_section_teammate_cn(names: list[str]) -> str:
+    roster = _format_human_agent_roster(names, "cn")
+    return (
+        "# HITT — 与人类成员协作\n\n"
+        f"团队里存在下列人类成员（真实人类）：{roster}。把他们视作普通 "
+        "teammate：与他们交流一律通过 `send_message(to=<对应名字>, ...)`，"
+        "不要假设他们会自动看到你的 plain text。他们可能拥有你无法完成的"
+        "决策权或操作能力。\n"
+    )
+
+
+def _hitt_section_human_agent_cn(names: list[str], self_name: str | None) -> str:
+    roster = _format_human_agent_roster(names, "cn")
+    peers = ""
+    if self_name:
+        peers = f"你的 member_name 是 `{self_name}`。\n"
+    return (
+        "# HITT — 你是团队里的人类成员\n\n"
+        f"{roster}。\n"
+        f"{peers}"
+        "你是团队里真实人类操作者的代理，与 leader、teammate 平等。\n"
+        "- 你只能通过 `send_message` 与团队交互；没有 `claim_task`、"
+        "`update_task`、`spawn_member` 等工具。\n"
+        "- Leader 通过 `update_task` 把任务指派给你后，你需要以对话方式"
+        "与团队沟通进展；完成后通过 `send_message` 告知 leader。\n"
+        "- 发送给你的消息一律自动标记已读，不会堆积未读。\n"
+    )
+
+
+def _hitt_section_leader_en(names: list[str]) -> str:
+    roster = _format_human_agent_roster(names, "en")
+    return (
+        "# HITT — Collaborating with Human Members\n\n"
+        f"{roster}. They represent real human operators and stand on "
+        "equal footing with you and the other teammates. The following "
+        "rules apply to every member whose role is `human_agent`:\n\n"
+        "1. You **must not** address a human member via plain text — "
+        "every direct exchange must go through "
+        '`send_message(to="<human_member_name>", ...)`. Your plain text '
+        "output is not visible to human members.\n"
+        "2. Use `update_task(task_id=..., "
+        'assignee="<human_member_name>")` to assign tasks that require a '
+        "specific human's judgement or action.\n"
+        "3. Once a human member claims a task (status=claimed) you "
+        "**cannot** cancel it (`update_task status=cancelled`) and "
+        "**cannot** reassign it (`update_task assignee=<someone>`). Even "
+        "if the team stalls waiting for that human, it must stall — only "
+        "`send_message` nudges to the specific human are allowed.\n"
+        "4. Every human member stays READY forever; never call "
+        "`shutdown_member` or `spawn_member` on them.\n"
+        '5. If the user signals intent to join the team (e.g. "I want '
+        'to join") and the team has not been created yet, call '
+        "`build_team` with `enable_hitt=true`. If multiple distinct "
+        "human members are needed, pass them via `predefined_members` "
+        "as TeamMemberSpec entries with role=human_agent.\n"
+    )
+
+
+def _hitt_section_teammate_en(names: list[str]) -> str:
+    roster = _format_human_agent_roster(names, "en")
+    return (
+        "# HITT — Working with Human Members\n\n"
+        f"The team includes the following human members (real humans): "
+        f"{roster}. Treat each of them as an ordinary teammate: every "
+        "direct exchange must use `send_message(to=<their_name>, ...)`. "
+        "Do not assume your plain text is visible to a human member; "
+        "they may hold decisions or privileges you cannot execute.\n"
+    )
+
+
+def _hitt_section_human_agent_en(names: list[str], self_name: str | None) -> str:
+    roster = _format_human_agent_roster(names, "en")
+    peers = ""
+    if self_name:
+        peers = f"Your member_name is `{self_name}`.\n"
+    return (
+        "# HITT — You are a human member\n\n"
+        f"{roster}.\n"
+        f"{peers}"
+        "You represent the human operator on this team, equal in "
+        "standing with the leader and teammates.\n"
+        "- Your only tool is `send_message`; you do not have "
+        "`claim_task`, `update_task`, `spawn_member`, etc.\n"
+        "- When the leader assigns you a task via `update_task`, reply "
+        "and coordinate through `send_message`. Announce completion "
+        "through `send_message` too.\n"
+        "- Every message addressed to you is auto-marked-read; there is "
+        "no unread backlog on your side.\n"
+    )
+
+
+def build_team_hitt_section(
+    *,
+    role: TeamRole,
+    human_agent_names: "list[str] | frozenset[str] | set[str] | None" = None,
+    language: str = "cn",
+    self_member_name: str | None = None,
+) -> Optional[PromptSection]:
+    """Build the HITT collaboration-rules section.
+
+    Returns a non-None section only when at least one human-agent
+    member is registered. Text is role-specific and enumerates every
+    registered human member inline so leaders and teammates can see
+    exactly whom to address via ``send_message``.
+
+    Args:
+        role: The role whose prompt this section targets.
+        human_agent_names: Member names of every registered human
+            agent. Empty/None means no human members → no section.
+        language: "cn" or "en".
+        self_member_name: The current member's own name, used to tell
+            a human-agent reader which entry in the roster is itself.
+    """
+    if not human_agent_names:
+        return None
+    names = sorted(human_agent_names)
+    if language == "cn":
+        if role == TeamRole.LEADER:
+            body = _hitt_section_leader_cn(names)
+        elif role == TeamRole.TEAMMATE:
+            body = _hitt_section_teammate_cn(names)
+        elif role == TeamRole.HUMAN_AGENT:
+            body = _hitt_section_human_agent_cn(names, self_member_name)
+        else:
+            return None
+    else:
+        if role == TeamRole.LEADER:
+            body = _hitt_section_leader_en(names)
+        elif role == TeamRole.TEAMMATE:
+            body = _hitt_section_teammate_en(names)
+        elif role == TeamRole.HUMAN_AGENT:
+            body = _hitt_section_human_agent_en(names, self_member_name)
+        else:
+            return None
+    return PromptSection(
+        name=TeamSectionName.HITT,
+        content={language: body},
+        priority=12,
+    )
+
+
 def build_team_members_section(
     *,
     team_members: list[dict[str, str]] | None,
@@ -423,7 +598,7 @@ class TeamRail(DeepAgentRail):
         lifecycle: str = "temporary",
         teammate_mode: str = "build_mode",
         language: str = "cn",
-        predefined_team: bool = False,
+        team_mode: str = "default",
         base_prompt: str | None = None,
         team_workspace_mount: str | None = None,
         team_workspace_path: str | None = None,
@@ -437,15 +612,21 @@ class TeamRail(DeepAgentRail):
         self._team_workspace_path = team_workspace_path
         self.system_prompt_builder = None
 
-        # Static sections built once and reused on every call.
+        # Static sections built once and reused on every call. The HITT
+        # section receives the roster snapshot captured at rail-init
+        # time; dynamic additions to the human-agent set (rare — only
+        # the build_team path adds them) take effect on the next rail
+        # rebuild.
+        human_names: list[str] = sorted(team_backend.human_agent_names()) if team_backend else []
         self._static_sections: list[PromptSection] = self._build_static_sections(
             role=role,
             persona=persona,
             member_name=member_name,
             lifecycle=lifecycle,
             teammate_mode=teammate_mode,
-            predefined_team=predefined_team,
+            team_mode=team_mode,
             base_prompt=base_prompt,
+            human_agent_names=human_names,
         )
 
         # Dynamic section caches: keyed on table-level mtime probes so
@@ -506,8 +687,9 @@ class TeamRail(DeepAgentRail):
         member_name: str | None,
         lifecycle: str,
         teammate_mode: str,
-        predefined_team: bool,
+        team_mode: str,
         base_prompt: str | None,
+        human_agent_names: list[str],
     ) -> list[PromptSection]:
         """Construct the never-changing sections once at rail init time."""
         builders = [
@@ -517,9 +699,15 @@ class TeamRail(DeepAgentRail):
                 teammate_mode=teammate_mode,
                 language=self._language,
             ),
+            build_team_hitt_section(
+                role=role,
+                human_agent_names=human_agent_names,
+                language=self._language,
+                self_member_name=member_name,
+            ),
             build_team_workflow_section(
                 role=role,
-                predefined_team=predefined_team,
+                team_mode=team_mode,
                 language=self._language,
             ),
             build_team_lifecycle_section(
@@ -579,6 +767,7 @@ __all__ = [
     "TeamRail",
     "TeamSectionName",
     "build_team_role_section",
+    "build_team_hitt_section",
     "build_team_workflow_section",
     "build_team_lifecycle_section",
     "build_team_persona_section",

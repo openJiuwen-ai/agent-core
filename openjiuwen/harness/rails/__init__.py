@@ -14,6 +14,7 @@ from openjiuwen.harness.rails.task_memory_rail import (
 )
 from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
 from openjiuwen.harness.rails.skill_evolution_rail import SkillEvolutionRail
+from openjiuwen.harness.rails.team_skill_rail import TeamSkillRail
 from openjiuwen.harness.rails.evolution_rail import EvolutionRail
 from openjiuwen.harness.rails.trajectory_rail import TrajectoryRail
 from openjiuwen.harness.rails.subagent_rail import SubagentRail
@@ -21,6 +22,7 @@ from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
 from openjiuwen.harness.rails.session_rail import SessionRail
 from openjiuwen.harness.rails.memory_rail import MemoryRail
 from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
+from openjiuwen.harness.rails.image_reference_rail import ImageReferenceRail
 from openjiuwen.harness.rails.verification_rail import VerificationRail
 from openjiuwen.harness.rails.verification_contract_rail import VerificationContractRail
 from openjiuwen.harness.rails.mcp_rail import McpRail
@@ -35,6 +37,7 @@ __all__ = [
     "TaskCompletionRail",
     "SkillUseRail",
     "SkillEvolutionRail",
+    "TeamSkillRail",
     "SubagentRail",
     "SessionRail",
     "AskUserRail",
@@ -45,6 +48,7 @@ __all__ = [
     "MemoryRail",
     "LspRail",
     "AgentModeRail",
+    "ImageReferenceRail",
     "VerificationRail",
     "VerificationContractRail",
     "McpRail",

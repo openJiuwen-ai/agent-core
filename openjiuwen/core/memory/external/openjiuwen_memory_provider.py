@@ -125,7 +125,7 @@ class OpenJiuwenMemoryProvider(MemoryProvider):
                 embedding_model=self._embedding_model,
             )
 
-        if self._scope_config and self._scope_id != "__default__":
+        if self._scope_config:
             await self._ltm.set_scope_config(self._scope_id, self._scope_config)
 
         self._is_initialized = True

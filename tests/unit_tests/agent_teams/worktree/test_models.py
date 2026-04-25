@@ -17,18 +17,21 @@ from tests.test_logger import logger
 
 
 class TestWorktreeLifecyclePolicy:
+    @pytest.mark.level0
     def test_enum_values(self):
         assert WorktreeLifecyclePolicy.AUTO == "auto"
         assert WorktreeLifecyclePolicy.EPHEMERAL == "ephemeral"
         assert WorktreeLifecyclePolicy.DURABLE == "durable"
         logger.info("WorktreeLifecyclePolicy enum values verified")
 
+    @pytest.mark.level0
     def test_all_members(self):
         members = set(WorktreeLifecyclePolicy)
         assert len(members) == 3
 
 
 class TestWorktreeConfig:
+    @pytest.mark.level0
     def test_defaults(self):
         cfg = WorktreeConfig()
         assert cfg.enabled is False
@@ -41,9 +44,11 @@ class TestWorktreeConfig:
         assert cfg.lifecycle_policy == WorktreeLifecyclePolicy.AUTO
         logger.info("WorktreeConfig default values verified")
 
+    @pytest.mark.level0
     def test_enabled(self, worktree_config):
         assert worktree_config.enabled is True
 
+    @pytest.mark.level0
     def test_with_lifecycle_policy(self):
         cfg = WorktreeConfig(
             enabled=True,
@@ -52,6 +57,7 @@ class TestWorktreeConfig:
         assert cfg.lifecycle_policy == WorktreeLifecyclePolicy.DURABLE
         logger.info("WorktreeConfig with lifecycle_policy verified")
 
+    @pytest.mark.level0
     def test_with_sparse_paths(self):
         cfg = WorktreeConfig(
             enabled=True,
@@ -59,6 +65,7 @@ class TestWorktreeConfig:
         )
         assert cfg.sparse_paths == ["src/", "tests/"]
 
+    @pytest.mark.level1
     def test_with_all_fields(self):
         cfg = WorktreeConfig(
             enabled=True,
@@ -76,6 +83,7 @@ class TestWorktreeConfig:
 
 
 class TestWorktreeSession:
+    @pytest.mark.level1
     def test_minimal(self):
         session = WorktreeSession(
             original_cwd="/home/user/repo",
@@ -91,6 +99,7 @@ class TestWorktreeSession:
         assert session.used_sparse_paths is False
         logger.info("WorktreeSession minimal creation verified")
 
+    @pytest.mark.level1
     def test_full(self):
         session = WorktreeSession(
             original_cwd="/repo",
@@ -112,6 +121,7 @@ class TestWorktreeSession:
         assert session.hook_based is True
         assert session.creation_duration_ms == 42.5
 
+    @pytest.mark.level1
     def test_serialization_roundtrip(self):
         session = WorktreeSession(
             original_cwd="/repo",
@@ -126,6 +136,7 @@ class TestWorktreeSession:
         assert restored == session
         logger.info("WorktreeSession serialization roundtrip verified")
 
+    @pytest.mark.level1
     def test_json_roundtrip(self):
         session = WorktreeSession(
             original_cwd="/repo",
@@ -138,6 +149,7 @@ class TestWorktreeSession:
 
 
 class TestWorktreeCreateResult:
+    @pytest.mark.level1
     def test_defaults(self):
         result = WorktreeCreateResult(worktree_path="/wt/test")
         assert result.worktree_path == "/wt/test"
@@ -148,6 +160,7 @@ class TestWorktreeCreateResult:
         assert result.hook_based is False
         logger.info("WorktreeCreateResult defaults verified")
 
+    @pytest.mark.level1
     def test_full(self):
         result = WorktreeCreateResult(
             worktree_path="/wt/test",
@@ -162,12 +175,14 @@ class TestWorktreeCreateResult:
 
 
 class TestWorktreeChangeSummary:
+    @pytest.mark.level1
     def test_defaults(self):
         summary = WorktreeChangeSummary()
         assert summary.changed_files == 0
         assert summary.commits == 0
         logger.info("WorktreeChangeSummary defaults verified")
 
+    @pytest.mark.level1
     def test_with_values(self):
         summary = WorktreeChangeSummary(changed_files=3, commits=2)
         assert summary.changed_files == 3

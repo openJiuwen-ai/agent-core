@@ -162,6 +162,13 @@ class LSPServerManager:
         self._instances: dict[ServerInstanceKey, LSPServerInstance] = {}
         self._spawning: dict[ServerInstanceKey, asyncio.Task[None]] = {}
         self._extension_map: dict[str, list[str]] = {}
+        # Set of object-ids for LSPServerInstance objects that already have the
+        # publishDiagnostics handler registered.  Prevents double-registration
+        # when open_file() or change_file() is called multiple times for the
+        # same server instance.
+        self._diag_handler_instances: set[int] = set()
+        # file URI → current document version (incremented on each didChange)
+        self._doc_versions: dict[str, int] = {}
 
     def get_workspace_root(self) -> str:
         """Get the workspace root directory."""
@@ -311,11 +318,87 @@ class LSPServerManager:
         """Log a server error."""
         logger.warning(f"[LSP] Server '{server_id}' failed: {error}")
 
+    def _ensure_diagnostic_handler(self, server: LSPServerInstance) -> None:
+        """Register the ``textDocument/publishDiagnostics`` handler on *server*.
+
+        Idempotent: the handler is registered at most once per server instance
+        (guarded by ``id(server)``).  The handler writes incoming diagnostic
+        notifications into the process-global :class:`LspDiagnosticRegistry`.
+
+        Called by :meth:`open_file` and :meth:`change_file` just before
+        sending the respective LSP notifications so that any diagnostics
+        emitted in response are captured.
+        """
+        from openjiuwen.harness.lsp.core.diagnostic_registry import LspDiagnosticRegistry
+
+        instance_id = id(server)
+        if instance_id in self._diag_handler_instances:
+            return
+
+        registry = LspDiagnosticRegistry.get_instance()
+        server_name = server.config.server_id
+
+        def _publish_diagnostics_handler(params: Any) -> None:
+            if not params or not isinstance(params, dict):
+                return
+            uri = params.get("uri", "")
+            raw_diags = params.get("diagnostics", [])
+            if not uri or not isinstance(raw_diags, list):
+                return
+            registry.register(server_name, uri, raw_diags)
+
+        server.add_notification_handler(
+            "textDocument/publishDiagnostics",
+            _publish_diagnostics_handler,
+        )
+        self._diag_handler_instances.add(instance_id)
+        logger.debug(
+            "[LSPServerManager] publishDiagnostics handler registered for server '%s'",
+            server_name,
+        )
+
+    @classmethod
+    def get_pending_diagnostics(
+        cls,
+        max_per_file: int = 10,
+        max_total: int = 30,
+    ) -> list[Any]:
+        """Return pending LSP diagnostics from the global registry and clear the queue.
+
+        Diagnostics are deduplicated, capped, and sorted by severity
+        (Error=1 first).  See :class:`LspDiagnosticRegistry` for full semantics.
+
+        Args:
+            max_per_file: Maximum diagnostics per file URI (default 10).
+            max_total:    Maximum diagnostics across all files (default 30).
+
+        Returns:
+            A list of :class:`LspDiagnosticFile` objects.  Empty when nothing pending.
+        """
+        from openjiuwen.harness.lsp.core.diagnostic_registry import LspDiagnosticRegistry
+
+        return LspDiagnosticRegistry.get_instance().get_and_clear(max_per_file, max_total)
+
+    def is_file_open(self, uri: str) -> bool:
+        """Return ``True`` if *uri* has been opened via :meth:`open_file`."""
+        return uri in self._doc_versions
+
     async def open_file(self, file_path: str, language_id: str) -> None:
-        """Open a file: send textDocument/didOpen."""
+        """Open a file: send ``textDocument/didOpen``.
+
+        Before sending, registers the ``publishDiagnostics`` handler on the
+        server (once per server instance) so that the full-file diagnostic
+        scan triggered by ``didOpen`` is captured in the global
+        :class:`LspDiagnosticRegistry`.
+
+        The document version is initialised to ``0`` and the next
+        :meth:`change_file` call will increment it to ``1``.
+        """
         server = await self.get_or_start_server(file_path)
         if not server:
             return
+
+        self._ensure_diagnostic_handler(server)
 
         try:
             text = Path(file_path).read_text(encoding="utf-8")
@@ -324,6 +407,7 @@ class LSPServerManager:
             text = ""
 
         uri = path_to_file_uri(file_path)
+        self._doc_versions[uri] = 0
         await server.send_notification(
             "textDocument/didOpen",
             {
@@ -333,6 +417,62 @@ class LSPServerManager:
                     "version": 0,
                     "text": text,
                 }
+            },
+        )
+
+    async def change_file(
+        self,
+        file_path: str,
+        language_id: str,
+        content: str | None = None,
+    ) -> None:
+        """Notify the LSP server that a file's content has changed.
+
+        Sends ``textDocument/didChange`` using a full-file content replacement
+        (no diff — the entire text is sent as a single content-change event
+        without a ``range`` field, which corresponds to LSP *full* sync mode).
+
+        Before sending, registers the ``publishDiagnostics`` handler on the
+        server (once per server instance) so that any diagnostics emitted in
+        response to the change are captured in the global
+        :class:`LspDiagnosticRegistry`.
+
+        The document version is incremented on each call.  If ``open_file``
+        has not been called previously for this URI the version starts at 1.
+
+        Args:
+            file_path:   Absolute path to the changed file.
+            language_id: LSP language identifier (e.g. ``"python"``).
+            content:     New full text of the file.  When ``None`` the file is
+                         read from disk.  Pass an explicit string when the
+                         in-memory content differs from the on-disk content
+                         (e.g. unsaved editor buffer).
+        """
+        server = await self.get_or_start_server(file_path)
+        if not server:
+            return
+
+        self._ensure_diagnostic_handler(server)
+
+        if content is None:
+            try:
+                content = Path(file_path).read_text(encoding="utf-8")
+            except OSError as exc:
+                logger.debug("Could not read file for didChange notification: %s", exc)
+                content = ""
+
+        uri = path_to_file_uri(file_path)
+        version = self._doc_versions.get(uri, 0) + 1
+        self._doc_versions[uri] = version
+
+        await server.send_notification(
+            "textDocument/didChange",
+            {
+                "textDocument": {
+                    "uri": uri,
+                    "version": version,
+                },
+                "contentChanges": [{"text": content}],
             },
         )
 

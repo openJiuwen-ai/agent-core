@@ -9,6 +9,7 @@ Configuration: DatabaseType, DatabaseConfig.
 """
 
 import copy
+import hashlib
 from typing import Dict, Optional, cast
 
 from sqlalchemy import BigInteger
@@ -59,7 +60,16 @@ class TeamMember(SQLModel, table=True):
     execution_status: Optional[str] = Field(default=None, nullable=True)
     mode: str = Field(nullable=False)
     prompt: Optional[str] = Field(default=None, nullable=True)
-    model_config_json: Optional[str] = Field(default=None, nullable=True)
+    model_ref_json: Optional[str] = Field(default=None, nullable=True)
+    """Lightweight reference to the assigned ``ModelPoolEntry`` as JSON.
+
+    Stores ``{"model_id": str, "model_name": str}`` rather than the full
+    ``TeamModelConfig`` so credential/endpoint refreshes in the live pool
+    (carried in the team session) take effect on the next resolution
+    instead of being frozen at spawn time. Resolved via
+    ``resolve_member_model`` against the current ``TeamSpec.model_pool``.
+    NULL when the team is configured without a pool.
+    """
     # Set on roster mutations only (create_member).  Status / execution
     # status updates intentionally do NOT bump this column because they
     # do not change how the # 成员关系 prompt section is rendered.
@@ -134,6 +144,21 @@ class MessageReadStatusBase(SQLModel):
     read_at: Optional[int] = Field(default=None, sa_type=BigInteger, nullable=True, index=True)
 
 
+# ============== Session ID Sanitization ==============
+
+def _sanitize_session_id_for_table(session_id: str) -> str:
+    """Return a fixed-length, SQL-safe hex suffix derived from session_id.
+
+    Uses BLAKE2s (digest_size=8 → 16 hex chars) — a general-purpose hash
+    designed for non-cryptographic use cases. Faster than SHA-256, FIPS-safe,
+    and 64 bits of output is more than sufficient to make collisions negligible
+    across any realistic number of concurrent sessions.
+    The cache dictionaries still use the raw session_id as their key so
+    _clear_session_model_cache remains correct.
+    """
+    return hashlib.blake2s(session_id.encode(), digest_size=8).hexdigest()
+
+
 # ============== Dynamic Model Caches & Factories ==============
 
 _task_models: Dict[str, type[TeamTaskBase]] = {}
@@ -146,8 +171,9 @@ def _get_task_model() -> type[TeamTaskBase]:
     """Get or create dynamic task model for current session"""
     session_id = get_session_id()
     if session_id not in _task_models:
-        class_name = f"TeamTask_{session_id}"
-        table_name = f"team_task_{session_id}"
+        suffix = _sanitize_session_id_for_table(session_id)
+        class_name = f"TeamTask_{suffix}"
+        table_name = f"team_task_{suffix}"
 
         attrs = {
             "__tablename__": table_name
@@ -164,8 +190,10 @@ def _get_task_dependency_model() -> type[TeamTaskDependencyBase]:
     """Get or create dynamic task dependency model for current session"""
     session_id = get_session_id()
     if session_id not in _task_dependency_models:
-        class_name = f"TeamTaskDependency_{session_id}"
-        table_name = f"team_task_dependency_{session_id}"
+        suffix = _sanitize_session_id_for_table(session_id)
+        class_name = f"TeamTaskDependency_{suffix}"
+        table_name = f"team_task_dependency_{suffix}"
+        task_table_name = f"team_task_{suffix}"
 
         attrs = {
             "__tablename__": table_name,
@@ -173,12 +201,20 @@ def _get_task_dependency_model() -> type[TeamTaskDependencyBase]:
         }
 
         attrs["__annotations__"]["task_id"] = str
-        attrs["task_id"] = Field(nullable=False, foreign_key=f"team_task_{session_id}.task_id", ondelete="CASCADE",
-                                 primary_key=True)
+        attrs["task_id"] = Field(
+            nullable=False,
+            foreign_key=f"{task_table_name}.task_id",
+            ondelete="CASCADE",
+            primary_key=True,
+        )
 
         attrs["__annotations__"]["depends_on_task_id"] = str
-        attrs["depends_on_task_id"] = Field(nullable=False, foreign_key=f"team_task_{session_id}.task_id",
-                                            ondelete="CASCADE", primary_key=True)
+        attrs["depends_on_task_id"] = Field(
+            nullable=False,
+            foreign_key=f"{task_table_name}.task_id",
+            ondelete="CASCADE",
+            primary_key=True,
+        )
 
         model_cls = SQLModelMetaclass(class_name, (TeamTaskDependencyBase,), attrs, table=True)
 
@@ -191,8 +227,9 @@ def _get_message_model() -> type[TeamMessageBase]:
     """Get or create dynamic message model for current session"""
     session_id = get_session_id()
     if session_id not in _message_models:
-        class_name = f"TeamMessage_{session_id}"
-        table_name = f"team_message_{session_id}"
+        suffix = _sanitize_session_id_for_table(session_id)
+        class_name = f"TeamMessage_{suffix}"
+        table_name = f"team_message_{suffix}"
 
         attrs = {
             "__tablename__": table_name
@@ -209,8 +246,9 @@ def _get_message_read_status_model() -> type[MessageReadStatusBase]:
     """Get or create dynamic message read status model for current session"""
     session_id = get_session_id()
     if session_id not in _message_read_status_models:
-        class_name = f"MessageReadStatus_{session_id}"
-        table_name = f"message_read_status_{session_id}"
+        suffix = _sanitize_session_id_for_table(session_id)
+        class_name = f"MessageReadStatus_{suffix}"
+        table_name = f"message_read_status_{suffix}"
 
         attrs = {
             "__tablename__": table_name,

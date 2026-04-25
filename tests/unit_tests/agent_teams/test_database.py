@@ -18,6 +18,7 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
+from openjiuwen.agent_teams.tools.models import _sanitize_session_id_for_table
 from openjiuwen.core.single_agent import AgentCard
 
 
@@ -44,12 +45,14 @@ async def db(db_config):
 class TestDatabaseConfig:
     """Test DatabaseConfig class;"""
 
+    @pytest.mark.level0
     def test_database_config_default(self):
         """Test default database configuration"""
         config = DatabaseConfig()
         assert config.db_type == DatabaseType.SQLITE
         assert config.connection_string == ""
 
+    @pytest.mark.level0
     def test_database_config_custom_custom(self):
         """Test custom database configuration"""
         config = DatabaseConfig(
@@ -63,6 +66,7 @@ class TestDatabaseConfig:
 class TestDatabaseType:
     """Test DatabaseType class;"""
 
+    @pytest.mark.level0
     def test_database_type_values(self):
         """Test database type enum values"""
         assert DatabaseType.SQLITE == "sqlite"
@@ -74,6 +78,7 @@ class TestTeamDatabaseInit:
     """Test TeamDatabase initialization"""
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_database_initialize_creates_tables(self, db_config):
         """Test that initialize creates all necessary tables"""
         database = TeamDatabase(db_config)
@@ -90,6 +95,7 @@ class TestTeamDatabaseInit:
             await database.close()
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_database_initialize_idempotent(self, db_config):
         """Test that calling initialize multiple times only initializes once"""
         database = TeamDatabase(db_config)
@@ -111,6 +117,7 @@ class TestTeamDatabaseInit:
             await database.close()
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_unsupported_database_type_raises(self):
         """Test that unsupported database types raise NotImplementedError"""
         config = DatabaseConfig(
@@ -188,6 +195,7 @@ class TestTeamOperations:
     """Test team CRUD operations"""
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_create_team_success(self, db):
         """Test successful team creation"""
         success = await db.create_team(
@@ -209,6 +217,7 @@ class TestTeamOperations:
         assert isinstance(team.created, int)
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_create_team_minimal(self, db):
         """Test team creation with minimal parameters"""
         result = await db.create_team(
@@ -227,6 +236,7 @@ class TestTeamOperations:
         assert team.prompt is None
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_create_team_duplicate_fails(self, db):
         """Test that creating duplicate team fails"""
         await db.create_team(
@@ -243,12 +253,14 @@ class TestTeamOperations:
         assert success is False
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_get_team_not_found(self, db):
         """Test getting non-existent team returns None"""
         team = await db.get_team("nonexistent")
         assert team is None
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_delete_team_success(self, db):
         """Test successful team deletion"""
         await db.create_team(
@@ -264,6 +276,7 @@ class TestTeamOperations:
         assert team is None
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_delete_team_not_found(self, db):
         """Test deleting non-existent team returns False"""
         success = await db.delete_team("nonexistent")
@@ -274,6 +287,7 @@ class TestMemberOperations:
     """Test member CRUD operations"""
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_create_member_success(self, db):
         """Test successful member creation"""
         await db.create_team(
@@ -307,6 +321,7 @@ class TestMemberOperations:
         assert member.prompt == "Review code"
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_create_member_duplicate_fails(self, db):
         """Test that creating duplicate member fails"""
         await db.create_team(
@@ -333,12 +348,14 @@ class TestMemberOperations:
         assert success is False
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_get_member_not_found(self, db):
         """Test getting non-existent member returns None"""
         member = await db.get_member("nonexistentmember", "team5")
         assert member is None
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_update_member_status(self, db):
         """Test updating member status"""
         await db.create_team(
@@ -362,12 +379,14 @@ class TestMemberOperations:
         assert member.status == "busy"
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_update_member_status_not_found(self, db):
         """Test updating status for non-existent member returns False"""
         success = await db.update_member_status("nonexistentmember", "team6", "busy")
         assert success is False
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_update_member_execution_status(self, db):
         """Test updating member execution status"""
         await db.create_team(
@@ -392,12 +411,14 @@ class TestMemberOperations:
         assert member.execution_status == "starting"
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_update_member_execution_status_not_found(self, db):
         """Test updating execution status for non-existent member returns False"""
         success = await db.update_member_execution_status("nonexistentmember", "team7", "running")
         assert success is False
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_get_team_members(self, db):
         """Test getting all members of a team"""
         await db.create_team(
@@ -428,6 +449,7 @@ class TestMemberOperations:
         assert "member6" in member_ids
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_get_team_members_empty(self, db):
         """Test getting members for empty team returns empty list"""
         await db.create_team(
@@ -444,6 +466,7 @@ class TestTaskOperations:
     """Test task CRUD operations"""
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_create_task_success(self, db):
         """Test successful task creation"""
         await db.create_team(
@@ -471,12 +494,14 @@ class TestTaskOperations:
         assert task.assignee is None
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_get_task_not_found(self, db):
         """Test getting non-existent task returns None"""
         task = await db.get_task("nonexistenttask")
         assert task is None
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_update_task_status(self, db):
         """Test updating task status"""
         await db.create_team(
@@ -499,12 +524,14 @@ class TestTaskOperations:
         assert task.status == "completed"
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_update_task_status_not_found(self, db):
         """Test updating status for non-existent task returns False"""
         success = await db.update_task_status("nonexistenttask", "completed")
         assert success is False
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_update_task_title_only(self, db):
         """Test updating task title only"""
         await db.create_team(
@@ -528,6 +555,7 @@ class TestTaskOperations:
         assert task.content == "Original Content"
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_update_task_content_only(self, db):
         """Test updating task content only"""
         await db.create_team(
@@ -551,6 +579,7 @@ class TestTaskOperations:
         assert task.content == "Updated Content"
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_update_task_both_title_and_content(self, db):
         """Test updating both task title and content"""
         await db.create_team(
@@ -578,12 +607,14 @@ class TestTaskOperations:
         assert task.content == "Updated Content"
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_update_task_not_found(self, db):
         """Test updating non-existent task returns False"""
         success = await db.update_task("nonexistent_task", title="New Title")
         assert success is False
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_update_task_same_values(self, db):
         """Test updating task with same values (no commit needed)"""
         await db.create_team(
@@ -608,6 +639,7 @@ class TestTaskOperations:
         assert task.content == "Same Content"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_update_claimed_task_fails(self, db):
         """Test that updating a claimed task fails"""
         await db.create_team(
@@ -633,6 +665,7 @@ class TestTaskOperations:
         assert task.content == "Original content"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_claim_task(self, db):
         """Test claiming a task"""
         await db.create_team(
@@ -655,12 +688,14 @@ class TestTaskOperations:
         assert task.assignee == "member7"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_claim_task_not_found(self, db):
         """Test claiming non-existent task returns False"""
         success = await db.claim_task("nonexistenttask", "member7")
         assert success is False
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_get_team_tasks(self, db):
         """Test getting all tasks of a team"""
         await db.create_team(
@@ -690,6 +725,7 @@ class TestTaskOperations:
         assert "task5" in task_ids
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_get_team_tasks_with_status_filter(self, db):
         """Test getting tasks filtered by status"""
         await db.create_team(
@@ -726,6 +762,7 @@ class TestTaskOperations:
         assert len(completed_tasks) == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_create_task_duplicate_fails(self, db):
         """Test that creating duplicate task fails"""
         await db.create_team(
@@ -751,6 +788,7 @@ class TestTaskOperations:
         assert success is False
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_concurrent_create_tasks_with_different_ids(self, db):
         """Test concurrently creating tasks with different task_ids all succeed."""
         await db.create_team(
@@ -781,6 +819,7 @@ class TestTaskOperations:
             assert task.task_id == tid
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_concurrent_create_tasks_with_file_db(self, tmp_path):
         """Test concurrently creating tasks with file-based SQLite.
 
@@ -831,6 +870,7 @@ class TestTaskDependencyOperations:
     """Test task dependency operations"""
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_add_task_dependency(self, db):
         """Test adding task dependency"""
         await db.create_team(
@@ -865,6 +905,7 @@ class TestTaskDependencyOperations:
         assert dependencies[0].depends_on_task_id == "task10"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_get_task_dependencies_empty(self, db):
         """Test getting dependencies for task with no dependencies"""
         await db.create_team(
@@ -884,6 +925,7 @@ class TestTaskDependencyOperations:
         assert dependencies == []
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_get_task_dependencies_multiple(self, db):
         """Test getting multiple dependencies"""
         await db.create_team(
@@ -923,6 +965,7 @@ class TestTaskDependencyOperations:
         assert "task14" in dep_ids
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_add_task_with_dependents_only(self, db):
         """Test creating a task that existing tasks depend on (high priority)"""
         await db.create_team(
@@ -968,6 +1011,7 @@ class TestTaskDependencyOperations:
         assert task2_updated.status == "blocked"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_add_task_with_dependencies_only(self, db):
         """Test creating a task that depends on existing tasks"""
         await db.create_team(
@@ -1005,6 +1049,7 @@ class TestTaskDependencyOperations:
         assert "task2" in dep_ids
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_add_task_insert_between(self, db):
         """Test inserting a task between other tasks in dependency chain"""
         await db.create_team(
@@ -1052,6 +1097,7 @@ class TestTaskDependencyOperations:
         assert task_b.status == "blocked"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_circular_dependency_detection(self, db):
         """Test circular dependency detection:
            Existing: taskA -> taskB
@@ -1083,6 +1129,7 @@ class TestTaskDependencyOperations:
         assert success is False
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_bidirectional_no_dependencies(self, db):
         """Test creating a task with no dependencies or dependents"""
         await db.create_team(
@@ -1110,6 +1157,7 @@ class TestTaskDependencyOperations:
         assert len(deps) == 0
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_add_task_with_completed_dependent_fails(self, db):
         """Test that adding a dependency to a completed task fails"""
         await db.create_team(
@@ -1140,6 +1188,7 @@ class TestTaskDependencyOperations:
         assert new_task is None
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_add_task_with_cancelled_dependent_fails(self, db):
         """Test that adding a dependency to a cancelled task fails"""
         await db.create_team(
@@ -1165,6 +1214,7 @@ class TestTaskDependencyOperations:
         assert success is False
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_add_task_with_claimed_dependent_fails(self, db):
         """Test that adding a dependency to a claimed task fails (claimed -> blocked is invalid)"""
         await db.create_team(
@@ -1195,6 +1245,7 @@ class TestTaskDependencyOperations:
         assert (claimed_task.status == "claimed")
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_add_task_with_nonexistent_dependent_fails(self, db):
         """Test that adding a dependency to a non-existent task fails"""
         await db.create_team(
@@ -1220,6 +1271,7 @@ class TestMessageOperations:
     """Test message CRUD operations"""
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_create_message_point_to_point(self, db):
         """Test creating point-to-point message"""
         await db.create_team(
@@ -1247,6 +1299,7 @@ class TestMessageOperations:
         assert message.broadcast == 0
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_create_message_broadcast(self, db):
         """Test creating broadcast message"""
         await db.create_team(
@@ -1271,12 +1324,14 @@ class TestMessageOperations:
         assert message.broadcast == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_get_message_not_found(self, db):
         """Test getting non-existent message returns None"""
         message = await db.get_message("nonexistentmsg")
         assert message is None
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_get_team_messages(self, db):
         """Test getting all messages of a team"""
         await db.create_team(
@@ -1308,6 +1363,7 @@ class TestMessageOperations:
         assert "msg4" in message_ids
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_get_messages_for_member(self, db):
         """Test getting messages for a specific member"""
         await db.create_team(
@@ -1348,6 +1404,7 @@ class TestMessageOperations:
         assert "msg7" not in message_ids
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_mark_message_read(self, db):
         """Test marking message as read"""
         await db.create_team(
@@ -1386,6 +1443,7 @@ class TestMessageOperations:
         assert messages[0].is_read is True
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_create_message_duplicate_fails(self, db):
         """Test that creating duplicate message fails"""
         await db.create_team(
@@ -1413,6 +1471,7 @@ class TestMessageOperations:
         assert success is False
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_mark_message_read_not_found(self, db):
         """Test marking non-existent message as read returns False"""
         success = await db.mark_message_read("nonexistent_msg", "member1")
@@ -1423,6 +1482,7 @@ class TestCascadeDelete:
     """Test cascade delete functionality"""
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_delete_team_cascades_to_members(self, db):
         """Test that deleting team cascades to members"""
         await db.create_team(
@@ -1445,6 +1505,7 @@ class TestCascadeDelete:
         assert member is None
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_delete_team_cascades_to_tasks(self, db):
         """Test that deleting team cascades to tasks"""
         await db.create_team(
@@ -1466,6 +1527,7 @@ class TestCascadeDelete:
         assert task is None
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_delete_team_cascades_to_messages(self, db):
         """Test that deleting team cascades to messages"""
         await db.create_team(
@@ -1488,6 +1550,7 @@ class TestCascadeDelete:
         assert message is None
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_delete_team_cascades_to_dependencies(self, db):
         """Test that deleting team cascades to task dependencies"""
         await db.create_team(
@@ -1522,6 +1585,7 @@ class TestVerifyAndFixTaskConsistency:
     """Test verify_and_fix_task_consistency for data consistency recovery"""
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_verify_and_fix_empty_team(self, db):
         """Test fixing consistency when team has no tasks"""
         await db.create_team(
@@ -1534,6 +1598,7 @@ class TestVerifyAndFixTaskConsistency:
         assert fixed == []
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_verify_and_fix_no_blocked_tasks(self, db):
         """Test when all tasks are pending (nothing to fix)"""
         await db.create_team(
@@ -1560,6 +1625,7 @@ class TestVerifyAndFixTaskConsistency:
         assert fixed == []
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_verify_and_fix_blocked_nothing_to_fix(self, db):
         """Test when blocked task's dependency is not complete (nothing to fix)"""
         await db.create_team(
@@ -1588,6 +1654,7 @@ class TestVerifyAndFixTaskConsistency:
         assert fixed == []
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_verify_and_fix_single_blocked_task(self, db):
         """Test fixing a single blocked task whose dependency is completed"""
         await db.create_team(
@@ -1636,6 +1703,7 @@ class TestVerifyAndFixTaskConsistency:
         assert task.status == "pending"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_verify_and_fix_multiple_blocked_tasks(self, db):
         """Test fixing multiple blocked tasks when their dependencies are completed"""
         await db.create_team(
@@ -1694,6 +1762,7 @@ class TestVerifyAndFixTaskConsistency:
         assert "task26" in fixed_ids
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_verify_and_fix_partial_dependencies(self, db):
         """Test that tasks only get fixed when ALL dependencies are completed"""
         await db.create_team(
@@ -1766,6 +1835,7 @@ class TestCancelAllTasks:
     """Test cancel_all_tasks functionality"""
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_cancel_all_pending_tasks(self, db):
         """Test cancelling all pending tasks"""
         await db.create_team(
@@ -1793,6 +1863,7 @@ class TestCancelAllTasks:
         assert task3.status == "cancelled"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_cancel_all_mixed_status_tasks(self, db):
         """Test cancelling tasks with mixed statuses"""
         await db.create_team(
@@ -1827,6 +1898,7 @@ class TestCancelAllTasks:
         assert task5.status == "completed"  # Stays completed
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_cancel_all_no_active_tasks(self, db):
         """Test cancelling when there are no active tasks"""
         await db.create_team(
@@ -1845,6 +1917,7 @@ class TestCancelAllTasks:
         assert len(cancelled_tasks) == 0
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_cancel_all_empty_team(self, db):
         """Test cancelling tasks for team with no tasks"""
         await db.create_team(
@@ -1859,6 +1932,7 @@ class TestCancelAllTasks:
         assert len(cancelled_tasks) == 0
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_cancel_all_tasks_atomic(self, db):
         """Test that cancel_all_tasks is atomic (single transaction)"""
         await db.create_team(
@@ -1886,6 +1960,7 @@ class TestResetTask:
     """Test reset_task functionality"""
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_reset_claimed_task(self, db):
         """Test resetting a claimed task back to pending"""
         await db.create_team(
@@ -1920,12 +1995,14 @@ class TestResetTask:
         assert task_after.assignee is None
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_reset_nonexistent_task(self, db):
         """Test resetting non-existent task returns None"""
         result = await db.reset_task("nonexistent-task-id")
         assert result is None
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_reset_pending_task_fails(self, db):
         """Test resetting a pending task fails (invalid state transition)"""
         await db.create_team(
@@ -1948,6 +2025,7 @@ class TestResetTask:
         assert task.status == "pending"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_reset_completed_task_fails(self, db):
         """Test resetting a completed task fails (invalid state transition)"""
         await db.create_team(
@@ -1970,6 +2048,7 @@ class TestResetTask:
         assert task.status == "completed"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_reset_cancelled_task_fails(self, db):
         """Test resetting a cancelled task fails (invalid state transition)"""
         await db.create_team(
@@ -1992,6 +2071,7 @@ class TestResetTask:
         assert task.status == "cancelled"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_reset_blocked_task_fails(self, db):
         """Test resetting a blocked task fails (invalid state transition)"""
         await db.create_team(
@@ -2018,6 +2098,7 @@ class TestGetTasksByAssignee:
     """Test get_tasks_by_assignee functionality"""
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_get_tasks_by_assignee_empty(self, db):
         """Test getting tasks by assignee when none exist"""
         await db.create_team(
@@ -2030,6 +2111,7 @@ class TestGetTasksByAssignee:
         assert tasks == []
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_get_tasks_by_assignee_with_tasks(self, db):
         """Test getting tasks assigned to a specific member"""
         await db.create_team(
@@ -2050,6 +2132,7 @@ class TestGetTasksByAssignee:
         assert all(t.assignee == "member1" for t in tasks)
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_get_tasks_by_assignee_with_status_filter(self, db):
         """Test getting tasks by assignee with status filter"""
         await db.create_team(
@@ -2071,6 +2154,7 @@ class TestGetTasksByAssignee:
         assert claimed_tasks[0].task_id == "task2"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_get_tasks_by_assignee_different_members(self, db):
         """Test that tasks are correctly filtered by assignee"""
         await db.create_team(
@@ -2095,6 +2179,7 @@ class TestGetTasksByAssignee:
         assert len(tasks_member3) == 0
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_get_tasks_by_assignee_excludes_unclaimed(self, db):
         """Test that unclaimed tasks are not returned"""
         await db.create_team(
@@ -2116,6 +2201,7 @@ class TestSessionTables:
     """Test session-specific table creation and deletion"""
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_create_cur_session_tables_success(self, db):
         """Test that create_cur_session_tables creates dynamic tables"""
         await db.create_team(
@@ -2136,6 +2222,7 @@ class TestSessionTables:
         assert task.task_id == "task1"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_drop_cur_session_tables_success(self, db_config):
         """Test that drop_cur_session_tables removes dynamic tables"""
         token = set_session_id("test_drop_session")
@@ -2172,6 +2259,7 @@ class TestSessionTables:
             reset_session_id(token)
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_create_and_drop_symmetry(self, db_config):
         """Test that create and drop are symmetric operations"""
         token = set_session_id("test_symmetry_session")
@@ -2202,6 +2290,7 @@ class TestSessionTables:
             reset_session_id(token)
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_multiple_sessions_isolated(self, db_config):
         """Test that different sessions have isolated tables"""
         token = set_session_id("session_1")
@@ -2255,6 +2344,7 @@ class TestSessionTables:
         await database.close()
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_create_tables_idempotent(self, db):
         """Test that create_cur_session_tables is idempotent"""
         await db.create_cur_session_tables()
@@ -2277,6 +2367,7 @@ class TestSessionTables:
         assert task is not None
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_drop_tables_idempotent(self, db_config):
         """Test that drop_cur_session_tables is idempotent"""
         token = set_session_id("test_drop_idempotent")
@@ -2309,6 +2400,7 @@ class TestSessionTables:
             reset_session_id(token)
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_drop_then_create_same_session(self, db_config):
         """Test that dropping and recreating tables in same session works"""
         token = set_session_id("test_recreate")
@@ -2364,6 +2456,7 @@ class TestSessionTables:
             reset_session_id(token)
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_drop_without_session_id(self, db_config):
         """Test that drop without session_id in context is safe"""
         token = set_session_id("")
@@ -2380,6 +2473,7 @@ class TestRuntimeCleanup:
     """Test storage-level runtime cleanup helpers."""
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_cleanup_all_runtime_state_clears_dynamic_tables_and_static_rows(self, tmp_path):
         """Cleanup should remove all session tables and clear team/member rows."""
         db_path = tmp_path / "runtime_cleanup.db"
@@ -2425,14 +2519,16 @@ class TestRuntimeCleanup:
 
             deleted_tables, cleared_tables = await database.cleanup_all_runtime_state()
 
-            assert "team_task_cleanup_session_a" in deleted_tables
-            assert "team_task_cleanup_session_b" in deleted_tables
-            assert "team_task_dependency_cleanup_session_a" in deleted_tables
-            assert "team_task_dependency_cleanup_session_b" in deleted_tables
-            assert "team_message_cleanup_session_a" in deleted_tables
-            assert "team_message_cleanup_session_b" in deleted_tables
-            assert "message_read_status_cleanup_session_a" in deleted_tables
-            assert "message_read_status_cleanup_session_b" in deleted_tables
+            suffix_a = _sanitize_session_id_for_table("cleanup_session_a")
+            suffix_b = _sanitize_session_id_for_table("cleanup_session_b")
+            assert f"team_task_{suffix_a}" in deleted_tables
+            assert f"team_task_{suffix_b}" in deleted_tables
+            assert f"team_task_dependency_{suffix_a}" in deleted_tables
+            assert f"team_task_dependency_{suffix_b}" in deleted_tables
+            assert f"team_message_{suffix_a}" in deleted_tables
+            assert f"team_message_{suffix_b}" in deleted_tables
+            assert f"message_read_status_{suffix_a}" in deleted_tables
+            assert f"message_read_status_{suffix_b}" in deleted_tables
             assert cleared_tables == ["team_info", "team_member"]
 
             async with database.engine.begin() as conn:
@@ -2454,6 +2550,7 @@ class TestRuntimeCleanup:
             reset_session_id(token)
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_force_delete_team_session_cleans_only_current_session(self, tmp_path):
         """Force delete should keep non-current session tables intact."""
         db_path = tmp_path / "force_cleanup.db"
@@ -2504,16 +2601,18 @@ class TestRuntimeCleanup:
                     await conn.exec_driver_sql("SELECT COUNT(*) FROM team_member")
                 ).scalar_one()
 
+            suffix_a = _sanitize_session_id_for_table("force_cleanup_a")
+            suffix_b = _sanitize_session_id_for_table("force_cleanup_b")
             assert "team_info" in table_names
             assert "team_member" in table_names
-            assert "team_task_force_cleanup_b" not in table_names
-            assert "team_task_dependency_force_cleanup_b" not in table_names
-            assert "team_message_force_cleanup_b" not in table_names
-            assert "message_read_status_force_cleanup_b" not in table_names
-            assert "team_task_force_cleanup_a" in table_names
-            assert "team_task_dependency_force_cleanup_a" in table_names
-            assert "team_message_force_cleanup_a" in table_names
-            assert "message_read_status_force_cleanup_a" in table_names
+            assert f"team_task_{suffix_b}" not in table_names
+            assert f"team_task_dependency_{suffix_b}" not in table_names
+            assert f"team_message_{suffix_b}" not in table_names
+            assert f"message_read_status_{suffix_b}" not in table_names
+            assert f"team_task_{suffix_a}" in table_names
+            assert f"team_task_dependency_{suffix_a}" in table_names
+            assert f"team_message_{suffix_a}" in table_names
+            assert f"message_read_status_{suffix_a}" in table_names
             assert team_count == 0
             assert member_count == 0
         finally:

@@ -2,8 +2,8 @@
 ## Workflow (Predefined Team Mode)
 This collaboration uses predefined team mode. All team members have been pre-configured by the system. You **must not** use `spawn_member` to create members.
 
-1. Analyze the problem, clarify objectives. Ask the user if anything is ambiguous
-2. Use `build_team` to assemble the team (the system auto-registers all predefined members)
+1. Analyze the problem, clarify objectives. Ask the user if anything is ambiguous. If the user signals intent to join the team, pass `enable_hitt=true` in the next `build_team` call
+2. Use `build_team` to assemble the team (the system auto-registers all predefined members). `enable_hitt=true` additionally registers the reserved `human_agent` member alongside the predefined teammates
 3. **Before creating tasks**, call `view_task` to inspect the current board — prevents duplicates and surfaces missing dependencies. Then use `create_task` to build the task DAG
 4. **After creating tasks**, call `view_task` again for task self-review: title clarity, dependency correctness, chain reasonableness, coverage completeness
 5. Use `send_message(to="*")` to send the startup signal; the system auto-launches all predefined members

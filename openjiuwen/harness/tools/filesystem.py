@@ -1,7 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-import base64
 import html
 import io
 import json
@@ -446,23 +445,7 @@ class ReadFileTool(Tool):
                 parts.append(f"## Page {page_no}\n{page_text}".rstrip())
             return "\n\n".join(parts).strip()
 
-    @staticmethod
-    def _compress_image_bytes(raw: bytes, size: Tuple[int, int], quality: int) -> Optional[bytes]:
-        try:
-            from PIL import Image
-            with Image.open(io.BytesIO(raw)) as img:
-                out = io.BytesIO()
-                img = img.convert("RGB")
-                img.thumbnail(size)
-                img.save(out, format="JPEG", quality=quality)
-                return out.getvalue()
-        except Exception:
-            return None
-
-    async def _read_image(self, file_path: str, model_name: str) -> str:
-        if model_name and not self._is_pdf_supported(model_name):
-            return "Current model does not support vision image payload."
-
+    async def _read_image(self, file_path: str, _model_name: str) -> str:
         res = await self.operation.fs().read_file(file_path, mode="bytes")
         if res.code != StatusCode.SUCCESS.code:
             raise RuntimeError(res.message)
@@ -474,42 +457,32 @@ class ReadFileTool(Tool):
 
         _, ext = os.path.splitext(file_path.lower())
         image_type = ext.lstrip(".") or "png"
+        dimensions: str | None = None
 
-        # Step 1: standard resize (thumbnail to 1536×1536).
-        resized = raw
         try:
             from PIL import Image
-            with Image.open(io.BytesIO(raw)) as img:
-                detected_format = (img.format or "PNG").lower()
-                image_type = detected_format  # prefer format detected from buffer
-                img.thumbnail((1536, 1536))
-                out = io.BytesIO()
-                img.save(out, format=detected_format.upper())
-                candidate = out.getvalue()
-                if candidate and len(candidate) < len(raw):
-                    resized = candidate
-        except Exception:
-            resized = raw
+        except ImportError as exc:
+            logger.debug("Pillow is unavailable for image metadata extraction (%s): %s", file_path, exc)
+        else:
+            try:
+                with Image.open(io.BytesIO(raw)) as img:
+                    detected_format = (img.format or "PNG").lower()
+                    image_type = detected_format
+                    dimensions = f"{img.width}x{img.height}"
+            except (OSError, ValueError) as exc:
+                logger.debug("Failed to parse image metadata (%s): %s", file_path, exc)
 
-        # Step 2: token budget check — base64 byte count × 0.125 ≈ tokens.
-        estimated_tokens = max(1, int(len(base64.b64encode(resized)) * 0.125))
-        if estimated_tokens > self.MAX_TOKENS:
-            # Aggressive compression from the same buffer.
-            compressed = self._compress_image_bytes(raw, size=(800, 800), quality=40)
-
-            if compressed and int(len(base64.b64encode(compressed)) * 0.125) <= self.MAX_TOKENS:
-                resized = compressed
-                image_type = "jpeg"
-            else:
-                # Final fallback: 400×400 JPEG q=20 (mirrors TS Sharp fallback).
-                fallback = self._compress_image_bytes(raw, size=(400, 400), quality=20)
-                if fallback:
-                    resized = fallback
-                    image_type = "jpeg"
-
-        encoded = base64.b64encode(resized).decode("ascii")
-        return f"data:image/{image_type};base64,{encoded}"
-
+        parts = [
+            f"Image file read: {file_path}",
+            f"format: {image_type}",
+            f"size_bytes: {len(raw)}",
+        ]
+        if dimensions:
+            parts.append(f"dimensions: {dimensions}")
+        parts.append(
+            "Image bytes are omitted from this tool result. Use the file path above as multimodal image input."
+        )
+        return "\n".join(parts)
     # ------------------------------------------------------------------
     # invoke / stream
     # ------------------------------------------------------------------
@@ -777,9 +750,13 @@ class WriteFileTool(Tool):
             except OSError:
                 _FILE_READ_REGISTRY.pop(path, None)
 
-        _base_dir = self._workspace_path or str(pathlib.Path(get_cwd()).expanduser().resolve())
-        _history_path = os.path.join(_base_dir, ".agent_history", f"file_ops_{self._agent_id}.json")
-        await _append_op_history(_history_path, path, "write", old_content, content)
+        _session = kwargs.get("session")
+        if _session is not None:
+            _base_dir = self._workspace_path or str(pathlib.Path(get_cwd()).expanduser().resolve())
+            _history_path = os.path.join(
+                _base_dir, ".agent_history", f"file_ops_{self._agent_id}_{_session.get_session_id()}.json"
+            )
+            await _append_op_history(_history_path, path, "write", old_content, content)
 
         return ToolOutput(
             success=True,
@@ -1185,9 +1162,13 @@ class EditFileTool(Tool):
         except OSError:
             _FILE_READ_REGISTRY.pop(file_path, None)
 
-        _base_dir = self._workspace_path or str(pathlib.Path(get_cwd()).expanduser().resolve())
-        _history_path = os.path.join(_base_dir, ".agent_history", f"file_ops_{self._agent_id}.json")
-        await _append_op_history(_history_path, file_path, "edit", content, new_content)
+        _session = kwargs.get("session")
+        if _session is not None:
+            _base_dir = self._workspace_path or str(pathlib.Path(get_cwd()).expanduser().resolve())
+            _history_path = os.path.join(
+                _base_dir, ".agent_history", f"file_ops_{self._agent_id}_{_session.get_session_id()}.json"
+            )
+            await _append_op_history(_history_path, file_path, "edit", content, new_content)
 
         return ToolOutput(
             success=True,
@@ -1213,10 +1194,15 @@ class GlobTool(Tool):
         return str(pathlib.Path(get_cwd()).expanduser().resolve())
 
     def _relativize_paths(self, paths: List[str], base_path: str) -> List[str]:
+        # FsOperation.search_files resolves symlinks internally (via Path.resolve),
+        # so returned file paths may live under e.g. /private/var on macOS while
+        # the caller-supplied base_path is /var. Normalize the base to real path
+        # so os.path.relpath does not produce "../../../" against a symlinked root.
+        resolved_base = str(pathlib.Path(base_path).resolve())
         relative_paths: List[str] = []
         for item in paths:
             try:
-                relative_paths.append(os.path.relpath(item, base_path))
+                relative_paths.append(os.path.relpath(item, resolved_base))
             except ValueError:
                 relative_paths.append(item)
         return relative_paths
@@ -1436,6 +1422,84 @@ class GrepTool(Tool):
         parts.append(self._shell_quote(path))
         return " ".join(parts)
 
+    def _build_select_string_command(
+            self,
+            *,
+            pattern: str,
+            path: str,
+            glob: Optional[str],
+            output_mode: str,
+            context_before: Optional[int],
+            context_after: Optional[int],
+            context_c: Optional[int],
+            context: Optional[int],
+            case_insensitive: bool,
+    ) -> str:
+        """Build a PowerShell Select-String command as fallback when rg is unavailable on Windows."""
+        sq = self._shell_quote
+
+        # Expand {ts,tsx} brace syntax — PS -like doesn't support it
+        glob_patterns = self._split_glob_patterns(glob)
+        expanded_globs: List[str] = []
+        for p in glob_patterns:
+            m = re.match(r'^(.*)\{([^}]+)\}(.*)$', p)
+            if m:
+                expanded_globs.extend(f"{m.group(1)}{alt}{m.group(3)}" for alt in m.group(2).split(","))
+            else:
+                expanded_globs.append(p)
+
+        # Context lines: -C / context takes priority over -B / -A
+        effective_c = context if context is not None else context_c
+        ctx_b = effective_c if effective_c is not None else (context_before or 0)
+        ctx_a = effective_c if effective_c is not None else (context_after or 0)
+
+        # VCS exclusion regex for -notmatch: (\\|/)(\.git|\.svn|...)(\\|/|$)
+        vcs_alts = "|".join(d.replace(".", r"\.") for d in self.VCS_DIRECTORIES_TO_EXCLUDE)
+        vcs_pat = sq(r"(\\|/)(" + vcs_alts + r")(\\|/|$)")
+
+        # --- Pipeline stages ---
+        pipeline: List[str] = []
+
+        # Stage 1: file enumeration + VCS pruning
+        is_file = os.path.isfile(path)
+        if is_file:
+            pipeline.append(f"Get-Item -LiteralPath {sq(path)}")
+        else:
+            pipeline.append(f"Get-ChildItem -LiteralPath {sq(path)} -Recurse -File")
+            pipeline.append(f"Where-Object {{ $_.FullName -notmatch {vcs_pat} }}")
+
+        # Stage 2: glob filter (skip for single-file input)
+        if expanded_globs and not is_file:
+            conds = " -or ".join(f"$_.Name -like {sq(p)}" for p in expanded_globs)
+            pipeline.append(f"Where-Object {{ {conds} }}")
+
+        # Stage 3: Select-String
+        # Default is case-insensitive; -CaseSensitive enables exact matching
+        cs_flag = " -CaseSensitive" if not case_insensitive else ""
+        ctx_flag = f" -Context {ctx_b},{ctx_a}" if output_mode == "content" and (ctx_b or ctx_a) else ""
+        pipeline.append(f"Select-String -Pattern {sq(pattern)}{cs_flag}{ctx_flag}")
+
+        # Stage 4: output formatting to match rg/grep line format
+        if output_mode == "files_with_matches":
+            pipeline.append("Select-Object -ExpandProperty Path -Unique")
+        elif output_mode == "count":
+            pipeline.append("Group-Object Path | ForEach-Object { \"$($_.Name):$($_.Count)\" }")
+        elif ctx_b or ctx_a:
+            # Manually expand PreContext / PostContext arrays into filepath:linenum:content lines
+            pipeline.append(
+                "ForEach-Object {"
+                " $m=$_; $p=$m.Context.PreContext.Length;"
+                " for($i=0;$i-lt$p;$i++){ \"$($m.Path):$([int]$m.LineNumber-$p+$i):$($m.Context.PreContext[$i])\" };"
+                " \"$($m.Path):$($m.LineNumber):$($m.Line)\";"
+                " for($i=0;$i-lt$m.Context.PostContext.Length;$i++)"
+                "{ \"$($m.Path):$([int]$m.LineNumber+1+$i):$($m.Context.PostContext[$i])\" }"
+                " }"
+            )
+        else:
+            pipeline.append("ForEach-Object { \"$($_.Path):$($_.LineNumber):$($_.Line)\" }")
+
+        return "$ErrorActionPreference='SilentlyContinue'; " + " | ".join(pipeline)
+
     def _build_grep_command(
             self,
             *,
@@ -1633,6 +1697,22 @@ class GrepTool(Tool):
                 case_insensitive=ignore_case,
                 file_type=file_type,
                 multiline=multiline,
+            )
+        elif os.name == "nt":
+            if file_type:
+                return ToolOutput(success=False, error="type filter requires ripgrep (rg) to be installed")
+            if multiline:
+                return ToolOutput(success=False, error="multiline search requires ripgrep (rg) to be installed")
+            cmd = self._build_select_string_command(
+                pattern=str(pattern),
+                path=path,
+                glob=glob,
+                output_mode=output_mode,
+                context_before=context_before,
+                context_after=context_after,
+                context_c=context_c,
+                context=context,
+                case_insensitive=ignore_case,
             )
         else:
             if file_type:
