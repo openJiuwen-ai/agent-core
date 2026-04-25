@@ -42,7 +42,7 @@ logging:
         {extra[short_path]}:{line} |
         {message}
     detail_json:
-      target: /Users/alan/.openjiuwen/.agent_teams/my_project_team/logs/jiuwen_details.log
+      target: ./logs/jiuwen_details.log
       level: DEBUG
       enqueue: true
       rotation: 500 MB

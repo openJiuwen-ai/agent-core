@@ -1,74 +1,193 @@
-# Agent Team E2E configuration
-# Structure mirrors TeamAgentSpec fields for direct deserialization.
-# Sensitive values (api_key) should be overridden via environment variables:
-#   API_BASE, API_KEY, MODEL_NAME, MODEL_PROVIDER, MODEL_TIMEOUT
+# Agent Team E2E configuration — 5-person parallel development with worktree isolation
+#
+# Each teammate gets an isolated git worktree so file changes never conflict.
+# The leader coordinates from the main repo; teammates work in:
+#   my-project/.agent_teams/worktrees/<slug>/
+#
+# Sensitive values should be overridden via environment variables:
+#   API_BASE, LEADER_API_KEY, TEAMMATE_API_KEY, MODEL_NAME
 
-team_name: e2e_test_team
-lifecycle: temporary
+team_name: my_project_team10
+lifecycle: persistent
 teammate_mode: build_mode
+spawn_mode: inprocess
 
 leader:
   member_name: team_leader
   display_name: TeamLeader
-  persona: "天才项目管理专家"
+  persona: "资深技术项目经理，擅长拆解复杂工程任务并协调多人并行开发"
+
+# ---------------------------------------------------------------------------
+# Worktree isolation — each teammate gets its own working copy
+# ---------------------------------------------------------------------------
+worktree:
+  enabled: true
+  # symlink heavy dirs instead of copying (saves disk + time)
+  symlink_directories:
+    - .venv
+    - node_modules
+  auto_cleanup_on_shutdown: true
+  lifecycle_policy: auto          # temporary team → ephemeral worktrees
+
+# Shared team workspace: ~/.openjiuwen/.agent_teams/{team_name}/team-workspace/
+# Omit root_path to use the default. Members access it via .team/ symlink.
+workspace:
+  enabled: true
+  artifact_dirs:
+    - artifacts/code
+    - artifacts/docs
+    - artifacts/reports
+  version_control: true
+  conflict_strategy: lock
+
+# ---------------------------------------------------------------------------
+# Shared capability anchors
+# ---------------------------------------------------------------------------
+
+x-model-template: &model_template
+  model_client_config:
+    client_provider: OpenAI
+    api_base: "${API_BASE}"
+    api_key: "${LEADER_API_KEY}"
+    timeout: 120
+    rate_limit: 10.0              # max 1 request/sec per endpoint
+    verify_ssl: false
+  model_request_config:
+    model: "${MODEL_NAME}"
+    temperature: 0.2
+    top_p: 0.9
+
+x-shared-rails: &shared_rails
+  - type: filesystem
+  - type: skill_use
+    params:
+      skill_mode: all
+#  - type: context_engineering
+#    params:
+#      preset: true
+#  - type: token_tracking
+#  - type: tool_tracking
+#  - type: ask_user
+#  - type: confirm_interrupt
+#    params:
+#      tool_names: [bash, write_file, edit_file]
+
+x-shared-tools: &shared_tools
+  - type: web_search
+    params: { language: cn }
+  - type: web_fetch
+    params: { language: cn }
+
+x-shared-subagents: &shared_subagents
+#  - agent_card:
+#      name: code_agent
+#      description: "资深软件工程师，擅长把任务落到可运行的代码与可验证的结果。"
+#    system_prompt: >-
+#      规则：能用工具就用工具（读/写/编辑/grep/list/bash/code），不要猜文件内容；
+#      变更要小、可回滚；先澄清数据结构与接口，再动代码；输出给出测试/验证步骤。
+#    rails:
+#      - type: filesystem
+#    tools:
+#      - type: web_search
+#        params: { language: cn }
+#      - type: web_fetch
+#        params: { language: cn }
+#  - agent_card:
+#      name: research_agent
+#      description: "研究调查专家，每次只给一个主题。"
+#    system_prompt: "你是研究助理，负责围绕用户输入的主题开展调研，仅需返回最终研究结果。"
+#    rails:
+#      - type: filesystem
+#    tools:
+#      - type: web_search
+#        params: { language: cn }
+#      - type: web_fetch
+#        params: { language: cn }
+  - agent_card:
+      name: browser_agent
+      description: "浏览器自动化代理，使用浏览器工具完成导航、交互和信息提取。"
+    system_prompt: "你是浏览器自动化代理，负责执行网页任务。请如实、简洁地汇报结果。"
+    factory_name: browser_agent
+    rails:
+      - type: filesystem
+
+x-shared-agent-spec: &shared_agent_spec
+  workspace:
+#    root_path: ./my-project
+    stable_base: true
+  max_iterations: 200
+  completion_timeout: 600.0
+  language: cn
+  enable_task_planning: false
+  enable_async_subagent: true
+  restrict_to_sandbox: false
+  rails: *shared_rails
+  tools: *shared_tools
+  subagents: *shared_subagents
+  project_root: /Users/alan/Developer/alan_workspace/jiuwenclaw
+
+# ---------------------------------------------------------------------------
+# Agent specifications
+# ---------------------------------------------------------------------------
 
 agents:
   leader:
+    <<: *shared_agent_spec
     model:
+      <<: *model_template
       model_client_config:
         client_provider: OpenAI
-        api_base: https://api.modelarts-maas.com/openai/v1
-        api_key: "${API_KEY}"
+        api_base: "${API_BASE}"
+        api_key: "${LEADER_API_KEY}"
         timeout: 120
+        rate_limit: 1.0
         verify_ssl: false
-      model_request_config:
-        model: glm-5
-        temperature: 0.2
-        top_p: 0.9
-    workspace:
-      root_path: ./workspace
-    max_iterations: 200
-    completion_timeout: 600.0
 
   teammate:
+    <<: *shared_agent_spec
     model:
+      <<: *model_template
       model_client_config:
-        client_provider: OpenRouter
-        api_base: https://openrouter.ai/api/v1
+        client_provider: OpenAI
+        api_base: "${API_BASE}"
         api_key: "${TEAMMATE_API_KEY}"
         timeout: 120
+        rate_limit: 1.0
         verify_ssl: false
-      model_request_config:
-        model: minimax/minimax-m2.5
-        temperature: 0.2
-        top_p: 0.9
-    workspace:
-      root_path: ./workspace
-    max_iterations: 200
-    completion_timeout: 600.0
+
+
+# ---------------------------------------------------------------------------
+# Infrastructure
+# ---------------------------------------------------------------------------
 
 transport:
-  type: pyzmq
-  params:
-    backend: pyzmq
-    team_id: e2e_team
-    node_id: team_leader
-    direct_addr: tcp://127.0.0.1:15555
-    pubsub_publish_addr: tcp://127.0.0.1:15556
-    pubsub_subscribe_addr: tcp://127.0.0.1:15557
-    metadata:
-      pubsub_bind: true
+  type: inprocess
+#transport:
+#  type: pyzmq
+#  params:
+#    backend: pyzmq
+#    team_name: my_project_team
+#    node_id: team_leader
+#    direct_addr: tcp://127.0.0.1:15555
+#    pubsub_publish_addr: tcp://127.0.0.1:15556
+#    pubsub_subscribe_addr: tcp://127.0.0.1:15557
+#    metadata:
+#      pubsub_bind: true
 
+# storage: omitted → default ~/.openjiuwen/.agent_teams/{team_name}/team.db
 storage:
   type: sqlite
-  params:
-    connection_string: ./team_data/team.db
+#  params:
+#    connection_string: /Users/alan/.openjiuwen/.agent_teams/team_data/team.db
 
-metadata:
-  teammate_base_port: 16000
-  teammate_port_offset: 10
+#metadata:
+#  teammate_base_port: 16000
+#  teammate_port_offset: 10
 
-# Runtime settings (not part of TeamAgentSpec, used by the e2e script)
+# ---------------------------------------------------------------------------
+# Runtime (not part of TeamAgentSpec, consumed by agent_team_e2e.py)
+# ---------------------------------------------------------------------------
 runtime:
-  session_id: agent_team_session
-  initial_query: "建立一个3人团队每人发言一次"
+  session_id: my_project_session
+  initial_query: >-
+    拉2个人报数，分为2个有依赖的任务

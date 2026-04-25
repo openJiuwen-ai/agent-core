@@ -9,15 +9,19 @@ Configuration:
     logging.yaml  — loguru logging sinks / routes
 
 Environment variable overrides (take precedence over config.yaml):
-    API_BASE, API_KEY, MODEL_NAME, MODEL_PROVIDER, MODEL_TIMEOUT
+    API_BASE, LEADER_API_KEY, TEAMMATE_API_KEY, MODEL_NAME
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from pathlib import Path
-from typing import Any
+
+# Ensure _e2e_utils is importable regardless of working directory
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE))
 
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.core.common.logging.log_config import (
@@ -30,15 +34,11 @@ from openjiuwen.core.runner.runner import Runner
 from _e2e_utils import load_team_config, run_interactive
 
 # ---------------------------------------------------------------------------
-# Paths
+# Logging — must be configured before any logger is used
 # ---------------------------------------------------------------------------
-_HERE = Path(__file__).resolve().parent
 _LOG_CONFIG_PATH = _HERE / "logging.yaml"
 _TEAM_CONFIG_PATH = _HERE / "config.yaml"
 
-# ---------------------------------------------------------------------------
-# Logging — must be configured before any logger is used
-# ---------------------------------------------------------------------------
 if _LOG_CONFIG_PATH.is_file():
     configure_log(str(_LOG_CONFIG_PATH))
 else:
@@ -47,21 +47,15 @@ else:
 os.environ.setdefault("LLM_SSL_VERIFY", "false")
 os.environ.setdefault("IS_SENSITIVE", "false")
 
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-_team_cfg: dict[str, Any] = {}
-_runtime_cfg: dict[str, Any] = {}
-
-
 async def main() -> None:
-    global _team_cfg, _runtime_cfg
-
     cfg = load_team_config(_TEAM_CONFIG_PATH)
-    _runtime_cfg = cfg.pop("runtime", {})
-    _team_cfg = cfg
+    runtime_cfg = cfg.pop("runtime", {})
 
-    spec = TeamAgentSpec.model_validate(_team_cfg)
+    spec = TeamAgentSpec.model_validate(cfg)
     leader = spec.build()
 
     await Runner.start()
@@ -72,7 +66,7 @@ async def main() -> None:
     print("Type 'exit' or 'quit' to stop.")
     print("=" * 60)
 
-    await run_interactive(leader, _runtime_cfg, default_session_id="agent_team_session")
+    await run_interactive(leader, runtime_cfg, default_session_id="agent_team_session")
 
     await Runner.stop()
     print("Done.")

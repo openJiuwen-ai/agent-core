@@ -50,6 +50,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "dispatcher.stale_claim_self": (
             "[催促] 你已认领的任务 [{task_id}] {title} 已超过 10 mins 仍未完成，请继续推进：{content}"
         ),
+        # agent/dispatcher.py — task assignment notification
+        "dispatcher.task_assigned_to_self": (
+            "[任务指派] 任务 [{task_id}] 已指派给你，请通过 view_task 工具查看任务详情并执行。"
+        ),
         # agent/dispatcher.py — message formatting
         "dispatcher.msg_type_broadcast": "广播消息",
         "dispatcher.msg_type_direct": "单播消息",
@@ -115,6 +119,11 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         "dispatcher.stale_claim_self": (
             "[Nudge] Your claimed task [{task_id}] {title} has been open for over 10 mins. Please continue: {content}"
+        ),
+        # agent/dispatcher.py — task assignment notification
+        "dispatcher.task_assigned_to_self": (
+            "[Task Assigned] Task [{task_id}] has been assigned to you. "
+            "Use view_task to inspect the details and start working on it."
         ),
         # agent/dispatcher.py — message formatting
         "dispatcher.msg_type_broadcast": "broadcast",

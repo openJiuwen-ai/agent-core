@@ -29,8 +29,13 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from pathlib import Path
 from typing import Any
+
+# Ensure _e2e_utils is importable regardless of working directory
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE))
 
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.team import ModelPoolEntry
@@ -43,10 +48,6 @@ from openjiuwen.core.runner.runner import Runner
 
 from _e2e_utils import load_team_config, run_interactive
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-_HERE = Path(__file__).resolve().parent
 _LOG_CONFIG_PATH = _HERE / "logging.yaml"
 _TEAM_CONFIG_PATH = _HERE / "config_model_pool.yaml"
 

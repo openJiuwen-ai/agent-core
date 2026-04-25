@@ -234,6 +234,26 @@ class EventDispatcher:
             await self._process_unread_messages(member_name)
             return
 
+        if event_type == TeamEvent.TASK_CLAIMED and host.task_manager:
+            # Directed assignment from another node (self-claims are
+            # filtered upstream via sender_id). Must reach the agent
+            # regardless of execution state, so we go through
+            # ``deliver_input`` — it picks steer / queue / start based on
+            # what the round is doing — and skip the generic task-board
+            # nudge below since the targeted message already tells the
+            # agent which task to look at.
+            payload = event.get_payload()
+            if payload.member_name == member_name:
+                await host.resume_polls()
+                content = t("dispatcher.task_assigned_to_self", task_id=payload.task_id)
+                team_logger.info(
+                    "[{}] received TASK_CLAIMED for self, task_id={}",
+                    member_name,
+                    payload.task_id,
+                )
+                await host.deliver_input(content)
+                return
+
         if event_type in self._TASK_EVENTS and not host.has_in_flight_round() and host.task_manager:
             # Gate on the task-level check, not ``is_agent_running``: nudging
             # during the pre-stream or finalize window would call
