@@ -1234,6 +1234,11 @@ class ReActAgent(BaseAgent):
 
                 context = await self._init_context(session)
                 ctx.context = context
+                
+                # Get background messages from session state
+                background_messages = session.get_state("background_messages")
+                if background_messages:
+                    await context.add_messages(background_messages)
 
                 rendered_system_prompt = self._build_rendered_system_prompt(
                     inputs,
