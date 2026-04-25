@@ -105,19 +105,19 @@ class EvolutionStore:
         return names
 
     def skill_exists(self, name: str) -> bool:
-        return self._resolve_skill_dir(name) is not None
+        return self.resolve_skill_dir(name) is not None
 
     async def read_skill_content(self, name: str) -> str:
         """Read SKILL.md content for one skill."""
-        skill_dir = self._resolve_skill_dir(name)
+        skill_dir = self.resolve_skill_dir(name)
         if skill_dir is None:
             return ""
         md_path = self._find_skill_md(skill_dir)
         if md_path is None:
             return ""
-        return await self._read_file_text(md_path)
+        return await self.read_file_text(md_path)
 
-    def _resolve_skill_dir(self, name: str, create: bool = False) -> Optional[Path]:
+    def resolve_skill_dir(self, name: str, create: bool = False) -> Optional[Path]:
         candidates = [base / name for base in self._base_dirs]
         for candidate in candidates:
             if candidate.is_dir():
@@ -134,7 +134,7 @@ class EvolutionStore:
         md_files = list(skill_dir.glob("*.md"))
         return md_files[0] if md_files else None
 
-    async def _read_file_text(self, path: Path) -> str:
+    async def read_file_text(self, path: Path) -> str:
         """Read a text file, routing through sys_operation when available."""
         try:
             if self.sys_operation is not None:
@@ -153,7 +153,7 @@ class EvolutionStore:
             logger.warning("[EvolutionStore] failed to read %s: %s", path, exc)
             return ""
 
-    async def _write_file_text(self, path: Path, content: str) -> None:
+    async def write_file_text(self, path: Path, content: str) -> None:
         """Write a text file, routing through sys_operation when available."""
         try:
             if self.sys_operation is not None:
@@ -179,7 +179,7 @@ class EvolutionStore:
         Returns:
             True on success, False on failure
         """
-        skill_dir = self._resolve_skill_dir(name)
+        skill_dir = self.resolve_skill_dir(name)
         if skill_dir is None:
             logger.warning("[EvolutionStore] write_skill_content: skill '%s' not found", name)
             return False
@@ -190,7 +190,7 @@ class EvolutionStore:
             skill_md_path = skill_dir / "SKILL.md"
 
         try:
-            await self._write_file_text(skill_md_path, content)
+            await self.write_file_text(skill_md_path, content)
             logger.info("[EvolutionStore] wrote SKILL.md for skill='%s'", name)
             return True
         except Exception as exc:
@@ -203,7 +203,7 @@ class EvolutionStore:
         target: Optional[EvolutionTarget] = None,
     ) -> EvolutionLog:
         """Load evolution log for one skill; optionally filter by target."""
-        evo_log = await self._load_full_evolution_log(name)
+        evo_log = await self.load_full_evolution_log(name)
         if target is not None:
             evo_log = EvolutionLog(
                 skill_id=evo_log.skill_id,
@@ -215,14 +215,14 @@ class EvolutionStore:
 
     async def append_record(self, name: str, record: EvolutionRecord) -> None:
         """Append or merge one evolution record to evolutions.json."""
-        skill_dir = self._resolve_skill_dir(name, create=True)
+        skill_dir = self.resolve_skill_dir(name, create=True)
         if skill_dir is None:
             return
 
         if record.change.target == EvolutionTarget.SCRIPT:
             await self._persist_script(skill_dir, record)
 
-        evo_log = await self._load_full_evolution_log(name)
+        evo_log = await self.load_full_evolution_log(name)
         merge_target = record.change.merge_target
         if merge_target:
             replaced = False
@@ -261,14 +261,14 @@ class EvolutionStore:
 
         await self.render_evolution_markdown(name)
 
-    async def _load_full_evolution_log(self, name: str) -> EvolutionLog:
-        skill_dir = self._resolve_skill_dir(name)
+    async def load_full_evolution_log(self, name: str) -> EvolutionLog:
+        skill_dir = self.resolve_skill_dir(name)
         if skill_dir is None:
             return EvolutionLog.empty(skill_id=name)
         evo_path = skill_dir / _EVOLUTION_FILENAME
         if not evo_path.exists():
             return EvolutionLog.empty(skill_id=name)
-        file_content = await self._read_file_text(evo_path)
+        file_content = await self.read_file_text(evo_path)
         if not file_content:
             return EvolutionLog.empty(skill_id=name)
         try:
@@ -284,13 +284,13 @@ class EvolutionStore:
         evo_log: EvolutionLog,
         skill_dir: Optional[Path] = None,
     ) -> None:
-        target_dir = skill_dir or self._resolve_skill_dir(name, create=True)
+        target_dir = skill_dir or self.resolve_skill_dir(name, create=True)
         if target_dir is None:
             return
 
         target_dir.mkdir(parents=True, exist_ok=True)
         evo_path = target_dir / _EVOLUTION_FILENAME
-        await self._write_file_text(evo_path, json.dumps(evo_log.to_dict(), ensure_ascii=False, indent=2))
+        await self.write_file_text(evo_path, json.dumps(evo_log.to_dict(), ensure_ascii=False, indent=2))
 
     async def get_pending_records(
         self,
@@ -309,7 +309,7 @@ class EvolutionStore:
         filename = record.change.script_filename or f"{record.id}_script.{ext}"
         script_path = scripts_dir / filename
 
-        await self._write_file_text(script_path, record.change.content)
+        await self.write_file_text(script_path, record.change.content)
         logger.info("[EvolutionStore] persisted script %s for record %s", filename, record.id)
 
         record.change.script_filename = filename
@@ -321,11 +321,11 @@ class EvolutionStore:
 
     async def render_evolution_markdown(self, name: str) -> None:
         """Render all evolution entries to human-readable Markdown files."""
-        skill_dir = self._resolve_skill_dir(name)
+        skill_dir = self.resolve_skill_dir(name)
         if skill_dir is None:
             return
 
-        evo_log = await self._load_full_evolution_log(name)
+        evo_log = await self.load_full_evolution_log(name)
         active_entries = [r for r in evo_log.entries if not r.change.skip_reason]
         if not active_entries:
             return
@@ -382,7 +382,7 @@ class EvolutionStore:
             )
 
         filename = section.lower().replace(" ", "_") + ".md"
-        await self._write_file_text(evo_dir / filename, "\n".join(lines))
+        await self.write_file_text(evo_dir / filename, "\n".join(lines))
 
     async def _render_script_index(
         self,
@@ -405,7 +405,7 @@ class EvolutionStore:
             date = record.timestamp[:10] if len(record.timestamp) >= 10 else record.timestamp
             lines.append(f"| [{fname}]({fname}) | {lang} | {purpose} | {date} |")
         lines.append("")
-        await self._write_file_text(scripts_dir / "_index.md", "\n".join(lines))
+        await self.write_file_text(scripts_dir / "_index.md", "\n".join(lines))
 
     async def _update_skill_md_index(
         self,
@@ -478,13 +478,13 @@ class EvolutionStore:
             ]
         )
 
-        content = await self._read_file_text(skill_md_path)
+        content = await self.read_file_text(skill_md_path)
         if _EVOLUTION_INDEX_PATTERN.search(content):
             content = _EVOLUTION_INDEX_PATTERN.sub(index_block, content)
         else:
             content = content.rstrip() + "\n\n" + index_block + "\n"
 
-        await self._write_file_text(skill_md_path, content)
+        await self.write_file_text(skill_md_path, content)
 
     async def format_desc_experience_text(self, name: str, max_items: int = _MAX_INJECT_DESC) -> str:
         pending = await self.get_pending_records(name, EvolutionTarget.DESCRIPTION)
@@ -558,7 +558,7 @@ class EvolutionStore:
         if not updates:
             return 0
 
-        evo_log = await self._load_full_evolution_log(name)
+        evo_log = await self.load_full_evolution_log(name)
         updated_count = 0
 
         for record in evo_log.entries:
@@ -599,7 +599,7 @@ class EvolutionStore:
         Returns:
             List of records sorted by score descending
         """
-        evo_log = await self._load_full_evolution_log(name)
+        evo_log = await self.load_full_evolution_log(name)
         records = evo_log.entries
         if min_score is not None:
             records = [r for r in records if r.score >= min_score]
@@ -618,7 +618,7 @@ class EvolutionStore:
         if not record_ids:
             return 0
 
-        evo_log = await self._load_full_evolution_log(name)
+        evo_log = await self.load_full_evolution_log(name)
         ids_set = set(record_ids)
         original_count = len(evo_log.entries)
         evo_log.entries = [r for r in evo_log.entries if r.id not in ids_set]
@@ -652,7 +652,7 @@ class EvolutionStore:
         if not record_ids:
             return 0
 
-        evo_log = await self._load_full_evolution_log(name)
+        evo_log = await self.load_full_evolution_log(name)
         ids_set = set(record_ids)
         updated_count = 0
 
@@ -693,7 +693,7 @@ class EvolutionStore:
         Returns:
             The updated primary record, or None if not found
         """
-        evo_log = await self._load_full_evolution_log(name)
+        evo_log = await self.load_full_evolution_log(name)
         primary_record = None
         records_to_remove = []
         all_scores = []
@@ -752,7 +752,7 @@ class EvolutionStore:
         Returns:
             The updated record, or None if not found
         """
-        evo_log = await self._load_full_evolution_log(name)
+        evo_log = await self.load_full_evolution_log(name)
         target_record = None
 
         for record in evo_log.entries:
@@ -788,6 +788,7 @@ class EvolutionStore:
         name: str,
         description: str,
         body: str,
+        frontmatter: Optional[str] = None,
     ) -> Optional[Path]:
         """Create a new skill directory with SKILL.md and empty evolutions.json.
 
@@ -795,6 +796,10 @@ class EvolutionStore:
             name: Skill name (directory name)
             description: Skill description for YAML front-matter
             body: Skill body content (instructions, examples, etc.)
+            frontmatter: Optional complete YAML front-matter string. When
+                provided, ``name`` and ``description`` are NOT used to
+                generate the front-matter — this string is written as-is
+                (must include ``---`` delimiters).
 
         Returns:
             Path to the created skill directory, or None on failure
@@ -807,7 +812,7 @@ class EvolutionStore:
             logger.error("[EvolutionStore] create_skill: path traversal attempt in name %r", name)
             return None
 
-        skill_dir = self._resolve_skill_dir(name, create=True)
+        skill_dir = self.resolve_skill_dir(name, create=True)
         if skill_dir is None:
             logger.error("[EvolutionStore] create_skill: cannot resolve skill dir for %s", name)
             return None
@@ -825,7 +830,10 @@ class EvolutionStore:
         skill_dir.mkdir(parents=True, exist_ok=True)
 
         # Create SKILL.md with YAML front-matter
-        skill_md_content = f"""---
+        if frontmatter:
+            skill_md_content = f"{frontmatter}\n\n# {name}\n\n{body}\n"
+        else:
+            skill_md_content = f"""---
 name: {name}
 description: {description}
 ---
@@ -835,7 +843,7 @@ description: {description}
 {body}
 """
         skill_md_path = skill_dir / "SKILL.md"
-        await self._write_file_text(skill_md_path, skill_md_content)
+        await self.write_file_text(skill_md_path, skill_md_content)
 
         # Create empty evolutions.json
         empty_log = EvolutionLog.empty(skill_id=name)
@@ -861,12 +869,12 @@ description: {description}
         result: List[Tuple[str, str]] = []
         for name in self.list_skill_names():
             content = await self.read_skill_content(name)
-            description = self._extract_description_from_skill_md(content)
+            description = self.extract_description_from_skill_md(content)
             result.append((name, description))
         return result
 
     @staticmethod
-    def _extract_description_from_skill_md(content: str) -> str:
+    def extract_description_from_skill_md(content: str) -> str:
         """Extract description from SKILL.md YAML front-matter."""
         if not content.startswith("---"):
             return ""
@@ -878,3 +886,65 @@ description: {description}
             if line.startswith("description:"):
                 return line.split(":", 1)[1].strip().strip('"').strip("'")
         return ""
+
+    # ── Governance primitives (archive / clear / rollback) ──
+
+    @staticmethod
+    def _archive_dir(skill_dir: Path) -> Path:
+        archive = skill_dir / "archive"
+        archive.mkdir(parents=True, exist_ok=True)
+        return archive
+
+    @staticmethod
+    def _ts_suffix() -> str:
+        return datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S")
+
+    async def archive_skill_body(self, name: str) -> Optional[str]:
+        """Copy SKILL.md -> archive/SKILL.v<ts>.md. Returns archive filename."""
+        skill_dir = self.resolve_skill_dir(name)
+        if skill_dir is None:
+            return None
+        md_path = self._find_skill_md(skill_dir)
+        if md_path is None:
+            return None
+        archive = self._archive_dir(skill_dir)
+        suffix = self._ts_suffix()
+        dest = archive / f"SKILL.v{suffix}.md"
+        content = await self.read_file_text(md_path)
+        await self.write_file_text(dest, content)
+        logger.info("[EvolutionStore] archived %s -> %s", md_path.name, dest.name)
+        return dest.name
+
+    async def archive_evolutions(self, name: str) -> Optional[str]:
+        """Copy evolutions.json -> archive/evolutions.v<ts>.json. Returns archive filename."""
+        skill_dir = self.resolve_skill_dir(name)
+        if skill_dir is None:
+            return None
+        evo_path = skill_dir / _EVOLUTION_FILENAME
+        if not evo_path.is_file():
+            return None
+        archive = self._archive_dir(skill_dir)
+        suffix = self._ts_suffix()
+        dest = archive / f"evolutions.v{suffix}.json"
+        content = await self.read_file_text(evo_path)
+        await self.write_file_text(dest, content)
+        logger.info("[EvolutionStore] archived evolutions -> %s", dest.name)
+        return dest.name
+
+    async def clear_evolutions(self, name: str) -> None:
+        """Reset evolutions.json to empty list."""
+        empty_log = EvolutionLog.empty(skill_id=name)
+        await self._save_evolution_log(name, empty_log)
+        await self.render_evolution_markdown(name)
+        logger.info("[EvolutionStore] cleared evolutions for skill=%s", name)
+
+    def list_archives(self, name: str) -> List[str]:
+        """List available archive versions for rollback (newest first)."""
+        skill_dir = self.resolve_skill_dir(name)
+        if skill_dir is None:
+            return []
+        archive = skill_dir / "archive"
+        if not archive.is_dir():
+            return []
+        files = sorted(archive.iterdir(), key=lambda p: p.name, reverse=True)
+        return [f.name for f in files if f.is_file()]

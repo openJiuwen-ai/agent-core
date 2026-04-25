@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
@@ -123,6 +124,8 @@ class SkillEvolutionRail(EvolutionRail):
         self._pending_approval_snapshots: Dict[str, PendingChange] = {}
         # New skill proposal storage: request_id → PendingSkillCreation
         self._pending_skill_proposals: Dict[str, PendingSkillCreation] = {}
+        # Governance staging: request_id → {kind, skill_name, actions/new_body}
+        self._pending_governance: Dict[str, Dict[str, Any]] = {}
         # Evaluation and new skill detection settings
         self._eval_interval = eval_interval
         self._new_skill_detection = new_skill_detection
@@ -339,7 +342,28 @@ class SkillEvolutionRail(EvolutionRail):
                             proposal.get("description", ""),
                         )
                         if not overlap:
-                            await self._emit_new_skill_approval(ctx, proposal)
+                            if self._auto_save:
+                                # Auto-save path: create skill immediately without user approval
+                                skill_name = proposal.get("name", "")
+                                created_path = await self._evolution_store.create_skill(
+                                    name=skill_name,
+                                    description=proposal.get("description", ""),
+                                    body=proposal.get("body", ""),
+                                )
+                                if created_path:
+                                    logger.info(
+                                        "[SkillEvolutionRail] auto-saved new skill '%s' at %s",
+                                        skill_name,
+                                        created_path,
+                                    )
+                                else:
+                                    logger.warning(
+                                        "[SkillEvolutionRail] failed to auto-save new skill '%s'",
+                                        skill_name,
+                                    )
+                            else:
+                                # Approval-required path: stage proposal and emit approval request
+                                await self._emit_new_skill_approval(ctx, proposal)
 
             # Trigger async evaluation if interval reached
             await self._trigger_async_evaluation(ctx, parsed_messages)
@@ -1069,6 +1093,242 @@ class SkillEvolutionRail(EvolutionRail):
                 "[SkillEvolutionRail] user rejected new skill creation: %s",
                 pending.name,
             )
+
+    # ── Governance commands (shared by 1D and team skills) ──
+
+    async def request_simplify(
+        self,
+        skill_name: str,
+        user_intent: Optional[str] = None,
+    ) -> Optional[str]:
+        """Stage a simplify proposal and emit an approval event.
+
+        Returns request_id on success, None if no actions proposed.
+        """
+        store = self._evolution_store
+        if not store.skill_exists(skill_name):
+            return None
+
+        evo_log = await store.load_full_evolution_log(skill_name)
+        records = evo_log.entries
+        if not records:
+            return None
+
+        content = await store.read_skill_content(skill_name)
+        summary = store.extract_description_from_skill_md(content)
+
+        actions = await self._scorer.simplify(
+            skill_name=skill_name,
+            skill_summary=summary,
+            records=records,
+            user_intent=user_intent,
+        )
+        if not actions:
+            return None
+
+        request_id = f"evolve_simplify_{uuid.uuid4().hex[:8]}"
+        self._pending_governance[request_id] = {
+            "kind": "simplify",
+            "skill_name": skill_name,
+            "actions": actions,
+        }
+
+        preview = "\n".join(
+            f"- **{a.get('action', '?')}** `{a.get('record_id', '?')}`: {a.get('reason', '')}" for a in actions[:10]
+        )
+        event = OutputSchema(
+            type="chat.ask_user_question",
+            index=0,
+            payload={
+                "request_id": request_id,
+                "questions": [
+                    {
+                        "question": (
+                            f"**精简 Skill '{skill_name}' 的演进经验**\n\n"
+                            f"共 {len(actions)} 项操作：\n{preview}\n\n"
+                            "是否执行？"
+                        ),
+                        "header": "Skill 精简审批",
+                        "options": [
+                            {"label": "执行", "description": "执行精简操作"},
+                            {"label": "取消", "description": "放弃本次精简"},
+                        ],
+                        "multi_select": False,
+                    }
+                ],
+            },
+        )
+        self._pending_approval_events.append(event)
+        return request_id
+
+    async def on_approve_simplify(self, request_id: str) -> Dict[str, int]:
+        """Execute a previously staged simplify proposal."""
+        gov = self._pending_governance.pop(request_id, None)
+        if not gov:
+            return {}
+
+        result = await self._scorer.execute_simplify_actions(
+            store=self._evolution_store,
+            skill_name=gov["skill_name"],
+            actions=gov["actions"],
+        )
+        logger.info("[SkillEvolutionRail] simplify executed for %s: %s", gov["skill_name"], result)
+        return result
+
+    async def on_reject_simplify(self, request_id: str) -> None:
+        gov = self._pending_governance.pop(request_id, None)
+        if gov:
+            logger.info("[SkillEvolutionRail] simplify rejected for %s", gov["skill_name"])
+
+    async def request_rebuild(
+        self,
+        skill_name: str,
+        user_intent: Optional[str] = None,
+    ) -> Optional[str]:
+        """Stage a rebuild proposal and emit an approval event.
+
+        Uses SkillRewriter to generate a new body by integrating evolution
+        experiences, then stages it for user approval.
+
+        Returns request_id on success, None if skill not found or rewrite fails.
+        """
+        store = self._evolution_store
+        if not store.skill_exists(skill_name):
+            return None
+
+        rewriter = SkillRewriter(
+            self._optimizer_llm,
+            self._optimizer_model,
+            self._optimizer_language,
+        )
+        result = await rewriter.rewrite(
+            skill_name=skill_name,
+            store=store,
+            min_score=0.0,
+            dry_run=True,
+            user_query=user_intent or "",
+        )
+        if result is None:
+            return None
+
+        request_id = f"evolve_rebuild_{uuid.uuid4().hex[:8]}"
+        self._pending_governance[request_id] = {
+            "kind": "rebuild",
+            "skill_name": skill_name,
+            "new_body": result.rewritten_content,
+            "consumed_ids": result.consumed_record_ids,
+        }
+
+        preview = result.rewritten_content[:2000]
+        event = OutputSchema(
+            type="chat.ask_user_question",
+            index=0,
+            payload={
+                "request_id": request_id,
+                "questions": [
+                    {
+                        "question": (
+                            f"**重建 Skill '{skill_name}' 的 Body**\n\n"
+                            f"```markdown\n{preview}\n```\n\n"
+                            f"共整合 {len(result.consumed_record_ids)} 条经验。"
+                            "⚠️ 重建将归档旧 body + 旧 evolutions 并清零经验。\n\n"
+                            "是否执行？"
+                        ),
+                        "header": "Skill 重建审批",
+                        "options": [
+                            {"label": "重建", "description": "用新 body 替换"},
+                            {"label": "取消", "description": "保持现状"},
+                        ],
+                        "multi_select": False,
+                    }
+                ],
+            },
+        )
+        self._pending_approval_events.append(event)
+        return request_id
+
+    async def on_approve_rebuild(self, request_id: str) -> bool:
+        """Execute a staged rebuild: archive old → write new → clear evolutions."""
+        gov = self._pending_governance.pop(request_id, None)
+        if not gov:
+            return False
+
+        store = self._evolution_store
+        name = gov["skill_name"]
+        await store.archive_skill_body(name)
+        await store.archive_evolutions(name)
+        await store.write_skill_content(name, gov["new_body"])
+        await store.clear_evolutions(name)
+        logger.info("[SkillEvolutionRail] rebuild completed for %s", name)
+        return True
+
+    async def on_reject_rebuild(self, request_id: str) -> None:
+        gov = self._pending_governance.pop(request_id, None)
+        if gov:
+            logger.info("[SkillEvolutionRail] rebuild rejected for %s", gov["skill_name"])
+
+    async def rollback_skill(self, skill_name: str, version: Optional[str] = None) -> bool:
+        """Rollback skill to an archived version (no approval required)."""
+        store = self._evolution_store
+        skill_dir = store.resolve_skill_dir(skill_name)
+        if skill_dir is None:
+            return False
+
+        archive = skill_dir / "archive"
+        if not archive.is_dir():
+            logger.warning("[SkillEvolutionRail] no archive dir for %s", skill_name)
+            return False
+
+        if version:
+            body_archive = archive / version
+            evo_version = version.replace("SKILL.", "evolutions.").replace(".md", ".json")
+            evo_archive = archive / evo_version
+        else:
+            body_files = sorted(
+                [f for f in archive.iterdir() if f.name.startswith("SKILL.v")],
+                key=lambda p: p.name,
+                reverse=True,
+            )
+            if not body_files:
+                logger.warning("[SkillEvolutionRail] no archived body for %s", skill_name)
+                return False
+            body_archive = body_files[0]
+            evo_version = body_archive.name.replace("SKILL.", "evolutions.").replace(".md", ".json")
+            evo_archive = archive / evo_version
+
+        # Archive current state first
+        await store.archive_skill_body(skill_name)
+        await store.archive_evolutions(skill_name)
+
+        old_body = await store.read_file_text(body_archive)
+        await store.write_skill_content(skill_name, old_body)
+
+        if evo_archive.is_file():
+            evo_content = await store.read_file_text(evo_archive)
+            evo_path = skill_dir / "evolutions.json"
+            await store.write_file_text(evo_path, evo_content)
+        else:
+            await store.clear_evolutions(skill_name)
+
+        await store.render_evolution_markdown(skill_name)
+        logger.info("[SkillEvolutionRail] rollback completed for %s -> %s", skill_name, body_archive.name)
+        return True
+
+    def should_hint_simplify_or_rebuild(self, skill_name: str) -> bool:
+        """Check if a skill has enough evolutions to suggest simplify/rebuild."""
+        store = self._evolution_store
+        skill_dir = store.resolve_skill_dir(skill_name)
+        if skill_dir is None:
+            return False
+        evo_path = skill_dir / "evolutions.json"
+        if not evo_path.is_file():
+            return False
+        try:
+            data = json.loads(evo_path.read_text(encoding="utf-8"))
+            entries = data.get("entries", [])
+            return len(entries) >= 10
+        except Exception:
+            return False
 
     async def rewrite_skill(
         self,

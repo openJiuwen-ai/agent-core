@@ -257,6 +257,19 @@ class PendingSkillCreation:
 
 
 @dataclass
+class PendingTeamSkillCreation(PendingSkillCreation):
+    """Snapshot of a team skill proposal awaiting user approval.
+
+    Extends PendingSkillCreation with extra_files for multi-file team skill
+    packages (roles/*.md, workflow.md, bind.md, etc.).
+    """
+
+    extra_files: Dict[str, str] = field(default_factory=dict)
+    frontmatter: str = ""
+    proposal_id: str = field(default_factory=lambda: f"team_skill_create_{uuid.uuid4().hex[:8]}")
+
+
+@dataclass
 class EvolutionContext:
     """All inputs required for LLM-based experience generation."""
 
@@ -278,5 +291,6 @@ __all__ = [
     "EvolveCheckpoint",
     "PendingChange",
     "PendingSkillCreation",
+    "PendingTeamSkillCreation",
     "EvolutionContext",
 ]

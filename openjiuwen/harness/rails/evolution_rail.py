@@ -49,15 +49,24 @@ class EvolutionRail(DeepAgentRail):
 
     priority = 60  # Lower than security rails, higher than user rails
 
-    def __init__(self, trajectory_store: Optional[TrajectoryStore] = None):
+    def __init__(
+        self,
+        trajectory_store: Optional[TrajectoryStore] = None,
+        accumulate_trajectory: bool = False,
+        trigger_evolution_after_invoke: bool = True,
+    ):
         """Initialize EvolutionRail.
 
         Args:
             trajectory_store: Optional trajectory store. If None, uses InMemoryTrajectoryStore.
+            accumulate_trajectory: Whether to keep the trajectory builder across invoke rounds.
+            trigger_evolution_after_invoke: Whether to trigger evolution after each invoke round.
         """
         super().__init__()
         self._trajectory_store = trajectory_store or InMemoryTrajectoryStore()
         self._builder: Optional[TrajectoryBuilder] = None
+        self._accumulate_trajectory = accumulate_trajectory
+        self._trigger_evolution_after_invoke = trigger_evolution_after_invoke
 
     @property
     def trajectory_store(self) -> TrajectoryStore:
@@ -70,6 +79,11 @@ class EvolutionRail(DeepAgentRail):
         """Initialize trajectory builder at the start of each invoke."""
         inputs = ctx.inputs
         if not isinstance(inputs, InvokeInputs):
+            return
+
+        # If accumulating across rounds and builder already exists, keep it
+        if self._builder is not None and self._should_accumulate_trajectory():
+            await self._on_before_invoke(ctx)
             return
 
         session_id = inputs.conversation_id or ""
@@ -155,21 +169,64 @@ class EvolutionRail(DeepAgentRail):
         await self._on_after_tool_call(ctx)
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
-        """Finalize trajectory, save it, and trigger run_evolution."""
+        """Finalize trajectory for this invoke round."""
         if self._builder is None:
             return
 
-        # Build trajectory
-        trajectory = self._builder.build()
+        trajectory = self._build_trajectory()
+        if trajectory is None:
+            return
 
-        # Save trajectory
         self._trajectory_store.save(trajectory)
 
-        # Trigger evolution
-        await self.run_evolution(trajectory, ctx)
+        if self._should_trigger_evolution_after_invoke():
+            await self.run_evolution(trajectory, ctx)
 
-        # Reset builder
-        self._builder = None
+        if not self._should_accumulate_trajectory():
+            self._builder = None
+
+    # ---- Trajectory strategy hooks ----
+
+    def _should_accumulate_trajectory(self) -> bool:
+        """Whether to keep the existing trajectory builder across invoke rounds.
+
+        Returns False (default): each invoke round gets a fresh builder.
+        Returns True: builder survives across rounds; subclass triggers
+                      evolution at custom timing.
+
+        Subclasses can either set _accumulate_trajectory = True or override
+        this method for dynamic logic.
+        """
+        return self._accumulate_trajectory
+
+    def _should_trigger_evolution_after_invoke(self) -> bool:
+        """Whether to trigger evolution after invoke.
+
+        Returns True (default): evolution runs at invoke round end.
+        Returns False: subclass triggers evolution at custom timing.
+
+        Subclasses can either set _trigger_evolution_after_invoke = False
+        or override this method for dynamic logic.
+        """
+        return self._trigger_evolution_after_invoke
+
+    # ---- Trajectory helper methods ----
+
+    def _build_trajectory(self) -> Optional[Trajectory]:
+        """Build trajectory from current builder with snapshot.
+
+        Returns trajectory on success, None if no builder.
+        """
+        if self._builder is None:
+            return None
+        trajectory = self._builder.build()
+        # Snapshot steps to avoid shared-reference mutation
+        trajectory.steps = list(trajectory.steps)
+        return trajectory
+
+    def _save_trajectory(self, trajectory: Trajectory) -> None:
+        """Save trajectory to store."""
+        self._trajectory_store.save(trajectory)
 
     # ---- Evolution extension points (override as needed, default no-op) ----
 

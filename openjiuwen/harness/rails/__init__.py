@@ -14,6 +14,7 @@ from openjiuwen.harness.rails.task_memory_rail import (
 )
 from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
 from openjiuwen.harness.rails.skill_evolution_rail import SkillEvolutionRail
+from openjiuwen.harness.rails.team_skill_rail import TeamSkillRail
 from openjiuwen.harness.rails.evolution_rail import EvolutionRail
 from openjiuwen.harness.rails.trajectory_rail import TrajectoryRail
 from openjiuwen.harness.rails.subagent_rail import SubagentRail
@@ -36,6 +37,7 @@ __all__ = [
     "TaskCompletionRail",
     "SkillUseRail",
     "SkillEvolutionRail",
+    "TeamSkillRail",
     "SubagentRail",
     "SessionRail",
     "AskUserRail",

@@ -1640,3 +1640,170 @@ async def test_rewrite_skill_handles_empty_consumed_records(tmp_path):
 
         assert result is mock_result
         # Rewriter handles record deletion internally
+
+
+# =============================================================================
+# Auto-save New Skill Creation Tests
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_new_skill_auto_save_creates_directly(tmp_path):
+    """When auto_save=True, new skill creation should skip approval and create directly."""
+    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail._new_skill_detection = True
+
+    parsed_messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"name": "read_file", "arguments": ""},
+                {"name": "write_file", "arguments": ""},
+                {"name": "bash", "arguments": ""},
+                {"name": "grep", "arguments": ""},
+                {"name": "python", "arguments": ""},
+            ],
+        },
+    ]
+
+    rail._evolution_store.list_skill_names = Mock(return_value=[])
+    rail._evolution_store.skill_exists = Mock(return_value=False)
+    rail._collect_parsed_messages = AsyncMock(return_value=parsed_messages)
+    rail._should_propose_new_skill = AsyncMock(return_value=True)
+    rail._generate_new_skill_proposal = AsyncMock(
+        return_value={
+            "name": "auto-created-skill",
+            "description": "Auto-created skill description",
+            "body": "## Instructions\nAuto-generated content",
+            "reason": "Pattern detected",
+        }
+    )
+    rail._check_skill_overlap = AsyncMock(return_value=False)
+    rail._evolution_store.create_skill = AsyncMock(return_value=tmp_path / "auto-created-skill")
+    rail._trigger_async_evaluation = AsyncMock()
+    rail._emit_new_skill_approval = AsyncMock()
+
+    from openjiuwen.agent_evolving.trajectory import Trajectory
+
+    traj = Mock(spec=Trajectory)
+    ctx = Mock()
+    ctx.session = None
+
+    await rail.run_evolution(traj, ctx)
+
+    # create_skill should be called directly without approval
+    rail._evolution_store.create_skill.assert_awaited_once_with(
+        name="auto-created-skill",
+        description="Auto-created skill description",
+        body="## Instructions\nAuto-generated content",
+    )
+    # Approval event should NOT be emitted
+    rail._emit_new_skill_approval.assert_not_awaited()
+    # No pending events should be buffered
+    assert rail.drain_pending_approval_events() == []
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_new_skill_auto_save_false_emits_approval(tmp_path):
+    """When auto_save=False, new skill creation should still use approval path."""
+    rail = _make_rail(tmp_path, auto_scan=True, auto_save=False)
+    rail._new_skill_detection = True
+
+    parsed_messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"name": "read_file", "arguments": ""},
+                {"name": "write_file", "arguments": ""},
+                {"name": "bash", "arguments": ""},
+                {"name": "grep", "arguments": ""},
+                {"name": "python", "arguments": ""},
+            ],
+        },
+    ]
+
+    rail._evolution_store.list_skill_names = Mock(return_value=[])
+    rail._evolution_store.skill_exists = Mock(return_value=False)
+    rail._collect_parsed_messages = AsyncMock(return_value=parsed_messages)
+    rail._should_propose_new_skill = AsyncMock(return_value=True)
+    rail._generate_new_skill_proposal = AsyncMock(
+        return_value={
+            "name": "approval-required-skill",
+            "description": "Approval required skill",
+            "body": "## Instructions\nContent",
+            "reason": "Pattern detected",
+        }
+    )
+    rail._check_skill_overlap = AsyncMock(return_value=False)
+    rail._evolution_store.create_skill = AsyncMock()
+    rail._trigger_async_evaluation = AsyncMock()
+
+    from openjiuwen.agent_evolving.trajectory import Trajectory
+
+    traj = Mock(spec=Trajectory)
+    ctx = Mock()
+    ctx.session = None
+
+    await rail.run_evolution(traj, ctx)
+
+    # create_skill should NOT be called directly
+    rail._evolution_store.create_skill.assert_not_awaited()
+    # Approval event should be emitted
+    events = rail.drain_pending_approval_events()
+    assert len(events) == 1
+    assert events[0].type == "chat.ask_user_question"
+    assert events[0].payload["_new_skill_data"]["name"] == "approval-required-skill"
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_new_skill_auto_save_failure_logs_warning(tmp_path):
+    """When auto_save=True and create_skill fails, should log warning and not emit approval."""
+    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail._new_skill_detection = True
+
+    parsed_messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"name": "read_file", "arguments": ""},
+                {"name": "write_file", "arguments": ""},
+                {"name": "bash", "arguments": ""},
+                {"name": "grep", "arguments": ""},
+                {"name": "python", "arguments": ""},
+            ],
+        },
+    ]
+
+    rail._evolution_store.list_skill_names = Mock(return_value=["existing-skill"])
+    rail._evolution_store.skill_exists = Mock(return_value=True)
+    rail._collect_parsed_messages = AsyncMock(return_value=parsed_messages)
+    rail._should_propose_new_skill = AsyncMock(return_value=True)
+    rail._generate_new_skill_proposal = AsyncMock(
+        return_value={
+            "name": "existing-skill",  # Same as existing, will fail
+            "description": "Duplicate skill",
+            "body": "## Instructions\nContent",
+            "reason": "Pattern detected",
+        }
+    )
+    rail._check_skill_overlap = AsyncMock(return_value=False)  # Overlap check passes
+    rail._evolution_store.create_skill = AsyncMock(return_value=None)  # create_skill fails
+    rail._trigger_async_evaluation = AsyncMock()
+    rail._emit_new_skill_approval = AsyncMock()
+
+    from openjiuwen.agent_evolving.trajectory import Trajectory
+
+    traj = Mock(spec=Trajectory)
+    ctx = Mock()
+    ctx.session = None
+
+    await rail.run_evolution(traj, ctx)
+
+    # create_skill was attempted but failed
+    rail._evolution_store.create_skill.assert_awaited_once()
+    # No approval event should be emitted (auto_save path)
+    rail._emit_new_skill_approval.assert_not_awaited()
+    assert rail.drain_pending_approval_events() == []

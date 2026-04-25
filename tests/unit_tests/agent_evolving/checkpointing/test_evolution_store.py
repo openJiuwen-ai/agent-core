@@ -93,7 +93,7 @@ class TestEvolutionStoreLogCRUD:
         (skill_dir / "evolutions.json").write_text("{not-json", encoding="utf-8")
 
         store = EvolutionStore(str(root))
-        evo_log = await store._load_full_evolution_log("skill-a")
+        evo_log = await store.load_full_evolution_log("skill-a")
         assert evo_log.skill_id == "skill-a"
         assert evo_log.entries == []
 
@@ -196,7 +196,7 @@ class TestEvolutionStoreSysOperationPath:
         )
         store.sys_operation = SimpleNamespace(fs=lambda: fs_mock)
 
-        text = await store._read_file_text(tmp_path / "x.txt")
+        text = await store.read_file_text(tmp_path / "x.txt")
         assert text == "123"
 
     @staticmethod
@@ -207,7 +207,7 @@ class TestEvolutionStoreSysOperationPath:
         fs_mock.write_file = AsyncMock(return_value=SimpleNamespace(code=0, message="ok"))
         store.sys_operation = SimpleNamespace(fs=lambda: fs_mock)
 
-        await store._write_file_text(tmp_path / "x.txt", "hello")
+        await store.write_file_text(tmp_path / "x.txt", "hello")
         fs_mock.write_file.assert_awaited_once()
 
     @staticmethod
@@ -215,7 +215,7 @@ class TestEvolutionStoreSysOperationPath:
     async def test_write_file_text_without_sys_operation(tmp_path: Path):
         store = EvolutionStore(str(tmp_path))
         target = tmp_path / "x.txt"
-        await store._write_file_text(target, "hello")
+        await store.write_file_text(target, "hello")
         assert target.read_text(encoding="utf-8") == "hello"
 
 

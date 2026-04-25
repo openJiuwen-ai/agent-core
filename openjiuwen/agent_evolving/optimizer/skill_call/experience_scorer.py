@@ -330,6 +330,7 @@ class ExperienceScorer:
         skill_name: str,
         skill_summary: str,
         records: List[EvolutionRecord],
+        user_intent: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Generate maintenance actions for experience library.
 
@@ -337,6 +338,7 @@ class ExperienceScorer:
             skill_name: Name of the skill
             skill_summary: Summary of skill content
             records: Current experience records (should be sorted by score)
+            user_intent: Optional natural-language instructions guiding simplification
 
         Returns:
             List of action dicts with action, record_id, reason, etc.
@@ -350,6 +352,8 @@ class ExperienceScorer:
             skill_summary=skill_summary[:1000],
             scored_experiences=formatted,
         )
+        if user_intent:
+            prompt += f"\n\n**用户意图**: {user_intent}"
 
         try:
             response = await self._llm.invoke(

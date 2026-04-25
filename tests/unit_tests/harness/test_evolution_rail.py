@@ -210,6 +210,146 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
         trajectories = self.store.query()
         self.assertEqual(len(trajectories), 0)
 
+    async def test_should_accumulate_trajectory_default(self):
+        """Test that _should_accumulate_trajectory defaults to False."""
+        self.assertFalse(self.rail._should_accumulate_trajectory())
+
+
+class TestEvolutionRailAccumulation(IsolatedAsyncioTestCase):
+    """Tests for multi-round trajectory accumulation."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.store = InMemoryTrajectoryStore()
+
+    def _create_ctx(
+        self,
+        event: AgentCallbackEvent,
+        inputs: Any,
+        agent_id: str = "test_agent",
+    ) -> AgentCallbackContext:
+        """Create a mock callback context."""
+        agent = MockAgent(card=MockAgentCard(id=agent_id))
+        return AgentCallbackContext(
+            agent=agent,
+            event=event,
+            inputs=inputs,
+        )
+
+    async def test_multi_round_accumulation(self):
+        """Test that accumulate mode keeps builder across rounds."""
+        evolution_calls: List[Trajectory] = []
+
+        class AccumulatingRail(EvolutionRail):
+            def _should_accumulate_trajectory(self) -> bool:
+                return True
+
+            def _should_trigger_evolution_after_invoke(self) -> bool:
+                # Defer evolution trigger, like TeamSkillRail
+                return False
+
+            async def run_evolution(self, trajectory, ctx):
+                evolution_calls.append(trajectory)
+
+        rail = AccumulatingRail(trajectory_store=self.store)
+
+        # Round 1: start, model call, end
+        ctx = self._create_ctx(
+            AgentCallbackEvent.BEFORE_INVOKE,
+            InvokeInputs(query="q1", conversation_id="conv_multi"),
+        )
+        await rail.before_invoke(ctx)
+
+        ctx = self._create_ctx(
+            AgentCallbackEvent.AFTER_MODEL_CALL,
+            ModelCallInputs(
+                messages=[{"role": "user", "content": "q1"}],
+                response={"role": "assistant", "content": "a1"},
+            ),
+        )
+        await rail.after_model_call(ctx)
+
+        ctx = self._create_ctx(
+            AgentCallbackEvent.AFTER_INVOKE,
+            InvokeInputs(query="q1", conversation_id="conv_multi"),
+        )
+        await rail.after_invoke(ctx)
+
+        # Builder should NOT be reset in accumulate mode
+        self.assertIsNotNone(rail._builder)
+        # No evolution triggered yet (defer mode)
+        self.assertEqual(len(evolution_calls), 0)
+        # Trajectory is saved in after_invoke even when evolution deferred
+        self.assertEqual(len(self.store.query()), 1)
+
+        # Round 2: another model call
+        ctx = self._create_ctx(
+            AgentCallbackEvent.BEFORE_INVOKE,
+            InvokeInputs(query="q2", conversation_id="conv_multi"),
+        )
+        await rail.before_invoke(ctx)
+
+        # Builder should be the same instance (accumulating)
+        self.assertEqual(len(rail._builder.steps), 1)
+
+        ctx = self._create_ctx(
+            AgentCallbackEvent.AFTER_MODEL_CALL,
+            ModelCallInputs(
+                messages=[{"role": "user", "content": "q2"}],
+                response={"role": "assistant", "content": "a2"},
+            ),
+        )
+        await rail.after_model_call(ctx)
+
+        # Now trigger evolution manually via helper methods
+        ctx = self._create_ctx(
+            AgentCallbackEvent.AFTER_TOOL_CALL,
+            InvokeInputs(query="q2", conversation_id="conv_multi"),
+        )
+        trajectory = rail._build_trajectory()
+        self.assertIsNotNone(trajectory)
+        rail._save_trajectory(trajectory)
+        await rail.run_evolution(trajectory, ctx)
+
+        self.assertEqual(len(trajectory.steps), 2)
+        self.assertEqual(len(evolution_calls), 1)
+        self.assertEqual(len(self.store.query()), 2)  # Round 1 + manual save
+
+    async def test_per_round_mode_resets_builder(self):
+        """Test that default mode resets builder after each invoke."""
+        evolution_calls: List[Trajectory] = []
+
+        class PerRoundRail(EvolutionRail):
+            async def run_evolution(self, trajectory, ctx):
+                evolution_calls.append(trajectory)
+
+        rail = PerRoundRail(trajectory_store=self.store)
+
+        ctx = self._create_ctx(
+            AgentCallbackEvent.BEFORE_INVOKE,
+            InvokeInputs(query="q1", conversation_id="conv_single"),
+        )
+        await rail.before_invoke(ctx)
+
+        ctx = self._create_ctx(
+            AgentCallbackEvent.AFTER_MODEL_CALL,
+            ModelCallInputs(
+                messages=[{"role": "user", "content": "q1"}],
+                response={"role": "assistant", "content": "a1"},
+            ),
+        )
+        await rail.after_model_call(ctx)
+
+        ctx = self._create_ctx(
+            AgentCallbackEvent.AFTER_INVOKE,
+            InvokeInputs(query="q1", conversation_id="conv_single"),
+        )
+        await rail.after_invoke(ctx)
+
+        self.assertIsNone(rail._builder)
+        self.assertEqual(len(evolution_calls), 1)
+        self.assertEqual(len(self.store.query()), 1)
+
 
 class TestTrajectoryRail(IsolatedAsyncioTestCase):
     """Tests for TrajectoryRail."""
