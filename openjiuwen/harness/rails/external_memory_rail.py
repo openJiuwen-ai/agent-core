@@ -192,7 +192,8 @@ class ExternalMemoryRail(DeepAgentRail):
         query = self._resolve_user_text_for_memory(ctx)
         output = self._extract_assistant_output(ctx)
         
-        if not query or not output:
+        # if not query or not output:
+        if not query:
             return
         
         # Serialize: wait for previous sync_turn to complete
