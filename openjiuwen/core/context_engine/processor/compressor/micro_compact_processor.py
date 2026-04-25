@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.observability import write_context_trace
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage
 
@@ -48,6 +49,17 @@ class MicroCompactProcessor(ContextProcessor):
         **kwargs: Any,
     ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
         all_messages = context.get_messages() + messages_to_add
+        write_context_trace(
+            "context.processor.micro_compact.before",
+            {
+                "processor": self.processor_type(),
+                "context_id": context.context_id(),
+                "session_id": context.session_id(),
+                "message_count_before": len(all_messages),
+                "trigger_threshold": self.config.trigger_threshold,
+                "keep_recent_per_tool": self.config.keep_recent_per_tool,
+            },
+        )
         indices_to_clear = self._collect_flat_indices_for_compact(all_messages)
 
         if not indices_to_clear:
@@ -64,6 +76,16 @@ class MicroCompactProcessor(ContextProcessor):
             modified_indices.append(index)
 
         context.set_messages(all_messages)
+        write_context_trace(
+            "context.processor.micro_compact.after",
+            {
+                "processor": self.processor_type(),
+                "context_id": context.context_id(),
+                "session_id": context.session_id(),
+                "modified_indices": modified_indices,
+                "message_count_after": len(all_messages),
+            },
+        )
         return ContextEvent(event_type=self.processor_type(), messages_to_modify=modified_indices), []
 
     def _collect_compactable_indices_by_tool(

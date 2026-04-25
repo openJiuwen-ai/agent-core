@@ -15,6 +15,7 @@ from openjiuwen.core.context_engine.processor.base import ContextEvent
 from openjiuwen.core.context_engine.processor.offloader.message_offloader import (
     MessageOffloader,
 )
+from openjiuwen.core.context_engine.observability import write_context_trace
 from openjiuwen.core.context_engine.schema.messages import OffloadToolMessage
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage
 
@@ -61,6 +62,17 @@ class ToolResultBudgetProcessor(MessageOffloader):
         self.sys_operation = kwargs.get("sys_operation")
 
         context_messages = context.get_messages() + messages_to_add
+        write_context_trace(
+            "context.processor.tool_result_budget.before",
+            {
+                "processor": self.processor_type(),
+                "context_id": context.context_id(),
+                "session_id": context.session_id(),
+                "message_count_before": len(context_messages),
+                "tokens_threshold": self.config.tokens_threshold,
+                "large_message_threshold": self.config.large_message_threshold,
+            },
+        )
         context_size = len(context)
         updated_messages = list(context_messages)
         modified_indices: List[int] = []
@@ -78,6 +90,17 @@ class ToolResultBudgetProcessor(MessageOffloader):
             return None, messages_to_add
 
         context.set_messages(updated_messages[:context_size])
+        write_context_trace(
+            "context.processor.tool_result_budget.after",
+            {
+                "processor": self.processor_type(),
+                "context_id": context.context_id(),
+                "session_id": context.session_id(),
+                "modified_indices": sorted(set(modified_indices)),
+                "message_count_after_context": len(updated_messages[:context_size]),
+                "message_count_after_incoming": len(updated_messages[context_size:]),
+            },
+        )
         event = ContextEvent(
             event_type=self.processor_type(),
             messages_to_modify=sorted(set(modified_indices)),

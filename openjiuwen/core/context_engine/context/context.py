@@ -15,6 +15,7 @@ from openjiuwen.core.foundation.tool import ToolInfo, Tool, ToolCard, tool
 from openjiuwen.core.context_engine.base import ModelContext, ContextWindow, ContextStats
 from openjiuwen.core.context_engine.context.message_buffer import ContextMessageBuffer, OffloadMessageBuffer
 from openjiuwen.core.context_engine.context.kv_cache_manager import KVCacheManager
+from openjiuwen.core.context_engine.observability import write_context_trace, snapshot_messages
 from openjiuwen.core.runner.callback import lazy_callback_framework as _fw
 from openjiuwen.core.runner.callback.events import ContextEvents
 
@@ -111,6 +112,48 @@ class SessionModelContext(ModelContext):
     def get_session_ref(self):
         return getattr(self, "_session_ref", None)
 
+    def _resolve_actor_tags(self) -> Dict[str, Any]:
+        """Best-effort actor identity for tracing (team leader/member)."""
+        tags: Dict[str, Any] = {
+            "actor_id": None,
+            "actor_role": None,
+            "team_name": None,
+        }
+        session = self.get_session_ref()
+        if session is None or not hasattr(session, "get_state"):
+            return tags
+        try:
+            state = session.get_state() or {}
+        except Exception:
+            return tags
+        if not isinstance(state, dict):
+            return tags
+
+        # TeamAgent persists this block; member_name is the most stable identifier.
+        context_obj = state.get("context")
+        if isinstance(context_obj, dict):
+            member_name = context_obj.get("member_name")
+            team_name = context_obj.get("team_name")
+            if isinstance(team_name, str) and team_name.strip():
+                tags["team_name"] = team_name.strip()
+            if isinstance(member_name, str) and member_name.strip():
+                normalized = member_name.strip()
+                tags["actor_id"] = normalized
+                tags["actor_role"] = "leader" if normalized.lower() == "leader" else "member"
+                return tags
+
+        # Fallbacks for non-team / other runtimes.
+        task_state = state.get("task_state")
+        if isinstance(task_state, dict):
+            for key in ("member_id", "agent_id", "current_agent_id"):
+                value = task_state.get(key)
+                if isinstance(value, str) and value.strip():
+                    tags["actor_id"] = value.strip()
+                    tags["actor_role"] = "member"
+                    return tags
+
+        return tags
+
     @_fw.emit_after(ContextEvents.CONTEXT_UPDATED, result_key="messages")
     async def add_messages(
             self,
@@ -130,7 +173,26 @@ class SessionModelContext(ModelContext):
             try:
                 if await processor.trigger_add_messages(self, messages_to_add, **kwargs):
                     logger.info(f"trigger context processor {processor.processor_type()} on ADD")
+                    before_buffer = self.get_messages()
+                    before_add = list(messages_to_add)
                     event, messages_to_add = await processor.on_add_messages(self, messages_to_add, **kwargs)
+                    write_context_trace(
+                        "context.add_messages.processor",
+                        {
+                            "session_id": self._session_id,
+                            "context_id": self._context_id,
+                            **self._resolve_actor_tags(),
+                            "processor": processor.processor_type(),
+                            "event": (
+                                {"event_type": event.event_type, "messages_to_modify": event.messages_to_modify}
+                                if event is not None else None
+                            ),
+                            "buffer_before": snapshot_messages(before_buffer),
+                            "incoming_before": snapshot_messages(before_add),
+                            "buffer_after": snapshot_messages(self.get_messages()),
+                            "incoming_after": snapshot_messages(messages_to_add),
+                        },
+                    )
             except Exception as e:
                 logger.warning(
                     f"Failed to process ADD messages by using processor {processor.processor_type()},"
@@ -220,7 +282,31 @@ class SessionModelContext(ModelContext):
             try:
                 if await processor.trigger_get_context_window(self, window):
                     logger.info(f"trigger context processor {processor.processor_type()} on GET")
+                    before_window = {
+                        "system_messages": snapshot_messages(window.system_messages),
+                        "context_messages": snapshot_messages(window.context_messages),
+                        "tool_count": len(window.tools or []),
+                    }
                     event, window = await processor.on_get_context_window(self, window, **kwargs)
+                    write_context_trace(
+                        "context.get_window.processor",
+                        {
+                            "session_id": self._session_id,
+                            "context_id": self._context_id,
+                            **self._resolve_actor_tags(),
+                            "processor": processor.processor_type(),
+                            "event": (
+                                {"event_type": event.event_type, "messages_to_modify": event.messages_to_modify}
+                                if event is not None else None
+                            ),
+                            "window_before": before_window,
+                            "window_after": {
+                                "system_messages": snapshot_messages(window.system_messages),
+                                "context_messages": snapshot_messages(window.context_messages),
+                                "tool_count": len(window.tools or []),
+                            },
+                        },
+                    )
             except Exception as e:
                 logger.warning(
                     f"Failed to process GET messages by using processor {processor.processor_type()},"
@@ -231,6 +317,18 @@ class SessionModelContext(ModelContext):
         if self._kv_cache_manager:
             await self._kv_cache_manager.release(window, **kwargs)
         window.statistic = self._stat_context_window(window)
+        write_context_trace(
+            "context.get_window.final",
+            {
+                "session_id": self._session_id,
+                "context_id": self._context_id,
+                **self._resolve_actor_tags(),
+                "system_messages": snapshot_messages(window.system_messages),
+                "context_messages": snapshot_messages(window.context_messages),
+                "tool_count": len(window.tools or []),
+                "statistics": window.statistic.model_dump() if window.statistic is not None else None,
+            },
+        )
         return window
 
     def _get_window_messages(

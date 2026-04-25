@@ -17,6 +17,7 @@ from openjiuwen.harness.prompts.sections import SectionName
 # TodoTool system prompt - for system message injection
 # ---------------------------------------------------------------------------
 TODO_SYSTEM_PROMPT_EN = """
+# Task Management
 Use the todo tools (todo_create, todo_modify, todo_list) to break down and manage your work. These tools help track progress, organize complex tasks, and ensure all requirements are completed.
 
 **When to create a task list — call todo_create immediately when:**
@@ -40,6 +41,7 @@ Identify the planning need and call todo_create BEFORE starting execution.
 """
 
 TODO_SYSTEM_PROMPT_CN = """
+# 任务管理
 使用 todo 工具（todo_create、todo_modify、todo_list）拆解和管理工作。这些工具用于跟踪进度、组织复杂任务，确保所有需求都被完成。
 
 **何时创建任务列表 — 以下情况立即调用 todo_create：**
@@ -145,5 +147,5 @@ def build_todo_section(language: str = "cn") -> Optional["PromptSection"]:
     return PromptSection(
         name=SectionName.TODO,
         content={language: content},
-        priority=90,
+        priority=31,
     )

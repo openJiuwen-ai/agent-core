@@ -19,6 +19,7 @@ from openjiuwen.core.context_engine.context.session_memory_manager import (
     invalidate_session_memory_anchor,
 )
 from openjiuwen.core.context_engine.context_engine import ContextEngine
+from openjiuwen.core.context_engine.observability import write_context_trace
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
 from openjiuwen.core.context_engine.processor.compressor.util import (
     FullCompactStateReinjector,
@@ -262,6 +263,16 @@ class FullCompactProcessor(ContextProcessor):
         **kwargs: Any,
     ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
         all_messages = context.get_messages() + list(messages_to_add or [])
+        write_context_trace(
+            "context.processor.full_compact.before",
+            {
+                "processor": self.processor_type(),
+                "context_id": context.context_id(),
+                "session_id": context.session_id(),
+                "trigger_total_tokens": self.config.trigger_total_tokens,
+                "message_count_before": len(all_messages),
+            },
+        )
         event, new_context_messages, session_memory_message = await self._build_replacement_messages(
             context,
             all_messages,
@@ -269,6 +280,20 @@ class FullCompactProcessor(ContextProcessor):
         if new_context_messages is None:
             return None, messages_to_add
         context.set_messages(new_context_messages)
+        write_context_trace(
+            "context.processor.full_compact.after",
+            {
+                "processor": self.processor_type(),
+                "context_id": context.context_id(),
+                "session_id": context.session_id(),
+                "replacement_kind": "session_memory" if session_memory_message is not None else "full_compact",
+                "event": (
+                    {"event_type": event.event_type, "messages_to_modify": event.messages_to_modify}
+                    if event is not None else None
+                ),
+                "message_count_after": len(new_context_messages),
+            },
+        )
         if session_memory_message is None:
             self._invalidate_session_memory_anchor(context)
         return event, []
