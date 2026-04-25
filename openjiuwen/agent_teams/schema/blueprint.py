@@ -282,6 +282,7 @@ class TeamAgentSpec(BaseModel):
         leader_member_model = (
             leader_allocation.to_team_model_config() if leader_allocation else None
         )
+        self._validate_leader_model_resolved(leader_agent, leader_member_model, team_spec)
 
         context = TeamRuntimeContext(
             role=TeamRole.LEADER,
@@ -302,6 +303,57 @@ class TeamAgentSpec(BaseModel):
         agent.attach_model_allocator(model_allocator, leader_allocation=leader_allocation)
         agent.configure(self, context)
         return agent
+
+    def _validate_leader_model_resolved(
+        self,
+        leader_agent: DeepAgentSpec,
+        leader_member_model,
+        team_spec: TeamSpec,
+    ) -> None:
+        """Fail fast when the leader has no model to drive its DeepAgent.
+
+        With a configured pool, ``ByModelNameAllocator`` returns ``None``
+        when ``leader.model_name`` is missing or unknown, leaving the
+        leader to fall through to ``agents['leader'].model``. If that
+        too is unset the underlying DeepAgent is built with no model
+        and the failure surfaces only at the first LLM invocation as
+        a confusing "model_client_config is required" error.
+
+        Surface it at ``build()`` time with a clear remediation list
+        so the inconsistency is caught while the user is still looking
+        at the spec.
+        """
+        if leader_member_model is not None or leader_agent.model is not None:
+            return
+        if not team_spec.model_pool:
+            return
+
+        from openjiuwen.core.common.exception.codes import StatusCode
+        from openjiuwen.core.common.exception.errors import raise_error
+
+        available_names = sorted({entry.model_name for entry in team_spec.model_pool})
+        strategy = team_spec.model_pool_strategy
+        leader_name = self.leader.model_name
+        if leader_name and leader_name not in available_names:
+            cause = (
+                f"leader.model_name='{leader_name}' is not present in the pool "
+                f"(available names: {available_names})"
+            )
+        elif strategy == "by_model_name":
+            cause = (
+                "model_pool_strategy='by_model_name' requires leader.model_name "
+                "to be set to one of the pool names"
+            )
+        else:
+            cause = "the allocator did not produce a model for the leader"
+
+        reason = (
+            f"{cause}; resolve by either: "
+            f"(1) set leader.model_name to one of {available_names}, "
+            f"(2) provide an explicit agents['leader'].model in the spec, "
+            f"(3) switch model_pool_strategy to 'round_robin' (always allocates)"
+        )
+        raise_error(StatusCode.AGENT_TEAM_CONFIG_INVALID, reason=reason)
 
     def _validate_reserved_names(self) -> None:
         """Reject user-declared members that collide with reserved names.

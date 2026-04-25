@@ -898,6 +898,90 @@ def test_inherit_pool_ids_handles_empty_inputs():
     assert inherit_pool_ids([], [_make_named_entry("gpt-4", "a1")]) != []
 
 
+def test_build_rejects_by_model_name_pool_without_leader_model_name():
+    """by_model_name + leader.model_name unset + no per-agent leader model → fail fast."""
+    from openjiuwen.agent_teams.schema.blueprint import LeaderSpec
+    from openjiuwen.core.common.exception.errors import ValidationError
+
+    pool = [_make_named_entry("gpt-4", "a1")]
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},  # model unset
+        team_name="t",
+        model_pool=pool,
+        model_pool_strategy="by_model_name",
+        leader=LeaderSpec(member_name="leader"),  # model_name unset
+    )
+    with pytest.raises(ValidationError, match="agent team config invalid"):
+        spec.build()
+
+
+def test_build_rejects_unknown_leader_model_name():
+    """leader.model_name typo / not in pool → fail fast with available names listed."""
+    from openjiuwen.agent_teams.schema.blueprint import LeaderSpec
+    from openjiuwen.core.common.exception.errors import ValidationError
+
+    pool = [_make_named_entry("gpt-4", "a1")]
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        team_name="t",
+        model_pool=pool,
+        model_pool_strategy="by_model_name",
+        leader=LeaderSpec(member_name="leader", model_name="claude"),  # not in pool
+    )
+    with pytest.raises(ValidationError, match="not present in the pool"):
+        spec.build()
+
+
+def test_build_accepts_pool_when_per_agent_leader_model_supplied():
+    """No leader.model_name but agents['leader'].model is set → falls back, no error."""
+    from openjiuwen.agent_teams.schema.blueprint import LeaderSpec
+    from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
+    from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
+
+    pool = [_make_named_entry("gpt-4", "a1")]
+    explicit_model = TeamModelConfig(
+        model_client_config=ModelClientConfig(
+            client_provider="OpenAI",
+            api_key="explicit",
+            api_base="http://explicit",
+            verify_ssl=False,
+        ),
+        model_request_config=ModelRequestConfig(model="explicit-model"),
+    )
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec(model=explicit_model)},
+        team_name="t",
+        spawn_mode="inprocess",
+        model_pool=pool,
+        model_pool_strategy="by_model_name",
+        leader=LeaderSpec(member_name="leader"),  # model_name unset, pool can't resolve
+    )
+    # Should NOT raise — per-agent fallback covers the leader.
+    spec.build()
+
+
+def test_build_round_robin_strategy_does_not_require_leader_model_name():
+    """round_robin always allocates regardless of leader.model_name."""
+    from openjiuwen.agent_teams.schema.blueprint import LeaderSpec
+
+    pool = [
+        ModelPoolEntry(
+            model_name="gpt-4", api_key="k", api_base_url="http://x",
+            api_provider="OpenAI", metadata={"client": {"verify_ssl": False}},
+        ),
+    ]
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        team_name="t",
+        spawn_mode="inprocess",
+        model_pool=pool,
+        model_pool_strategy="round_robin",
+        leader=LeaderSpec(member_name="leader"),
+    )
+    # round_robin allocates the first entry without needing model_name.
+    spec.build()
+
+
 def test_update_model_pool_preserves_id_only_when_entry_is_unchanged():
     """End-to-end: pure refresh keeps id; rotation forces new id."""
     initial = [
