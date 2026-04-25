@@ -494,11 +494,11 @@ def build_tools_content(
             if agent_lines:
                 lines.extend(["", "Available agent types:", *agent_lines])
 
-    for name, desc in tool_descriptions.items():
-        if name in rendered_names or name in hidden_tools:
-            continue
-        compact_desc = desc.strip().splitlines()[0]
-        lines.append(f"- {name}: {summary_overrides.get(name, compact_desc)}")
+    # for name, desc in tool_descriptions.items():
+    #     if name in rendered_names or name in hidden_tools:
+    #         continue
+    #     compact_desc = desc.strip().splitlines()[0]
+    #     lines.append(f"- {name}: {summary_overrides.get(name, compact_desc)}")
 
     return "\n".join(lines) + "\n"
 
