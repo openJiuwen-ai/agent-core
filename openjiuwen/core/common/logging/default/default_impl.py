@@ -53,12 +53,12 @@ class SafeRotatingFileHandler(RotatingFileHandler):
     """
 
     def __init__(
-            self,
-            filename: str,
-            *args: Any,
-            log_file_pattern: Optional[str] = None,
-            backup_file_pattern: Optional[str] = None,
-            **kwargs: Any,
+        self,
+        filename: str,
+        *args: Any,
+        log_file_pattern: Optional[str] = None,
+        backup_file_pattern: Optional[str] = None,
+        **kwargs: Any,
     ) -> None:
         """
         Initialize secure log file rotation handler
@@ -103,22 +103,38 @@ class SafeRotatingFileHandler(RotatingFileHandler):
         Perform log rotation
 
         Set backup file permissions during rotation to ensure security.
+        On Windows, close the file stream before rotation to avoid PermissionError.
+        Also restore write permission on oldest backup before deletion.
         """
-        super().doRollover()
+        if self.stream:
+            self.stream.close()
+            self.stream = None  # type: ignore[assignment]
 
-        # Set backup file permissions
+        if self.backupCount > 0:
+            oldest_backup = self.backup_file_pattern.format(baseFilename=self.baseFilename, index=self.backupCount)
+            if os.path.exists(oldest_backup):
+                try:
+                    os.chmod(oldest_backup, 0o640)
+                except OSError:
+                    pass
+
+        try:
+            super().doRollover()
+        finally:
+            if self.stream is None:
+                self.stream = self._open()
+
         for i in range(self.backupCount, 0, -1):
             sfn = self.backup_file_pattern.format(baseFilename=self.baseFilename, index=i)
             if os.path.exists(sfn):
                 try:
-                    os.chmod(sfn, 0o440)  # Read-only permission
+                    os.chmod(sfn, 0o440)
                 except OSError as e:
                     raise build_error(
                         StatusCode.COMMON_LOG_EXECUTION_RUNTIME_ERROR,
                         error_msg=f"failed to set backup file permissions: {e}"
                     ) from e
 
-        # Set new log file permissions
         try:
             os.chmod(self.baseFilename, 0o640)
         except OSError as e:
