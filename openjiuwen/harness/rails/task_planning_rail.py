@@ -205,9 +205,8 @@ class TaskPlanningRail(DeepAgentRail):
             tool_name = ctx.inputs.tool_name
             if tool_name and tool_name.startswith("todo_"):
                 session_id = ctx.session.get_session_id()
-                await tool.set_file(session_id)
                 try:
-                    todos = await tool.load_todos()
+                    todos = await tool.load_todos(session_id)
                     self._todos_cache[session_id] = todos
                 except Exception:
                     logger.debug("TaskPlanningRail: after tool call refresh cache failed")
@@ -223,9 +222,8 @@ class TaskPlanningRail(DeepAgentRail):
         if self._tool_call_counts[session_id] % self.list_tool_call_interval != 0:
             return
 
-        await tool.set_file(session_id)
         try:
-            todos = await tool.load_todos()
+            todos = await tool.load_todos(session_id)
         except Exception:
             logger.debug("TaskPlanningRail: after tool call load todos failed")
             return
@@ -307,9 +305,8 @@ class TaskPlanningRail(DeepAgentRail):
 
         todos = self._todos_cache.get(session_id)
         if todos is None:
-            await tool.set_file(session_id)
             try:
-                todos = await tool.load_todos()
+                todos = await tool.load_todos(session_id)
                 self._todos_cache[session_id] = todos
             except Exception:
                 return None
@@ -340,10 +337,9 @@ class TaskPlanningRail(DeepAgentRail):
             return
 
         session_id = ctx.session.get_session_id()
-        await tool.set_file(session_id)
 
         try:
-            todos = await tool.load_todos()
+            todos = await tool.load_todos(session_id)
         except Exception:
             logger.debug("TaskPlanningRail: no todos to sync")
             return
@@ -368,7 +364,7 @@ class TaskPlanningRail(DeepAgentRail):
         if not changed:
             return
 
-        await tool.save_todos(todos)
+        await tool.save_todos(session_id, todos)
         logger.info(
             "TaskPlanningRail: synced %d todos from TaskPlan",
             len(todos),

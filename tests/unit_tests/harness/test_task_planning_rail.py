@@ -192,7 +192,7 @@ async def test_after_task_iteration_bridges_todos() -> None:
     state = DeepAgentState(iteration=1, task_plan=plan)
     saved_todos: List[TodoItem] = []
 
-    def _capture_saved(todos_list: List[TodoItem]) -> None:
+    def _capture_saved(session_id: str, todos_list: List[TodoItem]) -> None:
         saved_todos.extend(todos_list)
 
     ctx = _make_ctx(session=MagicMock())
@@ -234,7 +234,7 @@ async def test_after_task_iteration_syncs_todo_status_from_plan() -> None:
     state = DeepAgentState(iteration=2, task_plan=plan)
     saved_todos: List[TodoItem] = []
 
-    def _capture_saved(todos_list: List[TodoItem]) -> None:
+    def _capture_saved(session_id: str, todos_list: List[TodoItem]) -> None:
         saved_todos.extend(todos_list)
 
     ctx = _make_ctx(session=MagicMock())
