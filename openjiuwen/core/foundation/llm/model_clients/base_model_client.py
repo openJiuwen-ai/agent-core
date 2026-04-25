@@ -173,7 +173,16 @@ class BaseModelClient(ABC):
             return [{"role": "user", "content": messages}]
 
         if all(isinstance(item, dict) for item in messages):
-            return messages
+            # Some OpenAI-compatible chat APIs require ``reasoning_content`` on assistant
+            # messages when replaying history (including turns without ``tool_calls``).
+            # Build a copied list to avoid mutating caller-owned message dicts in place.
+            normalized_messages: List[dict] = []
+            for msg_dict in messages:
+                msg_copy = dict(msg_dict)
+                if msg_copy.get("role") == "assistant" and msg_copy.get("reasoning_content") is None:
+                    msg_copy["reasoning_content"] = ""
+                normalized_messages.append(msg_copy)
+            return normalized_messages
 
         # Convert BaseMessage list
         result = []
@@ -193,6 +202,11 @@ class BaseModelClient(ABC):
                         }
                     })
                 msg_dict["tool_calls"] = tool_calls_list
+            if isinstance(msg, AssistantMessage):
+                # Emit ``reasoning_content`` for assistant turns: use stored value when set,
+                # otherwise empty string so downstream validators accept the payload.
+                rc = getattr(msg, "reasoning_content", None)
+                msg_dict["reasoning_content"] = "" if rc is None else rc
 
             # Handle tool_call_id for ToolMessage
             if isinstance(msg, ToolMessage):

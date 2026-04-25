@@ -1302,7 +1302,11 @@ class ReActAgent(BaseAgent):
                             break
 
                         await context.add_messages(
-                            AssistantMessage(content=ai_message.content, tool_calls=ai_message.tool_calls)
+                            AssistantMessage(
+                                content=ai_message.content,
+                                tool_calls=ai_message.tool_calls,
+                                reasoning_content=getattr(ai_message, "reasoning_content", None),
+                            )
                         )
 
                         if not ai_message.tool_calls:

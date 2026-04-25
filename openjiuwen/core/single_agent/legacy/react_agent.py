@@ -130,7 +130,8 @@ class LegacyReActAgent(BaseAgent):
 
         ai_message = AssistantMessage(
             content=llm_output.content,
-            tool_calls=llm_output.tool_calls
+            tool_calls=llm_output.tool_calls,
+            reasoning_content=getattr(llm_output, "reasoning_content", None),
         )
         await MessageUtils.add_ai_message(ai_message, self.context_engine, session)
         return llm_output
