@@ -183,7 +183,7 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
                         merged_tool_calls[-1] = ToolCall(
                             id=last.id or incoming.id,
                             type=last.type or incoming.type,
-                            name=(last.name or "") + (incoming.name or ""),
+                            name=(last.name if last.name else incoming.name) or "",
                             arguments=(last.arguments or "") + (incoming.arguments or ""),
                             index=last.index
                         )
