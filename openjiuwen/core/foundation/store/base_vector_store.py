@@ -256,11 +256,28 @@ class VectorSearchResult(BaseModel):
 
 class BaseVectorStore(ABC):
     """
-    Abstract base class defining a unified interface for vector storage.
+    Abstract base class for all vector-store backends.
 
     This class provides a common interface for vector database operations,
     supporting collection management, document insertion, vector search,
     and document deletion.
+
+    **Plugin authoring**: This class is a stable public API. Third-party
+    packages MAY subclass this and register via the ``openjiuwen.vector_stores``
+    entry_points group or ``openjiuwen.core.foundation.store.register_vector_store``.
+
+    Plugin contract:
+      - Implement every abstract method declared below.
+      - Every method MUST be async-compatible (``async def``).
+      - Constructor kwargs are plugin-defined and documented in the plugin's
+        own docs; ``create_vector_store(name, **kwargs)`` forwards them verbatim.
+      - The plugin owns its own connection / resource lifecycle; the
+        factory does not call ``close()`` for you. Provide ``close()``
+        yourself and document when callers must invoke it.
+
+    Compatibility: breaking changes to this ABC are announced at least one
+    minor release ahead of the change. Plugin authors should pin the
+    openjiuwen minor version they were built against.
     """
 
     @abstractmethod

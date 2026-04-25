@@ -59,6 +59,7 @@
     - [异步回调框架](2.开发指南/高阶用法/异步回调框架.md)
     - [安全护栏Guardrail](2.开发指南/高阶用法/安全护栏Guardrail.md)
     - [MCP工具](2.开发指南/高阶用法/MCP工具.md)
+    - [插件开发-存储后端](2.开发指南/高阶用法/插件开发-存储后端.md)
   - [API文档](2.开发指南/API文档/README.md)
     - [openjiuwen.harness](2.开发指南/API文档/openjiuwen.harness.README.md)
       - [deep_agent](2.开发指南/API文档/openjiuwen.harness/deep_agent.md)
