@@ -140,10 +140,10 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
             async def _on_after_tool_call(self, ctx):
                 call_log.append("tool")
 
-            async def run_evolution(self, trajectory, ctx):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 call_log.append("evolution")
 
-        rail = TestEvolutionRail(trajectory_store=self.store)
+        rail = TestEvolutionRail(trajectory_store=self.store, async_evolution=False)
 
         # Start invoke
         invoke_inputs = InvokeInputs(
@@ -248,7 +248,7 @@ class TestEvolutionRailAccumulation(IsolatedAsyncioTestCase):
                 # Defer evolution trigger, like TeamSkillRail
                 return False
 
-            async def run_evolution(self, trajectory, ctx):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 evolution_calls.append(trajectory)
 
         rail = AccumulatingRail(trajectory_store=self.store)
@@ -320,10 +320,10 @@ class TestEvolutionRailAccumulation(IsolatedAsyncioTestCase):
         evolution_calls: List[Trajectory] = []
 
         class PerRoundRail(EvolutionRail):
-            async def run_evolution(self, trajectory, ctx):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 evolution_calls.append(trajectory)
 
-        rail = PerRoundRail(trajectory_store=self.store)
+        rail = PerRoundRail(trajectory_store=self.store, async_evolution=False)
 
         ctx = self._create_ctx(
             AgentCallbackEvent.BEFORE_INVOKE,
@@ -449,10 +449,10 @@ class TestEvolutionRailCustomEvolution(IsolatedAsyncioTestCase):
 
         class CustomEvolutionRail(EvolutionRail):
             def __init__(self, store, call_log):
-                super().__init__(trajectory_store=store)
+                super().__init__(trajectory_store=store, async_evolution=False)
                 self.call_log = call_log
 
-            async def run_evolution(self, trajectory, ctx):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 self.call_log.append(trajectory)
 
         rail = CustomEvolutionRail(self.store, self.evolution_calls)
@@ -495,3 +495,150 @@ class TestEvolutionRailCustomEvolution(IsolatedAsyncioTestCase):
         traj = self.evolution_calls[0]
         self.assertEqual(traj.session_id, "conv_custom")
         self.assertEqual(len(traj.steps), 1)
+
+
+class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
+    """Tests for async_evolution mode in EvolutionRail."""
+
+    def setUp(self):
+        self.store = InMemoryTrajectoryStore()
+
+    def _create_ctx(
+        self,
+        event: AgentCallbackEvent,
+        inputs: Any,
+        agent_id: str = "test_agent",
+    ) -> AgentCallbackContext:
+        agent = MockAgent(card=MockAgentCard(id=agent_id))
+        return AgentCallbackContext(
+            agent=agent,
+            event=event,
+            inputs=inputs,
+        )
+
+    async def test_sync_evolution_mode_passes_active_ctx(self):
+        """When async_evolution=False, run_evolution receives active ctx."""
+        received_args: List[tuple] = []
+
+        class SyncRail(EvolutionRail):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
+                received_args.append((trajectory, ctx, snapshot))
+
+        rail = SyncRail(trajectory_store=self.store, async_evolution=False)
+
+        ctx = self._create_ctx(
+            AgentCallbackEvent.BEFORE_INVOKE,
+            InvokeInputs(query="test", conversation_id="conv_sync"),
+        )
+        await rail.before_invoke(ctx)
+
+        ctx = self._create_ctx(
+            AgentCallbackEvent.AFTER_INVOKE,
+            InvokeInputs(query="test", conversation_id="conv_sync"),
+        )
+        await rail.after_invoke(ctx)
+
+        self.assertEqual(len(received_args), 1)
+        _traj, ctx_arg, snapshot_arg = received_args[0]
+        self.assertIsNotNone(ctx_arg)
+        self.assertIsNone(snapshot_arg)
+
+    async def test_async_evolution_mode_passes_none_ctx_and_snapshot(self):
+        """When async_evolution=True, run_evolution receives ctx=None with snapshot."""
+        received_args: List[tuple] = []
+
+        class AsyncRail(EvolutionRail):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
+                received_args.append((trajectory, ctx, snapshot))
+
+        rail = AsyncRail(trajectory_store=self.store, async_evolution=True)
+
+        ctx = self._create_ctx(
+            AgentCallbackEvent.BEFORE_INVOKE,
+            InvokeInputs(query="test", conversation_id="conv_async"),
+        )
+        await rail.before_invoke(ctx)
+
+        ctx = self._create_ctx(
+            AgentCallbackEvent.AFTER_INVOKE,
+            InvokeInputs(query="test", conversation_id="conv_async"),
+        )
+        await rail.after_invoke(ctx)
+
+        # Wait for background task to complete
+        for task in rail._bg_tasks:
+            await task.wait()
+
+        self.assertEqual(len(received_args), 1)
+        _traj, ctx_arg, snapshot_arg = received_args[0]
+        self.assertIsNone(ctx_arg)
+        self.assertIsNotNone(snapshot_arg)
+        self.assertIn("trajectory", snapshot_arg)
+
+    async def test_snapshot_for_evolution_default_returns_trajectory(self):
+        """Base class _snapshot_for_evolution returns dict with trajectory."""
+        rail = EvolutionRail(trajectory_store=self.store)
+        ctx = self._create_ctx(
+            AgentCallbackEvent.AFTER_INVOKE,
+            InvokeInputs(query="test", conversation_id="conv_snap"),
+        )
+        result = await rail._snapshot_for_evolution(
+            Trajectory(execution_id="test", steps=[], session_id="test", source="online"), ctx
+        )
+        self.assertIsNotNone(result)
+        self.assertIn("trajectory", result)
+
+    async def test_safe_run_evolution_catches_exceptions(self):
+        """_safe_run_evolution catches and logs exceptions."""
+        class FailingRail(EvolutionRail):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
+                raise RuntimeError("evolution failed")
+
+        rail = FailingRail(trajectory_store=self.store)
+        # Should not raise
+        await rail._safe_run_evolution({"trajectory": Trajectory(execution_id="test", steps=[], session_id="test", source="online")})
+
+    async def test_drain_pending_approval_events_default(self):
+        """Base class drain returns empty list by default."""
+        rail = EvolutionRail(trajectory_store=self.store)
+        events = await rail.drain_pending_approval_events()
+        self.assertEqual(events, [])
+
+    async def test_drain_waits_for_background_tasks(self):
+        """drain(wait=True) waits for background tasks before returning."""
+        from openjiuwen.core.session.stream import OutputSchema
+
+        class EmitRail(EvolutionRail):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
+                event = OutputSchema(type="test", index=0, payload={})
+                self._pending_approval_events.append(event)
+
+            def _collect_pending_approval_events(self) -> list[OutputSchema]:
+                events = list(self._pending_approval_events)
+                self._pending_approval_events.clear()
+                return events
+
+        rail = EmitRail(trajectory_store=self.store, async_evolution=True)
+
+        ctx = self._create_ctx(
+            AgentCallbackEvent.BEFORE_INVOKE,
+            InvokeInputs(query="test", conversation_id="conv_drain"),
+        )
+        await rail.before_invoke(ctx)
+
+        ctx = self._create_ctx(
+            AgentCallbackEvent.AFTER_INVOKE,
+            InvokeInputs(query="test", conversation_id="conv_drain"),
+        )
+        await rail.after_invoke(ctx)
+
+        # drain with wait should get the event
+        events = await rail.drain_pending_approval_events(wait=True, timeout=5.0)
+        self.assertGreaterEqual(len(events), 1)
+
+    async def test_cleanup_background_tasks(self):
+        """cleanup_background_tasks clears the task set."""
+        rail = EvolutionRail(trajectory_store=self.store)
+        rail._bg_tasks = set()
+        await rail.cleanup_background_tasks()
+        self.assertEqual(len(rail._bg_tasks), 0)

@@ -25,7 +25,9 @@ from openjiuwen.agent_evolving.checkpointing.types import (
     PendingChange,
     PendingTeamSkillCreation,
 )
-from openjiuwen.agent_evolving.optimizer.team_skill_optimizer import TeamSkillOptimizer
+from openjiuwen.agent_evolving.optimizer.team_skill_optimizer import (
+    TeamSkillOptimizer,
+)
 from openjiuwen.agent_evolving.trajectory import Trajectory, TrajectoryStore
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
@@ -55,19 +57,23 @@ class TeamSkillRail(EvolutionRail):
         trajectory_store: Optional[TrajectoryStore] = None,
         min_team_members_for_create: int = 2,
         auto_save: bool = False,
+        async_evolution: bool = True,
     ) -> None:
         super().__init__(
             trajectory_store=trajectory_store,
             accumulate_trajectory=True,
             trigger_evolution_after_invoke=False,
+            async_evolution=async_evolution,
         )
         self._store = EvolutionStore(skills_dir)
         debug_dir = str(self._store.base_dirs[0].parent / "_debug")
-        self._optimizer = TeamSkillOptimizer(llm, model, language, debug_dir=debug_dir)
+        self._optimizer = TeamSkillOptimizer(
+            llm, model, language,
+            debug_dir=debug_dir,
+        )
         self._min_members = min_team_members_for_create
         self._auto_save = auto_save
 
-        self._pending_approval_events: list[OutputSchema] = []
         self._pending_skill_proposals: Dict[str, PendingTeamSkillCreation] = {}
         self._pending_patch_snapshots: Dict[str, PendingChange] = {}
         self._evolution_triggered: bool = False
@@ -104,6 +110,12 @@ class TeamSkillRail(EvolutionRail):
         if self._builder is None:
             self._evolution_triggered = False
 
+    async def _snapshot_for_evolution(
+        self, trajectory: Trajectory, ctx: Optional[AgentCallbackContext],
+    ) -> Optional[dict]:
+        """Phase 1: TeamSkillRail only needs trajectory (no session dependency)."""
+        return {"trajectory": trajectory, "skill_name": "team-skill"}
+
     async def _on_after_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Detect 'all tasks completed' via view_task result and trigger evolution."""
         if self._evolution_triggered:
@@ -133,25 +145,8 @@ class TeamSkillRail(EvolutionRail):
     ) -> bool:
         """Trigger skill evolution when all team tasks are completed.
 
-        This is the canonical entry point for evolution triggering.
-        It can be called from two paths:
-
-        1. **Internal** — ``_on_after_tool_call`` detects ``view_task``
-           showing all tasks in terminal state and delegates here.
-        2. **External** — coordination layer (e.g. dispatcher, cleanup
-           flow) detects team completion and calls this directly,
-           bypassing the ``view_task`` interception.
-
-        The method is idempotent: once triggered, subsequent calls
-        are no-ops within the same session.
-
-        Args:
-            ctx: Optional callback context.  May be ``None`` when
-                called from outside the rail callback system.
-
-        Returns:
-            ``True`` if evolution was triggered, ``False`` if skipped
-            (already triggered or no trajectory available).
+        In async mode: snapshots data, spawns background task, returns immediately.
+        In sync mode: awaits run_evolution directly (backward-compatible).
         """
         if self._evolution_triggered:
             return False
@@ -159,26 +154,30 @@ class TeamSkillRail(EvolutionRail):
         self._evolution_triggered = True
         self._emit_progress("all tasks completed, starting evolution analysis...")
 
-        trajectory = self._build_trajectory()
-        if trajectory is None:
+        if self.builder is None:
             logger.warning(
                 "[TeamSkillRail] notify_team_completed: no trajectory available "
                 "(before_invoke may not have fired)"
             )
             return False
 
-        self._save_trajectory(trajectory)
-        await self.run_evolution(trajectory, ctx)
+        trajectory = self.builder.build()
+        trajectory.steps = list(trajectory.steps)
+        self._trajectory_store.save(trajectory)
 
-        step_count = len(trajectory.steps)
-        tool_names = [
-            getattr(s.detail, "tool_name", "?")
-            for s in trajectory.steps if s.kind == "tool" and s.detail
-        ]
-        logger.info(
-            "[TeamSkillRail] trajectory built: %d steps, tool_names=%s",
-            step_count, tool_names,
-        )
+        if self._async_evolution:
+            snapshot = await self._snapshot_for_evolution(trajectory, ctx)
+            if snapshot is not None:
+                from openjiuwen.core.common.background_tasks import create_background_task
+                bg_task = await create_background_task(
+                    self._safe_run_evolution(snapshot),
+                    name="evolution-team-skill",
+                    group="evolution",
+                )
+                self._bg_tasks.add(bg_task)
+                self._bg_tasks = {t for t in self._bg_tasks if not t.done()}
+        else:
+            await self.run_evolution(trajectory, ctx)
 
         self._dump_trajectory_debug(trajectory)
         return True
@@ -197,7 +196,9 @@ class TeamSkillRail(EvolutionRail):
     async def run_evolution(
         self,
         trajectory: Trajectory,
-        ctx: AgentCallbackContext,
+        ctx: Optional[AgentCallbackContext] = None,
+        *,
+        snapshot: Optional[dict] = None,
     ) -> None:
         """Triggered when view_task shows all member tasks completed.
 
@@ -232,7 +233,7 @@ class TeamSkillRail(EvolutionRail):
     async def _handle_create(
         self,
         trajectory: Trajectory,
-        ctx: AgentCallbackContext,
+        ctx: Optional[AgentCallbackContext],
     ) -> None:
         if not self._meets_create_threshold(trajectory):
             spawn_count = 0
@@ -324,7 +325,7 @@ class TeamSkillRail(EvolutionRail):
     async def _handle_patch(
         self,
         trajectory: Trajectory,
-        ctx: AgentCallbackContext,
+        ctx: Optional[AgentCallbackContext],
         skill_name: str,
     ) -> None:
         logger.info("[TeamSkillRail] PATCH: reading current content of '%s'", skill_name)
@@ -392,11 +393,9 @@ class TeamSkillRail(EvolutionRail):
 
     # ===== Shared: drain approval events =====
 
-    def drain_pending_approval_events(self) -> list[OutputSchema]:
-        """Return and clear buffered approval events for host delivery."""
+    def _collect_pending_approval_events(self) -> list[OutputSchema]:
+        """Return and clear the team skill event buffer."""
         events = list(self._pending_approval_events)
-        if events:
-            logger.info("[TeamSkillRail] draining %d pending events", len(events))
         self._pending_approval_events.clear()
         return events
 
@@ -514,7 +513,7 @@ class TeamSkillRail(EvolutionRail):
 
     async def _emit_team_skill_approval(
         self,
-        ctx: AgentCallbackContext,
+        ctx: Optional[AgentCallbackContext],
         proposal: PendingTeamSkillCreation,
     ) -> None:
         """Buffer a CREATE approval event."""

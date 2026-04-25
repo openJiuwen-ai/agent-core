@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import datetime, timezone
@@ -44,6 +45,16 @@ class EvolutionStore:
         if not self._base_dirs:
             raise ValueError("skills_base_dir is empty")
         self.sys_operation: Optional[SysOperation] = None
+        self._skill_semantic_locks: Dict[str, asyncio.Lock] = {}
+
+    def _get_skill_lock(self, skill_name: str) -> asyncio.Lock:
+        """Get or create a lock for skill-level Read-Modify-Write operations.
+
+        Uses dict.setdefault to guarantee atomicity.
+        Avoids TOCTOU race: two coroutines simultaneously checking
+        if a key exists and each creating a new Lock.
+        """
+        return self._skill_semantic_locks.setdefault(skill_name, asyncio.Lock())
 
     @property
     def base_dirs(self) -> List[Path]:
@@ -215,51 +226,52 @@ class EvolutionStore:
 
     async def append_record(self, name: str, record: EvolutionRecord) -> None:
         """Append or merge one evolution record to evolutions.json."""
-        skill_dir = self.resolve_skill_dir(name, create=True)
-        if skill_dir is None:
-            return
+        async with self._get_skill_lock(name):
+            skill_dir = self.resolve_skill_dir(name, create=True)
+            if skill_dir is None:
+                return
 
-        if record.change.target == EvolutionTarget.SCRIPT:
-            await self._persist_script(skill_dir, record)
+            if record.change.target == EvolutionTarget.SCRIPT:
+                await self._persist_script(skill_dir, record)
 
-        evo_log = await self.load_full_evolution_log(name)
-        merge_target = record.change.merge_target
-        if merge_target:
-            replaced = False
-            for idx, existing in enumerate(evo_log.entries):
-                if existing.id == merge_target:
-                    evo_log.entries[idx] = record
-                    replaced = True
-                    logger.info(
-                        "[EvolutionStore] merged record %s replacing %s",
-                        record.id,
-                        merge_target,
-                    )
-                    break
-            if not replaced:
+            evo_log = await self.load_full_evolution_log(name)
+            merge_target = record.change.merge_target
+            if merge_target:
+                replaced = False
+                for idx, existing in enumerate(evo_log.entries):
+                    if existing.id == merge_target:
+                        evo_log.entries[idx] = record
+                        replaced = True
+                        logger.info(
+                            "[EvolutionStore] merged record %s replacing %s",
+                            record.id,
+                            merge_target,
+                        )
+                        break
+                if not replaced:
+                    evo_log.entries.append(record)
+            else:
                 evo_log.entries.append(record)
-        else:
-            evo_log.entries.append(record)
 
-        evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
-        await self._save_evolution_log(name, evo_log, skill_dir=skill_dir)
-        logger.info(
-            "[EvolutionStore] wrote %s/%s (id=%s, target=%s)",
-            name,
-            _EVOLUTION_FILENAME,
-            record.id,
-            record.change.target.value,
-        )
-
-        total = len(evo_log.entries)
-        if total >= _TOTAL_WARNING_THRESHOLD:
-            logger.warning(
-                "[EvolutionStore] skill '%s' has %d experiences, consider /evolve_simplify",
+            evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
+            await self._save_evolution_log(name, evo_log, skill_dir=skill_dir)
+            logger.info(
+                "[EvolutionStore] wrote %s/%s (id=%s, target=%s)",
                 name,
-                total,
+                _EVOLUTION_FILENAME,
+                record.id,
+                record.change.target.value,
             )
 
-        await self.render_evolution_markdown(name)
+            total = len(evo_log.entries)
+            if total >= _TOTAL_WARNING_THRESHOLD:
+                logger.warning(
+                    "[EvolutionStore] skill '%s' has %d experiences, consider /evolve_simplify",
+                    name,
+                    total,
+                )
+
+            await self.render_evolution_markdown(name)
 
     async def load_full_evolution_log(self, name: str) -> EvolutionLog:
         skill_dir = self.resolve_skill_dir(name)
@@ -558,32 +570,33 @@ class EvolutionStore:
         if not updates:
             return 0
 
-        evo_log = await self.load_full_evolution_log(name)
-        updated_count = 0
+        async with self._get_skill_lock(name):
+            evo_log = await self.load_full_evolution_log(name)
+            updated_count = 0
 
-        for record in evo_log.entries:
-            if record.id in updates:
-                update_data = updates[record.id]
-                if "score" in update_data:
-                    record.score = update_data["score"]
-                if "usage_stats" in update_data:
-                    stats_data = update_data["usage_stats"]
-                    if isinstance(stats_data, dict):
-                        record.usage_stats = UsageStats.from_dict(stats_data)
-                    elif isinstance(stats_data, UsageStats):
-                        record.usage_stats = stats_data
-                updated_count += 1
+            for record in evo_log.entries:
+                if record.id in updates:
+                    update_data = updates[record.id]
+                    if "score" in update_data:
+                        record.score = update_data["score"]
+                    if "usage_stats" in update_data:
+                        stats_data = update_data["usage_stats"]
+                        if isinstance(stats_data, dict):
+                            record.usage_stats = UsageStats.from_dict(stats_data)
+                        elif isinstance(stats_data, UsageStats):
+                            record.usage_stats = stats_data
+                    updated_count += 1
 
-        if updated_count > 0:
-            evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
-            await self._save_evolution_log(name, evo_log)
-            logger.info(
-                "[EvolutionStore] updated %d record score(s) for skill=%s",
-                updated_count,
-                name,
-            )
+            if updated_count > 0:
+                evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
+                await self._save_evolution_log(name, evo_log)
+                logger.info(
+                    "[EvolutionStore] updated %d record score(s) for skill=%s",
+                    updated_count,
+                    name,
+                )
 
-        return updated_count
+            return updated_count
 
     async def get_records_by_score(
         self,
@@ -618,23 +631,24 @@ class EvolutionStore:
         if not record_ids:
             return 0
 
-        evo_log = await self.load_full_evolution_log(name)
-        ids_set = set(record_ids)
-        original_count = len(evo_log.entries)
-        evo_log.entries = [r for r in evo_log.entries if r.id not in ids_set]
-        deleted_count = original_count - len(evo_log.entries)
+        async with self._get_skill_lock(name):
+            evo_log = await self.load_full_evolution_log(name)
+            ids_set = set(record_ids)
+            original_count = len(evo_log.entries)
+            evo_log.entries = [r for r in evo_log.entries if r.id not in ids_set]
+            deleted_count = original_count - len(evo_log.entries)
 
-        if deleted_count > 0:
-            evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
-            await self._save_evolution_log(name, evo_log)
-            await self.render_evolution_markdown(name)
-            logger.info(
-                "[EvolutionStore] deleted %d record(s) for skill=%s",
-                deleted_count,
-                name,
-            )
+            if deleted_count > 0:
+                evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
+                await self._save_evolution_log(name, evo_log)
+                await self.render_evolution_markdown(name)
+                logger.info(
+                    "[EvolutionStore] deleted %d record(s) for skill=%s",
+                    deleted_count,
+                    name,
+                )
 
-        return deleted_count
+            return deleted_count
 
     async def mark_records_applied(self, name: str, record_ids: List[str]) -> int:
         """Mark specified records as applied (integrated into SKILL.md).
@@ -652,26 +666,27 @@ class EvolutionStore:
         if not record_ids:
             return 0
 
-        evo_log = await self.load_full_evolution_log(name)
-        ids_set = set(record_ids)
-        updated_count = 0
+        async with self._get_skill_lock(name):
+            evo_log = await self.load_full_evolution_log(name)
+            ids_set = set(record_ids)
+            updated_count = 0
 
-        for record in evo_log.entries:
-            if record.id in ids_set and not record.applied:
-                record.applied = True
-                updated_count += 1
+            for record in evo_log.entries:
+                if record.id in ids_set and not record.applied:
+                    record.applied = True
+                    updated_count += 1
 
-        if updated_count > 0:
-            evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
-            await self._save_evolution_log(name, evo_log)
-            await self.render_evolution_markdown(name)
-            logger.info(
-                "[EvolutionStore] marked %d record(s) as applied for skill=%s",
-                updated_count,
-                name,
-            )
+            if updated_count > 0:
+                evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
+                await self._save_evolution_log(name, evo_log)
+                await self.render_evolution_markdown(name)
+                logger.info(
+                    "[EvolutionStore] marked %d record(s) as applied for skill=%s",
+                    updated_count,
+                    name,
+                )
 
-        return updated_count
+            return updated_count
 
     async def merge_records(
         self,
@@ -693,46 +708,47 @@ class EvolutionStore:
         Returns:
             The updated primary record, or None if not found
         """
-        evo_log = await self.load_full_evolution_log(name)
-        primary_record = None
-        records_to_remove = []
-        all_scores = []
+        async with self._get_skill_lock(name):
+            evo_log = await self.load_full_evolution_log(name)
+            primary_record = None
+            records_to_remove = []
+            all_scores = []
 
-        for record in evo_log.entries:
-            if record.id == primary_id:
-                primary_record = record
-            elif record.id in remove_ids:
-                records_to_remove.append(record)
-                all_scores.append(record.score)
+            for record in evo_log.entries:
+                if record.id == primary_id:
+                    primary_record = record
+                elif record.id in remove_ids:
+                    records_to_remove.append(record)
+                    all_scores.append(record.score)
 
-        if primary_record is None:
-            logger.warning(
-                "[EvolutionStore] merge_records: primary record %s not found",
+            if primary_record is None:
+                logger.warning(
+                    "[EvolutionStore] merge_records: primary record %s not found",
+                    primary_id,
+                )
+                return None
+
+            all_scores.append(primary_record.score)
+            final_score = new_score if new_score is not None else max(all_scores)
+
+            primary_record.change.content = new_content
+            primary_record.score = final_score
+            primary_record.timestamp = datetime.now(tz=timezone.utc).isoformat()
+
+            for record in records_to_remove:
+                evo_log.entries.remove(record)
+
+            evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
+            await self._save_evolution_log(name, evo_log)
+            await self.render_evolution_markdown(name)
+
+            logger.info(
+                "[EvolutionStore] merged %d record(s) into %s for skill=%s",
+                len(records_to_remove),
                 primary_id,
+                name,
             )
-            return None
-
-        all_scores.append(primary_record.score)
-        final_score = new_score if new_score is not None else max(all_scores)
-
-        primary_record.change.content = new_content
-        primary_record.score = final_score
-        primary_record.timestamp = datetime.now(tz=timezone.utc).isoformat()
-
-        for record in records_to_remove:
-            evo_log.entries.remove(record)
-
-        evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
-        await self._save_evolution_log(name, evo_log)
-        await self.render_evolution_markdown(name)
-
-        logger.info(
-            "[EvolutionStore] merged %d record(s) into %s for skill=%s",
-            len(records_to_remove),
-            primary_id,
-            name,
-        )
-        return primary_record
+            return primary_record
 
     async def update_record_content(
         self,
@@ -752,36 +768,37 @@ class EvolutionStore:
         Returns:
             The updated record, or None if not found
         """
-        evo_log = await self.load_full_evolution_log(name)
-        target_record = None
+        async with self._get_skill_lock(name):
+            evo_log = await self.load_full_evolution_log(name)
+            target_record = None
 
-        for record in evo_log.entries:
-            if record.id == record_id:
-                target_record = record
-                break
+            for record in evo_log.entries:
+                if record.id == record_id:
+                    target_record = record
+                    break
 
-        if target_record is None:
-            logger.warning(
-                "[EvolutionStore] update_record_content: record %s not found",
+            if target_record is None:
+                logger.warning(
+                    "[EvolutionStore] update_record_content: record %s not found",
+                    record_id,
+                )
+                return None
+
+            target_record.change.content = new_content
+            if new_score is not None:
+                target_record.score = new_score
+            target_record.timestamp = datetime.now(tz=timezone.utc).isoformat()
+
+            evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
+            await self._save_evolution_log(name, evo_log)
+            await self.render_evolution_markdown(name)
+
+            logger.info(
+                "[EvolutionStore] updated record %s for skill=%s",
                 record_id,
+                name,
             )
-            return None
-
-        target_record.change.content = new_content
-        if new_score is not None:
-            target_record.score = new_score
-        target_record.timestamp = datetime.now(tz=timezone.utc).isoformat()
-
-        evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
-        await self._save_evolution_log(name, evo_log)
-        await self.render_evolution_markdown(name)
-
-        logger.info(
-            "[EvolutionStore] updated record %s for skill=%s",
-            record_id,
-            name,
-        )
-        return target_record
+            return target_record
 
     async def create_skill(
         self,

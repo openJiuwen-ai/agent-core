@@ -111,7 +111,6 @@ class SkillEvolutionRail(EvolutionRail):
         self._auto_scan = auto_scan
         self._processed_signal_keys: set[tuple[str, ...]] = set()
         self._auto_save = auto_save
-        self._pending_approval_events: list[OutputSchema] = []
         # Optimizer path (for _auto_save=False): memory-staged records until user approval
         self._skill_ops: Dict[str, SkillCallOperator] = {}  # skill_name → operator
         # Store constructor args so _generate_experience_via_optimizer can create a
@@ -190,18 +189,13 @@ class SkillEvolutionRail(EvolutionRail):
         """Clear signal fingerprints, typically on conversation boundary."""
         self._processed_signal_keys.clear()
 
-    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Inject body experiences, track presented records, and record trajectory step.
+    async def _on_after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Inject body experiences and track presented records.
 
-        This override:
-        1. Calls super().after_tool_call(ctx) to record trajectory step
-        2. Injects body experiences when reading SKILL.md
-        3. Tracks presented records for scoring
+        Base class after_tool_call has already recorded the trajectory step.
+        This extension point handles SKILL.md-specific logic only.
         """
-        # First, let EvolutionRail record the trajectory step
-        await super().after_tool_call(ctx)
-
-        # Then, inject body experiences if reading SKILL.md
+        # Inject body experiences if reading SKILL.md
         inputs = ctx.inputs
         if not isinstance(inputs, ToolCallInputs):
             return
@@ -240,16 +234,17 @@ class SkillEvolutionRail(EvolutionRail):
             )
             await self._track_presented_records(ctx, skill_name, presentation_snippet)
 
-    async def run_evolution(self, trajectory: Trajectory, ctx: AgentCallbackContext) -> None:
+    async def run_evolution(
+        self,
+        trajectory: Trajectory,
+        ctx: Optional[AgentCallbackContext] = None,
+        *,
+        snapshot: Optional[dict] = None,
+    ) -> None:
         """Run skill evolution based on the collected trajectory.
 
-        This is called by EvolutionRail.after_invoke after the trajectory is saved.
-        SkillEvolutionRail implements evolution logic here instead of in after_invoke
-        to align with EvolutionRail's design pattern.
-
-        Args:
-            trajectory: Complete trajectory for this conversation
-            ctx: Callback context
+        In async mode: ctx=None, snapshot contains data captured by _snapshot_for_evolution.
+        In sync mode: ctx is active, snapshot=None (backward-compatible).
         """
         logger.info("[SkillEvolutionRail] run_evolution called, auto_scan=%s", self._auto_scan)
         if not self._auto_scan:
@@ -257,7 +252,17 @@ class SkillEvolutionRail(EvolutionRail):
             return
 
         try:
-            parsed_messages = await self._collect_parsed_messages(ctx)
+            # Async path: read from snapshot
+            if snapshot is not None:
+                parsed_messages = snapshot["parsed_messages"]
+                presented_entries = snapshot.get("presented_entries", [])
+            # Sync path: read from ctx (backward-compatible)
+            elif ctx is not None:
+                parsed_messages = await self._collect_parsed_messages(ctx)
+                presented_entries = self._consume_session_eval_state(ctx)
+            else:
+                return
+
             logger.info("[SkillEvolutionRail] collected %d parsed messages", len(parsed_messages))
             if not parsed_messages:
                 logger.info("[SkillEvolutionRail] no parsed messages, skipping")
@@ -365,18 +370,15 @@ class SkillEvolutionRail(EvolutionRail):
                                 # Approval-required path: stage proposal and emit approval request
                                 await self._emit_new_skill_approval(ctx, proposal)
 
-            # Trigger async evaluation if interval reached
-            await self._trigger_async_evaluation(ctx, parsed_messages)
+            # Trigger async evaluation
+            await self._trigger_async_evaluation(presented_entries)
         except Exception as exc:
             logger.warning("[SkillEvolutionRail] auto evolution failed: %s", exc)
 
-    def drain_pending_approval_events(self) -> list[OutputSchema]:
-        """Return and clear buffered approval events.
+    # ===== Shared: drain approval events =====
 
-        Called by the host (JiuWenClaw) after the streaming loop ends,
-        because ``after_invoke`` fires *after* the session stream is
-        closed and ``session.write_stream`` can no longer deliver data.
-        """
+    def _collect_pending_approval_events(self) -> list[OutputSchema]:
+        """Return and clear the skill evolution event buffer."""
         events = list(self._pending_approval_events)
         self._pending_approval_events.clear()
         return events
@@ -432,7 +434,7 @@ class SkillEvolutionRail(EvolutionRail):
 
     async def _emit_generated_records(
         self,
-        ctx: AgentCallbackContext,
+        ctx: Optional[AgentCallbackContext],
         skill_name: str,
     ) -> None:
         """Buffer an approval-request OutputSchema for later delivery.
@@ -846,30 +848,60 @@ class SkillEvolutionRail(EvolutionRail):
         except Exception as exc:
             logger.debug("[SkillEvolutionRail] track presented records failed: %s", exc)
 
-    async def _trigger_async_evaluation(
-        self,
-        ctx: AgentCallbackContext,
-        parsed_messages: List[dict],  # noqa: ARG002  kept for API compatibility
-    ) -> None:
-        """Trigger async evaluation of presented experiences.
+    def _consume_session_eval_state(
+        self, ctx: AgentCallbackContext,
+    ) -> List[tuple[str, EvolutionRecord, str]]:
+        """Consume eval counter and presented records from session.
 
-        Evaluates whether presented experiences were effectively used.
-        Each record is evaluated against the snippet captured when it was
-        presented, not the current conversation, to avoid cross-turn data leakage.
+        In snapshot phase (ctx alive): reads counter, increments it,
+        and if threshold reached, consumes presented_records.
+        Resets session state so background task doesn't need session access.
         """
         session = ctx.session if hasattr(ctx, "session") else None
         counter = self._get_session_eval_counter(session)
         counter += 1
-        self._set_session_eval_counter(session, counter)
+        presented_entries: List[tuple[str, EvolutionRecord, str]] = []
+        if counter >= self._eval_interval:
+            presented_entries = self._get_session_presented_records(session)
+            self._set_session_presented_records(session, [])
+            self._set_session_eval_counter(session, 0)
+        else:
+            self._set_session_eval_counter(session, counter)
+        return presented_entries
 
-        if counter < self._eval_interval:
-            return
+    async def _snapshot_for_evolution(
+        self, trajectory: Trajectory, ctx: AgentCallbackContext,
+    ) -> Optional[dict]:
+        """Phase 1: Collect messages and consume session state while ctx is alive."""
+        if not self._auto_scan:
+            return None
 
-        # Reset counter and get presented records
-        self._set_session_eval_counter(session, 0)
-        presented_entries = self._get_session_presented_records(session)
-        self._set_session_presented_records(session, [])
+        parsed_messages = await self._collect_parsed_messages(ctx)
+        if not parsed_messages:
+            return None
 
+        session_id = ctx.inputs.conversation_id if ctx.inputs else ""
+
+        # Consume session state before ctx becomes invalid
+        presented_entries = self._consume_session_eval_state(ctx)
+
+        return {
+            "trajectory": trajectory,
+            "parsed_messages": parsed_messages,
+            "session_id": session_id,
+            "presented_entries": presented_entries,
+            "skill_name": "skill-evolution",
+        }
+
+    async def _trigger_async_evaluation(
+        self,
+        presented_entries: List[tuple[str, EvolutionRecord, str]],
+    ) -> None:
+        """Trigger async evaluation of presented experiences.
+
+        In async mode: presented_entries comes from snapshot (consumed in _snapshot_for_evolution).
+        In sync mode: presented_entries comes from _consume_session_eval_state in run_evolution.
+        """
         if not presented_entries:
             return
 
@@ -886,7 +918,6 @@ class SkillEvolutionRail(EvolutionRail):
                 if not eval_results:
                     continue
 
-                # Update records with evaluation results
                 updates: Dict[str, Dict[str, Any]] = {}
                 for result in eval_results:
                     record_id = result.get("record_id")
@@ -996,7 +1027,7 @@ class SkillEvolutionRail(EvolutionRail):
 
     async def _emit_new_skill_approval(
         self,
-        ctx: AgentCallbackContext,
+        ctx: Optional[AgentCallbackContext],
         proposal: Dict[str, Any],
     ) -> None:
         """Emit approval event for new skill creation."""

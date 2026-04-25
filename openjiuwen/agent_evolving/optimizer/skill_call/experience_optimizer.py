@@ -104,6 +104,13 @@ NEW_SKILL_PROPOSAL_PROMPT: Dict[str, str] = {
 SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
 你是一个 Skill 优化专家。根据对话中发现的问题信号和对话历史，为 Skill 生成演进经验。
 
+## 输出格式（最重要）
+你的回复必须是一个合法的 JSON 数组，不要任何其他内容。
+- 不要使用 Markdown 代码块（```）包裹
+- 不要添加解释性文字
+- JSON 转义规则：字符串内换行用 \\n，引号用 \\"，制表符用 \\t
+- 数组内每个对象必须包含 action 字段（"append" 或 "skip"）
+
 ## 输入信息
 
 ### 当前 Skill 内容
@@ -208,6 +215,13 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
 
 SKILL_EXPERIENCE_GENERATE_PROMPT_EN = """\
 You are a Skill optimization expert. Based on problem signals discovered in the conversation and the conversation history, generate evolution experiences for the Skill.
+
+## Output Format (MOST IMPORTANT)
+Your response must be a valid JSON array, nothing else.
+- Do NOT wrap in Markdown code blocks (```)
+- Do NOT add explanatory text
+- JSON escaping: use \\n for newlines, \\" for quotes, \\t for tabs inside strings
+- Every object in the array must include an "action" field ("append" or "skip")
 
 ## Input Information
 
@@ -421,7 +435,8 @@ def _preview_section(section: str, preview_chars: int = _SECTION_PREVIEW_CHARS) 
 
 def _fix_json_text(text: str) -> str:
     """Apply common fixes to malformed JSON produced by LLMs."""
-    text = re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.MULTILINE)
+    text = text.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
     text = re.sub(r"```\s*$", "", text, flags=re.MULTILINE)
     text = re.sub(r"//[^\n]*", "", text)
     text = re.sub(r",\s*([}\]])", r"\1", text)
@@ -450,6 +465,7 @@ def _extract_json(raw: str) -> Optional[Any]:
     if result is not None:
         return result
 
+    # Step 3: regex extract outer [ ... ] or { ... } from already-fixed text
     for pattern in (r"\[[\s\S]*\]", r"\{[\s\S]*\}"):
         matched = re.search(pattern, fixed)
         if matched:
@@ -462,6 +478,38 @@ def _extract_json(raw: str) -> Optional[Any]:
                 return result
 
     return None
+
+
+def _extract_json_with_error(raw: str) -> tuple[Any, str] | tuple[None, str]:
+    """Like _extract_json but also returns the last parse error message."""
+    raw = raw.strip()
+    if not raw:
+        return None, "empty response"
+
+    last_error = "unknown"
+    result = _try_parse(raw)
+    if result is not None:
+        return result, ""
+
+    fixed = _fix_json_text(raw)
+    result = _try_parse(fixed)
+    if result is not None:
+        return result, ""
+
+    for pattern in (r"\[[\s\S]*\]", r"\{[\s\S]*\}"):
+        matched = re.search(pattern, fixed)
+        if matched:
+            result = _try_parse(matched.group(0))
+            if result is not None:
+                return result, ""
+            refixed = _fix_json_text(matched.group(0))
+            try:
+                parsed = json.loads(refixed)
+                return parsed, ""
+            except json.JSONDecodeError as e:
+                last_error = str(e)
+
+    return None, last_error
 
 
 _CONTEXT_MAX_CHARS = 500
@@ -555,6 +603,9 @@ _JSON_FIX_PROMPT = """\
 你上次的输出不是合法 JSON，请修复并重新输出。
 只输出修复后的 JSON 数组，不要任何解释文字。
 
+## 解析错误
+{parse_error}
+
 ## 目标格式
 [
   {{
@@ -572,6 +623,29 @@ _JSON_FIX_PROMPT = """\
 
 ## 原始输出（请从中提取并修复）
 {broken_output}"""
+
+_JSON_FIX_PROMPT_STRICT = """\
+你的 JSON 输出多次解析失败。请完全重新生成。
+
+## 解析错误
+{parse_error}
+
+## 上次输出预览
+{broken_preview}
+
+## 严格要求
+1. 只输出一个 JSON 数组，以 [ 开头，以 ] 结尾
+2. 不要任何解释文字、不要 Markdown 代码块
+3. 所有字符串内的换行必须写成 \\n
+4. 所有字符串内的引号必须写成 \\"
+5. 不要用单引号，只用双引号
+
+## 正确格式示例
+[
+  {{"action":"append","target":"body","section":"Troubleshooting","content":"## 标题\\n- 要点1\\n- 要点2","merge_target":null}},
+  {{"action":"skip","skip_reason":"irrelevant","target":null,"section":null,"content":null,"merge_target":null}}
+]
+"""
 
 
 class SkillExperienceOptimizer(BaseOptimizer):
@@ -659,15 +733,46 @@ class SkillExperienceOptimizer(BaseOptimizer):
             response = await self._llm.invoke(
                 model=self._model,
                 messages=[{"role": "user", "content": prompt}],
+                timeout=120,
             )
             raw = response.content if hasattr(response, "content") else str(response)
         except Exception as exc:
             logger.error("[SkillExperienceOptimizer] LLM call failed: %s", exc)
             return []
 
-        patches = _parse_llm_response(raw)
+        data, last_error = _extract_json_with_error(raw)
+        if data is not None:
+            items = data if isinstance(data, list) else [data]
+            patches: List[EvolutionPatch] = []
+            for item in items:
+                if isinstance(item, dict):
+                    p = _parse_single_patch(item)
+                    if p is not None:
+                        patches.append(p)
+        else:
+            patches = None
+        last_raw = raw
+        for attempt in range(2, 4):  # attempts 2 and 3
+            if patches is not None:
+                break
+            logger.warning(
+                "[SkillExperienceOptimizer] parse failed, retry attempt %d/3 (skill=%s)",
+                attempt,
+                ctx.skill_name,
+            )
+            result = await self.retry_parse(
+                broken_raw=last_raw,
+                original_prompt=prompt,
+                attempt_number=attempt,
+                parse_error=last_error,
+            )
+            patches, retry_raw = result
+            if retry_raw:
+                last_raw = retry_raw
+                _, last_error = _extract_json_with_error(retry_raw)
         if patches is None:
-            patches = await self.retry_parse(raw, original_prompt=prompt)
+            logger.warning("[SkillExperienceOptimizer] all retries exhausted, returning no records")
+            return []
         source = ctx.signals[0].signal_type
         merged_context = _build_context(ctx.signals)
         text_records: List[EvolutionRecord] = []
@@ -708,36 +813,77 @@ class SkillExperienceOptimizer(BaseOptimizer):
             )
         return text_records + script_records
 
-    async def retry_parse(self, broken_raw: str, original_prompt: str) -> List[EvolutionPatch]:
-        """One-shot retry: fix JSON if malformed, or regenerate if truncated."""
+    async def retry_parse(
+        self,
+        broken_raw: str,
+        original_prompt: str,
+        attempt_number: int = 1,
+        parse_error: str = "",
+    ) -> tuple[List[EvolutionPatch] | None, str]:
+        """Retry parsing: fix JSON if malformed, or regenerate if truncated.
+
+        Args:
+            broken_raw: The raw LLM output that failed parsing.
+            original_prompt: The original prompt used for generation.
+            attempt_number: Which retry attempt this is (2 or 3). Affects strategy.
+            parse_error: Specific error message from json.loads.
+
+        Returns:
+            (patches, retry_raw) where patches is None on failure,
+            [] on successful empty parse, or a non-empty list.
+            retry_raw is the raw LLM output for progressive retries.
+        """
         truncated = _looks_truncated(broken_raw)
+
         if truncated:
-            logger.warning("[SkillExperienceOptimizer] output appears truncated, retrying full regeneration")
+            if attempt_number >= 3:
+                logger.warning(
+                    "[SkillExperienceOptimizer] output still truncated on attempt 3, giving up"
+                )
+                return None, broken_raw
+            logger.warning(
+                "[SkillExperienceOptimizer] output appears truncated, retrying full regeneration"
+            )
             retry_prompt = original_prompt
+        elif attempt_number >= 3:
+            logger.warning(
+                "[SkillExperienceOptimizer] JSON malformed (attempt %d), using strict fix prompt",
+                attempt_number,
+            )
+            error_detail = parse_error or "无法解析为合法 JSON"
+            retry_prompt = _JSON_FIX_PROMPT_STRICT.format(
+                parse_error=error_detail,
+                broken_preview=broken_raw[:500],
+            )
         else:
             logger.warning(
                 "[SkillExperienceOptimizer] JSON malformed, requesting fix (preview: %s)",
                 broken_raw[:200],
             )
-            retry_prompt = _JSON_FIX_PROMPT.format(broken_output=broken_raw)
+            error_detail = parse_error or "JSON 解析失败"
+            retry_prompt = _JSON_FIX_PROMPT.format(
+                parse_error=error_detail, broken_output=broken_raw
+            )
 
         try:
             response = await self._llm.invoke(
                 model=self._model,
                 messages=[{"role": "user", "content": retry_prompt}],
+                temperature=0.1,
+                timeout=60,
             )
             retry_raw = response.content if hasattr(response, "content") else str(response)
         except Exception as exc:
             logger.error("[SkillExperienceOptimizer] retry LLM call failed: %s", exc)
-            return []
+            return None, ""
 
         patches = _parse_llm_response(retry_raw)
         if patches is None:
-            strategy = "regeneration" if truncated else "fix"
+            strategy = "regeneration" if truncated else ("strict_fix" if attempt_number >= 3 else "fix")
             logger.warning("[SkillExperienceOptimizer] retry (%s) also failed, giving up", strategy)
-            return []
+            return None, retry_raw
         logger.info("[SkillExperienceOptimizer] retry succeeded, got %d patches", len(patches))
-        return patches
+        return patches, retry_raw
 
     def update_llm(self, llm: Any, model: str) -> None:
         """Update runtime llm/model for hot reload."""

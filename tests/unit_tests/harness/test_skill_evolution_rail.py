@@ -148,7 +148,7 @@ async def test_after_tool_call_injects_body_experience(tmp_path):
     )
     ctx = AgentCallbackContext(agent=None, inputs=inputs, session=None)
 
-    await rail.after_tool_call(ctx)
+    await rail._on_after_tool_call(ctx)
 
     assert inputs.tool_msg.content == "original\nnew experience"
     rail._evolution_store.format_body_experience_text.assert_awaited_once_with("invoice-parser")
@@ -165,7 +165,7 @@ async def test_after_tool_call_skips_invalid_cases(tmp_path):
     ]
     for item in cases:
         ctx = AgentCallbackContext(agent=None, inputs=item, session=None)
-        await rail.after_tool_call(ctx)
+        await rail._on_after_tool_call(ctx)
 
     rail._evolution_store.format_body_experience_text.assert_awaited_once_with("s")
     assert cases[0].tool_msg.content == "x"
@@ -177,7 +177,7 @@ async def test_after_tool_call_skips_invalid_cases(tmp_path):
         tool_args={"file_path": "/a/demo/SKILL.md"},
         tool_msg=_DummyToolMsg("z"),
     )
-    await rail.after_tool_call(AgentCallbackContext(agent=None, inputs=empty_case, session=None))
+    await rail._on_after_tool_call(AgentCallbackContext(agent=None, inputs=empty_case, session=None))
     assert empty_case.tool_msg.content == "z"
 
 
@@ -386,7 +386,7 @@ async def test_emit_generated_records_and_drain_pending_events(tmp_path):
     rail._skill_ops["skill-a"] = skill_op
 
     await rail._emit_generated_records(ctx, "skill-a")
-    events = rail.drain_pending_approval_events()
+    events = await rail.drain_pending_approval_events()
 
     assert len(events) == 1
     event = events[0]
@@ -400,7 +400,7 @@ async def test_emit_generated_records_and_drain_pending_events(tmp_path):
     # Records should have been snapshotted (moved out of staged queue)
     assert skill_op._staged_records == []
     assert request_id in rail._pending_approval_snapshots
-    assert rail.drain_pending_approval_events() == []
+    assert await rail.drain_pending_approval_events() == []
 
 
 @pytest.mark.asyncio
@@ -417,7 +417,7 @@ async def test_on_approve_flushes_snapshot_records(tmp_path):
     rail._evolution_store.append_record = AsyncMock()
 
     await rail._emit_generated_records(ctx, "skill-a")
-    events = rail.drain_pending_approval_events()
+    events = await rail.drain_pending_approval_events()
     request_id = events[0].payload["request_id"]
 
     await rail.on_approve(request_id)
@@ -440,7 +440,7 @@ async def test_on_reject_discards_snapshot_records(tmp_path):
     rail._evolution_store.append_record = AsyncMock()
 
     await rail._emit_generated_records(ctx, "skill-a")
-    events = rail.drain_pending_approval_events()
+    events = await rail.drain_pending_approval_events()
     request_id = events[0].payload["request_id"]
 
     await rail.on_reject(request_id)
@@ -466,7 +466,8 @@ async def test_on_approve_partial_failure_retains_pending_change(tmp_path):
     rail._evolution_store.append_record = AsyncMock(side_effect=[None, OSError("disk full")])
 
     await rail._emit_generated_records(ctx, "skill-a")
-    request_id = rail.drain_pending_approval_events()[0].payload["request_id"]
+    events = await rail.drain_pending_approval_events()
+    request_id = events[0].payload["request_id"]
 
     await rail.on_approve(request_id)
 
@@ -500,7 +501,8 @@ async def test_on_approve_full_failure_then_retry_succeeds(tmp_path):
     rail._evolution_store.append_record = AsyncMock(side_effect=OSError("disk full"))
 
     await rail._emit_generated_records(ctx, "skill-a")
-    request_id = rail.drain_pending_approval_events()[0].payload["request_id"]
+    events = await rail.drain_pending_approval_events()
+    request_id = events[0].payload["request_id"]
 
     await rail.on_approve(request_id)
 
@@ -538,7 +540,7 @@ async def test_concurrent_approval_batches_are_independent(tmp_path):
     skill_op._staged_records = [record_b]
     await rail._emit_generated_records(ctx, "skill-a")
 
-    events = rail.drain_pending_approval_events()
+    events = await rail.drain_pending_approval_events()
     assert len(events) == 2
     req1 = events[0].payload["request_id"]
     req2 = events[1].payload["request_id"]
@@ -829,7 +831,7 @@ async def test_emit_new_skill_approval_buffers_event(tmp_path):
     }
     await rail._emit_new_skill_approval(ctx, proposal)
 
-    events = rail.drain_pending_approval_events()
+    events = await rail.drain_pending_approval_events()
     assert len(events) == 1
     event = events[0]
     assert event.type == "chat.ask_user_question"
@@ -852,7 +854,7 @@ async def test_emit_new_skill_approval_unique_ids(tmp_path):
     await rail._emit_new_skill_approval(ctx, proposal_a)
     await rail._emit_new_skill_approval(ctx, proposal_b)
 
-    events = rail.drain_pending_approval_events()
+    events = await rail.drain_pending_approval_events()
     ids = {e.payload["request_id"] for e in events}
     assert len(ids) == 2  # must be distinct
 
@@ -869,7 +871,7 @@ async def test_on_approve_new_skill_creates_skill(tmp_path):
     proposal = {"name": "new-skill", "description": "desc", "body": "body", "reason": "reason"}
 
     await rail._emit_new_skill_approval(ctx, proposal)
-    events = rail.drain_pending_approval_events()
+    events = await rail.drain_pending_approval_events()
     request_id = events[0].payload["request_id"]
 
     rail._evolution_store.create_skill = AsyncMock(return_value=tmp_path / "new-skill")
@@ -900,7 +902,7 @@ async def test_on_approve_new_skill_store_failure_returns_none(tmp_path):
     proposal = {"name": "fail-skill", "description": "d", "body": "b", "reason": "r"}
 
     await rail._emit_new_skill_approval(ctx, proposal)
-    events = rail.drain_pending_approval_events()
+    events = await rail.drain_pending_approval_events()
     request_id = events[0].payload["request_id"]
 
     rail._evolution_store.create_skill = AsyncMock(return_value=None)
@@ -915,7 +917,7 @@ async def test_on_approve_new_skill_exception_returns_none(tmp_path):
     proposal = {"name": "exc-skill", "description": "d", "body": "b", "reason": "r"}
 
     await rail._emit_new_skill_approval(ctx, proposal)
-    events = rail.drain_pending_approval_events()
+    events = await rail.drain_pending_approval_events()
     request_id = events[0].payload["request_id"]
 
     rail._evolution_store.create_skill = AsyncMock(side_effect=OSError("disk full"))
@@ -930,7 +932,7 @@ async def test_on_reject_new_skill_discards_proposal(tmp_path):
     proposal = {"name": "rej-skill", "description": "d", "body": "b", "reason": "r"}
 
     await rail._emit_new_skill_approval(ctx, proposal)
-    events = rail.drain_pending_approval_events()
+    events = await rail.drain_pending_approval_events()
     request_id = events[0].payload["request_id"]
 
     await rail.on_reject_new_skill(request_id)
@@ -1153,21 +1155,15 @@ def test_session_presented_records_store_snippet(tmp_path):
 async def test_trigger_async_evaluation_uses_per_record_snippet(tmp_path):
     """Scorer must be called with the snippet bound to each record, not current messages."""
     rail = _make_rail(tmp_path)
-    rail._eval_interval = 1
 
     record_a = _make_record("skill_a")
     record_b = _make_record("skill_b")
 
-    session = SimpleNamespace()
     # Two records from different conversations with different snippets
-    rail._set_session_presented_records(
-        session,
-        [
-            ("skill_a", record_a, "snippet_from_turn_1"),
-            ("skill_b", record_b, "snippet_from_turn_2"),
-        ],
-    )
-    rail._set_session_eval_counter(session, 0)
+    presented_entries = [
+        ("skill_a", record_a, "snippet_from_turn_1"),
+        ("skill_b", record_b, "snippet_from_turn_2"),
+    ]
 
     captured_snippets: list[str] = []
 
@@ -1178,16 +1174,11 @@ async def test_trigger_async_evaluation_uses_per_record_snippet(tmp_path):
     rail._scorer = Mock()
     rail._scorer.evaluate = fake_evaluate
 
-    ctx = Mock()
-    ctx.session = session
-
-    # Pass a completely different current-round messages list
-    await rail._trigger_async_evaluation(ctx, [{"role": "user", "content": "new unrelated message"}])
+    await rail._trigger_async_evaluation(presented_entries)
 
     # Must have evaluated with the stored snippets, not the current messages
     assert "snippet_from_turn_1" in captured_snippets
     assert "snippet_from_turn_2" in captured_snippets
-    assert not any("new unrelated" in s for s in captured_snippets)
 
 
 # =============================================================================
@@ -1273,7 +1264,7 @@ async def test_after_tool_call_no_track_when_no_body_text(tmp_path):
 
     rail._track_presented_records = fake_track
 
-    await rail.after_tool_call(ctx)
+    await rail._on_after_tool_call(ctx)
 
     assert not track_called, "_track_presented_records must not be called when no body text was injected"
 
@@ -1701,7 +1692,7 @@ async def test_run_evolution_new_skill_auto_save_creates_directly(tmp_path):
     # Approval event should NOT be emitted
     rail._emit_new_skill_approval.assert_not_awaited()
     # No pending events should be buffered
-    assert rail.drain_pending_approval_events() == []
+    assert await rail.drain_pending_approval_events() == []
 
 
 @pytest.mark.asyncio
@@ -1751,7 +1742,7 @@ async def test_run_evolution_new_skill_auto_save_false_emits_approval(tmp_path):
     # create_skill should NOT be called directly
     rail._evolution_store.create_skill.assert_not_awaited()
     # Approval event should be emitted
-    events = rail.drain_pending_approval_events()
+    events = await rail.drain_pending_approval_events()
     assert len(events) == 1
     assert events[0].type == "chat.ask_user_question"
     assert events[0].payload["_new_skill_data"]["name"] == "approval-required-skill"
@@ -1806,4 +1797,4 @@ async def test_run_evolution_new_skill_auto_save_failure_logs_warning(tmp_path):
     rail._evolution_store.create_skill.assert_awaited_once()
     # No approval event should be emitted (auto_save path)
     rail._emit_new_skill_approval.assert_not_awaited()
-    assert rail.drain_pending_approval_events() == []
+    assert await rail.drain_pending_approval_events() == []

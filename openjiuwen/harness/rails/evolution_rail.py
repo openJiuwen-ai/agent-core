@@ -14,6 +14,7 @@ Core design:
 
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 
 from openjiuwen.agent_evolving.trajectory import (
@@ -25,6 +26,9 @@ from openjiuwen.agent_evolving.trajectory import (
     LLMCallDetail,
     ToolCallDetail,
 )
+from openjiuwen.core.common.background_tasks import BackgroundTask
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ModelCallInputs,
@@ -54,6 +58,8 @@ class EvolutionRail(DeepAgentRail):
         trajectory_store: Optional[TrajectoryStore] = None,
         accumulate_trajectory: bool = False,
         trigger_evolution_after_invoke: bool = True,
+        async_evolution: bool = True,
+        max_concurrent_evolution: int = 1,
     ):
         """Initialize EvolutionRail.
 
@@ -61,17 +67,35 @@ class EvolutionRail(DeepAgentRail):
             trajectory_store: Optional trajectory store. If None, uses InMemoryTrajectoryStore.
             accumulate_trajectory: Whether to keep the trajectory builder across invoke rounds.
             trigger_evolution_after_invoke: Whether to trigger evolution after each invoke round.
+            async_evolution: When True (default), run_evolution runs in a background task
+                after snapshotting ctx data. When False, run_evolution runs synchronously
+                with the active ctx (backward-compatible).
+            max_concurrent_evolution: Max concurrent run_evolution executions.
+                Limits LLM competition with the main agent flow. Default is 1.
         """
         super().__init__()
         self._trajectory_store = trajectory_store or InMemoryTrajectoryStore()
         self._builder: Optional[TrajectoryBuilder] = None
         self._accumulate_trajectory = accumulate_trajectory
         self._trigger_evolution_after_invoke = trigger_evolution_after_invoke
+        self._async_evolution = async_evolution
+        self._bg_tasks: set[BackgroundTask] = set()
+        self._pending_approval_events: list[OutputSchema] = []
+        self._evolution_sem = asyncio.Semaphore(max_concurrent_evolution)
 
     @property
     def trajectory_store(self) -> TrajectoryStore:
         """Get the trajectory store."""
         return self._trajectory_store
+
+    @property
+    def builder(self) -> Optional[TrajectoryBuilder]:
+        """Public accessor for the trajectory builder.
+
+        Subclasses (TeamSkillRail, RLRail) need to access the builder
+        for custom evolution triggering outside of after_invoke.
+        """
+        return self._builder
 
     # ---- Trajectory collection (final, subclasses should not override) ----
 
@@ -180,7 +204,20 @@ class EvolutionRail(DeepAgentRail):
         self._trajectory_store.save(trajectory)
 
         if self._should_trigger_evolution_after_invoke():
-            await self.run_evolution(trajectory, ctx)
+            if self._async_evolution:
+                snapshot = await self._snapshot_for_evolution(trajectory, ctx)
+                if snapshot is not None:
+                    from openjiuwen.core.common.background_tasks import create_background_task
+                    bg_task = await create_background_task(
+                        self._safe_run_evolution(snapshot),
+                        name=f"evolution-{snapshot.get('skill_name', 'unknown')}",
+                        group="evolution",
+                    )
+                    self._bg_tasks.add(bg_task)
+                    # Prune completed tasks to prevent unbounded growth
+                    self._bg_tasks = {t for t in self._bg_tasks if not t.done()}
+            else:
+                await self.run_evolution(trajectory, ctx)
 
         if not self._should_accumulate_trajectory():
             self._builder = None
@@ -254,21 +291,95 @@ class EvolutionRail(DeepAgentRail):
         """
         pass
 
+    async def _snapshot_for_evolution(
+        self, trajectory: Trajectory, ctx: AgentCallbackContext,
+    ) -> Optional[dict]:
+        """Phase 1: Synchronously capture snapshot while ctx is alive.
+
+        Subclasses override to capture additional data (e.g. parsed_messages,
+        session state). Called in after_invoke before spawning background task.
+        """
+        return {"trajectory": trajectory}
+
+    async def _safe_run_evolution(self, snapshot: dict) -> None:
+        """Phase 2: Safely execute evolution in background.
+
+        Catches exceptions to prevent polluting the main lifecycle flow.
+        Acquires semaphore to limit concurrent evolution LLM calls.
+        """
+        try:
+            trajectory = snapshot["trajectory"]
+            async with self._evolution_sem:
+                await self.run_evolution(trajectory, ctx=None, snapshot=snapshot)
+        except Exception as exc:
+            logger.warning("[EvolutionRail] background evolution failed: %s", exc)
+
     async def run_evolution(
         self,
         trajectory: Trajectory,
-        ctx: AgentCallbackContext,
+        ctx: Optional[AgentCallbackContext] = None,
+        *,
+        snapshot: Optional[dict] = None,
     ) -> None:
         """Called after conversation round ends.
 
-        trajectory contains the complete trajectory for this round,
-        suitable for experience extraction algorithms.
+        In async mode: ctx=None, snapshot contains captured data.
+        In sync mode: ctx is active, snapshot=None (backward-compatible).
 
         Args:
             trajectory: Complete trajectory for this conversation round
-            ctx: Callback context with agent, session, etc.
+            ctx: Callback context (None in async mode)
+            snapshot: Captured data from _snapshot_for_evolution (None in sync mode)
         """
         pass
+
+    async def drain_pending_approval_events(
+        self,
+        wait: bool = False,
+        timeout: Optional[float] = None,
+    ) -> list[OutputSchema]:
+        """Return and clear buffered approval events.
+
+        Waits for background tasks if requested, then collects events from
+        the subclass-specific buffer.
+
+        Args:
+            wait: If True, wait for all pending background tasks to complete
+                  before draining. Ensures no events are missed.
+            timeout: Maximum seconds to wait (None = no limit).
+        """
+        if wait and self._bg_tasks:
+            pending = [t for t in self._bg_tasks if not t.done()]
+            if pending:
+                if timeout is not None:
+                    import anyio
+                    with anyio.move_on_after(timeout):
+                        for task in pending:
+                            await task.wait()
+                else:
+                    for task in pending:
+                        await task.wait()
+                self._bg_tasks = {t for t in self._bg_tasks if not t.done()}
+
+        events = self._collect_pending_approval_events()
+        if events:
+            logger.debug("[EvolutionRail] drained %d pending events", len(events))
+        return events
+
+    def _collect_pending_approval_events(self) -> list[OutputSchema]:
+        """Hook: return and clear subclass-specific event buffer.
+
+        Subclasses override to drain their own pending approval events.
+        Default returns empty list for direct EvolutionRail usage.
+        """
+        return []
+
+    async def cleanup_background_tasks(self) -> None:
+        """Cancel and clear all background tasks. Called by host on shutdown."""
+        for task in self._bg_tasks:
+            if not task.done():
+                await task.cancel(reason="evolution_rail_shutdown")
+        self._bg_tasks.clear()
 
 
 __all__ = ["EvolutionRail"]

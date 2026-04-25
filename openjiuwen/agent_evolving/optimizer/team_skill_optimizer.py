@@ -26,6 +26,9 @@ from openjiuwen.agent_evolving.trajectory import Trajectory
 
 logger = _logging.getLogger("jiuwenclaw.agentserver.team.team_skill_optimizer")
 
+
+
+
 _PROPOSE_PROMPT_CN = """\
 你是一个多角色协作 Skill 设计专家。根据 AgentTeam 的完整执行 trajectory，判断是否值得提炼一个可复用的 Team Skill。
 
@@ -283,11 +286,14 @@ class TeamSkillOptimizer:
         trajectory: Trajectory,
         existing_skills: List[str],
     ) -> Optional[PendingTeamSkillCreation]:
-        """Analyze trajectory and propose a new team skill if warranted."""
+        """Analyze trajectory and propose a new team skill if warranted.
+
+        Single LLM call using _PROPOSE_PROMPT to generate the full skill package.
+        """
         summary = self._build_trajectory_summary(trajectory)
         logger.info(
-            "[TeamSkillOptimizer] propose: trajectory_summary_len=%d, existing_skills=%s",
-            len(summary), existing_skills,
+            "[TeamSkillOptimizer] propose: summary_len=%d, model=%s",
+            len(summary), self._model,
         )
 
         prompt = _PROPOSE_PROMPT.get(self._language, _PROPOSE_PROMPT_EN).format(
@@ -296,8 +302,8 @@ class TeamSkillOptimizer:
         )
         approx_tokens = len(prompt) // 4
         logger.info(
-            "[TeamSkillOptimizer] propose: prompt_len=%d (~%d tokens), model=%s",
-            len(prompt), approx_tokens, self._model,
+            "[TeamSkillOptimizer] propose: prompt_len=%d (~%d tokens)",
+            len(prompt), approx_tokens,
         )
 
         t0 = time.time()
@@ -306,13 +312,9 @@ class TeamSkillOptimizer:
         logger.info("[TeamSkillOptimizer] propose: LLM responded in %.1fs, raw_len=%d", elapsed, len(raw))
 
         parsed = self._parse_json(raw)
-        if not parsed:
-            self._dump_raw("propose", raw)
-            logger.warning("[TeamSkillOptimizer] propose: failed to parse LLM response as JSON")
-            return None
-        if not parsed.get("should_create"):
-            reason = parsed.get("reason", "N/A")
-            logger.info("[TeamSkillOptimizer] propose: LLM decided not to create, reason: %s", reason)
+        if not parsed or not parsed.get("should_create"):
+            reason = parsed.get("reason", "N/A") if parsed else "JSON parse failed"
+            logger.info("[TeamSkillOptimizer] propose: no creation, reason: %s", reason)
             return None
 
         name = parsed.get("name", "")
@@ -320,22 +322,13 @@ class TeamSkillOptimizer:
             logger.warning("[TeamSkillOptimizer] propose: invalid name %r", name)
             return None
 
-        roles = parsed.get("roles", [])
-        extra_files = parsed.get("extra_files", {})
-        body = parsed.get("body", "")
-        frontmatter = self._build_frontmatter(name, parsed.get("description", ""), roles)
-
-        logger.info(
-            "[TeamSkillOptimizer] propose: will create '%s' with %d roles, %d extra files",
-            name, len(roles), len(extra_files),
-        )
         return PendingTeamSkillCreation(
             name=name,
             description=parsed.get("description", ""),
-            body=body,
+            body=parsed.get("body", ""),
             reason=parsed.get("reason", ""),
-            extra_files=extra_files,
-            frontmatter=frontmatter,
+            extra_files=parsed.get("extra_files", {}),
+            frontmatter=self._build_frontmatter(name, parsed.get("description", ""), parsed.get("roles", [])),
         )
 
     async def generate_patch(

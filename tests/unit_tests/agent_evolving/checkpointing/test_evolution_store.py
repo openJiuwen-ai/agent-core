@@ -301,6 +301,54 @@ class TestEvolutionStoreAppendScriptRecord:
         assert "Scripts" in skill_md
 
 
+class TestEvolutionStoreConcurrentSafety:
+    """Tests for skill-level semantic locks preventing Read-Modify-Write races."""
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_concurrent_append_record_no_data_loss(tmp_path: Path):
+        """Two coroutines appending to the same skill must not lose records."""
+        root = tmp_path / "skills"
+        prepare_skill(root, "skill-a")
+        store = EvolutionStore(str(root))
+
+        # Create 10 records to append concurrently
+        records = [make_record(f"ev_{i}", content=f"record {i}") for i in range(10)]
+
+        # Run 10 concurrent appends
+        import asyncio
+        await asyncio.gather(*[store.append_record("skill-a", r) for r in records])
+
+        evo_log = await store.load_full_evolution_log("skill-a")
+        assert len(evo_log.entries) == 10, (
+            f"Expected 10 entries, got {len(evo_log.entries)} — data lost due to race condition"
+        )
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_skill_lock_isolation(tmp_path: Path):
+        """Writes to different skills should not block each other."""
+        root = tmp_path / "skills"
+        prepare_skill(root, "skill-a")
+        prepare_skill(root, "skill-b")
+        store = EvolutionStore(str(root))
+
+        rec_a = make_record("ev_a", content="record a")
+        rec_b = make_record("ev_b", content="record b")
+
+        # Both should complete without deadlock
+        import asyncio
+        await asyncio.gather(
+            store.append_record("skill-a", rec_a),
+            store.append_record("skill-b", rec_b),
+        )
+
+        log_a = await store.load_full_evolution_log("skill-a")
+        log_b = await store.load_full_evolution_log("skill-b")
+        assert len(log_a.entries) == 1
+        assert len(log_b.entries) == 1
+
+
 class TestEvolutionStoreRenderMarkdown:
     @staticmethod
     @pytest.mark.asyncio
