@@ -46,6 +46,14 @@ class ContextEngineConfig(BaseModel):
         transparently fetches the full content from storage, injecting it back
         into the active context. When disabled, hints remain as-is in the
         conversation, and offloaded content is never automatically restored.
+
+    enable_reload_prompt : bool, default True
+        Whether the context engine should inject the built-in reloader system
+        prompt (which tells the model how to interpret OFFLOAD markers and call
+        the reload tool) when ``enable_reload`` is True. Set to False if the
+        downstream agent injects its own equivalent guidance (e.g., a
+        localized version via a rail) and wants to avoid duplicate prompts.
+        No effect when ``enable_reload`` is False.
     """
 
     max_context_message_num: Optional[int] = Field(default=None, gt=0)
@@ -53,5 +61,6 @@ class ContextEngineConfig(BaseModel):
     default_window_round_num: Optional[int] = Field(default=None, gt=0)
     enable_kv_cache_release: bool = Field(default=False)
     enable_reload: bool = Field(default=False)
+    enable_reload_prompt: bool = Field(default=True)
     max_active_skill_bodies: int = Field(default=1, ge=0)
     active_skill_pin_target: str = Field(default="system")

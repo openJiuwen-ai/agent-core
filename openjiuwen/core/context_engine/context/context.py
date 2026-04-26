@@ -59,6 +59,7 @@ class SessionModelContext(ModelContext):
         self._message_buffer = ContextMessageBuffer(history_messages or [], config.max_context_message_num)
         self._default_window_size = config.default_window_message_num
         self._enable_reload = config.enable_reload
+        self._enable_reload_prompt = config.enable_reload_prompt
         self._workspace = workspace
         self._sys_operation = sys_operation
         self._default_dialogue_round = config.default_window_round_num
@@ -265,7 +266,7 @@ class SessionModelContext(ModelContext):
             )
 
         system_messages = (system_messages or [])[:]
-        if self._enable_reload:
+        if self._enable_reload and self._enable_reload_prompt:
             system_messages.append(SystemMessage(content=_RELOADER_SYSTEM_PROMPT))
 
         # with specific context size
