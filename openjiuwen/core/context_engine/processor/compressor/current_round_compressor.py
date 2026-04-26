@@ -700,6 +700,11 @@ class CurrentRoundCompressor(ContextProcessor):
         the returned message list is empty because the new block has already been
         written back to `context`.
         """
+        from openjiuwen.core.context_engine.processor._protected import (
+            is_protected,
+            msg_in_window,
+            resolve_active_window_message_ids,
+        )
         context_messages = context.get_messages() + messages_to_add
         last_user_idx = await self.get_compress_idx(context_messages)
         if last_user_idx == -1:
@@ -709,6 +714,12 @@ class CurrentRoundCompressor(ContextProcessor):
         else:
             messages = context_messages
         end_idx = len(messages) - 1
+
+        # Skip compression when the selected span contains protected (active) skill body.
+        in_window_ids = resolve_active_window_message_ids(context, context_messages)
+        span = context_messages[last_user_idx + 1:end_idx + 1]
+        if any(is_protected(m, in_active_window=msg_in_window(m, in_window_ids)) for m in span):
+            return None, messages_to_add
 
         event = ContextEvent(event_type=self.processor_type())
         try:

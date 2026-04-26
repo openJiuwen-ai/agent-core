@@ -381,7 +381,7 @@ class FullCompactProcessor(ContextProcessor):
             logger.warning("[FullCompact] full_compact summary generation returned empty content")
             return None
 
-        messages_to_keep = self._select_messages_to_keep(active_messages)
+        messages_to_keep = self._select_messages_to_keep(active_messages, context)
         summary_message = UserMessage(content=self._build_summary_message(summary, bool(messages_to_keep)))
         boundary = SystemMessage(content=f"{self._marker}\nConversation compacted")
 
@@ -539,15 +539,27 @@ class FullCompactProcessor(ContextProcessor):
             return [UserMessage(content=self._synthetic_user_marker), tail[0]]
         return tail
 
-    def _select_messages_to_keep(self, messages: List[BaseMessage]) -> List[BaseMessage]:
+    def _select_messages_to_keep(self, messages: List[BaseMessage], context=None) -> List[BaseMessage]:
+        from openjiuwen.core.context_engine.processor._protected import (
+            is_protected,
+            msg_in_window,
+            resolve_active_window_message_ids,
+        )
+        in_window_ids = resolve_active_window_message_ids(context, messages) if context else set()
         keep_recent = self._messages_to_keep
         if keep_recent <= 0 or not messages:
-            return []
+            return [m for m in messages if is_protected(m, in_active_window=msg_in_window(m, in_window_ids))]
 
         start_index = max(len(messages) - keep_recent, 0)
         if self._keep_tool_message_pairs:
             start_index = self._adjust_start_index_for_tool_pairs(messages, start_index)
-        return list(messages[start_index:])
+        kept = list(messages[start_index:])
+        # Pull in any protected (active skill) messages that fall before start_index.
+        kept_ids = {id(m) for m in kept}
+        for m in messages[:start_index]:
+            if is_protected(m, in_active_window=msg_in_window(m, in_window_ids)) and id(m) not in kept_ids:
+                kept.append(m)
+        return kept
 
     def _adjust_start_index_for_tool_pairs(
         self,

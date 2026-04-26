@@ -16,6 +16,11 @@ from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
+from openjiuwen.core.context_engine.processor._protected import (
+    is_protected,
+    msg_in_window,
+    resolve_active_window_message_ids,
+)
 from openjiuwen.core.context_engine.processor.offloader.message_summary_offloader import TRUNCATED_MARKER
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
@@ -318,7 +323,8 @@ class RoundLevelCompressor(ContextProcessor):
 
         compress_end = len(working) - keep_recent - 1
         if compress_end >= 0:
-            raw_targets = self._build_raw_targets(working, compress_end)
+            in_window_ids = resolve_active_window_message_ids(context, working)
+            raw_targets = self._build_raw_targets(working, compress_end, in_window_ids)
             if raw_targets:
                 updated = await self._apply_llm_phase(
                     messages=working,
@@ -375,7 +381,8 @@ class RoundLevelCompressor(ContextProcessor):
         if compress_end < 0:
             return None
 
-        targets = self._build_aggressive_targets(messages, compress_end)
+        in_window_ids = resolve_active_window_message_ids(context, messages)
+        targets = self._build_aggressive_targets(messages, compress_end, in_window_ids)
         if not targets:
             return None
         return await self._apply_llm_phase(
@@ -390,7 +397,7 @@ class RoundLevelCompressor(ContextProcessor):
             keep_recent_messages=keep_recent,
         )
 
-    def _build_raw_targets(self, messages: List[BaseMessage], compress_end: int) -> List[_CompressTarget]:
+    def _build_raw_targets(self, messages: List[BaseMessage], compress_end: int, in_window_ids=None) -> List[_CompressTarget]:
         targets: List[_CompressTarget] = []
         block_no = 1
         cursor = 0
@@ -403,6 +410,11 @@ class RoundLevelCompressor(ContextProcessor):
             end_idx, scope = self._find_l0_block_end(messages, start_idx, compress_end)
             if end_idx < start_idx:
                 cursor += 1
+                continue
+
+            ids = in_window_ids or set()
+            if any(is_protected(m, in_active_window=msg_in_window(m, ids)) for m in messages[start_idx:end_idx + 1]):
+                cursor = end_idx + 1
                 continue
 
             targets.append(
@@ -435,8 +447,8 @@ class RoundLevelCompressor(ContextProcessor):
                 return idx, "completed_react"
         return last_non_round_level_idx, "ongoing_react"
 
-    def _build_aggressive_targets(self, messages: List[BaseMessage], compress_end: int) -> List[_CompressTarget]:
-        raw_targets = self._build_raw_targets(messages, compress_end)
+    def _build_aggressive_targets(self, messages: List[BaseMessage], compress_end: int, in_window_ids=None) -> List[_CompressTarget]:
+        raw_targets = self._build_raw_targets(messages, compress_end, in_window_ids)
         if raw_targets:
             return raw_targets
         return self._collect_round_level_memory_targets(messages, compress_end)

@@ -30,6 +30,11 @@ from openjiuwen.core.context_engine import (
     ContextEngineConfig,
     ModelContext
 )
+from openjiuwen.core.context_engine.observability import (
+    resolve_context_trace_ids,
+    snapshot_messages,
+    write_context_trace,
+)
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     Model,
@@ -711,6 +716,43 @@ class ReActAgent(BaseAgent):
         # equally pass context_window.get_*() directly.)
         ctx.inputs.messages = context_window.get_messages()
         ctx.inputs.tools = context_window.get_tools()
+
+        try:
+            trace_ids = resolve_context_trace_ids(ctx.session, ctx.context)
+            msgs_for_log = ctx.inputs.messages or []
+            total_chars = 0
+            active_skill_pin_count = 0
+            for _m in msgs_for_log:
+                if isinstance(_m, dict):
+                    _c = _m.get("content", "")
+                    _meta = _m.get("metadata")
+                else:
+                    _c = getattr(_m, "content", "") or ""
+                    _meta = getattr(_m, "metadata", None)
+                total_chars += len(_c) if isinstance(_c, str) else len(str(_c))
+                if isinstance(_meta, dict) and _meta.get("active_skill_pin"):
+                    active_skill_pin_count += 1
+            write_context_trace(
+                "llm.context.messages_for_model",
+                {
+                    **trace_ids,
+                    "message_count": len(msgs_for_log),
+                    "messages": snapshot_messages(ctx.inputs.messages),
+                    "tool_count": len(ctx.inputs.tools or []),
+                },
+            )
+            logger.info(
+                "[LLM] context_for_model session_id=%s context_id=%s message_count=%s "
+                "tool_count=%s total_content_chars=%s active_skill_pin_messages=%s",
+                trace_ids.get("session_id"),
+                trace_ids.get("context_id"),
+                len(msgs_for_log),
+                len(ctx.inputs.tools or []),
+                total_chars,
+                active_skill_pin_count,
+            )
+        except Exception as exc:
+            logger.warning("[ContextTrace] llm.context.messages_for_model failed: %s", exc)
 
         log_llm_request(logger, ctx.inputs.messages, ctx.inputs.tools)
         # --- End context window finalization ---

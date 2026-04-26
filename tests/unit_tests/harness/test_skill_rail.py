@@ -257,6 +257,37 @@ async def test_skill_rail_register_rail_auto_list_registers_list_skill_tool(tmp_
 
 
 @pytest.mark.asyncio
+async def test_skill_rail_include_tools_false_still_registers_skill_body_tools(tmp_path: Path):
+    """When include_tools is False but include_skill_body_tools is True, register skill_tool pair."""
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
+
+    sys_operation = _make_sys_operation(tmp_path)
+    agent = _make_agent(sys_operation, skills_root)
+
+    skill_rail = SkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+        include_skill_body_tools=True,
+    )
+
+    await agent.register_rail(skill_rail)
+
+    ability_names = {
+        getattr(item, "name", None)
+        for item in agent.ability_manager.list()
+        if getattr(item, "name", None)
+    }
+
+    assert "skill_tool" in ability_names
+    assert "skill_complete" in ability_names
+    assert "read_file" not in ability_names
+    assert "bash" not in ability_names
+
+
+@pytest.mark.asyncio
 async def test_auto_list_prompt_is_injected_without_preselecting_skills(tmp_path: Path):
     """auto_list mode should add guide prompt to builder without pre-expanding skills."""
     skills_root = tmp_path / "skills"
@@ -293,7 +324,7 @@ async def test_auto_list_prompt_is_injected_without_preselecting_skills(tmp_path
     assert "Base system prompt." in content
     assert "list_skill" in content
     assert "invoice-parser" not in content
-    assert "read_file" in content
+    assert "skill_tool" in content
     assert "code" in content
     assert "bash" in content
 

@@ -16,6 +16,11 @@ from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
+from openjiuwen.core.context_engine.processor._protected import (
+    is_protected,
+    msg_in_window,
+    resolve_active_window_message_ids,
+)
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     BaseMessage,
@@ -152,7 +157,8 @@ class DialogueCompressor(ContextProcessor):
         if compress_until_idx == -1:
             return None, messages_to_add
 
-        targets = self._build_compress_targets(context_messages[:compress_until_idx])
+        in_window_ids = resolve_active_window_message_ids(context, context_messages)
+        targets = self._build_compress_targets(context_messages[:compress_until_idx], in_window_ids)
         if not targets:
             return None, messages_to_add
 
@@ -232,8 +238,8 @@ class DialogueCompressor(ContextProcessor):
                 return idx
         return None
 
-    def _build_compress_targets(self, messages: List[BaseMessage]) -> List[_CompressTarget]:
-        rounds = self._collect_complete_rounds(messages)
+    def _build_compress_targets(self, messages: List[BaseMessage], in_window_ids=None) -> List[_CompressTarget]:
+        rounds = self._collect_complete_rounds(messages, in_window_ids or set())
         if not rounds:
             return []
 
@@ -274,12 +280,15 @@ class DialogueCompressor(ContextProcessor):
                 continue
         return result
 
-    def _collect_complete_rounds(self, messages: List[BaseMessage]) -> List[_DialogueRound]:
+    def _collect_complete_rounds(self, messages: List[BaseMessage], in_window_ids=None) -> List[_DialogueRound]:
         rounds: List[_DialogueRound] = []
+        ids = in_window_ids or set()
         for user_idx, assistant_idx in self.get_compress_pairs(messages):
             if user_idx < 0 or assistant_idx <= user_idx:
                 continue
             round_messages = messages[user_idx + 1:assistant_idx + 1]
+            if any(is_protected(m, in_active_window=msg_in_window(m, ids)) for m in round_messages):
+                continue
             rounds.append(
                 _DialogueRound(
                     user_idx=user_idx,

@@ -18,6 +18,10 @@ from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
 from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.prompts.sections.tools import build_tool_card
+from openjiuwen.core.context_engine.active_skill_bodies import (
+    derive_hints_from_session,
+    stage_active_skill_hints_for_session,
+)
 
 
 class TaskTool(Tool):
@@ -106,6 +110,15 @@ class TaskTool(Tool):
             ) from exc
 
         logger.info(f"[TaskTool] Invoking subagent with isolated session: {sub_session_id}, query: {task_description}")
+
+        # Stage parent's active-skill name+path hints for child session pickup.
+        # Body is not propagated; hint just nudges child agent to (re)load via skill_tool.
+        try:
+            hints = derive_hints_from_session(parent_session)
+            if hints:
+                stage_active_skill_hints_for_session(sub_session_id, hints)
+        except Exception as exc:
+            logger.debug(f"[TaskTool] failed to stage active skill hints: {exc}")
 
         try:
             # Invoke subagent with isolated session_id

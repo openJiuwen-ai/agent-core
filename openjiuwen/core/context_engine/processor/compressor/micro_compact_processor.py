@@ -40,7 +40,7 @@ class MicroCompactProcessor(ContextProcessor):
         all_messages = context.get_messages() + messages_to_add
         if not self._api_round(all_messages):
             return False
-        return self._has_any_tool_exceed_threshold(all_messages)
+        return self._has_any_tool_exceed_threshold(all_messages, context)
 
     async def on_add_messages(
         self,
@@ -60,7 +60,7 @@ class MicroCompactProcessor(ContextProcessor):
                 "keep_recent_per_tool": self.config.keep_recent_per_tool,
             },
         )
-        indices_to_clear = self._collect_flat_indices_for_compact(all_messages)
+        indices_to_clear = self._collect_flat_indices_for_compact(all_messages, context)
 
         if not indices_to_clear:
             return None, messages_to_add
@@ -91,7 +91,14 @@ class MicroCompactProcessor(ContextProcessor):
     def _collect_compactable_indices_by_tool(
         self,
         messages: List[BaseMessage],
+        context=None,
     ) -> dict[str, List[int]]:
+        from openjiuwen.core.context_engine.processor._protected import (
+            is_protected,
+            msg_in_window,
+            resolve_active_window_message_ids,
+        )
+        in_window_ids = resolve_active_window_message_ids(context, messages) if context else set()
         allowed_names = set(self.config.compactable_tool_names)
         result: dict[str, List[int]] = defaultdict(list)
 
@@ -99,6 +106,8 @@ class MicroCompactProcessor(ContextProcessor):
             if not isinstance(message, ToolMessage):
                 continue
             if message.content == self.config.cleared_marker:
+                continue
+            if is_protected(message, in_active_window=msg_in_window(message, in_window_ids)):
                 continue
             tool_name = ContextUtils.resolve_tool_name_from_message(message, messages)
             if tool_name in allowed_names:
@@ -109,8 +118,9 @@ class MicroCompactProcessor(ContextProcessor):
     def _has_any_tool_exceed_threshold(
         self,
         messages: List[BaseMessage],
+        context=None,
     ) -> bool:
-        grouped_indices = self._collect_compactable_indices_by_tool(messages)
+        grouped_indices = self._collect_compactable_indices_by_tool(messages, context)
         return any(
             len(indices) > self._config.trigger_threshold + self._config.keep_recent_per_tool
             for indices in grouped_indices.values()
@@ -119,8 +129,9 @@ class MicroCompactProcessor(ContextProcessor):
     def _collect_flat_indices_for_compact(
         self,
         messages: List[BaseMessage],
+        context=None,
     ) -> List[int]:
-        grouped = self._collect_compactable_indices_by_tool(messages)
+        grouped = self._collect_compactable_indices_by_tool(messages, context)
         result = []
         for indices in grouped.values():
             if len(indices) > self._config.trigger_threshold + self._config.keep_recent_per_tool:

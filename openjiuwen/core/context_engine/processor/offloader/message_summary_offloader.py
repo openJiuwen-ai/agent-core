@@ -17,6 +17,11 @@ from openjiuwen.core.foundation.llm import (
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.processor.offloader.message_offloader import MessageOffloader
 from openjiuwen.core.context_engine.processor.base import ContextEvent
+from openjiuwen.core.context_engine.processor._protected import (
+    is_protected,
+    msg_in_window,
+    resolve_active_window_message_ids,
+)
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 
 # Keywords used to detect "context overflow" errors from LLM responses
@@ -481,6 +486,9 @@ class MessageSummaryOffloader(MessageOffloader):
             return False
         if context_messages is None:
             context_messages = context.get_messages()
+        in_window_ids = resolve_active_window_message_ids(context, context_messages)
+        if is_protected(message, in_active_window=msg_in_window(message, in_window_ids)):
+            return False
         if self._is_protected_tool_message(message, context_messages):
             return False
         length = self._message_size(message, context)

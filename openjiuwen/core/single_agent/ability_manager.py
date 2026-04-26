@@ -34,6 +34,22 @@ from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_
 Ability = Union[ToolCard, WorkflowCard, AgentCard, McpServerConfig]
 
 
+def _extract_tool_metadata(result: Any) -> Dict[str, Any]:
+    """Extract ToolMessage metadata only from genuine ToolOutput instances.
+
+    sub-agent results, WorkflowOutput, dicts with extra_metadata key, etc.
+    are explicitly rejected to avoid accidentally forging skill_body markers.
+    """
+    from openjiuwen.harness.tools import ToolOutput
+
+    if not isinstance(result, ToolOutput):
+        return {}
+    extra = getattr(result, "extra_metadata", None)
+    if not isinstance(extra, dict):
+        return {}
+    return dict(extra)
+
+
 @dataclass
 class AddAbilityResult:
     """Ability add result."""
@@ -544,7 +560,8 @@ class AbilityManager:
                 if tool_message is None:
                     tool_message = ToolMessage(
                         content=error_msg,
-                        tool_call_id=tool_calls[i].id
+                        tool_call_id=tool_calls[i].id,
+                        metadata={},
                     )
 
                 final_results.append((tool_result, tool_message))
@@ -651,7 +668,11 @@ class AbilityManager:
             return workflow_output, None
 
         result = workflow_output.result if isinstance(workflow_output, WorkflowOutput) else workflow_output
-        return result, ToolMessage(content=str(result), tool_call_id=tool_call.id)
+        return result, ToolMessage(
+            content=str(result),
+            tool_call_id=tool_call.id,
+            metadata=_extract_tool_metadata(result),
+        )
 
     async def _execute_single_tool_call(self, tool_call: ToolCall, session: Session,
                                         tag=None) -> Tuple[Any, ToolMessage]:
@@ -758,7 +779,8 @@ class AbilityManager:
         content = str(result)
         tool_message = ToolMessage(
             content=content,
-            tool_call_id=tool_call.id
+            tool_call_id=tool_call.id,
+            metadata=_extract_tool_metadata(result),
         )
 
         return result, tool_message

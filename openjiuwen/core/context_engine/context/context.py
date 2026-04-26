@@ -18,6 +18,10 @@ from openjiuwen.core.context_engine.context.kv_cache_manager import KVCacheManag
 from openjiuwen.core.context_engine.observability import write_context_trace, snapshot_messages
 from openjiuwen.core.runner.callback import lazy_callback_framework as _fw
 from openjiuwen.core.runner.callback.events import ContextEvents
+from openjiuwen.core.context_engine.active_skill_bodies import (
+    DEFAULT_MAX_ACTIVE_SKILL_BODIES,
+    append_active_skill_pins_to_window,
+)
 
 
 _RELOADER_SYSTEM_PROMPT = """
@@ -49,6 +53,7 @@ class SessionModelContext(ModelContext):
         self._message_id = 0
         self._validate_and_init_messages(history_messages)
         history_messages = self._ensure_context_message_ids(history_messages or [])
+        self._config = config
         self._context_id = context_id
         self._session_id = session_id
         self._message_buffer = ContextMessageBuffer(history_messages or [], config.max_context_message_num)
@@ -312,6 +317,22 @@ class SessionModelContext(ModelContext):
                     f"Failed to process GET messages by using processor {processor.processor_type()},"
                     f"reason: {str(e)}"
                 )
+
+        try:
+            cfg_max = getattr(self._config, "max_active_skill_bodies", DEFAULT_MAX_ACTIVE_SKILL_BODIES) \
+                if hasattr(self, "_config") else DEFAULT_MAX_ACTIVE_SKILL_BODIES
+            cfg_target = getattr(self._config, "active_skill_pin_target", "system") \
+                if hasattr(self, "_config") else "system"
+            new_pins = append_active_skill_pins_to_window(
+                self,
+                window,
+                max_active_skill_bodies=cfg_max,
+                pin_target=cfg_target,
+            )
+            if new_pins:
+                self._ensure_context_message_ids(new_pins)
+        except Exception as exc:
+            logger.warning(f"Failed to append active skill pins: {exc}")
 
         self._validate_and_fix_context_window(window)
         if self._kv_cache_manager:

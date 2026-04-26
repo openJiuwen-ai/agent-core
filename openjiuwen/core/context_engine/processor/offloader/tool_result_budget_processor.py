@@ -15,6 +15,11 @@ from openjiuwen.core.context_engine.processor.base import ContextEvent
 from openjiuwen.core.context_engine.processor.offloader.message_offloader import (
     MessageOffloader,
 )
+from openjiuwen.core.context_engine.processor._protected import (
+    is_protected,
+    msg_in_window,
+    resolve_active_window_message_ids,
+)
 from openjiuwen.core.context_engine.observability import write_context_trace
 from openjiuwen.core.context_engine.schema.messages import OffloadToolMessage
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage
@@ -212,6 +217,9 @@ class ToolResultBudgetProcessor(MessageOffloader):
             return False
         if not isinstance(getattr(message, "content", None), str):
             return False
+        in_window_ids = resolve_active_window_message_ids(context, context_messages)
+        if is_protected(message, in_active_window=msg_in_window(message, in_window_ids)):
+            return False
         if self._is_allowlisted_tool_message(message, context_messages):
             return False
         return self._message_size(message, context) > self.config.large_message_threshold
@@ -245,6 +253,10 @@ class ToolResultBudgetProcessor(MessageOffloader):
             has_more=has_more,
         )
 
+        meta = dict(getattr(message, "metadata", {}) or {})
+        if meta.get("is_skill_body"):
+            meta["is_skill_body"] = False
+            meta["skill_body_offloaded"] = True
         offload_message = await self.offload_messages(
             role="tool",
             content=persisted_content,
@@ -252,7 +264,7 @@ class ToolResultBudgetProcessor(MessageOffloader):
             context=context,
             tool_call_id=message.tool_call_id,
             name=message.name,
-            metadata=dict(getattr(message, "metadata", {}) or {}),
+            metadata=meta,
             sys_operation=self.sys_operation,
         )
         if offload_message is not None:

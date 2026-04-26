@@ -14,6 +14,11 @@ from openjiuwen.core.context_engine.processor.base import ContextProcessor, Cont
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
+from openjiuwen.core.context_engine.processor._protected import (
+    is_protected,
+    msg_in_window,
+    resolve_active_window_message_ids,
+)
 from openjiuwen.core.foundation.llm import BaseMessage, AssistantMessage, ToolMessage
 from openjiuwen.core.sys_operation import SysOperation
 
@@ -153,6 +158,14 @@ class MessageOffloader(ContextProcessor):
         extra_fields = message.model_dump()
         extra_fields.pop("role", None)
         extra_fields.pop("content", None)
+        # Strip skill-body markers on the placeholder so it isn't re-protected
+        # or mistakenly re-pinned by the active skill helper.
+        meta = extra_fields.get("metadata")
+        if isinstance(meta, dict) and meta.get("is_skill_body"):
+            meta = dict(meta)
+            meta["is_skill_body"] = False
+            meta["skill_body_offloaded"] = True
+            extra_fields["metadata"] = meta
         offload_message = await self.offload_messages(
             role=message.role,
             content=trimmed_content,
@@ -218,6 +231,9 @@ class MessageOffloader(ContextProcessor):
         if len(message.content) <= self.config.large_message_threshold:
             return False
         if isinstance(message, OffloadMixin):
+            return False
+        in_window_ids = resolve_active_window_message_ids(context, context_messages)
+        if is_protected(message, in_active_window=msg_in_window(message, in_window_ids)):
             return False
         if self._is_protected_tool_message(message, context_messages):
             return False

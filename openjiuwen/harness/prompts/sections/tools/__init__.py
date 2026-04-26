@@ -64,6 +64,9 @@ from openjiuwen.harness.prompts.sections.tools.session_tools import (
 from openjiuwen.harness.prompts.sections.tools.skill_tool import (
     SkillToolMetadataProvider,
 )
+from openjiuwen.harness.prompts.sections.tools.skill_complete import (
+    SkillCompleteMetadataProvider,
+)
 from openjiuwen.harness.prompts.sections.tools.todo import (
     TodoCreateMetadataProvider,
     TodoListMetadataProvider,
@@ -118,6 +121,7 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     SessionsSpawnMetadataProvider(),
     SessionsCancelMetadataProvider(),
     SkillToolMetadataProvider(),
+    SkillCompleteMetadataProvider(),
     TodoCreateMetadataProvider(),
     TodoListMetadataProvider(),
     TodoModifyMetadataProvider(),

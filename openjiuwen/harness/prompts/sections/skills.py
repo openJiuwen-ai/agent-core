@@ -40,13 +40,18 @@ SKILL_RAIL_LIST_SKILL_SYSTEM_PROMPT: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 SKILL_RAIL_ALL_MODE_HEADER_CN = (
     "# 技能\n\n"
-    "执行前先用 read_file 阅读相关 SKILL.md。\n\n"
+    "需要使用某个技能时，先调用 skill_tool(skill_name=..., relative_file_path=\"SKILL.md\") "
+    "加载正文并遵从其内容；完成该技能全部步骤、不再需要回看时，立即调用 "
+    "skill_complete(skill_name=...) 释放上下文；之后若再需要可重新调用 skill_tool 加载。\n\n"
     "可用技能：\n"
 )
 
 SKILL_RAIL_ALL_MODE_HEADER_EN = (
     "# Skills\n\n"
-    "Read the relevant SKILL.md using read_file before execution.\n\n"
+    "When you need a skill, first call skill_tool(skill_name=..., relative_file_path=\"SKILL.md\") "
+    "to load its body and follow it; after finishing all steps and no longer needing the body, "
+    "immediately call skill_complete(skill_name=...) to release context; "
+    "re-call skill_tool later if you need it again.\n\n"
     "Available skills:\n"
 )
 
@@ -56,11 +61,13 @@ SKILL_RAIL_ALL_MODE_HEADER: Dict[str, str] = {
 }
 
 SKILL_RAIL_ALL_MODE_INSTRUCTION_CN = (
-    "\n选择最相关的技能，先阅读其 SKILL.md 再执行。"
+    "\n选择最相关的技能：用 skill_tool 加载其 SKILL.md 后再执行；"
+    "完成后调用 skill_complete 释放上下文。"
 )
 
 SKILL_RAIL_ALL_MODE_INSTRUCTION_EN = (
-    "\nSelect the most relevant skill by reading its SKILL.md first."
+    "\nSelect the most relevant skill: load its SKILL.md via skill_tool before executing, "
+    "then call skill_complete to release context when finished."
 )
 
 SKILL_RAIL_ALL_MODE_INSTRUCTION: Dict[str, str] = {
@@ -73,13 +80,15 @@ SKILL_RAIL_ALL_MODE_INSTRUCTION: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 SKILL_RAIL_AUTO_LIST_MODE_PROMPT_CN = """# 技能
 
-需要时先调用 list_skill 查看可用技能，再用 read_file 读取相关 SKILL.md 后执行。
+需要时先调用 list_skill 查看可用技能，再调用 skill_tool(skill_name=..., relative_file_path="SKILL.md") 加载正文并遵从。
+完成该技能全部步骤、不再需要回看正文时，立即调用 skill_complete(skill_name=...) 释放上下文；之后若需要可重新 skill_tool 加载。
 需要时使用 code 执行 Python 或 JavaScript，使用 bash 执行 shell 命令。
 """
 
 SKILL_RAIL_AUTO_LIST_MODE_PROMPT_EN = """# Skills
 
-When needed, call list_skill first to see available skills, then read the relevant SKILL.md with read_file before execution.
+When needed, call list_skill first to see available skills, then call skill_tool(skill_name=..., relative_file_path="SKILL.md") to load the body and follow it.
+After finishing all steps and no longer needing the body, immediately call skill_complete(skill_name=...) to release context; re-call skill_tool if you need it again.
 Use code for Python or JavaScript snippets when needed, and use bash for shell commands.
 """
 
@@ -93,12 +102,12 @@ SKILL_RAIL_AUTO_LIST_MODE_PROMPT: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 SKILL_RAIL_NO_SKILL_PROMPT_CN = """# 技能
 
-当前任务没有选择任何技能。如有技能信息可用，请用 read_file 阅读相关 SKILL.md。
+当前任务没有选择任何技能。如有技能信息可用，请用 skill_tool(skill_name=..., relative_file_path="SKILL.md") 加载，使用完成后调用 skill_complete(skill_name=...) 释放上下文。
 """
 
 SKILL_RAIL_NO_SKILL_PROMPT_EN = """# Skills
 
-No skill was selected for this task. When skill information is available, read the relevant SKILL.md using read_file.
+No skill was selected for this task. When skill information is available, load it via skill_tool(skill_name=..., relative_file_path="SKILL.md") and call skill_complete(skill_name=...) to release context once done.
 """
 
 SKILL_RAIL_NO_SKILL_PROMPT: Dict[str, str] = {

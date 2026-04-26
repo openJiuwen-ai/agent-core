@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import yaml
 
@@ -16,8 +16,6 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.skills import (
-    build_all_mode_skill_prompt,
-    build_auto_list_mode_skill_prompt,
     build_skill_line,
     build_skill_lines,
     build_skills_section,
@@ -25,8 +23,23 @@ from openjiuwen.harness.prompts.sections.skills import (
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools import BashTool, CodeTool, ReadFileTool
 from openjiuwen.harness.tools.list_skill import ListSkillTool
-from openjiuwen.harness.tools import SkillTool
+from openjiuwen.harness.tools import SkillTool, SkillCompleteTool
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
+from openjiuwen.core.context_engine.active_skill_bodies import (
+    ACTIVE_SKILL_HINTS_STATE_KEY,
+    DEFAULT_MAX_ACTIVE_SKILL_BODIES,
+    normalize_skill_relative_file_path,
+    pop_active_skill_hints_for_session,
+    record_active_skill_body,
+    unregister_active_skill_body,
+)
+from openjiuwen.core.context_engine.observability import (
+    resolve_context_trace_ids,
+    skill_trace_metadata_subset,
+    write_context_trace,
+)
+from openjiuwen.core.foundation.llm import ToolMessage
+from openjiuwen.core.single_agent.rail.base import ToolCallInputs
 
 
 class SkillUseRail(DeepAgentRail):
@@ -46,9 +59,11 @@ class SkillUseRail(DeepAgentRail):
         list_skill_model: Optional[Model] = None,
         enable_cache: bool = True,
         include_tools: bool = True,
+        include_skill_body_tools: bool = True,
         enabled_skills: Optional[Union[str, List[str]]] = None,
         disabled_skills: Optional[Union[str, List[str]]] = None,
         evolution_store: Optional[EvolutionStore] = None,
+        max_active_skill_bodies: int = DEFAULT_MAX_ACTIVE_SKILL_BODIES,
     ):
         """Initialize SkillUseRail.
 
@@ -59,7 +74,12 @@ class SkillUseRail(DeepAgentRail):
                 - "auto_list": add list_skill tool and let model decide when to inspect skills
             list_skill_model: Optional model used by list_skill tool.
             enable_cache: Whether to cache loaded skills across invokes.
-            include_tools: Whether to register read_file / code / bash tools.
+            include_tools: Whether to register harness read_file / code / bash tools (and,
+                when True, skill_tool / skill_complete in the same bundle).
+            include_skill_body_tools: When ``include_tools`` is False, still register
+                ``skill_tool`` and ``skill_complete`` so the skills prompt matches the tool
+                list (e.g. workspace file tools come from FileSystemRail). Set False for
+                profiles that must not expose skill body tools (e.g. ACP).
             enabled_skills: Optional allow-list of skill names. Supports str or List[str].
             disabled_skills: Optional deny-list of skill names. Supports str or List[str].
             evolution_store: Optional EvolutionStore for progressive disclosure experience text.
@@ -77,9 +97,11 @@ class SkillUseRail(DeepAgentRail):
         self.list_skill_model = list_skill_model
         self.enable_cache = enable_cache
         self.include_tools = include_tools
+        self.include_skill_body_tools = include_skill_body_tools
         self.enabled_skills = self._normalize_name_set(enabled_skills)
         self.disabled_skills = self._normalize_name_set(disabled_skills)
         self.evolution_store: Optional[EvolutionStore] = evolution_store
+        self.max_active_skill_bodies = max_active_skill_bodies
 
         self.skills: List[Skill] = []
         self.system_prompt_builder = None
@@ -244,6 +266,14 @@ class SkillUseRail(DeepAgentRail):
                     CodeTool(self.sys_operation, language=lang, agent_id=agent_id),
                     BashTool(self.sys_operation, language=lang, agent_id=agent_id),
                     SkillTool(self.sys_operation, self.get_skills_meta, language=lang, agent_id=agent_id),
+                    SkillCompleteTool(language=lang, agent_id=agent_id),
+                ]
+            )
+        elif self.include_skill_body_tools:
+            tools.extend(
+                [
+                    SkillTool(self.sys_operation, self.get_skills_meta, language=lang, agent_id=agent_id),
+                    SkillCompleteTool(language=lang, agent_id=agent_id),
                 ]
             )
 
@@ -281,6 +311,16 @@ class SkillUseRail(DeepAgentRail):
                         f"to ability_manager: {exc}"
                     )
 
+        # Propagate active-skill-body cap to agent context engine config so
+        # the window-pin helper sees the same limit as record_active_skill_body.
+        ce_config = getattr(getattr(agent, "_config", None), "context_engine_config", None)
+        if ce_config is not None:
+            try:
+                if getattr(ce_config, "max_active_skill_bodies", None) != self.max_active_skill_bodies:
+                    ce_config.max_active_skill_bodies = self.max_active_skill_bodies
+            except Exception as exc:
+                logger.debug(f"[SkillUseRail] could not sync max_active_skill_bodies: {exc}")
+
     def uninit(self, agent):
         """Remove tool cards from agent ability manager."""
         if hasattr(agent, "ability_manager"):
@@ -298,9 +338,41 @@ class SkillUseRail(DeepAgentRail):
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Prepare skills before invoke."""
-        _ = ctx
         await self._prepare_skills()
         await self._fetch_evolution_texts()
+        self._consume_pending_active_skill_hints(ctx)
+
+    def _consume_pending_active_skill_hints(self, ctx: AgentCallbackContext) -> None:
+        """Pull staged hints from spawn paths into this session's state."""
+        session = getattr(ctx, "session", None)
+        if session is None:
+            return
+        try:
+            session_id = session.get_session_id()
+        except Exception:
+            return
+        hints = pop_active_skill_hints_for_session(session_id)
+        if not hints:
+            return
+        try:
+            existing = session.get_state(ACTIVE_SKILL_HINTS_STATE_KEY) or []
+        except Exception:
+            existing = []
+        if not isinstance(existing, list):
+            existing = []
+        # De-duplicate by (skill_name, relative_file_path).
+        seen = {(h.get("skill_name"), h.get("relative_file_path")) for h in existing}
+        merged = list(existing)
+        for h in hints:
+            key = (h.get("skill_name"), h.get("relative_file_path"))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(h)
+        try:
+            session.update_state({ACTIVE_SKILL_HINTS_STATE_KEY: merged})
+        except Exception as exc:
+            logger.debug(f"[SkillUseRail] failed to persist active skill hints: {exc}")
 
     async def _fetch_evolution_texts(self) -> None:
         """Fetch and cache evolution experience texts from EvolutionStore."""
@@ -328,6 +400,308 @@ class SkillUseRail(DeepAgentRail):
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         _ = ctx
 
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Track skill body load/unload lifecycle.
+
+        - skill_tool success: record body into session active state and replace
+          original ToolMessage with a short load stub (only when active state
+          write succeeded; otherwise keep full body intact).
+        - skill_complete: clear session active state and mark prior skill_tool
+          ToolMessage as unloaded.
+        """
+        inputs = getattr(ctx, "inputs", None)
+        if not isinstance(inputs, ToolCallInputs):
+            return
+
+        tool_name = (inputs.tool_name or "").strip()
+        session = ctx.session
+        if session is None and ctx.context is not None:
+            getter = getattr(ctx.context, "get_session_ref", None)
+            if callable(getter):
+                try:
+                    session = getter()
+                except Exception:
+                    session = None
+
+        trace_ids = resolve_context_trace_ids(session, ctx.context)
+
+        if tool_name == "skill_tool":
+            self._handle_skill_tool_loaded(inputs, session, trace_ids, ctx)
+            return
+
+        if tool_name == "skill_complete":
+            self._handle_skill_complete(inputs, session, ctx.context, trace_ids)
+            return
+
+    def _handle_skill_tool_loaded(
+        self,
+        inputs: ToolCallInputs,
+        session,
+        trace_ids: Dict[str, Any],
+        ctx: AgentCallbackContext,
+    ) -> None:
+        tool_msg = inputs.tool_msg
+        tool_result = inputs.tool_result
+        if not isinstance(tool_msg, ToolMessage):
+            return
+        meta = getattr(tool_msg, "metadata", None) or {}
+        if not meta.get("is_skill_body"):
+            return
+
+        skill_name = meta.get("skill_name") or ""
+        relative_file_path = normalize_skill_relative_file_path(
+            str(meta.get("relative_file_path") or "")
+        )
+
+        raw_content = getattr(tool_msg, "content", "") or ""
+        content_len_before = len(raw_content) if isinstance(raw_content, str) else len(str(raw_content))
+        meta_before = skill_trace_metadata_subset(meta)
+
+        recorded = record_active_skill_body(
+            session,
+            tool_msg,
+            tool_result,
+            max_active_skill_bodies=self.max_active_skill_bodies,
+        )
+        if not recorded:
+            write_context_trace(
+                "skill.lifecycle.skill_tool_loaded",
+                {
+                    **trace_ids,
+                    "skill_name": skill_name,
+                    "relative_file_path": relative_file_path,
+                    "recorded": False,
+                    "content_len_before": content_len_before,
+                    "metadata_before": meta_before,
+                },
+            )
+            logger.info(
+                "[SkillUseRail] skill_tool_loaded session_id=%s recorded=False skill=%s path=%s "
+                "content_len_before=%s metadata_keys=%s",
+                trace_ids.get("session_id"),
+                skill_name,
+                relative_file_path,
+                content_len_before,
+                sorted(meta_before.keys()),
+            )
+            return
+
+        # append_active_skill_pins_to_window reads only context.get_session_ref(). If
+        # ModelContext._session_ref is unset while active state was written to
+        # ctx.session, the next get_context_window would not inject the pin. Align
+        # the ref to the same Session used for record_active_skill_body.
+        if session is not None and ctx is not None:
+            _ctx_model = getattr(ctx, "context", None)
+            # [PIN_DIAG] writer-rail: log alignment attempt + before/after ids (via trace)
+            _before_ref = getattr(_ctx_model, "_session_ref", None) if _ctx_model is not None else None
+            _align_err: Optional[str] = None
+            if _ctx_model is not None:
+                try:
+                    setattr(_ctx_model, "_session_ref", session)
+                except Exception as _exc:
+                    _align_err = repr(_exc)
+            _after_ref = getattr(_ctx_model, "_session_ref", None) if _ctx_model is not None else None
+            write_context_trace(
+                "pin_diag.rail.align",
+                {
+                    **trace_ids,
+                    "ctx_id": id(ctx),
+                    "ctx_context_id": id(_ctx_model) if _ctx_model is not None else None,
+                    "session_obj_id": id(session),
+                    "before_ref_id": id(_before_ref) if _before_ref is not None else None,
+                    "after_ref_id": id(_after_ref) if _after_ref is not None else None,
+                    "aligned": (_after_ref is session),
+                    "error": _align_err,
+                },
+            )
+
+        # Replace original ToolMessage content with short load stub.
+        # Models often try workspace file tools after seeing only a short ack; spell out
+        # that the full body is reinjected as [ACTIVE SKILL BODY] on later turns.
+        tool_msg.content = (
+            f"[SKILL LOADED] {skill_name} / {relative_file_path}\n"
+            f"完整正文已由系统保留，并在后续发给模型的上下文中以 [ACTIVE SKILL BODY] 块注入；"
+            f"请直接依据该块执行，不要按磁盘路径再次打开本技能的 SKILL.md。"
+            f"仅在需要强制刷新全文时再调用 skill_tool。\n"
+            f"The full SKILL body is kept and reinjected as an [ACTIVE SKILL BODY] block in later "
+            f"context—follow that block for workflow; do not open this skill's SKILL.md by path again. "
+            f"Call skill_tool again only to reload."
+        )
+        new_meta = dict(meta)
+        new_meta.update({
+            "is_skill_body": False,
+            "skill_body_stub": True,
+            "skill_body_active": True,
+            "original_is_skill_body": True,
+            "skill_name": skill_name,
+            "relative_file_path": relative_file_path,
+            "source_tool_call_id": getattr(tool_msg, "tool_call_id", None),
+        })
+        tool_msg.metadata = new_meta
+        meta_after = skill_trace_metadata_subset(tool_msg.metadata)
+        write_context_trace(
+            "skill.lifecycle.skill_tool_loaded",
+            {
+                **trace_ids,
+                "skill_name": skill_name,
+                "relative_file_path": relative_file_path,
+                "recorded": True,
+                "content_len_before": content_len_before,
+                "content_len_after_stub": len(tool_msg.content or ""),
+                "metadata_before": meta_before,
+                "metadata_after": meta_after,
+            },
+        )
+        logger.info(
+            "[SkillUseRail] skill_tool_loaded session_id=%s recorded=True skill=%s path=%s "
+            "content_len_before=%s content_len_after_stub=%s metadata_after_keys=%s",
+            trace_ids.get("session_id"),
+            skill_name,
+            relative_file_path,
+            content_len_before,
+            len(tool_msg.content or ""),
+            sorted(meta_after.keys()),
+        )
+
+    def _handle_skill_complete(
+        self,
+        inputs: ToolCallInputs,
+        session,
+        context,
+        trace_ids: Dict[str, Any],
+    ) -> None:
+        tool_result = inputs.tool_result
+        skill_name = ""
+        extra = getattr(tool_result, "extra_metadata", None) if tool_result is not None else None
+        if isinstance(extra, dict):
+            skill_name = (extra.get("unload_skill_name") or "").strip()
+        if not skill_name:
+            args = inputs.tool_args
+            if isinstance(args, dict):
+                skill_name = str(args.get("skill_name", "") or "").strip()
+        if not skill_name:
+            return
+
+        removed = unregister_active_skill_body(session, skill_name)
+
+        if context is None:
+            write_context_trace(
+                "skill.lifecycle.skill_complete",
+                {
+                    **trace_ids,
+                    "skill_name": skill_name,
+                    "unregister_removed": removed,
+                    "set_messages_called": False,
+                    "tool_messages_touched": 0,
+                    "buffer_changed": False,
+                    "set_messages_error": None,
+                    "note": "no_context",
+                },
+            )
+            logger.info(
+                "[SkillUseRail] skill_complete session_id=%s skill=%s unregister_removed=%s "
+                "set_messages_called=False note=no_context",
+                trace_ids.get("session_id"),
+                skill_name,
+                removed,
+            )
+            return
+        try:
+            buffered = list(context.get_messages() or [])
+        except Exception as exc:
+            write_context_trace(
+                "skill.lifecycle.skill_complete",
+                {
+                    **trace_ids,
+                    "skill_name": skill_name,
+                    "unregister_removed": removed,
+                    "set_messages_called": False,
+                    "tool_messages_touched": 0,
+                    "buffer_changed": False,
+                    "set_messages_error": str(exc),
+                    "note": "get_messages_failed",
+                },
+            )
+            logger.warning(
+                "[SkillUseRail] skill_complete session_id=%s skill=%s get_messages_failed: %s",
+                trace_ids.get("session_id"),
+                skill_name,
+                exc,
+            )
+            return
+
+        changed = False
+        tool_messages_touched = 0
+        unload_stub = (
+            f"[SKILL UNLOADED] Body of skill '{skill_name}' was released to save context. "
+            f"Re-call skill_tool if you need it again."
+        )
+        for msg in buffered:
+            if not isinstance(msg, ToolMessage):
+                continue
+            meta = getattr(msg, "metadata", None) or {}
+            if meta.get("skill_name") != skill_name:
+                continue
+            if meta.get("skill_unloaded"):
+                continue
+            # Skip the skill_complete tool's own ToolMessage.
+            if "unload_skill_name" in meta:
+                continue
+            if meta.get("skill_body_offloaded"):
+                new_meta = dict(meta)
+                new_meta["skill_unloaded"] = True
+                msg.metadata = new_meta
+                changed = True
+                tool_messages_touched += 1
+                continue
+            if meta.get("is_skill_body"):
+                # Degraded path: full body still in buffer; replace with unload stub.
+                msg.content = unload_stub
+            new_meta = dict(meta)
+            new_meta.update({
+                "is_skill_body": False,
+                "skill_body_active": False,
+                "skill_unloaded": True,
+            })
+            msg.metadata = new_meta
+            changed = True
+            tool_messages_touched += 1
+
+        set_messages_called = False
+        set_messages_error: Optional[str] = None
+        if changed:
+            try:
+                context.set_messages(buffered)
+                set_messages_called = True
+            except Exception as exc:
+                set_messages_error = str(exc)
+                logger.warning(f"[SkillUseRail] failed to set_messages on unload: {exc}")
+
+        write_context_trace(
+            "skill.lifecycle.skill_complete",
+            {
+                **trace_ids,
+                "skill_name": skill_name,
+                "unregister_removed": removed,
+                "set_messages_called": set_messages_called,
+                "tool_messages_touched": tool_messages_touched,
+                "buffer_changed": changed,
+                "set_messages_error": set_messages_error,
+            },
+        )
+        log_fn = logger.warning if set_messages_error else logger.info
+        log_fn(
+            "[SkillUseRail] skill_complete session_id=%s skill=%s unregister_removed=%s "
+            "set_messages_called=%s tool_messages_touched=%s buffer_changed=%s err=%s",
+            trace_ids.get("session_id"),
+            skill_name,
+            removed,
+            set_messages_called,
+            tool_messages_touched,
+            changed,
+            set_messages_error,
+        )
+
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Update system_prompt_builder with current skills before model call.
 
@@ -337,14 +711,28 @@ class SkillUseRail(DeepAgentRail):
         if self.system_prompt_builder is None:
             return
 
-        skills_section = self._build_skills_section()
+        hints = self._read_active_skill_hints(ctx)
+        skills_section = self._build_skills_section(hints=hints)
         if skills_section is not None:
             self.system_prompt_builder.add_section(skills_section)
         else:
             self.system_prompt_builder.remove_section(SectionName.SKILLS)
 
-    def _build_skills_section(self):
+    def _read_active_skill_hints(self, ctx: AgentCallbackContext) -> List[Dict[str, Any]]:
+        session = getattr(ctx, "session", None)
+        if session is None:
+            return []
+        try:
+            raw = session.get_state(ACTIVE_SKILL_HINTS_STATE_KEY) or []
+        except Exception:
+            return []
+        if not isinstance(raw, list):
+            return []
+        return [h for h in raw if isinstance(h, dict) and h.get("skill_name")]
+
+    def _build_skills_section(self, hints: Optional[List[Dict[str, Any]]] = None):
         """Build PromptSection from current skills."""
+        language = self.system_prompt_builder.language
         if self.skill_mode == self.SKILL_MODE_ALL:
             body_lines: List[str] = []
             for idx, skill in enumerate(self.skills):
@@ -353,36 +741,48 @@ class SkillUseRail(DeepAgentRail):
                         index=idx,
                         skill_name=skill.name,
                         description=self._get_skill_description(skill),
-                        # skill_md_path=str(self._skill_md_path(skill)), # No longer needed with SkillTool
                     )
                 )
-            return build_skills_section(
+            section = build_skills_section(
                 skill_lines=build_skill_lines(body_lines),
-                language=self.system_prompt_builder.language,
+                language=language,
                 mode="all",
             )
         else:
-            return build_skills_section(
+            section = build_skills_section(
                 skill_lines="",
-                language=self.system_prompt_builder.language,
+                language=language,
                 mode="auto_list",
             )
 
-    def _build_all_mode_prompt(self) -> str:
-        """Build skill prompt for all mode."""
-        body_lines: List[str] = []
+        # Append parent-derived active skill hints, if any.
+        if section is not None and hints:
+            hint_text = self._render_active_skill_hint_block(hints, language)
+            if hint_text:
+                base = section.content.get(language, "")
+                section.content[language] = (base + "\n\n" + hint_text) if base else hint_text
+        return section
 
-        for idx, skill in enumerate(self.skills):
-            body_lines.append(
-                build_skill_line(
-                    index=idx,
-                    skill_name=skill.name,
-                    description=self._get_skill_description(skill),
-                    # skill_md_path=str(self._skill_md_path(skill)), # No longer needed with SkillTool
-                )
+    @staticmethod
+    def _render_active_skill_hint_block(hints: List[Dict[str, Any]], language: str) -> str:
+        items = [
+            f"- {h.get('skill_name')} ({h.get('relative_file_path') or 'SKILL.md'})"
+            for h in hints
+            if h.get("skill_name")
+        ]
+        if not items:
+            return ""
+        if language == "en":
+            header = (
+                "Parent task currently has the following skills active. "
+                "If you need to follow them, call `skill_tool` to load each one yourself "
+                "(child sessions do not inherit the body):"
             )
-
-        return build_all_mode_skill_prompt(build_skill_lines(body_lines), language=self.system_prompt_builder.language)
+        else:
+            header = (
+                "父任务当前激活了以下 skill。如果你需要遵从它们，请自行调用 `skill_tool` 加载对应正文（子会话不会自动继承）："
+            )
+        return header + "\n" + "\n".join(items)
 
     @staticmethod
     def _normalize_name_list(raw: Optional[Union[str, List[str]]]) -> List[str]:
@@ -448,11 +848,6 @@ class SkillUseRail(DeepAgentRail):
         if yaml_data is None or "description" not in yaml_data:
             raise KeyError("SKILL.md file does not contain a description field")
         return str(yaml_data["description"])
-
-    @staticmethod
-    def _skill_md_path(skill: Skill) -> Path:
-        """Return SKILL.md path for a skill."""
-        return skill.directory / "SKILL.md"
 
     @staticmethod
     def _parse_skill_dirs(raw: str) -> List[str]:

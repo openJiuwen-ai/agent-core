@@ -146,8 +146,28 @@ class BaseModelClient(ABC):
             raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
                               error_msg="model client config ssl_cert is required when verify_ssl is True.")
 
-    @staticmethod
-    def _convert_messages_to_dict(messages: Union[str, List[BaseMessage], List[dict]]) -> List[dict]:
+    # Internal-only fields that must never reach the LLM provider wire format.
+    # Provider wire-format allowlist. Anything else (e.g. `metadata`,
+    # `usage_metadata`, `parser_content`, `finish_reason`, `context_message_id`)
+    # is internal to the context engine and must NOT leak to providers.
+    # Adapters with extra needs MUST extend ``_LLM_WIRE_ALLOWED_FIELDS`` rather
+    # than rely on pass-through.
+    _LLM_WIRE_ALLOWED_FIELDS = frozenset({
+        "role",
+        "content",
+        "name",
+        "tool_call_id",
+        "tool_calls",
+        "reasoning_content",
+    })
+
+    @classmethod
+    def _strip_internal_fields(cls, msg_dict: dict) -> dict:
+        """Keep only provider-schema-allowed fields before sending."""
+        return {k: v for k, v in msg_dict.items() if k in cls._LLM_WIRE_ALLOWED_FIELDS}
+
+    @classmethod
+    def _convert_messages_to_dict(cls, messages: Union[str, List[BaseMessage], List[dict]]) -> List[dict]:
         """Convert messages to specific API format
 
         Args:
@@ -159,7 +179,7 @@ class BaseModelClient(ABC):
         """Convert to OpenAI format: [{"role": "user", "content": "..."}]
 
            Args:
-               messages: 
+               messages:
                     String or list of BaseMessage
 
                Returns:
@@ -178,7 +198,7 @@ class BaseModelClient(ABC):
             # Build a copied list to avoid mutating caller-owned message dicts in place.
             normalized_messages: List[dict] = []
             for msg_dict in messages:
-                msg_copy = dict(msg_dict)
+                msg_copy = cls._strip_internal_fields(msg_dict)
                 if msg_copy.get("role") == "assistant" and msg_copy.get("reasoning_content") is None:
                     msg_copy["reasoning_content"] = ""
                 normalized_messages.append(msg_copy)
@@ -212,7 +232,7 @@ class BaseModelClient(ABC):
             if isinstance(msg, ToolMessage):
                 msg_dict["tool_call_id"] = msg.tool_call_id
 
-            result.append(msg_dict)
+            result.append(cls._strip_internal_fields(msg_dict))
 
         return result
 

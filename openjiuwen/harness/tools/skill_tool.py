@@ -11,6 +11,9 @@ from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
 from openjiuwen.core.sys_operation.sys_operation import SysOperation
 from openjiuwen.harness.prompts.sections.tools import build_tool_card
+from openjiuwen.core.context_engine.active_skill_bodies import (
+    normalize_skill_relative_file_path,
+)
 from openjiuwen.harness.tools import ToolOutput
 
 
@@ -42,7 +45,9 @@ class SkillTool(Tool):
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         """Invoke skill_tool tool."""
         skill_name = str(inputs.get("skill_name", "") or "").strip()
-        relative_file_path = str(inputs.get("relative_file_path") or "SKILL.md").strip() # SKILL.md by default
+        relative_file_path = normalize_skill_relative_file_path(
+            str(inputs.get("relative_file_path") or "")
+        )
 
         try:
             skill = self._get_skill_by_name(skill_name)
@@ -67,6 +72,11 @@ class SkillTool(Tool):
                 data={
                     "skill_directory": str(skill.directory),
                     "skill_content": skill_file_content,
+                },
+                extra_metadata={
+                    "is_skill_body": True,
+                    "skill_name": skill_name,
+                    "relative_file_path": relative_file_path,
                 },
             )
         

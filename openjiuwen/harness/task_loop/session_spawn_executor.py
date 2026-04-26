@@ -27,6 +27,10 @@ if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
 
 from openjiuwen.harness.tools.session_tools import SESSION_SPAWN_TASK_TYPE
+from openjiuwen.core.context_engine.active_skill_bodies import (
+    derive_hints_from_session,
+    stage_active_skill_hints_for_session,
+)
 
 
 class SessionSpawnExecutor(TaskExecutor):
@@ -71,6 +75,12 @@ class SessionSpawnExecutor(TaskExecutor):
 
         try:
             subagent = self._deep_agent.create_subagent(subagent_type, cid)
+            try:
+                hints = derive_hints_from_session(session)
+                if hints and cid:
+                    stage_active_skill_hints_for_session(cid, hints)
+            except Exception as exc:
+                logger.debug(f"[SessionSpawnExecutor] failed to stage active skill hints: {exc}")
             result = await subagent.invoke({"query": query, "conversation_id": cid})
             payload = result.get("output", "") if isinstance(result, dict) else str(result)
 

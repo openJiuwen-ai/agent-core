@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import threading
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import BaseMessage
@@ -102,6 +102,67 @@ def _context_trace_time_beijing() -> str:
     return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S") + " 北京时间"
 
 
+_SKILL_TRACE_META_KEYS = frozenset({
+    "is_skill_body",
+    "skill_body_stub",
+    "skill_body_active",
+    "active_skill_pin",
+    "skill_name",
+    "relative_file_path",
+    "skill_unloaded",
+    "skill_body_offloaded",
+    "original_is_skill_body",
+    "active_skill_eviction_notice",
+    "unload_skill_name",
+})
+
+
+def skill_trace_metadata_subset(metadata: Any) -> dict[str, Any]:
+    """Small metadata projection for traces and UIs (skill lifecycle / pin)."""
+    if not isinstance(metadata, dict):
+        return {}
+    return {k: metadata[k] for k in _SKILL_TRACE_META_KEYS if k in metadata}
+
+
+def resolve_context_trace_ids(session: Any = None, context: Any = None) -> dict[str, Any]:
+    """session_id / context_id for ``write_context_trace`` payloads."""
+    session_id = "unknown"
+    context_id: Optional[str] = None
+
+    if context is not None:
+        sid_fn = getattr(context, "session_id", None)
+        if callable(sid_fn):
+            try:
+                session_id = str(sid_fn())
+            except Exception:
+                session_id = "unknown"
+        if session_id == "unknown":
+            sid_attr = getattr(context, "_session_id", None)
+            if sid_attr is not None:
+                session_id = str(sid_attr)
+
+        cid_fn = getattr(context, "context_id", None)
+        if callable(cid_fn):
+            try:
+                context_id = str(cid_fn())
+            except Exception:
+                context_id = None
+        if context_id is None:
+            cid_attr = getattr(context, "_context_id", None)
+            if cid_attr is not None:
+                context_id = str(cid_attr)
+
+    if session is not None and session_id == "unknown":
+        sid = getattr(session, "session_id", None) or getattr(session, "id", None)
+        if sid is not None:
+            session_id = str(sid)
+
+    out: dict[str, Any] = {"session_id": session_id}
+    if context_id is not None:
+        out["context_id"] = context_id
+    return out
+
+
 def snapshot_messages(messages: list[BaseMessage] | None) -> list[dict[str, Any]]:
     if not messages:
         return []
@@ -122,6 +183,9 @@ def snapshot_messages(messages: list[BaseMessage] | None) -> list[dict[str, Any]
             content = getattr(msg, "content", "")
             entry["content_len"] = len(content) if isinstance(content, str) else len(str(content))
             entry["content_preview"] = _serialize_content(content, preview_limit)
+        skill_meta = skill_trace_metadata_subset(metadata)
+        if skill_meta:
+            entry["skill_meta"] = skill_meta
         out.append(entry)
     return out
 
