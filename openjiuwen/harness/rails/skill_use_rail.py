@@ -28,6 +28,7 @@ from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.core.context_engine.active_skill_bodies import (
     ACTIVE_SKILL_HINTS_STATE_KEY,
     DEFAULT_MAX_ACTIVE_SKILL_BODIES,
+    format_skill_tool_stub_appendix_from_result,
     normalize_skill_relative_file_path,
     pop_active_skill_hints_for_session,
     record_active_skill_body,
@@ -259,20 +260,37 @@ class SkillUseRail(DeepAgentRail):
 
         lang = agent.system_prompt_builder.language
         agent_id = getattr(getattr(agent, "card", None), "id", None)
+        skill_search_roots = self._normalize_skill_dirs(self.skills_dir)
         if self.include_tools:
             tools.extend(
                 [
                     ReadFileTool(self.sys_operation, language=lang, agent_id=agent_id),
                     CodeTool(self.sys_operation, language=lang, agent_id=agent_id),
                     BashTool(self.sys_operation, language=lang, agent_id=agent_id),
-                    SkillTool(self.sys_operation, self.get_skills_meta, language=lang, agent_id=agent_id),
+                    SkillTool(
+                        self.sys_operation,
+                        self.get_skills_meta,
+                        language=lang,
+                        agent_id=agent_id,
+                        skill_search_roots=skill_search_roots,
+                        enabled_skill_names=self.enabled_skills if self.enabled_skills else None,
+                        disabled_skill_names=self.disabled_skills if self.disabled_skills else None,
+                    ),
                     SkillCompleteTool(language=lang, agent_id=agent_id),
                 ]
             )
         elif self.include_skill_body_tools:
             tools.extend(
                 [
-                    SkillTool(self.sys_operation, self.get_skills_meta, language=lang, agent_id=agent_id),
+                    SkillTool(
+                        self.sys_operation,
+                        self.get_skills_meta,
+                        language=lang,
+                        agent_id=agent_id,
+                        skill_search_roots=skill_search_roots,
+                        enabled_skill_names=self.enabled_skills if self.enabled_skills else None,
+                        disabled_skill_names=self.disabled_skills if self.disabled_skills else None,
+                    ),
                     SkillCompleteTool(language=lang, agent_id=agent_id),
                 ]
             )
@@ -518,7 +536,7 @@ class SkillUseRail(DeepAgentRail):
         # Replace original ToolMessage content with short load stub.
         # Models often try workspace file tools after seeing only a short ack; spell out
         # that the full body is reinjected as [ACTIVE SKILL BODY] on later turns.
-        tool_msg.content = (
+        stub_core = (
             f"[SKILL LOADED] {skill_name} / {relative_file_path}\n"
             f"完整正文已由系统保留，并在后续发给模型的上下文中以 [ACTIVE SKILL BODY] 块注入；"
             f"请直接依据该块执行，不要按磁盘路径再次打开本技能的 SKILL.md。"
@@ -527,6 +545,8 @@ class SkillUseRail(DeepAgentRail):
             f"context—follow that block for workflow; do not open this skill's SKILL.md by path again. "
             f"Call skill_tool again only to reload."
         )
+        tree_appendix = format_skill_tool_stub_appendix_from_result(tool_result, max_tree_lines=120)
+        tool_msg.content = stub_core + tree_appendix
         new_meta = dict(meta)
         new_meta.update({
             "is_skill_body": False,

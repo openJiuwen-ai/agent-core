@@ -130,6 +130,61 @@ def _read_skill_content(result: Any) -> str:
     return ""
 
 
+def _read_directory_tree_from_result(result: Any) -> Optional[List[str]]:
+    """Extract directory_tree from skill_tool ToolOutput.data (flat path list or one ASCII-tree block)."""
+    data = getattr(result, "data", None)
+    if not isinstance(data, dict):
+        return None
+    tree = data.get("directory_tree")
+    if isinstance(tree, str) and tree.strip():
+        return [tree.strip()]
+    if not isinstance(tree, list) or not tree:
+        return None
+    out: List[str] = []
+    for item in tree:
+        if isinstance(item, str) and item.strip():
+            out.append(item)
+    return out or None
+
+
+def _directory_tree_is_ascii_blob(directory_tree: List[str]) -> bool:
+    if len(directory_tree) != 1:
+        return False
+    chunk = directory_tree[0]
+    return "├──" in chunk or "└──" in chunk
+
+
+def format_directory_tree_markdown_for_llm(
+    directory_tree: Optional[List[str]],
+    *,
+    max_lines: int = 120,
+) -> str:
+    """Markdown block for directory_tree (used in Tool stub and [ACTIVE SKILL BODY] pin)."""
+    if not directory_tree:
+        return ""
+    cap = max(1, min(max_lines, 500))
+    if _directory_tree_is_ascii_blob(directory_tree):
+        inner = directory_tree[0].splitlines()
+        body_lines = inner[:cap]
+        suffix = "\n…(truncated)" if len(inner) > cap else ""
+        body = "\n".join(body_lines) + suffix
+        title = "\n## Directory layout\n"
+    else:
+        lines = directory_tree[:cap]
+        suffix = "\n…(truncated)" if len(directory_tree) > cap else ""
+        body = "\n".join(lines) + suffix
+        title = "\n## Directory layout (relative paths; directories end with /)\n"
+    return f"{title}```\n{body}\n```\n"
+
+
+def format_skill_tool_stub_appendix_from_result(result: Any, *, max_tree_lines: int = 120) -> str:
+    """Append directory layout to the short [SKILL LOADED] tool stub when skill_tool returned a tree."""
+    tree = _read_directory_tree_from_result(result)
+    if not tree:
+        return ""
+    return format_directory_tree_markdown_for_llm(tree, max_lines=max_tree_lines)
+
+
 def record_active_skill_body(
     session: Any,
     tool_message: Optional[ToolMessage],
@@ -163,11 +218,20 @@ def record_active_skill_body(
     if not body:
         return False
 
+    directory_tree = _read_directory_tree_from_result(result)
+
     lock = _get_session_lock(session)
     try:
         with lock:
-            return _record_locked(session, tool_message, skill_name, relative_file_path,
-                                  body, max_active_skill_bodies)
+            return _record_locked(
+                session,
+                tool_message,
+                skill_name,
+                relative_file_path,
+                body,
+                max_active_skill_bodies,
+                directory_tree=directory_tree,
+            )
     except Exception as exc:
         logger.warning(f"[active_skill_bodies] record failed: {exc}")
         return False
@@ -180,6 +244,8 @@ def _record_locked(
     relative_file_path: str,
     body: str,
     max_active_skill_bodies: int,
+    *,
+    directory_tree: Optional[List[str]] = None,
 ) -> bool:
     active = _coerce_dict(session.get_state(ACTIVE_SKILL_BODIES_STATE_KEY))
     evictions = _coerce_dict(session.get_state(ACTIVE_SKILL_EVICTIONS_STATE_KEY))
@@ -187,7 +253,7 @@ def _record_locked(
     evictions, _ = _migrate_skill_body_keyed_map(evictions)
 
     key = _state_key(skill_name, relative_file_path)
-    active[key] = {
+    entry: Dict[str, Any] = {
         "skill_name": skill_name,
         "relative_file_path": relative_file_path,
         "body": body,
@@ -195,6 +261,9 @@ def _record_locked(
         "invoked_at": time.time(),
         "source_session_id": _safe_session_id(session),
     }
+    if directory_tree:
+        entry["directory_tree"] = list(directory_tree)
+    active[key] = entry
 
     # Reloading a skill clears any stale eviction notice for it.
     if key in evictions:
@@ -235,15 +304,17 @@ def _record_locked(
             "skill_name": skill_name,
             "relative_file_path": relative_file_path,
             "body_len": len(body),
+            "directory_tree_lines": len(directory_tree) if directory_tree else 0,
         },
     )
     logger.info(
         "[active_skill_bodies] record session_id=%s skill=%s path=%s body_len=%s "
-        "active_entries_after=%s evicted_keys=%s",
+        "directory_tree_lines=%s active_entries_after=%s evicted_keys=%s",
         trace_ids.get("session_id"),
         skill_name,
         relative_file_path,
         len(body),
+        len(directory_tree) if directory_tree else 0,
         len(active),
         evicted_keys or [],
     )
@@ -254,6 +325,7 @@ def _record_locked(
             "skill_name": skill_name,
             "relative_file_path": relative_file_path,
             "body_len": len(body),
+            "directory_tree_lines": len(directory_tree) if directory_tree else 0,
             "active_entries_after": len(active),
             "evicted_keys": evicted_keys,
         },
@@ -341,10 +413,22 @@ def _safe_session_id(session: Any) -> Optional[str]:
     return None
 
 
-def _build_pin_content(skill_name: str, relative_file_path: str, body: str) -> str:
+def _build_pin_content(
+    skill_name: str,
+    relative_file_path: str,
+    body: str,
+    directory_tree: Optional[List[str]] = None,
+    *,
+    max_tree_lines_in_pin: int = 250,
+) -> str:
+    tree_md = ""
+    if directory_tree:
+        cap = max(1, min(max_tree_lines_in_pin, 500))
+        tree_md = format_directory_tree_markdown_for_llm(directory_tree, max_lines=cap)
     return (
         f"[ACTIVE SKILL BODY] {skill_name} / {relative_file_path}\n"
         f"This skill body remains in effect until skill_complete is called.\n"
+        f"{tree_md}"
         f"---\n{body}"
     )
 
@@ -480,12 +564,14 @@ def append_active_skill_pins_to_window(
         skill_name = entry.get("skill_name") or ""
         path = entry.get("relative_file_path") or "SKILL.md"
         body = entry.get("body") or ""
+        tree = entry.get("directory_tree")
+        directory_tree = tree if isinstance(tree, list) else None
         if not skill_name or not body:
             continue
         if _has_existing_pin(ctx_msgs, skill_name, path) or _has_existing_pin(sys_msgs, skill_name, path):
             continue
         pin_messages.append(_make_pin_message(
-            content=_build_pin_content(skill_name, path, body),
+            content=_build_pin_content(skill_name, path, body, directory_tree),
             metadata={
                 "active_skill_pin": True,
                 "is_skill_body": True,
