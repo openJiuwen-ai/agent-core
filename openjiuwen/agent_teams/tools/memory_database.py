@@ -232,13 +232,15 @@ class InMemoryTeamDatabase:
             if team_name in self._teams:
                 team_logger.error(f"Team {team_name} already exists")
                 return False
+            now = self.get_current_time()
             self._teams[team_name] = Team(
                 team_name=team_name,
                 display_name=display_name,
                 leader_member_name=leader_member_name,
                 desc=desc,
                 prompt=prompt,
-                created=self.get_current_time(),
+                created=now,
+                updated_at=now,
             )
             team_logger.info(f"Team {team_name} created")
             return True
@@ -260,6 +262,23 @@ class InMemoryTeamDatabase:
             team_logger.info(f"Team {team_name} deleted")
             return True
 
+    async def get_team_updated_at(self, team_name: str) -> int:
+        """Probe team.updated_at for change detection.
+
+        Returns the team's updated_at timestamp (ms), or 0 if not found.
+        """
+        team = self._teams.get(team_name)
+        if team is None or team.updated_at is None:
+            return 0
+        return int(team.updated_at)
+
+    async def force_delete_team_session(self, team_name: str) -> bool:
+        """Force delete a team's records and clear in-memory session data."""
+        deleted = await self.delete_team(team_name)
+        await self.drop_cur_session_tables()
+        team_logger.info("Force deleted team session data for {}", team_name)
+        return deleted
+
     # =====================================================================
     # Member Operations
     # =====================================================================
@@ -276,6 +295,7 @@ class InMemoryTeamDatabase:
         execution_status: Optional[str] = None,
         mode: str = MemberMode.BUILD_MODE.value,
         prompt: Optional[str] = None,
+        model_ref_json: Optional[str] = None,
     ) -> bool:
         async with self._lock:
             if member_name in self._members:
@@ -291,6 +311,8 @@ class InMemoryTeamDatabase:
                 execution_status=execution_status,
                 mode=mode,
                 prompt=prompt,
+                model_ref_json=model_ref_json,
+                updated_at=self.get_current_time(),
             )
             team_logger.info(f"Member {member_name} created")
             return True
@@ -306,6 +328,17 @@ class InMemoryTeamDatabase:
         if status is not None:
             members = [m for m in members if m.status == status]
         return members
+
+    async def get_members_max_updated_at(self, team_name: str) -> int:
+        """Probe MAX(member.updated_at) for the team.
+
+        Returns the largest member update timestamp (ms), or 0 if no members.
+        """
+        members = [m for m in self._members.values() if m.team_name == team_name]
+        if not members:
+            return 0
+        timestamps = [m.updated_at for m in members if m.updated_at is not None]
+        return max(timestamps) if timestamps else 0
 
     async def update_member_status(self, member_name: str, team_name: str, status: str) -> bool:
         async with self._lock:
@@ -383,6 +416,27 @@ class InMemoryTeamDatabase:
         if status:
             tasks = [t for t in tasks if t.status == status]
         return tasks
+
+    async def assign_task(self, task_id: str, member_name: str) -> bool:
+        """Assign a task to a member and mark it as claimed."""
+        async with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                team_logger.error(f"Task {task_id} not found")
+                return False
+            if task.assignee:
+                team_logger.warning(f"Task {task_id} already assigned to {task.assignee}")
+                return False
+            if not is_valid_transition(TaskStatus(task.status), TaskStatus.CLAIMED, TASK_TRANSITIONS):
+                team_logger.error(
+                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.CLAIMED.value}"
+                )
+                return False
+            task.assignee = member_name
+            task.status = TaskStatus.CLAIMED.value
+            task.updated_at = self.get_current_time()
+            team_logger.info(f"Task {task_id} assigned to {member_name} (status=claimed)")
+            return True
 
     async def claim_task(self, task_id: str, member_name: str) -> bool:
         async with self._lock:

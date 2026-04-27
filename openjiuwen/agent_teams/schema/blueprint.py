@@ -77,6 +77,7 @@ def _ensure_builtin_infra_registered() -> None:
 
         _STORAGE_REGISTRY["sqlite"] = DatabaseConfig
         _STORAGE_REGISTRY["postgresql"] = DatabaseConfig
+        _STORAGE_REGISTRY["mysql"] = DatabaseConfig
         _STORAGE_REGISTRY["memory"] = MemoryDatabaseConfig
 
 

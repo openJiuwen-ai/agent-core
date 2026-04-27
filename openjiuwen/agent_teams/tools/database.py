@@ -216,6 +216,27 @@ class TeamDatabase:
                 pool_pre_ping=True,
                 pool_recycle=1800,
             )
+        elif db_type == DatabaseType.MYSQL:
+            conn_str = self.config.connection_string.strip()
+            if not conn_str:
+                raise ValueError("MySQL requires a non-empty connection_string")
+            if conn_str.startswith("mysql://"):
+                conn_str = f"mysql+aiomysql://{conn_str.removeprefix('mysql://')}"
+            elif not conn_str.startswith("mysql+aiomysql://"):
+                raise ValueError(
+                    "MySQL connection_string must use mysql:// or mysql+aiomysql:// scheme"
+                )
+
+            # Use queue pool settings suitable for distributed deployments.
+            self.engine = create_async_engine(
+                conn_str,
+                echo=False,
+                future=True,
+                pool_size=10,
+                max_overflow=20,
+                pool_pre_ping=True,
+                pool_recycle=1800,
+            )
         else:
             raise NotImplementedError(f"Database type {self.config.db_type} not yet implemented")
 

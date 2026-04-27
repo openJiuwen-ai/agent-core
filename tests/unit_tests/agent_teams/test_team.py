@@ -12,6 +12,11 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.messager import Messager
+from openjiuwen.agent_teams.schema.team import (
+    TeamRuntimeContext,
+    TeamSpec,
+    TeamRole,
+)
 from openjiuwen.agent_teams.spawn.context import (
     reset_session_id,
     set_session_id,
@@ -23,6 +28,7 @@ from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
     TeamMember,
 )
+from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberStatus,
@@ -931,3 +937,45 @@ class TestCancelAllTasks:
         """Test cancelling when team has no tasks"""
         count = await agent_team.cancel_all_tasks()
         assert count == 0
+
+
+class TestTeamRuntimeContextDbConfig:
+    """Test TeamRuntimeContext accepts both DatabaseConfig and MemoryDatabaseConfig."""
+
+    @pytest.mark.level0
+    def test_runtime_context_with_database_config(self):
+        """Test TeamRuntimeContext accepts DatabaseConfig."""
+        db_config = DatabaseConfig(
+            db_type=DatabaseType.SQLITE,
+            connection_string=":memory:",
+        )
+        context = TeamRuntimeContext(
+            role=TeamRole.LEADER,
+            member_name="leader1",
+            team_spec=TeamSpec(team_name="test_team", display_name="Test Team"),
+            db_config=db_config,
+        )
+        assert context.db_config.db_type == "sqlite"
+
+    @pytest.mark.level0
+    def test_runtime_context_with_memory_database_config(self):
+        """Test TeamRuntimeContext accepts MemoryDatabaseConfig."""
+        db_config = MemoryDatabaseConfig()
+        context = TeamRuntimeContext(
+            role=TeamRole.LEADER,
+            member_name="leader1",
+            team_spec=TeamSpec(team_name="test_team", display_name="Test Team"),
+            db_config=db_config,
+        )
+        assert context.db_config.db_type == "memory"
+
+    @pytest.mark.level0
+    def test_runtime_context_default_database_config(self):
+        """Test TeamRuntimeContext defaults to DatabaseConfig."""
+        context = TeamRuntimeContext(
+            role=TeamRole.LEADER,
+            member_name="leader1",
+            team_spec=TeamSpec(team_name="test_team", display_name="Test Team"),
+        )
+        assert isinstance(context.db_config, DatabaseConfig)
+        assert context.db_config.db_type == DatabaseType.SQLITE
