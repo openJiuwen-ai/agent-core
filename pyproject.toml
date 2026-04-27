@@ -61,7 +61,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-a2a = ["a2a-sdk==1.0.0"]
+a2a = ["a2a-sdk[http-server]==1.0.0"]
 pulsar = ["pulsar-client>=3.5.0"]
 elasticsearch = ["elasticsearch[async]>=8.0.0"]
 redis = ["redis>=7.1.0"]
@@ -98,10 +98,8 @@ test = [
     "fastapi>=0.115.0",
     "uvicorn>=0.32.0",
     "sse-starlette>=2.1.3",
+    "a2a-sdk[http-server]==1.0.0",
 ]
-
-[project.entry-points."openjiuwen.remote_clients"]
-A2A = "openjiuwen.extensions.a2a.a2a_remote_client:A2ARemoteClient"
 
 # Linting & formatting
 lint = [
@@ -117,6 +115,9 @@ docs = [
 ]
 
 dev = [{ include-group = "test" }, { include-group = "lint" }, { include-group = "docs" }]
+
+[project.entry-points."openjiuwen.remote_clients"]
+A2A = "openjiuwen.extensions.a2a.a2a_remote_client:A2ARemoteClient"
 
 [project.scripts]
 openjiuwen = "openjiuwen.harness.cli.cli:cli"

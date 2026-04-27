@@ -8,31 +8,31 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 
+from a2a.client import ClientConfig, ClientFactory
 from a2a.server.agent_execution.agent_executor import AgentExecutor
 from a2a.server.agent_execution.context import RequestContext
-from a2a.server.apps import A2AFastAPIApplication
 from a2a.server.events.event_queue import EventQueue
 from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
 from a2a.server.tasks.inmemory_task_store import InMemoryTaskStore
 from a2a.server.tasks.task_updater import TaskUpdater
-from a2a.client import ClientConfig, ClientFactory
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
     AgentInterface,
     AgentProvider,
     AgentSkill,
+    Part,
     Task,
     TaskState,
     TaskStatus as A2ATaskStatus,
-    Part,
 )
 
+from openjiuwen.core.controller.schema.task import TaskStatus
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
 from openjiuwen.core.runner.drunner.remote_client.remote_client_config import ProtocolEnum
 from openjiuwen.core.single_agent import AgentCard as OJWAgentCard
-from openjiuwen.core.controller.schema.task import TaskStatus
 
 
 class A2AExecutor(AgentExecutor):
@@ -95,6 +95,7 @@ class A2AExecutor(AgentExecutor):
 
 
 def build_test_app() -> FastAPI:
+    app = FastAPI()
     agent_card = AgentCard(
         name="System Test A2A Agent",
         description="A minimal A2A server for runner system tests",
@@ -130,14 +131,21 @@ def build_test_app() -> FastAPI:
     request_handler = DefaultRequestHandler(
         agent_executor=A2AExecutor(),
         task_store=task_store,
+        agent_card=agent_card,
     )
 
-    app_builder = A2AFastAPIApplication(
-        agent_card=agent_card,
-        http_handler=request_handler,
-        enable_v0_3_compat=True,
+    # a2a-sdk 1.0.0 removed `a2a.server.apps.*`; build routes directly.
+    app.router.routes.extend(
+        create_agent_card_routes(agent_card=agent_card, card_url="/.well-known/agent-card.json")
     )
-    return app_builder.build(agent_card_url="/.well-known/agent-card.json", rpc_url="/a2a/jsonrpc/")
+    app.router.routes.extend(
+        create_jsonrpc_routes(
+            request_handler=request_handler,
+            rpc_url="/a2a/jsonrpc/",
+            enable_v0_3_compat=True,
+        )
+    )
+    return app
 
 
 @pytest_asyncio.fixture
