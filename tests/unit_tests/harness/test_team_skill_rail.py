@@ -1,9 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Lightweight test for TeamSkillRail evolution flow.
-
-Usage:
-    cd agent-core
-    python tests/test_team_skill_evolution.py
 
 No real LLM calls — uses a mock that returns canned JSON.
 No real agent/service needed — constructs synthetic Trajectory directly.
@@ -20,40 +17,27 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryStore
 from openjiuwen.agent_evolving.trajectory.types import (
+    LLMCallDetail,
     Trajectory,
     TrajectoryStep,
     ToolCallDetail,
-    LLMCallDetail,
 )
-from openjiuwen.harness.rails.team_skill_rail import TeamSkillRail
+from openjiuwen.harness.rails.team_skill_rail import TeamSkillRail, UserIntent
 
 
 # ============================================================
 # Mock LLM: returns canned JSON, no network calls
 # ============================================================
 
-_CREATE_RESPONSE = """\
-```json
-{
-  "should_create": true,
-  "name": "deep-research-to-ppt",
-  "description": "多角色深度调研并生成PPT的协作模式",
-  "body": "# Deep Research to PPT\\n\\n由多个 researcher 并行调研，最后由 merger 汇总成 PPT。",
-  "reason": "该协作模式涉及10个角色并行调研+1个合并角色，具有通用性",
-  "roles": [
-    {"id": "researcher", "skills": [], "tools": ["web_search"]},
-    {"id": "merger", "skills": ["pptx"], "tools": []}
-  ],
-  "extra_files": {
-    "roles/researcher.md": "# Researcher\\n负责深度调研指定主题并生成单页PPT。",
-    "roles/merger.md": "# Merger\\n负责将所有单页PPT合并为完整文档。",
-    "workflow.md": "# Workflow\\n1. Leader分配10个调研任务 (并行)\\n2. 各Researcher完成调研+单页PPT\\n3. Merger合并所有PPT",
-    "bind.md": "# Constraints\\n- 每个Researcher最多3轮对话\\n- 总超时60分钟"
-  }
-}
-```"""
+# Response for trajectory issue detection — JSON array of issues
+# Note: Must NOT be wrapped in ``` fences, because _parse_json's balanced-brace
+# scan will extract the first {...} object from the array, returning a dict
+# instead of the full list.  Plain JSON array parses correctly via json.loads.
+_TRAJECTORY_ISSUES_RESPONSE = '[{"issue_type": "coordination", "description": "各成员产出格式不统一，缺少统一的工作流约束", "affected_role": "researcher", "severity": "medium"}]'
 
+# Response for patch generation (from TeamSkillOptimizer)
 _PATCH_RESPONSE = """\
 ```json
 {
@@ -68,20 +52,32 @@ _PATCH_RESPONSE = """\
 class MockLLM:
     """Fake LLM that returns pre-defined responses based on prompt keywords."""
 
-    def __init__(self, response: str = _CREATE_RESPONSE):
+    def __init__(self, response: str = _PATCH_RESPONSE):
         self.response = response
         self.call_count = 0
+        self._responses = {
+            "user_request": '{"is_improvement": false, "intent": ""}',
+            "trajectory_issue": _TRAJECTORY_ISSUES_RESPONSE,
+            "patch": _PATCH_RESPONSE,
+        }
 
     async def invoke(self, messages: list, model: str = "", **kwargs) -> Any:
         return await self.chat(messages, model, **kwargs)
 
     async def chat(self, messages: list, model: str = "", **kwargs) -> Any:
-        self.call_count += 1
+        self.call_count = (self.call_count or 0) + 1
         prompt = messages[0]["content"] if messages else ""
-        # Route to different responses based on prompt content
-        if "当前 Team Skill 内容" in prompt or "Current Team Skill" in prompt:
-            return _MockResponse(_PATCH_RESPONSE)
-        return _MockResponse(self.response)
+        # Route to different responses based on prompt content.
+        # Order matters: check the most specific keywords first.
+        if "need_patch" in prompt or "生成演进 patch" in prompt:
+            resp = self._responses["patch"]
+        elif "分析以下执行轨迹" in prompt:
+            resp = self._responses["trajectory_issue"]
+        elif "改进意见" in prompt:
+            resp = self._responses["user_request"]
+        else:
+            resp = self._responses["patch"]
+        return _MockResponse(resp)
 
 
 @dataclass
@@ -116,50 +112,9 @@ class _MockCtx:
 # Trajectory builders
 # ============================================================
 
-def build_create_trajectory(member_count: int = 5) -> Trajectory:
-    """Build a synthetic trajectory with spawn_member calls (triggers CREATE)."""
-    steps = []
-    # Leader's initial reasoning
-    steps.append(TrajectoryStep(
-        kind="llm",
-        detail=LLMCallDetail(
-            model="glm-5",
-            messages=[{"role": "user", "content": "深度调研openclaw技术原理"}],
-            response={"content": "我需要分配10个调研任务给不同成员"},
-        ),
-    ))
-    # spawn_member calls
-    for i in range(member_count):
-        role = f"researcher-{i}"
-        steps.append(TrajectoryStep(
-            kind="tool",
-            detail=ToolCallDetail(
-                tool_name="spawn_member",
-                call_args={"name": role, "desc": f"负责调研第{i+1}个方面"},
-                call_result={"status": "spawned", "member_id": role},
-            ),
-        ))
-    # Some view_task polling
-    steps.append(TrajectoryStep(
-        kind="tool",
-        detail=ToolCallDetail(
-            tool_name="view_task",
-            call_args={"action": "list"},
-            call_result={"tasks": [{"status": "completed"}] * member_count},
-        ),
-    ))
-    return Trajectory(
-        execution_id="test-create-001",
-        steps=steps,
-        source="online",
-        session_id="test-session",
-    )
-
-
 def build_patch_trajectory(skill_name: str = "deep-research-to-ppt") -> Trajectory:
     """Build a trajectory that references an existing team skill (triggers PATCH)."""
     steps = []
-    # Leader reads the existing SKILL.md
     steps.append(TrajectoryStep(
         kind="tool",
         detail=ToolCallDetail(
@@ -168,7 +123,6 @@ def build_patch_trajectory(skill_name: str = "deep-research-to-ppt") -> Trajecto
             call_result="---\nname: deep-research-to-ppt\n---\n# ...",
         ),
     ))
-    # Subsequent execution
     for i in range(3):
         steps.append(TrajectoryStep(
             kind="tool",
@@ -186,84 +140,44 @@ def build_patch_trajectory(skill_name: str = "deep-research-to-ppt") -> Trajecto
     )
 
 
+def _build_member_step(
+    tool_name: str,
+    args: Any = None,
+    start_time_ms: int = 0,
+    meta: dict | None = None,
+) -> TrajectoryStep:
+    return TrajectoryStep(
+        kind="tool",
+        detail=ToolCallDetail(tool_name=tool_name, call_args=args or {}),
+        start_time_ms=start_time_ms,
+        meta=meta or {},
+    )
+
+
+def _build_team_store_trajectory(
+    member_id: str,
+    session_id: str,
+    steps: list,
+) -> Trajectory:
+    """Build a trajectory with member_id meta for team store."""
+    return Trajectory(
+        execution_id=f"exec-{member_id}",
+        session_id=session_id,
+        source="online",
+        steps=steps,
+        meta={"member_id": member_id},
+    )
+
+
 # ============================================================
 # Test cases
 # ============================================================
 
 @pytest.mark.asyncio
-async def test_create_path():
-    """Test: no existing skills → CREATE proposal → approval events emitted."""
-    print("\n" + "=" * 60)
-    print("TEST 1: CREATE path (no existing team skills)")
-    print("=" * 60)
-
-    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
-    try:
-        mock_llm = MockLLM()
-        rail = TeamSkillRail(
-            skills_dir=str(tmp),
-            llm=mock_llm,
-            model="mock-model",
-            async_evolution=False,
-        )
-
-        trajectory = build_create_trajectory(member_count=5)
-        ctx = _MockCtx()
-
-        print(f"  Trajectory steps: {len(trajectory.steps)}")
-        print(f"  spawn_member calls: {sum(1 for s in trajectory.steps if s.detail and getattr(s.detail, 'tool_name', '') == 'spawn_member')}")
-
-        await rail.run_evolution(trajectory, ctx)
-
-        events = await rail.drain_pending_approval_events()
-        approval_events = [e for e in events if e.type == "chat.ask_user_question"]
-        proposals = rail._pending_skill_proposals
-
-        print(f"  LLM call count: {mock_llm.call_count}")
-        print(f"  Pending approval events: {len(approval_events)}")
-        print(f"  Pending proposals: {len(proposals)}")
-
-        if approval_events:
-            ev = approval_events[0]
-            payload = ev.payload
-            print(f"  Event type: {ev.type}")
-            print(f"  Request ID: {payload.get('request_id', '?')}")
-            skill_data = payload.get("_team_skill_data", {})
-            print(f"  Proposed skill name: {skill_data.get('name', '?')}")
-            print(f"  Proposed description: {skill_data.get('description', '?')}")
-
-        # Simulate approval
-        if proposals:
-            req_id = list(proposals.keys())[0]
-            print(f"\n  Simulating approval for: {req_id}")
-            result = await rail.on_approve_team_skill(req_id)
-            print(f"  Approved skill: {result}")
-
-            # Check files on disk
-            if result:
-                skill_dir = tmp / result
-                print(f"  Skill dir exists: {skill_dir.exists()}")
-                for f in sorted(skill_dir.rglob("*")):
-                    if f.is_file():
-                        print(f"    {f.relative_to(skill_dir)} ({f.stat().st_size} bytes)")
-
-        assert mock_llm.call_count >= 1, "Expected at least 1 LLM call"
-        assert len(approval_events) == 1, "Expected 1 approval event"
-        print("\n  PASS: CREATE path passed")
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-@pytest.mark.asyncio
 async def test_patch_path():
     """Test: existing skill detected → PATCH proposal → approval events emitted."""
-    print("\n" + "=" * 60)
-    print("TEST 2: PATCH path (existing team skill found)")
-    print("=" * 60)
-
     tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
     try:
-        # Pre-create a skill so _detect_used_team_skill can find it
         skill_dir = tmp / "deep-research-to-ppt"
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(
@@ -283,34 +197,18 @@ async def test_patch_path():
         trajectory = build_patch_trajectory("deep-research-to-ppt")
         ctx = _MockCtx()
 
-        print(f"  Existing skills: {rail.store.list_skill_names()}")
-        print(f"  Trajectory steps: {len(trajectory.steps)}")
-
         await rail.run_evolution(trajectory, ctx)
 
         events = await rail.drain_pending_approval_events()
         approval_events = [e for e in events if e.type == "chat.ask_user_question"]
         patches = rail._pending_patch_snapshots
 
-        print(f"  LLM call count: {mock_llm.call_count}")
-        print(f"  Pending patch approval events: {len(approval_events)}")
-        print(f"  Pending patch snapshots: {len(patches)}")
-
-        if approval_events:
-            ev = approval_events[0]
-            print(f"  Event type: {ev.type}")
-            print(f"  Request ID: {ev.payload.get('request_id', '?')}")
-
-        # Simulate approval
         if patches:
             req_id = list(patches.keys())[0]
-            print(f"\n  Simulating patch approval for: {req_id}")
             await rail.on_approve_patch(req_id)
-            print("  Patch approved and persisted")
 
-        assert mock_llm.call_count == 1, "Expected exactly 1 LLM call"
-        assert len(approval_events) == 1, "Expected 1 patch approval event"
-        print("\n  PASS: PATCH path passed")
+        assert mock_llm.call_count == 2
+        assert len(approval_events) == 1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -318,10 +216,6 @@ async def test_patch_path():
 @pytest.mark.asyncio
 async def test_patch_auto_save():
     """Test: auto_save=True → patch persisted immediately without approval."""
-    print("\n" + "=" * 60)
-    print("TEST 3: PATCH path with auto_save=True")
-    print("=" * 60)
-
     tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
     try:
         skill_dir = tmp / "deep-research-to-ppt"
@@ -349,85 +243,8 @@ async def test_patch_auto_save():
         approval_events = [e for e in events if e.type == "chat.ask_user_question"]
         patches = rail._pending_patch_snapshots
 
-        print(f"  LLM call count: {mock_llm.call_count}")
-        print(f"  Pending approval events: {len(approval_events)} (should be 0 for auto_save)")
-        print(f"  Pending patch snapshots: {len(patches)} (should be 0 for auto_save)")
-
-        assert len(approval_events) == 0, "auto_save should NOT produce approval events"
-        assert len(patches) == 0, "auto_save should NOT buffer patches"
-        print("\n  PASS: PATCH auto_save passed")
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-@pytest.mark.asyncio
-async def test_below_threshold():
-    """Test: too few spawn_member calls → no CREATE triggered."""
-    print("\n" + "=" * 60)
-    print("TEST 4: Below threshold (only 1 member)")
-    print("=" * 60)
-
-    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
-    try:
-        mock_llm = MockLLM()
-        rail = TeamSkillRail(
-            skills_dir=str(tmp),
-            llm=mock_llm,
-            model="mock-model",
-            async_evolution=False,
-        )
-
-        trajectory = build_create_trajectory(member_count=1)
-        ctx = _MockCtx()
-
-        await rail.run_evolution(trajectory, ctx)
-
-        events = await rail.drain_pending_approval_events()
-        approval_events = [e for e in events if e.type == "chat.ask_user_question"]
-        print(f"  LLM call count: {mock_llm.call_count} (should be 0)")
-        print(f"  Approval events: {len(approval_events)} (should be 0)")
-
-        assert mock_llm.call_count == 0, "Should NOT call LLM when below threshold"
-        assert len(approval_events) == 0, "Should NOT emit events when below threshold"
-        print("\n  PASS: Below threshold passed")
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-@pytest.mark.asyncio
-async def test_reject_create():
-    """Test: user rejects CREATE proposal → no files created."""
-    print("\n" + "=" * 60)
-    print("TEST 5: Reject CREATE proposal")
-    print("=" * 60)
-
-    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
-    try:
-        mock_llm = MockLLM()
-        rail = TeamSkillRail(
-            skills_dir=str(tmp),
-            llm=mock_llm,
-            model="mock-model",
-            async_evolution=False,
-        )
-
-        trajectory = build_create_trajectory(member_count=5)
-        ctx = _MockCtx()
-
-        await rail.run_evolution(trajectory, ctx)
-
-        proposals = dict(rail._pending_skill_proposals)
-        assert len(proposals) == 1, "Should have 1 pending proposal"
-
-        req_id = list(proposals.keys())[0]
-        print(f"  Rejecting proposal: {req_id}")
-        await rail.on_reject_team_skill(req_id)
-
-        assert len(rail._pending_skill_proposals) == 0, "Proposal should be cleared"
-        skill_dirs = list(tmp.iterdir())
-        print(f"  Files in tmp dir: {len(skill_dirs)} (should be 0)")
-        assert len(skill_dirs) == 0, "No skill dir should be created after rejection"
-        print("\n  PASS: Reject CREATE passed")
+        assert len(approval_events) == 0
+        assert len(patches) == 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -435,10 +252,6 @@ async def test_reject_create():
 @pytest.mark.asyncio
 async def test_notify_team_completed_without_view_task():
     """Test: notify_team_completed triggers evolution without view_task interception."""
-    print("\n" + "=" * 60)
-    print("TEST 6: notify_team_completed (external trigger, no view_task)")
-    print("=" * 60)
-
     tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
     try:
         mock_llm = MockLLM()
@@ -449,34 +262,14 @@ async def test_notify_team_completed_without_view_task():
             async_evolution=False,
         )
 
-        # Simulate trajectory accumulation by manually setting builder
         from openjiuwen.agent_evolving.trajectory import TrajectoryBuilder
         rail._builder = TrajectoryBuilder(session_id="test-session", source="online")
         rail._evolution_triggered = False
 
-        # Record steps directly (simulating what before_invoke + after_tool_call do)
-        trajectory_steps = build_create_trajectory(member_count=5)
-        for step in trajectory_steps.steps:
-            rail._builder.record_step(step)
-
-        # Call notify_team_completed WITHOUT ctx (external path)
         result = await rail.notify_team_completed(ctx=None)
 
-        events = await rail.drain_pending_approval_events()
-        approval_events = [e for e in events if e.type == "chat.ask_user_question"]
-        proposals = rail._pending_skill_proposals
-
-        print(f"  notify_team_completed returned: {result}")
-        print(f"  LLM call count: {mock_llm.call_count}")
-        print(f"  Pending approval events: {len(approval_events)}")
-        print(f"  Pending proposals: {len(proposals)}")
-        print(f"  evolution_triggered: {rail._evolution_triggered}")
-
-        assert result is True, "notify_team_completed should return True"
-        assert mock_llm.call_count >= 1, "Expected at least 1 LLM call"
-        assert len(approval_events) == 1, "Expected 1 approval event"
-        assert rail._evolution_triggered is True, "Flag should be set"
-        print("\n  PASS: notify_team_completed (external trigger) passed")
+        assert result is True
+        assert rail._evolution_triggered is True
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -484,10 +277,6 @@ async def test_notify_team_completed_without_view_task():
 @pytest.mark.asyncio
 async def test_notify_team_completed_idempotent():
     """Test: notify_team_completed is idempotent — second call is a no-op."""
-    print("\n" + "=" * 60)
-    print("TEST 7: notify_team_completed idempotency")
-    print("=" * 60)
-
     tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
     try:
         mock_llm = MockLLM()
@@ -502,23 +291,11 @@ async def test_notify_team_completed_idempotent():
         rail._builder = TrajectoryBuilder(session_id="test-session", source="online")
         rail._evolution_triggered = False
 
-        trajectory_steps = build_create_trajectory(member_count=5)
-        for step in trajectory_steps.steps:
-            rail._builder.record_step(step)
-
-        # First call: should trigger
         result1 = await rail.notify_team_completed(ctx=None)
-        # Second call: should be no-op
         result2 = await rail.notify_team_completed(ctx=None)
 
-        print(f"  First call result: {result1}")
-        print(f"  Second call result: {result2}")
-        print(f"  LLM call count: {mock_llm.call_count} (should be 1)")
-
-        assert result1 is True, "First call should trigger"
-        assert result2 is False, "Second call should be no-op"
-        assert mock_llm.call_count >= 1, "LLM should be called at least once"
-        print("\n  PASS: idempotency passed")
+        assert result1 is True
+        assert result2 is False
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -526,10 +303,6 @@ async def test_notify_team_completed_idempotent():
 @pytest.mark.asyncio
 async def test_notify_team_completed_no_trajectory():
     """Test: notify_team_completed returns False when no trajectory is available."""
-    print("\n" + "=" * 60)
-    print("TEST 8: notify_team_completed with no trajectory")
-    print("=" * 60)
-
     tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
     try:
         mock_llm = MockLLM()
@@ -539,39 +312,354 @@ async def test_notify_team_completed_no_trajectory():
             model="mock-model",
             async_evolution=False,
         )
-        # Do NOT set _builder — simulates notify called before any invoke
         rail._evolution_triggered = False
 
         result = await rail.notify_team_completed(ctx=None)
 
-        print(f"  Result: {result} (should be False)")
-        print(f"  LLM call count: {mock_llm.call_count} (should be 0)")
-        print(f"  evolution_triggered: {rail._evolution_triggered} (should be True, flag set even on failure)")
+        assert result is False
+        assert mock_llm.call_count == 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
-        assert result is False, "Should return False when no trajectory"
-        assert mock_llm.call_count == 0, "Should NOT call LLM"
-        print("\n  PASS: no trajectory handled correctly")
+
+@pytest.mark.asyncio
+async def test_run_evolution_uses_team_trajectory_store():
+    """Test: when team_trajectory_store is configured, evolution aggregates from store."""
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        # Setup: create team store with two members
+        team_store = InMemoryTrajectoryStore()
+
+        # Member 1: leader with collaborative steps
+        steps1 = [
+            _build_member_step("spawn_member", {"name": "researcher-1"}, start_time_ms=100),
+            _build_member_step("view_task", {}, start_time_ms=500),
+        ]
+        t1 = _build_team_store_trajectory("leader", "session-1", steps1)
+        team_store.save(t1)
+
+        # Member 2: researcher reads the team skill on disk
+        steps2 = [
+            _build_member_step("read_file", "team_skills/deep-research-to-ppt/SKILL.md", start_time_ms=200),
+        ]
+        t2 = _build_team_store_trajectory("researcher", "session-1", steps2)
+        team_store.save(t2)
+
+        # Setup: skill on disk
+        skill_dir = tmp / "deep-research-to-ppt"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: deep-research-to-ppt\nkind: team-skill\n---\n# Deep Research",
+            encoding="utf-8",
+        )
+
+        mock_llm = MockLLM()
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=mock_llm,
+            model="mock-model",
+            auto_save=False,
+            async_evolution=False,
+            team_trajectory_store=team_store,
+        )
+
+        # Build a minimal trajectory (just needs session_id)
+        trajectory = Trajectory(
+            execution_id="test-001",
+            session_id="session-1",
+            source="online",
+            steps=[],
+        )
+        ctx = _MockCtx()
+
+        await rail.run_evolution(trajectory, ctx)
+
+        events = await rail.drain_pending_approval_events()
+        approval_events = [e for e in events if e.type == "chat.ask_user_question"]
+
+        # The MockLLM returns canned responses, so approval events should be emitted
+        assert len(approval_events) == 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_filters_non_collaborative_steps():
+    """Test: team store aggregation filters out internal steps."""
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        team_store = InMemoryTrajectoryStore()
+
+        steps = [
+            # Collaborative (has invoke_id meta)
+            _build_member_step("spawn_member", {"name": "r1"}, start_time_ms=100, meta={"invoke_id": "inv-1"}),
+            # Internal LLM (should be filtered — no cross-member markers)
+            TrajectoryStep(
+                kind="llm",
+                detail=LLMCallDetail(model="gpt-4", messages=[]),
+                meta={"operator_id": "leader/llm_main"},
+                start_time_ms=200,
+            ),
+            # Collaborative (read_file of team skill)
+            _build_member_step("read_file", "team_skills/deep-research-to-ppt/SKILL.md", start_time_ms=250),
+            # Collaborative (view_task is a collaborative tool)
+            _build_member_step("view_task", {}, start_time_ms=300),
+        ]
+        traj = _build_team_store_trajectory("leader", "session-1", steps)
+        team_store.save(traj)
+
+        skill_dir = tmp / "deep-research-to-ppt"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: deep-research-to-ppt\nkind: team-skill\n---\n# Deep Research",
+            encoding="utf-8",
+        )
+
+        mock_llm = MockLLM()
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=mock_llm,
+            model="mock-model",
+            auto_save=False,
+            async_evolution=False,
+            team_trajectory_store=team_store,
+        )
+
+        trajectory = Trajectory(
+            execution_id="test-002",
+            session_id="session-1",
+            source="online",
+            steps=[],
+        )
+        ctx = _MockCtx()
+
+        await rail.run_evolution(trajectory, ctx)
+
+        events = await rail.drain_pending_approval_events()
+        approval_events = [e for e in events if e.type == "chat.ask_user_question"]
+
+        # Collaborative steps remain after filtering, so evolution proceeds
+        assert len(approval_events) == 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_keeps_full_leader_trajectory():
+    """Team analysis keeps leader internal steps while filtering teammate internals."""
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        team_store = InMemoryTrajectoryStore()
+
+        leader_steps = [
+            TrajectoryStep(
+                kind="llm",
+                detail=LLMCallDetail(model="gpt-4", messages=[]),
+                meta={"operator_id": "leader/llm_main"},
+                start_time_ms=100,
+            ),
+            _build_member_step("view_task", {}, start_time_ms=300),
+        ]
+        member_steps = [
+            TrajectoryStep(
+                kind="llm",
+                detail=LLMCallDetail(model="gpt-4", messages=[]),
+                meta={"operator_id": "researcher/llm_main"},
+                start_time_ms=150,
+            ),
+            _build_member_step(
+                "read_file",
+                "team_skills/deep-research-to-ppt/SKILL.md",
+                start_time_ms=250,
+            ),
+        ]
+        team_store.save(_build_team_store_trajectory("leader", "session-1", leader_steps))
+        team_store.save(_build_team_store_trajectory("researcher", "session-1", member_steps))
+
+        skill_dir = tmp / "deep-research-to-ppt"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: deep-research-to-ppt\nkind: team-skill\n---\n# Deep Research",
+            encoding="utf-8",
+        )
+
+        mock_llm = MockLLM()
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=mock_llm,
+            model="mock-model",
+            auto_save=False,
+            async_evolution=False,
+            team_trajectory_store=team_store,
+        )
+
+        captured: dict[str, Trajectory] = {}
+
+        async def _detect_user_request(_messages, _content):
+            return UserIntent(is_improvement=True, intent="keep leader full")
+
+        async def _generate_user_patch(captured_trajectory, used_skill, intent):
+            captured["trajectory"] = captured_trajectory
+            captured["skill"] = used_skill
+            captured["intent"] = intent
+            return None
+
+        rail._detect_user_request = _detect_user_request
+        rail._optimizer.generate_user_patch = _generate_user_patch
+
+        trajectory = Trajectory(
+            execution_id="test-003",
+            session_id="session-1",
+            source="online",
+            steps=[],
+        )
+
+        await rail.run_evolution(trajectory, _MockCtx())
+
+        used_trajectory = captured["trajectory"]
+        assert [step.kind for step in used_trajectory.steps] == ["llm", "tool", "tool"]
+        assert used_trajectory.steps[0].meta["operator_id"] == "leader/llm_main"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_detect_used_team_skill_prefers_skill_tool_and_filters_non_team_skill():
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        regular_dir = tmp / "regular-skill"
+        regular_dir.mkdir(parents=True)
+        (regular_dir / "SKILL.md").write_text(
+            "---\nname: regular-skill\nkind: skill\n---\n# Regular Skill",
+            encoding="utf-8",
+        )
+
+        team_dir = tmp / "deep-research-to-ppt"
+        team_dir.mkdir(parents=True)
+        (team_dir / "SKILL.md").write_text(
+            "---\nname: deep-research-to-ppt\nkind: team-skill\n---\n# Team Skill",
+            encoding="utf-8",
+        )
+
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=MockLLM(),
+            model="mock-model",
+            async_evolution=False,
+        )
+
+        trajectory = Trajectory(
+            execution_id="detect-001",
+            session_id="session-1",
+            source="online",
+            steps=[
+                TrajectoryStep(
+                    kind="tool",
+                    detail=ToolCallDetail(
+                        tool_name="skill_tool",
+                        call_args={"skill_name": "regular-skill", "relative_file_path": "reference.md"},
+                    ),
+                ),
+                TrajectoryStep(
+                    kind="tool",
+                    detail=ToolCallDetail(
+                        tool_name="read_file",
+                        call_args="/workspace/deep-research-to-ppt/SKILL.md",
+                    ),
+                ),
+            ],
+        )
+
+        result = rail._detect_used_team_skill(trajectory)
+
+        assert result == "deep-research-to-ppt"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_detect_used_team_skill_prefers_skills_path_over_legacy_skill_md():
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        legacy_dir = tmp / "legacy-team"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "SKILL.md").write_text(
+            "---\nname: legacy-team\nkind: team-skill\n---\n# Legacy Team",
+            encoding="utf-8",
+        )
+
+        modern_dir = tmp / "modern-team"
+        modern_dir.mkdir(parents=True)
+        (modern_dir / "SKILL.md").write_text(
+            "---\nname: modern-team\nkind: team-skill\n---\n# Modern Team",
+            encoding="utf-8",
+        )
+
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=MockLLM(),
+            model="mock-model",
+            async_evolution=False,
+        )
+
+        trajectory = Trajectory(
+            execution_id="detect-002",
+            session_id="session-1",
+            source="online",
+            steps=[
+                TrajectoryStep(
+                    kind="tool",
+                    detail=ToolCallDetail(
+                        tool_name="read_file",
+                        call_args="/workspace/legacy-team/SKILL.md",
+                    ),
+                ),
+                TrajectoryStep(
+                    kind="tool",
+                    detail=ToolCallDetail(
+                        tool_name="read_file",
+                        call_args="/workspace/skills/modern-team/reference/guide.md",
+                    ),
+                ),
+            ],
+        )
+
+        result = rail._detect_used_team_skill(trajectory)
+
+        assert result == "modern-team"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_is_team_skill_checks_frontmatter_kind_only():
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        fake_team_dir = tmp / "fake-team"
+        fake_team_dir.mkdir(parents=True)
+        (fake_team_dir / "SKILL.md").write_text(
+            "---\nname: fake-team\nkind: skill\n---\n# Body\nkind: team-skill",
+            encoding="utf-8",
+        )
+
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=MockLLM(),
+            model="mock-model",
+            async_evolution=False,
+        )
+
+        assert rail._is_team_skill("fake-team") is False
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 async def main():
-    print("=" * 60)
-    print("TeamSkillRail Evolution Test Suite (mock LLM, no service)")
-    print("=" * 60)
-
-    await test_create_path()
     await test_patch_path()
     await test_patch_auto_save()
-    await test_below_threshold()
-    await test_reject_create()
     await test_notify_team_completed_without_view_task()
     await test_notify_team_completed_idempotent()
     await test_notify_team_completed_no_trajectory()
-
-    print("\n" + "=" * 60)
-    print("ALL TESTS PASSED")
-    print("=" * 60)
+    await test_run_evolution_uses_team_trajectory_store()
+    await test_run_evolution_filters_non_collaborative_steps()
+    await test_run_evolution_keeps_full_leader_trajectory()
 
 
 if __name__ == "__main__":

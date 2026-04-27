@@ -14,8 +14,6 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-import logging as _logging
-
 from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionPatch,
     EvolutionRecord,
@@ -23,10 +21,7 @@ from openjiuwen.agent_evolving.checkpointing.types import (
     PendingTeamSkillCreation,
 )
 from openjiuwen.agent_evolving.trajectory import Trajectory
-
-logger = _logging.getLogger("jiuwenclaw.agentserver.team.team_skill_optimizer")
-
-
+from openjiuwen.core.common.logging import logger
 
 
 _PROPOSE_PROMPT_CN = """\
@@ -203,6 +198,125 @@ Output JSON only."""
 _PROPOSE_PROMPT = {"cn": _PROPOSE_PROMPT_CN, "en": _PROPOSE_PROMPT_EN}
 _PATCH_PROMPT = {"cn": _PATCH_PROMPT_CN, "en": _PATCH_PROMPT_EN}
 
+_USER_PATCH_PROMPT_CN = """\
+根据用户的改进意见，为团队技能生成演进 patch。
+
+当前团队技能：
+- 名称：{skill_name}
+- 描述：{description}
+- 角色：{roles_summary}
+- 工作流：{workflow_summary}
+
+用户意见：{user_intent}
+
+请分析用户意见属于以下哪类演进：
+- Roles：角色增删或数量调整
+- Constraints：新增或修改约束
+- Collaboration：角色间协作经验
+- Instructions：角色职责或任务指引
+- Examples：协作流程示例
+- Troubleshooting：问题排查
+
+生成 patch，包含：
+- section: 上述之一
+- action: append
+- content: 具体的演进内容
+
+输出格式：
+```json
+{{
+  "section": "章节名",
+  "action": "append",
+  "content": "Markdown 格式的经验内容"
+}}
+```
+
+只输出 JSON。"""
+
+_USER_PATCH_PROMPT_EN = """\
+Based on the user's improvement suggestions, generate an evolution patch for the team skill.
+
+Current team skill:
+- Name: {skill_name}
+- Description: {description}
+- Roles: {roles_summary}
+- Workflow: {workflow_summary}
+
+User suggestion: {user_intent}
+
+Please classify the user feedback into one of these evolution categories:
+- Roles: role addition/removal or count adjustment
+- Constraints: new or modified constraints
+- Collaboration: inter-role collaboration experience
+- Instructions: role responsibilities or task guidance
+- Examples: collaboration workflow examples
+- Troubleshooting: problem resolution
+
+Generate a patch with:
+- section: one of the above
+- action: append
+- content: specific evolution content in Markdown
+
+Output format:
+```json
+{{
+  "section": "section name",
+  "action": "append",
+  "content": "Markdown formatted experience content"
+}}
+```
+
+Output JSON only."""
+
+_USER_PATCH_PROMPT = {"cn": _USER_PATCH_PROMPT_CN, "en": _USER_PATCH_PROMPT_EN}
+
+
+_TRAJECTORY_PATCH_PROMPT_CN = """\
+分析以下执行轨迹，判断团队技能是否需要演进。
+
+当前团队技能：{skill_content}
+执行轨迹：{trajectory_summary}
+轨迹分析发现的不足：{trajectory_issues}
+
+如果轨迹显示团队技能存在不足（角色配合不当、约束被违反、流程低效），
+生成演进 patch。多数情况下不需要 patch（need_patch=false）。
+
+输出格式：
+```json
+{{
+  "need_patch": true/false,
+  "section": "章节名（如 Workflow、Collaboration、Constraints 等）",
+  "content": "Markdown 格式的经验内容",
+  "reason": "为什么值得沉淀（仅 need_patch=true 时填写）"
+}}
+```
+
+只输出 JSON。"""
+
+_TRAJECTORY_PATCH_PROMPT_EN = """\
+Analyze the following execution trajectory and determine whether the team skill needs evolution.
+
+Current team skill: {skill_content}
+Trajectory summary: {trajectory_summary}
+Detected issues: {trajectory_issues}
+
+If the trajectory shows team skill deficiencies (poor role coordination, constraint violations, inefficient workflows),
+generate an evolution patch. Most of the time need_patch should be false.
+
+Output format:
+```json
+{{
+  "need_patch": true/false,
+  "section": "section name (e.g. Workflow, Collaboration, Constraints)",
+  "content": "Markdown formatted experience content",
+  "reason": "Why worth capturing (only when need_patch=true)"
+}}
+```
+
+Output JSON only."""
+
+_TRAJECTORY_PATCH_PROMPT = {"cn": _TRAJECTORY_PATCH_PROMPT_CN, "en": _TRAJECTORY_PATCH_PROMPT_EN}
+
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*\n(.*?)```", re.DOTALL)
 
 
@@ -277,6 +391,22 @@ class TeamSkillOptimizer:
         self._language = language
         self._debug_dir = debug_dir
 
+    # Public properties for external access
+    @property
+    def language(self) -> str:
+        """Get the language setting (cn or en)."""
+        return self._language
+
+    @property
+    def llm(self) -> Any:
+        """Get the LLM client."""
+        return self._llm
+
+    @property
+    def model(self) -> str:
+        """Get the model name."""
+        return self._model
+
     def update_llm(self, llm: Any, model: str) -> None:
         self._llm = llm
         self._model = model
@@ -293,7 +423,8 @@ class TeamSkillOptimizer:
         summary = self._build_trajectory_summary(trajectory)
         logger.info(
             "[TeamSkillOptimizer] propose: summary_len=%d, model=%s",
-            len(summary), self._model,
+            len(summary),
+            self._model,
         )
 
         prompt = _PROPOSE_PROMPT.get(self._language, _PROPOSE_PROMPT_EN).format(
@@ -303,7 +434,8 @@ class TeamSkillOptimizer:
         approx_tokens = len(prompt) // 4
         logger.info(
             "[TeamSkillOptimizer] propose: prompt_len=%d (~%d tokens)",
-            len(prompt), approx_tokens,
+            len(prompt),
+            approx_tokens,
         )
 
         t0 = time.time()
@@ -341,7 +473,9 @@ class TeamSkillOptimizer:
         summary = self._build_trajectory_summary(trajectory)
         logger.info(
             "[TeamSkillOptimizer] patch: skill='%s', summary_len=%d, content_len=%d",
-            skill_name, len(summary), len(current_skill_content),
+            skill_name,
+            len(summary),
+            len(current_skill_content),
         )
 
         prompt = _PATCH_PROMPT.get(self._language, _PATCH_PROMPT_EN).format(
@@ -351,7 +485,9 @@ class TeamSkillOptimizer:
         approx_tokens = len(prompt) // 4
         logger.info(
             "[TeamSkillOptimizer] patch: prompt_len=%d (~%d tokens), model=%s",
-            len(prompt), approx_tokens, self._model,
+            len(prompt),
+            approx_tokens,
+            self._model,
         )
 
         t0 = time.time()
@@ -376,11 +512,141 @@ class TeamSkillOptimizer:
 
         logger.info(
             "[TeamSkillOptimizer] patch: generated for section='%s', content_len=%d",
-            section, len(content),
+            section,
+            len(content),
         )
         return EvolutionRecord.make(
             source="team_skill_evolution",
             context=parsed.get("reason", "Auto-detected from trajectory"),
+            change=EvolutionPatch(
+                section=section,
+                action="append",
+                content=content,
+                target=EvolutionTarget.BODY,
+            ),
+        )
+
+    async def generate_user_patch(
+        self,
+        trajectory: Trajectory,
+        skill_name: str,
+        user_intent: str,
+    ) -> Optional[EvolutionRecord]:
+        """Generate a patch based on explicit user improvement intent."""
+        description = "team-skill"
+        roles_summary = "N/A"
+        workflow_summary = "N/A"
+
+        # Try to extract frontmatter info from trajectory if available
+        summary = self._build_trajectory_summary(trajectory)
+        # Derive rough roles/workflow from trajectory tool calls
+        if "spawn_member" in summary:
+            role_mentions = re.findall(r"role[_-]?([a-z]+)", summary, re.IGNORECASE)
+            if role_mentions:
+                roles_summary = ", ".join(set(role_mentions[:5]))
+        if "workflow" in summary.lower() or "mermaid" in summary.lower():
+            workflow_summary = "Present in trajectory"
+
+        prompt_template = _USER_PATCH_PROMPT.get(self._language, _USER_PATCH_PROMPT_EN)
+        prompt = prompt_template.format(
+            skill_name=skill_name,
+            description=description,
+            roles_summary=roles_summary,
+            workflow_summary=workflow_summary,
+            user_intent=user_intent,
+        )
+
+        t0 = time.time()
+        raw = await self._call_llm(prompt)
+        elapsed = time.time() - t0
+
+        if not raw or not raw.strip():
+            logger.warning("[TeamSkillOptimizer] user_patch: empty LLM response (%.1fs)", elapsed)
+            return None
+
+        parsed = self._parse_json(raw)
+        if not parsed:
+            logger.warning("[TeamSkillOptimizer] user_patch: failed to parse LLM response")
+            return None
+
+        section = parsed.get("section", "Instructions")
+        content = parsed.get("content", "")
+        if not content.strip():
+            logger.warning("[TeamSkillOptimizer] user_patch: LLM returned empty content")
+            return None
+
+        logger.info(
+            "[TeamSkillOptimizer] user_patch: section='%s', content_len=%d (%.1fs)",
+            section,
+            len(content),
+            elapsed,
+        )
+        return EvolutionRecord.make(
+            source="team_skill_user_patch",
+            context=f"User intent: {user_intent[:200]}",
+            change=EvolutionPatch(
+                section=section,
+                action="append",
+                content=content,
+                target=EvolutionTarget.BODY,
+            ),
+        )
+
+    async def generate_trajectory_patch(
+        self,
+        trajectory: Trajectory,
+        skill_name: str,
+        trajectory_issues: list[dict],
+    ) -> Optional[EvolutionRecord]:
+        """Generate a patch based on trajectory issue analysis."""
+        try:
+            summary = self._build_trajectory_summary(trajectory)
+        except Exception as exc:
+            logger.warning("[TeamSkillOptimizer] trajectory_patch: failed to build summary: %s", exc)
+            return None
+
+        issues_text = json.dumps(trajectory_issues, ensure_ascii=False, indent=2) if trajectory_issues else "N/A"
+
+        prompt_template = _TRAJECTORY_PATCH_PROMPT.get(self._language, _TRAJECTORY_PATCH_PROMPT_EN)
+        prompt = prompt_template.format(
+            skill_content="(see current skill content)",
+            trajectory_summary=summary,
+            trajectory_issues=issues_text[:5000],
+        )
+
+        t0 = time.time()
+        raw = await self._call_llm(prompt)
+        elapsed = time.time() - t0
+
+        if not raw or not raw.strip():
+            logger.warning("[TeamSkillOptimizer] trajectory_patch: empty LLM response (%.1fs)", elapsed)
+            return None
+
+        parsed = self._parse_json(raw)
+        if not parsed:
+            logger.warning("[TeamSkillOptimizer] trajectory_patch: failed to parse LLM response")
+            return None
+
+        if not parsed.get("need_patch"):
+            reason = parsed.get("reason", "N/A")
+            logger.info("[TeamSkillOptimizer] trajectory_patch: no patch needed, reason: %s", reason)
+            return None
+
+        section = parsed.get("section", "Workflow")
+        content = parsed.get("content", "")
+        if not content.strip():
+            logger.warning("[TeamSkillOptimizer] trajectory_patch: LLM returned empty content")
+            return None
+
+        logger.info(
+            "[TeamSkillOptimizer] trajectory_patch: section='%s', content_len=%d (%.1fs)",
+            section,
+            len(content),
+            elapsed,
+        )
+        return EvolutionRecord.make(
+            source="team_skill_trajectory_patch",
+            context=f"Trajectory issues: {issues_text[:200]}",
             change=EvolutionPatch(
                 section=section,
                 action="append",
@@ -437,7 +703,11 @@ class TeamSkillOptimizer:
         logger.info(
             "[TeamSkillOptimizer] trajectory summary: %d LLM steps, %d tool steps, "
             "tool_section_len=%d, llm_section_len=%d, total_len=%d",
-            llm_count, tool_count, len(tool_section), len(llm_section), len(full),
+            llm_count,
+            tool_count,
+            len(tool_section),
+            len(llm_section),
+            len(full),
         )
         return full
 
@@ -487,7 +757,8 @@ class TeamSkillOptimizer:
 
             logger.info(
                 "[TeamSkillOptimizer] LLM call done: %.1fs, response_len=%d",
-                elapsed, len(result),
+                elapsed,
+                len(result),
             )
             return result
         except Exception as exc:
@@ -505,11 +776,14 @@ class TeamSkillOptimizer:
 
         Returns new body text, or None if LLM fails or declines.
         """
-        evo_summary = "\n".join(
-            f"- [{getattr(r, 'id', '?')}] {getattr(getattr(r, 'change', None), 'section', '?')}: "
-            f"{getattr(getattr(r, 'change', None), 'content', '')[:200]}"
-            for r in evolution_records[:20]
-        ) or "(no evolutions)"
+        evo_summary = (
+            "\n".join(
+                f"- [{getattr(r, 'id', '?')}] {getattr(getattr(r, 'change', None), 'section', '?')}: "
+                f"{getattr(getattr(r, 'change', None), 'content', '')[:200]}"
+                for r in evolution_records[:20]
+            )
+            or "(no evolutions)"
+        )
 
         intent_section = f"\n\n## 用户意图\n{user_intent}" if user_intent else ""
 
@@ -588,15 +862,31 @@ class TeamSkillOptimizer:
                 continue
             seen.add(cand)
             data = _try_parse_json(cand)
-            if isinstance(data, dict):
+            if isinstance(data, (dict, list)):
                 return data
 
         head = raw[:600].replace("\n", "\\n")
         logger.warning(
             "[TeamSkillOptimizer] JSON parse failed (raw_len=%d, head=%r)",
-            len(raw), head,
+            len(raw),
+            head,
         )
         return None
 
+    # Public wrappers for static methods (used by TeamSkillRail)
+    @staticmethod
+    def build_trajectory_summary(trajectory: Trajectory) -> str:
+        """Public wrapper for _build_trajectory_summary."""
+        return TeamSkillOptimizer._build_trajectory_summary(trajectory)
 
-__all__ = ["TeamSkillOptimizer"]
+    @staticmethod
+    def parse_json(raw: str) -> Optional[Dict]:
+        """Public wrapper for _parse_json."""
+        return TeamSkillOptimizer._parse_json(raw)
+
+
+__all__ = [
+    "TeamSkillOptimizer",
+    "_USER_PATCH_PROMPT",
+    "_TRAJECTORY_PATCH_PROMPT",
+]

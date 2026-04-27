@@ -45,7 +45,7 @@ class TestTeamWorkspaceConfig:
     def test_defaults(self):
         cfg = TeamWorkspaceConfig()
         assert cfg.enabled is False
-        assert cfg.artifact_dirs == ["artifacts/code", "artifacts/docs", "artifacts/reports"]
+        assert cfg.artifact_dirs == ["artifacts/code", "artifacts/docs", "artifacts/reports", "trajectories"]
         assert cfg.version_control is True
         assert cfg.conflict_strategy == ConflictStrategy.LOCK
         assert cfg.remote_url is None

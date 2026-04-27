@@ -16,6 +16,7 @@ from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionRecord,
 )
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
+    SKILL_EXPERIENCE_GENERATE_PROMPT,
     SkillExperienceOptimizer,
     _build_conversation_snippet,
     _build_context,
@@ -170,11 +171,7 @@ class TestParsing:
         assert len(patches) == 1
         assert patches[0].merge_target is None
 
-        mixed = (
-            "prefix text "
-            "{\"action\":\"append\",\"target\":\"invalid\","
-            "\"section\":\"NotExist\",\"content\":\"X\"} suffix"
-        )
+        mixed = 'prefix text {"action":"append","target":"invalid","section":"NotExist","content":"X"} suffix'
         patches2 = _parse_llm_response(mixed)
         assert len(patches2) == 1
         assert patches2[0].section == "Troubleshooting"
@@ -192,15 +189,17 @@ class TestParsing:
 
     @staticmethod
     def test_parse_single_patch_with_script_fields():
-        patch = _parse_single_patch({
-            "action": "append",
-            "target": "script",
-            "section": "Scripts",
-            "content": "import os",
-            "script_filename": "setup.py",
-            "script_language": "python",
-            "script_purpose": "environment setup",
-        })
+        patch = _parse_single_patch(
+            {
+                "action": "append",
+                "target": "script",
+                "section": "Scripts",
+                "content": "import os",
+                "script_filename": "setup.py",
+                "script_language": "python",
+                "script_purpose": "environment setup",
+            }
+        )
         assert patch.target == EvolutionTarget.SCRIPT
         assert patch.script_filename == "setup.py"
         assert patch.script_language == "python"
@@ -290,13 +289,14 @@ class TestFixJsonText:
         fixed = _fix_json_text(text)
         assert "//" not in fixed
         import json
+
         assert json.loads(fixed) == [{"a": 1}]
 
 
 class TestExtractJson:
     @staticmethod
     def test_direct_parse():
-        assert _extract_json('[1, 2]') == [1, 2]
+        assert _extract_json("[1, 2]") == [1, 2]
 
     @staticmethod
     def test_with_markdown_fence():
@@ -367,7 +367,9 @@ class TestConversationSnippetTruncation:
     def test_recency_bias_last_messages_get_more_budget():
         messages = [{"role": "user", "content": "x" * 400} for _ in range(10)]
         snippet = _build_conversation_snippet(
-            messages, content_preview_chars=200, language="cn",
+            messages,
+            content_preview_chars=200,
+            language="cn",
         )
         lines = snippet.strip().split("\n")
         last_line = lines[-1]
@@ -401,11 +403,7 @@ class TestRetryParse:
     @pytest.mark.asyncio
     async def test_retry_on_truncated_uses_original_prompt():
         llm = MagicMock()
-        llm.invoke = AsyncMock(
-            return_value=SimpleNamespace(
-                content='[{"action":"skip","skip_reason":"irrelevant"}]'
-            )
-        )
+        llm.invoke = AsyncMock(return_value=SimpleNamespace(content='[{"action":"skip","skip_reason":"irrelevant"}]'))
         optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
         truncated_raw = '[{"action":"append","target":"body","section":"Troubleshooting","content":"partial'
         patches, _ = await optimizer.retry_parse(
@@ -441,9 +439,7 @@ class TestRetryParse:
     @pytest.mark.asyncio
     async def test_retry_passes_parse_error_to_fix_prompt():
         llm = MagicMock()
-        llm.invoke = AsyncMock(
-            return_value=SimpleNamespace(content='[{"action":"skip","skip_reason":"irrelevant"}]')
-        )
+        llm.invoke = AsyncMock(return_value=SimpleNamespace(content='[{"action":"skip","skip_reason":"irrelevant"}]'))
         optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
         await optimizer.retry_parse(
             broken_raw="not json at all",
@@ -590,3 +586,32 @@ class TestScriptLimit:
         assert len(script_recs) == 1
         assert text_recs[0].change.content == "A"
         assert text_recs[1].change.content == "B"
+
+
+class TestPromptRoleConstraints:
+    """SKILL_EXPERIENCE_GENERATE_PROMPT must contain role constraints and Collaboration section."""
+
+    @staticmethod
+    def test_role_constraint_in_cn_prompt():
+        """中文 prompt 必须包含角色约束段落。"""
+        prompt = SKILL_EXPERIENCE_GENERATE_PROMPT["cn"]
+        assert "角色约束" in prompt
+        assert "演进经验必须遵从 Agent 的角色能力和主要任务目标" in prompt
+
+    @staticmethod
+    def test_role_constraint_in_en_prompt():
+        """英文 prompt 必须包含角色约束段落。"""
+        prompt = SKILL_EXPERIENCE_GENERATE_PROMPT["en"]
+        assert "Role Constraints" in prompt or "role constraints" in prompt.lower()
+
+    @staticmethod
+    def test_collaboration_section_in_cn_prompt():
+        """中文 prompt 的 section 参考列表必须包含 Collaboration。"""
+        prompt = SKILL_EXPERIENCE_GENERATE_PROMPT["cn"]
+        assert "Collaboration" in prompt
+
+    @staticmethod
+    def test_collaboration_section_in_en_prompt():
+        """英文 prompt 的 section 参考列表必须包含 Collaboration。"""
+        prompt = SKILL_EXPERIENCE_GENERATE_PROMPT["en"]
+        assert "Collaboration" in prompt

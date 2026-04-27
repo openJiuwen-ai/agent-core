@@ -4,12 +4,13 @@
 Utility functions for self-evolving operations.
 
 Includes parameter validation, case/message/template serialization,
-and JSON/list parsing from LLM outputs.
+JSON/list parsing from LLM outputs, and skill trace inference helpers.
 """
 
 import re
 import json
-from typing import Optional, List, Dict, Any, Union
+from dataclasses import dataclass
+from typing import Optional, List, Dict, Any, Union, Iterable
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -17,6 +18,92 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm import BaseMessage, AssistantMessage
 from openjiuwen.agent_evolving.dataset import Case, EvaluatedCase
+
+_LEGACY_SKILL_MD_RE = re.compile(r"[/\\]([^/\\]+)[/\\]SKILL\.md", re.IGNORECASE)
+_SKILLS_PATH_RE = re.compile(r"[/\\]skills[/\\]([^/\\]+)(?=[/\\])", re.IGNORECASE)
+_INLINE_SKILL_TOOL_RE = re.compile(
+    r"\bskill_tool\s*\(\s*skill_name\s*=\s*['\"]?([A-Za-z0-9._-]+)['\"]?",
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class SkillReferenceScore:
+    """Priority-aware score for a detected skill reference."""
+
+    skill_tool_hits: int = 0
+    skills_path_hits: int = 0
+    legacy_skill_md_hits: int = 0
+
+    def ranking_key(self) -> tuple[int, int, int]:
+        """Return the priority-sorted ranking key."""
+        return (
+            self.skill_tool_hits,
+            self.skills_path_hits,
+            self.legacy_skill_md_hits,
+        )
+
+
+def infer_skill_from_texts(
+    skill_names: Iterable[str],
+    *,
+    skill_tool_payloads: Iterable[Any] = (),
+    texts: Iterable[str] = (),
+) -> Optional[str]:
+    """Infer the most likely referenced skill from ordered trace sources."""
+    known_skills = set(skill_names)
+    if not known_skills:
+        return None
+
+    hits: dict[str, SkillReferenceScore] = {}
+
+    for payload in skill_tool_payloads:
+        skill_name = _extract_skill_tool_name(payload)
+        if skill_name in known_skills:
+            hits.setdefault(skill_name, SkillReferenceScore()).skill_tool_hits += 1
+
+    for text in texts:
+        for skill_name in _find_skill_tool_mentions(text):
+            if skill_name in known_skills:
+                hits.setdefault(skill_name, SkillReferenceScore()).skill_tool_hits += 1
+
+        for skill_name in _SKILLS_PATH_RE.findall(text):
+            if skill_name in known_skills:
+                hits.setdefault(skill_name, SkillReferenceScore()).skills_path_hits += 1
+
+        for skill_name in _LEGACY_SKILL_MD_RE.findall(text):
+            if skill_name in known_skills:
+                hits.setdefault(skill_name, SkillReferenceScore()).legacy_skill_md_hits += 1
+
+    if not hits:
+        return None
+
+    return max(hits.items(), key=lambda item: item[1].ranking_key())[0]
+
+
+def _extract_skill_tool_name(payload: Any) -> str:
+    """Extract ``skill_name`` from skill_tool arguments when possible."""
+    if isinstance(payload, dict):
+        value = payload.get("skill_name", "")
+        return str(value) if value else ""
+
+    if isinstance(payload, str):
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            return ""
+        if isinstance(parsed, dict):
+            value = parsed.get("skill_name", "")
+            return str(value) if value else ""
+
+    return ""
+
+
+def _find_skill_tool_mentions(text: str) -> list[str]:
+    """Extract inline ``skill_tool(skill_name=...)`` mentions from free text."""
+    if not text:
+        return []
+    return _INLINE_SKILL_TOOL_RE.findall(text)
 
 
 class TuneUtils:

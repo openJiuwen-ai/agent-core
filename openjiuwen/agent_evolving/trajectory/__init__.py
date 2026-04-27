@@ -21,6 +21,11 @@ from openjiuwen.agent_evolving.trajectory.store import (
     InMemoryTrajectoryStore,
     TrajectoryStore,
 )
+from openjiuwen.agent_evolving.trajectory.aggregator import (
+    TeamTrajectory,
+    TeamTrajectoryAggregator,
+    filter_member_trajectory,
+)
 
 __all__ = [
     "LLMCallDetail",
@@ -37,4 +42,7 @@ __all__ = [
     "TrajectoryStore",
     "InMemoryTrajectoryStore",
     "FileTrajectoryStore",
+    "TeamTrajectory",
+    "TeamTrajectoryAggregator",
+    "filter_member_trajectory",
 ]

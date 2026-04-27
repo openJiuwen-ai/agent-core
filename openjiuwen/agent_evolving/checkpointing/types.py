@@ -13,7 +13,7 @@ from openjiuwen.agent_evolving.signal.base import EvolutionSignal, EvolutionTarg
 
 
 # Valid sections for skill evolution
-VALID_SECTIONS = {"Instructions", "Examples", "Troubleshooting", "Scripts"}
+VALID_SECTIONS = {"Instructions", "Examples", "Troubleshooting", "Scripts", "Collaboration", "Roles", "Constraints"}
 
 
 @dataclass

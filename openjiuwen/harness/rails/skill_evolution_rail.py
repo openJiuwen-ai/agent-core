@@ -22,7 +22,6 @@ from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionContext,
     EvolutionTarget,
     PendingChange,
-    PendingSkillCreation,
     UsageStats,
 )
 from openjiuwen.agent_evolving.optimizer.skill_call import (
@@ -39,6 +38,7 @@ from openjiuwen.agent_evolving.signal import (
     make_signal_fingerprint,
 )
 from openjiuwen.agent_evolving.trajectory import Trajectory, TrajectoryStore
+from openjiuwen.agent_evolving.utils import infer_skill_from_texts
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.operator.skill_call import SkillCallOperator
 from openjiuwen.core.session.stream import OutputSchema
@@ -66,6 +66,32 @@ class SkillEvolutionRail(EvolutionRail):
     priority = 80
     _SKILL_MD_RE = re.compile(r"[/\\]([^/\\]+)[/\\]SKILL\.md", re.IGNORECASE)
 
+    _REBUILD_PROMPT_TEMPLATE_CN = (
+        "你收到了一个技能的重建请求。旧版本已归档，请执行以下步骤：\n\n"
+        "## 已筛选的历史演进经验（score >= {min_score}）\n\n"
+        "{evolution_records}\n\n"
+        "## 用户意图\n\n"
+        "{user_intent}\n\n"
+        "## 执行要求\n\n"
+        "请调用 skill-creator 技能：\n"
+        "1. 基于以上历史经验和用户意图，生成新的 SKILL.md\n"
+        "2. 重置 evolutions.json 为空列表\n\n"
+        "旧版本已归档至 archive/ 目录，可直接创建新版本。"
+    )
+
+    _REBUILD_PROMPT_TEMPLATE_EN = (
+        "You received a skill rebuild request. Old version has been archived. Please follow these steps:\n\n"
+        "## Filtered Historical Evolution Records (score >= {min_score})\n\n"
+        "{evolution_records}\n\n"
+        "## User Intent\n\n"
+        "{user_intent}\n\n"
+        "## Execution Requirements\n\n"
+        "Please invoke the skill-creator skill:\n"
+        "1. Generate new SKILL.md based on the historical records and user intent above\n"
+        "2. Reset evolutions.json to empty list\n\n"
+        "Old version has been archived to archive/ directory, you can directly create the new version."
+    )
+
     def __init__(
         self,
         skills_dir: Union[str, List[str]],
@@ -76,10 +102,8 @@ class SkillEvolutionRail(EvolutionRail):
         auto_save: bool = True,
         language: str = "cn",
         trajectory_store: Optional[TrajectoryStore] = None,
+        team_trajectory_store: Optional[TrajectoryStore] = None,
         eval_interval: int = 5,
-        new_skill_detection: bool = True,
-        new_skill_tool_threshold: int = 5,
-        new_skill_tool_diversity: int = 2,
     ) -> None:
         """Initialize SkillEvolutionRail.
 
@@ -92,19 +116,14 @@ class SkillEvolutionRail(EvolutionRail):
             language: Language for experience generation ("cn" or "en")
             trajectory_store: Optional trajectory store (inherited from EvolutionRail)
             eval_interval: Number of conversations between async evaluations
-            new_skill_detection: Whether to enable new skill creation detection
-            new_skill_tool_threshold: Minimum tool calls to trigger new skill detection
-            new_skill_tool_diversity: Minimum unique tool count for new skill detection
         """
-        # Validate configuration parameters
         if eval_interval < 1:
             raise ValueError("eval_interval must be >= 1")
-        if new_skill_tool_threshold < 1:
-            raise ValueError("new_skill_tool_threshold must be >= 1")
-        if new_skill_tool_diversity < 1:
-            raise ValueError("new_skill_tool_diversity must be >= 1")
 
-        super().__init__(trajectory_store=trajectory_store)
+        super().__init__(
+            trajectory_store=trajectory_store,
+            team_trajectory_store=team_trajectory_store
+        )
         self._evolution_store = EvolutionStore(skills_dir)
         self._evolver = SkillExperienceOptimizer(llm, model, language)
         self._scorer = ExperienceScorer(llm, model, language)
@@ -121,15 +140,10 @@ class SkillEvolutionRail(EvolutionRail):
         self._optimizer_language = language
         # request_id → PendingChange: stable per-approval-prompt snapshot batches
         self._pending_approval_snapshots: Dict[str, PendingChange] = {}
-        # New skill proposal storage: request_id → PendingSkillCreation
-        self._pending_skill_proposals: Dict[str, PendingSkillCreation] = {}
         # Governance staging: request_id → {kind, skill_name, actions/new_body}
         self._pending_governance: Dict[str, Dict[str, Any]] = {}
-        # Evaluation and new skill detection settings
+        # Evaluation settings
         self._eval_interval = eval_interval
-        self._new_skill_detection = new_skill_detection
-        self._new_skill_tool_threshold = new_skill_tool_threshold
-        self._new_skill_tool_diversity = new_skill_tool_diversity
         self._language = language
 
     @property
@@ -302,10 +316,8 @@ class SkillEvolutionRail(EvolutionRail):
                     continue
                 skill_groups.setdefault(signal.skill_name, []).append(signal)
 
-            # Branch 1: Evolve existing skills (when signals are attributed to known skills)
-            existing_skill_processed = False
+            # Evolve existing skills (when signals are attributed to known skills)
             for skill_name, skill_signals in skill_groups.items():
-                existing_skill_processed = True
                 if self._auto_save:
                     # Auto-save path: persist immediately without user approval
                     records = await self._generate_experience_for_skill(
@@ -328,47 +340,6 @@ class SkillEvolutionRail(EvolutionRail):
                     )
                     if has_staged:
                         await self._emit_generated_records(ctx, skill_name)
-
-            # Branch 2: Detect new skill creation (only when no existing skill was processed)
-            logger.info(
-                "[SkillEvolutionRail] existing_skill_processed=%s, new_skill_detection=%s",
-                existing_skill_processed,
-                self._new_skill_detection,
-            )
-            if not existing_skill_processed and self._new_skill_detection:
-                logger.info("[SkillEvolutionRail] checking for new skill creation opportunity")
-                should_propose = await self._should_propose_new_skill(parsed_messages)
-                logger.info("[SkillEvolutionRail] new_skill_conditions_met=%s", should_propose)
-                if should_propose:
-                    proposal = await self._generate_new_skill_proposal(parsed_messages)
-                    if proposal:
-                        overlap = await self._check_skill_overlap(
-                            proposal.get("name", ""),
-                            proposal.get("description", ""),
-                        )
-                        if not overlap:
-                            if self._auto_save:
-                                # Auto-save path: create skill immediately without user approval
-                                skill_name = proposal.get("name", "")
-                                created_path = await self._evolution_store.create_skill(
-                                    name=skill_name,
-                                    description=proposal.get("description", ""),
-                                    body=proposal.get("body", ""),
-                                )
-                                if created_path:
-                                    logger.info(
-                                        "[SkillEvolutionRail] auto-saved new skill '%s' at %s",
-                                        skill_name,
-                                        created_path,
-                                    )
-                                else:
-                                    logger.warning(
-                                        "[SkillEvolutionRail] failed to auto-save new skill '%s'",
-                                        skill_name,
-                                    )
-                            else:
-                                # Approval-required path: stage proposal and emit approval request
-                                await self._emit_new_skill_approval(ctx, proposal)
 
             # Trigger async evaluation
             await self._trigger_async_evaluation(presented_entries)
@@ -556,23 +527,23 @@ class SkillEvolutionRail(EvolutionRail):
         skill_names: List[str],
     ) -> Optional[str]:
         """Infer the most likely active skill from SKILL.md read traces in the conversation."""
-        skill_set = set(skill_names)
-        hits: dict[str, int] = {}
+        skill_tool_payloads: list[Any] = []
+        texts: list[str] = []
         for msg in parsed_messages:
             role = msg.get("role", "")
-            texts: list[str] = []
             if role in ("tool", "function"):
-                texts.append(msg.get("content", ""))
+                texts.append(str(msg.get("content", "")))
             elif role == "assistant":
-                texts.extend(tc.get("arguments", "") for tc in msg.get("tool_calls", []))
-            for text in texts:
-                for matched in self._SKILL_MD_RE.finditer(text):
-                    name = matched.group(1)
-                    if name in skill_set:
-                        hits[name] = hits.get(name, 0) + 1
-        if not hits:
-            return None
-        return max(hits, key=hits.get)  # type: ignore[arg-type]
+                for tool_call in msg.get("tool_calls", []):
+                    texts.append(str(tool_call.get("arguments", "")))
+                    if tool_call.get("name") == "skill_tool":
+                        skill_tool_payloads.append(tool_call.get("arguments"))
+
+        return infer_skill_from_texts(
+            skill_names,
+            skill_tool_payloads=skill_tool_payloads,
+            texts=texts,
+        )
 
     async def _generate_experience_via_optimizer(
         self,
@@ -944,187 +915,6 @@ class SkillEvolutionRail(EvolutionRail):
         except Exception as exc:
             logger.warning("[SkillEvolutionRail] async evaluation failed: %s", exc, exc_info=True)
 
-    async def _should_propose_new_skill(
-        self,
-        parsed_messages: List[dict],
-    ) -> bool:
-        """Check if conditions are met for new skill proposal.
-
-        Returns True if:
-        - Tool call count meets threshold
-        - Tool diversity meets threshold
-        """
-        tool_calls: List[dict] = []
-        for msg in parsed_messages:
-            if msg.get("role") == "assistant":
-                calls = msg.get("tool_calls", [])
-                if isinstance(calls, list):
-                    tool_calls.extend(calls)
-
-        logger.info(
-            "[SkillEvolutionRail] new skill check: tool_calls=%d, threshold=%d",
-            len(tool_calls),
-            self._new_skill_tool_threshold,
-        )
-
-        if len(tool_calls) < self._new_skill_tool_threshold:
-            logger.info(
-                "[SkillEvolutionRail] tool call count %d below threshold %d",
-                len(tool_calls),
-                self._new_skill_tool_threshold,
-            )
-            return False
-
-        # Check tool diversity
-        unique_tools = set()
-        for call in tool_calls:
-            if isinstance(call, dict):
-                name = call.get("name", "")
-                if name:
-                    unique_tools.add(name)
-
-        logger.info(
-            "[SkillEvolutionRail] unique_tools=%d, diversity_threshold=%d",
-            len(unique_tools),
-            self._new_skill_tool_diversity,
-        )
-        return len(unique_tools) >= self._new_skill_tool_diversity
-
-    async def _generate_new_skill_proposal(
-        self,
-        parsed_messages: List[dict],
-    ) -> Optional[Dict[str, Any]]:
-        """Generate new skill proposal using optimizer."""
-        existing_skills = self._evolution_store.list_skill_names()
-        return await self._evolver.generate_new_skill_proposal(
-            parsed_messages,
-            existing_skills,
-        )
-
-    async def _check_skill_overlap(
-        self,
-        proposal_name: str,
-        proposal_desc: str,
-    ) -> bool:
-        """Check if proposed skill overlaps with existing skills.
-
-        Returns True if overlap detected (should not propose).
-        """
-        existing_names = self._evolution_store.list_skill_names()
-        proposal_lower = proposal_name.lower()
-
-        for existing in existing_names:
-            # Simple name containment check
-            if proposal_lower in existing.lower() or existing.lower() in proposal_lower:
-                logger.info(
-                    "[SkillEvolutionRail] new skill proposal '%s' overlaps with existing '%s'",
-                    proposal_name,
-                    existing,
-                )
-                return True
-
-        return False
-
-    async def _emit_new_skill_approval(
-        self,
-        ctx: Optional[AgentCallbackContext],
-        proposal: Dict[str, Any],
-    ) -> None:
-        """Emit approval event for new skill creation."""
-        pending = PendingSkillCreation(
-            name=proposal.get("name", ""),
-            description=proposal.get("description", ""),
-            body=proposal.get("body", ""),
-            reason=proposal.get("reason", ""),
-        )
-        proposal_id = pending.proposal_id
-        self._pending_skill_proposals[proposal_id] = pending
-
-        questions = [
-            {
-                "question": (
-                    f"**New Skill Proposal: '{pending.name}'**\n\n"
-                    f"{pending.description}\n\n"
-                    f"**Reason:** {pending.reason}\n\n"
-                    "Create this new skill?"
-                ),
-                "header": "New Skill Creation",
-                "options": [
-                    {"label": "Create", "description": "Create the new skill with proposed content"},
-                    {"label": "Skip", "description": "Discard this proposal"},
-                ],
-                "multi_select": False,
-            }
-        ]
-        event = OutputSchema(
-            type="chat.ask_user_question",
-            index=0,
-            payload={
-                "request_id": proposal_id,
-                "_new_skill_data": {
-                    "name": pending.name,
-                    "description": pending.description,
-                    "body": pending.body,
-                },
-                "questions": questions,
-            },
-        )
-        self._pending_approval_events.append(event)
-        logger.info(
-            "[SkillEvolutionRail] buffered new skill approval request (%s) for '%s'",
-            proposal_id,
-            pending.name,
-        )
-
-    async def on_approve_new_skill(self, request_id: str) -> Optional[str]:
-        """Handle approval of new skill creation.
-
-        Args:
-            request_id: The proposal ID
-
-        Returns:
-            Name of created skill, or None if failed
-        """
-        pending = self._pending_skill_proposals.pop(request_id, None)
-        if not pending:
-            logger.warning("[SkillEvolutionRail] on_approve_new_skill: unknown request_id=%s", request_id)
-            return None
-
-        try:
-            result = await self._evolution_store.create_skill(
-                name=pending.name,
-                description=pending.description,
-                body=pending.body,
-            )
-            if result:
-                logger.info(
-                    "[SkillEvolutionRail] user approved new skill creation: %s",
-                    pending.name,
-                )
-                return pending.name
-            else:
-                logger.error(
-                    "[SkillEvolutionRail] failed to create skill: %s",
-                    pending.name,
-                )
-                return None
-        except Exception as exc:
-            logger.error(
-                "[SkillEvolutionRail] on_approve_new_skill failed for %s: %s",
-                pending.name,
-                exc,
-            )
-            return None
-
-    async def on_reject_new_skill(self, request_id: str) -> None:
-        """Handle rejection of new skill creation."""
-        pending = self._pending_skill_proposals.pop(request_id, None)
-        if pending:
-            logger.info(
-                "[SkillEvolutionRail] user rejected new skill creation: %s",
-                pending.name,
-            )
-
     # ── Governance commands (shared by 1D and team skills) ──
 
     async def request_simplify(
@@ -1215,88 +1005,114 @@ class SkillEvolutionRail(EvolutionRail):
         self,
         skill_name: str,
         user_intent: Optional[str] = None,
+        min_score: float = 0.5,
     ) -> Optional[str]:
-        """Stage a rebuild proposal and emit an approval event.
+        """Build a rebuild prompt for skill.
 
-        Uses SkillRewriter to generate a new body by integrating evolution
-        experiences, then stages it for user approval.
+        Archive old version FIRST, then return prompt containing filtered
+        evolution records. The caller (slash command handler or host) injects
+        this prompt into agent loop, and agent executes skill-creator to
+        generate new SKILL.md.
 
-        Returns request_id on success, None if skill not found or rewrite fails.
+        Args:
+            skill_name: Name of the skill to rebuild.
+            user_intent: Optional user-specified optimization direction.
+            min_score: Minimum score threshold for evolution records to include.
+                Default 0.5 filters out low-quality experiences.
+
+        Returns the followup prompt text on success, None if skill not found.
         """
         store = self._evolution_store
         if not store.skill_exists(skill_name):
             return None
 
-        rewriter = SkillRewriter(
-            self._optimizer_llm,
-            self._optimizer_model,
-            self._optimizer_language,
+        # Step 1: Archive current SKILL.md and evolutions.json BEFORE rebuild
+        try:
+            body_archive = await store.archive_skill_body(skill_name)
+            if body_archive:
+                logger.info(
+                    "[SkillEvolutionRail] archived SKILL.md -> %s for '%s'",
+                    body_archive,
+                    skill_name,
+                )
+
+            evo_archive = await store.archive_evolutions(skill_name)
+            if evo_archive:
+                logger.info(
+                    "[SkillEvolutionRail] archived evolutions.json -> %s for '%s'",
+                    evo_archive,
+                    skill_name,
+                )
+
+            logger.info("[SkillEvolutionRail] archived old version for '%s'", skill_name)
+        except Exception as exc:
+            logger.warning(
+                "[SkillEvolutionRail] archive failed for '%s': %s",
+                skill_name,
+                exc,
+            )
+            # Continue anyway - archive failure shouldn't block rebuild
+
+        # Step 2: Load and filter evolution records
+        records_log = await store.load_full_evolution_log(skill_name)
+        filtered_records = []
+        for record in records_log.entries:
+            score = getattr(record, "score", 0.0)
+            if score < min_score:
+                continue
+            change = getattr(record, "change", None)
+            skip_reason = getattr(change, "skip_reason", None) if change else None
+            if skip_reason:
+                continue
+            filtered_records.append(record)
+
+        # Step 3: Format evolution records as readable text
+        evolution_text = self._format_evolution_records(filtered_records)
+        if self._optimizer_language == "cn":
+            intent = user_intent or "根据以上演进经验，对技能进行全面优化和重建。"
+        else:
+            intent = user_intent or (
+                "Based on the evolution records above, perform a comprehensive rebuild "
+                "of the skill."
+            )
+
+        template = (
+            self._REBUILD_PROMPT_TEMPLATE_CN if self._optimizer_language == "cn"
+            else self._REBUILD_PROMPT_TEMPLATE_EN
         )
-        result = await rewriter.rewrite(
-            skill_name=skill_name,
-            store=store,
-            min_score=0.0,
-            dry_run=True,
-            user_query=user_intent or "",
+
+        logger.info(
+            "[SkillEvolutionRail] rebuild prompt built: skill=%s, "
+            "total_records=%d, filtered_records=%d, min_score=%.2f",
+            skill_name,
+            len(records_log.entries),
+            len(filtered_records),
+            min_score,
         )
-        if result is None:
-            return None
 
-        request_id = f"evolve_rebuild_{uuid.uuid4().hex[:8]}"
-        self._pending_governance[request_id] = {
-            "kind": "rebuild",
-            "skill_name": skill_name,
-            "new_body": result.rewritten_content,
-            "consumed_ids": result.consumed_record_ids,
-        }
-
-        preview = result.rewritten_content[:2000]
-        event = OutputSchema(
-            type="chat.ask_user_question",
-            index=0,
-            payload={
-                "request_id": request_id,
-                "questions": [
-                    {
-                        "question": (
-                            f"**重建 Skill '{skill_name}' 的 Body**\n\n"
-                            f"```markdown\n{preview}\n```\n\n"
-                            f"共整合 {len(result.consumed_record_ids)} 条经验。"
-                            "⚠️ 重建将归档旧 body + 旧 evolutions 并清零经验。\n\n"
-                            "是否执行？"
-                        ),
-                        "header": "Skill 重建审批",
-                        "options": [
-                            {"label": "重建", "description": "用新 body 替换"},
-                            {"label": "取消", "description": "保持现状"},
-                        ],
-                        "multi_select": False,
-                    }
-                ],
-            },
+        return template.format(
+            evolution_records=evolution_text,
+            user_intent=intent,
+            min_score=min_score,
         )
-        self._pending_approval_events.append(event)
-        return request_id
 
-    async def on_approve_rebuild(self, request_id: str) -> bool:
-        """Execute a staged rebuild: archive old → write new → clear evolutions."""
-        gov = self._pending_governance.pop(request_id, None)
-        if not gov:
-            return False
-
-        store = self._evolution_store
-        name = gov["skill_name"]
-        await store.archive_skill_body(name)
-        await store.archive_evolutions(name)
-        await store.write_skill_content(name, gov["new_body"])
-        await store.clear_evolutions(name)
-        logger.info("[SkillEvolutionRail] rebuild completed for %s", name)
-        return True
-
-    async def on_reject_rebuild(self, request_id: str) -> None:
-        gov = self._pending_governance.pop(request_id, None)
-        if gov:
-            logger.info("[SkillEvolutionRail] rebuild rejected for %s", gov["skill_name"])
+    @staticmethod
+    def _format_evolution_records(records: List[EvolutionRecord]) -> str:
+        """Format evolution records as readable markdown text."""
+        lines: List[str] = []
+        for idx, record in enumerate(records, 1):
+            change = record.change
+            section = getattr(change, "section", "?")
+            content = getattr(change, "content", "")
+            source = getattr(record, "source", "unknown")
+            timestamp = getattr(record, "timestamp", "")
+            score = getattr(record, "score", 0.0)
+            lines.append(
+                f"### 经验 #{idx} [{timestamp}] - source: {source}, score: {score:.2f}\n"
+                f"- Section: {section}\n"
+                f"- 内容: {content}"
+            )
+        return "\n\n".join(lines) if lines else "（无演进经验）"
 
     async def rollback_skill(self, skill_name: str, version: Optional[str] = None) -> bool:
         """Rollback skill to an archived version (no approval required)."""

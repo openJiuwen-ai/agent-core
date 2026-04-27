@@ -19,7 +19,7 @@ from openjiuwen.core.single_agent.rail.base import (
     ToolCallInputs,
     InvokeInputs,
 )
-from openjiuwen.harness.rails.evolution_rail import EvolutionRail
+from openjiuwen.harness.rails.evolution_rail import EvolutionRail, EvolutionTriggerPoint
 from openjiuwen.harness.rails.trajectory_rail import TrajectoryRail
 
 
@@ -244,14 +244,13 @@ class TestEvolutionRailAccumulation(IsolatedAsyncioTestCase):
             def _should_accumulate_trajectory(self) -> bool:
                 return True
 
-            def _should_trigger_evolution_after_invoke(self) -> bool:
-                # Defer evolution trigger, like TeamSkillRail
-                return False
-
             async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 evolution_calls.append(trajectory)
 
-        rail = AccumulatingRail(trajectory_store=self.store)
+        rail = AccumulatingRail(
+            trajectory_store=self.store,
+            evolution_trigger=EvolutionTriggerPoint.NONE,
+        )
 
         # Round 1: start, model call, end
         ctx = self._create_ctx(

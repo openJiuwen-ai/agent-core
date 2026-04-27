@@ -63,6 +63,7 @@ def _make_record(
 # calc_effectiveness
 # ---------------------------------------------------------------------------
 
+
 class TestCalcEffectiveness:
     def test_no_data_returns_neutral(self):
         stats = UsageStats()  # all zeros
@@ -97,6 +98,7 @@ class TestCalcEffectiveness:
 # calc_utilization
 # ---------------------------------------------------------------------------
 
+
 class TestCalcUtilization:
     def test_no_presentations_returns_neutral(self):
         stats = UsageStats(times_presented=0, times_used=0)
@@ -118,6 +120,7 @@ class TestCalcUtilization:
 # ---------------------------------------------------------------------------
 # calc_freshness
 # ---------------------------------------------------------------------------
+
 
 class TestCalcFreshness:
     def test_recent_record_high_freshness(self):
@@ -168,6 +171,7 @@ class TestCalcFreshness:
 # calc_score
 # ---------------------------------------------------------------------------
 
+
 class TestCalcScore:
     def test_weights_sum_to_one(self):
         assert W_E + W_U + W_F == pytest.approx(1.0)
@@ -202,6 +206,7 @@ class TestCalcScore:
 # update_score
 # ---------------------------------------------------------------------------
 
+
 class TestUpdateScore:
     def test_positive_result_increases_score(self):
         stats = UsageStats(times_presented=5, times_used=3, times_positive=3)
@@ -235,6 +240,7 @@ class TestUpdateScore:
 # ---------------------------------------------------------------------------
 # ExperienceScorer
 # ---------------------------------------------------------------------------
+
 
 class TestExperienceScorerEvaluate:
     def _make_scorer(self, response_json: str) -> ExperienceScorer:
@@ -321,17 +327,17 @@ class TestExecuteSimplifyActions:
         store = Mock()
         store.merge_records = AsyncMock(return_value=record)
         scorer = ExperienceScorer(llm=Mock(), model="test", language="en")
-        actions = [{
-            "action": "MERGE",
-            "record_id": "ev_001",
-            "merge_remove_ids": ["ev_002", "ev_003"],
-            "new_content": "merged content",
-            "reason": "similar",
-        }]
+        actions = [
+            {
+                "action": "MERGE",
+                "record_id": "ev_001",
+                "merge_remove_ids": ["ev_002", "ev_003"],
+                "new_content": "merged content",
+                "reason": "similar",
+            }
+        ]
         counts = await scorer.execute_simplify_actions(store, "skill-a", actions)
-        store.merge_records.assert_called_once_with(
-            "skill-a", "ev_001", ["ev_002", "ev_003"], "merged content"
-        )
+        store.merge_records.assert_called_once_with("skill-a", "ev_001", ["ev_002", "ev_003"], "merged content")
         assert counts["merged"] == 1
 
     @pytest.mark.asyncio
@@ -413,3 +419,45 @@ class TestExperienceScorerFormatHelpers:
         assert "ev_test02" in result
         assert "0.75" in result
         assert "presented=3" in result
+
+
+class TestExperienceScorerSimplifyNewSections:
+    """Confirm simplify() accepts arbitrary section types (not hardcoded)."""
+
+    @pytest.mark.asyncio
+    async def test_simplify_accepts_collaboration_roles_constraints(self):
+        """simplify 方法应该能处理包含新 section 的记录。"""
+        patches = [
+            EvolutionPatch(
+                section="Collaboration",
+                action="append",
+                content="与目标角色协作：传递结果",
+                target=EvolutionTarget.BODY,
+            ),
+            EvolutionPatch(
+                section="Roles",
+                action="append",
+                content="增加 reviewer 角色",
+                target=EvolutionTarget.BODY,
+            ),
+            EvolutionPatch(
+                section="Constraints",
+                action="append",
+                content="执行时间不超过 10 分钟",
+                target=EvolutionTarget.BODY,
+            ),
+        ]
+        records = [EvolutionRecord.make(source="test", context="test", change=p) for p in patches]
+
+        llm = Mock()
+        llm.invoke = AsyncMock(return_value=SimpleNamespace(content="[]"))
+        scorer = ExperienceScorer(llm=llm, model="test-model", language="cn")
+
+        result = await scorer.simplify(
+            skill_name="test-skill",
+            skill_summary="test summary",
+            records=records,
+        )
+        assert isinstance(result, list)
+        # LLM was invoked — confirms no section-name gating exists
+        assert llm.invoke.call_count == 1

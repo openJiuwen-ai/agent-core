@@ -610,6 +610,37 @@ def test_infer_primary_skill_ignores_unknown_skills(tmp_path):
     assert result is None
 
 
+def test_infer_primary_skill_prefers_skill_tool_over_paths(tmp_path):
+    rail = _make_rail(tmp_path)
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"name": "read_file", "arguments": "/workspace/skills/skill-b/reference.md"},
+                {"name": "skill_tool", "arguments": '{"skill_name":"skill-a","relative_file_path":"reference.md"}'},
+            ],
+        },
+        {"role": "tool", "content": "/workspace/skill-b/SKILL.md"},
+    ]
+
+    result = rail._infer_primary_skill(messages, ["skill-a", "skill-b"])
+
+    assert result == "skill-a"
+
+
+def test_infer_primary_skill_prefers_skills_path_over_legacy_skill_md(tmp_path):
+    rail = _make_rail(tmp_path)
+    messages = [
+        {"role": "tool", "content": "/workspace/legacy-skill/SKILL.md"},
+        {"role": "tool", "content": "/workspace/skills/new-skill/reference/notes.md"},
+    ]
+
+    result = rail._infer_primary_skill(messages, ["legacy-skill", "new-skill"])
+
+    assert result == "new-skill"
+
+
 # =============================================================================
 # Zero-signal fallback & unattributed signal tests
 # =============================================================================
@@ -704,249 +735,6 @@ async def test_run_evolution_multiple_attributed_skills_no_fallback(tmp_path):
 
 
 # =============================================================================
-# _should_propose_new_skill Tests
-# =============================================================================
-
-
-@pytest.mark.asyncio
-async def test_should_propose_new_skill_meets_thresholds(tmp_path):
-    rail = _make_rail(tmp_path)
-    messages = [
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {"name": "read_file", "arguments": ""},
-                {"name": "write_file", "arguments": ""},
-                {"name": "run_bash", "arguments": ""},
-                {"name": "read_file", "arguments": ""},
-                {"name": "write_file", "arguments": ""},
-            ],
-        },
-    ]
-    result = await rail._should_propose_new_skill(messages)
-    assert result is True
-
-
-@pytest.mark.asyncio
-async def test_should_propose_new_skill_too_few_tool_calls(tmp_path):
-    rail = _make_rail(tmp_path)
-    messages = [
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {"name": "read_file", "arguments": ""},
-                {"name": "write_file", "arguments": ""},
-            ],
-        },
-    ]
-    result = await rail._should_propose_new_skill(messages)
-    assert result is False
-
-
-@pytest.mark.asyncio
-async def test_should_propose_new_skill_insufficient_diversity(tmp_path):
-    # 5 tool calls but all the same tool
-    rail = _make_rail(tmp_path)
-    messages = [
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {"name": "read_file", "arguments": ""},
-                {"name": "read_file", "arguments": ""},
-                {"name": "read_file", "arguments": ""},
-                {"name": "read_file", "arguments": ""},
-                {"name": "read_file", "arguments": ""},
-            ],
-        },
-    ]
-    # default diversity threshold is 2, only 1 unique tool → False
-    result = await rail._should_propose_new_skill(messages)
-    assert result is False
-
-
-@pytest.mark.asyncio
-async def test_should_propose_new_skill_no_tool_calls(tmp_path):
-    rail = _make_rail(tmp_path)
-    messages = [{"role": "user", "content": "no tools used"}]
-    result = await rail._should_propose_new_skill(messages)
-    assert result is False
-
-
-# =============================================================================
-# _check_skill_overlap Tests
-# =============================================================================
-
-
-@pytest.mark.asyncio
-async def test_check_skill_overlap_detects_containment(tmp_path):
-    rail = _make_rail(tmp_path)
-    rail._evolution_store.list_skill_names = Mock(return_value=["data-analysis", "report-gen"])
-    # "data" is contained in "data-analysis"
-    result = await rail._check_skill_overlap("data", "analyze data")
-    assert result is True
-
-
-@pytest.mark.asyncio
-async def test_check_skill_overlap_no_overlap(tmp_path):
-    rail = _make_rail(tmp_path)
-    rail._evolution_store.list_skill_names = Mock(return_value=["data-analysis", "report-gen"])
-    result = await rail._check_skill_overlap("code-review", "review source code")
-    assert result is False
-
-
-@pytest.mark.asyncio
-async def test_check_skill_overlap_empty_name(tmp_path):
-    rail = _make_rail(tmp_path)
-    rail._evolution_store.list_skill_names = Mock(return_value=["data-analysis"])
-    # Empty proposal name is contained in "data-analysis" as empty string
-    result = await rail._check_skill_overlap("", "some description")
-    assert result is True
-
-
-@pytest.mark.asyncio
-async def test_check_skill_overlap_no_existing_skills(tmp_path):
-    rail = _make_rail(tmp_path)
-    rail._evolution_store.list_skill_names = Mock(return_value=[])
-    result = await rail._check_skill_overlap("brand-new-skill", "something new")
-    assert result is False
-
-
-# =============================================================================
-# _emit_new_skill_approval Tests
-# =============================================================================
-
-
-@pytest.mark.asyncio
-async def test_emit_new_skill_approval_buffers_event(tmp_path):
-    rail = _make_rail(tmp_path)
-    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
-    proposal = {
-        "name": "my-skill",
-        "description": "Does something",
-        "body": "## Instructions\nDo stuff",
-        "reason": "Useful pattern",
-    }
-    await rail._emit_new_skill_approval(ctx, proposal)
-
-    events = await rail.drain_pending_approval_events()
-    assert len(events) == 1
-    event = events[0]
-    assert event.type == "chat.ask_user_question"
-    payload = event.payload
-    assert payload["_new_skill_data"]["name"] == "my-skill"
-    request_id = payload["request_id"]
-    # UUID-based prefix for skill creation
-    assert request_id.startswith("skill_create_")
-    assert request_id in rail._pending_skill_proposals
-
-
-@pytest.mark.asyncio
-async def test_emit_new_skill_approval_unique_ids(tmp_path):
-    """Two concurrent proposals must not share the same request_id."""
-    rail = _make_rail(tmp_path)
-    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
-    proposal_a = {"name": "skill-a", "description": "A", "body": "", "reason": ""}
-    proposal_b = {"name": "skill-b", "description": "B", "body": "", "reason": ""}
-
-    await rail._emit_new_skill_approval(ctx, proposal_a)
-    await rail._emit_new_skill_approval(ctx, proposal_b)
-
-    events = await rail.drain_pending_approval_events()
-    ids = {e.payload["request_id"] for e in events}
-    assert len(ids) == 2  # must be distinct
-
-
-# =============================================================================
-# on_approve_new_skill / on_reject_new_skill Tests
-# =============================================================================
-
-
-@pytest.mark.asyncio
-async def test_on_approve_new_skill_creates_skill(tmp_path):
-    rail = _make_rail(tmp_path)
-    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
-    proposal = {"name": "new-skill", "description": "desc", "body": "body", "reason": "reason"}
-
-    await rail._emit_new_skill_approval(ctx, proposal)
-    events = await rail.drain_pending_approval_events()
-    request_id = events[0].payload["request_id"]
-
-    rail._evolution_store.create_skill = AsyncMock(return_value=tmp_path / "new-skill")
-
-    result = await rail.on_approve_new_skill(request_id)
-
-    rail._evolution_store.create_skill.assert_awaited_once_with(
-        name="new-skill",
-        description="desc",
-        body="body",
-    )
-    assert result == "new-skill"
-    # Proposal should be removed
-    assert request_id not in rail._pending_skill_proposals
-
-
-@pytest.mark.asyncio
-async def test_on_approve_new_skill_unknown_request_id(tmp_path):
-    rail = _make_rail(tmp_path)
-    result = await rail.on_approve_new_skill("ns_nonexistent")
-    assert result is None
-
-
-@pytest.mark.asyncio
-async def test_on_approve_new_skill_store_failure_returns_none(tmp_path):
-    rail = _make_rail(tmp_path)
-    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
-    proposal = {"name": "fail-skill", "description": "d", "body": "b", "reason": "r"}
-
-    await rail._emit_new_skill_approval(ctx, proposal)
-    events = await rail.drain_pending_approval_events()
-    request_id = events[0].payload["request_id"]
-
-    rail._evolution_store.create_skill = AsyncMock(return_value=None)
-    result = await rail.on_approve_new_skill(request_id)
-    assert result is None
-
-
-@pytest.mark.asyncio
-async def test_on_approve_new_skill_exception_returns_none(tmp_path):
-    rail = _make_rail(tmp_path)
-    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
-    proposal = {"name": "exc-skill", "description": "d", "body": "b", "reason": "r"}
-
-    await rail._emit_new_skill_approval(ctx, proposal)
-    events = await rail.drain_pending_approval_events()
-    request_id = events[0].payload["request_id"]
-
-    rail._evolution_store.create_skill = AsyncMock(side_effect=OSError("disk full"))
-    result = await rail.on_approve_new_skill(request_id)
-    assert result is None
-
-
-@pytest.mark.asyncio
-async def test_on_reject_new_skill_discards_proposal(tmp_path):
-    rail = _make_rail(tmp_path)
-    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
-    proposal = {"name": "rej-skill", "description": "d", "body": "b", "reason": "r"}
-
-    await rail._emit_new_skill_approval(ctx, proposal)
-    events = await rail.drain_pending_approval_events()
-    request_id = events[0].payload["request_id"]
-
-    await rail.on_reject_new_skill(request_id)
-    assert request_id not in rail._pending_skill_proposals
-
-
-@pytest.mark.asyncio
-async def test_on_reject_new_skill_unknown_id_is_noop(tmp_path):
-    rail = _make_rail(tmp_path)
-    await rail.on_reject_new_skill("ns_does_not_exist")
-    # No exception should be raised
-
-
-# =============================================================================
 # Constructor Validation Tests (Issue #4)
 # =============================================================================
 
@@ -956,28 +744,14 @@ def test_init_invalid_eval_interval_raises():
         SkillEvolutionRail(skills_dir="skills", llm=Mock(), model="m", eval_interval=0)
 
 
-def test_init_invalid_tool_threshold_raises():
-    with pytest.raises(ValueError, match="new_skill_tool_threshold"):
-        SkillEvolutionRail(skills_dir="skills", llm=Mock(), model="m", new_skill_tool_threshold=0)
-
-
-def test_init_invalid_tool_diversity_raises():
-    with pytest.raises(ValueError, match="new_skill_tool_diversity"):
-        SkillEvolutionRail(skills_dir="skills", llm=Mock(), model="m", new_skill_tool_diversity=-1)
-
-
 def test_init_valid_params_no_error():
     rail = SkillEvolutionRail(
         skills_dir="skills",
         llm=Mock(),
         model="m",
         eval_interval=3,
-        new_skill_tool_threshold=4,
-        new_skill_tool_diversity=2,
     )
     assert rail._eval_interval == 3
-    assert rail._new_skill_tool_threshold == 4
-    assert rail._new_skill_tool_diversity == 2
 
 
 # =============================================================================
@@ -1028,106 +802,6 @@ def test_session_helpers_with_none_session(tmp_path):
     # Setting with None session must not raise
     rail._set_session_presented_records(None, [])
     rail._set_session_eval_counter(None, 5)
-
-
-# =============================================================================
-# Fix #1: Path B reachable when no skill is inferred
-# =============================================================================
-
-
-@pytest.mark.asyncio
-async def test_run_evolution_path_b_reached_when_no_primary_skill(tmp_path):
-    """When no signals and no primary skill, Path B should still be evaluated."""
-    rail = _make_rail(tmp_path)
-    rail._auto_scan = True
-    rail._new_skill_detection = True
-
-    parsed_messages = [
-        {
-            "role": "user",
-            "content": "do something",
-            "tool_calls": [
-                {"name": "bash", "arguments": ""},
-                {"name": "read_file", "arguments": ""},
-                {"name": "write_file", "arguments": ""},
-                {"name": "grep", "arguments": ""},
-                {"name": "ls", "arguments": ""},
-                {"name": "python", "arguments": ""},
-            ],
-        },
-    ]
-    rail._evolution_store.list_skill_names = Mock(return_value=["existing_skill"])
-    rail._evolution_store.skill_exists = Mock(return_value=True)
-    # No SKILL.md reads → _infer_primary_skill returns None
-    # Enough tool calls to pass _should_propose_new_skill threshold
-
-    should_propose_called = []
-
-    async def fake_should_propose(msgs):
-        should_propose_called.append(True)
-        return False  # Don't actually emit; just confirm Path B was entered
-
-    rail._should_propose_new_skill = fake_should_propose
-    rail._collect_parsed_messages = AsyncMock(return_value=parsed_messages)
-    rail._trigger_async_evaluation = AsyncMock()
-
-    from openjiuwen.agent_evolving.trajectory import Trajectory
-
-    traj = Mock(spec=Trajectory)
-    ctx = Mock()
-    ctx.session = None
-
-    await rail.run_evolution(traj, ctx)
-
-    assert should_propose_called, "Path B (_should_propose_new_skill) must be reached when no primary skill"
-
-
-@pytest.mark.asyncio
-async def test_run_evolution_path_b_not_reached_when_path_a_handled(tmp_path):
-    """Path B should NOT run when Path A already handled at least one skill."""
-    rail = _make_rail(tmp_path)
-    rail._auto_scan = True
-    rail._new_skill_detection = True
-    rail._auto_save = True
-
-    parsed_messages = [
-        {"role": "tool", "content": "read /skills/my_skill/SKILL.md", "tool_calls": []},
-    ]
-    # Arrange: detect a signal attributed to an existing skill
-    from openjiuwen.agent_evolving.signal import EvolutionSignal, EvolutionCategory
-
-    dummy_signal = EvolutionSignal(
-        signal_type="execution_failure",
-        evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
-        section="",
-        excerpt="err",
-        skill_name="my_skill",
-    )
-
-    rail._evolution_store.list_skill_names = Mock(return_value=["my_skill"])
-    rail._evolution_store.skill_exists = Mock(return_value=True)
-    rail._collect_parsed_messages = AsyncMock(return_value=parsed_messages)
-    rail._detect_signals = Mock(return_value=[dummy_signal])
-    rail._generate_experience_for_skill = AsyncMock(return_value=[])
-    rail._trigger_async_evaluation = AsyncMock()
-
-    path_b_called = []
-
-    async def fake_should_propose(msgs):
-        path_b_called.append(True)
-        return False
-
-    rail._should_propose_new_skill = fake_should_propose
-
-    from openjiuwen.agent_evolving.trajectory import Trajectory
-
-    traj = Mock(spec=Trajectory)
-    ctx = Mock()
-    ctx.session = None
-
-    await rail.run_evolution(traj, ctx)
-
-    assert not path_b_called, "Path B must not run when Path A already handled signals"
 
 
 # =============================================================================
@@ -1633,168 +1307,104 @@ async def test_rewrite_skill_handles_empty_consumed_records(tmp_path):
         # Rewriter handles record deletion internally
 
 
-# =============================================================================
-# Auto-save New Skill Creation Tests
-# =============================================================================
+# ---------------------------------------------------------------------------
+# request_rebuild tests (archive-first approach)
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_run_evolution_new_skill_auto_save_creates_directly(tmp_path):
-    """When auto_save=True, new skill creation should skip approval and create directly."""
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
-    rail._new_skill_detection = True
+async def test_request_rebuild_archives_before_building_prompt(tmp_path):
+    """request_rebuild should archive old version BEFORE building the prompt."""
 
-    parsed_messages = [
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {"name": "read_file", "arguments": ""},
-                {"name": "write_file", "arguments": ""},
-                {"name": "bash", "arguments": ""},
-                {"name": "grep", "arguments": ""},
-                {"name": "python", "arguments": ""},
-            ],
-        },
-    ]
+    rail = _make_rail(tmp_path)
 
-    rail._evolution_store.list_skill_names = Mock(return_value=[])
-    rail._evolution_store.skill_exists = Mock(return_value=False)
-    rail._collect_parsed_messages = AsyncMock(return_value=parsed_messages)
-    rail._should_propose_new_skill = AsyncMock(return_value=True)
-    rail._generate_new_skill_proposal = AsyncMock(
-        return_value={
-            "name": "auto-created-skill",
-            "description": "Auto-created skill description",
-            "body": "## Instructions\nAuto-generated content",
-            "reason": "Pattern detected",
-        }
-    )
-    rail._check_skill_overlap = AsyncMock(return_value=False)
-    rail._evolution_store.create_skill = AsyncMock(return_value=tmp_path / "auto-created-skill")
-    rail._trigger_async_evaluation = AsyncMock()
-    rail._emit_new_skill_approval = AsyncMock()
+    mock_record = _make_record("test-skill", content="test experience")
+    mock_record.score = 0.8
 
-    from openjiuwen.agent_evolving.trajectory import Trajectory
-
-    traj = Mock(spec=Trajectory)
-    ctx = Mock()
-    ctx.session = None
-
-    await rail.run_evolution(traj, ctx)
-
-    # create_skill should be called directly without approval
-    rail._evolution_store.create_skill.assert_awaited_once_with(
-        name="auto-created-skill",
-        description="Auto-created skill description",
-        body="## Instructions\nAuto-generated content",
-    )
-    # Approval event should NOT be emitted
-    rail._emit_new_skill_approval.assert_not_awaited()
-    # No pending events should be buffered
-    assert await rail.drain_pending_approval_events() == []
-
-
-@pytest.mark.asyncio
-async def test_run_evolution_new_skill_auto_save_false_emits_approval(tmp_path):
-    """When auto_save=False, new skill creation should still use approval path."""
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=False)
-    rail._new_skill_detection = True
-
-    parsed_messages = [
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {"name": "read_file", "arguments": ""},
-                {"name": "write_file", "arguments": ""},
-                {"name": "bash", "arguments": ""},
-                {"name": "grep", "arguments": ""},
-                {"name": "python", "arguments": ""},
-            ],
-        },
-    ]
-
-    rail._evolution_store.list_skill_names = Mock(return_value=[])
-    rail._evolution_store.skill_exists = Mock(return_value=False)
-    rail._collect_parsed_messages = AsyncMock(return_value=parsed_messages)
-    rail._should_propose_new_skill = AsyncMock(return_value=True)
-    rail._generate_new_skill_proposal = AsyncMock(
-        return_value={
-            "name": "approval-required-skill",
-            "description": "Approval required skill",
-            "body": "## Instructions\nContent",
-            "reason": "Pattern detected",
-        }
-    )
-    rail._check_skill_overlap = AsyncMock(return_value=False)
-    rail._evolution_store.create_skill = AsyncMock()
-    rail._trigger_async_evaluation = AsyncMock()
-
-    from openjiuwen.agent_evolving.trajectory import Trajectory
-
-    traj = Mock(spec=Trajectory)
-    ctx = Mock()
-    ctx.session = None
-
-    await rail.run_evolution(traj, ctx)
-
-    # create_skill should NOT be called directly
-    rail._evolution_store.create_skill.assert_not_awaited()
-    # Approval event should be emitted
-    events = await rail.drain_pending_approval_events()
-    assert len(events) == 1
-    assert events[0].type == "chat.ask_user_question"
-    assert events[0].payload["_new_skill_data"]["name"] == "approval-required-skill"
-
-
-@pytest.mark.asyncio
-async def test_run_evolution_new_skill_auto_save_failure_logs_warning(tmp_path):
-    """When auto_save=True and create_skill fails, should log warning and not emit approval."""
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
-    rail._new_skill_detection = True
-
-    parsed_messages = [
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {"name": "read_file", "arguments": ""},
-                {"name": "write_file", "arguments": ""},
-                {"name": "bash", "arguments": ""},
-                {"name": "grep", "arguments": ""},
-                {"name": "python", "arguments": ""},
-            ],
-        },
-    ]
-
-    rail._evolution_store.list_skill_names = Mock(return_value=["existing-skill"])
     rail._evolution_store.skill_exists = Mock(return_value=True)
-    rail._collect_parsed_messages = AsyncMock(return_value=parsed_messages)
-    rail._should_propose_new_skill = AsyncMock(return_value=True)
-    rail._generate_new_skill_proposal = AsyncMock(
-        return_value={
-            "name": "existing-skill",  # Same as existing, will fail
-            "description": "Duplicate skill",
-            "body": "## Instructions\nContent",
-            "reason": "Pattern detected",
-        }
+    rail._evolution_store.archive_skill_body = AsyncMock(return_value="SKILL.v20260426_172600.md")
+    rail._evolution_store.archive_evolutions = AsyncMock(return_value="evolutions.v20260426_172600.json")
+    rail._evolution_store.load_full_evolution_log = AsyncMock(
+        return_value=Mock(entries=[mock_record])
     )
-    rail._check_skill_overlap = AsyncMock(return_value=False)  # Overlap check passes
-    rail._evolution_store.create_skill = AsyncMock(return_value=None)  # create_skill fails
-    rail._trigger_async_evaluation = AsyncMock()
-    rail._emit_new_skill_approval = AsyncMock()
 
-    from openjiuwen.agent_evolving.trajectory import Trajectory
+    result = await rail.request_rebuild("test-skill", user_intent="优化技能")
 
-    traj = Mock(spec=Trajectory)
-    ctx = Mock()
-    ctx.session = None
+    # Archive operations should be called BEFORE prompt is built
+    rail._evolution_store.archive_skill_body.assert_called_once_with("test-skill")
+    rail._evolution_store.archive_evolutions.assert_called_once_with("test-skill")
 
-    await rail.run_evolution(traj, ctx)
+    # Should return prompt (not None)
+    assert result is not None
+    # Prompt should contain archived indication
+    assert "已归档" in result or "archived" in result.lower()
+    # Prompt should contain filtered experience
+    assert "test experience" in result
+    # Prompt should contain skill-creator instruction
+    assert "skill-creator" in result.lower()
 
-    # create_skill was attempted but failed
-    rail._evolution_store.create_skill.assert_awaited_once()
-    # No approval event should be emitted (auto_save path)
-    rail._emit_new_skill_approval.assert_not_awaited()
-    assert await rail.drain_pending_approval_events() == []
+
+@pytest.mark.asyncio
+async def test_request_rebuild_returns_none_when_skill_not_found(tmp_path):
+    """request_rebuild should return None when skill doesn't exist."""
+    rail = _make_rail(tmp_path)
+
+    rail._evolution_store.skill_exists = Mock(return_value=False)
+
+    result = await rail.request_rebuild("nonexistent-skill")
+
+    assert result is None
+    rail._evolution_store.archive_skill_body.assert_not_called()
+    rail._evolution_store.archive_evolutions.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_request_rebuild_filters_low_score_records(tmp_path):
+    """request_rebuild should filter out records with score below min_score."""
+
+    rail = _make_rail(tmp_path)
+
+    high_record = _make_record("test-skill", content="good experience")
+    high_record.score = 0.8
+
+    low_record = _make_record("test-skill", content="bad experience")
+    low_record.score = 0.3
+
+    rail._evolution_store.skill_exists = Mock(return_value=True)
+    rail._evolution_store.archive_skill_body = AsyncMock(return_value="SKILL.v1.md")
+    rail._evolution_store.archive_evolutions = AsyncMock(return_value="evolutions.v1.json")
+    rail._evolution_store.load_full_evolution_log = AsyncMock(
+        return_value=Mock(entries=[high_record, low_record])
+    )
+
+    result = await rail.request_rebuild("test-skill", min_score=0.5)
+
+    assert result is not None
+    # High score record should be included
+    assert "good experience" in result
+    # Low score record should be filtered out
+    assert "bad experience" not in result
+
+
+@pytest.mark.asyncio
+async def test_request_rebuild_continues_on_archive_failure(tmp_path):
+    """request_rebuild should continue even if archive fails."""
+
+    rail = _make_rail(tmp_path)
+
+    high_record = _make_record("test-skill", content="test content")
+    high_record.score = 0.7
+
+    rail._evolution_store.skill_exists = Mock(return_value=True)
+    rail._evolution_store.archive_skill_body = AsyncMock(side_effect=RuntimeError("disk full"))
+    rail._evolution_store.archive_evolutions = AsyncMock(return_value=None)
+    rail._evolution_store.load_full_evolution_log = AsyncMock(
+        return_value=Mock(entries=[high_record])
+    )
+
+    result = await rail.request_rebuild("test-skill")
+
+    # Should still return prompt even if archive failed
+    assert result is not None
+    rail._evolution_store.load_full_evolution_log.assert_called_once_with("test-skill")
+

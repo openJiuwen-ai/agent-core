@@ -111,6 +111,12 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
 - JSON 转义规则：字符串内换行用 \\n，引号用 \\"，制表符用 \\t
 - 数组内每个对象必须包含 action 字段（"append" 或 "skip"）
 
+## 角色约束
+演进经验必须遵从 Agent 的角色能力和主要任务目标：
+- 经验应当增强角色核心能力，而非引入角色职责之外的行为
+- 从角色的主要任务出发，生成有价值的演进经验
+- 避免生成与角色无关或超出角色能力范围的建议
+
 ## 输入信息
 
 ### 当前 Skill 内容
@@ -185,6 +191,8 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
 - execution_failure / workaround 类：通常归入 Troubleshooting
 - user_correction / 流程偏差类：通常归入 Instructions 或 Examples
 - script_artifact 类：归入 Scripts
+- collaboration_send / collaboration_claim / collaboration_view / collaboration_receive / collaboration_failure 类：
+  归入 Collaboration（记录 AgentSkill 作为 TeamSkill 成员时的协作经验，如发送消息、认领任务、接收上下文等）
 
 ## 内容生成规范
 1. 语言一致：输出语言必须与 Skill 完全一致（中文 Skill 输出中文，英文 Skill 输出英文）
@@ -204,7 +212,7 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
     "action": "append | skip",
     "skip_reason": "irrelevant | duplicate | low_priority（仅 action 为 skip 时填写，否则为 null）",
     "target": "description | body | script",
-    "section": "Instructions | Examples | Troubleshooting | Scripts",
+    "section": "Instructions | Examples | Troubleshooting | Scripts | Collaboration",
     "content": "Markdown 内容或脚本源码（仅 action 为 append 时填写）",
     "merge_target": "ev_xxxxxxxx 或 null",
     "script_filename": "文件名（仅 target 为 script 时填写，如 generate_chart.py）",
@@ -222,6 +230,12 @@ Your response must be a valid JSON array, nothing else.
 - Do NOT add explanatory text
 - JSON escaping: use \\n for newlines, \\" for quotes, \\t for tabs inside strings
 - Every object in the array must include an "action" field ("append" or "skip")
+
+## Role Constraints
+Evolution experiences must respect the Agent's role capabilities and primary objectives:
+- Experiences should enhance core role capabilities, not introduce behaviors outside the role's responsibilities
+- Generate valuable experiences from the role's primary mission perspective
+- Avoid generating suggestions unrelated to or beyond the role's capabilities
 
 ## Input Information
 
@@ -297,6 +311,9 @@ Determine the experience's target layer (target) and section (section), then gen
 - execution_failure / workaround types: Usually belong to Troubleshooting
 - user_correction / process deviation types: Usually belong to Instructions or Examples
 - script_artifact types: Belong to Scripts
+- collaboration_send / collaboration_claim / collaboration_view / collaboration_receive / collaboration_failure types:
+  Belong to Collaboration (records AgentSkill collaboration experiences when acting as TeamSkill member,
+  e.g., sending messages, claiming tasks, receiving context, etc.)
 
 ## Content Generation Guidelines
 1. Language consistency: Output language must match the Skill exactly (Chinese Skill outputs Chinese, English Skill outputs English)
@@ -316,7 +333,7 @@ Output only the following JSON array, nothing else (even if there is only one en
     "action": "append | skip",
     "skip_reason": "irrelevant | duplicate | low_priority (fill only when action is skip, otherwise null)",
     "target": "description | body | script",
-    "section": "Instructions | Examples | Troubleshooting | Scripts",
+    "section": "Instructions | Examples | Troubleshooting | Scripts | Collaboration",
     "content": "Markdown content or script source code (fill only when action is append)",
     "merge_target": "ev_xxxxxxxx or null",
     "script_filename": "filename (only when target is script, e.g. generate_chart.py)",
@@ -837,13 +854,9 @@ class SkillExperienceOptimizer(BaseOptimizer):
 
         if truncated:
             if attempt_number >= 3:
-                logger.warning(
-                    "[SkillExperienceOptimizer] output still truncated on attempt 3, giving up"
-                )
+                logger.warning("[SkillExperienceOptimizer] output still truncated on attempt 3, giving up")
                 return None, broken_raw
-            logger.warning(
-                "[SkillExperienceOptimizer] output appears truncated, retrying full regeneration"
-            )
+            logger.warning("[SkillExperienceOptimizer] output appears truncated, retrying full regeneration")
             retry_prompt = original_prompt
         elif attempt_number >= 3:
             logger.warning(
@@ -861,9 +874,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
                 broken_raw[:200],
             )
             error_detail = parse_error or "JSON 解析失败"
-            retry_prompt = _JSON_FIX_PROMPT.format(
-                parse_error=error_detail, broken_output=broken_raw
-            )
+            retry_prompt = _JSON_FIX_PROMPT.format(parse_error=error_detail, broken_output=broken_raw)
 
         try:
             response = await self._llm.invoke(

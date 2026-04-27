@@ -8,13 +8,15 @@ to implement evolution algorithms.
 
 Core design:
 - Trajectory collection is automatic (handled by base class)
-- Extension points for evolution: _on_after_model_call, _on_after_tool_call, run_evolution
-- DeepAgents imports from core (consistent with existing patterns)
+- Extension points: _on_before_invoke, _on_after_model_call,
+  _on_after_tool_call, _on_after_invoke, run_evolution
+- Evolution trigger is configurable via evolution_trigger parameter
 """
 
 from __future__ import annotations
 
 import asyncio
+from enum import Enum
 from typing import Optional
 
 from openjiuwen.agent_evolving.trajectory import (
@@ -38,17 +40,29 @@ from openjiuwen.core.single_agent.rail.base import (
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 
+class EvolutionTriggerPoint(Enum):
+    """Configurable trigger points for evolution in EvolutionRail."""
+
+    AFTER_INVOKE = "after_invoke"
+    AFTER_MODEL_CALL = "after_model_call"
+    AFTER_TOOL_CALL = "after_tool_call"
+    AFTER_TASK_ITERATION = "after_task_iteration"
+    NONE = "none"
+
+
 class EvolutionRail(DeepAgentRail):
     """Base class for all evolution rails.
 
     Inheriting this class provides automatic trajectory collection.
     Subclasses should override one or more extension points:
-      - _on_after_model_call(ctx): Called after each model call, suitable for RL step-level updates
-      - _on_after_tool_call(ctx): Called after each tool call, suitable for tool selection optimization
-      - run_evolution(trajectory, ctx): Called after conversation round ends, suitable for experience extraction
+      - _on_before_invoke(ctx): Initialization at invoke start
+      - _on_after_model_call(ctx): Step-level updates after LLM calls
+      - _on_after_tool_call(ctx): Tool-level updates after tool calls
+      - _on_after_invoke(ctx): Custom logic after invoke, before builder cleared
+      - _on_after_task_iteration(ctx): Custom logic after each task-loop iteration
+      - run_evolution(trajectory, ctx): Called when evolution_trigger fires
 
-    DeepAgents hard-depends on core (consistent with deep_agent.py patterns).
-    agent_id is retrieved from ctx.agent.card.id at runtime, no need to pass in constructor.
+    The evolution trigger point is configurable via ``evolution_trigger``.
     """
 
     priority = 60  # Lower than security rails, higher than user rails
@@ -56,8 +70,9 @@ class EvolutionRail(DeepAgentRail):
     def __init__(
         self,
         trajectory_store: Optional[TrajectoryStore] = None,
+        team_trajectory_store: Optional[TrajectoryStore] = None,
         accumulate_trajectory: bool = False,
-        trigger_evolution_after_invoke: bool = True,
+        evolution_trigger: EvolutionTriggerPoint = EvolutionTriggerPoint.AFTER_INVOKE,
         async_evolution: bool = True,
         max_concurrent_evolution: int = 1,
     ):
@@ -65,8 +80,15 @@ class EvolutionRail(DeepAgentRail):
 
         Args:
             trajectory_store: Optional trajectory store. If None, uses InMemoryTrajectoryStore.
+            team_trajectory_store: Optional shared team trajectory store. When set,
+                each member's trajectory is also saved here for team-level aggregation.
             accumulate_trajectory: Whether to keep the trajectory builder across invoke rounds.
-            trigger_evolution_after_invoke: Whether to trigger evolution after each invoke round.
+            evolution_trigger: When to automatically trigger run_evolution.
+                AFTER_INVOKE (default): after invoke completes
+                AFTER_TASK_ITERATION: after each task-loop iteration, before next round
+                AFTER_MODEL_CALL: after each model call
+                AFTER_TOOL_CALL: after each tool call
+                NONE: subclass triggers manually via run_evolution()
             async_evolution: When True (default), run_evolution runs in a background task
                 after snapshotting ctx data. When False, run_evolution runs synchronously
                 with the active ctx (backward-compatible).
@@ -77,7 +99,9 @@ class EvolutionRail(DeepAgentRail):
         self._trajectory_store = trajectory_store or InMemoryTrajectoryStore()
         self._builder: Optional[TrajectoryBuilder] = None
         self._accumulate_trajectory = accumulate_trajectory
-        self._trigger_evolution_after_invoke = trigger_evolution_after_invoke
+        self._evolution_trigger = evolution_trigger
+        self._team_trajectory_store = team_trajectory_store
+
         self._async_evolution = async_evolution
         self._bg_tasks: set[BackgroundTask] = set()
         self._pending_approval_events: list[OutputSchema] = []
@@ -111,9 +135,13 @@ class EvolutionRail(DeepAgentRail):
             return
 
         session_id = inputs.conversation_id or ""
+        # Capture member_id for team trajectory aggregation
+        agent_id = getattr(ctx.agent, "card", None)
+        member_id = agent_id.id if agent_id else None
         self._builder = TrajectoryBuilder(
             session_id=session_id,
             source="online",
+            member_id=member_id,
         )
 
         # Trigger extension point for subclasses
@@ -161,6 +189,12 @@ class EvolutionRail(DeepAgentRail):
         # Trigger extension point
         await self._on_after_model_call(ctx)
 
+        # Trigger evolution if configured
+        if self._evolution_trigger == EvolutionTriggerPoint.AFTER_MODEL_CALL:
+            trajectory = self._build_trajectory()
+            if trajectory is not None:
+                await self._trigger_evolution(trajectory, ctx)
+
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Record tool step and trigger evolution extension point."""
         if self._builder is None:
@@ -192,6 +226,21 @@ class EvolutionRail(DeepAgentRail):
         # Trigger extension point
         await self._on_after_tool_call(ctx)
 
+        # Trigger evolution if configured
+        if self._evolution_trigger == EvolutionTriggerPoint.AFTER_TOOL_CALL:
+            trajectory = self._build_trajectory()
+            if trajectory is not None:
+                await self._trigger_evolution(trajectory, ctx)
+
+    async def after_task_iteration(self, ctx: AgentCallbackContext) -> None:
+        """Called after each task-loop iteration."""
+        await self._on_after_task_iteration(ctx)
+
+        if self._evolution_trigger == EvolutionTriggerPoint.AFTER_TASK_ITERATION:
+            trajectory = self._build_trajectory()
+            if trajectory is not None:
+                await self._trigger_evolution(trajectory, ctx)
+
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         """Finalize trajectory for this invoke round."""
         if self._builder is None:
@@ -203,21 +252,15 @@ class EvolutionRail(DeepAgentRail):
 
         self._trajectory_store.save(trajectory)
 
-        if self._should_trigger_evolution_after_invoke():
-            if self._async_evolution:
-                snapshot = await self._snapshot_for_evolution(trajectory, ctx)
-                if snapshot is not None:
-                    from openjiuwen.core.common.background_tasks import create_background_task
-                    bg_task = await create_background_task(
-                        self._safe_run_evolution(snapshot),
-                        name=f"evolution-{snapshot.get('skill_name', 'unknown')}",
-                        group="evolution",
-                    )
-                    self._bg_tasks.add(bg_task)
-                    # Prune completed tasks to prevent unbounded growth
-                    self._bg_tasks = {t for t in self._bg_tasks if not t.done()}
-            else:
-                await self.run_evolution(trajectory, ctx)
+        if self._team_trajectory_store is not None:
+            self._team_trajectory_store.save(trajectory)
+
+        # Extension point: called after saving, before builder is cleared
+        await self._on_after_invoke(ctx)
+
+        # Trigger evolution if configured for after_invoke
+        if self._evolution_trigger == EvolutionTriggerPoint.AFTER_INVOKE:
+            await self._trigger_evolution(trajectory, ctx)
 
         if not self._should_accumulate_trajectory():
             self._builder = None
@@ -236,17 +279,6 @@ class EvolutionRail(DeepAgentRail):
         """
         return self._accumulate_trajectory
 
-    def _should_trigger_evolution_after_invoke(self) -> bool:
-        """Whether to trigger evolution after invoke.
-
-        Returns True (default): evolution runs at invoke round end.
-        Returns False: subclass triggers evolution at custom timing.
-
-        Subclasses can either set _trigger_evolution_after_invoke = False
-        or override this method for dynamic logic.
-        """
-        return self._trigger_evolution_after_invoke
-
     # ---- Trajectory helper methods ----
 
     def _build_trajectory(self) -> Optional[Trajectory]:
@@ -264,6 +296,28 @@ class EvolutionRail(DeepAgentRail):
     def _save_trajectory(self, trajectory: Trajectory) -> None:
         """Save trajectory to store."""
         self._trajectory_store.save(trajectory)
+
+    async def _trigger_evolution(
+        self,
+        trajectory: Trajectory,
+        ctx: AgentCallbackContext,
+    ) -> None:
+        """Internal: trigger evolution with async/sync handling."""
+        if self._async_evolution:
+            snapshot = await self._snapshot_for_evolution(trajectory, ctx)
+            if snapshot is not None:
+                from openjiuwen.core.common.background_tasks import create_background_task
+
+                bg_task = await create_background_task(
+                    self._safe_run_evolution(snapshot),
+                    name=f"evolution-{snapshot.get('skill_name', 'unknown')}",
+                    group="evolution",
+                )
+                self._bg_tasks.add(bg_task)
+                # Prune completed tasks to prevent unbounded growth
+                self._bg_tasks = {t for t in self._bg_tasks if not t.done()}
+        else:
+            await self.run_evolution(trajectory, ctx)
 
     # ---- Evolution extension points (override as needed, default no-op) ----
 
@@ -291,8 +345,27 @@ class EvolutionRail(DeepAgentRail):
         """
         pass
 
+    async def _on_after_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Called at the end of each invoke, before builder is cleared.
+
+        The trajectory has been saved, but the builder is still available.
+        Override this method to implement custom post-invoke logic
+        (e.g., threshold detection, follow_up triggering).
+        """
+        pass
+
+    async def _on_after_task_iteration(self, ctx: AgentCallbackContext) -> None:
+        """Extension point for after_task_iteration hook.
+
+        Override this method to implement custom per-iteration logic
+        while the trajectory builder is still populated.
+        """
+        pass
+
     async def _snapshot_for_evolution(
-        self, trajectory: Trajectory, ctx: AgentCallbackContext,
+        self,
+        trajectory: Trajectory,
+        ctx: AgentCallbackContext,
     ) -> Optional[dict]:
         """Phase 1: Synchronously capture snapshot while ctx is alive.
 
@@ -321,7 +394,7 @@ class EvolutionRail(DeepAgentRail):
         *,
         snapshot: Optional[dict] = None,
     ) -> None:
-        """Called after conversation round ends.
+        """Called when evolution_trigger fires or subclass calls manually.
 
         In async mode: ctx=None, snapshot contains captured data.
         In sync mode: ctx is active, snapshot=None (backward-compatible).
@@ -353,6 +426,7 @@ class EvolutionRail(DeepAgentRail):
             if pending:
                 if timeout is not None:
                     import anyio
+
                     with anyio.move_on_after(timeout):
                         for task in pending:
                             await task.wait()
@@ -382,4 +456,4 @@ class EvolutionRail(DeepAgentRail):
         self._bg_tasks.clear()
 
 
-__all__ = ["EvolutionRail"]
+__all__ = ["EvolutionRail", "EvolutionTriggerPoint"]
