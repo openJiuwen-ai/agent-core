@@ -29,6 +29,7 @@ class SummaryManager(BaseMemoryManager):
                            llm: Tuple[str, Model] | None = None, **kwargs):
         """add memories in batch."""
         semantic_store = self._get_semantic_store("add", **kwargs)
+        valid_units: list[SummaryUnit] = []
         for mem_type, memory in memories.items():
             if mem_type != self.mem_type:
                 continue
@@ -42,19 +43,41 @@ class SummaryManager(BaseMemoryManager):
                         scope_id=scope_id
                     )
                     continue
-                vector_success = await self._add_summary_memory_to_vector(
-                    summary_unit=unit,
-                    user_id=user_id,
-                    scope_id=scope_id,
-                    semantic_store=semantic_store
-                )
-                if not vector_success:
-                    raise build_error(
-                        StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                if not unit.summary:
+                    memory_logger.warning(
+                        "summary is empty, skipping",
+                        event_type=LogEventType.MEMORY_STORE,
                         memory_type=self.mem_type,
-                        error_msg="summary add to vector store failed",
+                        user_id=user_id,
+                        scope_id=scope_id
                     )
-                await self._add_summary_memory_to_mem_store(user_id, scope_id, unit)
+                    continue
+                valid_units.append(unit)
+
+        if not valid_units:
+            memory_logger.warning(
+                "No valid summary units to add",
+                event_type=LogEventType.MEMORY_STORE,
+                memory_type=self.mem_type,
+                user_id=user_id,
+                scope_id=scope_id
+            )
+            return
+
+        for unit in valid_units:
+            vector_success = await self._add_summary_memory_to_vector(
+                summary_unit=unit,
+                user_id=user_id,
+                scope_id=scope_id,
+                semantic_store=semantic_store
+            )
+            if not vector_success:
+                raise build_error(
+                    StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                    memory_type=self.mem_type,
+                    error_msg="summary add to vector store failed",
+                )
+            await self._add_summary_memory_to_mem_store(user_id, scope_id, unit)
 
     async def update(self, user_id: str, scope_id: str, mem_id: str, new_memory: str, **kwargs):
         """update memory by its id."""
