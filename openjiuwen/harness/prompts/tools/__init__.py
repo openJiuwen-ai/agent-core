@@ -38,6 +38,13 @@ from openjiuwen.harness.prompts.tools.code import (
 )
 from openjiuwen.harness.prompts.tools.cron import (
     CronMetadataProvider,
+    CronListJobsMetadataProvider,
+    CronGetJobMetadataProvider,
+    CronCreateJobMetadataProvider,
+    CronUpdateJobMetadataProvider,
+    CronDeleteJobMetadataProvider,
+    CronToggleJobMetadataProvider,
+    CronPreviewJobMetadataProvider,
 )
 from openjiuwen.harness.prompts.tools.filesystem import (
     ReadFileMetadataProvider,
@@ -110,6 +117,13 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     AudioMetadataMetadataProvider(),
     CodeMetadataProvider(),
     CronMetadataProvider(),
+    CronListJobsMetadataProvider(),
+    CronGetJobMetadataProvider(),
+    CronCreateJobMetadataProvider(),
+    CronUpdateJobMetadataProvider(),
+    CronDeleteJobMetadataProvider(),
+    CronToggleJobMetadataProvider(),
+    CronPreviewJobMetadataProvider(),
     ReadFileMetadataProvider(),
     WriteFileMetadataProvider(),
     EditFileMetadataProvider(),

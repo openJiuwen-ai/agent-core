@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
-from openjiuwen.harness.prompts.tools import build_tool_card
+from openjiuwen.harness.prompts.tools import build_tool_card, get_tool_input_params
 
 
 @dataclass(frozen=True)
@@ -93,16 +93,27 @@ def _tool_scope(context: CronToolContext | None) -> str:
     return scope.replace(":", "_")
 
 
-def _make_tool(*, tool_id: str, name: str, description: str, input_params: dict[str, Any], func: Any) -> Tool:
-    return LocalFunction(
-        card=ToolCard(
-            id=tool_id,
-            name=name,
-            description=description,
+def _make_tool(
+    *,
+    name: str,
+    scope: str,
+    language: str,
+    agent_id: str,
+    func: Any,
+    target_schema: dict[str, Any] | None = None,
+) -> Tool:
+    card = build_tool_card(name, f"{name}_{scope}", language, agent_id=agent_id)
+    if target_schema is not None:
+        input_params = get_tool_input_params(name, language)
+        if "properties" in input_params and "targets" in input_params["properties"]:
+            input_params["properties"]["targets"] = target_schema
+        card = ToolCard(
+            id=card.id,
+            name=card.name,
+            description=card.description,
             input_params=input_params,
-        ),
-        func=func,
-    )
+        )
+    return LocalFunction(card=card, func=func)
 
 
 def _target_schema(
@@ -239,157 +250,57 @@ def create_cron_tools(
         return tools
 
     target_schema = _target_schema(target_channels, default_target_channel)
+
     tools.extend(
         [
             _make_tool(
-                tool_id=f"cron_list_jobs_{scope}",
                 name="cron_list_jobs",
-                description="Legacy compatibility tool. List all cron jobs.",
-                input_params={"type": "object", "properties": {}, "required": []},
+                scope=scope,
+                language=language,
+                agent_id=final_agent_id,
                 func=list_jobs_wrapper,
             ),
             _make_tool(
-                tool_id=f"cron_get_job_{scope}",
                 name="cron_get_job",
-                description="Legacy compatibility tool. Get a single cron job by id.",
-                input_params={
-                    "type": "object",
-                    "properties": {
-                        "job_id": {
-                            "type": "string",
-                            "description": "The job id to look up",
-                        }
-                    },
-                    "required": ["job_id"],
-                },
+                scope=scope,
+                language=language,
+                agent_id=final_agent_id,
                 func=get_job_wrapper,
             ),
             _make_tool(
-                tool_id=f"cron_create_job_{scope}",
                 name="cron_create_job",
-                description=(
-                    "Legacy compatibility tool. Create a cron job using flat fields "
-                    "(name, cron_expr, timezone, targets, description, wake_offset_seconds)."
-                    "\n\n[CRITICAL: Cron Expression Limits] Standard cron's */X means 'trigger when the field value "
-                    "is divisible by X', NOT 'every X units'. Uniform intervals only work when the cycle unit "
-                    "is divisible by X. Field limits:"
-                    "\n- Minute(0-59): */X only works for X dividing 60: 1/2/3/4/5/6/10/12/15/20/30."
-                    "  Example: */40 triggers at minute 0 and 40 each hour (alternating 40min-20min gaps), "
-                    "NOT every 40 minutes."
-                    "  When user requests 'every 40 minutes', MUST inform user of this limitation first "
-                    "and let user confirm whether to accept uneven intervals, or suggest intervals that divide 60."
-                    "  Do NOT create without user confirmation."
-                    "\n- Hour(0-23): */X only works for X dividing 24: 1/2/3/4/6/8/12."
-                    "  Example: */5 triggers at hours 0/5/10/15/20 (alternating 5h-4h gaps), NOT every 5 hours."
-                    "\n- Day(1-31): */X is unreliable due to varying month lengths."
-                    "\n- Month(1-12): */X only works for X dividing 12: 1/2/3/4/6."
-                    "\n- Weekday(0-6): */X only works for X dividing 7: 1/7."
-                    "\nWhen handling 'every X minutes/hours' requests, always check if X divides the cycle unit. "
-                    "If not, MUST inform user and let user confirm before creating."
-                ),
-                input_params={
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "任务名称"},
-                        "cron_expr": {
-                            "type": "string",
-                            "description": (
-                                "Cron表达式。*/X仅当周期能被X整除时间隔均匀。"
-                                "分钟X整除60；小时X整除24；日不可靠。详见工具描述。"
-                            ),
-                        },
-                        "timezone": {
-                            "type": "string",
-                            "description": "时区，如 Asia/Shanghai",
-                            "default": "Asia/Shanghai",
-                        },
-                        "targets": target_schema,
-                        "enabled": {
-                            "type": "boolean",
-                            "description": "是否启用",
-                            "default": True,
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": (
-                                "具体任务内容，到点执行时发给助手。"
-                                "不要包含时间/频率信息（如'每隔40分钟'、'每天9点'）"
-                            ),
-                        },
-                        "wake_offset_seconds": {
-                            "type": "integer",
-                            "description": "提前多少秒执行，默认 300",
-                            "default": 300,
-                        },
-                    },
-                    "required": ["name", "cron_expr", "timezone", "description"],
-                },
+                scope=scope,
+                language=language,
+                agent_id=final_agent_id,
                 func=create_job_wrapper,
+                target_schema=target_schema,
             ),
             _make_tool(
-                tool_id=f"cron_update_job_{scope}",
                 name="cron_update_job",
-                description="Legacy compatibility tool. Update an existing cron job with a flat patch dict.",
-                input_params={
-                    "type": "object",
-                    "properties": {
-                        "job_id": {"type": "string", "description": "Job id to update"},
-                        "patch": {
-                            "type": "object",
-                            "description": "Fields to update",
-                            "additionalProperties": True,
-                        },
-                    },
-                    "required": ["job_id", "patch"],
-                },
+                scope=scope,
+                language=language,
+                agent_id=final_agent_id,
                 func=update_job_wrapper,
             ),
             _make_tool(
-                tool_id=f"cron_delete_job_{scope}",
                 name="cron_delete_job",
-                description="Legacy compatibility tool. Delete a cron job by id.",
-                input_params={
-                    "type": "object",
-                    "properties": {
-                        "job_id": {"type": "string", "description": "Job id to delete"},
-                    },
-                    "required": ["job_id"],
-                },
+                scope=scope,
+                language=language,
+                agent_id=final_agent_id,
                 func=delete_job_wrapper,
             ),
             _make_tool(
-                tool_id=f"cron_toggle_job_{scope}",
                 name="cron_toggle_job",
-                description="Legacy compatibility tool. Enable or disable a cron job.",
-                input_params={
-                    "type": "object",
-                    "properties": {
-                        "job_id": {"type": "string", "description": "Job id"},
-                        "enabled": {
-                            "type": "boolean",
-                            "description": "Whether to enable the job",
-                        },
-                    },
-                    "required": ["job_id", "enabled"],
-                },
+                scope=scope,
+                language=language,
+                agent_id=final_agent_id,
                 func=toggle_job_wrapper,
             ),
             _make_tool(
-                tool_id=f"cron_preview_job_{scope}",
                 name="cron_preview_job",
-                description="Legacy compatibility tool. Preview next N scheduled run times for a job.",
-                input_params={
-                    "type": "object",
-                    "properties": {
-                        "job_id": {"type": "string", "description": "Job id"},
-                        "count": {
-                            "type": "integer",
-                            "description": "Number of runs to preview (1-50, default 5)",
-                            "default": 5,
-                        },
-                    },
-                    "required": ["job_id"],
-                },
+                scope=scope,
+                language=language,
+                agent_id=final_agent_id,
                 func=preview_job_wrapper,
             ),
         ]

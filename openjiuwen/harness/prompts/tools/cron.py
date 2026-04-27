@@ -527,3 +527,379 @@ class CronMetadataProvider(ToolMetadataProvider):
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return get_cron_input_params(language)
+
+
+# ---------------------------------------------------------------------------
+# Legacy cron tools descriptions
+# ---------------------------------------------------------------------------
+CRON_LIST_JOBS_DESCRIPTION: Dict[str, str] = {
+    "cn": "列出所有 cron 定时任务。",
+    "en": "List all cron jobs.",
+}
+
+CRON_GET_JOB_DESCRIPTION: Dict[str, str] = {
+    "cn": "根据任务 ID 获取单个 cron 定时任务的详细信息。",
+    "en": "Get a single cron job by its ID.",
+}
+
+CRON_CREATE_JOB_DESCRIPTION_CN = """
+创建新的 cron 定时任务，使用扁平字段（name, cron_expr, timezone, targets, description, wake_offset_seconds）。
+
+【重要：cron 表达式限制】标准 cron 的 */X 语义是'当字段值能被 X 整除时触发'，而非'每隔 X 单位触发'。
+只有当周期单位能被 X 整除时，间隔才是均匀的。以下是各字段的限制：
+- 分钟(0-59)：*/X 仅支持 X 整除60的值：1/2/3/4/5/6/10/12/15/20/30。
+  例如 */40 实际在每小时第0分和第40分触发（间隔40分→20分交替），并非每40分钟。
+  用户要求'每隔40分钟'时，必须先告知此限制并让用户确认是否接受不均匀间隔，
+  或建议改用整除60的间隔（如20分钟或30分钟）。未经用户确认不得直接创建。
+- 小时(0-23)：*/X 仅支持 X 整除24的值：1/2/3/4/6/8/12。
+  例如 */5 实际在每天0/5/10/15/20时触发（间隔5h→4h→5h→4h交替），并非每5小时。
+- 日(1-31)：*/X 不可靠，因为不同月份天数不同（28/29/30/31）。
+- 月(1-12)：*/X 仅支持 X 整除12的值：1/2/3/4/6。
+- 周(0-6)：*/X 仅支持 X 整除7的值：1/7。
+
+处理'每隔X分钟/小时/天'需求时，务必检查 X 是否整除对应周期单位；
+若不整除，必须告知用户限制，让用户确认后再创建，或建议替代方案。
+"""
+
+CRON_CREATE_JOB_DESCRIPTION_EN = """
+Create a new cron job using flat fields (name, cron_expr, timezone, targets, description, wake_offset_seconds).
+
+[CRITICAL: Cron Expression Limits] Standard cron's */X means 'trigger when the field value is divisible by X',
+NOT 'every X units'. Uniform intervals only work when the cycle unit is divisible by X. Field limits:
+- Minute(0-59): */X only works for X dividing 60: 1/2/3/4/5/6/10/12/15/20/30.
+  Example: */40 triggers at minute 0 and 40 each hour (alternating 40min-20min gaps), NOT every 40 minutes.
+  When user requests 'every 40 minutes', MUST inform user of this limitation first
+  and let user confirm whether to accept uneven intervals, or suggest intervals that divide 60.
+  Do NOT create without user confirmation.
+- Hour(0-23): */X only works for X dividing 24: 1/2/3/4/6/8/12.
+  Example: */5 triggers at hours 0/5/10/15/20 (alternating 5h-4h gaps), NOT every 5 hours.
+- Day(1-31): */X is unreliable due to varying month lengths (28/29/30/31 days).
+- Month(1-12): */X only works for X dividing 12: 1/2/3/4/6.
+- Weekday(0-6): */X only works for X dividing 7: 1/7.
+
+When handling 'every X minutes/hours/days' requests, always check if X divides the cycle unit.
+If not, MUST inform user and let user confirm before creating.
+"""
+
+CRON_CREATE_JOB_DESCRIPTION: Dict[str, str] = {
+    "cn": CRON_CREATE_JOB_DESCRIPTION_CN,
+    "en": CRON_CREATE_JOB_DESCRIPTION_EN,
+}
+
+CRON_UPDATE_JOB_DESCRIPTION: Dict[str, str] = {
+    "cn": "使用扁平字段更新已有的 cron 定时任务。",
+    "en": "Update an existing cron job with a flat patch dict.",
+}
+
+CRON_DELETE_JOB_DESCRIPTION: Dict[str, str] = {
+    "cn": "根据任务 ID 删除 cron 定时任务。",
+    "en": "Delete a cron job by its ID.",
+}
+
+CRON_TOGGLE_JOB_DESCRIPTION: Dict[str, str] = {
+    "cn": "启用或禁用指定的 cron 定时任务。",
+    "en": "Enable or disable a cron job.",
+}
+
+CRON_PREVIEW_JOB_DESCRIPTION: Dict[str, str] = {
+    "cn": "预览 cron 定时任务的下 N 次计划执行时间。",
+    "en": "Preview next N scheduled run times for a cron job.",
+}
+
+LEGACY_FIELD_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
+    "job_id": {
+        "cn": "任务 ID",
+        "en": "Job ID",
+    },
+    "job_id_to_look_up": {
+        "cn": "要查询的任务 ID",
+        "en": "The job ID to look up",
+    },
+    "job_id_to_update": {
+        "cn": "要更新的任务 ID",
+        "en": "Job ID to update",
+    },
+    "job_id_to_delete": {
+        "cn": "要删除的任务 ID",
+        "en": "Job ID to delete",
+    },
+    "job_id_to_toggle": {
+        "cn": "要启用/禁用的任务 ID",
+        "en": "Job ID",
+    },
+    "job_id_to_preview": {
+        "cn": "要预览的任务 ID",
+        "en": "Job ID",
+    },
+    "patch": {
+        "cn": "要更新的字段",
+        "en": "Fields to update",
+    },
+    "enabled": {
+        "cn": "是否启用该任务",
+        "en": "Whether to enable the job",
+    },
+    "count": {
+        "cn": "预览的执行次数（1-50，默认 5）",
+        "en": "Number of runs to preview (1-50, default 5)",
+    },
+    "name": {
+        "cn": "任务名称",
+        "en": "Job name",
+    },
+    "cron_expr": {
+        "cn": (
+            "Cron表达式。*/X仅当周期能被X整除时间隔均匀。"
+            "分钟仅支持X整除60(1/2/3/4/5/6/10/12/15/20/30)；"
+            "小时仅支持X整除24(1/2/3/4/6/8/12)；日不可靠；月仅支持X整除12(1/2/3/4/6)；周仅支持X整除7(1/7)。"
+            "详见工具描述。"
+        ),
+        "en": (
+            "Cron expression. */X only yields uniform intervals when cycle divisible by X. "
+            "Minute: X must divide 60; Hour: X must divide 24; Day unreliable; "
+            "Month: X must divide 12; Weekday: X must divide 7. See tool description."
+        ),
+    },
+    "timezone": {
+        "cn": "时区，如 Asia/Shanghai",
+        "en": "Timezone, e.g. Asia/Shanghai",
+    },
+    "targets": {
+        "cn": "兼容层目标频道字段",
+        "en": "Legacy compatibility target channel",
+    },
+    "legacy_enabled": {
+        "cn": "是否启用",
+        "en": "Whether to enable the job",
+    },
+    "legacy_description": {
+        "cn": "具体任务内容，到点执行时发给助手。不要包含时间/频率信息（如'每隔40分钟'、'每天9点'）",
+        "en": "Task content sent to assistant at scheduled time. Do NOT include time/frequency info",
+    },
+    "wake_offset_seconds": {
+        "cn": "提前多少秒执行，默认 300",
+        "en": "Wake offset in seconds, default 300",
+    },
+}
+
+
+def _legacy_desc(key: str, language: str) -> str:
+    return LEGACY_FIELD_DESCRIPTIONS[key].get(language, LEGACY_FIELD_DESCRIPTIONS[key]["cn"])
+
+
+def get_cron_list_jobs_input_params(language: str = "cn") -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    }
+
+
+def get_cron_get_job_input_params(language: str = "cn") -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "job_id": {
+                "type": "string",
+                "description": _legacy_desc("job_id_to_look_up", language),
+            },
+        },
+        "required": ["job_id"],
+    }
+
+
+def get_cron_create_job_input_params(language: str = "cn") -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": _legacy_desc("name", language),
+            },
+            "cron_expr": {
+                "type": "string",
+                "description": _legacy_desc("cron_expr", language),
+            },
+            "timezone": {
+                "type": "string",
+                "description": _legacy_desc("timezone", language),
+                "default": "Asia/Shanghai",
+            },
+            "targets": {
+                "type": "string",
+                "description": _legacy_desc("targets", language),
+            },
+            "enabled": {
+                "type": "boolean",
+                "description": _legacy_desc("legacy_enabled", language),
+                "default": True,
+            },
+            "description": {
+                "type": "string",
+                "description": _legacy_desc("legacy_description", language),
+            },
+            "wake_offset_seconds": {
+                "type": "integer",
+                "description": _legacy_desc("wake_offset_seconds", language),
+                "default": 300,
+            },
+        },
+        "required": ["name", "cron_expr", "timezone", "description"],
+    }
+
+
+def get_cron_update_job_input_params(language: str = "cn") -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "job_id": {
+                "type": "string",
+                "description": _legacy_desc("job_id_to_update", language),
+            },
+            "patch": {
+                "type": "object",
+                "description": _legacy_desc("patch", language),
+                "additionalProperties": True,
+            },
+        },
+        "required": ["job_id", "patch"],
+    }
+
+
+def get_cron_delete_job_input_params(language: str = "cn") -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "job_id": {
+                "type": "string",
+                "description": _legacy_desc("job_id_to_delete", language),
+            },
+        },
+        "required": ["job_id"],
+    }
+
+
+def get_cron_toggle_job_input_params(language: str = "cn") -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "job_id": {
+                "type": "string",
+                "description": _legacy_desc("job_id_to_toggle", language),
+            },
+            "enabled": {
+                "type": "boolean",
+                "description": _legacy_desc("enabled", language),
+            },
+        },
+        "required": ["job_id", "enabled"],
+    }
+
+
+def get_cron_preview_job_input_params(language: str = "cn") -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "job_id": {
+                "type": "string",
+                "description": _legacy_desc("job_id_to_preview", language),
+            },
+            "count": {
+                "type": "integer",
+                "description": _legacy_desc("count", language),
+                "default": 5,
+            },
+        },
+        "required": ["job_id"],
+    }
+
+
+class CronListJobsMetadataProvider(ToolMetadataProvider):
+    """Metadata provider for legacy cron_list_jobs tool."""
+
+    def get_name(self) -> str:
+        return "cron_list_jobs"
+
+    def get_description(self, language: str = "cn") -> str:
+        return CRON_LIST_JOBS_DESCRIPTION.get(language, CRON_LIST_JOBS_DESCRIPTION["cn"])
+
+    def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
+        return get_cron_list_jobs_input_params(language)
+
+
+class CronGetJobMetadataProvider(ToolMetadataProvider):
+    """Metadata provider for legacy cron_get_job tool."""
+
+    def get_name(self) -> str:
+        return "cron_get_job"
+
+    def get_description(self, language: str = "cn") -> str:
+        return CRON_GET_JOB_DESCRIPTION.get(language, CRON_GET_JOB_DESCRIPTION["cn"])
+
+    def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
+        return get_cron_get_job_input_params(language)
+
+
+class CronCreateJobMetadataProvider(ToolMetadataProvider):
+    """Metadata provider for legacy cron_create_job tool."""
+
+    def get_name(self) -> str:
+        return "cron_create_job"
+
+    def get_description(self, language: str = "cn") -> str:
+        return CRON_CREATE_JOB_DESCRIPTION.get(language, CRON_CREATE_JOB_DESCRIPTION["cn"])
+
+    def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
+        return get_cron_create_job_input_params(language)
+
+
+class CronUpdateJobMetadataProvider(ToolMetadataProvider):
+    """Metadata provider for legacy cron_update_job tool."""
+
+    def get_name(self) -> str:
+        return "cron_update_job"
+
+    def get_description(self, language: str = "cn") -> str:
+        return CRON_UPDATE_JOB_DESCRIPTION.get(language, CRON_UPDATE_JOB_DESCRIPTION["cn"])
+
+    def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
+        return get_cron_update_job_input_params(language)
+
+
+class CronDeleteJobMetadataProvider(ToolMetadataProvider):
+    """Metadata provider for legacy cron_delete_job tool."""
+
+    def get_name(self) -> str:
+        return "cron_delete_job"
+
+    def get_description(self, language: str = "cn") -> str:
+        return CRON_DELETE_JOB_DESCRIPTION.get(language, CRON_DELETE_JOB_DESCRIPTION["cn"])
+
+    def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
+        return get_cron_delete_job_input_params(language)
+
+
+class CronToggleJobMetadataProvider(ToolMetadataProvider):
+    """Metadata provider for legacy cron_toggle_job tool."""
+
+    def get_name(self) -> str:
+        return "cron_toggle_job"
+
+    def get_description(self, language: str = "cn") -> str:
+        return CRON_TOGGLE_JOB_DESCRIPTION.get(language, CRON_TOGGLE_JOB_DESCRIPTION["cn"])
+
+    def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
+        return get_cron_toggle_job_input_params(language)
+
+
+class CronPreviewJobMetadataProvider(ToolMetadataProvider):
+    """Metadata provider for legacy cron_preview_job tool."""
+
+    def get_name(self) -> str:
+        return "cron_preview_job"
+
+    def get_description(self, language: str = "cn") -> str:
+        return CRON_PREVIEW_JOB_DESCRIPTION.get(language, CRON_PREVIEW_JOB_DESCRIPTION["cn"])
+
+    def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
+        return get_cron_preview_job_input_params(language)
