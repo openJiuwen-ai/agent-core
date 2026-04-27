@@ -12,7 +12,6 @@ import yaml
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.runner.runner import Runner
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.skills import (
@@ -28,7 +27,6 @@ from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.core.context_engine.active_skill_bodies import (
     ACTIVE_SKILL_HINTS_STATE_KEY,
     DEFAULT_MAX_ACTIVE_SKILL_BODIES,
-    format_skill_tool_stub_appendix_from_result,
     normalize_skill_relative_file_path,
     pop_active_skill_hints_for_session,
     record_active_skill_body,
@@ -39,8 +37,87 @@ from openjiuwen.core.context_engine.observability import (
     skill_trace_metadata_subset,
     write_context_trace,
 )
-from openjiuwen.core.foundation.llm import ToolMessage
-from openjiuwen.core.single_agent.rail.base import ToolCallInputs
+from openjiuwen.core.foundation.llm import SystemMessage, ToolMessage, UserMessage
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
+from openjiuwen.harness.prompts import resolve_language
+
+
+def _coerce_ui_language_string(raw: Optional[str]) -> str:
+    """Map config or deep_config language to ``cn`` or ``en`` for the skill load stub."""
+    if not raw or not isinstance(raw, str):
+        return resolve_language(None)
+    s = raw.strip().lower()
+    if s in ("en", "english"):
+        return "en"
+    if s in ("cn", "zh", "zh-cn", "zhcn", "chinese"):
+        return "cn"
+    return resolve_language(None)
+
+
+def _safe_deep_config_language(ctx: Optional[AgentCallbackContext]) -> Optional[str]:
+    if ctx is None:
+        return None
+    agent = getattr(ctx, "agent", None)
+    if agent is None:
+        return None
+    dc = getattr(agent, "deep_config", None)
+    if dc is None:
+        return None
+    lang = getattr(dc, "language", None)
+    if not isinstance(lang, str):
+        return None
+    t = lang.strip()
+    return t or None
+
+
+def _resolve_skill_load_stub_ui_language(
+    ctx: Optional[AgentCallbackContext],
+    rail: Any,
+) -> str:
+    override = getattr(rail, "skill_tool_stub_language", None)
+    if override is not None and isinstance(override, str) and override.strip():
+        return _coerce_ui_language_string(override.strip())
+    from_ctx = _safe_deep_config_language(ctx)
+    if from_ctx is not None:
+        return _coerce_ui_language_string(from_ctx)
+    return _coerce_ui_language_string(None)
+
+
+def _format_skill_load_stub_core(
+    skill_name: str,
+    relative_file_path: str,
+    *,
+    ui_language: str,
+) -> str:
+    if ui_language == "en":
+        return (
+            f"[SKILL LOADED] {skill_name} / {relative_file_path}\n"
+            "The full SKILL body is kept and reinjected as an [ACTIVE SKILL BODY] block in later "
+            "context—follow that block for workflow; do not open this skill's SKILL.md by path again. "
+            "Call skill_tool again only to reload."
+        )
+    return (
+        f"[SKILL LOADED] {skill_name} / {relative_file_path}\n"
+        "完整正文已由系统保留，并在后续发给模型的上下文中以 [ACTIVE SKILL BODY] 块注入；"
+        "请直接依据该块执行，不要按磁盘路径再次打开本技能的 SKILL.md。"
+        "仅在需要强制刷新全文时再调用 skill_tool。"
+    )
+
+
+def _format_skill_unload_stub(
+    skill_name: str,
+    *,
+    ui_language: str,
+) -> str:
+    if ui_language == "en":
+        return (
+            f"[SKILL UNLOADED] Body of skill '{skill_name}' was released to save context. "
+            f"Re-call skill_tool if you need it again."
+        )
+    return (
+        f"[SKILL UNLOADED] 技能 '{skill_name}' 的正文已释放以节省上下文，"
+        f"如需再次使用请重新调用 skill_tool。"
+    )
 
 
 class SkillUseRail(DeepAgentRail):
@@ -65,6 +142,7 @@ class SkillUseRail(DeepAgentRail):
         disabled_skills: Optional[Union[str, List[str]]] = None,
         evolution_store: Optional[EvolutionStore] = None,
         max_active_skill_bodies: int = DEFAULT_MAX_ACTIVE_SKILL_BODIES,
+        skill_tool_stub_language: Optional[str] = None,
     ):
         """Initialize SkillUseRail.
 
@@ -84,6 +162,9 @@ class SkillUseRail(DeepAgentRail):
             enabled_skills: Optional allow-list of skill names. Supports str or List[str].
             disabled_skills: Optional deny-list of skill names. Supports str or List[str].
             evolution_store: Optional EvolutionStore for progressive disclosure experience text.
+            skill_tool_stub_language: Optional override for the short ``[SKILL LOADED]`` tool
+                message (``"cn"`` or ``"en"``). When None, use ``agent.deep_config.language``
+                on each tool callback; if still unset, the harness default (usually ``"cn"``).
         """
         super().__init__()
 
@@ -103,6 +184,7 @@ class SkillUseRail(DeepAgentRail):
         self.disabled_skills = self._normalize_name_set(disabled_skills)
         self.evolution_store: Optional[EvolutionStore] = evolution_store
         self.max_active_skill_bodies = max_active_skill_bodies
+        self.skill_tool_stub_language = skill_tool_stub_language
 
         self.skills: List[Skill] = []
         self.system_prompt_builder = None
@@ -448,7 +530,7 @@ class SkillUseRail(DeepAgentRail):
             return
 
         if tool_name == "skill_complete":
-            self._handle_skill_complete(inputs, session, ctx.context, trace_ids)
+            self._handle_skill_complete(inputs, session, ctx.context, trace_ids, ctx)
             return
 
     def _handle_skill_tool_loaded(
@@ -536,17 +618,11 @@ class SkillUseRail(DeepAgentRail):
         # Replace original ToolMessage content with short load stub.
         # Models often try workspace file tools after seeing only a short ack; spell out
         # that the full body is reinjected as [ACTIVE SKILL BODY] on later turns.
-        stub_core = (
-            f"[SKILL LOADED] {skill_name} / {relative_file_path}\n"
-            f"完整正文已由系统保留，并在后续发给模型的上下文中以 [ACTIVE SKILL BODY] 块注入；"
-            f"请直接依据该块执行，不要按磁盘路径再次打开本技能的 SKILL.md。"
-            f"仅在需要强制刷新全文时再调用 skill_tool。\n"
-            f"The full SKILL body is kept and reinjected as an [ACTIVE SKILL BODY] block in later "
-            f"context—follow that block for workflow; do not open this skill's SKILL.md by path again. "
-            f"Call skill_tool again only to reload."
+        ui_lang = _resolve_skill_load_stub_ui_language(ctx, self)
+        stub_core = _format_skill_load_stub_core(
+            skill_name, relative_file_path, ui_language=ui_lang
         )
-        tree_appendix = format_skill_tool_stub_appendix_from_result(tool_result, max_tree_lines=120)
-        tool_msg.content = stub_core + tree_appendix
+        tool_msg.content = stub_core
         new_meta = dict(meta)
         new_meta.update({
             "is_skill_body": False,
@@ -589,6 +665,7 @@ class SkillUseRail(DeepAgentRail):
         session,
         context,
         trace_ids: Dict[str, Any],
+        ctx: Optional[AgentCallbackContext] = None,
     ) -> None:
         tool_result = inputs.tool_result
         skill_name = ""
@@ -603,6 +680,9 @@ class SkillUseRail(DeepAgentRail):
             return
 
         removed = unregister_active_skill_body(session, skill_name)
+        ctx_session = getattr(context, "_session_ref", None)
+        if ctx_session is not None and ctx_session is not session:
+            removed += unregister_active_skill_body(ctx_session, skill_name)
 
         if context is None:
             write_context_trace(
@@ -652,10 +732,20 @@ class SkillUseRail(DeepAgentRail):
 
         changed = False
         tool_messages_touched = 0
-        unload_stub = (
-            f"[SKILL UNLOADED] Body of skill '{skill_name}' was released to save context. "
-            f"Re-call skill_tool if you need it again."
-        )
+        ui_lang = _resolve_skill_load_stub_ui_language(ctx, self)
+        unload_stub = _format_skill_unload_stub(skill_name, ui_language=ui_lang)
+        kept: List[Any] = []
+        for msg in buffered:
+            meta = getattr(msg, "metadata", None) or {}
+            if (
+                isinstance(msg, (SystemMessage, UserMessage))
+                and meta.get("active_skill_pin")
+                and meta.get("skill_name") == skill_name
+            ):
+                changed = True
+                continue
+            kept.append(msg)
+        buffered = kept
         for msg in buffered:
             if not isinstance(msg, ToolMessage):
                 continue

@@ -85,6 +85,28 @@ def _coerce_dict(value: Any) -> Dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def _replace_active_skill_state(
+    session: Any,
+    active: Dict[str, Any],
+    evictions: Dict[str, Any],
+) -> None:
+    """Write ``active_skill_bodies`` and eviction maps as full snapshots.
+
+    ``Session.update_state`` merges dict-shaped values into existing keys via
+    ``update_dict``; keys removed in the new snapshot are not deleted from the
+    stored map. Clearing both roots with ``None`` first makes the follow-up
+    write a full replace (required for unregister and eviction).
+    """
+    session.update_state({
+        ACTIVE_SKILL_BODIES_STATE_KEY: None,
+        ACTIVE_SKILL_EVICTIONS_STATE_KEY: None,
+    })
+    session.update_state({
+        ACTIVE_SKILL_BODIES_STATE_KEY: dict(active),
+        ACTIVE_SKILL_EVICTIONS_STATE_KEY: dict(evictions),
+    })
+
+
 def _migrate_skill_body_keyed_map(raw: Any) -> Tuple[Dict[str, Any], bool]:
     """Re-key maps stored under ``active_skill_bodies`` / eviction keys.
 
@@ -159,7 +181,7 @@ def format_directory_tree_markdown_for_llm(
     *,
     max_lines: int = 120,
 ) -> str:
-    """Markdown block for directory_tree (used in Tool stub and [ACTIVE SKILL BODY] pin)."""
+    """Markdown block for directory_tree (used in [ACTIVE SKILL BODY] pin)."""
     if not directory_tree:
         return ""
     cap = max(1, min(max_lines, 500))
@@ -175,14 +197,6 @@ def format_directory_tree_markdown_for_llm(
         body = "\n".join(lines) + suffix
         title = "\n## Directory layout (relative paths; directories end with /)\n"
     return f"{title}```\n{body}\n```\n"
-
-
-def format_skill_tool_stub_appendix_from_result(result: Any, *, max_tree_lines: int = 120) -> str:
-    """Append directory layout to the short [SKILL LOADED] tool stub when skill_tool returned a tree."""
-    tree = _read_directory_tree_from_result(result)
-    if not tree:
-        return ""
-    return format_directory_tree_markdown_for_llm(tree, max_lines=max_tree_lines)
 
 
 def record_active_skill_body(
@@ -284,10 +298,7 @@ def _record_locked(
                 "reason": "max_active_skill_bodies",
             }
 
-    session.update_state({
-        ACTIVE_SKILL_BODIES_STATE_KEY: active,
-        ACTIVE_SKILL_EVICTIONS_STATE_KEY: evictions if evictions else {},
-    })
+    _replace_active_skill_state(session, active, evictions if evictions else {})
     trace_ids = resolve_context_trace_ids(session, None)
     # [PIN_DIAG] write-side: capture session identity + post-write keys
     try:
@@ -376,10 +387,7 @@ def _unregister_locked(
             if evictions[key].get("skill_name") == skill_name:
                 evictions.pop(key, None)
 
-    session.update_state({
-        ACTIVE_SKILL_BODIES_STATE_KEY: active,
-        ACTIVE_SKILL_EVICTIONS_STATE_KEY: evictions,
-    })
+    _replace_active_skill_state(session, active, evictions)
     trace_ids = resolve_context_trace_ids(session, None)
     logger.info(
         "[active_skill_bodies] unregister session_id=%s skill=%s path_filter=%s "
@@ -508,10 +516,7 @@ def append_active_skill_pins_to_window(
         evictions, e_mig = _migrate_skill_body_keyed_map(evictions)
         if a_mig or e_mig:
             try:
-                session.update_state({
-                    ACTIVE_SKILL_BODIES_STATE_KEY: active,
-                    ACTIVE_SKILL_EVICTIONS_STATE_KEY: evictions,
-                })
+                _replace_active_skill_state(session, active, evictions)
             except Exception:
                 pass
         prev_signature = session.get_state(ACTIVE_SKILL_EVICTION_SIGNATURE_STATE_KEY) or ""
