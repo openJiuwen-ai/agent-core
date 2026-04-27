@@ -98,10 +98,6 @@ class SkillUseRail(DeepAgentRail):
         """Return all managed skills."""
         return list(self.skills)
 
-    def get_skills_meta(self) -> List[Skill]:
-        """Return all managed skills."""
-        return list(self.skills)
-
     async def _prepare_skills(self) -> None:
         """Refresh skills incrementally from skills_dir and apply filters."""
         if not self.enable_cache:
@@ -234,13 +230,22 @@ class SkillUseRail(DeepAgentRail):
 
         lang = agent.system_prompt_builder.language
         agent_id = getattr(getattr(agent, "card", None), "id", None)
+        
+        tools.append(
+            SkillTool(
+                operation=self.sys_operation,
+                get_skills=lambda: self.skills,
+                language=lang,
+                agent_id=agent_id
+            ),
+        )
+
         if self.include_tools:
             tools.extend(
                 [
                     ReadFileTool(self.sys_operation, language=lang, agent_id=agent_id),
                     CodeTool(self.sys_operation, language=lang, agent_id=agent_id),
                     BashTool(self.sys_operation, language=lang, agent_id=agent_id),
-                    SkillTool(self.sys_operation, self.get_skills_meta, language=lang, agent_id=agent_id),
                 ]
             )
 
