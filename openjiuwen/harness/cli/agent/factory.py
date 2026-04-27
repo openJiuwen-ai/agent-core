@@ -507,17 +507,19 @@ def create_agent(
     )
     rails.append(skill_rail)
 
-    # ContextEngineeringRail — context window management
+    # ContextProcessorRail — context window management
     # (includes DialogueCompressor for /compact support)
     try:
-        from openjiuwen.harness.rails.context_engineering_rail import (
-            ContextEngineeringRail,
+        from openjiuwen.harness.rails.context_engineer import (
+            ContextProcessorRail,
+            ContextAssembleRail
         )
 
-        rails.append(ContextEngineeringRail(preset=True))
+        rails.append(ContextProcessorRail(preset=True))
+        rails.append(ContextAssembleRail())
     except ImportError:
         logger.debug(
-            "ContextEngineeringRail not available"
+            "ContextProcessorRail or ContextAssembleRail not available"
         )
 
     # --- MemoryRail ---

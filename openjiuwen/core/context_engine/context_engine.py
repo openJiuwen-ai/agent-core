@@ -94,6 +94,10 @@ class ContextEngine:
             for processor_type, processor_config in (processors or [])
         ]
 
+        if token_counter is None and self._config.enable_tiktoken_counter:
+            from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
+            token_counter = TiktokenCounter()
+
         context = SessionModelContext(
             context_id,
             session_id,

@@ -53,3 +53,4 @@ class ContextEngineConfig(BaseModel):
     default_window_round_num: Optional[int] = Field(default=None, gt=0)
     enable_kv_cache_release: bool = Field(default=False)
     enable_reload: bool = Field(default=False)
+    enable_tiktoken_counter: bool = Field(default=False)

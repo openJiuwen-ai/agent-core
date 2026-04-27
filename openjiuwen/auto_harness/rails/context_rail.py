@@ -13,13 +13,13 @@ from __future__ import annotations
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
 )
-from openjiuwen.harness.rails.context_engineering_rail import (
-    ContextEngineeringRail,
+from openjiuwen.harness.rails.context_engineer.context_processor_rail import (
+    ContextProcessorRail,
 )
 
 
 class AutoHarnessContextRail(
-    ContextEngineeringRail
+    ContextProcessorRail
 ):
     """Context processor rail without workspace/context prompt injection."""
 

@@ -1126,11 +1126,9 @@ class ReActAgent(BaseAgent):
             session: Optional[Session]
     ) -> ModelContext:
         if self._config.context_processors:
-            from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
             context = await self.context_engine.create_context(
                 session=session,
                 processors=self._config.context_processors,
-                token_counter=TiktokenCounter()
             )
         else:
             context = await self.context_engine.create_context(
@@ -1286,7 +1284,11 @@ class ReActAgent(BaseAgent):
                             break
 
                         await context.add_messages(
-                            AssistantMessage(content=ai_message.content, tool_calls=ai_message.tool_calls)
+                            AssistantMessage(
+                                content=ai_message.content,
+                                tool_calls=ai_message.tool_calls,
+                                usage_metadata=ai_message.usage_metadata
+                            )
                         )
 
                         if not ai_message.tool_calls:

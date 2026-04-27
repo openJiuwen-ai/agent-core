@@ -159,11 +159,11 @@ async def test_init_preset_defaults(tmp_path: Path):
     assert off is not None
     assert off.messages_threshold is None
     assert off.tokens_threshold == 60000
-    assert off.large_message_threshold == 20000
+    assert off.large_message_threshold == 60000
     assert off.offload_message_type == ["tool"]
-    assert off.protected_tool_names == ["reload_original_context_messages"]
-    assert off.enable_adaptive_compression is False
-    assert off.summary_max_tokens == 1000
+    assert off.protected_tool_names == ["read_file:*SKILL.md", "reload_original_context_messages"]
+    assert off.enable_adaptive_compression is True
+    assert off.summary_max_tokens == 900
 
     # DialogueCompressor tests
     comp = procs.get("DialogueCompressor")
@@ -178,7 +178,7 @@ async def test_init_preset_defaults(tmp_path: Path):
     curr = procs.get("CurrentRoundCompressor")
     assert curr is not None
     assert curr.tokens_threshold == 100000
-    assert curr.messages_to_keep == 6
+    assert curr.messages_to_keep == 3
     assert curr.compression_target_tokens == 4000
 
     # RoundLevelCompressor tests
