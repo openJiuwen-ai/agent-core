@@ -1437,10 +1437,14 @@ class DeepAgent(BaseAgent):
             )
 
         last_result: Dict[str, Any] = {}
-        async for result in self._run_task_loop(
-            ctx, session
-        ):
-            last_result = result
+        try:
+            async for result in self._run_task_loop(
+                ctx, session
+            ):
+                last_result = result
+        except Exception as e:
+            logger.error(f"Task loop invoke error: {e}", exc_info=True)
+            raise
         return last_result
 
     async def _run_task_loop_stream(
@@ -1484,7 +1488,9 @@ class DeepAgent(BaseAgent):
                 async for result in self._run_task_loop(ctx, session):
                     await self._write_round_result_to_stream(result, session)
             except Exception as e:
-                logger.error(f"Task loop stream error: {e}")
+                logger.error(f"Task loop stream error: {e}", exc_info=True)
+                error_result = {"output": str(e), "result_type": "error"}
+                await self._write_round_result_to_stream(error_result, session)
             finally:
                 # Only close the stream emitter to send END_FRAME,
                 # so stream_iterator() can terminate.

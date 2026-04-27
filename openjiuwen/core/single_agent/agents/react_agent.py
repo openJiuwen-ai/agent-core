@@ -1435,7 +1435,11 @@ class ReActAgent(BaseAgent):
                         final_result, session
                     )
             except Exception as e:
-                logger.error(f"ReActAgent stream error: {e}")
+                logger.error(f"ReActAgent stream error: {e}", exc_info=True)
+                error_result = {"output": str(e), "result_type": "error"}
+                await self._write_invoke_result_to_stream(
+                    error_result, session
+                )
             finally:
                 if need_cleanup:
                     await self.context_engine.save_contexts(session)
