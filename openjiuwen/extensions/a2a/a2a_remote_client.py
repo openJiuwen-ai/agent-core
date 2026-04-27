@@ -6,8 +6,6 @@ from typing import Any, AsyncGenerator, Dict, Optional
 
 from a2a.types import AgentCard as A2AAgentCard
 
-from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.drunner.remote_client.remote_client import RemoteClient
 from openjiuwen.core.runner.drunner.remote_client.remote_client_config import RemoteClientConfig
@@ -18,15 +16,19 @@ from openjiuwen.extensions.a2a.a2a_client import A2AClient
 
 
 class A2ARemoteClient(RemoteClient):
-    """Minimal remote client for the A2A protocol."""
+    """A2A remote client plugin implementation."""
 
-    def __init__(self, config: RemoteClientConfig, card: Optional[AgentCard]):
+    def __init__(self, config: RemoteClientConfig):
         self.config = config
-        self.card = card
+        self.card = config.kwargs.get("card")
         self._started = False
 
         try:
-            a2a_card = self._convert_to_a2a_card(card)
+            if not isinstance(self.card, AgentCard):
+                raise ValueError("card is not openjiuwen agent card")
+            a2a_card = self._convert_to_a2a_card(self.card)
+            if a2a_card is None:
+                raise ValueError("failed to convert openjiuwen agent card to a2a agent card")
             self.client = A2AClient(card=a2a_card)
             logger.info(f"[A2ARemoteClient] Initialized client for {config.id}, url={config.url}")
         except Exception as exc:

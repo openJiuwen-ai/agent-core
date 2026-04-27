@@ -4,9 +4,9 @@
 import uuid
 from typing import Any, Dict
 
-from a2a.client.client import ClientEvent
 from a2a.types.a2a_pb2 import Message, Part as A2APart, Role, SendMessageRequest, Task
 from a2a.types.a2a_pb2 import TaskArtifactUpdateEvent, TaskState as A2ATaskStatus, TaskStatusUpdateEvent
+from a2a.types import StreamResponse
 from google.protobuf.struct_pb2 import Struct
 from openjiuwen.core.controller.schema.task import TaskStatus
 from openjiuwen.core.single_agent.schema.agent_result import AgentResult, Artifact, Part
@@ -55,7 +55,7 @@ class A2ATransformer:
         return send_request
 
     @classmethod
-    def from_a2a_response(cls, response: ClientEvent | Any) -> AgentResult:
+    def from_a2a_response(cls, response: StreamResponse | Any) -> AgentResult:
         if isinstance(response, tuple) and len(response) == 2:
             stream_response, task = response
 

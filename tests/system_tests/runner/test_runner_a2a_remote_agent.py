@@ -10,9 +10,9 @@ from fastapi import FastAPI
 
 from a2a.server.agent_execution.agent_executor import AgentExecutor
 from a2a.server.agent_execution.context import RequestContext
-from a2a.server.apps import A2AFastAPIApplication, A2ARESTFastAPIApplication
+from a2a.server.apps import A2AFastAPIApplication
 from a2a.server.events.event_queue import EventQueue
-from a2a.server.request_handlers.default_request_handler import DefaultRequestHandler
+from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks.inmemory_task_store import InMemoryTaskStore
 from a2a.server.tasks.task_updater import TaskUpdater
 from a2a.client import ClientConfig, ClientFactory
@@ -22,6 +22,9 @@ from a2a.types import (
     AgentInterface,
     AgentProvider,
     AgentSkill,
+    Task,
+    TaskState,
+    TaskStatus as A2ATaskStatus,
     Part,
 )
 
@@ -62,6 +65,15 @@ class A2AExecutor(AgentExecutor):
             event_queue=event_queue,
             task_id=task_id,
             context_id=context_id,
+        )
+
+        await updater.event_queue.enqueue_event(
+            Task(
+                id=task_id,
+                context_id=context_id,
+                status=A2ATaskStatus(state=TaskState.TASK_STATE_SUBMITTED),
+                history=[user_message],
+            )
         )
 
         await updater.start_work(
@@ -111,11 +123,6 @@ def build_test_app() -> FastAPI:
                 protocol_version="1.0",
                 url="http://testserver/a2a/jsonrpc/",
             ),
-            AgentInterface(
-                protocol_binding="HTTP+JSON",
-                protocol_version="1.0",
-                url="http://testserver/a2a/rest/",
-            ),
         ],
     )
 
@@ -125,20 +132,12 @@ def build_test_app() -> FastAPI:
         task_store=task_store,
     )
 
-    rest_app = A2ARESTFastAPIApplication(
+    app_builder = A2AFastAPIApplication(
         agent_card=agent_card,
         http_handler=request_handler,
         enable_v0_3_compat=True,
-    ).build()
-
-    app = FastAPI()
-    A2AFastAPIApplication(
-        agent_card=agent_card,
-        http_handler=request_handler,
-        enable_v0_3_compat=True,
-    ).add_routes_to_app(app, rpc_url="/a2a/jsonrpc/")
-    app.mount("/a2a/rest", rest_app)
-    return app
+    )
+    return app_builder.build(agent_card_url="/.well-known/agent-card.json", rpc_url="/a2a/jsonrpc/")
 
 
 @pytest_asyncio.fixture
@@ -169,15 +168,14 @@ async def registered_a2a_remote_agent(a2a_server_app, started_runner, monkeypatc
     class _TestClientFactory(ClientFactory):
         def __init__(self, config: ClientConfig, consumers=None):
             config.httpx_client = httpx_client
-            super().__init__(config, consumers)
+            super().__init__(config)
 
     monkeypatch.setattr("openjiuwen.extensions.a2a.a2a_client.ClientFactory", _TestClientFactory)
 
     agent = RemoteAgent(
         agent_id=agent_id,
         protocol=ProtocolEnum.A2A,
-        config={"url": "http://testserver"},
-        card=remote_card,
+        config={"url": "http://testserver", "kwargs": {"card": remote_card}},
     )
 
     Runner.resource_mgr.add_agent(OJWAgentCard(id=agent_id), agent=agent)
