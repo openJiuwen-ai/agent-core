@@ -10,7 +10,13 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord, UsageStats
+from openjiuwen.agent_evolving.optimizer.llm_resilience import (
+    LLMInvokePolicy,
+    invoke_text_with_retry,
+)
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.model import Model
 
 # E/U/F score weights
 W_E = 0.5
@@ -19,6 +25,17 @@ W_F = 0.2
 
 FRESHNESS_HALF_LIFE_DAYS = 90
 STALE_VERSION_PENALTY = 0.7
+
+_EVALUATE_LLM_POLICY = LLMInvokePolicy(
+    attempt_timeout_secs=20,
+    total_budget_secs=45,
+    max_attempts=2,
+)
+_SIMPLIFY_LLM_POLICY = LLMInvokePolicy(
+    attempt_timeout_secs=30,
+    total_budget_secs=60,
+    max_attempts=2,
+)
 
 
 # Evaluate experience effectiveness from conversation snippet
@@ -275,12 +292,12 @@ def update_score(
 class ExperienceScorer:
     """LLM-based experience scorer and maintainer."""
 
-    def __init__(self, llm: Any, model: str, language: str = "cn") -> None:
+    def __init__(self, llm: Model, model: str, language: str = "cn") -> None:
         self._llm = llm
         self._model = model
         self._language = language
 
-    def update_llm(self, llm: Any, model: str) -> None:
+    def update_llm(self, llm: Model, model: str) -> None:
         """Update runtime llm/model for hot reload."""
         self._llm = llm
         self._model = model
@@ -309,12 +326,14 @@ class ExperienceScorer:
         )
 
         try:
-            response = await self._llm.invoke(
+            raw = await invoke_text_with_retry(
+                llm=self._llm,
                 model=self._model,
-                messages=[{"role": "user", "content": prompt}],
+                prompt=prompt,
+                policy=_EVALUATE_LLM_POLICY,
+                is_result_usable=lambda text: self._parse_llm_json(text) is not None,
             )
-            raw = response.content if hasattr(response, "content") else str(response)
-        except Exception as exc:
+        except BaseError as exc:
             logger.error("[ExperienceScorer] evaluate LLM call failed: %s", exc)
             return []
 
@@ -356,12 +375,14 @@ class ExperienceScorer:
             prompt += f"\n\n**用户意图**: {user_intent}"
 
         try:
-            response = await self._llm.invoke(
+            raw = await invoke_text_with_retry(
+                llm=self._llm,
                 model=self._model,
-                messages=[{"role": "user", "content": prompt}],
+                prompt=prompt,
+                policy=_SIMPLIFY_LLM_POLICY,
+                is_result_usable=lambda text: self._parse_llm_json(text) is not None,
             )
-            raw = response.content if hasattr(response, "content") else str(response)
-        except Exception as exc:
+        except BaseError as exc:
             logger.error("[ExperienceScorer] simplify LLM call failed: %s", exc)
             return []
 

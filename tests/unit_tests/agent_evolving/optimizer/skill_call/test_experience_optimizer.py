@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -150,6 +151,37 @@ class TestSkillExperienceOptimizerGenerate:
         assert len(records) == 2
         assert records[0].change.content == "A"
         assert records[1].change.content == "B"
+        assert llm.invoke.await_args_list[0].kwargs["timeout"] == 45
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_generate_retries_with_shorter_prompt_after_timeout():
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            side_effect=[
+                asyncio.TimeoutError("request timed out"),
+                SimpleNamespace(
+                    content='[{"action":"append","target":"body","section":"Troubleshooting","content":"A"}]'
+                ),
+            ]
+        )
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
+        ctx = EvolutionContext(
+            skill_name="skill-a",
+            signals=[make_signal("s1"), make_signal("s2"), make_signal("s3")],
+            skill_content="# Skill\n" + ("content\n" * 3000),
+            messages=[{"role": "user", "content": "hello " * 400}] * 12,
+            existing_desc_records=[make_record("ev_d1", "desc old"), make_record("ev_d2", "desc old 2")],
+            existing_body_records=[make_record("ev_b1", "body old"), make_record("ev_b2", "body old 2")],
+            user_query="query " * 200,
+        )
+
+        records = await optimizer.generate_records(ctx)
+
+        assert len(records) == 1
+        first_prompt = llm.invoke.await_args_list[0].kwargs["messages"][0]["content"]
+        second_prompt = llm.invoke.await_args_list[1].kwargs["messages"][0]["content"]
+        assert len(second_prompt) < len(first_prompt)
 
     @staticmethod
     def test_update_llm_updates_runtime_references():
@@ -398,6 +430,7 @@ class TestRetryParse:
         call_args = llm.invoke.call_args
         prompt_sent = call_args.kwargs["messages"][0]["content"]
         assert "修复" in prompt_sent or "invalid json" in prompt_sent
+        assert call_args.kwargs["timeout"] == 20
 
     @staticmethod
     @pytest.mark.asyncio
@@ -552,6 +585,43 @@ class TestGenerateRecordsRetry:
         assert records[0].change.content == "final"
         # Verify attempt 3 got the strict fix prompt (contains "严格要求")
         assert "严格要求" in prompts_sent[2]
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_timeout_fallback_prompt_is_preserved_for_truncated_retry_regeneration():
+        prompts_sent = []
+
+        async def fake_invoke(**kwargs):
+            prompts_sent.append(kwargs["messages"][0]["content"])
+            if len(prompts_sent) == 1:
+                raise asyncio.TimeoutError("request timed out")
+            if len(prompts_sent) == 2:
+                return SimpleNamespace(
+                    content='[{"action":"append","target":"body","section":"Troubleshooting","content":"partial'
+                )
+            return SimpleNamespace(
+                content='[{"action":"append","target":"body","section":"Troubleshooting","content":"final"}]'
+            )
+
+        llm = MagicMock()
+        llm.invoke = fake_invoke
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
+        ctx = EvolutionContext(
+            skill_name="skill-a",
+            signals=[make_signal("s1"), make_signal("s2"), make_signal("s3")],
+            skill_content="# Skill\n" + ("content\n" * 3000),
+            messages=[{"role": "user", "content": "hello " * 400}] * 12,
+            existing_desc_records=[make_record("ev_d1", "desc old"), make_record("ev_d2", "desc old 2")],
+            existing_body_records=[make_record("ev_b1", "body old"), make_record("ev_b2", "body old 2")],
+            user_query="query " * 200,
+        )
+
+        records = await optimizer.generate_records(ctx)
+
+        assert len(records) == 1
+        assert len(prompts_sent) == 3
+        assert len(prompts_sent[1]) < len(prompts_sent[0])
+        assert prompts_sent[2] == prompts_sent[1]
 
 
 class TestScriptLimit:

@@ -16,9 +16,15 @@ from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionTarget,
 )
 from openjiuwen.agent_evolving.optimizer.base import BaseOptimizer
+from openjiuwen.agent_evolving.optimizer.llm_resilience import (
+    LLMInvokePolicy,
+    invoke_text_with_retry_and_prompt,
+)
 from openjiuwen.agent_evolving.signal.base import EvolutionSignal
 from openjiuwen.agent_evolving.trajectory.types import Updates
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.model import Model
 
 # Initial score mapping by signal type
 INITIAL_SCORE_BY_SIGNAL = {
@@ -28,78 +34,12 @@ INITIAL_SCORE_BY_SIGNAL = {
     "conversation_review": 0.50,
 }
 
-NEW_SKILL_PROPOSAL_PROMPT_CN = """\
-你是一个 Skill 设计专家。根据对话历史，判断是否值得创建一个新的 Skill 来封装这个工作流。
-
-## 对话历史
-{conversation_snippet}
-
-## 现有 Skill 列表
-{existing_skill_names}
-
-## 判断标准
-1. 对话包含复杂的多步骤工作流
-2. 工作流具有通用性和可复用性
-3. 现有 Skill 无法覆盖此场景
-4. 工作流涉及特定工具组合或特定领域知识
-
-## 输出格式
-如果值得创建新 Skill，输出：
-```json
-{{
-  "should_create": true,
-  "name": "建议的 Skill 名称（英文，短横线连接）",
-  "description": "一句话描述 Skill 用途",
-  "body": "完整的 Skill 内容（Instructions、Examples 等）",
-  "reason": "为什么值得创建这个 Skill"
-}}
-```
-
-如果不值得创建，输出：
-```json
-{{"should_create": false}}
-```
-
-只输出 JSON，不要其他内容。"""
-
-NEW_SKILL_PROPOSAL_PROMPT_EN = """\
-You are a Skill design expert. Based on the conversation history, determine whether it's worth creating a new Skill to encapsulate this workflow.
-
-## Conversation History
-{conversation_snippet}
-
-## Existing Skill Names
-{existing_skill_names}
-
-## Criteria
-1. The conversation contains a complex multi-step workflow
-2. The workflow has generality and reusability
-3. Existing Skills cannot cover this scenario
-4. The workflow involves specific tool combinations or domain knowledge
-
-## Output Format
-If a new Skill is worth creating, output:
-```json
-{{
-  "should_create": true,
-  "name": "Suggested Skill name (English, kebab-case)",
-  "description": "One-sentence description of Skill purpose",
-  "body": "Complete Skill content (Instructions, Examples, etc.)",
-  "reason": "Why this Skill is worth creating"
-}}
-```
-
-If not worth creating, output:
-```json
-{{"should_create": false}}
-```
-
-Output only JSON, no other content."""
-
-NEW_SKILL_PROPOSAL_PROMPT: Dict[str, str] = {
-    "cn": NEW_SKILL_PROPOSAL_PROMPT_CN,
-    "en": NEW_SKILL_PROPOSAL_PROMPT_EN,
-}
+_GENERATE_RECORDS_LLM_POLICY = LLMInvokePolicy(
+    attempt_timeout_secs=45,
+    total_budget_secs=90,
+    max_attempts=2,
+)
+_RETRY_PARSE_TIMEOUT_SECS = 20
 
 SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
 你是一个 Skill 优化专家。根据对话中发现的问题信号和对话历史，为 Skill 生成演进经验。
@@ -563,6 +503,12 @@ def _build_existing_summary(records: List[EvolutionRecord], label: str = "") -> 
     return "\n".join(lines)
 
 
+def _limit_summary_lines(summary: str, max_lines: int) -> str:
+    if not summary or max_lines <= 0:
+        return ""
+    return "\n".join(summary.splitlines()[:max_lines])
+
+
 def _parse_single_patch(data: dict) -> Optional[EvolutionPatch]:
     action = data.get("action", "append")
     if action == "skip":
@@ -675,7 +621,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
 
     domain = "skill_experience"
 
-    def __init__(self, llm: Any, model: str, language: str = "cn") -> None:
+    def __init__(self, llm: Model, model: str, language: str = "cn") -> None:
         super().__init__()
         self._llm = llm
         self._model = model
@@ -744,16 +690,32 @@ class SkillExperienceOptimizer(BaseOptimizer):
             existing_body_summary=body_summary or ("无已有记录" if self._language == "cn" else "No existing records"),
             user_query=ctx.user_query or ("无" if self._language == "cn" else "None"),
         )
+        retry_prompt = SKILL_EXPERIENCE_GENERATE_PROMPT[self._language].format(
+            skill_content=_summarize_skill_content(ctx.skill_content, max_chars=2500),
+            signals_json=json.dumps([signal.to_dict() for signal in ctx.signals], ensure_ascii=False),
+            conversation_snippet=_build_conversation_snippet(
+                ctx.messages,
+                max_messages=10,
+                content_preview_chars=100,
+                language=self._language,
+            ).strip(),
+            existing_desc_summary=_limit_summary_lines(desc_summary, 2)
+            or ("无已有记录" if self._language == "cn" else "No existing records"),
+            existing_body_summary=_limit_summary_lines(body_summary, 2)
+            or ("无已有记录" if self._language == "cn" else "No existing records"),
+            user_query=(ctx.user_query[:500] if ctx.user_query else ("无" if self._language == "cn" else "None")),
+        )
 
         logger.info("[SkillExperienceOptimizer] calling LLM (skill=%s)", ctx.skill_name)
         try:
-            response = await self._llm.invoke(
+            raw, prompt_used = await invoke_text_with_retry_and_prompt(
+                llm=self._llm,
                 model=self._model,
-                messages=[{"role": "user", "content": prompt}],
-                timeout=120,
+                prompt=prompt,
+                retry_prompt=retry_prompt,
+                policy=_GENERATE_RECORDS_LLM_POLICY,
             )
-            raw = response.content if hasattr(response, "content") else str(response)
-        except Exception as exc:
+        except BaseError as exc:
             logger.error("[SkillExperienceOptimizer] LLM call failed: %s", exc)
             return []
 
@@ -779,7 +741,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
             )
             result = await self.retry_parse(
                 broken_raw=last_raw,
-                original_prompt=prompt,
+                original_prompt=prompt_used,
                 attempt_number=attempt,
                 parse_error=last_error,
             )
@@ -881,7 +843,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
                 model=self._model,
                 messages=[{"role": "user", "content": retry_prompt}],
                 temperature=0.1,
-                timeout=60,
+                timeout=_RETRY_PARSE_TIMEOUT_SECS,
             )
             retry_raw = response.content if hasattr(response, "content") else str(response)
         except Exception as exc:
@@ -896,63 +858,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
         logger.info("[SkillExperienceOptimizer] retry succeeded, got %d patches", len(patches))
         return patches, retry_raw
 
-    def update_llm(self, llm: Any, model: str) -> None:
+    def update_llm(self, llm: Model, model: str) -> None:
         """Update runtime llm/model for hot reload."""
         self._llm = llm
         self._model = model
-
-    async def generate_new_skill_proposal(
-        self,
-        messages: List[dict],
-        existing_skill_names: List[str],
-    ) -> Optional[Dict[str, Any]]:
-        """Generate a new skill proposal based on conversation history.
-
-        Args:
-            messages: Conversation messages
-            existing_skill_names: List of existing skill names
-
-        Returns:
-            Proposal dict with name, description, body, reason if should_create=True,
-            None otherwise
-        """
-        conversation_snippet = _build_conversation_snippet(messages, language=self._language)
-        prompt = NEW_SKILL_PROPOSAL_PROMPT[self._language].format(
-            conversation_snippet=conversation_snippet,
-            existing_skill_names=", ".join(existing_skill_names) if existing_skill_names else "(none)",
-        )
-
-        logger.info("[SkillExperienceOptimizer] generating new skill proposal")
-        try:
-            response = await self._llm.invoke(
-                model=self._model,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = response.content if hasattr(response, "content") else str(response)
-        except Exception as exc:
-            logger.error("[SkillExperienceOptimizer] new skill proposal LLM call failed: %s", exc)
-            return None
-
-        data = _extract_json(raw)
-        if data is None:
-            logger.warning("[SkillExperienceOptimizer] failed to parse new skill proposal response")
-            return None
-
-        if not data.get("should_create"):
-            logger.info("[SkillExperienceOptimizer] LLM decided not to create new skill")
-            return None
-
-        required_fields = ["name", "description", "body", "reason"]
-        for field in required_fields:
-            if field not in data:
-                logger.warning(
-                    "[SkillExperienceOptimizer] new skill proposal missing field: %s",
-                    field,
-                )
-                return None
-
-        logger.info(
-            "[SkillExperienceOptimizer] generated new skill proposal: %s",
-            data["name"],
-        )
-        return data

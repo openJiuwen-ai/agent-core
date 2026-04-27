@@ -53,6 +53,35 @@ def test_trajectory_issue_dataclass():
 
 
 @pytest.mark.asyncio
+async def test_detect_user_request_retries_on_invalid_response():
+    """_detect_user_request 首次坏结果时应重试。"""
+    import json
+
+    mock_optimizer = MagicMock()
+    mock_optimizer.language = "cn"
+    mock_optimizer.model = "test-model"
+    mock_optimizer.llm = MagicMock()
+    mock_optimizer.llm.invoke = AsyncMock(
+        side_effect=[
+            MagicMock(content="not json"),
+            MagicMock(content=json.dumps({"is_improvement": True, "intent": "增加 reviewer"})),
+        ]
+    )
+
+    with patch.object(TeamSkillRail, "__init__", lambda self, *args, **kwargs: None):
+        rail = TeamSkillRail.__new__(TeamSkillRail)
+        rail._optimizer = mock_optimizer
+
+        result = await rail._detect_user_request(
+            [{"role": "user", "content": "请增加 reviewer 角色"}],
+            "team skill",
+        )
+
+        assert result == UserIntent(is_improvement=True, intent="增加 reviewer")
+        assert mock_optimizer.llm.invoke.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_request_simplify_calls_scorer_and_executes():
     """/evolve_simplify should load records, call scorer.simplify, then execute actions."""
     mock_store = MagicMock()
@@ -314,6 +343,39 @@ class TestDetectTrajectoryIssues:
             issues = await rail._detect_trajectory_issues(MagicMock(), "skill content")
 
             assert issues == []
+
+    @pytest.mark.asyncio
+    async def test_retries_when_first_response_is_invalid_json(self):
+        """首次返回坏 JSON 时应重试并解析问题列表。"""
+        import json
+
+        mock_optimizer = MagicMock()
+        mock_optimizer.language = "cn"
+        mock_optimizer.llm = MagicMock()
+        mock_optimizer.llm.invoke = AsyncMock(
+            side_effect=[
+                MagicMock(content="not json"),
+                MagicMock(content=json.dumps([
+                    {
+                        "issue_type": "coordination",
+                        "description": "data not passed",
+                        "affected_role": "reviewer",
+                        "severity": "high",
+                    }
+                ])),
+            ]
+        )
+        mock_optimizer.model = "test-model"
+
+        with patch.object(TeamSkillRail, "__init__", lambda self, *args, **kwargs: None):
+            rail = TeamSkillRail.__new__(TeamSkillRail)
+            rail._optimizer = mock_optimizer
+
+            issues = await rail._detect_trajectory_issues(MagicMock(), "skill content")
+
+            assert len(issues) == 1
+            assert issues[0].issue_type == "coordination"
+            assert mock_optimizer.llm.invoke.await_count == 2
 
     @pytest.mark.asyncio
     async def test_filters_out_low_severity(self):

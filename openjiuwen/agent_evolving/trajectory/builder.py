@@ -97,6 +97,9 @@ class TrajectoryBuilder:
         Returns:
             Assembled Trajectory with all steps and metadata
         """
+        meta: dict[str, Any] = {}
+        if self.member_id:
+            meta["member_id"] = self.member_id
         return Trajectory(
             execution_id=_generate_uuid(),
             session_id=self.session_id,

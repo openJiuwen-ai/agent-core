@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from typing import Any
@@ -51,6 +52,22 @@ class _MockTrajectory:
         self.steps = steps or []
 
 
+def _tool_step(
+    tool_name: str = "spawn_member",
+    *,
+    args_text: str = "arg " * 1000,
+    result_text: str = "result " * 1000,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        kind="tool",
+        detail=SimpleNamespace(
+            tool_name=tool_name,
+            call_args=args_text,
+            call_result=result_text,
+        ),
+    )
+
+
 def _make_optimizer(llm_mock: Any, language: str = "cn") -> TeamSkillOptimizer:
     llm_mock.invoke = AsyncMock()
     return TeamSkillOptimizer(llm=llm_mock, model="test-model", language=language)
@@ -79,6 +96,7 @@ class TestGenerateUserPatch:
         assert record.change.section == "Collaboration"
         assert "角色 A 完成后通知角色 B" in record.change.content
         assert record.source == "team_skill_user_patch"
+        assert llm.invoke.await_args_list[0].kwargs["timeout"] == 40
 
     @pytest.mark.asyncio
     async def test_returns_none_on_empty_response(self):
@@ -118,6 +136,52 @@ class TestGenerateUserPatch:
 
         assert record is None
 
+    @pytest.mark.asyncio
+    async def test_retries_when_first_response_is_invalid_json(self):
+        """首次返回坏 JSON 时应重试并产出 patch。"""
+        llm = MagicMock()
+        optimizer = _make_optimizer(llm)
+        llm.invoke = AsyncMock(
+            side_effect=[
+                SimpleNamespace(content="not json"),
+                SimpleNamespace(content=json.dumps({
+                    "section": "Collaboration",
+                    "action": "append",
+                    "content": "先同步上下文，再分派角色",
+                })),
+            ]
+        )
+
+        trajectory = _MockTrajectory()
+        record = await optimizer.generate_user_patch(trajectory, "test-skill", "优化协作")
+
+        assert record is not None
+        assert record.change.section == "Collaboration"
+        assert llm.invoke.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_retries_with_shorter_prompt_after_timeout(self):
+        llm = MagicMock()
+        optimizer = _make_optimizer(llm)
+        llm.invoke = AsyncMock(
+            side_effect=[
+                asyncio.TimeoutError("request timed out"),
+                SimpleNamespace(content=json.dumps({
+                    "section": "Collaboration",
+                    "action": "append",
+                    "content": "先同步上下文，再分派角色",
+                })),
+            ]
+        )
+
+        trajectory = _MockTrajectory(steps=[_tool_step()])
+        record = await optimizer.generate_user_patch(trajectory, "test-skill", "优化协作 " * 400)
+
+        assert record is not None
+        first_prompt = llm.invoke.await_args_list[0].kwargs["messages"][0]["content"]
+        second_prompt = llm.invoke.await_args_list[1].kwargs["messages"][0]["content"]
+        assert len(second_prompt) < len(first_prompt)
+
 
 # ---------------------------------------------------------------------------
 # generate_trajectory_patch
@@ -148,6 +212,7 @@ class TestGenerateTrajectoryPatch:
         assert record.change.section == "Constraints"
         assert "执行超时不得超过 30 秒" in record.change.content
         assert record.source == "team_skill_trajectory_patch"
+        assert llm.invoke.await_args_list[0].kwargs["timeout"] == 40
 
     @pytest.mark.asyncio
     async def test_returns_none_when_need_patch_false(self):
@@ -200,3 +265,54 @@ class TestGenerateTrajectoryPatch:
         record = await optimizer.generate_trajectory_patch(trajectory, "test-skill", [])
 
         assert record is None
+
+    @pytest.mark.asyncio
+    async def test_retries_with_shorter_prompt_after_timeout(self):
+        llm = MagicMock()
+        optimizer = _make_optimizer(llm)
+        llm.invoke = AsyncMock(
+            side_effect=[
+                asyncio.TimeoutError("request timed out"),
+                SimpleNamespace(content=json.dumps({
+                    "need_patch": True,
+                    "section": "Workflow",
+                    "content": "失败后先收敛上下文，再重试",
+                    "reason": "轨迹过长",
+                })),
+            ]
+        )
+
+        trajectory = _MockTrajectory(steps=[_tool_step(), _tool_step(tool_name="send_message")])
+        issues = [{"issue_type": "timeout", "description": "超时 " * 1000, "severity": "high"}]
+        record = await optimizer.generate_trajectory_patch(trajectory, "test-skill", issues)
+
+        assert record is not None
+        first_prompt = llm.invoke.await_args_list[0].kwargs["messages"][0]["content"]
+        second_prompt = llm.invoke.await_args_list[1].kwargs["messages"][0]["content"]
+        assert len(second_prompt) < len(first_prompt)
+
+
+class TestGeneratePatch:
+    @pytest.mark.asyncio
+    async def test_retries_with_shorter_prompt_after_timeout(self):
+        llm = MagicMock()
+        optimizer = _make_optimizer(llm)
+        llm.invoke = AsyncMock(
+            side_effect=[
+                asyncio.TimeoutError("request timed out"),
+                SimpleNamespace(content=json.dumps({
+                    "need_patch": True,
+                    "section": "Constraints",
+                    "content": "限制上下文摘要长度",
+                    "reason": "提示过长",
+                })),
+            ]
+        )
+
+        trajectory = _MockTrajectory(steps=[_tool_step(), _tool_step(tool_name="build_team")])
+        record = await optimizer.generate_patch(trajectory, "test-skill", "# Skill\n" + ("content\n" * 4000))
+
+        assert record is not None
+        first_prompt = llm.invoke.await_args_list[0].kwargs["messages"][0]["content"]
+        second_prompt = llm.invoke.await_args_list[1].kwargs["messages"][0]["content"]
+        assert len(second_prompt) < len(first_prompt)

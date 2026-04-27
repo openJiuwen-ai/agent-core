@@ -17,11 +17,15 @@ import uuid
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Optional, Union
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.agent_evolving.checkpointing.types import (
     PendingChange,
+)
+from openjiuwen.agent_evolving.optimizer.llm_resilience import (
+    LLMInvokePolicy,
+    invoke_text_with_retry,
 )
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_scorer import (
     ExperienceScorer,
@@ -29,6 +33,7 @@ from openjiuwen.agent_evolving.optimizer.skill_call.experience_scorer import (
 from openjiuwen.agent_evolving.optimizer.team_skill_optimizer import (
     TeamSkillOptimizer,
 )
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.agent_evolving.trajectory import (
     TeamTrajectoryAggregator,
     Trajectory,
@@ -36,10 +41,22 @@ from openjiuwen.agent_evolving.trajectory import (
 )
 from openjiuwen.agent_evolving.utils import infer_skill_from_texts
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.memory.lite.frontmatter import parse_frontmatter
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
 from openjiuwen.harness.rails.evolution_rail import EvolutionRail, EvolutionTriggerPoint
+
+_USER_REQUEST_LLM_POLICY = LLMInvokePolicy(
+    attempt_timeout_secs=15,
+    total_budget_secs=30,
+    max_attempts=2,
+)
+_TRAJECTORY_ISSUE_LLM_POLICY = LLMInvokePolicy(
+    attempt_timeout_secs=30,
+    total_budget_secs=60,
+    max_attempts=2,
+)
 
 
 class TeamSignalType(Enum):
@@ -130,7 +147,7 @@ class TeamSkillRail(EvolutionRail):
         self,
         skills_dir: Union[str, list[str]],
         *,
-        llm: Any,
+        llm: Model,
         model: str,
         language: str = "cn",
         trajectory_store: Optional[TrajectoryStore] = None,
@@ -179,6 +196,9 @@ class TeamSkillRail(EvolutionRail):
     def scorer(self) -> ExperienceScorer:
         """Get the experience scorer."""
         return self._scorer
+
+    def _get_evolution_total_timeout_secs(self) -> Optional[float]:
+        return 180.0
 
     # ===== TUI progress helper =====
 
@@ -815,13 +835,14 @@ class TeamSkillRail(EvolutionRail):
         )
 
         try:
-            response = await self._optimizer.llm.invoke(
+            raw = await invoke_text_with_retry(
+                llm=self._optimizer.llm,
                 model=self._optimizer.model,
-                messages=[{"role": "user", "content": prompt}],
-                timeout=30,
+                prompt=prompt,
+                policy=_USER_REQUEST_LLM_POLICY,
+                is_result_usable=lambda text: isinstance(TeamSkillOptimizer.parse_json(text), dict),
             )
-            raw = response.content if hasattr(response, "content") else str(response)
-        except Exception as exc:
+        except BaseError as exc:
             logger.warning("[TeamSkillRail] _detect_user_request LLM call failed: %s", exc)
             return None
 
@@ -852,13 +873,14 @@ class TeamSkillRail(EvolutionRail):
         )
 
         try:
-            response = await self._optimizer.llm.invoke(
+            raw = await invoke_text_with_retry(
+                llm=self._optimizer.llm,
                 model=self._optimizer.model,
-                messages=[{"role": "user", "content": prompt}],
-                timeout=60,
+                prompt=prompt,
+                policy=_TRAJECTORY_ISSUE_LLM_POLICY,
+                is_result_usable=lambda text: isinstance(TeamSkillOptimizer.parse_json(text), list),
             )
-            raw = response.content if hasattr(response, "content") else str(response)
-        except Exception as exc:
+        except BaseError as exc:
             logger.warning("[TeamSkillRail] _detect_trajectory_issues LLM call failed: %s", exc)
             return []
 

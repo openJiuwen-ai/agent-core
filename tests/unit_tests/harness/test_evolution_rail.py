@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any, List
 from unittest import IsolatedAsyncioTestCase
@@ -596,6 +597,90 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
         rail = FailingRail(trajectory_store=self.store)
         # Should not raise
         await rail._safe_run_evolution({"trajectory": Trajectory(execution_id="test", steps=[], session_id="test", source="online")})
+
+    async def test_safe_run_evolution_respects_total_timeout_hook(self):
+        """_safe_run_evolution should stop background evolution when total timeout is exceeded."""
+
+        class SlowRail(EvolutionRail):
+            def __init__(self, trajectory_store):
+                super().__init__(trajectory_store=trajectory_store)
+                self.completed = False
+
+            def _get_evolution_total_timeout_secs(self) -> float | None:
+                return 0.01
+
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
+                await asyncio.sleep(0.05)
+                self.completed = True
+
+        rail = SlowRail(trajectory_store=self.store)
+        await rail._safe_run_evolution(
+            {"trajectory": Trajectory(execution_id="test", steps=[], session_id="test", source="online")}
+        )
+
+        self.assertFalse(rail.completed)
+        self.assertEqual(
+            rail.drain_evolution_outcomes(),
+            [{"status": "timed_out", "message": "background evolution timed out after 0.01s"}],
+        )
+
+    async def test_safe_run_evolution_records_failure_outcome(self):
+        """_safe_run_evolution should preserve failed outcome for downstream watchers."""
+
+        class FailingRail(EvolutionRail):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
+                raise RuntimeError("evolution failed")
+
+        rail = FailingRail(trajectory_store=self.store)
+        await rail._safe_run_evolution(
+            {"trajectory": Trajectory(execution_id="test", steps=[], session_id="test", source="online")}
+        )
+
+        self.assertEqual(
+            rail.drain_evolution_outcomes(),
+            [{"status": "failed", "message": "evolution failed"}],
+        )
+
+    async def test_safe_run_evolution_does_not_buffer_completed_outcomes(self):
+        """Successful background evolution should not retain drainable outcome state."""
+
+        class SuccessfulRail(EvolutionRail):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
+                return None
+
+        rail = SuccessfulRail(trajectory_store=self.store)
+        await rail._safe_run_evolution(
+            {"trajectory": Trajectory(execution_id="test", steps=[], session_id="test", source="online")}
+        )
+
+        self.assertEqual(rail.drain_evolution_outcomes(), [])
+
+    async def test_safe_run_evolution_limits_buffered_failure_outcomes(self):
+        """Failure outcome buffer should remain bounded in long-lived processes."""
+
+        class FailingRail(EvolutionRail):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
+                raise RuntimeError(f"failed-{trajectory.execution_id}")
+
+        rail = FailingRail(trajectory_store=self.store)
+        outcome_count = rail._MAX_PENDING_EVOLUTION_OUTCOMES + 5
+
+        for index in range(outcome_count):
+            await rail._safe_run_evolution(
+                {
+                    "trajectory": Trajectory(
+                        execution_id=str(index),
+                        steps=[],
+                        session_id="test",
+                        source="online",
+                    )
+                }
+            )
+
+        outcomes = rail.drain_evolution_outcomes()
+        self.assertEqual(len(outcomes), rail._MAX_PENDING_EVOLUTION_OUTCOMES)
+        self.assertEqual(outcomes[0]["message"], "failed-5")
+        self.assertEqual(outcomes[-1]["message"], f"failed-{outcome_count - 1}")
 
     async def test_drain_pending_approval_events_default(self):
         """Base class drain returns empty list by default."""

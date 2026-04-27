@@ -40,6 +40,7 @@ from openjiuwen.agent_evolving.signal import (
 from openjiuwen.agent_evolving.trajectory import Trajectory, TrajectoryStore
 from openjiuwen.agent_evolving.utils import infer_skill_from_texts
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.operator.skill_call import SkillCallOperator
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.sys_operation import SysOperation
@@ -96,7 +97,7 @@ class SkillEvolutionRail(EvolutionRail):
         self,
         skills_dir: Union[str, List[str]],
         *,
-        llm: Any,
+        llm: Model,
         model: str,
         auto_scan: bool = True,
         auto_save: bool = True,
@@ -146,6 +147,9 @@ class SkillEvolutionRail(EvolutionRail):
         self._eval_interval = eval_interval
         self._language = language
 
+    def _get_evolution_total_timeout_secs(self) -> Optional[float]:
+        return 240.0
+
     @property
     def store(self) -> EvolutionStore:
         """Deprecated: Use evolution_store instead. Kept for backward compatibility."""
@@ -194,7 +198,7 @@ class SkillEvolutionRail(EvolutionRail):
         super().set_sys_operation(sys_operation)
         self._evolution_store.sys_operation = sys_operation
 
-    def update_llm(self, llm: Any, model: str) -> None:
+    def update_llm(self, llm: Model, model: str) -> None:
         """Hot-update LLM client and model."""
         self._evolver.update_llm(llm, model)
         self._scorer.update_llm(llm, model)

@@ -1,27 +1,26 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""TeamSkillOptimizer: LLM-based team skill extraction and patching.
-
-Counterpart of SkillExperienceOptimizer for team skills.
-- propose_team_skill: CREATE path — extract a full team skill package from trajectory
-- generate_patch: PATCH path — generate an EvolutionRecord from a follow-up trajectory
-"""
+"""TeamSkillOptimizer: LLM-based patch generation for team skills."""
 
 from __future__ import annotations
 
 import json
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionPatch,
     EvolutionRecord,
     EvolutionTarget,
-    PendingTeamSkillCreation,
+)
+from openjiuwen.agent_evolving.optimizer.llm_resilience import (
+    LLMInvokePolicy,
+    invoke_text_with_retry,
 )
 from openjiuwen.agent_evolving.trajectory import Trajectory
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.model import Model
 
 
 _PROPOSE_PROMPT_CN = """\
@@ -319,6 +318,18 @@ _TRAJECTORY_PATCH_PROMPT = {"cn": _TRAJECTORY_PATCH_PROMPT_CN, "en": _TRAJECTORY
 
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*\n(.*?)```", re.DOTALL)
 
+_TEAM_SKILL_PATCH_LLM_POLICY = LLMInvokePolicy(
+    attempt_timeout_secs=40,
+    total_budget_secs=75,
+    max_attempts=2,
+)
+
+_PATCH_RETRY_SKILL_CONTENT_CHARS = 3000
+_PATCH_RETRY_TRAJECTORY_CHARS = 6000
+_TRAJECTORY_ISSUES_RETRY_CHARS = 2000
+_USER_INTENT_RETRY_CHARS = 500
+_SUMMARY_RETRY_CHARS = 200
+
 
 def _try_parse_json(text: str) -> Optional[Any]:
     try:
@@ -372,16 +383,11 @@ def _extract_balanced_object(text: str, opener: str, closer: str) -> Optional[st
 
 
 class TeamSkillOptimizer:
-    """LLM-based team skill extraction and patching.
-
-    Counterpart of SkillExperienceOptimizer:
-    - propose_team_skill → PendingTeamSkillCreation (CREATE)
-    - generate_patch → Optional[EvolutionRecord] (PATCH)
-    """
+    """LLM-based patch generation and rewrite support for team skills."""
 
     def __init__(
         self,
-        llm: Any,
+        llm: Model,
         model: str,
         language: str = "cn",
         debug_dir: Optional[str] = None,
@@ -398,7 +404,7 @@ class TeamSkillOptimizer:
         return self._language
 
     @property
-    def llm(self) -> Any:
+    def llm(self) -> Model:
         """Get the LLM client."""
         return self._llm
 
@@ -407,61 +413,9 @@ class TeamSkillOptimizer:
         """Get the model name."""
         return self._model
 
-    def update_llm(self, llm: Any, model: str) -> None:
+    def update_llm(self, llm: Model, model: str) -> None:
         self._llm = llm
         self._model = model
-
-    async def propose_team_skill(
-        self,
-        trajectory: Trajectory,
-        existing_skills: List[str],
-    ) -> Optional[PendingTeamSkillCreation]:
-        """Analyze trajectory and propose a new team skill if warranted.
-
-        Single LLM call using _PROPOSE_PROMPT to generate the full skill package.
-        """
-        summary = self._build_trajectory_summary(trajectory)
-        logger.info(
-            "[TeamSkillOptimizer] propose: summary_len=%d, model=%s",
-            len(summary),
-            self._model,
-        )
-
-        prompt = _PROPOSE_PROMPT.get(self._language, _PROPOSE_PROMPT_EN).format(
-            trajectory_summary=summary,
-            existing_skill_names=", ".join(existing_skills) if existing_skills else "(none)",
-        )
-        approx_tokens = len(prompt) // 4
-        logger.info(
-            "[TeamSkillOptimizer] propose: prompt_len=%d (~%d tokens)",
-            len(prompt),
-            approx_tokens,
-        )
-
-        t0 = time.time()
-        raw = await self._call_llm(prompt)
-        elapsed = time.time() - t0
-        logger.info("[TeamSkillOptimizer] propose: LLM responded in %.1fs, raw_len=%d", elapsed, len(raw))
-
-        parsed = self._parse_json(raw)
-        if not parsed or not parsed.get("should_create"):
-            reason = parsed.get("reason", "N/A") if parsed else "JSON parse failed"
-            logger.info("[TeamSkillOptimizer] propose: no creation, reason: %s", reason)
-            return None
-
-        name = parsed.get("name", "")
-        if not name or not re.match(r"^[a-zA-Z0-9_-]+$", name):
-            logger.warning("[TeamSkillOptimizer] propose: invalid name %r", name)
-            return None
-
-        return PendingTeamSkillCreation(
-            name=name,
-            description=parsed.get("description", ""),
-            body=parsed.get("body", ""),
-            reason=parsed.get("reason", ""),
-            extra_files=parsed.get("extra_files", {}),
-            frontmatter=self._build_frontmatter(name, parsed.get("description", ""), parsed.get("roles", [])),
-        )
 
     async def generate_patch(
         self,
@@ -482,6 +436,10 @@ class TeamSkillOptimizer:
             skill_content=current_skill_content[:15000],
             trajectory_summary=summary,
         )
+        retry_prompt = _PATCH_PROMPT.get(self._language, _PATCH_PROMPT_EN).format(
+            skill_content=current_skill_content[:_PATCH_RETRY_SKILL_CONTENT_CHARS],
+            trajectory_summary=summary[:_PATCH_RETRY_TRAJECTORY_CHARS],
+        )
         approx_tokens = len(prompt) // 4
         logger.info(
             "[TeamSkillOptimizer] patch: prompt_len=%d (~%d tokens), model=%s",
@@ -491,7 +449,12 @@ class TeamSkillOptimizer:
         )
 
         t0 = time.time()
-        raw = await self._call_llm(prompt)
+        raw = await self._call_llm(
+            prompt,
+            retry_prompt=retry_prompt,
+            policy=_TEAM_SKILL_PATCH_LLM_POLICY,
+            is_result_usable=lambda text: self._parse_json(text) is not None,
+        )
         elapsed = time.time() - t0
         logger.info("[TeamSkillOptimizer] patch: LLM responded in %.1fs, raw_len=%d", elapsed, len(raw))
 
@@ -555,9 +518,21 @@ class TeamSkillOptimizer:
             workflow_summary=workflow_summary,
             user_intent=user_intent,
         )
+        retry_prompt = prompt_template.format(
+            skill_name=skill_name,
+            description=description,
+            roles_summary=roles_summary[:_SUMMARY_RETRY_CHARS],
+            workflow_summary=workflow_summary[:_SUMMARY_RETRY_CHARS],
+            user_intent=user_intent[:_USER_INTENT_RETRY_CHARS],
+        )
 
         t0 = time.time()
-        raw = await self._call_llm(prompt)
+        raw = await self._call_llm(
+            prompt,
+            retry_prompt=retry_prompt,
+            policy=_TEAM_SKILL_PATCH_LLM_POLICY,
+            is_result_usable=lambda text: self._parse_json(text) is not None,
+        )
         elapsed = time.time() - t0
 
         if not raw or not raw.strip():
@@ -613,9 +588,19 @@ class TeamSkillOptimizer:
             trajectory_summary=summary,
             trajectory_issues=issues_text[:5000],
         )
+        retry_prompt = prompt_template.format(
+            skill_content="(see current skill content)",
+            trajectory_summary=summary[:_PATCH_RETRY_TRAJECTORY_CHARS],
+            trajectory_issues=issues_text[:_TRAJECTORY_ISSUES_RETRY_CHARS],
+        )
 
         t0 = time.time()
-        raw = await self._call_llm(prompt)
+        raw = await self._call_llm(
+            prompt,
+            retry_prompt=retry_prompt,
+            policy=_TEAM_SKILL_PATCH_LLM_POLICY,
+            is_result_usable=lambda text: self._parse_json(text) is not None,
+        )
         elapsed = time.time() - t0
 
         if not raw or not raw.strip():
@@ -736,24 +721,39 @@ class TeamSkillOptimizer:
         lines.append("---")
         return "\n".join(lines)
 
-    async def _call_llm(self, prompt: str) -> str:
+    async def _call_llm(
+        self,
+        prompt: str,
+        *,
+        retry_prompt: Optional[str] = None,
+        policy: Optional[LLMInvokePolicy] = None,
+        is_result_usable: Optional[Callable[[str], bool]] = None,
+    ) -> str:
         """Call the LLM and return raw text response."""
         try:
-            messages = [{"role": "user", "content": prompt}]
             logger.info("[TeamSkillOptimizer] LLM call start: model=%s, prompt_len=%d", self._model, len(prompt))
             t0 = time.time()
-            response = await self._llm.invoke(
-                messages=messages,
-                model=self._model,
-            )
-            elapsed = time.time() - t0
-
-            if hasattr(response, "content"):
-                result = str(response.content)
-            elif isinstance(response, dict):
-                result = response.get("content", "") or response.get("text", "")
+            if policy is None:
+                response = await self._llm.invoke(
+                    messages=[{"role": "user", "content": prompt}],
+                    model=self._model,
+                )
+                if hasattr(response, "content"):
+                    result = str(response.content)
+                elif isinstance(response, dict):
+                    result = response.get("content", "") or response.get("text", "")
+                else:
+                    result = str(response)
             else:
-                result = str(response)
+                result = await invoke_text_with_retry(
+                    llm=self._llm,
+                    model=self._model,
+                    prompt=prompt,
+                    retry_prompt=retry_prompt,
+                    policy=policy,
+                    is_result_usable=is_result_usable,
+                )
+            elapsed = time.time() - t0
 
             logger.info(
                 "[TeamSkillOptimizer] LLM call done: %.1fs, response_len=%d",

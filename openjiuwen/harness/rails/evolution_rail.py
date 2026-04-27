@@ -16,6 +16,7 @@ Core design:
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from enum import Enum
 from typing import Optional
 
@@ -66,6 +67,7 @@ class EvolutionRail(DeepAgentRail):
     """
 
     priority = 60  # Lower than security rails, higher than user rails
+    _MAX_PENDING_EVOLUTION_OUTCOMES = 32
 
     def __init__(
         self,
@@ -105,6 +107,9 @@ class EvolutionRail(DeepAgentRail):
         self._async_evolution = async_evolution
         self._bg_tasks: set[BackgroundTask] = set()
         self._pending_approval_events: list[OutputSchema] = []
+        self._pending_evolution_outcomes: deque[dict[str, str]] = deque(
+            maxlen=self._MAX_PENDING_EVOLUTION_OUTCOMES
+        )
         self._evolution_sem = asyncio.Semaphore(max_concurrent_evolution)
 
     @property
@@ -380,12 +385,35 @@ class EvolutionRail(DeepAgentRail):
         Catches exceptions to prevent polluting the main lifecycle flow.
         Acquires semaphore to limit concurrent evolution LLM calls.
         """
+        outcome: dict[str, str] | None = None
         try:
             trajectory = snapshot["trajectory"]
-            async with self._evolution_sem:
-                await self.run_evolution(trajectory, ctx=None, snapshot=snapshot)
+            total_timeout = self._get_evolution_total_timeout_secs()
+            if total_timeout is None:
+                async with self._evolution_sem:
+                    await self.run_evolution(trajectory, ctx=None, snapshot=snapshot)
+            else:
+                async with asyncio.timeout(total_timeout):
+                    async with self._evolution_sem:
+                        await self.run_evolution(trajectory, ctx=None, snapshot=snapshot)
+        except TimeoutError:
+            total_timeout = self._get_evolution_total_timeout_secs()
+            timeout_text = f"{total_timeout:.2f}".rstrip("0").rstrip(".") if total_timeout is not None else "unknown"
+            outcome = {
+                "status": "timed_out",
+                "message": f"background evolution timed out after {timeout_text}s",
+            }
+            logger.warning("[EvolutionRail] background evolution timed out after %ss", timeout_text)
         except Exception as exc:
+            outcome = {"status": "failed", "message": str(exc)}
             logger.warning("[EvolutionRail] background evolution failed: %s", exc)
+        finally:
+            if outcome is not None:
+                self._pending_evolution_outcomes.append(outcome)
+
+    def _get_evolution_total_timeout_secs(self) -> Optional[float]:
+        """Optional total timeout for one background evolution task."""
+        return None
 
     async def run_evolution(
         self,
@@ -447,6 +475,12 @@ class EvolutionRail(DeepAgentRail):
         Default returns empty list for direct EvolutionRail usage.
         """
         return []
+
+    def drain_evolution_outcomes(self) -> list[dict[str, str]]:
+        """Return and clear buffered non-success background evolution outcomes."""
+        outcomes = list(self._pending_evolution_outcomes)
+        self._pending_evolution_outcomes.clear()
+        return outcomes
 
     async def cleanup_background_tasks(self) -> None:
         """Cancel and clear all background tasks. Called by host on shutdown."""

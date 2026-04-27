@@ -279,6 +279,25 @@ class TestExperienceScorerEvaluate:
         result = await scorer.evaluate("snippet", [_make_record()])
         assert result == []
 
+    @pytest.mark.asyncio
+    async def test_retries_when_first_response_is_unparseable(self):
+        llm = Mock()
+        llm.invoke = AsyncMock(
+            side_effect=[
+                SimpleNamespace(content="not json at all"),
+                SimpleNamespace(content='[{"record_id":"ev_abc","used":true,"positive":false,"negative":false}]'),
+            ]
+        )
+        scorer = ExperienceScorer(llm=llm, model="test", language="en")
+        record = _make_record()
+        record.id = "ev_abc"
+
+        result = await scorer.evaluate("snippet", [record])
+
+        assert len(result) == 1
+        assert result[0]["record_id"] == "ev_abc"
+        assert llm.invoke.await_count == 2
+
 
 class TestExperienceScorerSimplify:
     def _make_scorer(self, response_json: str) -> ExperienceScorer:
@@ -308,6 +327,23 @@ class TestExperienceScorerSimplify:
         scorer = ExperienceScorer(llm=llm, model="test", language="cn")
         result = await scorer.simplify("skill-a", "summary", [_make_record()])
         assert result == []
+
+    @pytest.mark.asyncio
+    async def test_retries_when_first_simplify_response_is_unparseable(self):
+        llm = Mock()
+        llm.invoke = AsyncMock(
+            side_effect=[
+                SimpleNamespace(content="not json at all"),
+                SimpleNamespace(content='[{"action":"KEEP","record_id":"ev_1","reason":"ok"}]'),
+            ]
+        )
+        scorer = ExperienceScorer(llm=llm, model="test", language="cn")
+
+        result = await scorer.simplify("skill-a", "summary", [_make_record()])
+
+        assert len(result) == 1
+        assert result[0]["action"] == "KEEP"
+        assert llm.invoke.await_count == 2
 
 
 class TestExecuteSimplifyActions:
