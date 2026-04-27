@@ -15,7 +15,7 @@ Sub-packages:
 - optimizer/   : User-facing entrypoints (OfflineRLOptimizer, OnlineRLOptimizer, TaskRunners)
 - rl_trainer/  : PPO training core pipeline (VerlTrainingExecutor, run_ppo_step)
 - offline/     : Offline RL specific modules
-- online/      : Online RL (stub, not yet implemented)
+- online/      : Online RL (gateway, scheduler, storage, trainer; see examples/jiuwenrl_online)
 """
 
 from openjiuwen.core.common.logging import logger
@@ -63,6 +63,7 @@ def __getattr__(name):
 
 
 from openjiuwen.agent_evolving.agent_rl.rl_rail import RLRail
+from openjiuwen.agent_evolving.agent_rl.online.rail import RLOnlineRail
 from openjiuwen.agent_evolving.agent_rl.schemas import (
     Rollout,
     RolloutMessage,
@@ -78,6 +79,7 @@ __all__ = [
     "OnlineRLOptimizer",
     "RewardRegistry",
     "RLRail",
+    "RLOnlineRail",
     "RLTask",
     "Rollout",
     "RolloutMessage",

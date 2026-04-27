@@ -17,7 +17,7 @@ Explicitly NOT responsible for:
 from __future__ import annotations
 
 import uuid
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 from openjiuwen.agent_evolving.trajectory.types import (
     LLMCallDetail,
@@ -50,6 +50,7 @@ class TrajectoryBuilder:
         source: str,  # "online" | "offline"
         case_id: Optional[str] = None,
         member_id: Optional[str] = None,
+        meta: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Initialize builder.
 
@@ -59,13 +60,17 @@ class TrajectoryBuilder:
             source: Source type - "online" or "offline"
             case_id: Optional case ID (for offline scenarios)
             member_id: Optional team member identifier for trajectory aggregation.
+            meta: Optional extension metadata.
         """
         self.session_id = session_id
         self.source = source
         self.case_id = case_id
         self.member_id = member_id
-        self.steps: list[TrajectoryStep] = []
-        self.cost: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+        self.meta: Dict[str, Any] = dict(meta or {})
+        if member_id:
+            self.meta.setdefault("member_id", member_id)
+        self.steps: List[TrajectoryStep] = []
+        self.cost: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
         self._start_time_ms: Optional[int] = None
 
     def record_step(self, step: TrajectoryStep) -> None:
@@ -92,9 +97,6 @@ class TrajectoryBuilder:
         Returns:
             Assembled Trajectory with all steps and metadata
         """
-        meta: dict[str, Any] = {}
-        if self.member_id:
-            meta["member_id"] = self.member_id
         return Trajectory(
             execution_id=_generate_uuid(),
             session_id=self.session_id,
@@ -102,5 +104,5 @@ class TrajectoryBuilder:
             case_id=self.case_id,
             steps=self.steps,
             cost=self.cost if self.cost["input_tokens"] > 0 else None,
-            meta=meta,
+            meta=dict(self.meta),
         )

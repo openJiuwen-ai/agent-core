@@ -77,6 +77,15 @@ zmq = ["pyzmq>=26.0.0", "tornado>=6.1"]
 sandbox = ["agent-sandbox>=0.0.26"]
 mem0 = ["mem0ai>=1.0.0"]
 
+online-rl = [
+    "fastapi>=0.100",
+    "uvicorn[standard]",
+    "httpx>=0.24",
+    "pandas",
+    "pyarrow",
+    "omegaconf>=2.3.0",
+]
+
 all-mq = ["openjiuwen[pulsar]"]
 all-storage = ["openjiuwen[sqlite,postgres,mysql,gaussdb,redis,elasticsearch,obs]"]
 all-vector = ["openjiuwen[pgvector,chromadb,gaussvector]"]
@@ -143,6 +152,7 @@ include = ["openjiuwen*"]
 openjiuwen = [
     "**/prompts/**/*.md",
     "**/locales/**/*.md",
+    "**/online/yaml/*.yaml",
 ]
 
 [tool.coverage.run]

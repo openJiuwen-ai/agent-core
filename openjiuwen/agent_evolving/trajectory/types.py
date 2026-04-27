@@ -29,6 +29,7 @@ class LLMCallDetail:
     response: Optional[Dict[str, Any]] = None
     tools: Optional[List[Dict[str, Any]]] = None
     usage: Optional[Dict[str, Any]] = None
+    meta: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
