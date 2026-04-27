@@ -5,10 +5,6 @@ from enum import Enum
 from typing import Optional, Union, Any, Self
 
 from pydantic import BaseModel, Field, model_validator
-from pydantic.config import ExtraValues
-
-from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.exception.codes import StatusCode
 
 
 class ProviderType(str, Enum):
@@ -17,6 +13,7 @@ class ProviderType(str, Enum):
     OpenRouter = "OpenRouter"
     SiliconFlow = "SiliconFlow"
     DashScope = "DashScope"
+    DeepSeek = "DeepSeek"
     InferenceAffinity = "InferenceAffinity"
 
 

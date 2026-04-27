@@ -1309,6 +1309,7 @@ class ReActAgent(BaseAgent):
                             AssistantMessage(
                                 content=ai_message.content,
                                 tool_calls=ai_message.tool_calls,
+                                reasoning_content=ai_message.reasoning_content,
                                 usage_metadata=ai_message.usage_metadata
                             )
                         )
