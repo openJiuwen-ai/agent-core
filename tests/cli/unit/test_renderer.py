@@ -336,7 +336,7 @@ class TestRenderStream:
                 {
                     "tool_name": "read_file",
                     "tool_args": {},
-                    "tool_result": "File unchanged since last read. Reuse the previously returned content.",
+                    "tool_result": "line one\nline two\nline three\n",
                     "line_count": 50,
                 },
             ),

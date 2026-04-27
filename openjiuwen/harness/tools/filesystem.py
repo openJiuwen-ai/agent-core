@@ -114,12 +114,6 @@ class MaxFileReadTokenExceededError(Exception):
         self.max_tokens = max_tokens
 
 
-@dataclass
-class _ReadSnapshot:
-    mtime_ns: int
-    line_count: int
-
-
 def _resolve_tool_file_path(operation: SysOperation, file_path: str) -> str:
     """Resolve relative tool paths against the configured sys_operation work_dir.
 
@@ -144,13 +138,11 @@ class ReadFileTool(Tool):
     MAX_TOKENS: int = 25_000
     PDF_MAX_PAGES_PER_READ: int = 20
     PDF_AT_MENTION_INLINE_THRESHOLD: int = 100
-    FILE_UNCHANGED_STUB: str = "File unchanged since last read. Reuse the previously returned content."
     _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
 
     def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
         super().__init__(build_tool_card("read_file", "ReadFileTool", language, agent_id=agent_id))
         self.operation = operation
-        self._snapshots: Dict[Tuple[str, int, int, str], _ReadSnapshot] = {}
 
     # ------------------------------------------------------------------
     # File-type predicates
@@ -548,9 +540,6 @@ class ReadFileTool(Tool):
         )
         model_name: str = self._resolve_model_name(kwargs)
 
-        key = (file_path, offset, limit, str(pages or ""))
-
-        # mtime-based dedup: avoid re-reading unchanged files.
         mtime_ns: int = 0
         size_bytes: int = 0
         try:
@@ -559,25 +548,6 @@ class ReadFileTool(Tool):
             size_bytes = _st.st_size
         except OSError:
             pass
-
-        previous = self._snapshots.get(key)
-        if previous and mtime_ns and previous.mtime_ns == mtime_ns:
-            await self._record_read_state(
-                file_path=file_path,
-                mtime_ns=mtime_ns,
-                size_bytes=size_bytes,
-                is_partial=user_supplied_limit or offset > 0,
-                rendered_line_count=previous.line_count,
-            )
-            return ToolOutput(
-                success=True,
-                data={
-                    "content": self.FILE_UNCHANGED_STUB,
-                    "file_path": file_path,
-                    "unchanged": True,
-                    "line_count": previous.line_count,
-                },
-            )
 
         try:
             if self._is_pdf(file_path):
@@ -598,8 +568,6 @@ class ReadFileTool(Tool):
             return ToolOutput(success=False, error=str(exc))
 
         line_count = len(rendered.splitlines()) if rendered else 0
-        if mtime_ns:
-            self._snapshots[key] = _ReadSnapshot(mtime_ns=mtime_ns, line_count=line_count)
 
         # Populate read registry for EditFileTool pre-read validation.
         await self._record_read_state(
@@ -615,7 +583,6 @@ class ReadFileTool(Tool):
             data={
                 "content": rendered,
                 "file_path": file_path,
-                "unchanged": False,
                 "line_count": line_count,
             },
         )

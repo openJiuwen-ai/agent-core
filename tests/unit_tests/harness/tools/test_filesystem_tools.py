@@ -570,7 +570,7 @@ async def test_edit_file_tool_html_desanitization(sys_op, temp_dir):
 
 
 @pytest.mark.asyncio
-async def test_read_file_tool_text_and_unchanged(sys_op, temp_dir):
+async def test_read_file_tool_text(sys_op, temp_dir):
     write_tool = WriteFileTool(sys_op)
     read_tool = ReadFileTool(sys_op)
     file_path = os.path.join(temp_dir, "max.txt")
@@ -579,14 +579,14 @@ async def test_read_file_tool_text_and_unchanged(sys_op, temp_dir):
 
     first = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 2})
     assert first.success is True
-    assert first.data["unchanged"] is False
     assert first.data["content"].startswith("     1\tbeta")
     assert "     2\tgamma" in first.data["content"]
 
+    # Second read of the same range always returns full content (no dedup).
     second = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 2})
     assert second.success is True
-    assert second.data["unchanged"] is True
-    assert "File unchanged since last read" in second.data["content"]
+    assert second.data["content"].startswith("     1\tbeta")
+    assert "     2\tgamma" in second.data["content"]
 
     # Relative paths resolve against get_cwd(); the file is not in the default cwd.
     relative_missing = await read_tool.invoke({"file_path": "max.txt"})
