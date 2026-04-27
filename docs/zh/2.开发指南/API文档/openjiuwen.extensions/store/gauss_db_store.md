@@ -361,16 +361,28 @@ gaussdb+async_gaussdb://username:password@host:port/database
 |--------|----------|------|
 | `sqlalchemy` | >= 2.0.41 | 已在项目主依赖中 |
 | `async-gaussdb` | ~= 0.30.0 | GaussDB 异步驱动（0.30.x 兼容），作为可选依赖 |
+| `asyncpg` | >= 0.29.0 | PostgreSQL 异步驱动，SQLAlchemy `PGDialect_asyncpg` 在运行时需要此依赖用于错误翻译（`_asyncpg_error_translate`）及异步连接适配 |
+
+### 为什么需要 asyncpg
+
+虽然 `GaussDbStore` 使用 `async_gaussdb` 作为主驱动，但 `asyncpg` 仍然是必需的运行时依赖，原因如下：
+
+1. **SQLAlchemy asyncpg 方言基础设施**：`GaussDialectAsyncpg` 继承自 `PGDialect_asyncpg`，复用了 SQLAlchemy 的 asyncpg 适配层（`AsyncAdapt_asyncpg_dbapi`）。SQLAlchemy asyncpg 方言中的错误翻译机制（`_asyncpg_error_translate`）在运行时引用了 `asyncpg.exceptions.*`。
+
+2. **运行时错误处理**：当查询执行过程中发生数据库异常时，SQLAlchemy 的 `AsyncAdapt_asyncpg_connection._handle_exception` 会访问 `_asyncpg_error_translate`，其中直接执行 `import asyncpg`。如果未安装 `asyncpg`，在错误处理阶段将导致 `ImportError`。
+
+3. **连接适配层**：`AsyncAdapt_asyncpg_dbapi` 提供了 SQLAlchemy 所需的异步连接适配层，内部依赖 asyncpg 兼容接口。
 
 ### 安装方式
 
 ```bash
-# 方式一：安装 GaussDB 可选依赖
+# 方式一：安装 GaussDB 可选依赖（已包含 asyncpg）
 pip install openjiuwen[gaussdb]
 
 # 方式二：安装所有存储依赖（推荐）
 pip install openjiuwen[all-storage]
 
 # 方式三：单独安装驱动
-pip install async-gaussdb
+# 方式三：单独安装驱动
+pip install async-gaussdb asyncpg
 ```

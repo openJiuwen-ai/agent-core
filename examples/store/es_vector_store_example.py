@@ -8,6 +8,14 @@ This script requires:
 1. A running Elasticsearch instance (default: http://localhost:9200)
 2. The elasticsearch Python package installed
 
+IMPORTANT: Please ensure the Elasticsearch Python client version matches your
+Elasticsearch server version. Version mismatch will cause connection errors:
+  - Example error (server 8.17.1, client 9.3.0):
+    BadRequestError(400, 'media_type_header_exception', 'Invalid media-type value on headers [Accept, Content-Type]',
+    Accept version must be either version 8 or 7, but found 9. Accept=application/vnd.elasticsearch+json; compatible-with=9)
+  - Solution: Install matching version, e.g., pip install elasticsearch==8.17.1
+
+
 To run this example:
     python examples/es_vector_store_example.py
 
@@ -38,7 +46,13 @@ async def main():
     print("=" * 60)
     print()
 
-    # Connect to local Elasticsearch
+    # Connect to Elasticsearch (supports both local and remote servers)
+    # Local example: "http://localhost:9200"
+    # Remote example: "https://your-es-server.com:9200"
+    # For remote connections, ensure:
+    # - Network connectivity and firewall rules allow the connection
+    # - Set appropriate request_timeout for network latency
+    # - Configure verify_certs=True for HTTPS connections with valid certificates
     es_url = "http://localhost:9200"
     print(f"Connecting to Elasticsearch at {es_url}...")
 
@@ -51,12 +65,17 @@ async def main():
     except Exception as e:
         print(f"[X] Failed to connect to Elasticsearch: {e}")
         print()
-        print("Please make sure Elasticsearch is running at http://localhost:9200")
-        print("You can start Elasticsearch using Docker:")
+        print("Please make sure Elasticsearch is running at the specified URL")
+        print("For local Elasticsearch, you can start it using Docker:")
         print("  docker run -d -p 9200:9200 -p 9300:9300 \\")
         print("    -e 'discovery.type=single-node' \\")
         print("    -e 'xpack.security.enabled=false' \\")
         print("    docker.elastic.co/elasticsearch/elasticsearch:8.11.0")
+        print()
+        print("For remote Elasticsearch, please check:")
+        print("  - Server URL is correct and accessible")
+        print("  - Network connectivity and firewall settings")
+        print("  - Authentication credentials (if required)")
         sys.exit(1)
 
     # Create vector store instance

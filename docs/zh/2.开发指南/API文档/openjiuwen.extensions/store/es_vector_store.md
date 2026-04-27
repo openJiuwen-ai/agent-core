@@ -453,6 +453,10 @@ from openjiuwen.extensions.store.vector.es_vector_store import ElasticsearchVect
 
 async def main():
     # 连接 Elasticsearch
+    # 注意：支持本地和远程 Elasticsearch 服务器
+    # 本地示例: "http://localhost:9200"
+    # 远程示例: "https://your-es-server.com:9200"
+    # 远程连接时建议：设置 request_timeout、verify_certs 等参数
     es = AsyncElasticsearch("http://localhost:9200", verify_certs=False)
     store = ElasticsearchVectorStore(es=es, index_prefix="my_app")
 
@@ -507,13 +511,24 @@ asyncio.run(main())
 ## 注意事项
 
 1. **Elasticsearch 版本**：需要 Elasticsearch 8.x 或更高版本以支持原生 k-NN 搜索。
-2. **索引命名**：索引名称格式为 `{index_prefix}__{collection_name}`。
-3. **元数据存储**：集合元数据存储在索引内 ID 为 `__collection_metadata__` 的特殊文档中。
-4. **异步操作**：所有方法都是异步的，需要使用 `await` 调用。
-5. **批量操作**：添加和删除文档支持批量处理，可以通过 `batch_size` 参数调整。
-6. **向量维度**：创建集合时必须指定向量字段的维度。
-7. **主键字段**：建议始终指定主键字段以便于文档管理。
-8. **索引刷新**：添加文档后会自动刷新索引以确保数据可搜索。
+2. **客户端版本兼容性**：**请确保 Elasticsearch Python 客户端版本与服务端版本一致**。当客户端版本与服务端版本不匹配时（例如服务端 8.17.1，客户端 9.3.0），会导致连接失败并报错：
+   ```
+   BadRequestError(400, 'media_type_header_exception', 'Invalid media-type value on headers [Accept, Content-Type]',
+   Accept version must be either version 8 or 7, but found 9. Accept=application/vnd.elasticsearch+json; compatible-with=9)
+   ```
+   建议安装与服务端版本一致的客户端包，例如：`pip install elasticsearch==8.17.1`
+3. **远程连接**：支持连接本地和远程 Elasticsearch 服务器。连接远程服务器时需要注意：
+   - 确保网络连通性，检查防火墙规则是否允许访问 Elasticsearch 端口（默认 9200）
+   - 对于 HTTPS 连接，建议设置 `verify_certs=True` 并提供有效的证书
+   - 根据网络延迟适当调整 `request_timeout` 参数
+   - 如果服务器启用了安全认证，需要提供 `basic_auth` 或 `api_key` 等认证信息
+4. **索引命名**：索引名称格式为 `{index_prefix}__{collection_name}`。
+5. **元数据存储**：集合元数据存储在索引内 ID 为 `__collection_metadata__` 的特殊文档中。
+6. **异步操作**：所有方法都是异步的，需要使用 `await` 调用。
+7. **批量操作**：添加和删除文档支持批量处理，可以通过 `batch_size` 参数调整。
+8. **向量维度**：创建集合时必须指定向量字段的维度。
+9. **主键字段**：建议始终指定主键字段以便于文档管理。
+10. **索引刷新**：添加文档后会自动刷新索引以确保数据可搜索。
 
 ---
 
