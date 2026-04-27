@@ -77,13 +77,18 @@ class FreeSearchMetadataProvider(ToolMetadataProvider):
     def get_description(self, language: str = "cn") -> str:
         return {
             "cn": (
-                "免费搜索，返回结果 URL 和摘要。如果前几条结果看起来相关但还不足以直接回答任务，"
+                "免费搜索，返回结果 URL 和摘要。当 petal 搜索可用时应优先使用；"
+                "仅当结果不符合预期（如报错、空结果、覆盖不足）时，再执行 free 搜索。"
+                "如果前几条结果看起来相关但还不足以直接回答任务，"
                 "应先抓取前 1-3 条中的至少 2 条；如果第一条抓取失败、是动态壳页或内容仍然不完整，"
                 "就继续抓下一条，而不是立刻继续改写搜索词。"
                 "当用户询问最新、当前、今年、实时、近期等信息时，query 必须使用系统提示中的当前年份或日期；"
             ),
             "en": (
                 "Free search. Input a query and return result URLs with snippets. "
+                "When Petal search is available, use it first. "
+                "Run free search only when the Petal result is not as expected "
+                "(e.g. error, empty results, or insufficient coverage). "
                 "If the top results look relevant but do not directly answer the task, "
                 "you must fetch at least 2 of the top 1-3 results first. "
                 "If the first fetch fails, is a dynamic shell page, or is still incomplete, "
