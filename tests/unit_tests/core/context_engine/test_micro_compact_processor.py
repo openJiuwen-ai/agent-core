@@ -82,13 +82,13 @@ class TestMicroCompactProcessor:
 
         agent_messages = ctx.get_messages()
         tool_messages = [msg for msg in agent_messages if isinstance(msg, ToolMessage)]
-        # First `keep` (1) old message per tool cleared: fc-1 and fc-4
+        # Keep last `keep` (1) per tool, clear the rest: fc-3 and fc-6 survive.
         assert [msg.content for msg in tool_messages] == [
             config.cleared_marker,
-            "file-content-2",
+            config.cleared_marker,
             "file-content-3",
             config.cleared_marker,
-            "file-content-5",
+            config.cleared_marker,
             "file-content-6",
         ]
 
@@ -140,13 +140,13 @@ class TestMicroCompactProcessor:
 
         agent_messages = ctx.get_messages()
         tool_messages = [msg for msg in agent_messages if isinstance(msg, ToolMessage)]
-        # With trigger=1, keep=1: limit=2. 3 > 2, so clear first 1 per tool.
+        # With trigger=1, keep=1: limit=2. 3 > 2, keep last 1 per tool, clear the rest.
         assert [msg.content for msg in tool_messages] == [
             config.cleared_marker,
-            "read-2",
+            config.cleared_marker,
             "read-3",
             config.cleared_marker,
-            "grep-2",
+            config.cleared_marker,
             "grep-3",
         ]
 

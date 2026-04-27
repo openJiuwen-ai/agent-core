@@ -132,10 +132,11 @@ class MicroCompactProcessor(ContextProcessor):
         context=None,
     ) -> List[int]:
         grouped = self._collect_compactable_indices_by_tool(messages, context)
+        keep = self._config.keep_recent_per_tool
         result = []
         for indices in grouped.values():
-            if len(indices) > self._config.trigger_threshold + self._config.keep_recent_per_tool:
-                result.extend(indices[: self._config.keep_recent_per_tool])
+            if len(indices) > self._config.trigger_threshold + keep:
+                result.extend(indices[:-keep] if keep else indices)
         return result
 
     def load_state(self, state: Dict[str, Any]) -> None:
