@@ -195,6 +195,12 @@ class OpenAIModelClient(BaseModelClient):
         if effective_headers:
             params["extra_headers"] = effective_headers
 
+        # OpenAI SDK drops unknown top-level create() args; vLLM needs return_token_ids in JSON body.
+        if "return_token_ids" in params:
+            extra_body = dict(params.get("extra_body") or {})
+            extra_body["return_token_ids"] = params.pop("return_token_ids")
+            params["extra_body"] = extra_body
+
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
@@ -341,6 +347,11 @@ class OpenAIModelClient(BaseModelClient):
         )
         if effective_headers:
             params["extra_headers"] = effective_headers
+
+        if "return_token_ids" in params:
+            extra_body = dict(params.get("extra_body") or {})
+            extra_body["return_token_ids"] = params.pop("return_token_ids")
+            params["extra_body"] = extra_body
 
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
@@ -640,13 +651,30 @@ class OpenAIModelClient(BaseModelClient):
                     exception=str(e)
                 )
                 parser_content = None
+        
+        # Extract token IDs if present in response (for return_token_ids support)
+        metadata = {}
+        if hasattr(response, 'prompt_token_ids') and response.prompt_token_ids:
+            metadata['prompt_token_ids'] = response.prompt_token_ids
+        if hasattr(choice, 'token_ids') and choice.token_ids:
+            metadata['completion_token_ids'] = choice.token_ids
+        if hasattr(choice, 'logprobs') and choice.logprobs:
+            logprobs_obj = choice.logprobs
+            if hasattr(logprobs_obj, 'model_dump'):
+                metadata['logprobs'] = logprobs_obj.model_dump()
+            elif hasattr(logprobs_obj, '__dict__'):
+                metadata['logprobs'] = vars(logprobs_obj)
+            else:
+                metadata['logprobs'] = logprobs_obj
+
         return AssistantMessage(
             content=content,
             tool_calls=tool_calls if tool_calls else None,
             usage_metadata=usage_metadata,
             finish_reason="tool_calls" if tool_calls else "stop",
             reasoning_content=reasoning_content,
-            parser_content=parser_content
+            parser_content=parser_content,
+            metadata=metadata
         )
 
     def _parse_stream_chunk(self, chunk: Any) -> Optional[AssistantMessageChunk]:

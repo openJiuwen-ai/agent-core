@@ -167,6 +167,21 @@ class ReActAgentConfig(BaseModel):
 
     max_iterations: int = Field(default=5, description="Maximum iterations")
 
+    llm_return_token_ids: bool = Field(
+        default=False,
+        description="Whether to request token IDs from LLM (for RL trajectory collection)"
+    )
+    llm_logprobs: bool = Field(
+        default=False,
+        description="Whether to request logprobs from LLM (requires provider support)",
+    )
+    llm_top_logprobs: int = Field(
+        default=1,
+        ge=0,
+        le=20,
+        description="Number of top logprobs per token when llm_logprobs is True (OpenAI: 0–20)",
+    )
+
     # LLM configuration objects (for Model initialization)
     model_client_config: Optional[ModelClientConfig] = Field(
         default=None,
@@ -724,6 +739,13 @@ class ReActAgent(BaseAgent):
                 session=session,
                 enable_kv_cache_release=enable_kv_release,
             ))
+
+        if self._config.llm_return_token_ids:
+            extra_kwargs["return_token_ids"] = True
+
+        if self._config.llm_logprobs:
+            extra_kwargs["logprobs"] = True
+            extra_kwargs["top_logprobs"] = self._config.llm_top_logprobs
 
         if not ctx.extra.get("_streaming"):
             ai_message = await llm.invoke(
