@@ -30,6 +30,8 @@ class DeepSeekModelClient(OpenAIModelClient):
         for msg in new_messages:
             if msg.get("role") == "assistant" and msg.get("tool_calls") and "reasoning_content" not in msg:
                 msg["reasoning_content"] = ""
+            if msg.get("role") == "assistant" and "reasoning_content" not in msg:
+                msg["reasoning_content"] = ""
         return new_messages
 
 
