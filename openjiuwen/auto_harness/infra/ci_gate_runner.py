@@ -51,16 +51,44 @@ class CIGateRunner:
 
     @staticmethod
     def _load_gates(path: str) -> List[Dict[str, Any]]:
-        """从 YAML 加载门控定义列表。"""
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                data = yaml.safe_load(fh) or {}
-            return data.get("ci_gates", [])
-        except Exception:
-            logger.warning(
-                "Failed to load ci_gate.yaml: %s", path
-            )
-            return []
+        """从 YAML 加载门控定义列表。
+
+        如果指定路径不存在或加载失败，回退到默认配置。
+        """
+        # 尝试加载指定路径
+        if path and Path(path).is_file():
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    data = yaml.safe_load(fh) or {}
+                gates = data.get("ci_gates", [])
+                if gates:
+                    return gates
+                logger.warning(
+                    "ci_gate.yaml has no ci_gates section: %s", path
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to load ci_gate.yaml: %s", path
+                )
+
+        # 回退到默认配置
+        default_path = Path(__file__).resolve().parent.parent / "resources" / "ci_gate.yaml"
+        if default_path.is_file():
+            try:
+                with open(default_path, "r", encoding="utf-8") as fh:
+                    data = yaml.safe_load(fh) or {}
+                gates = data.get("ci_gates", [])
+                if gates:
+                    logger.info(
+                        "Using default ci_gate.yaml: %s", default_path
+                    )
+                    return gates
+            except Exception:
+                logger.warning(
+                    "Failed to load default ci_gate.yaml: %s", default_path
+                )
+
+        return []
 
     def _match_gates(
         self, action: str

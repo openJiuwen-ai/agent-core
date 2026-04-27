@@ -42,11 +42,13 @@ class TestCIGateRunnerInit(IsolatedAsyncioTestCase):
         finally:
             os.unlink(path)
 
-    def test_missing_yaml_returns_empty(self):
+    def test_missing_yaml_falls_back_to_default(self):
         tool = CIGateRunner(
             "/tmp", config_path="/nonexistent.yaml",
         )
-        assert tool._gates == []
+        # 当配置文件不存在时，回退到默认配置
+        assert len(tool._gates) >= 1
+        assert tool._gates[0]["name"] == "lint"
 
 
 class TestCIGateRunnerMatchGates(IsolatedAsyncioTestCase):
