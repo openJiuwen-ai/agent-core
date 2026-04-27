@@ -245,3 +245,4 @@ class SubAgentConfig:
     factory_name: Optional[str] = None
     factory_kwargs: dict[str, Any] = field(default_factory=dict)
     enable_plan_mode: bool = False
+    restrict_to_work_dir: bool = True

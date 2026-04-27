@@ -23,6 +23,7 @@ from openjiuwen.harness.rails import (
     SubagentRail,
     TaskPlanningRail,
 )
+from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.schema.agent_mode import AgentMode
 from openjiuwen.harness.schema.config import (
     AudioModelConfig,
@@ -120,7 +121,10 @@ def _inject_general_purpose_subagent(
     gp_rails = [
         r for r in (rails or [])
         if not isinstance(r, (SubagentRail, SessionRail))
-    ] or None
+    ]
+    if not any(isinstance(r, FileSystemRail) for r in gp_rails):
+        gp_rails = [FileSystemRail(), *gp_rails]
+    gp_rails = gp_rails or None
     effective_subagents.insert(0, SubAgentConfig(
         agent_card=AgentCard(name="general-purpose", description=desc),
         system_prompt=system_prompt or "",
@@ -129,6 +133,7 @@ def _inject_general_purpose_subagent(
         model=model,
         skills=skills,
         rails=gp_rails,
+        restrict_to_work_dir=False,
     ))
     return effective_subagents
 
@@ -329,8 +334,8 @@ def create_deep_agent(
         (SecurityRail, True, lambda: SecurityRail()),
         (TaskPlanningRail, enable_task_planning, _make_task_planning_rail),
         (SkillUseRail, bool(skills) or config.enable_skill_discovery, _make_skill_rail),
-        (SessionRail, bool(subagents) and enable_async_subagent, lambda: SessionRail()),
-        (SubagentRail, bool(subagents) and not enable_async_subagent, lambda: SubagentRail()),
+        (SessionRail, bool(effective_subagents) and enable_async_subagent, lambda: SessionRail()),
+        (SubagentRail, bool(effective_subagents) and not enable_async_subagent, lambda: SubagentRail()),
     ]
     for rail_cls, should_add, make_rail in default_rails:
         if should_add and not _already_provided(rail_cls):

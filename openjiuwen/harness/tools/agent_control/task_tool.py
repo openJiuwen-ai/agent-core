@@ -112,7 +112,7 @@ class TaskTool(Tool):
             # Invoke subagent with isolated session_id
             result = await subagent.invoke({"query": task_description, "conversation_id": sub_session_id})
             output = result.get("output", "")
-            return ToolOutput(success=True, data={"output": output}, error=None)
+            return ToolOutput(success=True, data={"output": output, "agent_id": subagent.card.id}, error=None)
         except Exception as e:
             logger.error(f"[TaskTool] Subagent: {subagent_type} execution failed, error={e}")
             raise build_error(
