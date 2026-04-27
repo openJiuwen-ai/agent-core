@@ -871,8 +871,10 @@ class TestTaskDependencyOperations:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_add_task_dependency(self, db):
-        """Test adding task dependency"""
+    async def test_mutate_dependency_graph_adds_single_edge(self, db):
+        """Adding an edge through mutate_dependency_graph wires it into
+        the dependency table; an edge to a COMPLETED target is born
+        resolved so the source task's PENDING status survives refresh."""
         await db.create_team(
             team_name="team15",
             display_name="Team 15",
@@ -893,16 +895,18 @@ class TestTaskDependencyOperations:
             status="completed"
         )
 
-        success = await db.add_task_dependency(
-            task_id="task9",
-            depends_on_task_id="task10",
-            team_name="team15"
+        result = await db.mutate_dependency_graph(
+            team_name="team15",
+            add_edges=[("task9", "task10")],
         )
-        assert success is True
+        assert result.ok is True
 
         dependencies = await db.get_task_dependencies("task9")
         assert len(dependencies) == 1
         assert dependencies[0].depends_on_task_id == "task10"
+        assert dependencies[0].resolved is True
+        task9 = await db.get_task("task9")
+        assert task9.status == "pending"
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -955,8 +959,8 @@ class TestTaskDependencyOperations:
             status="completed"
         )
 
-        await db.add_task_dependency("task12", "task13", "team17")
-        await db.add_task_dependency("task12", "task14", "team17")
+        await db.mutate_dependency_graph("team17", add_edges=[("task12", "task13")])
+        await db.mutate_dependency_graph("team17", add_edges=[("task12", "task14")])
 
         dependencies = await db.get_task_dependencies("task12")
         assert len(dependencies) == 2
@@ -1036,10 +1040,13 @@ class TestTaskDependencyOperations:
         )
         assert success is True
 
-        # Verify: new task was created
+        # Verify: new task was created. Both dependencies are already
+        # COMPLETED, so the edges are born resolved and the post-mutation
+        # refresh pass flips the seed BLOCKED status to PENDING — there
+        # is nothing for the new task to wait on.
         new_task = await db.get_task("new_task")
         assert new_task is not None
-        assert new_task.status == "blocked"
+        assert new_task.status == "pending"
 
         # Verify: new task depends on task1 and task2
         deps = await db.get_task_dependencies("new_task")
@@ -1047,6 +1054,7 @@ class TestTaskDependencyOperations:
         dep_ids = [d.depends_on_task_id for d in deps]
         assert "task1" in dep_ids
         assert "task2" in dep_ids
+        assert all(d.resolved for d in deps)
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -1062,7 +1070,7 @@ class TestTaskDependencyOperations:
         await db.create_task("taskA", "team_bidir3", "Task A", "Content A",
                              "completed")
         await db.create_task("taskB", "team_bidir3", "Task B", "Content B", "pending")
-        await db.add_task_dependency("taskB", "taskA", "team_bidir3")
+        await db.mutate_dependency_graph("team_bidir3", add_edges=[("taskB", "taskA")])
 
         # Insert taskM such that: taskA -> taskM -> taskB
         success = await db.add_task_with_bidirectional_dependencies(
@@ -1076,10 +1084,12 @@ class TestTaskDependencyOperations:
         )
         assert success is True
 
-        # Verify: taskM was created
+        # Verify: taskM was created. taskA is COMPLETED so the edge
+        # (taskM -> taskA) is born resolved; refresh flips taskM from
+        # the seed BLOCKED to PENDING (nothing to wait on).
         task_m = await db.get_task("taskM")
         assert task_m is not None
-        assert task_m.status == "blocked"
+        assert task_m.status == "pending"
 
         # Verify: taskM depends on taskA
         deps_m = await db.get_task_dependencies("taskM")
@@ -1092,7 +1102,8 @@ class TestTaskDependencyOperations:
         dep_ids = [d.depends_on_task_id for d in deps_b]
         assert "taskM" in dep_ids
 
-        # Verify: taskB was changed from pending to blocked
+        # Verify: taskB transitioned to BLOCKED because the (taskB -> taskM)
+        # edge is unresolved (taskM is PENDING, not terminal).
         task_b = await db.get_task("taskB")
         assert task_b.status == "blocked"
 
@@ -1113,7 +1124,7 @@ class TestTaskDependencyOperations:
         # Setup existing dependency: taskA -> taskB
         await db.create_task("taskA", "team_cycle", "Task A", "Content A", "pending")
         await db.create_task("taskB", "team_cycle", "Task B", "Content B", "completed")
-        await db.add_task_dependency("taskA", "taskB", "team_cycle")
+        await db.mutate_dependency_graph("team_cycle", add_edges=[("taskA", "taskB")])
 
         # Try to add taskC that would create a cycle
         success = await db.add_task_with_bidirectional_dependencies(
@@ -1572,7 +1583,7 @@ class TestCascadeDelete:
             content="Content 17",
             status="completed"
         )
-        await db.add_task_dependency("task16", "task17", "team26")
+        await db.mutate_dependency_graph("team26", add_edges=[("task16", "task17")])
 
         await db.delete_team("team26")
 
@@ -1647,7 +1658,7 @@ class TestVerifyAndFixTaskConsistency:
             content="Content 21",
             status="blocked"
         )
-        await db.add_task_dependency("task21", "task20", "team29")
+        await db.mutate_dependency_graph("team29", add_edges=[("task21", "task20")])
 
         # task21 is BLOCKED because task20 is not complete, nothing to fix
         fixed = await db.verify_and_fix_task_consistency("team29")
@@ -1656,7 +1667,14 @@ class TestVerifyAndFixTaskConsistency:
     @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_verify_and_fix_single_blocked_task(self, db):
-        """Test fixing a single blocked task whose dependency is completed"""
+        """Recovery sweep flips a BLOCKED task whose deps are all resolved.
+
+        Drift is fabricated by inserting an already-resolved edge to a
+        BLOCKED task without going through the unified mutation path —
+        the kind of state a crash between completing a dep and refreshing
+        downstream could leave behind.
+        """
+        from openjiuwen.agent_teams.tools.database import _get_task_dependency_model
         await db.create_team(
             team_name="team30",
             display_name="Team 30",
@@ -1676,36 +1694,30 @@ class TestVerifyAndFixTaskConsistency:
             content="Content 23",
             status="blocked"
         )
-        await db.add_task_dependency("task23", "task22", "team30")
-
-        # Manually resolve the dependency (simulating external intervention)
-        # In a real scenario, this would happen through the complete() method
+        # Hand-write the drifted edge: resolved=True against a BLOCKED task.
         async with db.session_local() as session:
-            from sqlalchemy import update
-            from openjiuwen.agent_teams.tools.database import _get_task_dependency_model
             task_dependency_model = _get_task_dependency_model()
-            result = await session.execute(
-                update(task_dependency_model).where(
-                    task_dependency_model.task_id == "task23",
-                    task_dependency_model.depends_on_task_id == "task22"
-                ).values(resolved=True)
-            )
+            session.add(task_dependency_model(
+                task_id="task23",
+                depends_on_task_id="task22",
+                team_name="team30",
+                resolved=True,
+            ))
             await session.commit()
 
-        # Now task23 should be fixed
         fixed = await db.verify_and_fix_task_consistency("team30")
         assert len(fixed) == 1
         assert fixed[0].task_id == "task23"
         assert fixed[0].status == "pending"
 
-        # Verify task is now PENDING in database
         task = await db.get_task("task23")
         assert task.status == "pending"
 
     @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_verify_and_fix_multiple_blocked_tasks(self, db):
-        """Test fixing multiple blocked tasks when their dependencies are completed"""
+        """Recovery sweep handles multiple drifted BLOCKED tasks at once."""
+        from openjiuwen.agent_teams.tools.database import _get_task_dependency_model
         await db.create_team(
             team_name="team31",
             display_name="Team 31",
@@ -1732,29 +1744,17 @@ class TestVerifyAndFixTaskConsistency:
             content="Content 26",
             status="blocked"
         )
-        await db.add_task_dependency("task25", "task24", "team31")
-        await db.add_task_dependency("task26", "task24", "team31")
-
-        # Manually resolve both dependencies
         async with db.session_local() as session:
-            from sqlalchemy import update
-            from openjiuwen.agent_teams.tools.database import _get_task_dependency_model
             task_dependency_model = _get_task_dependency_model()
-            await session.execute(
-                update(task_dependency_model).where(
-                    task_dependency_model.task_id == "task25",
-                    task_dependency_model.depends_on_task_id == "task24"
-                ).values(resolved=True)
-            )
-            await session.execute(
-                update(task_dependency_model).where(
-                    task_dependency_model.task_id == "task26",
-                    task_dependency_model.depends_on_task_id == "task24"
-                ).values(resolved=True)
-            )
+            for src in ("task25", "task26"):
+                session.add(task_dependency_model(
+                    task_id=src,
+                    depends_on_task_id="task24",
+                    team_name="team31",
+                    resolved=True,
+                ))
             await session.commit()
 
-        # Both tasks should be fixed
         fixed = await db.verify_and_fix_task_consistency("team31")
         assert len(fixed) == 2
         fixed_ids = [t.task_id for t in fixed]
@@ -1791,12 +1791,13 @@ class TestVerifyAndFixTaskConsistency:
             content="Content 29",
             status="blocked"
         )
-        await db.add_task_dependency("task29", "task27", "team32")
-        await db.add_task_dependency("task29", "task28", "team32")
+        await db.mutate_dependency_graph("team32", add_edges=[("task29", "task27")])
+        await db.mutate_dependency_graph("team32", add_edges=[("task29", "task28")])
 
         # Only resolve first dependency (task27 -> task29)
         async with db.session_local() as session:
             from sqlalchemy import update
+
             from openjiuwen.agent_teams.tools.database import _get_task_dependency_model
             task_dependency_model = _get_task_dependency_model()
             await session.execute(
@@ -1850,7 +1851,7 @@ class TestCancelAllTasks:
         await db.create_task("task3", "team_cancel_all", "Task 3", "Content 3", "pending")
 
         # Cancel all tasks
-        cancelled_tasks = await db.cancel_all_tasks("team_cancel_all")
+        cancelled_tasks = (await db.cancel_all_tasks("team_cancel_all"))["cancelled_tasks"]
 
         assert len(cancelled_tasks) == 3
 
@@ -1880,7 +1881,7 @@ class TestCancelAllTasks:
         await db.create_task("task5", "team_mixed_cancel", "Task 5", "Content 5", "completed")
 
         # Cancel all tasks
-        cancelled_tasks = await db.cancel_all_tasks("team_mixed_cancel")
+        cancelled_tasks = (await db.cancel_all_tasks("team_mixed_cancel"))["cancelled_tasks"]
 
         assert len(cancelled_tasks) == 3  # Only pending, claimed, blocked tasks
 
@@ -1912,7 +1913,7 @@ class TestCancelAllTasks:
         await db.create_task("task2", "team_no_active", "Task 2", "Content 2", "completed")
 
         # Cancel all tasks
-        cancelled_tasks = await db.cancel_all_tasks("team_no_active")
+        cancelled_tasks = (await db.cancel_all_tasks("team_no_active"))["cancelled_tasks"]
 
         assert len(cancelled_tasks) == 0
 
@@ -1927,7 +1928,7 @@ class TestCancelAllTasks:
         )
 
         # Cancel all tasks
-        cancelled_tasks = await db.cancel_all_tasks("team_empty")
+        cancelled_tasks = (await db.cancel_all_tasks("team_empty"))["cancelled_tasks"]
 
         assert len(cancelled_tasks) == 0
 
@@ -1946,7 +1947,7 @@ class TestCancelAllTasks:
             await db.create_task(f"task{i}", "team_atomic", f"Task {i}", f"Content {i}", "pending")
 
         # Cancel all in one call - should be atomic
-        cancelled_tasks = await db.cancel_all_tasks("team_atomic")
+        cancelled_tasks = (await db.cancel_all_tasks("team_atomic"))["cancelled_tasks"]
 
         assert len(cancelled_tasks) == 10
 
@@ -2618,3 +2619,149 @@ class TestRuntimeCleanup:
         finally:
             await database.close()
             reset_session_id(token)
+
+
+# ---------------------------------------------------------------------------
+# Dependency-graph primitive coverage (mutate_dependency_graph,
+# _terminate_task_in_session, status refresh).
+#
+# New tests use plain pytest function style; older sections retain their
+# class-based layout to keep diff churn focused.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_mutate_dependency_graph_atomic_with_cycle(db):
+    """A batch that closes a cycle is rejected and rolled back as one unit.
+
+    No edge from the batch survives — the dependency table looks identical
+    to the pre-call state.
+    """
+    await db.create_team(team_name="team_atomic_cycle", display_name="T", leader_member_name="leader")
+    for tid in ("A", "B", "C"):
+        await db.create_task(tid, "team_atomic_cycle", tid, "content", "pending")
+    pre_result = await db.mutate_dependency_graph(
+        team_name="team_atomic_cycle",
+        add_edges=[("A", "B")],
+    )
+    assert pre_result.ok is True
+
+    # Batch: B -> C, C -> A (the second edge closes A -> B -> C -> A).
+    result = await db.mutate_dependency_graph(
+        team_name="team_atomic_cycle",
+        add_edges=[("B", "C"), ("C", "A")],
+    )
+    assert result.ok is False
+    assert "Circular dependency" in result.reason
+
+    deps_b = await db.get_task_dependencies("B")
+    deps_c = await db.get_task_dependencies("C")
+    assert deps_b == []
+    assert deps_c == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_mutate_dependency_graph_refreshes_downstream(db):
+    """Adding a single edge flips the source from PENDING to BLOCKED."""
+    await db.create_team(team_name="team_refresh", display_name="T", leader_member_name="leader")
+    await db.create_task("upstream", "team_refresh", "U", "c", "pending")
+    await db.create_task("downstream", "team_refresh", "D", "c", "pending")
+
+    result = await db.mutate_dependency_graph(
+        team_name="team_refresh",
+        add_edges=[("downstream", "upstream")],
+    )
+    assert result.ok is True
+    refreshed_ids = {t.task_id for t in result.refreshed_tasks}
+    assert "downstream" in refreshed_ids
+
+    downstream = await db.get_task("downstream")
+    assert downstream.status == "blocked"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_cancel_task_resolves_outgoing_edges_and_unblocks_downstream(db):
+    """Cancelling A flips B (which depended on A) from BLOCKED to PENDING.
+
+    Regression guard for the prior bug: cancel_task left dependent tasks
+    stuck in BLOCKED forever because the outgoing edge was never resolved.
+    """
+    await db.create_team(team_name="team_cancel_unblock", display_name="T", leader_member_name="leader")
+    await db.create_task("A", "team_cancel_unblock", "A", "c", "pending")
+    await db.create_task("B", "team_cancel_unblock", "B", "c", "pending")
+    await db.mutate_dependency_graph(team_name="team_cancel_unblock", add_edges=[("B", "A")])
+    assert (await db.get_task("B")).status == "blocked"
+
+    result = await db.cancel_task("A")
+    assert result is not None
+    unblocked_ids = {t.task_id for t in result["unblocked_tasks"]}
+    assert "B" in unblocked_ids
+
+    a = await db.get_task("A")
+    b = await db.get_task("B")
+    assert a.status == "cancelled"
+    assert b.status == "pending"
+
+    deps_b = await db.get_task_dependencies("B")
+    assert all(d.resolved for d in deps_b)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_cancel_all_tasks_does_not_resurrect_terminal_tasks(db):
+    """Bulk cancel along a chain (A -> B -> C) leaves every task CANCELLED.
+
+    Even though resolving A's outgoing edge would normally unblock B, B
+    itself is also being cancelled in the same call. The refresh
+    primitive is gated on PENDING/BLOCKED, so CANCELLED tasks are never
+    rolled back to PENDING.
+    """
+    await db.create_team(team_name="team_cancel_chain", display_name="T", leader_member_name="leader")
+    for tid in ("A", "B", "C"):
+        await db.create_task(tid, "team_cancel_chain", tid, "c", "pending")
+    await db.mutate_dependency_graph(
+        team_name="team_cancel_chain",
+        add_edges=[("B", "A"), ("C", "B")],
+    )
+
+    result = await db.cancel_all_tasks("team_cancel_chain")
+    cancelled_ids = {t.task_id for t in result["cancelled_tasks"]}
+    assert cancelled_ids == {"A", "B", "C"}
+
+    for tid in ("A", "B", "C"):
+        task = await db.get_task(tid)
+        assert task.status == "cancelled"
+
+    unblocked_ids = {t.task_id for t in result["unblocked_tasks"]}
+    assert unblocked_ids.isdisjoint(cancelled_ids)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_mutate_dependency_graph_rejects_terminal_target(db):
+    """Adding an edge whose source is already CLAIMED is rejected.
+
+    The CLAIMED task is mid-execution; silently re-blocking it would
+    surprise the assignee. Same protection applies to terminal statuses.
+    """
+    await db.create_team(team_name="team_reject_terminal", display_name="T", leader_member_name="leader")
+    await db.create_task("upstream", "team_reject_terminal", "U", "c", "pending")
+    await db.create_task("claimed_task", "team_reject_terminal", "C", "c", "pending")
+    await db.create_member(
+        member_name="m1",
+        team_name="team_reject_terminal",
+        display_name="m1",
+        agent_card="{}",
+        status="ready",
+    )
+    await db.claim_task("claimed_task", "m1")
+
+    result = await db.mutate_dependency_graph(
+        team_name="team_reject_terminal",
+        add_edges=[("claimed_task", "upstream")],
+    )
+    assert result.ok is False
+    assert "claimed" in result.reason

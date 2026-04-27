@@ -30,6 +30,7 @@ from openjiuwen.agent_teams.schema.status import (
     is_valid_transition,
 )
 from openjiuwen.agent_teams.schema.task import (
+    NewTaskSpec,
     TaskCreateResult,
     TaskDetail,
     TaskListResult,
@@ -144,33 +145,47 @@ class TeamTaskManager:
         if task_id is None:
             task_id = str(uuid.uuid4())
 
-        # Determine initial status based on dependencies
-        if dependencies and len(dependencies) > 0:
-            status = TaskStatus.BLOCKED.value
-        else:
-            status = TaskStatus.PENDING.value
+        # Initial seed: PENDING for an isolated task; the graph mutation
+        # path's refresh pass will flip it to BLOCKED if any dependency
+        # is still unresolved at insert time.
+        status = TaskStatus.PENDING.value
 
-        # Create task
-        success = await self.db.create_task(
-            task_id=task_id,
-            team_name=self.team_name,
-            title=title,
-            content=content,
-            status=status,
-        )
-
-        if not success:
-            return TaskCreateResult.fail(f"Failed to create task {task_id} (likely a task_id collision)")
-
-        # Add dependencies if provided
         if dependencies:
-            for dep_task_id in dependencies:
-                await self.db.add_task_dependency(
-                    task_id=task_id,
-                    depends_on_task_id=dep_task_id,
-                    team_name=self.team_name,
-                )
+            # Edges + node go through the unified mutation primitive so
+            # cycle detection and BLOCKED/PENDING refresh fire as one
+            # atomic step.
+            mutation = await self.db.mutate_dependency_graph(
+                team_name=self.team_name,
+                new_tasks=[
+                    NewTaskSpec(
+                        task_id=task_id,
+                        title=title,
+                        content=content,
+                        initial_status=status,
+                    )
+                ],
+                add_edges=[(task_id, dep_id) for dep_id in dependencies],
+            )
+            if not mutation.ok:
+                return TaskCreateResult.fail(f"Failed to create task {task_id}: {mutation.reason}")
+            # Refresh pass may have flipped PENDING -> BLOCKED; reflect
+            # that in the response so the caller and downstream event
+            # carry the right status.
+            for refreshed in mutation.refreshed_tasks:
+                if refreshed.task_id == task_id:
+                    status = refreshed.status
+                    break
             team_logger.debug(f"Added task {task_id} with dependencies: {dependencies}")
+        else:
+            success = await self.db.create_task(
+                task_id=task_id,
+                team_name=self.team_name,
+                title=title,
+                content=content,
+                status=status,
+            )
+            if not success:
+                return TaskCreateResult.fail(f"Failed to create task {task_id} (likely a task_id collision)")
 
         # Publish task created event
         try:
@@ -493,39 +508,33 @@ class TeamTaskManager:
         return TaskOpResult.success()
 
     async def add_dependencies(self, task_id: str, depends_on_ids: List[str]) -> TaskOpResult:
-        """Add dependencies to an existing task and refresh its status.
+        """Add dependencies to an existing task atomically.
 
-        For each new dependency, adds the dependency edge. Then checks
-        whether the task should be blocked (has unresolved deps) or
-        unblocked (all deps resolved).
+        Routes through ``mutate_dependency_graph`` so the operation
+        carries the same guarantees as a graph-shaping create:
+        - Cycle detection runs against the post-mutation graph; a
+          rejected mutation surfaces the cycle path in the failure
+          reason.
+        - BLOCKED/PENDING is refreshed in the same transaction as the
+          edge writes, so the on-disk state is always consistent with
+          the dependency graph.
 
         Args:
             task_id: Task to add dependencies to.
             depends_on_ids: Task IDs that this task should depend on.
 
         Returns:
-            ``TaskOpResult`` describing the outcome.
+            ``TaskOpResult`` carrying the mutation reason on failure.
         """
-        task = await self.get(task_id)
-        if not task:
-            return TaskOpResult.fail(f"Task {task_id} not found")
+        if not depends_on_ids:
+            return TaskOpResult.success()
 
-        for dep_id in depends_on_ids:
-            await self.db.add_task_dependency(
-                task_id=task_id,
-                depends_on_task_id=dep_id,
-                team_name=self.team_name,
-            )
-
-        # Refresh: if task has unresolved deps, it should be blocked
-        unresolved = await self.db.get_unresolved_dependencies_count(task_id)
-        if unresolved > 0 and task.status == TaskStatus.PENDING.value:
-            await self.db.update_task_status(task_id, TaskStatus.BLOCKED.value)
-            team_logger.info(f"Task {task_id} blocked ({unresolved} unresolved deps)")
-        elif unresolved == 0 and task.status == TaskStatus.BLOCKED.value:
-            await self.db.update_task_status(task_id, TaskStatus.PENDING.value)
-            team_logger.info(f"Task {task_id} unblocked (all deps resolved)")
-
+        mutation = await self.db.mutate_dependency_graph(
+            team_name=self.team_name,
+            add_edges=[(task_id, dep_id) for dep_id in depends_on_ids],
+        )
+        if not mutation.ok:
+            return TaskOpResult.fail(mutation.reason)
         return TaskOpResult.success()
 
     async def claim(self, task_id: str) -> TaskOpResult:
@@ -642,77 +651,47 @@ class TeamTaskManager:
 
         team_logger.info(f"Task {task_id} completed")
 
-        # Publish task completed event
-        try:
-            await self.messager.publish(
-                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
-                message=EventMessage.from_event(
-                    TaskCompletedEvent(
-                        team_name=self.team_name,
-                        task_id=task_id,
-                        member_name=completed_task.assignee,
-                    )
-                ),
-            )
-            team_logger.debug(f"Task completed event published: {task_id}")
-        except Exception as e:
-            team_logger.error(f"Failed to publish task completed event for {task_id}: {e}")
-
-        # Publish task unblocked events for each unblocked task
-        for unblocked_task in unblocked_tasks:
-            try:
-                await self.messager.publish(
-                    topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
-                    message=EventMessage.from_event(
-                        TaskUnblockedEvent(team_name=self.team_name, task_id=unblocked_task.task_id)
-                    ),
-                )
-                team_logger.debug(f"Task unblocked event published: {unblocked_task.task_id}")
-            except Exception as e:
-                team_logger.error(f"Failed to publish task unblocked event for {unblocked_task.task_id}: {e}")
-
-        if unblocked_tasks:
-            team_logger.info(f"Unblocked {len(unblocked_tasks)} tasks after completing {task_id}")
-
+        await self._publish_task_event(
+            TaskCompletedEvent(
+                team_name=self.team_name,
+                task_id=task_id,
+                member_name=completed_task.assignee,
+            ),
+            error_label=f"Task completed event for {task_id}",
+        )
+        await self._publish_unblocked_events(unblocked_tasks)
         return TaskOpResult.success()
 
     async def cancel(self, task_id: str) -> Optional[TeamTaskBase]:
-        """Cancel a task
-
-        Updates the task status to 'cancelled'.
+        """Cancel a task and notify any tasks unblocked as a side effect.
 
         Args:
-            task_id: Task identifier
+            task_id: Task identifier.
 
         Returns:
-            TeamTask if successful, None otherwise
+            The cancelled task, or ``None`` if the task is missing or
+            the transition is invalid.
         """
+        result = await self.db.cancel_task(task_id)
+        if result is None:
+            return None
 
-        # cancel task
-        task = await self.db.cancel_task(task_id)
-        if task:
-            team_logger.info(f"Task {task_id} cancelled")
+        task = result["task"]
+        unblocked_tasks = result.get("unblocked_tasks") or []
+        team_logger.info(f"Task {task_id} cancelled")
 
-            # Publish task cancelled event
-            try:
-                await self.messager.publish(
-                    topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
-                    message=EventMessage.from_event(TaskCancelledEvent(team_name=self.team_name, task_id=task_id)),
-                )
-                team_logger.debug(f"Task cancelled event published: {task_id}")
-            except Exception as e:
-                team_logger.error(f"Failed to publish task cancelled event for {task_id}: {e}")
-
-            return task
-        return None
+        await self._publish_task_event(
+            TaskCancelledEvent(team_name=self.team_name, task_id=task_id),
+            error_label=f"Task cancelled event for {task_id}",
+        )
+        await self._publish_unblocked_events(unblocked_tasks)
+        return task
 
     async def cancel_all_tasks(
         self,
         skip_assignees: Optional[set[str]] = None,
     ) -> List[TeamTaskBase]:
-        """Cancel all non-cancelled and non-completed tasks
-
-        Cancels all active tasks (pending, claimed, blocked) in a single atomic transaction.
+        """Cancel every active task in the team in a single transaction.
 
         Args:
             skip_assignees: Member names whose claimed tasks must be
@@ -720,30 +699,51 @@ class TeamTaskManager:
                 left untouched.
 
         Returns:
-            List of cancelled TeamTask objects
+            The cancelled tasks. Side effect: publishes a CANCELLED
+            event for each cancelled task and an UNBLOCKED event for
+            each task that flipped from BLOCKED to PENDING during the
+            cascade.
         """
-        # Cancel all tasks atomically
-        cancelled_tasks = await self.db.cancel_all_tasks(
+        result = await self.db.cancel_all_tasks(
             self.team_name,
             skip_assignees=skip_assignees,
         )
+        cancelled_tasks: List[TeamTaskBase] = result.get("cancelled_tasks") or []
+        unblocked_tasks: List[TeamTaskBase] = result.get("unblocked_tasks") or []
 
         if not cancelled_tasks:
             team_logger.info(f"No tasks to cancel in team {self.team_name}")
             return []
 
-        # Publish task cancelled event for each cancelled task
         for task in cancelled_tasks:
-            try:
-                await self.messager.publish(
-                    topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
-                    message=EventMessage.from_event(TaskCancelledEvent(team_name=self.team_name, task_id=task.task_id)),
-                )
-                team_logger.debug(f"Task cancelled event published: {task.task_id}")
-            except Exception as e:
-                team_logger.error(f"Failed to publish task cancelled event for {task.task_id}: {e}")
-
+            await self._publish_task_event(
+                TaskCancelledEvent(team_name=self.team_name, task_id=task.task_id),
+                error_label=f"Task cancelled event for {task.task_id}",
+            )
+        await self._publish_unblocked_events(unblocked_tasks)
         return cancelled_tasks
+
+    async def _publish_task_event(self, event, *, error_label: str) -> None:
+        """Publish a task event on the team task topic; log on failure."""
+        try:
+            await self.messager.publish(
+                topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
+                message=EventMessage.from_event(event),
+            )
+            team_logger.debug(f"Published: {error_label}")
+        except Exception as e:
+            team_logger.error(f"Failed to publish {error_label}: {e}")
+
+    async def _publish_unblocked_events(self, unblocked_tasks: List[TeamTaskBase]) -> None:
+        """Notify the team about tasks that just transitioned to PENDING."""
+        if not unblocked_tasks:
+            return
+        for task in unblocked_tasks:
+            await self._publish_task_event(
+                TaskUnblockedEvent(team_name=self.team_name, task_id=task.task_id),
+                error_label=f"Task unblocked event for {task.task_id}",
+            )
+        team_logger.info(f"Unblocked {len(unblocked_tasks)} tasks")
 
     async def list_tasks(self, status: Optional[str] = None) -> List[TeamTaskBase]:
         """List all tasks for the team

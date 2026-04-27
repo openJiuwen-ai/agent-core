@@ -10,6 +10,10 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.messager import Messager
+from openjiuwen.agent_teams.schema.status import (
+    MemberMode,
+    TaskStatus,
+)
 from openjiuwen.agent_teams.spawn.context import (
     reset_session_id,
     set_session_id,
@@ -18,10 +22,6 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
     TeamDatabase,
-)
-from openjiuwen.agent_teams.schema.status import (
-    MemberMode,
-    TaskStatus,
 )
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.core.single_agent import AgentCard
@@ -546,14 +546,18 @@ class TestCancel:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_cancel_already_cancelled_task_fails(self, task_manager):
-        """Test that cancelling an already cancelled task fails (invalid state transition)"""
+    async def test_cancel_already_cancelled_task_is_idempotent(self, task_manager):
+        """Cancelling a task that is already CANCELLED is a no-op rather
+        than an error — the unified termination primitive treats the
+        target state as the contract, so a second cancel returns the
+        existing task unchanged."""
         task = await task_manager.add(title="Task 1", content="Content 1")
         await task_manager.cancel(task.task_id)
 
-        # Cannot cancel again
         result = await task_manager.cancel(task.task_id)
-        assert result is None
+        assert result is not None
+        assert result.task_id == task.task_id
+        assert result.status == TaskStatus.CANCELLED.value
 
         updated_task = await task_manager.get(task.task_id)
         assert updated_task.status == TaskStatus.CANCELLED.value
@@ -1004,3 +1008,71 @@ class TestGetTasksByAssignee:
 
         tasks_member2 = await task_manager.get_tasks_by_assignee(member_name="member2")
         assert len(tasks_member2) == 0
+
+
+# ---------------------------------------------------------------------------
+# Dependency-graph mutations through the manager layer.
+#
+# Plain pytest function style. Covers the manager-level guarantees on top
+# of the database primitives: that a cycle bubbles up as TaskOpResult.fail
+# with the diagnostic and that cancel propagates unblocking events.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_add_dependencies_rejects_cycle(task_manager):
+    """add_dependencies surfaces a cycle as a TaskOpResult failure.
+
+    Regression guard: previously add_dependencies skipped cycle detection
+    entirely and silently inserted a cycle-creating edge.
+    """
+    a = await task_manager.add(title="A", content="c")
+    b = await task_manager.add(title="B", content="c", dependencies=[a.task_id])
+
+    # b -> a already; trying to make a -> b would close A -> B -> A.
+    result = await task_manager.add_dependencies(a.task_id, [b.task_id])
+    assert result.ok is False
+    assert "Circular dependency" in result.reason
+
+    # a's dependency table stays empty — the rejected edge did not commit.
+    deps_a = await task_manager.get_dependencies(a.task_id)
+    assert deps_a == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_add_dependencies_refreshes_status(task_manager):
+    """Adding an unresolved dep flips the task from PENDING to BLOCKED."""
+    upstream = await task_manager.add(title="Up", content="c")
+    downstream = await task_manager.add(title="Down", content="c")
+    assert downstream.status == TaskStatus.PENDING.value
+
+    result = await task_manager.add_dependencies(downstream.task_id, [upstream.task_id])
+    assert result.ok is True
+
+    refreshed = await task_manager.get(downstream.task_id)
+    assert refreshed.status == TaskStatus.BLOCKED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_cancel_unblocks_downstream_at_manager_layer(task_manager):
+    """task_manager.cancel propagates downstream unblocking.
+
+    The manager layer must surface the unblocked tasks as published
+    TaskUnblockedEvent messages — this is what wakes the leader's
+    coordinator loop.
+    """
+    upstream = await task_manager.add(title="Up", content="c")
+    downstream = await task_manager.add(
+        title="Down", content="c", dependencies=[upstream.task_id]
+    )
+    assert downstream.status == TaskStatus.BLOCKED.value
+
+    result = await task_manager.cancel(upstream.task_id)
+    assert result is not None
+    assert result.status == TaskStatus.CANCELLED.value
+
+    refreshed = await task_manager.get(downstream.task_id)
+    assert refreshed.status == TaskStatus.PENDING.value

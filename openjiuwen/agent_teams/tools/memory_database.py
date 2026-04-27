@@ -13,8 +13,8 @@ from __future__ import annotations
 import asyncio
 import time
 from typing import (
-    Any,
     Dict,
+    Iterable,
     List,
     Optional,
 )
@@ -30,6 +30,15 @@ from openjiuwen.agent_teams.schema.status import (
     MemberStatus,
     TaskStatus,
     is_valid_transition,
+)
+from openjiuwen.agent_teams.schema.task import (
+    GraphMutationResult,
+    NewTaskSpec,
+)
+from openjiuwen.agent_teams.tools.database import (
+    _TASK_DEPENDENCY_REJECT_STATUSES,
+    _TASK_TERMINAL_STATUSES,
+    detect_cycle_in_adjacency,
 )
 from openjiuwen.agent_teams.tools.models import (
     Team,
@@ -532,43 +541,175 @@ class InMemoryTeamDatabase:
                 task.content = content
             return True
 
-    async def add_task_dependency(self, task_id: str, depends_on_task_id: str, team_name: str) -> bool:
-        async with self._lock:
-            # Idempotent — skip if already exists
-            for d in self._task_deps:
-                if d.task_id == task_id and d.depends_on_task_id == depends_on_task_id:
-                    return True
-            self._task_deps.append(
-                _MemTaskDep(task_id=task_id, depends_on_task_id=depends_on_task_id, team_name=team_name)
-            )
-            team_logger.info(f"Task dependency added: {task_id} -> {depends_on_task_id}")
-            return True
+    def _refresh_status_for_tasks(self, task_ids: Iterable[str], now: int) -> List[_MemTask]:
+        """In-memory mirror of ``TeamDatabase._refresh_status_in_session``.
 
-    def _check_circular_dependency_sync(
+        Caller must hold ``self._lock``. Same rules: PENDING with
+        unresolved deps becomes BLOCKED; BLOCKED with no unresolved deps
+        becomes PENDING; everything else is left alone.
+        """
+        unique_ids = {tid for tid in task_ids if tid}
+        if not unique_ids:
+            return []
+        refreshed: List[_MemTask] = []
+        for tid in unique_ids:
+            task = self._tasks.get(tid)
+            if task is None:
+                continue
+            if task.status not in (TaskStatus.PENDING.value, TaskStatus.BLOCKED.value):
+                continue
+            unresolved = sum(1 for d in self._task_deps if d.task_id == tid and not d.resolved)
+            if task.status == TaskStatus.PENDING.value and unresolved > 0:
+                task.status = TaskStatus.BLOCKED.value
+                task.updated_at = now
+                refreshed.append(task)
+                team_logger.info(f"Task {tid} blocked ({unresolved} unresolved deps)")
+            elif task.status == TaskStatus.BLOCKED.value and unresolved == 0:
+                task.status = TaskStatus.PENDING.value
+                task.updated_at = now
+                refreshed.append(task)
+                team_logger.info(f"Task {tid} unblocked (all deps resolved)")
+        return refreshed
+
+    def _terminate_task_locked(
         self,
         task_id: str,
-        target_task_id: str,
-        visited: Optional[set] = None,
-    ) -> bool:
-        """Synchronous DFS cycle check (called under lock)."""
-        if visited is None:
-            visited = set()
-        if target_task_id == task_id:
-            return True
-        if target_task_id in visited:
-            return False
-        visited.add(target_task_id)
-        for dep in self._task_deps:
-            if dep.task_id == target_task_id:
-                if self._check_circular_dependency_sync(task_id, dep.depends_on_task_id, visited):
-                    return True
-        return False
+        new_status: TaskStatus,
+        now: int,
+    ) -> Optional[tuple[_MemTask, List[_MemTask]]]:
+        """In-memory mirror of ``TeamDatabase._terminate_task_in_session``.
 
-    async def _check_circular_dependency(
-        self, session: Any, task_id: str, target_task_id: str, visited: Optional[set] = None
-    ) -> bool:
-        """API-compatible wrapper; *session* is ignored for in-memory."""
-        return self._check_circular_dependency_sync(task_id, target_task_id, visited)
+        Caller must hold ``self._lock``.
+        """
+        if new_status not in (TaskStatus.COMPLETED, TaskStatus.CANCELLED):
+            raise ValueError(f"_terminate_task_locked expects a terminal status, got {new_status}")
+
+        task = self._tasks.get(task_id)
+        if task is None:
+            team_logger.error(f"Task {task_id} not found")
+            return None
+        if task.status == new_status.value:
+            team_logger.debug(f"Task {task_id} already {new_status.value}")
+            return task, []
+        if not is_valid_transition(TaskStatus(task.status), new_status, TASK_TRANSITIONS):
+            team_logger.error(
+                f"Invalid state transition for task {task_id}: {task.status} -> {new_status.value}"
+            )
+            return None
+
+        task.status = new_status.value
+        task.updated_at = now
+        team_logger.info(f"Task {task_id} {new_status.value} at {now}")
+
+        downstream_ids: set[str] = set()
+        for dep in self._task_deps:
+            if dep.depends_on_task_id == task_id:
+                if not dep.resolved:
+                    dep.resolved = True
+                downstream_ids.add(dep.task_id)
+
+        refreshed = self._refresh_status_for_tasks(downstream_ids, now)
+        return task, refreshed
+
+    async def mutate_dependency_graph(
+        self,
+        team_name: str,
+        *,
+        new_tasks: Optional[List[NewTaskSpec]] = None,
+        add_edges: Optional[List[tuple[str, str]]] = None,
+    ) -> GraphMutationResult:
+        """In-memory mirror of ``TeamDatabase.mutate_dependency_graph``."""
+        new_tasks = list(new_tasks or [])
+        add_edges = list(add_edges or [])
+        if not new_tasks and not add_edges:
+            return GraphMutationResult.success()
+
+        async with self._lock:
+            now = self.get_current_time()
+
+            # 1. Validate and stage new tasks (do not mutate state until cycle check passes).
+            seen_new_ids: set[str] = set()
+            for spec in new_tasks:
+                if spec.task_id in seen_new_ids:
+                    return GraphMutationResult.fail(f"Duplicate task_id {spec.task_id} in new_tasks")
+                seen_new_ids.add(spec.task_id)
+                if spec.task_id in self._tasks:
+                    return GraphMutationResult.fail(f"Task {spec.task_id} already exists")
+
+            # 2. Validate edge endpoints. New tasks count as existing once staged.
+            staged_status: Dict[str, str] = {spec.task_id: spec.initial_status for spec in new_tasks}
+            for tid, dep_id in add_edges:
+                src_status = staged_status.get(tid) or (self._tasks[tid].status if tid in self._tasks else None)
+                dst_status = staged_status.get(dep_id) or (
+                    self._tasks[dep_id].status if dep_id in self._tasks else None
+                )
+                if src_status is None:
+                    return GraphMutationResult.fail(f"Task {tid} not found")
+                if dst_status is None:
+                    return GraphMutationResult.fail(f"Dependency target {dep_id} not found")
+                # Reject when the source (the task gaining a new dep) is already
+                # executing or terminal — see _TASK_DEPENDENCY_REJECT_STATUSES.
+                if tid not in seen_new_ids and src_status in _TASK_DEPENDENCY_REJECT_STATUSES:
+                    return GraphMutationResult.fail(
+                        f"Cannot add dependency to {tid} in terminal or executing status: {src_status}"
+                    )
+
+            # 3. Build the post-mutation adjacency and run a single cycle check.
+            existing_edge_set: set[tuple[str, str]] = {
+                (d.task_id, d.depends_on_task_id) for d in self._task_deps if d.team_name == team_name
+            }
+            adjacency: Dict[str, List[str]] = {}
+            for src, dst in existing_edge_set:
+                adjacency.setdefault(src, []).append(dst)
+            new_edge_set: set[tuple[str, str]] = set()
+            for tid, dep_id in add_edges:
+                edge = (tid, dep_id)
+                if edge in existing_edge_set or edge in new_edge_set:
+                    continue
+                new_edge_set.add(edge)
+                adjacency.setdefault(tid, []).append(dep_id)
+
+            cycle = detect_cycle_in_adjacency(adjacency)
+            if cycle is not None:
+                return GraphMutationResult.fail(f"Circular dependency detected: {' -> '.join(cycle)}")
+
+            # 4. Apply: insert new tasks then new edges.
+            for spec in new_tasks:
+                self._tasks[spec.task_id] = _MemTask(
+                    task_id=spec.task_id,
+                    team_name=team_name,
+                    title=spec.title,
+                    content=spec.content,
+                    status=spec.initial_status,
+                    updated_at=now,
+                )
+            for tid, dep_id in new_edge_set:
+                dep_status = staged_status.get(dep_id) or self._tasks[dep_id].status
+                initial_resolved = dep_status in _TASK_TERMINAL_STATUSES
+                self._task_deps.append(
+                    _MemTaskDep(
+                        task_id=tid,
+                        depends_on_task_id=dep_id,
+                        team_name=team_name,
+                        resolved=initial_resolved,
+                    )
+                )
+
+            # 5. Refresh status for affected tasks.
+            affected_ids: set[str] = {spec.task_id for spec in new_tasks}
+            affected_ids.update(tid for tid, _ in new_edge_set)
+            refreshed = self._refresh_status_for_tasks(affected_ids, now)
+
+            if new_tasks:
+                team_logger.info(
+                    f"Created {len(new_tasks)} task(s); "
+                    f"added {len(new_edge_set)} edge(s); refreshed {len(refreshed)} task(s)"
+                )
+            else:
+                team_logger.info(
+                    f"Added {len(new_edge_set)} edge(s); refreshed {len(refreshed)} task(s)"
+                )
+            return GraphMutationResult.success(refreshed_tasks=list(refreshed))
 
     async def add_task_with_bidirectional_dependencies(
         self,
@@ -581,87 +722,28 @@ class InMemoryTeamDatabase:
         dependencies: Optional[List[str]] = None,
         dependent_task_ids: Optional[List[str]] = None,
     ) -> bool:
-        async with self._lock:
-            # 1. Circular dependency check
-            if dependencies:
-                for dep_id in dependencies:
-                    for dep in self._task_deps:
-                        if dep.task_id == dep_id:
-                            if self._check_circular_dependency_sync(task_id, dep.depends_on_task_id):
-                                team_logger.error(f"Circular dependency detected: {task_id} -> {dep_id}")
-                                return False
+        """Thin wrapper over ``mutate_dependency_graph`` for the legacy shape."""
+        edges: List[tuple[str, str]] = []
+        for dep_id in dependencies or ():
+            edges.append((task_id, dep_id))
+        for dependent_id in dependent_task_ids or ():
+            edges.append((dependent_id, task_id))
 
-            if dependent_task_ids and dependencies:
-                for dependent_id in dependent_task_ids:
-                    for new_dep in dependencies:
-                        if self._check_circular_dependency_sync(dependent_id, new_dep):
-                            team_logger.error(f"Circular dependency detected via dependent {dependent_id}")
-                            return False
-
-            # 2. Create task
-            if task_id in self._tasks:
-                team_logger.error(f"Task {task_id} already exists")
-                return False
-            now = self.get_current_time()
-            self._tasks[task_id] = _MemTask(
-                task_id=task_id,
-                team_name=team_name,
-                title=title,
-                content=content,
-                status=status,
-                updated_at=now,
-            )
-
-            # 3. New task depends on existing tasks
-            if dependencies:
-                for dep_id in dependencies:
-                    self._task_deps.append(
-                        _MemTaskDep(
-                            task_id=task_id,
-                            depends_on_task_id=dep_id,
-                            team_name=team_name,
-                        )
-                    )
-
-            # 4. Existing tasks depend on new task
-            if dependent_task_ids:
-                for dependent_id in dependent_task_ids:
-                    dep_task = self._tasks.get(dependent_id)
-                    if not dep_task:
-                        team_logger.error(f"Dependent task {dependent_id} not found")
-                        # Rollback: remove created task and deps
-                        del self._tasks[task_id]
-                        self._task_deps = [
-                            d
-                            for d in self._task_deps
-                            if not (d.depends_on_task_id == task_id and d.task_id in (dependent_task_ids or []))
-                        ]
-                        return False
-                    if dep_task.status in (
-                        TaskStatus.COMPLETED.value,
-                        TaskStatus.CANCELLED.value,
-                        TaskStatus.CLAIMED.value,
-                        TaskStatus.PLAN_APPROVED.value,
-                    ):
-                        team_logger.error(
-                            f"Cannot add dependency to {dependent_id} in terminal "
-                            f"or executing status: {dep_task.status}"
-                        )
-                        del self._tasks[task_id]
-                        return False
-                    self._task_deps.append(
-                        _MemTaskDep(
-                            task_id=dependent_id,
-                            depends_on_task_id=task_id,
-                            team_name=team_name,
-                        )
-                    )
-                    if dep_task.status == TaskStatus.PENDING.value:
-                        dep_task.status = TaskStatus.BLOCKED.value
-                        dep_task.updated_at = now
-
-            team_logger.info(f"Task {task_id} created with bidirectional dependencies")
-            return True
+        result = await self.mutate_dependency_graph(
+            team_name=team_name,
+            new_tasks=[
+                NewTaskSpec(
+                    task_id=task_id,
+                    title=title,
+                    content=content,
+                    initial_status=status,
+                )
+            ],
+            add_edges=edges,
+        )
+        if not result.ok:
+            team_logger.error(f"Failed to create task {task_id}: {result.reason}")
+        return result.ok
 
     async def get_task_dependencies(self, task_id: str) -> List[_MemTaskDep]:
         return [d for d in self._task_deps if d.task_id == task_id]
@@ -683,99 +765,69 @@ class InMemoryTeamDatabase:
             team_logger.info(f"Task {task_id} deleted")
             return True
 
-    async def cancel_task(self, task_id: str) -> Optional[_MemTask]:
+    async def cancel_task(self, task_id: str) -> Optional[Dict]:
         async with self._lock:
-            task = self._tasks.get(task_id)
-            if not task:
-                team_logger.error(f"Task {task_id} not found")
+            outcome = self._terminate_task_locked(task_id, TaskStatus.CANCELLED, self.get_current_time())
+            if outcome is None:
                 return None
-            if not is_valid_transition(TaskStatus(task.status), TaskStatus.CANCELLED, TASK_TRANSITIONS):
-                team_logger.error(
-                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.CANCELLED.value}"
-                )
-                return None
-            task.status = TaskStatus.CANCELLED.value
-            task.updated_at = self.get_current_time()
-            team_logger.info(f"Task {task_id} cancelled")
-            return task
+            task, unblocked = outcome
+            return {"task": task, "unblocked_tasks": unblocked}
 
     async def cancel_all_tasks(
         self,
         team_name: str,
         skip_assignees: Optional[set[str]] = None,
-    ) -> List[_MemTask]:
+    ) -> Dict:
         async with self._lock:
-            skip = {TaskStatus.CANCELLED.value, TaskStatus.COMPLETED.value}
             skip_assignees = skip_assignees or set()
-            cancelled = []
             now = self.get_current_time()
-            for task in self._tasks.values():
-                if task.team_name != team_name or task.status in skip:
+            cancelled: List[_MemTask] = []
+            unblocked_by_id: Dict[str, _MemTask] = {}
+            # Snapshot the candidate IDs first — _terminate_task_locked mutates
+            # the very dict we'd otherwise iterate over (dependent task statuses
+            # flip during downstream refresh).
+            already_terminal = {TaskStatus.CANCELLED.value, TaskStatus.COMPLETED.value}
+            candidate_ids = [
+                t.task_id
+                for t in self._tasks.values()
+                if t.team_name == team_name
+                and t.status not in already_terminal
+                and t.assignee not in skip_assignees
+            ]
+            for tid in candidate_ids:
+                outcome = self._terminate_task_locked(tid, TaskStatus.CANCELLED, now)
+                if outcome is None:
                     continue
-                if task.assignee in skip_assignees:
-                    continue
-                if not is_valid_transition(TaskStatus(task.status), TaskStatus.CANCELLED, TASK_TRANSITIONS):
-                    continue
-                task.status = TaskStatus.CANCELLED.value
-                task.updated_at = now
+                task, refreshed = outcome
                 cancelled.append(task)
-            team_logger.info(f"Cancelled {len(cancelled)} tasks for team {team_name}")
-            return cancelled
+                for t in refreshed:
+                    unblocked_by_id[t.task_id] = t
+            cancelled_ids = {t.task_id for t in cancelled}
+            unblocked_tasks = [t for tid, t in unblocked_by_id.items() if tid not in cancelled_ids]
+            team_logger.info(
+                f"Cancelled {len(cancelled)} tasks for team {team_name}; "
+                f"unblocked {len(unblocked_tasks)}"
+            )
+            return {"cancelled_tasks": cancelled, "unblocked_tasks": unblocked_tasks}
 
     async def complete_task(self, task_id: str) -> Optional[Dict]:
         async with self._lock:
-            task = self._tasks.get(task_id)
-            if not task:
-                team_logger.error(f"Task {task_id} not found")
+            outcome = self._terminate_task_locked(task_id, TaskStatus.COMPLETED, self.get_current_time())
+            if outcome is None:
                 return None
-            if task.status == TaskStatus.COMPLETED.value:
-                return {"task": task, "unblocked_tasks": []}
-            if not is_valid_transition(TaskStatus(task.status), TaskStatus.COMPLETED, TASK_TRANSITIONS):
-                team_logger.error(
-                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.COMPLETED.value}"
-                )
-                return None
-
-            now = self.get_current_time()
-            task.status = TaskStatus.COMPLETED.value
-            task.updated_at = now
-
-            # Resolve deps
-            for dep in self._task_deps:
-                if dep.depends_on_task_id == task_id and not dep.resolved:
-                    dep.resolved = True
-
-            # Unblock tasks
-            dependent_task_ids = {d.task_id for d in self._task_deps if d.depends_on_task_id == task_id}
-            unblocked = []
-            for dtid in dependent_task_ids:
-                dt = self._tasks.get(dtid)
-                if not dt or dt.status != TaskStatus.BLOCKED.value:
-                    continue
-                unresolved = sum(1 for d in self._task_deps if d.task_id == dtid and not d.resolved)
-                if unresolved == 0:
-                    dt.status = TaskStatus.PENDING.value
-                    dt.updated_at = now
-                    unblocked.append(dt)
-                    team_logger.info(f"Task {dtid} unblocked (from BLOCKED to PENDING)")
-
-            team_logger.info(f"Task {task_id} completed, unblocked {len(unblocked)} tasks")
+            task, unblocked = outcome
             return {"task": task, "unblocked_tasks": unblocked}
 
     async def _verify_and_fix_blocked_tasks(self, team_name: str) -> List[_MemTask]:
         async with self._lock:
-            fixed = []
-            now = self.get_current_time()
-            for task in self._tasks.values():
-                if task.team_name != team_name or task.status != TaskStatus.BLOCKED.value:
-                    continue
-                unresolved = sum(1 for d in self._task_deps if d.task_id == task.task_id and not d.resolved)
-                if unresolved == 0:
-                    task.status = TaskStatus.PENDING.value
-                    task.updated_at = now
-                    fixed.append(task)
-                    team_logger.info(f"Task {task.task_id} fixed from BLOCKED to PENDING")
-            return fixed
+            blocked_ids = [
+                t.task_id
+                for t in self._tasks.values()
+                if t.team_name == team_name and t.status == TaskStatus.BLOCKED.value
+            ]
+            if not blocked_ids:
+                return []
+            return self._refresh_status_for_tasks(blocked_ids, self.get_current_time())
 
     async def verify_and_fix_task_consistency(self, team_name: str) -> List[_MemTask]:
         return await self._verify_and_fix_blocked_tasks(team_name)

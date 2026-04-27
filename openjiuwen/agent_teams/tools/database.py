@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import (
     Dict,
+    Iterable,
     List,
     Optional,
 )
@@ -46,6 +47,10 @@ from openjiuwen.agent_teams.schema.status import (
     MemberStatus,
     TaskStatus,
     is_valid_transition,
+)
+from openjiuwen.agent_teams.schema.task import (
+    GraphMutationResult,
+    NewTaskSpec,
 )
 from openjiuwen.agent_teams.spawn.context import get_session_id
 from openjiuwen.agent_teams.tools.models import (
@@ -85,6 +90,79 @@ class DatabaseConfig(BaseModel):
 
 _DB_RETRY_ATTEMPTS = 3
 _DB_RETRY_BASE_DELAY = 0.5
+
+
+# ----------------- Dependency-graph helpers -----------------
+_TASK_TERMINAL_STATUSES = frozenset(
+    {TaskStatus.COMPLETED.value, TaskStatus.CANCELLED.value}
+)
+# Statuses that cannot accept new incoming dependencies — terminal or
+# already executing. Adding a dep mid-execution would silently re-block a
+# task the assignee is actively working on.
+_TASK_DEPENDENCY_REJECT_STATUSES = frozenset(
+    {
+        TaskStatus.COMPLETED.value,
+        TaskStatus.CANCELLED.value,
+        TaskStatus.CLAIMED.value,
+        TaskStatus.PLAN_APPROVED.value,
+    }
+)
+
+
+def detect_cycle_in_adjacency(
+    adjacency: Dict[str, List[str]],
+) -> Optional[List[str]]:
+    """Detect a cycle in a task-dependency adjacency map.
+
+    The map points from a task to the tasks it depends on (``task_id ->
+    [depends_on_task_id, ...]``). The walk follows edges in that
+    direction; reaching an ancestor node in the current DFS path means
+    the dependency chain loops back on itself.
+
+    Args:
+        adjacency: Outgoing-edge adjacency map.
+
+    Returns:
+        The cycle as a list of task IDs (the repeated node appears at
+        both ends, e.g. ``[A, B, C, A]``), or ``None`` if the graph is
+        acyclic. Iterative DFS with WHITE/GRAY/BLACK coloring keeps the
+        recursion depth bounded for deep dependency chains.
+    """
+    white, gray, black = 0, 1, 2
+    color: Dict[str, int] = {}
+    for node, deps in adjacency.items():
+        color[node] = white
+        for dep in deps:
+            color.setdefault(dep, white)
+
+    cycle: Optional[List[str]] = None
+
+    for root in list(color.keys()):
+        if color[root] != white:
+            continue
+        # Iterative DFS: stack frames are (node, iterator-over-children).
+        path: List[str] = [root]
+        color[root] = gray
+        stack: List[tuple[str, Iterable[str]]] = [(root, iter(adjacency.get(root, ())))]
+        while stack:
+            node, it = stack[-1]
+            nxt = next(it, None)
+            if nxt is None:
+                stack.pop()
+                color[node] = black
+                path.pop()
+                continue
+            c = color.get(nxt, white)
+            if c == gray:
+                idx = path.index(nxt)
+                cycle = path[idx:] + [nxt]
+                return cycle
+            if c == white:
+                color[nxt] = gray
+                path.append(nxt)
+                stack.append((nxt, iter(adjacency.get(nxt, ()))))
+
+    return None
 
 
 # ----------------- Asynchronous Database Manager -----------------
@@ -969,72 +1047,312 @@ class TeamDatabase:
 
             return True
 
-    async def add_task_dependency(
+    async def _refresh_status_in_session(
         self,
-        task_id: str,
-        depends_on_task_id: str,
-        team_name: str,
-    ) -> bool:
-        """Add a task dependency"""
-        await self._ensure_initialized()
-        task_dependency_model = _get_task_dependency_model()
-        async with self.session_local() as session:
-            try:
-                dependency = task_dependency_model(
-                    task_id=task_id,
-                    depends_on_task_id=depends_on_task_id,
-                    team_name=team_name,
-                )
-                session.add(dependency)
-                await session.commit()
-                team_logger.info(f"Task dependency added: {task_id} -> {depends_on_task_id}")
-                return True
-            except IntegrityError:
-                await session.rollback()
-                team_logger.debug(f"Dependency {task_id} -> {depends_on_task_id} already exists")
-                return True
+        session: AsyncSession,
+        task_ids: Iterable[str],
+        now: int,
+    ) -> List[TeamTaskBase]:
+        """Recompute PENDING/BLOCKED status for tasks based on unresolved deps.
 
-    async def _check_circular_dependency(
-        self, session, task_id: str, target_task_id: str, visited: Optional[set] = None
-    ) -> bool:
-        """Check if adding a dependency from task_id to target_task_id would create a cycle
-
-        This performs a DFS to see if target_task_id transitively depends on task_id.
+        Rules:
+        - ``PENDING`` with unresolved deps > 0 transitions to ``BLOCKED``.
+        - ``BLOCKED`` with unresolved deps == 0 transitions to ``PENDING``.
+        - All other statuses are left untouched (terminal or executing
+          tasks must not be silently re-routed by edge changes).
 
         Args:
-            session: SQLAlchemy session
-            task_id: Task that would depend on target_task_id
-            target_task_id: Task that task_id would depend on
-            visited: Set of visited tasks (for recursion)
+            session: Active SQLAlchemy session (caller manages commit).
+            task_ids: Candidate task IDs to evaluate. Duplicates and
+                non-existent IDs are tolerated.
+            now: Wall-clock timestamp to stamp on changed tasks.
 
         Returns:
-            True if cycle would be created, False otherwise
+            Tasks whose status actually changed.
         """
-        if visited is None:
-            visited = set()
+        unique_ids = list({tid for tid in task_ids if tid})
+        if not unique_ids:
+            return []
 
-        # Check if we've reached the task_id (cycle detected)
-        if target_task_id == task_id:
-            return True
-
-        # Prevent infinite recursion
-        if target_task_id in visited:
-            return False
-        visited.add(target_task_id)
-
-        # Get all tasks that target_task_id depends on
+        team_task_model = _get_task_model()
         task_dependency_model = _get_task_dependency_model()
-        result = await session.execute(
-            select(task_dependency_model).where(task_dependency_model.task_id == target_task_id)
+
+        tasks_result = await session.execute(
+            select(team_task_model).where(team_task_model.task_id.in_(unique_ids))
         )
-        dependencies = result.scalars().all()
+        candidates = [
+            t
+            for t in tasks_result.scalars().all()
+            if t.status in (TaskStatus.PENDING.value, TaskStatus.BLOCKED.value)
+        ]
+        if not candidates:
+            return []
 
-        # Recursively check each dependency
-        for dep in dependencies:
-            if await self._check_circular_dependency(session, task_id, dep.depends_on_task_id, visited):
-                return True
+        candidate_ids = [t.task_id for t in candidates]
+        unresolved_result = await session.execute(
+            select(
+                task_dependency_model.task_id,
+                func.count().label("unresolved"),
+            )
+            .where(
+                task_dependency_model.task_id.in_(candidate_ids),
+                task_dependency_model.resolved.is_(False),
+            )
+            .group_by(task_dependency_model.task_id)
+        )
+        unresolved_by_task: Dict[str, int] = {row[0]: row[1] for row in unresolved_result.all()}
 
-        return False
+        refreshed: List[TeamTaskBase] = []
+        for task in candidates:
+            unresolved = unresolved_by_task.get(task.task_id, 0)
+            if task.status == TaskStatus.PENDING.value and unresolved > 0:
+                task.status = TaskStatus.BLOCKED.value
+                task.updated_at = now
+                refreshed.append(task)
+                team_logger.info(f"Task {task.task_id} blocked ({unresolved} unresolved deps)")
+            elif task.status == TaskStatus.BLOCKED.value and unresolved == 0:
+                task.status = TaskStatus.PENDING.value
+                task.updated_at = now
+                refreshed.append(task)
+                team_logger.info(f"Task {task.task_id} unblocked (all deps resolved)")
+        return refreshed
+
+    async def _terminate_task_in_session(
+        self,
+        session: AsyncSession,
+        task_id: str,
+        new_status: TaskStatus,
+        now: int,
+    ) -> Optional[tuple[TeamTaskBase, List[TeamTaskBase]]]:
+        """Terminate a task and propagate dependency resolution downstream.
+
+        Both ``COMPLETED`` and ``CANCELLED`` are "terminal" from the
+        dependency graph's point of view: the task no longer produces
+        anything new, so every edge ``X -> task_id`` (X waits on this
+        task) is now resolved and X may be eligible to unblock.
+
+        Args:
+            session: Active SQLAlchemy session (caller manages commit).
+            task_id: Task to terminate.
+            new_status: ``TaskStatus.COMPLETED`` or ``TaskStatus.CANCELLED``.
+            now: Wall-clock timestamp.
+
+        Returns:
+            ``(task, refreshed_downstream_tasks)`` on success;
+            ``None`` if the task is missing or the transition is invalid.
+        """
+        if new_status not in (TaskStatus.COMPLETED, TaskStatus.CANCELLED):
+            raise ValueError(f"_terminate_task_in_session expects a terminal status, got {new_status}")
+
+        team_task_model = _get_task_model()
+        task_dependency_model = _get_task_dependency_model()
+
+        result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
+        task = result.scalar_one_or_none()
+        if task is None:
+            team_logger.error(f"Task {task_id} not found")
+            return None
+
+        # Idempotent: a no-op if already in the target state.
+        if task.status == new_status.value:
+            team_logger.debug(f"Task {task_id} already {new_status.value}")
+            return task, []
+
+        if not is_valid_transition(TaskStatus(task.status), new_status, TASK_TRANSITIONS):
+            team_logger.error(
+                f"Invalid state transition for task {task_id}: {task.status} -> {new_status.value}"
+            )
+            return None
+
+        task.status = new_status.value
+        task.updated_at = now
+        team_logger.info(f"Task {task_id} {new_status.value} at {now}")
+
+        # Resolve outgoing edges: every X that was waiting on this task is now released.
+        dep_update_result = await session.execute(
+            update(task_dependency_model)
+            .where(
+                task_dependency_model.depends_on_task_id == task_id,
+                task_dependency_model.resolved.is_(False),
+            )
+            .values(resolved=True)
+        )
+        resolved_count = dep_update_result.rowcount or 0
+        if resolved_count > 0:
+            team_logger.info(f"Resolved {resolved_count} dependencies for task {task_id}")
+
+        downstream_result = await session.execute(
+            select(task_dependency_model.task_id)
+            .where(task_dependency_model.depends_on_task_id == task_id)
+            .distinct()
+        )
+        downstream_ids = {row[0] for row in downstream_result.all()}
+
+        refreshed = await self._refresh_status_in_session(session, downstream_ids, now)
+        return task, refreshed
+
+    async def mutate_dependency_graph(
+        self,
+        team_name: str,
+        *,
+        new_tasks: Optional[List[NewTaskSpec]] = None,
+        add_edges: Optional[List[tuple[str, str]]] = None,
+    ) -> GraphMutationResult:
+        """Atomic dependency-graph mutation: insert nodes and/or edges.
+
+        Single entry point for every structural change to the dependency
+        graph. Cycle detection runs against the post-mutation graph (so
+        a batch of edges that individually look fine but collectively
+        close a loop is rejected as one). After the writes succeed, the
+        affected tasks are passed through the status-refresh pass so
+        ``BLOCKED``/``PENDING`` always reflects the current edge state.
+
+        Args:
+            team_name: Team identifier (applied to all new rows).
+            new_tasks: Tasks to create. Their ``initial_status`` is the
+                seed; the refresh pass may flip ``PENDING`` to
+                ``BLOCKED`` if edges land that gate them.
+            add_edges: Edges as ``(task_id, depends_on_task_id)`` tuples.
+                Both endpoints must exist after ``new_tasks`` are
+                applied. Adding an edge to an executing/terminal task
+                (CLAIMED / PLAN_APPROVED / COMPLETED / CANCELLED) is
+                rejected — the assignee is mid-flight or the work is
+                already settled.
+
+        Returns:
+            ``GraphMutationResult`` with the cause on failure and the
+            list of tasks whose status changed during refresh on success.
+        """
+        new_tasks = list(new_tasks or [])
+        add_edges = list(add_edges or [])
+        if not new_tasks and not add_edges:
+            return GraphMutationResult.success()
+
+        await self._ensure_initialized()
+        team_task_model = _get_task_model()
+        task_dependency_model = _get_task_dependency_model()
+
+        async with self.session_local() as session:
+            try:
+                now = self.get_current_time()
+
+                # 1. Insert new tasks (so cycle check and endpoint validation see them).
+                seen_new_ids: set[str] = set()
+                for spec in new_tasks:
+                    if spec.task_id in seen_new_ids:
+                        await session.rollback()
+                        return GraphMutationResult.fail(f"Duplicate task_id {spec.task_id} in new_tasks")
+                    seen_new_ids.add(spec.task_id)
+                    session.add(
+                        team_task_model(
+                            task_id=spec.task_id,
+                            team_name=team_name,
+                            title=spec.title,
+                            content=spec.content,
+                            status=spec.initial_status,
+                            updated_at=now,
+                        )
+                    )
+                if new_tasks:
+                    await session.flush()  # surface task_id collisions before edge work
+
+                # 2. Validate edge endpoints (existence + non-terminal source).
+                edge_endpoints: set[str] = set()
+                for tid, dep_id in add_edges:
+                    edge_endpoints.add(tid)
+                    edge_endpoints.add(dep_id)
+
+                endpoint_tasks: Dict[str, TeamTaskBase] = {}
+                if edge_endpoints:
+                    endpoint_result = await session.execute(
+                        select(team_task_model).where(team_task_model.task_id.in_(list(edge_endpoints)))
+                    )
+                    endpoint_tasks = {t.task_id: t for t in endpoint_result.scalars().all()}
+
+                for tid, dep_id in add_edges:
+                    if tid not in endpoint_tasks:
+                        await session.rollback()
+                        return GraphMutationResult.fail(f"Task {tid} not found")
+                    if dep_id not in endpoint_tasks:
+                        await session.rollback()
+                        return GraphMutationResult.fail(f"Dependency target {dep_id} not found")
+                    src_status = endpoint_tasks[tid].status
+                    if src_status in _TASK_DEPENDENCY_REJECT_STATUSES:
+                        await session.rollback()
+                        return GraphMutationResult.fail(
+                            f"Cannot add dependency to {tid} in terminal or executing status: {src_status}"
+                        )
+
+                # 3. Build the post-mutation adjacency and run a single cycle check.
+                existing_edges_rows = (
+                    await session.execute(
+                        select(
+                            task_dependency_model.task_id,
+                            task_dependency_model.depends_on_task_id,
+                        ).where(task_dependency_model.team_name == team_name)
+                    )
+                ).all()
+                existing_edge_set: set[tuple[str, str]] = {(row[0], row[1]) for row in existing_edges_rows}
+                adjacency: Dict[str, List[str]] = {}
+                for src, dst in existing_edge_set:
+                    adjacency.setdefault(src, []).append(dst)
+
+                new_edge_set: set[tuple[str, str]] = set()
+                for tid, dep_id in add_edges:
+                    edge = (tid, dep_id)
+                    if edge in existing_edge_set or edge in new_edge_set:
+                        continue  # idempotent — no-op for already-present edges
+                    new_edge_set.add(edge)
+                    adjacency.setdefault(tid, []).append(dep_id)
+
+                cycle = detect_cycle_in_adjacency(adjacency)
+                if cycle is not None:
+                    await session.rollback()
+                    return GraphMutationResult.fail(f"Circular dependency detected: {' -> '.join(cycle)}")
+
+                # 4. Insert new edges. An edge whose target is already terminal is
+                # born resolved — skip the redundant unblock round-trip later.
+                for tid, dep_id in new_edge_set:
+                    dep_status = endpoint_tasks[dep_id].status
+                    initial_resolved = dep_status in _TASK_TERMINAL_STATUSES
+                    session.add(
+                        task_dependency_model(
+                            task_id=tid,
+                            depends_on_task_id=dep_id,
+                            team_name=team_name,
+                            resolved=initial_resolved,
+                        )
+                    )
+                if new_edge_set:
+                    await session.flush()
+
+                # 5. Refresh status. Affected = newly created tasks (which start
+                # at their seed status) plus any task that gained a new edge.
+                affected_ids: set[str] = {spec.task_id for spec in new_tasks}
+                affected_ids.update(tid for tid, _ in new_edge_set)
+                refreshed = await self._refresh_status_in_session(session, affected_ids, now)
+
+                await session.commit()
+
+                if new_tasks:
+                    team_logger.info(
+                        f"Created {len(new_tasks)} task(s); "
+                        f"added {len(new_edge_set)} edge(s); refreshed {len(refreshed)} task(s)"
+                    )
+                else:
+                    team_logger.info(
+                        f"Added {len(new_edge_set)} edge(s); refreshed {len(refreshed)} task(s)"
+                    )
+                return GraphMutationResult.success(refreshed_tasks=list(refreshed))
+
+            except IntegrityError as e:
+                await session.rollback()
+                team_logger.error(f"mutate_dependency_graph integrity error: {e}")
+                return GraphMutationResult.fail(f"Integrity error: {e}")
+            except Exception as e:
+                await session.rollback()
+                team_logger.error(f"mutate_dependency_graph unexpected error: {e}")
+                return GraphMutationResult.fail(f"Unexpected error: {e}")
 
     async def add_task_with_bidirectional_dependencies(
         self,
@@ -1047,140 +1365,47 @@ class TeamDatabase:
         dependencies: Optional[List[str]] = None,
         dependent_task_ids: Optional[List[str]] = None,
     ) -> bool:
-        """Create a task with bidirectional dependencies (insert into task dependency chain)
+        """Create a task and wire it into the dependency chain atomically.
 
-        This operation is performed atomically to ensure concurrent safety.
-        The new task can depend on existing tasks and/or have existing tasks depend on it.
-
-        Cycle detection: This method prevents circular dependencies by checking if
-        adding specified dependencies would create a cycle in the dependency graph.
+        Thin wrapper over ``mutate_dependency_graph`` that translates the
+        legacy "new task with upstream/downstream lists" shape into the
+        unified ``new_tasks + add_edges`` form.
 
         Args:
-            task_id: ID of the new task to create
-            team_name: Team identifier
-            title: Task title
-            content: Task content
-            status: Task status
-            dependencies: List of existing task IDs that are new task depends on
-            dependent_task_ids: List of existing task IDs that should depend on the new task
+            task_id: ID of the new task to create.
+            team_name: Team identifier.
+            title: Task title.
+            content: Task content.
+            status: Initial seed status (refresh pass may adjust).
+            dependencies: Existing task IDs the new task should depend on.
+            dependent_task_ids: Existing task IDs that should depend on
+                the new task.
 
         Returns:
-            True if successful, False otherwise (e.g., circular dependency detected)
+            True on success; False on any rejection (cycle, missing
+            endpoint, terminal/executing dependent, task_id collision).
         """
-        await self._ensure_initialized()
-        team_task_model = _get_task_model()
-        task_dependency_model = _get_task_dependency_model()
-        async with self.session_local() as session:
-            try:
-                # 1. Check for circular dependencies before making any changes
-                # New task A depends on B -> check if B transitively depends on A (would be cycle)
-                if dependencies:
-                    for dep_id in dependencies:
-                        # Check if dep_id (or its transitive dependencies) leads back to task_id
-                        result = await session.execute(
-                            select(task_dependency_model).where(task_dependency_model.task_id == dep_id)
-                        )
-                        dep_tasks = result.scalars().all()
+        edges: List[tuple[str, str]] = []
+        for dep_id in dependencies or ():
+            edges.append((task_id, dep_id))
+        for dependent_id in dependent_task_ids or ():
+            edges.append((dependent_id, task_id))
 
-                        for dep_task in dep_tasks:
-                            if await self._check_circular_dependency(session, task_id, dep_task.depends_on_task_id):
-                                team_logger.error(
-                                    f"Circular dependency detected: {task_id} -> {dep_id} -> "
-                                    f"... -> {dep_task.depends_on_task_id}"
-                                )
-                                await session.rollback()
-                                return False
-
-                # Also check dependents for potential cycles
-                if dependent_task_ids and dependencies:
-                    for dependent_id in dependent_task_ids:
-                        for new_dep in dependencies:
-                            if await self._check_circular_dependency(session, dependent_id, new_dep):
-                                team_logger.error(f"Circular dependency detected via dependent {dependent_id}")
-                                await session.rollback()
-                                return False
-
-                # 2. Create new task
-                now = self.get_current_time()
-                new_task = team_task_model(
+        result = await self.mutate_dependency_graph(
+            team_name=team_name,
+            new_tasks=[
+                NewTaskSpec(
                     task_id=task_id,
-                    team_name=team_name,
                     title=title,
                     content=content,
-                    status=status,
-                    updated_at=now,
+                    initial_status=status,
                 )
-                session.add(new_task)
-                await session.flush()
-
-                # 3. Add dependencies: new_task depends on existing tasks
-                if dependencies:
-                    for dep_id in dependencies:
-                        dependency = task_dependency_model(
-                            task_id=task_id,
-                            depends_on_task_id=dep_id,
-                            team_name=team_name,
-                        )
-                        session.add(dependency)
-
-                # 4. Add dependents: existing tasks now depend on new_task
-                if dependent_task_ids:
-                    for dependent_id in dependent_task_ids:
-                        # Verify dependent task exists and check its status
-                        result = await session.execute(
-                            select(team_task_model).where(team_task_model.task_id == dependent_id)
-                        )
-                        dep_task = result.scalar_one_or_none()
-
-                        if not dep_task:
-                            team_logger.error(f"Dependent task {dependent_id} not found")
-                            await session.rollback()
-                            return False
-
-                        # Check if dependent task is in terminal status (cannot add new dependency)
-                        if dep_task.status in [
-                            TaskStatus.COMPLETED.value,
-                            TaskStatus.CANCELLED.value,
-                            TaskStatus.CLAIMED.value,
-                            TaskStatus.PLAN_APPROVED.value,
-                        ]:
-                            team_logger.error(
-                                f"Cannot add dependency to {dependent_id} in terminal or executing "
-                                f"status: {dep_task.status}"
-                            )
-                            await session.rollback()
-                            return False
-
-                        # Create dependency relationship
-                        dependency = task_dependency_model(
-                            task_id=dependent_id,
-                            depends_on_task_id=task_id,
-                            team_name=team_name,
-                        )
-                        session.add(dependency)
-
-                        # Update dependent task status from pending to blocked
-                        if dep_task.status == TaskStatus.PENDING.value:
-                            dep_task.status = TaskStatus.BLOCKED.value
-                            dep_task.updated_at = now
-
-                # 5. Commit transaction - atomic and acquires write lock
-                await session.commit()
-
-                deps_info = f" depends on {dependencies}" if dependencies else ""
-                dependents_info = f", {len(dependent_task_ids)} dependents" if dependent_task_ids else ""
-                team_logger.info(f"Task {task_id} created{deps_info}{dependents_info}")
-
-                return True
-
-            except IntegrityError as e:
-                await session.rollback()
-                team_logger.error(f"Failed to create task {task_id}: {e}")
-                return False
-            except Exception as e:
-                await session.rollback()
-                team_logger.error(f"Unexpected error creating task {task_id}: {e}")
-                return False
+            ],
+            add_edges=edges,
+        )
+        if not result.ok:
+            team_logger.error(f"Failed to create task {task_id}: {result.reason}")
+        return result.ok
 
     async def get_task_dependencies(self, task_id: str) -> List[TeamTaskDependencyBase]:
         """Get all dependencies for a task"""
@@ -1259,266 +1484,176 @@ class TeamDatabase:
             team_logger.info(f"Task {task_id} deleted")
             return True
 
-    async def cancel_task(self, task_id: str) -> Optional[TeamTaskBase]:
-        """Cancel a task atomically and return the updated task
+    async def cancel_task(self, task_id: str) -> Optional[Dict]:
+        """Cancel a task atomically and unblock dependent tasks.
 
-        This method performs cancellation in a single transaction to prevent
-        race conditions where a task could be claimed between checking
-        assignee and cancelling.
+        Cancelling is a node-termination operation: the task no longer
+        produces work, so every downstream task waiting on it has its
+        edge resolved and is re-evaluated for unblocking. ``CANCELLED``
+        and ``COMPLETED`` are equivalent from the dependency graph's
+        point of view; both flow through ``_terminate_task_in_session``.
 
         Args:
-            task_id: Task identifier
+            task_id: Task identifier.
 
         Returns:
-            Task model if cancellation succeeded, None otherwise
-            (task not found or invalid state transition)
+            ``{"task": TeamTaskBase, "unblocked_tasks": [TeamTaskBase, ...]}``
+            on success; ``None`` if the task is missing or the
+            transition is invalid. Mirrors ``complete_task``'s shape so
+            both terminal paths return the same envelope.
         """
         await self._ensure_initialized()
-        team_task_model = _get_task_model()
         async with self.session_local() as session:
-            # Get task with write lock
-            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
-            task = result.scalar_one_or_none()
-            if not task:
-                team_logger.error(f"Task {task_id} not found")
+            now = self.get_current_time()
+            outcome = await self._terminate_task_in_session(
+                session,
+                task_id=task_id,
+                new_status=TaskStatus.CANCELLED,
+                now=now,
+            )
+            if outcome is None:
                 return None
-
-            # Validate state transition
-            if not is_valid_transition(
-                TaskStatus(task.status),
-                TaskStatus.CANCELLED,
-                TASK_TRANSITIONS,
-            ):
-                team_logger.error(
-                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.CANCELLED.value}"
-                )
-                return None
-
-            # Update task status
-            task.status = TaskStatus.CANCELLED.value
-            task.updated_at = self.get_current_time()
+            task, unblocked = outcome
             await session.commit()
-            team_logger.info(f"Task {task_id} cancelled")
-
-            return task
+            return {"task": task, "unblocked_tasks": unblocked}
 
     async def cancel_all_tasks(
         self,
         team_name: str,
         skip_assignees: Optional[set[str]] = None,
-    ) -> List[TeamTaskBase]:
-        """Cancel all non-cancelled and non-completed tasks for a team atomically
+    ) -> Dict:
+        """Cancel every active task for a team atomically.
 
-        This method performs bulk cancellation in a single transaction to prevent
-        race conditions. Only tasks that are in pending/claimed/plan_approved/blocked status
-        will be cancelled. Tasks already cancelled or completed will be skipped.
+        Bulk cancellation walks the team's non-terminal tasks in a single
+        transaction and routes each through ``_terminate_task_in_session``
+        so downstream edges are resolved and dependents re-evaluated.
+        Tasks already in CANCELLED/COMPLETED are skipped.
 
         Args:
-            team_name: Team identifier
+            team_name: Team identifier.
             skip_assignees: Member names whose claimed tasks must be
                 preserved (used to honor the HITT human_agent lock).
 
         Returns:
-            List of cancelled task models (empty if no tasks to cancel)
+            ``{"cancelled_tasks": [...], "unblocked_tasks": [...]}``.
+            ``unblocked_tasks`` aggregates every task that flipped from
+            BLOCKED to PENDING during the cascade — typically rare
+            because most blocked tasks share the same upstream chain
+            that's also being cancelled, but possible when a blocked
+            task waits on both a cancelled and a non-cancelled chain.
         """
         await self._ensure_initialized()
         team_task_model = _get_task_model()
         skip_assignees = skip_assignees or set()
         async with self.session_local() as session:
-            # Get all tasks for this team that are NOT cancelled or completed
             skip_statuses = [TaskStatus.CANCELLED.value, TaskStatus.COMPLETED.value]
             result = await session.execute(
-                select(team_task_model).where(
-                    team_task_model.team_name == team_name, ~team_task_model.status.in_(skip_statuses)
+                select(team_task_model.task_id, team_task_model.assignee).where(
+                    team_task_model.team_name == team_name,
+                    ~team_task_model.status.in_(skip_statuses),
                 )
             )
-            tasks = result.scalars().all()
-
-            if not tasks:
+            candidates = [(row[0], row[1]) for row in result.all()]
+            if not candidates:
                 team_logger.info(f"No active tasks to cancel for team {team_name}")
-                return []
+                return {"cancelled_tasks": [], "unblocked_tasks": []}
 
-            cancelled_tasks = []
             now = self.get_current_time()
-
-            # Cancel each task (all in same transaction)
-            for task in tasks:
-                if task.assignee in skip_assignees:
-                    team_logger.debug(f"Skipping task {task.task_id}: assignee '{task.assignee}' in skip_assignees")
+            cancelled_tasks: List[TeamTaskBase] = []
+            unblocked_by_id: Dict[str, TeamTaskBase] = {}
+            for task_id, assignee in candidates:
+                if assignee in skip_assignees:
+                    team_logger.debug(f"Skipping task {task_id}: assignee '{assignee}' in skip_assignees")
                     continue
-                # Validate state transition one more time (defense in depth)
-                if not is_valid_transition(
-                    TaskStatus(task.status),
-                    TaskStatus.CANCELLED,
-                    TASK_TRANSITIONS,
-                ):
-                    team_logger.debug(
-                        f"Skipping task {task.task_id}: invalid state transition "
-                        f"{task.status} -> {TaskStatus.CANCELLED.value}"
-                    )
+                outcome = await self._terminate_task_in_session(
+                    session,
+                    task_id=task_id,
+                    new_status=TaskStatus.CANCELLED,
+                    now=now,
+                )
+                if outcome is None:
                     continue
-
-                # Update task status
-                task.status = TaskStatus.CANCELLED.value
-                task.updated_at = now
-                cancelled_tasks.append(task)
+                cancelled, refreshed = outcome
+                cancelled_tasks.append(cancelled)
+                # Dedupe: a task could refresh into PENDING after one
+                # ancestor cancels and refresh again into something else
+                # later — we only want the final state and we want it once.
+                for t in refreshed:
+                    unblocked_by_id[t.task_id] = t
 
             await session.commit()
-
-            team_logger.info(f"Cancelled {len(cancelled_tasks)} tasks for team {team_name}")
-
-            return cancelled_tasks
+            # Filter out tasks that ended up cancelled themselves — they
+            # can't also be reported as "unblocked".
+            cancelled_ids = {t.task_id for t in cancelled_tasks}
+            unblocked_tasks = [t for tid, t in unblocked_by_id.items() if tid not in cancelled_ids]
+            team_logger.info(
+                f"Cancelled {len(cancelled_tasks)} tasks for team {team_name}; "
+                f"unblocked {len(unblocked_tasks)}"
+            )
+            return {"cancelled_tasks": cancelled_tasks, "unblocked_tasks": unblocked_tasks}
 
     async def complete_task(self, task_id: str) -> Optional[Dict]:
-        """Complete a task atomically and unblock dependent tasks
+        """Complete a task atomically and unblock dependent tasks.
 
-        This method performs task completion and dependent task unblocking in a single
-        transaction to prevent race conditions:
-
-        1. Validates task state and transitions to COMPLETED atomically
-        2. Resolves all dependencies that depend on this task
-        3. Unblocks tasks whose all dependencies are now resolved
-        4. Uses CAS (Compare-And-Swap) pattern to prevent multiple completions
+        Thin wrapper over ``_terminate_task_in_session`` with
+        ``COMPLETED`` semantics. The result preserves the legacy
+        ``{"task": ..., "unblocked_tasks": ...}`` shape so existing
+        callers (``TeamTaskManager.complete``) keep working unchanged.
 
         Args:
-            task_id: Task identifier
+            task_id: Task identifier.
 
         Returns:
-            Dictionary with 'task' (TeamTaskBase) and 'unblocked_tasks' (List[TeamTaskBase]) keys,
-            or None if task not found or invalid state transition
+            Dictionary with the completed task and any tasks that
+            transitioned out of BLOCKED as a result, or ``None`` if the
+            task is missing or the transition is invalid.
         """
         await self._ensure_initialized()
-        team_task_model = _get_task_model()
-        task_dependency_model = _get_task_dependency_model()
         async with self.session_local() as session:
-            # Get task with write lock
-            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
-            task = result.scalar_one_or_none()
-            if not task:
-                team_logger.error(f"Task {task_id} not found")
-                return None
-
-            # Validate state transition - use CAS pattern
-            if task.status == TaskStatus.COMPLETED.value:
-                # Already completed - no-op (idempotent)
-                team_logger.debug(f"Task {task_id} already completed")
-                return {"task": task, "unblocked_tasks": []}
-
-            if not is_valid_transition(
-                TaskStatus(task.status),
-                TaskStatus.COMPLETED,
-                TASK_TRANSITIONS,
-            ):
-                team_logger.error(
-                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.COMPLETED.value}"
-                )
-                return None
-
-            # Complete task and resolve dependencies atomically
             now = self.get_current_time()
-            task.status = TaskStatus.COMPLETED.value
-            task.updated_at = now
-            team_logger.info(f"Task {task_id} completed at {now}")
-
-            # Resolve all dependencies that depend on this task
-            dep_update_result = await session.execute(
-                update(task_dependency_model)
-                .where(task_dependency_model.depends_on_task_id == task_id, task_dependency_model.resolved.is_(False))
-                .values(resolved=True)
+            outcome = await self._terminate_task_in_session(
+                session,
+                task_id=task_id,
+                new_status=TaskStatus.COMPLETED,
+                now=now,
             )
-            resolved_count = dep_update_result.rowcount or 0
-            if resolved_count > 0:
-                team_logger.info(f"Resolved {resolved_count} dependencies for task {task_id}")
-
-            # Unblock tasks whose all dependencies are now resolved
-            # Get all tasks that depend on the completed task
-            dependent_result = await session.execute(
-                select(task_dependency_model).where(task_dependency_model.depends_on_task_id == task_id)
-            )
-            dependent_deps = dependent_result.scalars().all()
-
-            unblocked_tasks = []
-            for dep in dependent_deps:
-                # Get dependent task
-                task_result = await session.execute(
-                    select(team_task_model).where(team_task_model.task_id == dep.task_id)
-                )
-                dependent_task = task_result.scalar_one_or_none()
-                if not dependent_task:
-                    continue
-
-                # Only unblock if currently BLOCKED (CAS pattern)
-                if dependent_task.status != TaskStatus.BLOCKED.value:
-                    continue
-
-                # Check if all dependencies are resolved
-                unresolved_result = await session.execute(
-                    select(task_dependency_model).where(
-                        task_dependency_model.task_id == dep.task_id, task_dependency_model.resolved.is_(False)
-                    )
-                )
-                unresolved_count = len(unresolved_result.scalars().all())
-
-                # If no unresolved dependencies, unblock atomically
-                if unresolved_count == 0:
-                    dependent_task.status = TaskStatus.PENDING.value
-                    dependent_task.updated_at = now
-                    unblocked_tasks.append(dependent_task)
-                    team_logger.info(f"Task {dep.task_id} unblocked (from BLOCKED to PENDING)")
-
+            if outcome is None:
+                return None
+            task, unblocked = outcome
             await session.commit()
-            team_logger.info(f"Task {task_id} completion committed, unblocked {len(unblocked_tasks)} tasks")
-
-            # Return completed task with unblocked tasks list
-            return {"task": task, "unblocked_tasks": unblocked_tasks}
+            return {"task": task, "unblocked_tasks": unblocked}
 
     async def _verify_and_fix_blocked_tasks(self, team_name: str) -> List[TeamTaskBase]:
-        """Internal method to verify and fix blocked tasks whose' dependencies are completed
+        """Recovery sweep: re-evaluate every BLOCKED task in the team.
 
-        This method is used for data consistency checks and recovery scenarios,
-        such as after system recovery or manual database intervention.
-
-        This is an internal method (prefixed with _) and should not be used as part of
-        normal workflow. The complete() method handles task unblocking automatically.
+        Wraps ``_refresh_status_in_session`` over the team's BLOCKED set
+        so the recovery path uses the same status-transition rules as
+        normal mutations. Useful after a crash/restart or manual DB
+        intervention has left status drifted from the dependency graph.
 
         Args:
-            team_name: Team identifier
+            team_name: Team identifier.
 
         Returns:
-            List of task models that were updated from BLOCKED to PENDING
+            Tasks transitioned out of BLOCKED.
         """
         await self._ensure_initialized()
         team_task_model = _get_task_model()
-        task_dependency_model = _get_task_dependency_model()
         async with self.session_local() as session:
-            # Get all blocked tasks for the team
             result = await session.execute(
-                select(team_task_model).where(
-                    team_task_model.team_name == team_name, team_task_model.status == TaskStatus.BLOCKED.value
+                select(team_task_model.task_id).where(
+                    team_task_model.team_name == team_name,
+                    team_task_model.status == TaskStatus.BLOCKED.value,
                 )
             )
-            blocked_tasks = result.scalars().all()
+            blocked_ids = [row[0] for row in result.all()]
+            if not blocked_ids:
+                return []
 
-            updated_tasks = []
             now = self.get_current_time()
-            for task in blocked_tasks:
-                # Check if all dependencies are resolved
-                deps_result = await session.execute(
-                    select(task_dependency_model).where(
-                        task_dependency_model.task_id == task.task_id, task_dependency_model.resolved.is_(False)
-                    )
-                )
-                unresolved_deps = deps_result.scalars().all()
-
-                # If no unresolved dependencies, update to PENDING
-                if len(unresolved_deps) == 0:
-                    task.status = TaskStatus.PENDING.value
-                    task.updated_at = now
-                    updated_tasks.append(task)
-                    team_logger.info(f"Task {task.task_id} fixed from BLOCKED to PENDING")
-
+            refreshed = await self._refresh_status_in_session(session, blocked_ids, now)
             await session.commit()
-            return updated_tasks
+            return refreshed
 
     async def verify_and_fix_task_consistency(self, team_name: str) -> List[TeamTaskBase]:
         """Verify and fix task consistency for a team

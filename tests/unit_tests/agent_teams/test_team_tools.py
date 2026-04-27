@@ -9,6 +9,9 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.messager import Messager
+from openjiuwen.agent_teams.schema.status import (
+    MemberStatus,
+)
 from openjiuwen.agent_teams.spawn.context import (
     reset_session_id,
     set_session_id,
@@ -18,13 +21,11 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
-from openjiuwen.agent_teams.schema.status import (
-    MemberStatus,
-)
+from openjiuwen.agent_teams.tools.locales import Translator, make_translator
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import (
-    ApproveToolCallTool,
     ApprovePlanTool,
+    ApproveToolCallTool,
     BuildTeamTool,
     ClaimTaskTool,
     CleanTeamTool,
@@ -37,9 +38,8 @@ from openjiuwen.agent_teams.tools.team_tools import (
     UpdateTaskTool,
     ViewTaskToolV2,
 )
-from openjiuwen.agent_teams.tools.locales import Translator, make_translator
-from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.harness.tools.base_tool import ToolOutput
 
 
 @pytest.fixture
@@ -669,6 +669,46 @@ class TestUpdateTaskTool:
 
         assert result.success is False
         assert "No update specified" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_add_blocked_by_rejects_cycle(self, agent_team, t):
+        """add_blocked_by must reject edges that would close a cycle.
+
+        Regression guard: this path used to skip cycle detection entirely
+        because it routed through a primitive that was missing the check.
+        """
+        a = await agent_team.task_manager.add(title="A", content="c")
+        b = await agent_team.task_manager.add(title="B", content="c", dependencies=[a.task_id])
+
+        tool = UpdateTaskTool(agent_team, t)
+        # b -> a already; trying to make a -> b would close A -> B -> A.
+        result = await tool.invoke({
+            "task_id": a.task_id,
+            "add_blocked_by": [b.task_id],
+        })
+
+        assert result.success is False
+        assert "Circular dependency" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_cancel_unblocks_downstream(self, agent_team, t):
+        """Cancelling a task via update_task unblocks anything that
+        depended on it. Mirrors the bug-fix coverage in test_database
+        but exercises the full tool boundary."""
+        upstream = await agent_team.task_manager.add(title="Up", content="c")
+        downstream = await agent_team.task_manager.add(
+            title="Down", content="c", dependencies=[upstream.task_id]
+        )
+        assert downstream.status == "blocked"
+
+        tool = UpdateTaskTool(agent_team, t)
+        result = await tool.invoke({"task_id": upstream.task_id, "status": "cancelled"})
+        assert result.success is True
+
+        refreshed = await agent_team.task_manager.get(downstream.task_id)
+        assert refreshed.status == "pending"
 
 
 class TestViewTaskToolV2:
