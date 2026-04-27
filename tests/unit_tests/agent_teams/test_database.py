@@ -165,7 +165,7 @@ class TestTeamDatabaseInit:
             return None
 
         monkeypatch.setattr(
-            "openjiuwen.agent_teams.tools.database.create_async_engine",
+            "openjiuwen.agent_teams.tools.database.engine.create_async_engine",
             _fake_create_async_engine,
         )
         monkeypatch.setattr(
