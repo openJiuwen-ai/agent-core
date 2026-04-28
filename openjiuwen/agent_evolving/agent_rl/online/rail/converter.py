@@ -111,6 +111,30 @@ def _extract_text(value: Any) -> str:
     return str(value)
 
 
+def _coerce_logprobs(value: Any) -> Optional[list[float]]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        out: list[float] = []
+        for item in value:
+            try:
+                out.append(float(item))
+            except (TypeError, ValueError):
+                continue
+        return out or None
+    content = value.get("content") if isinstance(value, dict) else getattr(value, "content", None)
+    if isinstance(content, list):
+        out = []
+        for item in content:
+            try:
+                logprob = item.get("logprob") if isinstance(item, dict) else getattr(item, "logprob")
+                out.append(float(logprob))
+            except (AttributeError, TypeError, ValueError):
+                continue
+        return out or None
+    return None
+
+
 def _fingerprint_payload(messages: list[dict[str, Any]], tools: Any) -> dict[str, Any]:
     raw = json.dumps(
         {"messages": messages, "tools": _json_value(tools)},
@@ -217,7 +241,7 @@ class OnlineTrajectoryConverter:
                 or step.meta.get("prompt_ids")
                 or extract_prompt_ids(token_source)
             )
-            logprobs = step.logprobs or extract_logprobs(token_source)
+            logprobs = _coerce_logprobs(step.logprobs) or extract_logprobs(token_source)
             sample = PerTurnSample(
                 trajectory_id=trajectory_id,
                 step_index=step_index,

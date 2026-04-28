@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from openjiuwen.agent_evolving.agent_rl.online.gateway.app.server import _forward_chat_completions
+from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.judge_dispatcher import JudgeDispatcher
 from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.sample_payloads import (
     build_sample,
 )
@@ -31,6 +32,25 @@ class _FakeJudgeScorer:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class _FakePendingStore:
+    def __init__(self, samples: list[dict]) -> None:
+        self.samples = list(samples)
+
+    async def pop_all(self, session_id: str) -> list[dict]:
+        del session_id
+        samples = list(self.samples)
+        self.samples.clear()
+        return samples
+
+
+class _FakeRecorder:
+    def __init__(self) -> None:
+        self.samples: list[dict] = []
+
+    async def record_sample(self, sample: dict) -> None:
+        self.samples.append(sample)
 
 
 def test_build_sample_builds_shared_masks():
@@ -81,3 +101,31 @@ async def test_processor_chat_completion_proxies_without_turn_or_sample_work():
 
     assert result["choices"][0]["message"]["content"] == "pong"
     assert len(forwarder.forward_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_judge_dispatcher_scores_session_done_sample_without_followup_feedback():
+    recorder = _FakeRecorder()
+    scorer = _FakeJudgeScorer({"score": 0.25, "votes": [6.25], "details": {"overall": 6.25}})
+    sample = {
+        "sample_id": "sample-1",
+        "user_id": "user-1",
+        "session_id": "s1",
+        "turn_num": 1,
+        "request": {"messages": [{"role": "user", "content": "hello"}]},
+        "trajectory": {"response_text": "pong"},
+    }
+    dispatcher = JudgeDispatcher(
+        pending_store=_FakePendingStore([sample]),
+        record_sample=recorder.record_sample,
+        judge_scorer=scorer,
+    )
+
+    count = await dispatcher.on_session_done("s1")
+
+    assert count == 1
+    assert len(scorer.calls) == 1
+    assert scorer.calls[0]["instruction_text"] == "hello"
+    assert scorer.calls[0]["followup_user_feedback"] == ""
+    assert recorder.samples[0]["judge"]["score"] == 0.25
+    assert recorder.samples[0]["judge_feedback"]["tag"] == "session_done"
