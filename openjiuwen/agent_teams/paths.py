@@ -83,3 +83,11 @@ def independent_member_workspace(member_name: str) -> Path:
         Absolute path to the independent workspace directory.
     """
     return get_openjiuwen_home() / f"{member_name}_workspace"
+
+
+def team_memory_dir(team_name: str) -> Path:
+    """Return the per-team shared memory directory.
+
+    Layout: ``{AGENT_TEAMS_HOME}/{team_name}/team-memory/``
+    """
+    return team_home(team_name) / "team-workspace" / "team-memory"

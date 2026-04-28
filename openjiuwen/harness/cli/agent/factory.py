@@ -145,20 +145,18 @@ def _build_memory_rail(cfg: CLIConfig) -> Any:
         from openjiuwen.core.foundation.store.base_embedding import (
             EmbeddingConfig,
         )
+        from openjiuwen.core.memory.lite.embeddings import (
+            resolve_embedding_config_from_env,
+        )
         from openjiuwen.harness.rails.memory.memory_rail import MemoryRail
 
-        embedding_config = EmbeddingConfig(
-            model_name=os.getenv(
-                "EMBEDDING_MODEL_NAME",
-                "text-embedding-3-small",
-            ),
-            base_url=os.getenv(
-                "EMBEDDING_BASE_URL", cfg.api_base
-            ),
-            api_key=os.getenv(
-                "EMBEDDING_API_KEY", cfg.api_key
-            ),
+        embedding_config = resolve_embedding_config_from_env(
+            model_name="text-embedding-3-small",
+            fallback_base_url=cfg.api_base,
+            fallback_api_key=cfg.api_key,
         )
+        if embedding_config is None:
+            return None
         return MemoryRail(embedding_config=embedding_config)
     except Exception:  # noqa: BLE001
         logger.debug(

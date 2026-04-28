@@ -38,6 +38,7 @@ from openjiuwen.agent_teams.schema.team import (
 )
 from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
 from openjiuwen.agent_teams.worktree.models import WorktreeConfig
+from openjiuwen.core.memory.team import TeamMemoryConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 if TYPE_CHECKING:
@@ -217,8 +218,13 @@ class TeamAgentSpec(BaseModel):
         default=None,
         exclude=True,
     )
-    """Optional callback invoked on each member's DeepAgent after creation.
+    """Optional callback invoked on each member's DeepAgent after creation."""
 
+    memory: Optional[TeamMemoryConfig] = None
+    """Optional team memory configuration. When enabled, TeamMemoryManager
+    replaces default MemoryRail/CodingMemoryRail with per-member isolated instances."""
+
+    """
     Signature: ``(deep_agent: DeepAgent) -> None``.
     Used by platform adapters to inject additional rails / tools.
     Not serializable — only usable with in-process spawn mode.

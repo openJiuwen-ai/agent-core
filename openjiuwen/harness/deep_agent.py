@@ -897,6 +897,27 @@ class DeepAgent(BaseAgent):
         self._pending_rails.append(rail)
         return self
 
+    def strip_rails_by_type(self, rail_types: tuple[type, ...]) -> int:
+        """Remove queued rails by type and mark registered ones as stale.
+
+        This provides a public API for callers that need to replace built-in rails
+        without touching DeepAgent's internal rail lists directly.
+        """
+        if not rail_types:
+            return 0
+
+        removed = 0
+        before = len(self._pending_rails)
+        self._pending_rails = [r for r in self._pending_rails if not isinstance(r, rail_types)]
+        removed += before - len(self._pending_rails)
+
+        for rail in list(self._registered_rails):
+            if isinstance(rail, rail_types):
+                self._stale_rails.append(rail)
+                removed += 1
+
+        return removed
+
     async def register_rail(self, rail: AgentRail) -> "DeepAgent":
         """Register a rail with selective routing."""
         if isinstance(rail, TaskCompletionRail):

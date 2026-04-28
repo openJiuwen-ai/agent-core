@@ -14,6 +14,13 @@ from openjiuwen.core.memory.manage.update.mem_update_checker import (
     MemoryStatus,
 )
 from openjiuwen.harness.workspace.workspace import Workspace
+from .coding_memory_tool_context import CodingMemoryToolContext
+from .coding_memory_tool_ops import (
+    MAX_INDEX_LINES,
+    coding_memory_read_with_context,
+    remove_from_coding_memory_index,
+    validate_coding_memory_path,
+)
 
 from .manager import MemoryIndexManager, MemoryManagerParams
 from .config import create_memory_settings, is_memory_enabled
@@ -29,11 +36,12 @@ from .conflict_types import WriteResult, WriteMode
 if TYPE_CHECKING:
     from openjiuwen.core.sys_operation.sys_operation import SysOperation
 
+_default_coding_context: Optional[CodingMemoryToolContext] = None
+
 coding_memory_manager: Optional[MemoryIndexManager] = None
-coding_memory_workspace: "Workspace" = None
+coding_memory_workspace: Optional[Workspace] = None
 coding_memory_sys_operation: Optional["SysOperation"] = None
 coding_memory_dir: str = "coding_memory"
-MAX_INDEX_LINES = 200
 
 # File-level lock registry: one asyncio.Lock per resolved path, retained for the process lifetime.
 # Do not remove entries after use: after ``async with lock`` releases, waiters may still be
@@ -51,6 +59,55 @@ _memory_index_lock = asyncio.Lock()
 
 # Optimistic concurrency: maximum retry count (re-run conflict detection when snapshot expires)
 _MAX_CONFLICT_RETRIES = 2
+
+
+def _sync_legacy_aliases() -> None:
+    """Keep legacy module-level names in sync (tests and older code)."""
+    global coding_memory_manager, coding_memory_workspace, coding_memory_sys_operation, coding_memory_dir
+    c = _default_coding_context
+    if c is None:
+        coding_memory_manager = None
+        coding_memory_workspace = None
+        coding_memory_sys_operation = None
+        coding_memory_dir = "coding_memory"
+        return
+    coding_memory_workspace = c.workspace
+    coding_memory_sys_operation = c.sys_operation
+    coding_memory_manager = c.manager
+    coding_memory_dir = c.coding_memory_dir or "coding_memory"
+
+
+def bind_coding_memory_runtime(
+    workspace: Workspace,
+    sys_operation: "SysOperation",
+    coding_memory_directory: str,
+) -> None:
+    """Attach runtime for tests or tooling without ``init_memory_manager_async``."""
+    global _default_coding_context
+    settings = create_memory_settings(coding_memory_directory)
+    _default_coding_context = CodingMemoryToolContext(
+        workspace=workspace,
+        settings=settings,
+        sys_operation=sys_operation,
+        coding_memory_dir=coding_memory_directory,
+    )
+    _sync_legacy_aliases()
+
+
+def clear_coding_memory_runtime() -> None:
+    """Clear default coding memory context (e.g. test teardown)."""
+    global _default_coding_context
+    _default_coding_context = None
+    _sync_legacy_aliases()
+
+
+def _validate_coding_memory_path(
+    path: str, workspace: Optional[Workspace] = None
+) -> tuple[bool, str]:
+    ws = workspace or (_default_coding_context.workspace if _default_coding_context else None)
+    if ws is None:
+        return (False, "Workspace not initialized")
+    return validate_coding_memory_path(path, ws)
 
 
 async def _get_file_lock(path: str) -> asyncio.Lock:
@@ -289,39 +346,17 @@ async def _upsert_memory_index(memory_dir: str, filename: str, frontmatter: Dict
         )
 
 
-async def _remove_from_memory_index(memory_dir: str, filename: str):
-    """Async removal of the MEMORY.md index line for ``filename``.
-
-    Uses _memory_index_lock to prevent concurrent modifications to MEMORY.md.
-    """
+async def _remove_from_memory_index(
+    memory_dir: str,
+    filename: str,
+    sys_operation: Optional["SysOperation"] = None,
+) -> None:
+    """Remove the MEMORY.md index line for ``filename`` (serialized with index upserts)."""
+    sys_op = sys_operation or (
+        _default_coding_context.sys_operation if _default_coding_context else None
+    )
     async with _memory_index_lock:
-        index_path = os.path.join(memory_dir, "MEMORY.md")
-        try:
-            if not coding_memory_sys_operation:
-                logger.warning("coding_memory_sys_operation is none, please init first")
-                return
-            result = await coding_memory_sys_operation.fs().read_file(index_path)
-            if not result or not hasattr(result, 'data') or not result.data:
-                return
-            content = result.data.content
-            lines = content.split("\n") if content else []
-            lines = [line for line in lines if f"]({filename})" not in line]
-            new_content = "\n".join(lines)
-            await coding_memory_sys_operation.fs().write_file(
-                index_path, content=new_content, create_if_not_exist=True, prepend_newline=False
-            )
-        except Exception as e:
-            logger.error(f"Failed to remove from memory index: {e}")
-
-
-def _validate_coding_memory_path(path: str) -> tuple[bool, str]:
-    if ".." in path or path.startswith("/"):
-        return (False, "Invalid path: directory traversal not allowed")
-    if not path.endswith(".md"):
-        return (False, "Path must end with .md")
-    memory_dir = coding_memory_workspace.get_node_path("coding_memory")
-    resolved = os.path.join(memory_dir, os.path.basename(path))
-    return (True, resolved)
+        await remove_from_coding_memory_index(memory_dir, filename, sys_op)
 
 
 async def init_memory_manager_async(
@@ -331,24 +366,31 @@ async def init_memory_manager_async(
     sys_operation: Optional["SysOperation"] = None,
     llm: Optional[Any] = None,
 ) -> Optional[MemoryIndexManager]:
-
-    global coding_memory_manager, coding_memory_workspace, coding_memory_sys_operation, coding_memory_dir
+    global _default_coding_context
 
     if not is_memory_enabled():
         logger.info("Memory system is disabled")
         return None
 
-    if coding_memory_manager is not None:
-        # Update llm reference
+    if _default_coding_context is not None and _default_coding_context.manager is not None:
         if llm:
-            coding_memory_manager.llm = llm
-        return coding_memory_manager
+            _default_coding_context.manager.llm = llm
+        _sync_legacy_aliases()
+        return _default_coding_context.manager
 
     node_path = workspace.get_node_path("coding_memory")
-    coding_memory_dir = str(node_path) if node_path else ""
-    settings = create_memory_settings(coding_memory_dir)
-    coding_memory_sys_operation = sys_operation
-    coding_memory_workspace = workspace
+    cm_dir = str(node_path) if node_path else ""
+    settings = create_memory_settings(cm_dir)
+
+    ctx = CodingMemoryToolContext(
+        workspace=workspace,
+        settings=settings,
+        agent_id=agent_id,
+        embedding_config=embedding_config,
+        sys_operation=sys_operation,
+        manager=None,
+        coding_memory_dir=cm_dir,
+    )
 
     try:
         params = MemoryManagerParams(
@@ -359,14 +401,16 @@ async def init_memory_manager_async(
             sys_operation=sys_operation,
             node_name="coding_memory",
         )
-        coding_memory_manager = await MemoryIndexManager.get(params)
+        ctx.manager = await MemoryIndexManager.get(params)
+        _default_coding_context = ctx
+        _sync_legacy_aliases()
 
         if coding_memory_manager:
             # Attach llm
             coding_memory_manager.llm = llm
             logger.info(f"initialized Coding Memory manager for: {coding_memory_dir}")
 
-        return coding_memory_manager
+        return ctx.manager
 
     except Exception as e:
         logger.error(f"Failed to initialize Coding Memory manager: {e}")
@@ -374,12 +418,12 @@ async def init_memory_manager_async(
 
 
 async def _read_file_safe(filepath: str) -> str:
-    """Async full-file read; return empty string if missing or on error."""
     try:
-        if not coding_memory_sys_operation:
+        sys_op = _default_coding_context.sys_operation if _default_coding_context else None
+        if not sys_op:
             return ""
-        result = await coding_memory_sys_operation.fs().read_file(filepath)
-        if result and hasattr(result, 'data') and result.data:
+        result = await sys_op.fs().read_file(filepath)
+        if result and hasattr(result, "data") and result.data:
             return result.data.content
         return ""
     except Exception:
@@ -387,12 +431,12 @@ async def _read_file_safe(filepath: str) -> str:
 
 
 async def _read_head_async(filepath: str, max_lines: int = 30) -> str:
-    """Read the first ``max_lines`` lines for frontmatter extraction (performance cap)."""
     try:
-        if not coding_memory_sys_operation:
+        sys_op = _default_coding_context.sys_operation if _default_coding_context else None
+        if not sys_op:
             return ""
-        result = await coding_memory_sys_operation.fs().read_file(filepath, head=max_lines)
-        if result and hasattr(result, 'data') and result.data:
+        result = await sys_op.fs().read_file(filepath, head=max_lines)
+        if result and hasattr(result, "data") and result.data:
             return result.data.content
         return ""
     except Exception:
@@ -400,15 +444,12 @@ async def _read_head_async(filepath: str, max_lines: int = 30) -> str:
 
 
 async def _count_memory_files_async(memory_dir: str) -> int:
-    """Count ``.md`` memory files under ``memory_dir`` (excludes MEMORY.md)."""
     try:
-        if not coding_memory_sys_operation:
+        sys_op = _default_coding_context.sys_operation if _default_coding_context else None
+        if not sys_op:
             return 0
-        result = await coding_memory_sys_operation.fs().list_files(
-            memory_dir,
-            recursive=False
-        )
-        if result and hasattr(result, 'data') and result.data:
+        result = await sys_op.fs().list_files(memory_dir, recursive=False)
+        if result and hasattr(result, "data") and result.data:
             count = 0
             for f in result.data.list_items:
                 if f.is_directory:
@@ -428,70 +469,12 @@ async def _count_memory_files_async(memory_dir: str) -> int:
 async def coding_memory_read(
     path: str,
     offset: Optional[int] = None,
-    limit: Optional[int] = None
+    limit: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Read a markdown file under ``coding_memory/`` (full file or line range).
-
-    Args:
-        path: File name (e.g. ``user_role.md``).
-        offset: 1-based start line; omit to read from the beginning.
-        limit: Number of lines to read; omit to read through end of file.
-
-    Returns:
-        Dict with content and line metadata, or error fields.
-    """
-    try:
-        is_valid, result = _validate_coding_memory_path(path)
-        if not is_valid:
-            return {
-                "success": False,
-                "path": path,
-                "content": "",
-                "error": result,
-            }
-
-        full_path = result
-        sys_op = coding_memory_sys_operation
-        if not sys_op:
-            logger.error("Read memory failed, no available path _global_sys_operation")
-            return {
-                "success": False,
-                "path": path,
-                "error": "Read failed, no available _global_sys_operation.",
-            }
-
-        line_range = None
-        if offset is not None:
-            line_range = (
-                (offset, offset + limit - 1) if limit is not None else (offset, -1)
-            )
-
-        read_result = await sys_op.fs().read_file(full_path, line_range=line_range)
-        content = read_result.data.content
-        lines = content.split("\n") if content else []
-        total_lines = len(lines)
-
-        start = max(0, offset - 1) if offset is not None else 0
-        end = min(start + limit, total_lines) if limit is not None else total_lines
-
-        return {
-            "success": True,
-            "path": full_path,
-            "content": "\n".join(lines[start:end]),
-            "totalLines": total_lines,
-            "start_line": start + 1,
-            "end_line": end,
-            "truncated": limit is not None and end < total_lines,
-        }
-
-    except Exception as e:
-        logger.error(f"Read failed: {e}")
-        return {
-            "success": False,
-            "path": path,
-            "content": "",
-            "error": str(e)
-        }
+    """Read a markdown file under ``coding_memory/`` (full file or line range)."""
+    return await coding_memory_read_with_context(
+        _default_coding_context, path, offset=offset, limit=limit
+    )
 
 
 @tool(name="coding_memory_write")

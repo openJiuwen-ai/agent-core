@@ -24,7 +24,9 @@ from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, Local
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.harness.rails.memory.coding_memory_rail import CodingMemoryRail
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
+from openjiuwen.core.memory.lite import coding_memory_tools
 from openjiuwen.core.memory.lite.coding_memory_tools import (
+    bind_coding_memory_runtime,
     coding_memory_read,
     coding_memory_write,
     coding_memory_edit,
@@ -54,16 +56,12 @@ async def coding_memory_system_env():
     os.makedirs(coding_memory_dir, exist_ok=True)
     
     sys_op = Runner.resource_mgr.get_sys_operation(sys_operation_id)
-    
-    # 设置全局变量
-    from openjiuwen.core.memory.lite import coding_memory_tools
+
     workspace = Workspace(
         root_path=work_dir,
         directories=[{"name": "coding_memory", "path": "coding_memory"}]
     )
-    coding_memory_tools.coding_memory_workspace = workspace
-    coding_memory_tools.coding_memory_sys_operation = sys_op
-    coding_memory_tools.coding_memory_dir = coding_memory_dir
+    bind_coding_memory_runtime(workspace, sys_op, coding_memory_dir)
     
     yield {
         "tmp_dir": tmp_dir,
@@ -77,7 +75,7 @@ async def coding_memory_system_env():
     coding_memory_tools.coding_memory_workspace = None
     coding_memory_tools.coding_memory_sys_operation = None
     coding_memory_tools.coding_memory_dir = "coding_memory"
-    
+
     try:
         Runner.resource_mgr.remove_sys_operation(sys_operation_id=sys_operation_id)
     finally:

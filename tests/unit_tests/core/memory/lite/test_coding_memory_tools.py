@@ -12,6 +12,8 @@ from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, Local
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.core.memory.lite import coding_memory_tools
 from openjiuwen.core.memory.lite.coding_memory_tools import (
+    bind_coding_memory_runtime,
+    clear_coding_memory_runtime,
     coding_memory_read,
     coding_memory_write,
     coding_memory_edit,
@@ -40,9 +42,13 @@ async def memory_test_setup(temp_dir):
     temp_dir_value = temp_dir
     await Runner.start()
     card_id = "test_coding_memory_setup"
-    card = SysOperationCard(id=card_id, mode=OperationMode.LOCAL, work_config=LocalWorkConfig(
-        shell_allowlist=["echo", "ls", "dir", "cd", "pwd", "python", "python3", "cat", "mkdir"]
-    ))
+    card = SysOperationCard(
+        id=card_id,
+        mode=OperationMode.LOCAL,
+        work_config=LocalWorkConfig(
+            shell_allowlist=["echo", "ls", "dir", "cd", "pwd", "python", "python3", "cat", "mkdir"],
+        ),
+    )
     Runner.resource_mgr.add_sys_operation(card)
     sys_op = Runner.resource_mgr.get_sys_operation(card_id)
 
@@ -52,19 +58,15 @@ async def memory_test_setup(temp_dir):
     workspace = Workspace(
         root_path=temp_dir_value,
         directories=[
-            {"name": "coding_memory", "path": "coding_memory"}
-        ]
+            {"name": "coding_memory", "path": "coding_memory"},
+        ],
     )
 
-    coding_memory_tools.coding_memory_workspace = workspace
-    coding_memory_tools.coding_memory_sys_operation = sys_op
-    coding_memory_tools.coding_memory_dir = coding_memory_dir
+    bind_coding_memory_runtime(workspace, sys_op, coding_memory_dir)
 
     yield sys_op, coding_memory_dir
 
-    coding_memory_tools.coding_memory_workspace = None
-    coding_memory_tools.coding_memory_sys_operation = None
-    coding_memory_tools.coding_memory_dir = "coding_memory"
+    clear_coding_memory_runtime()
     Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
     await Runner.stop()
 

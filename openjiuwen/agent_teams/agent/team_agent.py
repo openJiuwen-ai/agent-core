@@ -15,6 +15,7 @@ from typing import (
     List,
     Optional,
     Tuple,
+    TYPE_CHECKING,
 )
 
 from openjiuwen.agent_teams.agent.coordinator import (
@@ -32,6 +33,7 @@ from openjiuwen.agent_teams.messager import (
 from openjiuwen.agent_teams.paths import (
     independent_member_workspace,
     team_home,
+    team_memory_dir as default_team_memory_dir,
 )
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import SysOperationSpec
@@ -69,6 +71,9 @@ from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.prompts import resolve_language as _resolve_language
+
+if TYPE_CHECKING:
+    from openjiuwen.core.memory.team.manager import TeamMemoryManager
 
 
 def _resolve_team_mode(spec: TeamAgentSpec) -> str:
@@ -182,6 +187,7 @@ class TeamAgent(BaseAgent):
         self._workspace_initialized: bool = False
         self._worktree_manager: Optional["WorktreeManager"] = None
         self._team_session: Optional[AgentTeamSession] = None
+        self._memory_manager: Optional["TeamMemoryManager"] = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -735,6 +741,59 @@ class TeamAgent(BaseAgent):
                     )
                 )
 
+        # TeamMemoryManager init
+        self._memory_manager = None
+        if spec.memory and spec.memory.enabled:
+            from openjiuwen.core.memory.team.config import resolve_embedding_config
+            from openjiuwen.core.memory.team.manager import TeamMemoryManager
+            from openjiuwen.core.memory.team.manager_params import TeamMemoryManagerParams
+
+            resolved_team_name = (
+                (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
+            )
+            resolved_embedding = resolve_embedding_config(spec.memory)
+
+            # Temporary: read-only source points to the parent agent's workspace
+            read_only_source = (
+                spec.memory.parent_workspace_path
+                if spec.lifecycle == "temporary"
+                else None
+            )
+
+            # Persistent: team memory directory (prefer config path over default)
+            team_memory_dir = None
+            if spec.memory.shared_memory and spec.lifecycle == "persistent":
+                team_memory_dir = (
+                    spec.memory.team_memory_dir
+                    or str(default_team_memory_dir(resolved_team_name))
+                )
+
+            # Get DeepAgent's workspace (persistent when setup_agent is called)
+            agent_workspace = self._deep_agent.deep_config.workspace if self._deep_agent else None
+
+            params = TeamMemoryManagerParams(
+                member_name=member_name or "",
+                team_name=resolved_team_name,
+                role=ctx.role.value,
+                lifecycle=spec.lifecycle,
+                scenario=spec.memory.scenario,
+                embedding_config=resolved_embedding,
+                workspace=agent_workspace,
+                sys_operation=self._deep_agent.deep_config.sys_operation if self._deep_agent else None,
+                team_memory_dir=team_memory_dir,
+                language=resolved_language,
+                prompt_mode=spec.memory.member_memory_prompt_mode,
+                enable_auto_extract=(
+                    spec.memory.auto_extract and spec.lifecycle == "persistent"
+                ),
+                read_only_source_workspace=read_only_source,
+                db=self._team_backend.db if self._team_backend else None,
+                task_manager=self._task_manager,
+                extraction_model=None,  # Set in _start_coordination (requires model instance)
+                timezone_offset_hours=spec.memory.timezone_offset_hours,
+            )
+            self._memory_manager = TeamMemoryManager(params)
+
         # Platform customizer: inject additional rails & tools (e.g. Claw adapter).
         if spec.agent_customizer and self._deep_agent:
             try:
@@ -897,6 +956,8 @@ class TeamAgent(BaseAgent):
         """
         team_logger.info("[{}] invoke start, role={}", self._member_name() or "?", self.role.value)
         self._stream_queue = asyncio.Queue()
+        # Store query for _start_coordination to use
+        self._pending_user_query = inputs.get("query", "") if isinstance(inputs, dict) else str(inputs)
         await self._start_coordination(session)
         try:
             await self._enqueue_user_input(inputs)
@@ -967,6 +1028,8 @@ class TeamAgent(BaseAgent):
         """
         team_logger.info("[{}] stream start, role={}", self._member_name() or "?", self.role.value)
         self._stream_queue = asyncio.Queue()
+        # Store query for _start_coordination to use
+        self._pending_user_query = inputs.get("query", "") if isinstance(inputs, dict) else str(inputs)
         await self._start_coordination(session)
         try:
             await self._enqueue_user_input(inputs)
@@ -993,6 +1056,8 @@ class TeamAgent(BaseAgent):
         shutdown_requested = (
             self._team_member is not None and await self._team_member.status() == MemberStatus.SHUTDOWN_REQUESTED
         )
+        if hasattr(self, '_memory_manager') and self._memory_manager:
+            await self._memory_manager.extract_after_round()
         if self.lifecycle == "persistent" and not shutdown_requested:
             await self._pause_coordination()
             if self._team_member:
@@ -1085,6 +1150,24 @@ class TeamAgent(BaseAgent):
                 remote_url=self._spec.workspace.remote_url if self._spec and self._spec.workspace else None,
             )
             self._workspace_initialized = True
+
+        # --- Team Memory initialization ---
+        if self._memory_manager:
+            # The init_toolkit contains built-in idempotency checks
+            success = await self._memory_manager.init_toolkit()
+            if success and self._deep_agent:
+                self._memory_manager.register_tools(self._deep_agent)
+
+                # Set extraction_model (obtained from the model of DeepAgent)
+                if self._memory_manager.extraction_model is None and self._deep_agent.deep_config:
+                    self._memory_manager.set_extraction_model(self._deep_agent.deep_config.model)
+
+                # Construct the memory prompt section and inject it
+                # The user_query is temporarily stored in self._pending_user_query
+                await self._memory_manager.load_and_inject(
+                    self._deep_agent,
+                    query=getattr(self, '_pending_user_query', "") or "",
+                )
 
         await self._update_status(MemberStatus.READY)
         if not self._coordination_loop.is_running:
@@ -1214,6 +1297,8 @@ class TeamAgent(BaseAgent):
                 await handle.shutdown()
             except Exception as e:
                 team_logger.error("Error shutting down teammate {}: {}", mid, e)
+        if hasattr(self, '_memory_manager') and self._memory_manager:
+            await self._memory_manager.close()
         self._spawned_handles.clear()
         if self._coordination_loop is None:
             return
