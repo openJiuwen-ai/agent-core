@@ -5,7 +5,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.base import ContextWindow
+from openjiuwen.core.context_engine.processor.base import ContextEvent
 from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
     ROUND_LEVEL_FALLBACK_MARKER,
     RoundLevelCompressor,
@@ -13,6 +15,11 @@ from openjiuwen.core.context_engine.processor.compressor.round_level_compressor 
     _CompressTarget,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, UserMessage
+from openjiuwen.core.session.agent import Session
+from tests.unit_tests.core.context_engine._stream_state_helpers import (
+    assert_context_state_pair,
+    capture_context_compression_states,
+)
 
 
 class _TestableRoundLevelCompressor(RoundLevelCompressor):
@@ -50,6 +57,52 @@ class TestRoundLevelCompressor:
 
         compressor._count_context_window_tokens = MagicMock(return_value=101)
         assert await compressor.trigger_get_context_window(context, context_window) is True
+
+    @pytest.mark.asyncio
+    async def test_streams_state_when_round_level_compressor_triggers_on_get(self):
+        session = Session(session_id="round-level-compressor-stream-session")
+        engine = ContextEngine(ContextEngineConfig(default_window_message_num=100))
+        ctx = await engine.create_context(
+            "test_ctx",
+            session,
+            history_messages=[
+                UserMessage(content="old request"),
+                AssistantMessage(content="old answer"),
+            ],
+            processors=[
+                (
+                    "RoundLevelCompressor",
+                    RoundLevelCompressorConfig(
+                        trigger_total_tokens=1,
+                        target_total_tokens=1,
+                    ),
+                )
+            ],
+        )
+        processor = ctx._processors[0]  # type: ignore[attr-defined]
+        processor.trigger_get_context_window = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        processor.on_get_context_window = AsyncMock(
+            return_value=(
+                ContextEvent(event_type=processor.processor_type(), messages_to_modify=[0, 1]),
+                ContextWindow(
+                    system_messages=[],
+                    context_messages=[UserMessage(content="compressed")],
+                    tools=[],
+                ),
+            )
+        )  # type: ignore[method-assign]
+
+        _, states = await capture_context_compression_states(
+            session,
+            lambda: ctx.get_context_window(),
+        )
+
+        assert_context_state_pair(
+            states,
+            processor_type="RoundLevelCompressor",
+            phase="get_context_window",
+        )
+        assert "modified 2 messages" in states[1].summary
 
     @pytest.mark.asyncio
     async def test_build_memory_message_offload_falls_back_to_plain_user_message(self):

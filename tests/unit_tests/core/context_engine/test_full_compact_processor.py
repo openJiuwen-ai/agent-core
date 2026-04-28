@@ -3,16 +3,22 @@
 
 from __future__ import annotations
 
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 from tempfile import TemporaryDirectory
 
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
+from openjiuwen.core.context_engine.processor.base import ContextEvent
 from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
     FullCompactProcessorConfig,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, ToolCall, ToolMessage, UserMessage
+from openjiuwen.core.session.agent import Session
+from tests.unit_tests.core.context_engine._stream_state_helpers import (
+    assert_context_state_pair,
+    capture_context_compression_states,
+)
 
 
 def create_tool_call(tool_call_id: str, name: str, arguments: str = "") -> ToolCall:
@@ -22,11 +28,12 @@ def create_tool_call(tool_call_id: str, name: str, arguments: str = "") -> ToolC
 async def create_context_with_full_compact(
     config: FullCompactProcessorConfig,
     history_messages=None,
+    session=None,
 ):
     engine = ContextEngine(ContextEngineConfig(default_window_message_num=100))
     return await engine.create_context(
         "test_ctx",
-        None,
+        session,
         history_messages=history_messages or [],
         processors=[("FullCompactProcessor", config)],
     )
@@ -50,6 +57,35 @@ class TestFullCompactProcessor:
             [AssistantMessage(content="new assistant " + ("payload " * 20))],
         )
         assert triggered is True
+
+    @pytest.mark.asyncio
+    async def test_streams_state_when_full_compact_processor_triggers(self):
+        session = Session(session_id="full-compact-stream-session")
+        ctx = await create_context_with_full_compact(
+            FullCompactProcessorConfig(
+                trigger_total_tokens=1,
+                compression_call_max_tokens=2000,
+                messages_to_keep=1,
+            ),
+            history_messages=[UserMessage(content="old message")],
+            session=session,
+        )
+        processor = ctx._processors[0]  # type: ignore[attr-defined]
+        processor.trigger_add_messages = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        processor.on_add_messages = AsyncMock(
+            return_value=(
+                ContextEvent(event_type=processor.processor_type(), messages_to_modify=[0]),
+                [UserMessage(content="new message")],
+            )
+        )  # type: ignore[method-assign]
+
+        _, states = await capture_context_compression_states(
+            session,
+            lambda: ctx.add_messages([UserMessage(content="new message")]),
+        )
+
+        assert_context_state_pair(states, processor_type="FullCompactProcessor")
+        assert "modified 1 messages" in states[1].summary
 
     @pytest.mark.asyncio
     async def test_on_add_messages_uses_session_memory_candidate_after_prior_full_compact(self):
@@ -233,10 +269,6 @@ class TestFullCompactProcessor:
         from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import FullCompactProcessor
 
         processor = FullCompactProcessor(FullCompactProcessorConfig())
-        prefix = [
-            UserMessage(content="old-a", metadata={"context_message_id": "msg-1"}),
-            UserMessage(content="old-b", metadata={"context_message_id": "msg-2"}),
-        ]
         active_messages = [
             UserMessage(content="keep-1", metadata={"context_message_id": "msg-3"}),
             AssistantMessage(content="keep-2", metadata={"context_message_id": "msg-4"}),
@@ -265,10 +297,6 @@ class TestFullCompactProcessor:
         tool_message = ToolMessage(
             content="tool output", tool_call_id="tc-unsafe", metadata={"context_message_id": "msg-5"}
         )
-        prefix = [
-            UserMessage(content="u1", metadata={"context_message_id": "msg-1"}),
-            AssistantMessage(content="a1", metadata={"context_message_id": "msg-2"}),
-        ]
         active_messages = [
             UserMessage(content="u2", metadata={"context_message_id": "msg-3"}),
             assistant_with_tools,
@@ -290,10 +318,6 @@ class TestFullCompactProcessor:
         from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import FullCompactProcessor
 
         processor = FullCompactProcessor(FullCompactProcessorConfig())
-        prefix = [
-            UserMessage(content="old-u", metadata={"context_message_id": "msg-1"}),
-            AssistantMessage(content="old-a", metadata={"context_message_id": "msg-2"}),
-        ]
         active_messages = [
             UserMessage(content="recent-u", metadata={"context_message_id": "msg-3"}),
             AssistantMessage(content="recent-a", metadata={"context_message_id": "msg-4"}),
