@@ -480,8 +480,6 @@ class SFTPClient(FTPClientBase):
     ):
         """Establish connection to SFTP server."""
         try:
-            import asyncssh
-
             # Load private key if provided
             client_keys = None
             if credentials.private_key:
@@ -734,8 +732,6 @@ class SFTPClient(FTPClientBase):
     ) -> Dict[str, Any]:
         """Get file/directory metadata via SFTP."""
         try:
-            import asyncssh
-
             attrs = await self._sftp.stat(remote_path)
 
             is_dir = attrs.type == asyncssh.FILEXFER_TYPE_DIRECTORY
@@ -762,8 +758,8 @@ class SFTPClient(FTPClientBase):
             if not await self._sftp.exists(current_path):
                 try:
                     await self._sftp.mkdir(current_path)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Could not create directory {current_path}: {e}")
 
 
 class FTPService:
@@ -826,11 +822,13 @@ class FTPService:
 
         return self._clients[client_key], self._locks[client_key]
 
-    def _build_client_key(self, credentials: FTPCredentials) -> str:
+    @staticmethod
+    def _build_client_key(credentials: FTPCredentials) -> str:
         """Build unique key for connection pooling."""
         return f"{credentials.protocol.value}://{credentials.username}@{credentials.host}:{credentials.port}"
 
-    def _create_client(self, protocol: FTPProtocol) -> FTPClientBase:
+    @staticmethod
+    def _create_client(protocol: FTPProtocol) -> FTPClientBase:
         """Create protocol-specific client."""
         if protocol in (FTPProtocol.FTP, FTPProtocol.FTPS):
             return FTPClient()
