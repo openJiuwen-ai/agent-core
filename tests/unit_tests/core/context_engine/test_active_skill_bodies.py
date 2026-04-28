@@ -66,6 +66,29 @@ def _make_skill_tool_message(name: str, path: str = "SKILL.md") -> ToolMessage:
     )
 
 
+def _make_stub_tool_message(
+    name: str,
+    path: str = "SKILL.md",
+    *,
+    active: bool = True,
+) -> ToolMessage:
+    """Mirror the shape SkillUseRail writes onto the original ToolMessage after
+    a successful skill body record (load stub) or after skill_complete (unload
+    stub when ``active=False``)."""
+    return ToolMessage(
+        content="[SKILL LOADED] ..." if active else "[SKILL UNLOADED] ...",
+        tool_call_id=f"tc-{name}",
+        metadata={
+            "is_skill_body": False,
+            "skill_body_stub": True,
+            "skill_body_active": active,
+            "original_is_skill_body": True,
+            "skill_name": name,
+            "relative_file_path": path,
+        },
+    )
+
+
 class _FakeToolOutput:
     def __init__(self, body: str):
         self.data = {"skill_content": body}
@@ -296,6 +319,219 @@ class TestAppendActiveSkillPinsToWindow:
         )
         assert pin.metadata.get("relative_file_path") == "SKILL.md"
 
+
+@pytest.mark.unit
+class TestAppendActiveSkillPinsAfterSkillTool:
+    """``pin_target='after_skill_tool'`` anchors each body pin right after its
+    matching stub ToolMessage, falling back to user_prefix when the stub is no
+    longer in the window. This mirrors claude-code's
+    [assistant(tool_use), tool_result(short ack), user(SKILL.md body)] layout.
+    """
+
+    def _record_and_window(
+        self,
+        sess,
+        ctx_messages,
+        skill_specs,
+    ):
+        for name, body in skill_specs:
+            record_active_skill_body(
+                sess, _make_skill_tool_message(name),
+                _FakeToolOutput(body), max_active_skill_bodies=max(1, len(skill_specs)),
+            )
+        win = _FakeWindow()
+        win.context_messages = list(ctx_messages)
+        return win
+
+    def _body_pin(self, msgs, skill_name):
+        for m in msgs:
+            meta = getattr(m, "metadata", None) or {}
+            if (
+                meta.get("active_skill_pin")
+                and meta.get("skill_name") == skill_name
+                and not meta.get("active_skill_eviction_notice")
+            ):
+                return m
+        return None
+
+    def test_pin_inserts_right_after_matching_stub(self):
+        sess = _FakeSession()
+        original_user = UserMessage(content="please make a deck")
+        stub = _make_stub_tool_message("alpha")
+        next_msg = ToolMessage(content="follow up", tool_call_id="tc-other", metadata={})
+        win = self._record_and_window(
+            sess, [original_user, stub, next_msg], [("alpha", "ALPHA BODY")]
+        )
+        new_pins = append_active_skill_pins_to_window(
+            _FakeContext(sess), win,
+            max_active_skill_bodies=len(win.context_messages),
+            pin_target="after_skill_tool",
+        )
+        assert new_pins, "expected a pin to be appended"
+
+        msgs = win.context_messages
+        stub_idx = msgs.index(stub)
+        # Pin must be the immediate next message after the stub.
+        pin = msgs[stub_idx + 1]
+        assert isinstance(pin, UserMessage)
+        assert pin.metadata.get("active_skill_pin") is True
+        assert pin.metadata.get("skill_name") == "alpha"
+        assert pin.metadata.get("pin_anchor") == "after_skill_tool"
+        assert "ALPHA BODY" in (pin.content or "")
+        # Surrounding order is preserved.
+        assert msgs[0] is original_user
+        assert msgs[stub_idx + 2] is next_msg
+
+    def test_pin_falls_back_to_user_prefix_when_stub_missing(self):
+        sess = _FakeSession()
+        original_user = UserMessage(content="please make a deck")
+        unrelated = ToolMessage(content="other", tool_call_id="tc-x", metadata={})
+        win = self._record_and_window(
+            sess, [original_user, unrelated], [("alpha", "ALPHA BODY")]
+        )
+        new_pins = append_active_skill_pins_to_window(
+            _FakeContext(sess), win,
+            max_active_skill_bodies=1,
+            pin_target="after_skill_tool",
+        )
+        assert new_pins
+        # Pin lives at user_prefix position (before the original UserMessage).
+        first = win.context_messages[0]
+        assert isinstance(first, UserMessage)
+        assert first.metadata.get("active_skill_pin") is True
+        assert first.metadata.get("pin_anchor") == "user_prefix_fallback"
+        # Original user message is preserved right after the pin.
+        assert win.context_messages[1] is original_user
+
+    def test_multiple_skills_each_anchored_independently(self):
+        sess = _FakeSession()
+        u = UserMessage(content="multi-skill task")
+        stub_a = _make_stub_tool_message("alpha")
+        between = ToolMessage(content="step", tool_call_id="tc-mid", metadata={})
+        stub_b = _make_stub_tool_message("beta")
+        tail = ToolMessage(content="tail", tool_call_id="tc-tail", metadata={})
+        win = self._record_and_window(
+            sess,
+            [u, stub_a, between, stub_b, tail],
+            [("alpha", "ALPHA"), ("beta", "BETA")],
+        )
+        new_pins = append_active_skill_pins_to_window(
+            _FakeContext(sess), win,
+            max_active_skill_bodies=2,
+            pin_target="after_skill_tool",
+        )
+        assert len(new_pins) == 2
+
+        msgs = win.context_messages
+        stub_a_idx = msgs.index(stub_a)
+        stub_b_idx = msgs.index(stub_b)
+        # Each pin sits immediately after its own stub.
+        assert msgs[stub_a_idx + 1].metadata.get("skill_name") == "alpha"
+        assert msgs[stub_b_idx + 1].metadata.get("skill_name") == "beta"
+        # Between marker (the original ToolMessage between stubs) survives.
+        assert between in msgs
+        assert tail in msgs
+
+    def test_eviction_notice_anchored_at_user_prefix_even_with_after_target(self):
+        sess = _FakeSession()
+        # Force eviction with cap=1 and two records.
+        record_active_skill_body(
+            sess, _make_skill_tool_message("alpha"),
+            _FakeToolOutput("AAA"), max_active_skill_bodies=1,
+        )
+        record_active_skill_body(
+            sess, _make_skill_tool_message("beta"),
+            _FakeToolOutput("BBB"), max_active_skill_bodies=1,
+        )
+        u = UserMessage(content="task")
+        stub_b = _make_stub_tool_message("beta")
+        win = _FakeWindow()
+        win.context_messages = [u, stub_b]
+        append_active_skill_pins_to_window(
+            _FakeContext(sess), win,
+            max_active_skill_bodies=1,
+            pin_target="after_skill_tool",
+        )
+        msgs = win.context_messages
+        # The eviction notice (for alpha) must appear at user_prefix, not after stub_b.
+        notice = next(
+            (m for m in msgs if (m.metadata or {}).get("active_skill_eviction_notice")),
+            None,
+        )
+        assert notice is not None
+        assert msgs.index(notice) < msgs.index(u)
+        # Beta's body pin still anchored to its stub.
+        beta_pin = self._body_pin(msgs, "beta")
+        assert beta_pin is not None
+        assert msgs.index(beta_pin) == msgs.index(stub_b) + 1
+
+    def test_pin_anchors_to_most_recent_stub_on_reload(self):
+        """Same skill loaded twice without skill_complete: window has two live
+        load stubs (both ``skill_body_active=True``). Pin must anchor to the
+        *latest* stub, since the registry holds the latest body and the model
+        just saw the latest tool_result.
+        """
+        sess = _FakeSession()
+        # First load: record then simulate the rail's stub of the original.
+        record_active_skill_body(
+            sess, _make_skill_tool_message("alpha"),
+            _FakeToolOutput("OLD BODY"), max_active_skill_bodies=1,
+        )
+        # Second load (reload before unload): registry overwrites with new body
+        # and stores the *new* tool_call_id.
+        reload_msg = ToolMessage(
+            content="full body",
+            tool_call_id="tc-alpha-RELOAD",
+            metadata={
+                "is_skill_body": True,
+                "skill_name": "alpha",
+                "relative_file_path": "SKILL.md",
+            },
+        )
+        record_active_skill_body(
+            sess, reload_msg, _FakeToolOutput("NEW BODY"),
+            max_active_skill_bodies=1,
+        )
+
+        # Window contains BOTH live stubs (no skill_complete fired between).
+        u = UserMessage(content="task")
+        old_stub = _make_stub_tool_message("alpha")  # tool_call_id = "tc-alpha"
+        between = ToolMessage(content="step", tool_call_id="tc-mid", metadata={})
+        new_stub = ToolMessage(
+            content="[SKILL LOADED] ...",
+            tool_call_id="tc-alpha-RELOAD",
+            metadata={
+                "is_skill_body": False,
+                "skill_body_stub": True,
+                "skill_body_active": True,
+                "original_is_skill_body": True,
+                "skill_name": "alpha",
+                "relative_file_path": "SKILL.md",
+            },
+        )
+        win = _FakeWindow()
+        win.context_messages = [u, old_stub, between, new_stub]
+
+        new_pins = append_active_skill_pins_to_window(
+            _FakeContext(sess), win,
+            max_active_skill_bodies=1,
+            pin_target="after_skill_tool",
+        )
+        assert len(new_pins) == 1
+        msgs = win.context_messages
+        new_stub_idx = msgs.index(new_stub)
+        old_stub_idx = msgs.index(old_stub)
+        pin = msgs[new_stub_idx + 1]
+        assert pin.metadata.get("active_skill_pin") is True
+        assert pin.metadata.get("skill_name") == "alpha"
+        assert pin.metadata.get("pin_anchor") == "after_skill_tool"
+        # Body is the *latest* one.
+        assert "NEW BODY" in (pin.content or "")
+        assert "OLD BODY" not in (pin.content or "")
+        # Pin tracks the latest tool_call_id, not the old one.
+        assert pin.metadata.get("source_tool_call_id") == "tc-alpha-RELOAD"
+        # Critically: pin sits AFTER the new stub, NOT after the old stub.
+        assert msgs.index(pin) > old_stub_idx + 1
 
 @pytest.mark.unit
 class TestActiveSkillHintStaging:

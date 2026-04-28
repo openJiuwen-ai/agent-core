@@ -63,4 +63,4 @@ class ContextEngineConfig(BaseModel):
     enable_reload: bool = Field(default=False)
     enable_reload_prompt: bool = Field(default=True)
     max_active_skill_bodies: int = Field(default=1, ge=0)
-    active_skill_pin_target: str = Field(default="system")
+    active_skill_pin_target: str = Field(default="after_skill_tool")

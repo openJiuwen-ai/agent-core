@@ -31,7 +31,10 @@ ACTIVE_SKILL_EVICTION_SIGNATURE_STATE_KEY = "active_skill_body_eviction_signatur
 
 DEFAULT_MAX_ACTIVE_SKILL_BODIES = 1
 
-ActiveSkillPinTarget = Literal["system", "user_prefix"]
+# "after_skill_tool" anchors each body pin right after its corresponding stub
+# ToolMessage (CC-shaped placement). Falls back to user_prefix when the stub
+# is no longer in the window.
+ActiveSkillPinTarget = Literal["system", "user_prefix", "after_skill_tool"]
 
 # Per-session RMW lock for active_skill_bodies state.
 # Keyed by session_id; bounded by typical session lifetime, fallback to id(session)
@@ -468,6 +471,56 @@ def _has_existing_pin(messages: List[BaseMessage], skill_name: str, path: str) -
     return False
 
 
+def _find_skill_stub_index(
+    messages: List[BaseMessage],
+    skill_name: str,
+    relative_file_path: str,
+    *,
+    expected_tool_call_id: Optional[str] = None,
+) -> Optional[int]:
+    """Locate the live load-stub ToolMessage for a given active skill.
+
+    Matches the metadata that ``SkillUseRail.after_tool_call`` writes when it
+    stubs the original ``skill_tool`` ToolMessage on successful body recording:
+    ``skill_body_stub`` is True, ``skill_body_active`` is True (so unloaded
+    stubs from ``skill_complete`` are skipped), and the skill identity matches.
+
+    When the same skill has been loaded more than once without an intervening
+    ``skill_complete`` (e.g. a re-load), the window may contain multiple live
+    load stubs for the same ``(skill_name, relative_file_path)``. The pin must
+    anchor to the *most recent* one — the registry only stores the latest body
+    for that key, so anchoring to an older stub would put the pin far from the
+    current tool result and confuse the model. Lookup order:
+
+    1. If ``expected_tool_call_id`` is supplied (registry entry's
+       ``tool_call_id``), prefer the exact match — that's the stub which
+       produced the body currently in the registry.
+    2. Otherwise return the *last* (highest-index) matching stub in the window.
+    """
+    if not skill_name:
+        return None
+    last_match: Optional[int] = None
+    for idx, msg in enumerate(messages or []):
+        if not isinstance(msg, ToolMessage):
+            continue
+        meta = getattr(msg, "metadata", None) or {}
+        if not meta.get("skill_body_stub"):
+            continue
+        if not meta.get("skill_body_active"):
+            continue
+        if meta.get("skill_name") != skill_name:
+            continue
+        if meta.get("relative_file_path") != relative_file_path:
+            continue
+        if (
+            expected_tool_call_id is not None
+            and getattr(msg, "tool_call_id", None) == expected_tool_call_id
+        ):
+            return idx
+        last_match = idx
+    return last_match
+
+
 def append_active_skill_pins_to_window(
     context: Any,
     window: Any,
@@ -575,15 +628,23 @@ def append_active_skill_pins_to_window(
             continue
         if _has_existing_pin(ctx_msgs, skill_name, path) or _has_existing_pin(sys_msgs, skill_name, path):
             continue
+        entry_tool_call_id = entry.get("tool_call_id")
+        pin_meta: Dict[str, Any] = {
+            "active_skill_pin": True,
+            "is_skill_body": True,
+            "skill_name": skill_name,
+            "relative_file_path": path,
+            "attachment_id": entry_tool_call_id or f"skill_pin:{skill_name}:{path}",
+        }
+        # ``source_tool_call_id`` lets ``after_skill_tool`` dispatch anchor to
+        # the *exact* stub that produced the registry's current body (not just
+        # any stub matching the (name, path) key), which matters when the same
+        # skill was reloaded without an intervening skill_complete.
+        if entry_tool_call_id:
+            pin_meta["source_tool_call_id"] = entry_tool_call_id
         pin_messages.append(_make_pin_message(
             content=_build_pin_content(skill_name, path, body, directory_tree),
-            metadata={
-                "active_skill_pin": True,
-                "is_skill_body": True,
-                "skill_name": skill_name,
-                "relative_file_path": path,
-                "attachment_id": entry.get("tool_call_id") or f"skill_pin:{skill_name}:{path}",
-            },
+            metadata=pin_meta,
             target=pin_target,
         ))
 
@@ -598,6 +659,60 @@ def append_active_skill_pins_to_window(
     if pin_target == "system":
         sys_msgs.extend(pin_messages)
         window.system_messages = sys_msgs
+    elif pin_target == "after_skill_tool":
+        # Each body pin anchors right after its corresponding stub ToolMessage
+        # so the wire shape mirrors claude-code's
+        # [assistant(tool_use), tool_result(short ack), user(SKILL.md body)].
+        # Pins whose stub has slid out of the window (or whose stub is already
+        # an unload stub) fall back to the user_prefix position. The eviction
+        # notice always rides the user_prefix block — it has no 1:1 stub.
+        notice_pin: Optional[BaseMessage] = None
+        body_pins: List[BaseMessage] = []
+        for m in pin_messages:
+            meta = getattr(m, "metadata", None) or {}
+            if meta.get("active_skill_eviction_notice"):
+                notice_pin = m
+            else:
+                body_pins.append(m)
+
+        anchored: List[Tuple[int, BaseMessage]] = []
+        fallback_pins: List[BaseMessage] = []
+        for pin in body_pins:
+            meta = getattr(pin, "metadata", None) or {}
+            sn = str(meta.get("skill_name") or "")
+            rp = str(meta.get("relative_file_path") or "SKILL.md")
+            expected_tcid = meta.get("source_tool_call_id")
+            stub_idx = _find_skill_stub_index(
+                ctx_msgs, sn, rp,
+                expected_tool_call_id=expected_tcid if isinstance(expected_tcid, str) else None,
+            )
+            if stub_idx is None:
+                if isinstance(meta, dict):
+                    meta["pin_anchor"] = "user_prefix_fallback"
+                fallback_pins.append(pin)
+            else:
+                if isinstance(meta, dict):
+                    meta["pin_anchor"] = "after_skill_tool"
+                anchored.append((stub_idx, pin))
+
+        # Insert anchored pins from highest index to lowest so earlier inserts
+        # do not shift the indices of later ones.
+        for stub_idx, pin in sorted(anchored, key=lambda t: t[0], reverse=True):
+            ctx_msgs.insert(stub_idx + 1, pin)
+
+        prefix_block: List[BaseMessage] = []
+        if notice_pin is not None:
+            prefix_block.append(notice_pin)
+        prefix_block.extend(fallback_pins)
+        if prefix_block:
+            insert_at = 0
+            for idx, msg in enumerate(ctx_msgs):
+                if isinstance(msg, UserMessage):
+                    insert_at = idx
+                    break
+            ctx_msgs = ctx_msgs[:insert_at] + prefix_block + ctx_msgs[insert_at:]
+
+        window.context_messages = ctx_msgs
     else:
         # user_prefix: insert before first UserMessage in context_messages
         insert_at = 0

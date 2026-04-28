@@ -322,8 +322,8 @@ class SessionModelContext(ModelContext):
         try:
             cfg_max = getattr(self._config, "max_active_skill_bodies", DEFAULT_MAX_ACTIVE_SKILL_BODIES) \
                 if hasattr(self, "_config") else DEFAULT_MAX_ACTIVE_SKILL_BODIES
-            cfg_target = getattr(self._config, "active_skill_pin_target", "system") \
-                if hasattr(self, "_config") else "system"
+            cfg_target = getattr(self._config, "active_skill_pin_target", "after_skill_tool") \
+                if hasattr(self, "_config") else "after_skill_tool"
             new_pins = append_active_skill_pins_to_window(
                 self,
                 window,
