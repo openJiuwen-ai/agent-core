@@ -91,7 +91,9 @@ def extract_entity_attributes(
     if extras:
         kwargs.update(extras)
     if entity.obj_type.casefold() == "human" and "summary_target" in kwargs:
-        kwargs["summary_target"] = kwargs["summary_target"] * 2
+        summary_target = kwargs["summary_target"]
+        if isinstance(summary_target, (int, float)) or (isinstance(summary_target, str) and summary_target.isdigit()):
+            kwargs["summary_target"] = int(summary_target) * 2
     return kwargs, TemplateManager().get(template_name), output_model.response_format(language)
 
 
