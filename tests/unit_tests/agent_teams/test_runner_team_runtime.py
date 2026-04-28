@@ -412,26 +412,40 @@ async def test_runner_interact_pause_and_delete_agent_team_route_through_team_ru
 
 @pytest.mark.asyncio
 async def test_team_agent_cancelled_round_does_not_restart_follow_up():
-    leader_card = AgentCard(id=f"leader_{uuid.uuid4().hex}", name="leader", description="leader")
-    agent = TeamAgent(card=leader_card)
-    agent._stream_queue = object()
-    agent._pending_inputs = ["follow-up"]
-    agent._execute_round = AsyncMock(side_effect=asyncio.CancelledError())
-    agent._start_agent = AsyncMock()
+    # The cancel-skip logic lives on StreamController (where the round
+    # actually runs), so drive it directly instead of bypassing TeamAgent
+    # construction with private attribute injection.
+    from openjiuwen.agent_teams.agent.stream_controller import StreamController
+
+    async def _noop(*_a, **_kw):
+        return None
+
+    fake_deep_agent = SimpleNamespace(deep_config=None)
+    sc = StreamController(
+        deep_agent_getter=lambda: fake_deep_agent,
+        member_name_getter=lambda: "leader",
+        status_updater=_noop,
+        execution_updater=_noop,
+        team_member_getter=lambda: None,
+    )
+    sc.stream_queue = object()
+    sc.pending_inputs = ["follow-up"]
+    sc._execute_round = AsyncMock(side_effect=asyncio.CancelledError())
+    sc.start_round = AsyncMock()
 
     with pytest.raises(asyncio.CancelledError):
-        await agent._run_one_round("cancelled")
+        await sc._run_one_round("cancelled")
 
-    assert agent._start_agent.await_count == 0
-    assert agent._pending_inputs == ["follow-up"]
-    assert agent._agent_task is None
+    assert sc.start_round.await_count == 0
+    assert sc.pending_inputs == ["follow-up"]
+    assert sc.agent_task is None
 
 
 @pytest.mark.asyncio
 async def test_team_agent_resume_for_new_session_rebinds_only_live_teammates():
     leader_card = AgentCard(id=f"leader_{uuid.uuid4().hex}", name="leader", description="leader")
     agent = TeamAgent(card=leader_card)
-    agent._ctx = SimpleNamespace(
+    agent._configurator.ctx = SimpleNamespace(
         role=TeamRole.LEADER,
         member_name="leader",
         team_spec=SimpleNamespace(team_name="persistent_team"),
@@ -451,13 +465,13 @@ async def test_team_agent_resume_for_new_session_rebinds_only_live_teammates():
             ]
         ),
     )
-    agent._team_backend = fake_backend
-    agent._spawned_handles = {
+    agent._configurator.team_backend = fake_backend
+    agent._spawn_manager.spawned_handles = {
         "worker_busy": object(),
         "worker_ready": object(),
     }
-    agent._cleanup_teammate = AsyncMock()
-    agent._restart_teammate = AsyncMock(return_value=True)
+    agent._spawn_manager.cleanup_teammate = AsyncMock()
+    agent._spawn_manager.restart_teammate = AsyncMock(return_value=True)
 
     new_session = create_agent_team_session(
         session_id=f"session_{uuid.uuid4().hex}",
@@ -466,17 +480,17 @@ async def test_team_agent_resume_for_new_session_rebinds_only_live_teammates():
 
     await agent.resume_for_new_session(new_session)
 
-    assert agent._session_id == new_session.get_session_id()
+    assert agent._session_manager.session_id == new_session.get_session_id()
     fake_db.create_cur_session_tables.assert_awaited_once()
-    assert agent._cleanup_teammate.await_args_list == [
+    assert agent._spawn_manager.cleanup_teammate.await_args_list == [
         call("worker_busy"),
         call("worker_ready"),
     ]
-    assert agent._restart_teammate.await_args_list == [
+    assert agent._spawn_manager.restart_teammate.await_args_list == [
         call("worker_busy"),
         call("worker_ready"),
     ]
-    assert fake_db.update_member_status.await_args_list == [
+    assert fake_db.member.update_member_status.await_args_list == [
         call("worker_busy", "persistent_team", "error"),
         call("worker_busy", "persistent_team", "restarting"),
         call("worker_ready", "persistent_team", "error"),
@@ -488,7 +502,7 @@ async def test_team_agent_resume_for_new_session_rebinds_only_live_teammates():
 async def test_team_agent_recover_for_existing_session_rebinds_live_teammates():
     leader_card = AgentCard(id=f"leader_{uuid.uuid4().hex}", name="leader", description="leader")
     agent = TeamAgent(card=leader_card)
-    agent._ctx = SimpleNamespace(
+    agent._configurator.ctx = SimpleNamespace(
         role=TeamRole.LEADER,
         member_name="leader",
         team_spec=SimpleNamespace(team_name="persistent_team"),
@@ -508,13 +522,13 @@ async def test_team_agent_recover_for_existing_session_rebinds_live_teammates():
             ]
         ),
     )
-    agent._team_backend = fake_backend
-    agent._spawned_handles = {
+    agent._configurator.team_backend = fake_backend
+    agent._spawn_manager.spawned_handles = {
         "worker_busy": object(),
         "worker_ready": object(),
     }
-    agent._stop_coordination = AsyncMock()
-    agent._restart_teammate = AsyncMock(return_value=True)
+    agent._coordination_manager.stop = AsyncMock()
+    agent._spawn_manager.restart_teammate = AsyncMock(return_value=True)
 
     existing_session = create_agent_team_session(
         session_id=f"recover_{uuid.uuid4().hex}",
@@ -523,14 +537,14 @@ async def test_team_agent_recover_for_existing_session_rebinds_live_teammates():
 
     await agent.recover_for_existing_session(existing_session)
 
-    assert agent._session_id == existing_session.get_session_id()
-    agent._stop_coordination.assert_awaited_once()
+    assert agent._session_manager.session_id == existing_session.get_session_id()
+    agent._coordination_manager.stop.assert_awaited_once()
     fake_db.create_cur_session_tables.assert_awaited_once()
-    assert agent._restart_teammate.await_args_list == [
+    assert agent._spawn_manager.restart_teammate.await_args_list == [
         call("worker_busy"),
         call("worker_ready"),
     ]
-    assert fake_db.update_member_status.await_args_list == [
+    assert fake_db.member.update_member_status.await_args_list == [
         call("worker_busy", "persistent_team", "error"),
         call("worker_busy", "persistent_team", "restarting"),
         call("worker_ready", "persistent_team", "error"),
@@ -566,7 +580,7 @@ def test_team_agent_recover_from_session_restores_session_id():
 
     agent = TeamAgent.recover_from_session(session)
 
-    assert agent._session_id == session_id
+    assert agent._session_manager.session_id == session_id
 
 
 @pytest.mark.asyncio

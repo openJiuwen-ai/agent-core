@@ -8,6 +8,10 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.messager import Messager
+from openjiuwen.agent_teams.schema.status import (
+    ExecutionStatus,
+    MemberStatus,
+)
 from openjiuwen.agent_teams.schema.team import (
     TeamMemberSpec,
     TeamRole,
@@ -20,10 +24,6 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
     TeamDatabase,
-)
-from openjiuwen.agent_teams.schema.status import (
-    ExecutionStatus,
-    MemberStatus,
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import (
@@ -92,7 +92,6 @@ class TestBuildTeamWithPredefinedMembers:
         await team_with_predefined.build_team(
             display_name="Test Team",
             desc="A predefined team",
-
             leader_display_name="Leader",
             leader_desc="PM",
         )
@@ -112,7 +111,6 @@ class TestBuildTeamWithPredefinedMembers:
         await team_with_predefined.build_team(
             display_name="Test Team",
             desc="desc",
-
             leader_display_name="Leader",
             leader_desc="PM",
         )
@@ -131,7 +129,6 @@ class TestBuildTeamWithPredefinedMembers:
         await team_with_predefined.build_team(
             display_name="Test Team",
             desc="desc",
-
             leader_display_name="Leader",
             leader_desc="PM",
         )
@@ -150,7 +147,6 @@ class TestBuildTeamWithPredefinedMembers:
         await team_with_predefined.build_team(
             display_name="Test Team",
             desc="desc",
-
             leader_display_name="Leader",
             leader_desc="PM",
         )
@@ -179,7 +175,6 @@ class TestBuildTeamWithoutPredefinedMembers:
         await team_no_predefined.build_team(
             display_name="Auto Team",
             desc="desc",
-
             leader_display_name="Leader",
             leader_desc="PM",
         )
@@ -351,12 +346,12 @@ class TestResolveAgentSpecByMemberName:
     @pytest.mark.level1
     def test_resolve_by_member_name_first(self):
         """When member_name exists in agents dict, use that spec."""
+        from openjiuwen.agent_teams.agent.team_agent import TeamAgent
         from openjiuwen.agent_teams.schema.blueprint import (
             DeepAgentSpec,
-            TeamAgentSpec,
             LeaderSpec,
+            TeamAgentSpec,
         )
-        from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 
         # Create agent specs with different max_iterations
         leader_spec = DeepAgentSpec(max_iterations=100)
@@ -374,9 +369,10 @@ class TestResolveAgentSpecByMemberName:
 
         # Create a minimal TeamAgent to test _resolve_agent_spec
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
         card = AgentCard(id="test", name="test")
         agent = TeamAgent(card)
-        agent._spec = spec
+        agent._configurator.spec = spec
 
         # Resolve by member_name should return custom_spec
         result = agent._resolve_agent_spec(spec, TeamRole.TEAMMATE, "custom-member")
@@ -385,12 +381,12 @@ class TestResolveAgentSpecByMemberName:
     @pytest.mark.level1
     def test_fallback_to_role_value(self):
         """When member_name not in agents, fallback to role.value."""
+        from openjiuwen.agent_teams.agent.team_agent import TeamAgent
         from openjiuwen.agent_teams.schema.blueprint import (
             DeepAgentSpec,
-            TeamAgentSpec,
             LeaderSpec,
+            TeamAgentSpec,
         )
-        from openjiuwen.agent_teams.agent.team_agent import TeamAgent
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
         leader_spec = DeepAgentSpec(max_iterations=100)
@@ -407,7 +403,7 @@ class TestResolveAgentSpecByMemberName:
 
         card = AgentCard(id="test", name="test")
         agent = TeamAgent(card)
-        agent._spec = spec
+        agent._configurator.spec = spec
 
         # Fallback to teammate spec
         result = agent._resolve_agent_spec(spec, TeamRole.TEAMMATE, "unknown-member")
@@ -416,12 +412,12 @@ class TestResolveAgentSpecByMemberName:
     @pytest.mark.level1
     def test_fallback_chain_to_leader(self):
         """When neither member_name nor role.value in agents, fallback to leader."""
+        from openjiuwen.agent_teams.agent.team_agent import TeamAgent
         from openjiuwen.agent_teams.schema.blueprint import (
             DeepAgentSpec,
-            TeamAgentSpec,
             LeaderSpec,
+            TeamAgentSpec,
         )
-        from openjiuwen.agent_teams.agent.team_agent import TeamAgent
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
         leader_spec = DeepAgentSpec(max_iterations=100)
@@ -436,7 +432,7 @@ class TestResolveAgentSpecByMemberName:
 
         card = AgentCard(id="test", name="test")
         agent = TeamAgent(card)
-        agent._spec = spec
+        agent._configurator.spec = spec
 
         # Fallback chain: member_name -> role.value -> "teammate" -> "leader"
         result = agent._resolve_agent_spec(spec, TeamRole.TEAMMATE, "unknown-member")
@@ -445,12 +441,12 @@ class TestResolveAgentSpecByMemberName:
     @pytest.mark.level1
     def test_leader_role_uses_leader_spec(self):
         """Leader role should use leader spec regardless of member_name."""
+        from openjiuwen.agent_teams.agent.team_agent import TeamAgent
         from openjiuwen.agent_teams.schema.blueprint import (
             DeepAgentSpec,
-            TeamAgentSpec,
             LeaderSpec,
+            TeamAgentSpec,
         )
-        from openjiuwen.agent_teams.agent.team_agent import TeamAgent
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
         leader_spec = DeepAgentSpec(max_iterations=100)
@@ -466,7 +462,7 @@ class TestResolveAgentSpecByMemberName:
 
         card = AgentCard(id="test", name="test")
         agent = TeamAgent(card)
-        agent._spec = spec
+        agent._configurator.spec = spec
 
         # Leader role with no member_name uses leader spec
         result = agent._resolve_agent_spec(spec, TeamRole.LEADER, None)

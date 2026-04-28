@@ -54,10 +54,7 @@ def _make_named_entry(name: str, suffix: str) -> ModelPoolEntry:
 def test_round_robin_allocator_rotates_through_pool():
     pool = _make_pool(3)
     allocator = RoundRobinModelAllocator(pool)
-    names = [
-        allocator.allocate().to_team_model_config().model_request_config.model_name
-        for _ in range(7)
-    ]
+    names = [allocator.allocate().to_team_model_config().model_request_config.model_name for _ in range(7)]
     assert names == ["m0", "m1", "m2", "m0", "m1", "m2", "m0"]
 
 
@@ -69,10 +66,16 @@ def test_round_robin_allocator_returns_none_when_pool_empty():
 
 def test_model_pool_entry_assigns_unique_model_id_per_instance():
     a = ModelPoolEntry(
-        model_name="m", api_key="k", api_base_url="http://x", api_provider="OpenAI",
+        model_name="m",
+        api_key="k",
+        api_base_url="http://x",
+        api_provider="OpenAI",
     )
     b = ModelPoolEntry(
-        model_name="m", api_key="k", api_base_url="http://x", api_provider="OpenAI",
+        model_name="m",
+        api_key="k",
+        api_base_url="http://x",
+        api_provider="OpenAI",
     )
     # model_id is runtime-only client identity: auto-uuid, per-instance,
     # not persisted to DB. Distinct instances must get distinct ids so
@@ -222,8 +225,7 @@ def test_by_model_name_allocator_rotates_within_named_group():
     allocator = ByModelNameAllocator(pool)
 
     bases = [
-        allocator.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base
-        for _ in range(3)
+        allocator.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base for _ in range(3)
     ]
     assert bases == ["http://a1", "http://a2", "http://a3"]
 
@@ -258,10 +260,7 @@ def test_by_model_name_allocator_returns_none_for_unknown_or_missing_name():
     assert allocator.allocate(model_name="") is None
     assert allocator.allocate(model_name="gemini") is None
     # Unknown-name calls must NOT advance any counter.
-    assert (
-        allocator.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base
-        == "http://a1"
-    )
+    assert allocator.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base == "http://a1"
 
 
 def test_by_model_name_allocator_handles_empty_pool():
@@ -292,14 +291,18 @@ def test_build_model_allocator_dispatches_by_strategy():
     spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()})
 
     rr = TeamSpec(
-        team_name="t", display_name="t",
-        model_pool=pool, model_pool_strategy="round_robin",
+        team_name="t",
+        display_name="t",
+        model_pool=pool,
+        model_pool_strategy="round_robin",
     )
     assert isinstance(build_model_allocator(spec, rr), RoundRobinModelAllocator)
 
     bn = TeamSpec(
-        team_name="t", display_name="t",
-        model_pool=pool, model_pool_strategy="by_model_name",
+        team_name="t",
+        display_name="t",
+        model_pool=pool,
+        model_pool_strategy="by_model_name",
     )
     assert isinstance(build_model_allocator(spec, bn), ByModelNameAllocator)
 
@@ -308,8 +311,10 @@ def test_build_model_allocator_rejects_unknown_strategy():
     pool = [_make_named_entry("gpt-4", "a1")]
     spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()})
     team_spec = TeamSpec.model_construct(
-        team_name="t", display_name="t",
-        model_pool=pool, model_pool_strategy="weighted",
+        team_name="t",
+        display_name="t",
+        model_pool=pool,
+        model_pool_strategy="weighted",
     )
     with pytest.raises(ValueError, match="Unknown model_pool_strategy"):
         build_model_allocator(spec, team_spec)
@@ -339,9 +344,7 @@ def test_round_robin_state_dict_round_trip_resumes_rotation():
     b = RoundRobinModelAllocator(pool)
     b.load_state_dict(snapshot)
     resume_name = b.allocate().to_team_model_config().model_request_config.model_name
-    fresh_name = (
-        RoundRobinModelAllocator(pool).allocate().to_team_model_config().model_request_config.model_name
-    )
+    fresh_name = RoundRobinModelAllocator(pool).allocate().to_team_model_config().model_request_config.model_name
     assert resume_name == "m2"
     assert fresh_name == "m0"
 
@@ -401,14 +404,8 @@ def test_by_model_name_state_dict_resumes_per_group_rotation():
 
     b = ByModelNameAllocator(pool)
     b.load_state_dict(snapshot)
-    assert (
-        b.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base
-        == "http://a3"
-    )
-    assert (
-        b.allocate(model_name="claude").to_team_model_config().model_client_config.api_base
-        == "http://c2"
-    )
+    assert b.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base == "http://a3"
+    assert b.allocate(model_name="claude").to_team_model_config().model_client_config.api_base == "http://c2"
 
 
 def test_by_model_name_load_state_dict_resets_on_pool_digest_change():
@@ -430,14 +427,8 @@ def test_by_model_name_load_state_dict_resets_on_pool_digest_change():
     b = ByModelNameAllocator(new_pool)
     b.load_state_dict(snapshot)
     # Digest mismatch -> counters zeroed. gpt-4 group starts at a1, not a2.
-    assert (
-        b.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base
-        == "http://a1"
-    )
-    assert (
-        b.allocate(model_name="gemini").to_team_model_config().model_client_config.api_base
-        == "http://g1"
-    )
+    assert b.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base == "http://a1"
+    assert b.allocate(model_name="gemini").to_team_model_config().model_client_config.api_base == "http://g1"
 
 
 def test_pool_digest_stable_under_credential_refresh():
@@ -474,16 +465,10 @@ def test_by_model_name_load_state_dict_tolerates_malformed_input():
     a = ByModelNameAllocator(pool)
     digest = a.state_dict()["pool_digest"]
     a.load_state_dict({"inner_indexes": "not-a-dict", "pool_digest": digest})
-    assert (
-        a.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base
-        == "http://a1"
-    )
+    assert a.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base == "http://a1"
 
     a.load_state_dict({"inner_indexes": {"gpt-4": "bogus"}, "pool_digest": digest})
-    assert (
-        a.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base
-        == "http://a1"
-    )
+    assert a.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base == "http://a1"
 
 
 # ---------------------------------------------------------------------------
@@ -519,22 +504,27 @@ def _bare_team_agent(allocator):
         _make_named_entry("claude", "c1"),
     ]
     team_spec = TeamSpec(
-        team_name="t", display_name="t",
+        team_name="t",
+        display_name="t",
         leader_member_name="leader",
-        model_pool=pool, model_pool_strategy="by_model_name",
+        model_pool=pool,
+        model_pool_strategy="by_model_name",
     )
     spec = TeamAgentSpec(
         agents={"leader": DeepAgentSpec()},
         team_name="t",
-        model_pool=pool, model_pool_strategy="by_model_name",
+        model_pool=pool,
+        model_pool_strategy="by_model_name",
     )
     ctx = TeamRuntimeContext(
-        role=TeamRole.LEADER, member_name="leader", team_spec=team_spec,
+        role=TeamRole.LEADER,
+        member_name="leader",
+        team_spec=team_spec,
     )
     agent = TeamAgent(AgentCard(id="t_leader", name="leader"))
-    agent._spec = spec
-    agent._ctx = ctx
-    agent._model_allocator = allocator
+    agent._configurator.spec = spec
+    agent._configurator.ctx = ctx
+    agent._configurator.model_allocator = allocator
     return agent
 
 
@@ -564,7 +554,7 @@ def test_persist_allocator_state_writes_only_allocator_payload():
 
     agent = _bare_team_agent(allocator)
     session = _StubSession()
-    agent._team_session = session
+    agent._session_manager.team_session = session
     agent._persist_allocator_state()
 
     assert set(session.state) == {"model_allocator_state"}
@@ -597,12 +587,14 @@ def test_persist_leader_config_omits_allocator_state_when_no_pool():
     spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="t")
     team_spec = TeamSpec(team_name="t", display_name="t")
     ctx = TeamRuntimeContext(
-        role=TeamRole.LEADER, member_name="leader", team_spec=team_spec,
+        role=TeamRole.LEADER,
+        member_name="leader",
+        team_spec=team_spec,
     )
     agent = TeamAgent(AgentCard(id="t_leader", name="leader"))
-    agent._spec = spec
-    agent._ctx = ctx
-    agent._model_allocator = None
+    agent._configurator.spec = spec
+    agent._configurator.ctx = ctx
+    agent._configurator.model_allocator = None
 
     session = _StubSession()
     agent._persist_leader_config(session)
@@ -714,7 +706,7 @@ def test_update_model_pool_replaces_pool_and_resets_allocator():
     allocator.allocate(model_name="gpt-4")
 
     agent = _bare_team_agent(allocator)
-    agent._team_session = None
+    agent._session_manager.team_session = None
 
     replacement = [
         _make_named_entry("gpt-4", "b1"),  # different endpoint -> no inherit
@@ -723,10 +715,10 @@ def test_update_model_pool_replaces_pool_and_resets_allocator():
     agent.update_model_pool(replacement)
 
     # Pool replaced (entries inherited or kept their own model_id).
-    assert len(agent._ctx.team_spec.model_pool) == 2
-    assert {e.api_base_url for e in agent._ctx.team_spec.model_pool} == {"http://b1", "http://c1"}
+    assert len(agent._configurator.ctx.team_spec.model_pool) == 2
+    assert {e.api_base_url for e in agent._configurator.ctx.team_spec.model_pool} == {"http://b1", "http://c1"}
     # Allocator rebuilt -> counters zeroed against new layout.
-    first_after = agent._model_allocator.allocate(model_name="gpt-4").to_team_model_config()
+    first_after = agent._configurator.model_allocator.allocate(model_name="gpt-4").to_team_model_config()
     assert first_after.model_client_config.api_base == "http://b1"
 
 
@@ -740,12 +732,16 @@ def test_inherit_pool_ids_preserves_id_for_bit_exact_entry():
     from openjiuwen.agent_teams.schema.team import inherit_pool_ids
 
     old = ModelPoolEntry(
-        model_name="gpt-4", api_key="K",
-        api_base_url="http://x", api_provider="OpenAI",
+        model_name="gpt-4",
+        api_key="K",
+        api_base_url="http://x",
+        api_provider="OpenAI",
     )
     new = ModelPoolEntry(
-        model_name="gpt-4", api_key="K",
-        api_base_url="http://x", api_provider="OpenAI",
+        model_name="gpt-4",
+        api_key="K",
+        api_base_url="http://x",
+        api_provider="OpenAI",
     )
     assert old.model_id != new.model_id  # different uuids before merge
 
@@ -759,12 +755,16 @@ def test_inherit_pool_ids_breaks_inheritance_on_credential_rotation():
     from openjiuwen.agent_teams.schema.team import inherit_pool_ids
 
     old = ModelPoolEntry(
-        model_name="gpt-4", api_key="OLD",
-        api_base_url="http://x", api_provider="OpenAI",
+        model_name="gpt-4",
+        api_key="OLD",
+        api_base_url="http://x",
+        api_provider="OpenAI",
     )
     new = ModelPoolEntry(
-        model_name="gpt-4", api_key="ROTATED",
-        api_base_url="http://x", api_provider="OpenAI",
+        model_name="gpt-4",
+        api_key="ROTATED",
+        api_base_url="http://x",
+        api_provider="OpenAI",
     )
 
     [merged] = inherit_pool_ids([old], [new])
@@ -776,12 +776,16 @@ def test_inherit_pool_ids_breaks_inheritance_on_base_url_migration():
     from openjiuwen.agent_teams.schema.team import inherit_pool_ids
 
     old = ModelPoolEntry(
-        model_name="gpt-4", api_key="K",
-        api_base_url="http://old", api_provider="OpenAI",
+        model_name="gpt-4",
+        api_key="K",
+        api_base_url="http://old",
+        api_provider="OpenAI",
     )
     new = ModelPoolEntry(
-        model_name="gpt-4", api_key="K",
-        api_base_url="http://new", api_provider="OpenAI",
+        model_name="gpt-4",
+        api_key="K",
+        api_base_url="http://new",
+        api_provider="OpenAI",
     )
     [merged] = inherit_pool_ids([old], [new])
     assert merged.model_id == new.model_id
@@ -793,13 +797,17 @@ def test_inherit_pool_ids_breaks_inheritance_on_metadata_change():
     from openjiuwen.agent_teams.schema.team import inherit_pool_ids
 
     old = ModelPoolEntry(
-        model_name="gpt-4", api_key="K",
-        api_base_url="http://x", api_provider="OpenAI",
+        model_name="gpt-4",
+        api_key="K",
+        api_base_url="http://x",
+        api_provider="OpenAI",
         metadata={"client": {"timeout": 30.0}},
     )
     new = ModelPoolEntry(
-        model_name="gpt-4", api_key="K",
-        api_base_url="http://x", api_provider="OpenAI",
+        model_name="gpt-4",
+        api_key="K",
+        api_base_url="http://x",
+        api_provider="OpenAI",
         metadata={"client": {"timeout": 60.0}},  # tuned
     )
     [merged] = inherit_pool_ids([old], [new])
@@ -810,12 +818,16 @@ def test_inherit_pool_ids_keeps_own_id_for_truly_new_endpoint():
     from openjiuwen.agent_teams.schema.team import inherit_pool_ids
 
     old = ModelPoolEntry(
-        model_name="gpt-4", api_key="k",
-        api_base_url="http://a", api_provider="OpenAI",
+        model_name="gpt-4",
+        api_key="k",
+        api_base_url="http://a",
+        api_provider="OpenAI",
     )
     new = ModelPoolEntry(
-        model_name="claude", api_key="k",
-        api_base_url="http://b", api_provider="OpenAI",
+        model_name="claude",
+        api_key="k",
+        api_base_url="http://b",
+        api_provider="OpenAI",
     )
     [merged] = inherit_pool_ids([old], [new])
     assert merged.model_id == new.model_id
@@ -881,10 +893,16 @@ def test_inherit_pool_ids_does_not_mutate_input_lists():
     from openjiuwen.agent_teams.schema.team import inherit_pool_ids
 
     old_entry = ModelPoolEntry(
-        model_name="gpt-4", api_key="K", api_base_url="http://x", api_provider="OpenAI",
+        model_name="gpt-4",
+        api_key="K",
+        api_base_url="http://x",
+        api_provider="OpenAI",
     )
     new_entry = ModelPoolEntry(
-        model_name="gpt-4", api_key="K", api_base_url="http://x", api_provider="OpenAI",
+        model_name="gpt-4",
+        api_key="K",
+        api_base_url="http://x",
+        api_provider="OpenAI",
     )
     new_entry_id_before = new_entry.model_id
     inherit_pool_ids([old_entry], [new_entry])
@@ -966,8 +984,11 @@ def test_build_round_robin_strategy_does_not_require_leader_model_name():
 
     pool = [
         ModelPoolEntry(
-            model_name="gpt-4", api_key="k", api_base_url="http://x",
-            api_provider="OpenAI", metadata={"client": {"verify_ssl": False}},
+            model_name="gpt-4",
+            api_key="k",
+            api_base_url="http://x",
+            api_provider="OpenAI",
+            metadata={"client": {"verify_ssl": False}},
         ),
     ]
     spec = TeamAgentSpec(
@@ -989,8 +1010,8 @@ def test_update_model_pool_preserves_id_only_when_entry_is_unchanged():
     ]
     allocator = ByModelNameAllocator(initial)
     agent = _bare_team_agent(allocator)
-    agent._ctx.team_spec.model_pool = initial
-    agent._team_session = None
+    agent._configurator.ctx.team_spec.model_pool = initial
+    agent._session_manager.team_session = None
 
     old_id = initial[0].model_id
 
@@ -999,7 +1020,7 @@ def test_update_model_pool_preserves_id_only_when_entry_is_unchanged():
         ModelPoolEntry(model_name="gpt-4", api_key="K", api_base_url="http://x", api_provider="OpenAI"),
     ]
     agent.update_model_pool(same_again)
-    assert agent._ctx.team_spec.model_pool[0].model_id == old_id
+    assert agent._configurator.ctx.team_spec.model_pool[0].model_id == old_id
 
     # Now rotate the credential -> id MUST change so a future cache
     # can't serve a client built against the previous api_key.
@@ -1007,6 +1028,6 @@ def test_update_model_pool_preserves_id_only_when_entry_is_unchanged():
         ModelPoolEntry(model_name="gpt-4", api_key="ROTATED", api_base_url="http://x", api_provider="OpenAI"),
     ]
     agent.update_model_pool(rotated)
-    stored = agent._ctx.team_spec.model_pool[0]
+    stored = agent._configurator.ctx.team_spec.model_pool[0]
     assert stored.model_id != old_id
     assert stored.api_key == "ROTATED"

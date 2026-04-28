@@ -99,15 +99,15 @@ async def test_wake_feeds_messages_to_agent():
     """When loop wakes, unread messages are fed
     to the DeepAgent via follow_up or Runner."""
     agent = _make_leader()
-    agent._deep_agent.follow_up = AsyncMock()
+    agent._configurator.deep_agent.follow_up = AsyncMock()
     fake_msg = MagicMock()
     fake_msg.message_id = "msg-1"
     fake_msg.from_member_name = "dev-1"
     fake_msg.content = "task done"
     fake_msg.broadcast = False
     fake_msg.timestamp = 1000
-    agent._message_manager = MagicMock()
-    agent._message_manager.mark_message_read = AsyncMock(return_value=True)
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.mark_message_read = AsyncMock(return_value=True)
     agent._dispatcher._read_all_unread = AsyncMock(
         side_effect=[[fake_msg], []],
     )
@@ -174,8 +174,8 @@ def _make_teammate() -> TeamAgent:
 async def test_mention_routes_direct_message():
     """@member_id pattern sends a direct message from 'user', bypassing leader agent."""
     agent = _make_leader_with_teammate()
-    agent._message_manager = MagicMock()
-    agent._message_manager.send_message = AsyncMock(return_value="msg-123")
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.send_message = AsyncMock(return_value="msg-123")
     agent._start_agent = AsyncMock()
 
     await agent._start_coordination(session=None)
@@ -183,7 +183,7 @@ async def test_mention_routes_direct_message():
     await asyncio.sleep(0.1)
     await agent._stop_coordination()
 
-    agent._message_manager.send_message.assert_called_once_with(
+    agent._configurator.message_manager.send_message.assert_called_once_with(
         content="请完成这个任务",
         to_member_name="dev-1",
         from_member_name="user",
@@ -196,8 +196,8 @@ async def test_mention_routes_direct_message():
 async def test_mention_invalid_member_falls_through():
     """@nonexistent falls through to normal leader-agent path."""
     agent = _make_leader_with_teammate()
-    agent._message_manager = MagicMock()
-    agent._message_manager.send_message = AsyncMock()
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.send_message = AsyncMock()
     agent._is_agent_running = lambda: False
     agent._start_agent = AsyncMock()
 
@@ -206,7 +206,7 @@ async def test_mention_invalid_member_falls_through():
     await asyncio.sleep(0.1)
     await agent._stop_coordination()
 
-    agent._message_manager.send_message.assert_not_called()
+    agent._configurator.message_manager.send_message.assert_not_called()
     agent._start_agent.assert_called_once()
 
 
@@ -215,8 +215,8 @@ async def test_mention_invalid_member_falls_through():
 async def test_no_mention_normal_flow():
     """Plain message without @ goes through existing leader flow."""
     agent = _make_leader_with_teammate()
-    agent._message_manager = MagicMock()
-    agent._message_manager.send_message = AsyncMock()
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.send_message = AsyncMock()
     agent._is_agent_running = lambda: False
     agent._start_agent = AsyncMock()
 
@@ -225,7 +225,7 @@ async def test_no_mention_normal_flow():
     await asyncio.sleep(0.1)
     await agent._stop_coordination()
 
-    agent._message_manager.send_message.assert_not_called()
+    agent._configurator.message_manager.send_message.assert_not_called()
     agent._start_agent.assert_called_once()
 
 
@@ -234,8 +234,8 @@ async def test_no_mention_normal_flow():
 async def test_mention_no_body_falls_through():
     """@member_id with no message body falls through (regex requires body)."""
     agent = _make_leader_with_teammate()
-    agent._message_manager = MagicMock()
-    agent._message_manager.send_message = AsyncMock()
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.send_message = AsyncMock()
     agent._is_agent_running = lambda: False
     agent._start_agent = AsyncMock()
 
@@ -244,7 +244,7 @@ async def test_mention_no_body_falls_through():
     await asyncio.sleep(0.1)
     await agent._stop_coordination()
 
-    agent._message_manager.send_message.assert_not_called()
+    agent._configurator.message_manager.send_message.assert_not_called()
     agent._start_agent.assert_called_once()
 
 
@@ -292,8 +292,8 @@ async def test_tool_approval_event_resumes_interrupt():
 async def test_mailbox_messages_deferred_while_interrupt_pending():
     """Normal mailbox messages should not preempt a pending tool interrupt."""
     agent = _make_leader_with_teammate()
-    agent._message_manager = MagicMock()
-    agent._message_manager.mark_message_read = AsyncMock(return_value=True)
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.mark_message_read = AsyncMock(return_value=True)
     agent._start_agent = AsyncMock()
     agent.steer = AsyncMock()
     agent.follow_up = AsyncMock()
@@ -309,7 +309,7 @@ async def test_mailbox_messages_deferred_while_interrupt_pending():
 
     await agent._dispatcher._process_unread_messages("leader-1")
 
-    agent._message_manager.mark_message_read.assert_not_called()
+    agent._configurator.message_manager.mark_message_read.assert_not_called()
     agent._start_agent.assert_not_called()
     agent.steer.assert_not_called()
     agent.follow_up.assert_not_called()
@@ -324,10 +324,10 @@ async def test_resume_interrupt_queues_while_agent_running():
     fake_entry.interrupt_requests = {"call-1": MagicMock()}
     fake_state = MagicMock()
     fake_state.interrupted_tools = {"call-1": fake_entry}
-    agent._deep_agent._loop_session = MagicMock()
-    agent._deep_agent._loop_session.get_state = MagicMock(return_value=fake_state)
-    agent._agent_task = MagicMock()
-    agent._agent_task.done.return_value = False
+    agent._configurator.deep_agent._loop_session = MagicMock()
+    agent._configurator.deep_agent._loop_session.get_state = MagicMock(return_value=fake_state)
+    agent._stream_controller.agent_task = MagicMock()
+    agent._stream_controller.agent_task.done.return_value = False
     agent._start_agent = AsyncMock()
 
     interactive_input = InteractiveInput()
@@ -335,7 +335,7 @@ async def test_resume_interrupt_queues_while_agent_running():
 
     await agent.resume_interrupt(interactive_input)
 
-    assert agent._pending_interrupt_resumes == [interactive_input]
+    assert agent._stream_controller.pending_interrupt_resumes == [interactive_input]
     agent._start_agent.assert_not_called()
 
 
@@ -350,10 +350,10 @@ async def test_member_ready_with_claimed_task_triggers_nudge():
     fake_task.content = "Investigate and fix the critical bug"
     fake_task.updated_at = 0  # stale → triggers nudge path
 
-    agent._task_manager = MagicMock()
-    agent._task_manager.get_tasks_by_assignee = AsyncMock(return_value=[fake_task])
-    agent._message_manager = MagicMock()
-    agent._message_manager.send_message = AsyncMock(return_value="msg-1")
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.get_tasks_by_assignee = AsyncMock(return_value=[fake_task])
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.send_message = AsyncMock(return_value="msg-1")
 
     event = EventMessage.from_event(
         MemberStatusChangedEvent(
@@ -365,12 +365,12 @@ async def test_member_ready_with_claimed_task_triggers_nudge():
     )
     await agent._dispatcher._handle_leader_member_event(event)
 
-    agent._task_manager.get_tasks_by_assignee.assert_awaited_once_with(
+    agent._configurator.task_manager.get_tasks_by_assignee.assert_awaited_once_with(
         "dev-1",
         status="claimed",
     )
-    agent._message_manager.send_message.assert_awaited_once()
-    content, to_member_name = agent._message_manager.send_message.await_args.args
+    agent._configurator.message_manager.send_message.assert_awaited_once()
+    content, to_member_name = agent._configurator.message_manager.send_message.await_args.args
     assert to_member_name == "dev-1"
     assert "task-1" in content
     assert "Fix bug" in content
@@ -387,10 +387,10 @@ async def test_member_error_with_claimed_task_triggers_nudge():
     fake_task.content = "Wrap up the pending PR"
     fake_task.updated_at = 0  # stale → triggers nudge path
 
-    agent._task_manager = MagicMock()
-    agent._task_manager.get_tasks_by_assignee = AsyncMock(return_value=[fake_task])
-    agent._message_manager = MagicMock()
-    agent._message_manager.send_message = AsyncMock(return_value="msg-2")
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.get_tasks_by_assignee = AsyncMock(return_value=[fake_task])
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.send_message = AsyncMock(return_value="msg-2")
 
     event = EventMessage.from_event(
         MemberStatusChangedEvent(
@@ -402,7 +402,7 @@ async def test_member_error_with_claimed_task_triggers_nudge():
     )
     await agent._dispatcher._handle_leader_member_event(event)
 
-    agent._message_manager.send_message.assert_awaited_once()
+    agent._configurator.message_manager.send_message.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -410,10 +410,10 @@ async def test_member_error_with_claimed_task_triggers_nudge():
 async def test_member_ready_without_claimed_task_skips_nudge():
     """No message is sent when the member has no claimed tasks."""
     agent = _make_leader()
-    agent._task_manager = MagicMock()
-    agent._task_manager.get_tasks_by_assignee = AsyncMock(return_value=[])
-    agent._message_manager = MagicMock()
-    agent._message_manager.send_message = AsyncMock()
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.get_tasks_by_assignee = AsyncMock(return_value=[])
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.send_message = AsyncMock()
 
     event = EventMessage.from_event(
         MemberStatusChangedEvent(
@@ -425,7 +425,7 @@ async def test_member_ready_without_claimed_task_skips_nudge():
     )
     await agent._dispatcher._handle_leader_member_event(event)
 
-    agent._message_manager.send_message.assert_not_called()
+    agent._configurator.message_manager.send_message.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -433,10 +433,10 @@ async def test_member_ready_without_claimed_task_skips_nudge():
 async def test_member_status_unchanged_skips_nudge():
     """Redundant READY → READY transitions should not query tasks nor send messages."""
     agent = _make_leader()
-    agent._task_manager = MagicMock()
-    agent._task_manager.get_tasks_by_assignee = AsyncMock()
-    agent._message_manager = MagicMock()
-    agent._message_manager.send_message = AsyncMock()
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.get_tasks_by_assignee = AsyncMock()
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.send_message = AsyncMock()
 
     event = EventMessage.from_event(
         MemberStatusChangedEvent(
@@ -448,8 +448,8 @@ async def test_member_status_unchanged_skips_nudge():
     )
     await agent._dispatcher._handle_leader_member_event(event)
 
-    agent._task_manager.get_tasks_by_assignee.assert_not_called()
-    agent._message_manager.send_message.assert_not_called()
+    agent._configurator.task_manager.get_tasks_by_assignee.assert_not_called()
+    agent._configurator.message_manager.send_message.assert_not_called()
 
 
 def _make_claimed_task(
@@ -493,16 +493,16 @@ async def test_stale_claim_leader_messages_assignee():
     # updated_at at wall clock 0 → ancient → well past 60s threshold.
     stale_task = _make_claimed_task("task-1", assignee="dev-1", updated_at=0)
 
-    agent._task_manager = MagicMock()
-    agent._task_manager.list_tasks = AsyncMock(return_value=[stale_task])
-    agent._message_manager = MagicMock()
-    agent._message_manager.send_message = AsyncMock(return_value="msg-1")
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale_task])
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.send_message = AsyncMock(return_value="msg-1")
 
     await agent._dispatcher._check_stale_claimed_tasks()
 
-    agent._task_manager.list_tasks.assert_awaited_once_with(status="claimed")
-    agent._message_manager.send_message.assert_awaited_once()
-    content, to_name = agent._message_manager.send_message.await_args.args
+    agent._configurator.task_manager.list_tasks.assert_awaited_once_with(status="claimed")
+    agent._configurator.message_manager.send_message.assert_awaited_once()
+    content, to_name = agent._configurator.message_manager.send_message.await_args.args
     assert to_name == "dev-1"
     assert "task-1" in content
     assert "task-1" in agent._dispatcher._last_stale_nudge
@@ -516,14 +516,14 @@ async def test_stale_claim_fresh_task_does_not_nudge():
     fresh_ms = int(time.time() * 1000)
     fresh_task = _make_claimed_task("task-2", assignee="dev-1", updated_at=fresh_ms)
 
-    agent._task_manager = MagicMock()
-    agent._task_manager.list_tasks = AsyncMock(return_value=[fresh_task])
-    agent._message_manager = MagicMock()
-    agent._message_manager.send_message = AsyncMock()
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[fresh_task])
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.send_message = AsyncMock()
 
     await agent._dispatcher._check_stale_claimed_tasks()
 
-    agent._message_manager.send_message.assert_not_called()
+    agent._configurator.message_manager.send_message.assert_not_called()
     assert "task-2" not in agent._dispatcher._last_stale_nudge
 
 
@@ -534,15 +534,15 @@ async def test_stale_claim_throttles_follow_up_polls():
     agent = _make_leader()
     stale_task = _make_claimed_task("task-1b", assignee="dev-1", updated_at=0)
 
-    agent._task_manager = MagicMock()
-    agent._task_manager.list_tasks = AsyncMock(return_value=[stale_task])
-    agent._message_manager = MagicMock()
-    agent._message_manager.send_message = AsyncMock(return_value="msg")
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale_task])
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.send_message = AsyncMock(return_value="msg")
 
     await agent._dispatcher._check_stale_claimed_tasks()
     await agent._dispatcher._check_stale_claimed_tasks()
 
-    agent._message_manager.send_message.assert_awaited_once()
+    agent._configurator.message_manager.send_message.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -553,8 +553,8 @@ async def test_stale_claim_self_nudge_when_idle():
     agent._team_member = None
     own_task = _make_claimed_task("task-3", assignee="dev-1", updated_at=0)
 
-    agent._task_manager = MagicMock()
-    agent._task_manager.list_tasks = AsyncMock(return_value=[own_task])
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[own_task])
     agent._is_agent_running = lambda: False
     agent._start_agent = AsyncMock()
     agent.steer = AsyncMock()
@@ -575,11 +575,11 @@ async def test_stale_claim_self_nudge_steers_when_running():
     agent._team_member = None
     own_task = _make_claimed_task("task-4", assignee="dev-1", updated_at=0)
 
-    agent._task_manager = MagicMock()
-    agent._task_manager.list_tasks = AsyncMock(return_value=[own_task])
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[own_task])
     # deliver_input dispatches on the ``_streaming_active`` flag, not on
     # ``_is_agent_running()`` — set the flag directly so steer is chosen.
-    agent._streaming_active = True
+    agent._stream_controller.streaming_active = True
     agent._start_agent = AsyncMock()
     agent.steer = AsyncMock()
 
@@ -596,10 +596,10 @@ async def test_stale_claim_throttle_drops_unrelated_entries():
     agent = _make_leader()
     still_claimed = _make_claimed_task("task-5", assignee="dev-1", updated_at=0)
 
-    agent._task_manager = MagicMock()
-    agent._task_manager.list_tasks = AsyncMock(return_value=[still_claimed])
-    agent._message_manager = MagicMock()
-    agent._message_manager.send_message = AsyncMock()
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[still_claimed])
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.send_message = AsyncMock()
 
     agent._dispatcher._last_stale_nudge["task-5"] = 0.0
     agent._dispatcher._last_stale_nudge["task-6"] = 0.0
@@ -617,15 +617,15 @@ async def test_stale_pending_leader_self_nudges_with_hint():
     agent = _make_leader()
     stale = _make_pending_task("p-1", updated_at=0, title="Argue for ACP")
 
-    agent._task_manager = MagicMock()
-    agent._task_manager.list_tasks = AsyncMock(return_value=[stale])
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
     agent._is_agent_running = lambda: False
     agent._start_agent = AsyncMock()
     agent.steer = AsyncMock()
 
     await agent._dispatcher._check_stale_pending_tasks()
 
-    agent._task_manager.list_tasks.assert_awaited_once_with(status="pending")
+    agent._configurator.task_manager.list_tasks.assert_awaited_once_with(status="pending")
     agent._start_agent.assert_awaited_once()
     agent.steer.assert_not_called()
     content = agent._start_agent.await_args.args[0]
@@ -642,11 +642,11 @@ async def test_stale_pending_leader_steers_when_running():
     agent = _make_leader()
     stale = _make_pending_task("p-2", updated_at=0)
 
-    agent._task_manager = MagicMock()
-    agent._task_manager.list_tasks = AsyncMock(return_value=[stale])
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
     # deliver_input dispatches on the ``_streaming_active`` flag, not on
     # ``_is_agent_running()`` — set the flag directly so steer is chosen.
-    agent._streaming_active = True
+    agent._stream_controller.streaming_active = True
     agent._start_agent = AsyncMock()
     agent.steer = AsyncMock()
 
@@ -663,8 +663,8 @@ async def test_stale_pending_fresh_task_skipped():
     agent = _make_leader()
     fresh = _make_pending_task("p-3", updated_at=int(time.time() * 1000))
 
-    agent._task_manager = MagicMock()
-    agent._task_manager.list_tasks = AsyncMock(return_value=[fresh])
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[fresh])
     agent._is_agent_running = lambda: False
     agent._start_agent = AsyncMock()
 
@@ -681,8 +681,8 @@ async def test_stale_pending_throttled_after_first_nudge():
     agent = _make_leader()
     stale = _make_pending_task("p-4", updated_at=0)
 
-    agent._task_manager = MagicMock()
-    agent._task_manager.list_tasks = AsyncMock(return_value=[stale])
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
     agent._is_agent_running = lambda: False
     agent._start_agent = AsyncMock()
 
@@ -700,14 +700,14 @@ async def test_stale_pending_teammate_skips_check():
     agent._team_member = None
     stale = _make_pending_task("p-5", updated_at=0)
 
-    agent._task_manager = MagicMock()
-    agent._task_manager.list_tasks = AsyncMock(return_value=[stale])
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
     agent._is_agent_running = lambda: False
     agent._start_agent = AsyncMock()
 
     await agent._dispatcher._check_stale_pending_tasks()
 
-    agent._task_manager.list_tasks.assert_not_called()
+    agent._configurator.task_manager.list_tasks.assert_not_called()
     agent._start_agent.assert_not_called()
 
 
@@ -749,16 +749,16 @@ async def test_shutdown_self_cancels_running_round_and_closes_stream():
     """shutdown_self cancels the in-flight agent task and unblocks stream()."""
     agent = _make_teammate()
     agent._team_member = None
-    agent._stream_queue = asyncio.Queue()
+    agent._stream_controller.stream_queue = asyncio.Queue()
 
     fake_task = MagicMock()
     fake_task.done.return_value = False
-    agent._agent_task = fake_task
+    agent._stream_controller.agent_task = fake_task
 
     await agent.shutdown_self()
 
     fake_task.cancel.assert_called_once()
-    sentinel = await agent._stream_queue.get()
+    sentinel = await agent._stream_controller.stream_queue.get()
     assert sentinel is None
 
 
@@ -773,10 +773,10 @@ async def test_teammate_round_completion_wakes_mailbox_after_interrupt_clears():
     # which is scoped to the mailbox-wake behavior in _run_one_round.
     agent._team_member = None
     agent._coordination_loop.enqueue = AsyncMock()
-    agent._execute_round = AsyncMock(return_value=None)
-    agent.has_pending_interrupt = lambda: False
+    agent._stream_controller._execute_round = AsyncMock(return_value=None)
+    agent._stream_controller.has_pending_interrupt = lambda: False
 
-    await agent._run_one_round("continue work")
+    await agent._stream_controller._run_one_round("continue work")
 
     agent._coordination_loop.enqueue.assert_awaited_once()
     event = agent._coordination_loop.enqueue.await_args.args[0]
