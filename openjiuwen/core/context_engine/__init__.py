@@ -24,6 +24,7 @@ from openjiuwen.core.context_engine.processor.offloader.message_summary_offloade
 from openjiuwen.core.context_engine.processor.compressor.micro_compact_processor import (
     MicroCompactProcessor,
     MicroCompactProcessorConfig,
+    ToolCompactOverride,
 )
 from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
     DialogueCompressor,
@@ -72,6 +73,7 @@ _PROCESSORS_CLASSES = [
     # micro compact
     "MicroCompactProcessor",
     "MicroCompactProcessorConfig",
+    "ToolCompactOverride",
     # dialogue compressor
     "DialogueCompressor",
     "DialogueCompressorConfig",

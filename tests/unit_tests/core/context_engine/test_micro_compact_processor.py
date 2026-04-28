@@ -10,6 +10,7 @@ import pytest
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.processor.compressor.micro_compact_processor import (
     MicroCompactProcessorConfig,
+    ToolCompactOverride,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage, UserMessage
 
@@ -190,6 +191,101 @@ class TestMicroCompactProcessor:
             "glob-newer",
             "read-newest",
         ]
+
+    @pytest.mark.asyncio
+    async def test_per_tool_override_applies_tighter_policy(self):
+        """A per-tool override tightens compaction for one tool while
+        other whitelisted tools keep using the global policy."""
+        config = MicroCompactProcessorConfig(
+            trigger_threshold=5,
+            keep_recent_per_tool=10,
+            compactable_tool_names=["read_file", "bash"],
+            per_tool_overrides={
+                "bash": ToolCompactOverride(trigger_threshold=0, keep_recent_per_tool=1),
+            },
+        )
+        ctx = await create_context_with_micro_compact(config)
+
+        # 3 bash calls (override: trigger=0, keep=1 -> only last one survives)
+        # and 3 read_file calls (global: 3 < 5+10, no compaction).
+        batch = []
+        for i in range(1, 4):
+            batch.append(AssistantMessage(content="", tool_calls=create_tool_call_list([f"b{i}"], ["bash"])))
+            batch.append(ToolMessage(content=f"bash-{i}", tool_call_id=f"b{i}"))
+        for i in range(1, 4):
+            batch.append(AssistantMessage(content="", tool_calls=create_tool_call_list([f"r{i}"], ["read_file"])))
+            batch.append(ToolMessage(content=f"read-{i}", tool_call_id=f"r{i}"))
+        await ctx.add_messages(batch)
+
+        tool_messages = [m for m in ctx.get_messages() if isinstance(m, ToolMessage)]
+        assert [m.content for m in tool_messages] == [
+            config.cleared_marker, config.cleared_marker, "bash-3",
+            "read-1", "read-2", "read-3",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_per_tool_override_partial_inherits_globals(self):
+        """An override that only sets one field inherits the rest from globals."""
+        config = MicroCompactProcessorConfig(
+            trigger_threshold=1,
+            keep_recent_per_tool=5,
+            compactable_tool_names=["bash"],
+            # trigger_threshold inherits global=1; combined with keep=1 -> limit=2.
+            per_tool_overrides={"bash": ToolCompactOverride(keep_recent_per_tool=1)},
+        )
+        ctx = await create_context_with_micro_compact(config)
+
+        batch = []
+        for i in range(3):
+            batch.append(AssistantMessage(content="", tool_calls=create_tool_call_list([f"b{i}"], ["bash"])))
+            batch.append(ToolMessage(content=f"out-{i}", tool_call_id=f"b{i}"))
+        await ctx.add_messages(batch)
+
+        tool_messages = [m for m in ctx.get_messages() if isinstance(m, ToolMessage)]
+        assert [m.content for m in tool_messages] == [config.cleared_marker, config.cleared_marker, "out-2"]
+
+    @pytest.mark.asyncio
+    async def test_override_for_tool_outside_whitelist_has_no_effect(self):
+        """An override for a tool not in compactable_tool_names is ignored —
+        the whitelist remains the gate (forced tools excepted)."""
+        config = MicroCompactProcessorConfig(
+            trigger_threshold=5,
+            keep_recent_per_tool=10,
+            compactable_tool_names=["read_file"],   # bash NOT whitelisted
+            per_tool_overrides={"bash": ToolCompactOverride(trigger_threshold=0, keep_recent_per_tool=1)},
+        )
+        ctx = await create_context_with_micro_compact(config)
+
+        batch = []
+        for i in range(1, 4):
+            batch.append(AssistantMessage(content="", tool_calls=create_tool_call_list([f"b{i}"], ["bash"])))
+            batch.append(ToolMessage(content=f"out-{i}", tool_call_id=f"b{i}"))
+        await ctx.add_messages(batch)
+
+        tool_messages = [m for m in ctx.get_messages() if isinstance(m, ToolMessage)]
+        assert [m.content for m in tool_messages] == ["out-1", "out-2", "out-3"]
+
+    @pytest.mark.asyncio
+    async def test_skill_step_is_force_compacted_regardless_of_config(self):
+        """``skill_step`` is in the module-level forced-override set: it is
+        always compacted with (trigger=0, keep=1) even when user config
+        omits it from compactable_tool_names and per_tool_overrides."""
+        config = MicroCompactProcessorConfig(
+            trigger_threshold=5,
+            keep_recent_per_tool=10,
+            compactable_tool_names=["read_file"],   # skill_step deliberately absent
+            per_tool_overrides={},
+        )
+        ctx = await create_context_with_micro_compact(config)
+
+        batch = []
+        for i in range(1, 4):
+            batch.append(AssistantMessage(content="", tool_calls=create_tool_call_list([f"s{i}"], ["skill_step"])))
+            batch.append(ToolMessage(content=f"plan-{i}", tool_call_id=f"s{i}"))
+        await ctx.add_messages(batch)
+
+        tool_messages = [m for m in ctx.get_messages() if isinstance(m, ToolMessage)]
+        assert [m.content for m in tool_messages] == [config.cleared_marker, config.cleared_marker, "plan-3"]
 
     @pytest.mark.asyncio
     async def test_cleared_messages_are_not_reprocessed(self):

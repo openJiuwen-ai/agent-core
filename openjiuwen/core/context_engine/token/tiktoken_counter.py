@@ -4,6 +4,8 @@
 import json
 from typing import List, Dict
 
+from pydantic import BaseModel
+
 from openjiuwen.core.foundation.llm import BaseMessage, AssistantMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.context_engine.token.base import TokenCounter
@@ -66,10 +68,13 @@ class TiktokenCounter(TokenCounter):
             return 0
         total = 0
         for idx, tool in enumerate(tools):
+            parameters = tool.parameters
+            if isinstance(parameters, type) and issubclass(parameters, BaseModel):
+                parameters = parameters.model_json_schema()
             function_obj = {
                 "name": tool.name,
                 "description": tool.description or "",
-                "parameters": tool.parameters  # 期望是 JSON Schema dict
+                "parameters": parameters,
             }
             json_str = json.dumps(function_obj, ensure_ascii=False, separators=(",", ":"))
 

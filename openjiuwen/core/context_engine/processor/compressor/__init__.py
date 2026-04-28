@@ -13,6 +13,7 @@ from openjiuwen.core.context_engine.processor.compressor.full_compact_processor 
 from openjiuwen.core.context_engine.processor.compressor.micro_compact_processor import (
     MicroCompactProcessor,
     MicroCompactProcessorConfig,
+    ToolCompactOverride,
 )
 from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
     RoundLevelCompressor,
@@ -28,6 +29,7 @@ __all__ = [
     "FullCompactProcessorConfig",
     "MicroCompactProcessor",
     "MicroCompactProcessorConfig",
+    "ToolCompactOverride",
     "RoundLevelCompressor",
     "RoundLevelCompressorConfig",
 ]

@@ -13,6 +13,8 @@ from typing import (
     Union,
 )
 
+from pydantic import BaseModel
+
 from openjiuwen.core.common.clients.client_registry import get_client_registry
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -254,13 +256,11 @@ class BaseModelClient(ABC):
 
         result = []
         for tool in tools:
-            # Handle parameters (could be dict or BaseModel)
-            if hasattr(tool.parameters, 'model_dump'):
-                # If it's a Pydantic BaseModel
-                parameters = tool.parameters.model_dump()
+            params = tool.parameters
+            if isinstance(params, type) and issubclass(params, BaseModel):
+                parameters = params.model_json_schema()
             else:
-                # If it's already a dict
-                parameters = tool.parameters
+                parameters = params
 
             tool_dict = {
                 "type": tool.type,
