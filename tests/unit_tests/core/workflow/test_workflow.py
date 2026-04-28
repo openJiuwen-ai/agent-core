@@ -29,7 +29,8 @@ from openjiuwen.core.workflow import Workflow, WorkflowExecutionState, WorkflowO
 from openjiuwen.core.workflow import ComponentAbility
 from openjiuwen.core.workflow.components.flow.loop.loop_comp import AdvancedLoopComponent
 from tests.unit_tests.core.workflow.mock_nodes import MockStartNode, MockEndNode, CommonNode, \
-    AddTenNode, Node1, SlowNode, CountNode, StreamNode, CollectCompNode, TransformCompNode, StreamCompNode
+    AddTenNode, Node1, SlowNode, CountNode, StreamNode, CollectCompNode, TransformCompNode, StreamCompNode, \
+    ComputeComponent2
 
 pytestmark = pytest.mark.asyncio
 
@@ -1669,3 +1670,44 @@ async def test_two_iterative_node_and_recover_each():
         OutputSchema(type='end node stream', index=2, payload={'response': {'question': 'bb'}}),
         OutputSchema(type='end node stream', index=3, payload={'response': '####'})]
     assert chunks == right_chunks
+
+
+async def test_consumer_fast_than_producer_node():
+    flow = Workflow()
+    runtime = create_workflow_session()
+
+    flow.set_start_comp("start_id", Start(),
+                        inputs_schema={'a': '${user_inputs.a}', 'b': '${user_inputs.b}'})
+    flow.set_end_comp("end_id", End(), response_mode="streaming",
+                      inputs_schema={'final_result': '${D.result_collect}'})
+
+    inputs_schema_a = {'a': '${start_id.a}', 'b': '${start_id.b}'}
+    flow.add_workflow_comp("A", ComputeComponent2(), inputs_schema=inputs_schema_a)
+
+    inputs_schema_b = {'a': '${A.result}', 'b': '${A.result}'}
+    flow.add_workflow_comp("B", ComputeComponent2(), inputs_schema=inputs_schema_b)
+
+    stream_inputs_schema_c = {'a': '${A.a}', 'op': '${A.op}', 'b': '${A.b}', 'result': '${A.result}'}
+    flow.add_workflow_comp("C", ComputeComponent2(), stream_inputs_schema=stream_inputs_schema_c)
+
+    stream_inputs_schema_d = {'data1': {'a': '${C.a}', 'op': '${C.op}',
+                                        'b': '${C.b}', 'result': '${C.result}'},
+                              'data': {'a': '${B.a}', 'op': '${B.op}',
+                                       'b': '${B.b}', 'result': '${B.result}'}}
+    flow.add_workflow_comp("D", ComputeComponent2(), stream_inputs_schema=stream_inputs_schema_d)
+
+    flow.add_connection("start_id", "A")
+    flow.add_connection("A", "B")
+    flow.add_stream_connection("A", "C")
+    flow.add_stream_connection("B", "D")
+    flow.add_stream_connection("C", "D")
+    flow.add_connection("D", "end_id")
+
+    user_inputs = {'user_inputs': {'a': 1, 'b': 2}}
+
+    stream_chunks = []
+    async for chunk in flow.stream(user_inputs, runtime, stream_modes=[BaseStreamMode.OUTPUT]):
+        stream_chunks.append(chunk)
+    logger.info(f"result: {stream_chunks}")
+    assert len(stream_chunks) == 1
+    assert stream_chunks[-1].payload == {'output': {'final_result': 9}}
