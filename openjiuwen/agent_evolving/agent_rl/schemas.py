@@ -26,12 +26,23 @@ class Rollout(BaseModel):
     - input_prompt["message"]: input message list (OpenAI message format)
     - input_prompt["tools"]:   tool definition list
     - output_response:         LLM output message (content or tool_calls)
+
+    When the LLM service returns token IDs (e.g. vLLM ``return_token_ids``),
+    they are stored in ``input_prompt_ids`` / ``output_response_ids`` so the
+    training encoder can skip local re-tokenisation.  Both fields are ``None``
+    for trajectories collected without that capability.
     """
 
     turn_id: Optional[int] = None
     input_prompt: Optional[Dict[str, Any]] = None
     output_response: Optional[Dict[str, Any]] = None
     llm_config: Optional[Dict[str, Any]] = None
+    input_prompt_ids: Optional[List[int]] = None
+    """Prompt token IDs returned by the LLM service (e.g. vLLM return_token_ids).
+    None when token IDs were not requested or not available."""
+    output_response_ids: Optional[List[int]] = None
+    """Completion token IDs returned by the LLM service.
+    None when token IDs were not requested or not available."""
 
 
 class RolloutMessage(BaseModel):
@@ -191,11 +202,16 @@ def trajectory_to_rollouts(trajectory: Any) -> List[Rollout]:
         if hasattr(step, "meta") and step.meta:
             llm_config = step.meta.get("llm_config")
 
+        prompt_ids: Optional[List[int]] = getattr(step, "prompt_token_ids", None)
+        completion_ids: Optional[List[int]] = getattr(step, "completion_token_ids", None)
+
         rollouts.append(Rollout(
             turn_id=len(rollouts),
             input_prompt=input_prompt,
             output_response=output_response,
             llm_config=llm_config,
+            input_prompt_ids=prompt_ids or None,
+            output_response_ids=completion_ids or None,
         ))
 
     return rollouts

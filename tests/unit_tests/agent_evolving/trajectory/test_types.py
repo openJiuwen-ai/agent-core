@@ -198,12 +198,14 @@ class TestTrajectoryStep:
         step = TrajectoryStep(
             kind="llm",
             reward=1.0,
-            log_probs=[-0.5, -0.3],
-            token_ids=[101, 102, 103],
+            logprobs=[-0.5, -0.3],
+            prompt_token_ids=[1, 2, 3],
+            completion_token_ids=[101, 102, 103],
         )
         assert step.reward == 1.0
-        assert step.log_probs == [-0.5, -0.3]
-        assert step.token_ids == [101, 102, 103]
+        assert step.logprobs == [-0.5, -0.3]
+        assert step.prompt_token_ids == [1, 2, 3]
+        assert step.completion_token_ids == [101, 102, 103]
 
     @staticmethod
     def test_step_with_error():

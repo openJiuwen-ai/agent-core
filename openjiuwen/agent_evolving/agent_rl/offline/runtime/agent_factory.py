@@ -106,8 +106,6 @@ class AgentFactory:
 
         # Enable token ID + logprobs for RL trajectory training
         agent.react_agent.config.llm_return_token_ids = True
-        agent.react_agent.config.llm_logprobs = True
-        agent.react_agent.config.llm_top_logprobs = 1
 
         # Register tools on DeepAgent (will be shared with inner ReActAgent)
         if self._tools:

@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 from openjiuwen.agent_evolving.trajectory import (
     Trajectory,
@@ -39,6 +39,38 @@ from openjiuwen.core.single_agent.rail.base import (
     InvokeInputs,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
+
+
+def _split_response_token_fields(
+    response: Any,
+) -> tuple[Any, Optional[list], Optional[list], Optional[Any]]:
+    """Lift token-level fields out of an LLM response.
+
+    Returns ``(response_for_detail, prompt_token_ids, completion_token_ids,
+    logprobs)``. The returned ``response_for_detail`` has those three
+    fields stripped to avoid duplicate storage in the trajectory.
+
+    The response is typically an ``AssistantMessage`` (Pydantic) carrying
+    ``prompt_token_ids`` / ``completion_token_ids`` / ``logprobs`` as
+    direct attributes (see ``AssistantMessage.model_dump``). Dicts are
+    also accepted; other shapes are passed through untouched.
+    """
+    if response is None:
+        return None, None, None, None
+    response_dict: Any = response
+    if hasattr(response, "model_dump"):
+        try:
+            dumped = response.model_dump()
+        except Exception:
+            dumped = None
+        if isinstance(dumped, dict):
+            response_dict = dumped
+    if not isinstance(response_dict, dict):
+        return response, None, None, None
+    prompt_token_ids = response_dict.pop("prompt_token_ids", None)
+    completion_token_ids = response_dict.pop("completion_token_ids", None)
+    logprobs = response_dict.pop("logprobs", None)
+    return response_dict, prompt_token_ids, completion_token_ids, logprobs
 
 
 class EvolutionTriggerPoint(Enum):
@@ -163,6 +195,9 @@ class EvolutionRail(DeepAgentRail):
 
         # Build LLMCallDetail
         detail: Optional[LLMCallDetail] = None
+        prompt_token_ids = None
+        completion_token_ids = None
+        logprobs = None
         if inputs.messages or inputs.response:
             model_name = "unknown"
             if model_name == "unknown" and ctx.agent:
@@ -170,10 +205,14 @@ class EvolutionRail(DeepAgentRail):
                 if config:
                     model_name = getattr(config, "model", None) or model_name
 
+            response_dict, prompt_token_ids, completion_token_ids, logprobs = (
+                _split_response_token_fields(inputs.response)
+            )
+
             detail = LLMCallDetail(
                 model=model_name,
                 messages=list(inputs.messages) if inputs.messages else [],
-                response=inputs.response,
+                response=response_dict,
                 tools=list(inputs.tools) if inputs.tools else None,
             )
 
@@ -184,6 +223,9 @@ class EvolutionRail(DeepAgentRail):
         step = TrajectoryStep(
             kind="llm",
             detail=detail,
+            prompt_token_ids=prompt_token_ids,
+            completion_token_ids=completion_token_ids,
+            logprobs=logprobs,
             meta={
                 "operator_id": f"{agent_id_str}/llm_main",
                 "agent_id": agent_id_str,

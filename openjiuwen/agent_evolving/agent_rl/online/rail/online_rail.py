@@ -94,16 +94,23 @@ class RLOnlineRail(EvolutionRail):
         last_step = self._builder.steps[-1]
         if last_step.kind != "llm":
             return
+        # The base ``EvolutionRail`` already lifts top-level
+        # prompt/completion token ids and logprobs from the response into
+        # the step. Fall back to deeper extraction (e.g. nested
+        # ``response.metadata.choices[0]``) only when those are empty.
         response = getattr(ctx.inputs, "response", None)
-        prompt_ids = extract_prompt_ids(response)
-        token_ids = extract_token_ids(response)
-        logprobs = extract_logprobs(response)
-        if prompt_ids is not None:
-            last_step.meta["prompt_ids"] = prompt_ids
-        if token_ids is not None:
-            last_step.token_ids = token_ids
-        if logprobs is not None:
-            last_step.log_probs = logprobs
+        if last_step.prompt_token_ids is None:
+            prompt_ids = extract_prompt_ids(response)
+            if prompt_ids is not None:
+                last_step.prompt_token_ids = prompt_ids
+        if last_step.completion_token_ids is None:
+            token_ids = extract_token_ids(response)
+            if token_ids is not None:
+                last_step.completion_token_ids = token_ids
+        if last_step.logprobs is None:
+            logprobs = extract_logprobs(response)
+            if logprobs is not None:
+                last_step.logprobs = logprobs
         last_step.meta.update({
             "turn_id": self._llm_step_count - 1,
             "source": "rl_online",

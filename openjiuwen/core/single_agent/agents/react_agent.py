@@ -795,6 +795,9 @@ class ReActAgent(BaseAgent):
                 tool_calls=accumulated_chunk.tool_calls or [],
                 usage_metadata=accumulated_chunk.usage_metadata,
                 reasoning_content=accumulated_chunk.reasoning_content,
+                prompt_token_ids=accumulated_chunk.prompt_token_ids,
+                completion_token_ids=accumulated_chunk.completion_token_ids,
+                logprobs=accumulated_chunk.logprobs,
             )
         ctx.inputs.response = ai_message
         if ai_message.usage_metadata:

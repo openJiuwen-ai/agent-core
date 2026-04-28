@@ -94,6 +94,57 @@ class TestRolloutEncoderBuildWholeTrajectory:
         assert out[0].n_turns == 3
 
 
+class TestRolloutEncoderPrecomputedIds:
+    """Fast-path: rollout carries server-side token IDs → tokenizer is NOT called."""
+
+    @staticmethod
+    def test_build_uses_precomputed_ids_without_tokenizer(mock_tokenizer):
+        called = []
+
+        class FailTokenizer:
+            def apply_chat_template(self, *args, **kwargs):
+                called.append("apply_chat_template")
+                return ""
+
+            def encode(self, *args, **kwargs):
+                called.append("encode")
+                return []
+
+        enc = RolloutEncoder(tokenizer=FailTokenizer())
+        msg = RolloutMessage(
+            task_id="t1",
+            origin_task_id="o1",
+            rollout_id="r1",
+            rollout_info=[
+                Rollout(
+                    turn_id=0,
+                    input_prompt={"message": [{"role": "user", "content": "hi"}]},
+                    output_response={"role": "assistant", "content": "hello"},
+                    input_prompt_ids=[1, 2, 3],
+                    output_response_ids=[4, 5],
+                )
+            ],
+            reward_list=[1.0],
+            global_reward=1.0,
+            turn_count=1,
+            round_num=0,
+        )
+        out = enc.build(msg)
+        assert len(out) == 1
+        assert out[0].input_prompt_ids == [1, 2, 3]
+        assert out[0].output_response_ids == [4, 5]
+        assert out[0].reward == 1.0
+        assert called == [], "tokenizer should not be called when precomputed IDs are present"
+
+    @staticmethod
+    def test_build_falls_back_to_tokenizer_when_ids_missing(encoder):
+        msg = _rollout_msg_single_turn(encoder)
+        out = encoder.build(msg)
+        assert len(out) == 1
+        assert len(out[0].input_prompt_ids) > 0
+        assert len(out[0].output_response_ids) > 0
+
+
 class TestSchemasInContext:
     @staticmethod
     def test_legal_rollout_message_produces_non_empty_build(encoder):
