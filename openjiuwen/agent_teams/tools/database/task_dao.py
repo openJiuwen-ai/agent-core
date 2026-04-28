@@ -101,39 +101,14 @@ class TaskDao:
             result = await session.execute(query)
             return result.scalars().all()
 
-    async def assign_task(self, task_id: str, member_name: str) -> bool:
-        """Assign a task to a member and mark it as claimed."""
-        team_task_model = _get_task_model()
-        async with self._session_local() as session:
-            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
-            task = result.scalar_one_or_none()
-            if not task:
-                team_logger.error("Task %s not found", task_id)
-                return False
-            if task.assignee:
-                team_logger.warning("Task %s already assigned to %s", task_id, task.assignee)
-                return False
-            if not is_valid_transition(
-                TaskStatus(task.status),
-                TaskStatus.CLAIMED,
-                TASK_TRANSITIONS,
-            ):
-                team_logger.error(
-                    "Invalid state transition for task %s: %s -> %s",
-                    task_id,
-                    task.status,
-                    TaskStatus.CLAIMED.value,
-                )
-                return False
-            task.assignee = member_name
-            task.status = TaskStatus.CLAIMED.value
-            task.updated_at = get_current_time()
-            await session.commit()
-            team_logger.info("Task %s assigned to %s (status=claimed)", task_id, member_name)
-            return True
-
     async def claim_task(self, task_id: str, member_name: str) -> bool:
-        """Claim a task for a member."""
+        """Bind a task to ``member_name`` and move it to CLAIMED.
+
+        Single entry point for both teammate self-claim and leader-side
+        assign — the persistence step is identical in both cases.
+        Higher-level semantics (who initiated, what to log) belong in
+        the caller.
+        """
         team_task_model = _get_task_model()
         async with self._session_local() as session:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))

@@ -625,7 +625,7 @@ class TestUpdateTaskTool:
                 status=MemberStatus.READY,
             )
         task = await agent_team.task_manager.add(title="Task", content="Content")
-        await db.task.assign_task(task.task_id, "dev-1")
+        await db.task.claim_task(task.task_id, "dev-1")
 
         tool = UpdateTaskTool(agent_team, t)
         result = await tool.invoke({

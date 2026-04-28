@@ -488,7 +488,7 @@ class TeamTaskManager:
                 f"Task {task_id} is already claimed by {task.assignee}; reset the task before reassigning to {assignee}"
             )
 
-        success = await self.db.task.assign_task(task_id, assignee)
+        success = await self.db.task.claim_task(task_id, assignee)
         if not success:
             return TaskOpResult.fail(
                 f"Database rejected assign for task {task_id} (invalid state transition from {task.status})"
