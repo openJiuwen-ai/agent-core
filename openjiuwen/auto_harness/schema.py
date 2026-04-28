@@ -34,7 +34,7 @@ def _default_immutable_files() -> list[str]:
     return [
         "openjiuwen/auto_harness/prompts/identity.md",
         "openjiuwen/auto_harness/resources/ci_gate.yaml",
-        "openjiuwen/harness/rails/security_rail.py",
+        "openjiuwen/harness/rails/security_rail/prompt_security_rail.py",
     ]
 
 
@@ -282,7 +282,7 @@ class ProjectProfile:
         default_factory=lambda: [
             "openjiuwen/auto_harness/prompts/identity.md",
             "openjiuwen/auto_harness/resources/ci_gate.yaml",
-            "openjiuwen/harness/rails/security_rail.py",
+            "openjiuwen/harness/rails/security_rail/prompt_security_rail.py",
         ]
     )
     high_impact_prefixes: List[str] = field(

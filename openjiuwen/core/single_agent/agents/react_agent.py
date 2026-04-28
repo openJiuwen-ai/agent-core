@@ -167,6 +167,21 @@ class ReActAgentConfig(BaseModel):
 
     max_iterations: int = Field(default=5, description="Maximum iterations")
 
+    llm_return_token_ids: bool = Field(
+        default=False,
+        description="Whether to request token IDs from LLM (for RL trajectory collection)"
+    )
+    llm_logprobs: bool = Field(
+        default=False,
+        description="Whether to request logprobs from LLM (requires provider support)",
+    )
+    llm_top_logprobs: int = Field(
+        default=1,
+        ge=0,
+        le=20,
+        description="Number of top logprobs per token when llm_logprobs is True (OpenAI: 0–20)",
+    )
+
     # LLM configuration objects (for Model initialization)
     model_client_config: Optional[ModelClientConfig] = Field(
         default=None,
@@ -725,6 +740,13 @@ class ReActAgent(BaseAgent):
                 enable_kv_cache_release=enable_kv_release,
             ))
 
+        if self._config.llm_return_token_ids:
+            extra_kwargs["return_token_ids"] = True
+
+        if self._config.llm_logprobs:
+            extra_kwargs["logprobs"] = True
+            extra_kwargs["top_logprobs"] = self._config.llm_top_logprobs
+
         if not ctx.extra.get("_streaming"):
             ai_message = await llm.invoke(
                 model=self._config.model_name,
@@ -1126,11 +1148,9 @@ class ReActAgent(BaseAgent):
             session: Optional[Session]
     ) -> ModelContext:
         if self._config.context_processors:
-            from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
             context = await self.context_engine.create_context(
                 session=session,
                 processors=self._config.context_processors,
-                token_counter=TiktokenCounter()
             )
         else:
             context = await self.context_engine.create_context(
@@ -1286,7 +1306,12 @@ class ReActAgent(BaseAgent):
                             break
 
                         await context.add_messages(
-                            AssistantMessage(content=ai_message.content, tool_calls=ai_message.tool_calls)
+                            AssistantMessage(
+                                content=ai_message.content,
+                                tool_calls=ai_message.tool_calls,
+                                reasoning_content=ai_message.reasoning_content,
+                                usage_metadata=ai_message.usage_metadata
+                            )
                         )
 
                         if not ai_message.tool_calls:
@@ -1435,7 +1460,11 @@ class ReActAgent(BaseAgent):
                         final_result, session
                     )
             except Exception as e:
-                logger.error(f"ReActAgent stream error: {e}")
+                logger.error(f"ReActAgent stream error: {e}", exc_info=True)
+                error_result = {"output": str(e), "result_type": "error"}
+                await self._write_invoke_result_to_stream(
+                    error_result, session
+                )
             finally:
                 if need_cleanup:
                     await self.context_engine.save_contexts(session)

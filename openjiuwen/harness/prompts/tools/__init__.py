@@ -38,6 +38,13 @@ from openjiuwen.harness.prompts.tools.code import (
 )
 from openjiuwen.harness.prompts.tools.cron import (
     CronMetadataProvider,
+    CronListJobsMetadataProvider,
+    CronGetJobMetadataProvider,
+    CronCreateJobMetadataProvider,
+    CronUpdateJobMetadataProvider,
+    CronDeleteJobMetadataProvider,
+    CronToggleJobMetadataProvider,
+    CronPreviewJobMetadataProvider,
 )
 from openjiuwen.harness.prompts.tools.filesystem import (
     ReadFileMetadataProvider,
@@ -93,6 +100,10 @@ from openjiuwen.harness.prompts.tools.agent_mode import (
     EnterPlanModeMetadataProvider,
     ExitPlanModeMetadataProvider,
 )
+from openjiuwen.harness.prompts.tools.mcp import (
+    ListMcpResourcesMetadataProvider,
+    ReadMcpResourceMetadataProvider,
+)
 
 # ---------------------------------------------------------------------------
 # Provider registry
@@ -106,6 +117,13 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     AudioMetadataMetadataProvider(),
     CodeMetadataProvider(),
     CronMetadataProvider(),
+    CronListJobsMetadataProvider(),
+    CronGetJobMetadataProvider(),
+    CronCreateJobMetadataProvider(),
+    CronUpdateJobMetadataProvider(),
+    CronDeleteJobMetadataProvider(),
+    CronToggleJobMetadataProvider(),
+    CronPreviewJobMetadataProvider(),
     ReadFileMetadataProvider(),
     WriteFileMetadataProvider(),
     EditFileMetadataProvider(),
@@ -134,6 +152,8 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     SwitchModeMetadataProvider(),
     EnterPlanModeMetadataProvider(),
     ExitPlanModeMetadataProvider(),
+    ListMcpResourcesMetadataProvider(),
+    ReadMcpResourceMetadataProvider(),
 ]
 
 _REGISTRY: Dict[str, ToolMetadataProvider] = {

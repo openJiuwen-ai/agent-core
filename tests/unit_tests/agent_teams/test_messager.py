@@ -33,6 +33,7 @@ def _clean_bus():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
 async def test_inprocess_messager_is_messager() -> None:
     config = MessagerTransportConfig(
         backend="inprocess",
@@ -44,6 +45,7 @@ async def test_inprocess_messager_is_messager() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
 async def test_inprocess_pubsub_delivers_to_subscriber() -> None:
     """publish fans out to all subscribed handlers."""
     received: list[BaseEventMessage] = []
@@ -64,6 +66,7 @@ async def test_inprocess_pubsub_delivers_to_subscriber() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
 async def test_inprocess_publish_stamps_sender_id() -> None:
     """publish must stamp sender_id so subscribers can filter self-events."""
     received: list[EventMessage] = []
@@ -85,6 +88,7 @@ async def test_inprocess_publish_stamps_sender_id() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
 async def test_inprocess_pubsub_fan_out() -> None:
     """Multiple subscribers on the same topic all receive the message."""
     received_a: list[BaseEventMessage] = []
@@ -110,6 +114,7 @@ async def test_inprocess_pubsub_fan_out() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_inprocess_unsubscribe_stops_delivery() -> None:
     received: list[BaseEventMessage] = []
 
@@ -125,6 +130,7 @@ async def test_inprocess_unsubscribe_stops_delivery() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_inprocess_p2p_delivers_to_handler() -> None:
     """send delivers to the registered direct-message handler."""
     received: list[BaseEventMessage] = []
@@ -145,6 +151,7 @@ async def test_inprocess_p2p_delivers_to_handler() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_inprocess_unregister_p2p_stops_delivery() -> None:
     received: list[BaseEventMessage] = []
 
@@ -160,6 +167,7 @@ async def test_inprocess_unregister_p2p_stops_delivery() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_inprocess_pubsub_handler_error_does_not_block_others() -> None:
     """A failing handler should not prevent other subscribers from receiving."""
     received: list[BaseEventMessage] = []
@@ -184,11 +192,13 @@ async def test_inprocess_pubsub_handler_error_does_not_block_others() -> None:
 # === Factory ===
 
 
+@pytest.mark.level1
 def test_create_messager_builds_inprocess() -> None:
     transport = create_messager(MessagerTransportConfig(backend="inprocess"))
     assert isinstance(transport, InProcessMessager)
 
 
+@pytest.mark.level1
 def test_create_messager_builds_pyzmq() -> None:
     transport = create_messager(
         MessagerTransportConfig(
@@ -207,6 +217,7 @@ def test_create_messager_builds_pyzmq() -> None:
 # === Model roundtrip ===
 
 
+@pytest.mark.level1
 def test_models_roundtrip_with_pydantic_serialization() -> None:
     subscription = SubscriptionHandle(
         subscription_id="sub-1",

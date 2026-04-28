@@ -2,7 +2,7 @@
 """Factory for creating TeamAgent instances."""
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Union
 
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 from openjiuwen.agent_teams.schema.blueprint import (
@@ -15,6 +15,7 @@ from openjiuwen.agent_teams.schema.blueprint import (
 from openjiuwen.agent_teams.schema.team import TeamMemberSpec
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.agent_teams.worktree.models import WorktreeConfig
+from openjiuwen.core.session.agent_team import Session as AgentTeamSession
 
 
 def create_agent_team(
@@ -71,7 +72,10 @@ def create_agent_team(
     return spec.build()
 
 
-async def recover_agent_team(session_id: str, db_config: Optional[DatabaseConfig] = None) -> TeamAgent:
+async def recover_agent_team(
+    session: Union[str, AgentTeamSession],
+    db_config: Optional[DatabaseConfig] = None,
+) -> TeamAgent:
     """Recover a leader TeamAgent after full team restart.
 
     Restores the leader from persisted session state, then re-launches
@@ -81,13 +85,16 @@ async def recover_agent_team(session_id: str, db_config: Optional[DatabaseConfig
     state survives across process restarts.
 
     Args:
-        session_id: The original session ID from the previous run.
+        session: The original session ID from the previous run or an
+            existing prepared team session.
         db_config: Database config (used only if session state is unavailable).
     """
-    from openjiuwen.core.session.agent_team import create_agent_team_session
+    if isinstance(session, str):
+        from openjiuwen.core.session.agent_team import create_agent_team_session
 
-    session = create_agent_team_session(session_id=session_id)
-    await session.pre_run()  # triggers checkpointer.recover()
+        session = create_agent_team_session(session_id=session)
+        await session.pre_run()  # triggers checkpointer.recover()
+
     agent = TeamAgent.recover_from_session(session)
     await agent.recover_team()
     return agent
@@ -95,7 +102,7 @@ async def recover_agent_team(session_id: str, db_config: Optional[DatabaseConfig
 
 async def resume_persistent_team(
     agent: TeamAgent,
-    new_session_id: str,
+    session: Union[str, AgentTeamSession],
 ) -> TeamAgent:
     """Resume a persistent team in a new session.
 
@@ -106,14 +113,47 @@ async def resume_persistent_team(
     Args:
         agent: A configured persistent-team leader that has
             completed at least one round.
-        new_session_id: Session ID for the new round.
+        session: Session ID for the new round or an existing prepared
+            team session.
     """
-    from openjiuwen.core.session.agent_team import create_agent_team_session
+    if isinstance(session, str):
+        from openjiuwen.core.session.agent_team import create_agent_team_session
 
-    session = create_agent_team_session(session_id=new_session_id)
-    await session.pre_run()
+        session = create_agent_team_session(session_id=session)
+        await session.pre_run()
+
     await agent.resume_for_new_session(session)
     return agent
 
 
-__all__ = ["create_agent_team", "recover_agent_team", "resume_persistent_team"]
+async def recover_for_existing_session(
+    agent: TeamAgent,
+    session: Union[str, AgentTeamSession],
+) -> TeamAgent:
+    """Recover an existing session on a running TeamAgent.
+
+    Reuses the current agent and restores the session state from checkpoint.
+    This avoids creating a new agent when switching between sessions of the
+    same team while the leader process is still running.
+
+    Args:
+        agent: A running TeamAgent (leader) that belongs to the same team.
+        session: Session ID for the existing session or an existing prepared
+            team session (must have checkpoint).
+    """
+    if isinstance(session, str):
+        from openjiuwen.core.session.agent_team import create_agent_team_session
+
+        session = create_agent_team_session(session_id=session)
+        await session.pre_run()
+
+    await agent.recover_for_existing_session(session)
+    return agent
+
+
+__all__ = [
+    "create_agent_team",
+    "recover_agent_team",
+    "recover_for_existing_session",
+    "resume_persistent_team",
+]

@@ -26,7 +26,7 @@ from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent, Workspace
 from openjiuwen.harness.deep_agent import DeepAgent
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.schema.config import DeepAgentConfig, SubAgentConfig
 from openjiuwen.harness.subagents import (
     build_code_agent_config,
@@ -889,7 +889,7 @@ def test_create_code_agent_injects_default_code_tool_and_fs_rail() -> None:
 
     assert isinstance(agent, DeepAgent)
     assert agent.card.name == "code_agent"
-    assert any(isinstance(rail, FileSystemRail) for rail in agent._pending_rails)
+    assert any(isinstance(rail, SysOperationRail) for rail in agent._pending_rails)
 
 
 def test_create_code_agent_accepts_explicit_mcps() -> None:
@@ -953,7 +953,7 @@ def test_create_subagent_uses_code_agent_factory(tmp_path) -> None:
     assert call_kwargs["card"].name == "code_agent"
     assert call_kwargs["tools"] is None
     assert call_kwargs["rails"] is None
-    assert call_kwargs["workspace"].root_path.endswith("/sub_session_id")
+    assert Path(call_kwargs["workspace"].root_path).name == "sub_session_id"
 
 
 def test_create_subagent_uses_research_agent_factory(tmp_path) -> None:
@@ -979,7 +979,7 @@ def test_create_subagent_uses_research_agent_factory(tmp_path) -> None:
     assert call_kwargs["card"].name == "research_agent"
     assert call_kwargs["tools"] is None
     assert call_kwargs["rails"] is None
-    assert call_kwargs["workspace"].root_path.endswith("/sub_session_id")
+    assert Path(call_kwargs["workspace"].root_path).name == "sub_session_id"
 
 
 @pytest.mark.asyncio

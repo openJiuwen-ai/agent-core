@@ -17,7 +17,7 @@ Explicitly NOT responsible for:
 from __future__ import annotations
 
 import uuid
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from openjiuwen.agent_evolving.trajectory.types import (
     LLMCallDetail,
@@ -49,6 +49,8 @@ class TrajectoryBuilder:
         session_id: str,
         source: str,  # "online" | "offline"
         case_id: Optional[str] = None,
+        member_id: Optional[str] = None,
+        meta: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Initialize builder.
 
@@ -57,10 +59,16 @@ class TrajectoryBuilder:
                 case_id for offline)
             source: Source type - "online" or "offline"
             case_id: Optional case ID (for offline scenarios)
+            member_id: Optional team member identifier for trajectory aggregation.
+            meta: Optional extension metadata.
         """
         self.session_id = session_id
         self.source = source
         self.case_id = case_id
+        self.member_id = member_id
+        self.meta: Dict[str, Any] = dict(meta or {})
+        if member_id:
+            self.meta.setdefault("member_id", member_id)
         self.steps: List[TrajectoryStep] = []
         self.cost: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
         self._start_time_ms: Optional[int] = None
@@ -76,12 +84,8 @@ class TrajectoryBuilder:
         # Accumulate token usage from LLM steps
         if step.kind == "llm" and step.detail:
             if isinstance(step.detail, LLMCallDetail) and step.detail.usage:
-                self.cost["input_tokens"] += step.detail.usage.get(
-                    "prompt_tokens", 0
-                )
-                self.cost["output_tokens"] += step.detail.usage.get(
-                    "completion_tokens", 0
-                )
+                self.cost["input_tokens"] += step.detail.usage.get("prompt_tokens", 0)
+                self.cost["output_tokens"] += step.detail.usage.get("completion_tokens", 0)
 
         # Record start time
         if self._start_time_ms is None and step.start_time_ms:
@@ -93,6 +97,9 @@ class TrajectoryBuilder:
         Returns:
             Assembled Trajectory with all steps and metadata
         """
+        meta: dict[str, Any] = {}
+        if self.member_id:
+            meta["member_id"] = self.member_id
         return Trajectory(
             execution_id=_generate_uuid(),
             session_id=self.session_id,
@@ -100,4 +107,5 @@ class TrajectoryBuilder:
             case_id=self.case_id,
             steps=self.steps,
             cost=self.cost if self.cost["input_tokens"] > 0 else None,
+            meta=dict(self.meta),
         )

@@ -53,6 +53,8 @@ class LSPClient:
         # so that stop() can cancel it directly without relying on _read_loop's
         # finally block running first.
         self._stderr_task: asyncio.Task[None] | None = None
+        # method → list of callables registered via add_notification_handler()
+        self._notification_handlers: dict[str, list[Callable[[Any], None]]] = {}
 
     @property
     def capabilities(self) -> dict[str, Any] | None:
@@ -113,6 +115,17 @@ class LSPClient:
 
         self._is_initialized = True
         return result
+
+    def add_notification_handler(
+        self, method: str, handler: Callable[[Any], None]
+    ) -> None:
+        """Register *handler* to be called when a server push notification for
+        *method* arrives.
+
+        Multiple handlers for the same method are called in registration order.
+        Safe to call before :meth:`initialize`.
+        """
+        self._notification_handlers.setdefault(method, []).append(handler)
 
     async def send_request(self, method: str, params: Any) -> Any:
         """Send LSP request and wait for response."""
@@ -278,10 +291,20 @@ class LSPClient:
                 asyncio.create_task(self._handle_server_request(method, msg_id, message.get("params")))
             return
 
-        # Handle server-initiated notifications (e.g., window/logMessage, telemetry/event)
-        # These have 'method' but no 'id' — just log them
+        # Handle server-initiated notifications (e.g., publishDiagnostics, window/logMessage)
+        # These have 'method' but no 'id'.
         if msg_id is None and method is not None:
-            if method.startswith("window/") or method.startswith("telemetry/"):
+            handlers = self._notification_handlers.get(method)
+            if handlers:
+                params = message.get("params")
+                for handler in handlers:
+                    try:
+                        handler(params)
+                    except Exception as exc:
+                        logger.debug(
+                            "[_dispatch] notification handler error for %s: %s", method, exc
+                        )
+            elif method.startswith("window/") or method.startswith("telemetry/"):
                 logger.debug("[_dispatch] server notification: %s", method)
             return
 

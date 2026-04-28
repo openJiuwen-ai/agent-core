@@ -14,8 +14,8 @@ from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
-from openjiuwen.harness.rails.verification_rail import VerificationRail
+from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
+from openjiuwen.harness.rails.subagent.verification_rail import VerificationRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.workspace.workspace import Workspace
 
@@ -303,7 +303,7 @@ def build_verification_agent_config(
         tools=list(tools or []),
         mcps=list(mcps or []),
         model=model,
-        rails=rails if rails is not None else [FileSystemRail(), VerificationRail()],
+        rails=rails if rails is not None else [SysOperationRail(), VerificationRail()],
         skills=skills,
         backend=backend,
         workspace=workspace,
@@ -350,7 +350,7 @@ def create_verification_agent(
         tools=tools,
         mcps=mcps,
         subagents=subagents,
-        rails=rails if rails is not None else [FileSystemRail(), VerificationRail()],
+        rails=rails if rails is not None else [SysOperationRail(), VerificationRail()],
         enable_task_loop=enable_task_loop,
         max_iterations=max_iterations,
         workspace=workspace,

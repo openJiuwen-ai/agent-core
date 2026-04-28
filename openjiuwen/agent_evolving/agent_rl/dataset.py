@@ -1,5 +1,6 @@
 # coding: utf-8
 
+import json
 import os
 import tempfile
 from dataclasses import dataclass
@@ -24,7 +25,13 @@ class AgentDataset(RLHFDataset):
 
     def __getitem__(self, item: int) -> dict:
         row_dict: dict = self.dataframe[item]
-        index = row_dict.get("extra_info", {}).get("index", 0)
+        extra_info = row_dict.get("extra_info", {})
+        if isinstance(extra_info, str):
+            try:
+                extra_info = json.loads(extra_info)
+            except (json.JSONDecodeError, TypeError):
+                extra_info = {}
+        index = extra_info.get("index", 0) if isinstance(extra_info, dict) else 0
         row_dict["index"] = index
         row_dict["fake_ids"] = torch.ones(1, dtype=torch.int)
         return row_dict

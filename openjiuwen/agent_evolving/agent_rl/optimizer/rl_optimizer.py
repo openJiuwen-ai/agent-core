@@ -1,4 +1,5 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import os
 from abc import ABC, abstractmethod
@@ -294,7 +295,7 @@ class OfflineRLOptimizer(BaseRLOptimizer):
 class OnlineRLOptimizer(BaseRLOptimizer):
     def __init__(self, config: RLConfig) -> None:
         super().__init__(config)
-        self._gateway_url: str = ""
+        self._redis_url: str = ""
         self._lora_repo_root: str = ""
         self._vllm_url: str = ""
         self._poll_interval: float = 30.0
@@ -305,16 +306,38 @@ class OnlineRLOptimizer(BaseRLOptimizer):
         self._scheduler = None
         self._ppo_runner = None
 
+    def setup_redis(
+        self,
+        redis_url: str,
+        poll_interval: float = 30.0,
+        min_samples: int = 4,
+    ) -> "OnlineRLOptimizer":
+        self._redis_url = redis_url.rstrip("/")
+        self._poll_interval = poll_interval
+        self._min_samples = min_samples
+        return self
+
     def setup_gateway(
         self,
         gateway_url: str,
         poll_interval: float = 30.0,
         min_samples: int = 4,
     ) -> "OnlineRLOptimizer":
-        self._gateway_url = gateway_url.rstrip("/")
-        self._poll_interval = poll_interval
-        self._min_samples = min_samples
-        return self
+        logger.warning(
+            "setup_gateway() is deprecated for OnlineRLOptimizer; use setup_redis() instead"
+        )
+        normalized = gateway_url.strip()
+        if not normalized.startswith(("redis://", "rediss://")):
+            raise ValueError(
+                "setup_gateway() no longer accepts HTTP Gateway URLs. "
+                "OnlineRLOptimizer now polls Redis directly; call setup_redis() "
+                "with a redis:// or rediss:// URL instead."
+            )
+        return self.setup_redis(
+            normalized,
+            poll_interval=poll_interval,
+            min_samples=min_samples,
+        )
 
     def setup_lora_repo(self, lora_repo_root: str) -> "OnlineRLOptimizer":
         self._lora_repo_root = lora_repo_root
@@ -358,15 +381,15 @@ class OnlineRLOptimizer(BaseRLOptimizer):
         )
 
     def start_training(self) -> None:
-        if not self._gateway_url:
+        if not self._redis_url:
             raise ValueError(
-                "Gateway URL not configured. Call setup_gateway() first."
+                "Redis URL not configured. Call setup_redis() first."
             )
 
         from openjiuwen.agent_evolving.agent_rl.online.scheduler.online_training_scheduler import (
             OnlineTrainingScheduler,
         )
-        from openjiuwen.agent_evolving.agent_rl.online.storage.lora_repo import LoRARepository
+        from openjiuwen.agent_evolving.agent_rl.storage.lora_repo import LoRARepository
         from openjiuwen.agent_evolving.agent_rl.online.inference.notifier import InferenceNotifier
 
         lora_repo = (
@@ -375,7 +398,7 @@ class OnlineRLOptimizer(BaseRLOptimizer):
         notifier = InferenceNotifier(self._vllm_url) if self._vllm_url else None
 
         self._scheduler = OnlineTrainingScheduler(
-            gateway_url=self._gateway_url,
+            redis_url=self._redis_url,
             poll_interval=self._poll_interval,
             min_samples_for_training=self._min_samples,
             base_model_path=self.config.training.model_path,
@@ -387,8 +410,8 @@ class OnlineRLOptimizer(BaseRLOptimizer):
         )
         self._scheduler.start()
         logger.info(
-            "OnlineTrainingScheduler started: gateway=%s min_samples=%d poll=%.0fs",
-            self._gateway_url,
+            "OnlineTrainingScheduler started: redis=%s min_samples=%d poll=%.0fs",
+            self._redis_url,
             self._min_samples,
             self._poll_interval,
         )
@@ -405,16 +428,12 @@ class OnlineRLOptimizer(BaseRLOptimizer):
 
     def train_on_batch(self, samples: list[dict]) -> dict:
         import ray_adapter as ray
-        from openjiuwen.agent_evolving.agent_rl.online.trainer.online_ppo_trainer import (
-            OnlineTaskRunner,
-            _compose_online_ppo_config,
-        )
-        from openjiuwen.agent_evolving.agent_rl.online.gateway.verl_converter import (
-            VerlDataProtoConverter,
-        )
+        from openjiuwen.agent_evolving.agent_rl.online.scheduler.ppo_config import compose_online_ppo_config
+        from openjiuwen.agent_evolving.agent_rl.optimizer.task_runner import OnlineTaskRunner
+        from openjiuwen.agent_evolving.agent_rl.rl_trainer.verl_converter import VerlDataProtoConverter
 
         if self._ppo_runner is None:
-            config = _compose_online_ppo_config(
+            config = compose_online_ppo_config(
                 model_path=self.config.training.model_path,
                 n_gpus_per_node=self._nproc_per_node,
                 config_path=self._ppo_config_path,

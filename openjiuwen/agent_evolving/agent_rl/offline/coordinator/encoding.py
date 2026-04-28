@@ -89,6 +89,35 @@ class RolloutEncoder:
         *, should_log=False, total_turns=1, ground_truth=""
     ) -> RolloutWithReward:
         """Build a single input-output rollout sample."""
+        pre_pid = pre_rid = None
+        resp = rollout.output_response
+        if isinstance(resp, dict):
+            meta = resp.get("metadata")
+            if isinstance(meta, dict):
+                pid = meta.get("prompt_token_ids")
+                rid = meta.get("completion_token_ids")
+                if isinstance(pid, list) and isinstance(rid, list):
+                    if pid and rid:
+                        pre_pid, pre_rid = pid, rid
+        if pre_pid and pre_rid:
+            if should_log:
+                logger.info(
+                    "[turn %d/%d] using precomputed token IDs: prompt_len=%d  output_len=%d  reward=%.2f",
+                    turn_id + 1, total_turns,
+                    len(pre_pid), len(pre_rid),
+                    reward,
+                )
+            return RolloutWithReward(
+                turn_id=turn_id,
+                task_id=task_id,
+                rollout_id=rollout_id,
+                input_prompt_ids=pre_pid,
+                output_response_ids=pre_rid,
+                reward=reward,
+                n_turns=total_turns,
+            )
+        
+        # Fallback to tokenizer-based encoding
         input_messages = rollout.input_prompt["message"]
         output_messages = [rollout.output_response]
         full_messages = input_messages + output_messages

@@ -58,7 +58,7 @@ class TeamWorkspaceConfig(BaseModel):
     ``openjiuwen.agent_teams.paths``."""
 
     artifact_dirs: list[str] = Field(
-        default=["artifacts/code", "artifacts/docs", "artifacts/reports"],
+        default=["artifacts/code", "artifacts/docs", "artifacts/reports", "trajectories"],
     )
     """Pre-created artifact directories."""
 

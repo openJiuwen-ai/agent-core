@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.harness.rails.subagent_rail import SubagentRail
+from openjiuwen.harness.rails.subagent.subagent_rail import SubagentRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 
 _TASK_SYSTEM_PROMPT = "openjiuwen.harness.prompts.sections.task_tool.build_task_system_prompt"
@@ -39,8 +39,8 @@ class TestSubagentRail:
         assert rail.priority == 95
 
     @staticmethod
-    @patch("openjiuwen.harness.rails.subagent_rail.Runner")
-    @patch("openjiuwen.harness.rails.subagent_rail.create_task_tool")
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.Runner")
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool")
     def test_init_with_subagents(mock_create_task_tool, mock_runner):
         """Test init method when subagents are configured."""
         mock_tool = _make_tool_mock()
@@ -70,7 +70,7 @@ class TestSubagentRail:
         assert rail.tools == [mock_tool]
 
     @staticmethod
-    @patch("openjiuwen.harness.rails.subagent_rail.logger")
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.logger")
     def test_init_without_subagents(mock_logger):
         """Test init method when no subagents are configured."""
         mock_agent = Mock()
@@ -98,7 +98,7 @@ class TestSubagentRail:
         rail = SubagentRail()
         rail.tools = [mock_tool]
 
-        with patch("openjiuwen.harness.rails.subagent_rail.Runner") as mock_runner:
+        with patch("openjiuwen.harness.rails.subagent.subagent_rail.Runner") as mock_runner:
             mock_resource_mgr = Mock()
             mock_runner.resource_mgr = mock_resource_mgr
 
@@ -108,7 +108,7 @@ class TestSubagentRail:
             mock_resource_mgr.remove_tool.assert_called_once_with("test_tool_id")
 
     @staticmethod
-    @patch("openjiuwen.harness.rails.subagent_rail.logger")
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.logger")
     def test_uninit_without_tools(mock_logger):
         """Test uninit method when no tools are registered."""
         mock_agent = Mock()
@@ -120,8 +120,8 @@ class TestSubagentRail:
         mock_logger.info.assert_not_called()
 
     @staticmethod
-    @patch("openjiuwen.harness.rails.subagent_rail.Runner")
-    @patch("openjiuwen.harness.rails.subagent_rail.create_task_tool")
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.Runner")
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool")
     def test_build_available_agents_description_with_subagents(mock_create, mock_runner):
         """Exercise available-agents formatting via init(create_task_tool kwargs)."""
         mock_runner.resource_mgr = Mock()
@@ -158,8 +158,8 @@ class TestSubagentRail:
         assert '"code_agent": Code specialist' in available_agents
 
     @staticmethod
-    @patch("openjiuwen.harness.rails.subagent_rail.Runner")
-    @patch("openjiuwen.harness.rails.subagent_rail.create_task_tool")
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.Runner")
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool")
     def test_build_available_agents_description_with_general_purpose(mock_create, mock_runner):
         """When general-purpose is explicit, it appears once in available_agents."""
         mock_runner.resource_mgr = Mock()
@@ -193,8 +193,8 @@ class TestSubagentRail:
         assert available_agents.count("general-purpose") == 1
 
     @staticmethod
-    @patch("openjiuwen.harness.rails.subagent_rail.Runner")
-    @patch("openjiuwen.harness.rails.subagent_rail.create_task_tool")
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.Runner")
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool")
     def test_extract_agent_meta_with_subagentspec(mock_create, mock_runner):
         """SubAgentConfig card name/description appear in available_agents passed to create_task_tool."""
         mock_runner.resource_mgr = Mock()
@@ -222,8 +222,8 @@ class TestSubagentRail:
         assert '"test_agent": Test description' in available_agents
 
     @staticmethod
-    @patch("openjiuwen.harness.rails.subagent_rail.Runner")
-    @patch("openjiuwen.harness.rails.subagent_rail.create_task_tool")
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.Runner")
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool")
     def test_extract_agent_meta_with_deepagent(mock_create, mock_runner):
         """DeepAgent-like mock with card contributes name/description to available_agents."""
         mock_runner.resource_mgr = Mock()
@@ -251,8 +251,8 @@ class TestSubagentRail:
         assert '"agent_name": agent description' in available_agents
 
     @staticmethod
-    @patch("openjiuwen.harness.rails.subagent_rail.Runner")
-    @patch("openjiuwen.harness.rails.subagent_rail.create_task_tool")
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.Runner")
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool")
     def test_extract_agent_meta_with_deepagent_fallback(mock_create, mock_runner):
         """DeepAgent-like mock without card uses fallback meta in available_agents."""
         mock_runner.resource_mgr = Mock()
@@ -279,8 +279,8 @@ class TestSubagentRail:
 
     @staticmethod
     @pytest.mark.asyncio
-    @patch("openjiuwen.harness.rails.subagent_rail.Runner")
-    @patch("openjiuwen.harness.rails.subagent_rail.create_task_tool")
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.Runner")
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool")
     async def test_before_model_call_with_builder(mock_create, mock_runner):
         """before_model_call is a no-op after task_tool moved into tools section."""
         mock_runner.resource_mgr = Mock()
@@ -318,6 +318,6 @@ class TestSubagentRail:
     @staticmethod
     def test_all_method():
         """Test that __all__ exports the correct class."""
-        from openjiuwen.harness.rails.subagent_rail import __all__
+        from openjiuwen.harness.rails.subagent.subagent_rail import __all__
 
         assert __all__ == ["SubagentRail"]

@@ -22,7 +22,7 @@ from openjiuwen.core.sys_operation import (
 from openjiuwen.harness import Workspace
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts.builder import PromptSection, SystemPromptBuilder
-from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
+from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
 from openjiuwen.harness.tools import ListSkillTool
 
 

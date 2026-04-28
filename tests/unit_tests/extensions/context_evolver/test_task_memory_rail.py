@@ -1,6 +1,6 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Unit tests for TaskMemoryRail.
+"""Unit tests for ContextEvolutionRail.
 
 Tests are organised by component:
 
@@ -15,7 +15,7 @@ Tests are organised by component:
     TestRoundTrip                  — full before → after cycle
 
 Run:
-    uv run python tests/unit_tests/extensions/context_evolver/test_task_memory_rail.py
+    uv run python tests/unit_tests/extensions/context_evolver/test_context_evolution_rail.py
 """
 
 import os
@@ -36,15 +36,14 @@ if _agent_core_root not in sys.path:
 
 import pytest
 
-from openjiuwen.core.common.logging import context_engine_logger as logger
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackEvent,
     AgentCallbackContext,
 )
 from openjiuwen.core.foundation.llm import UserMessage, AssistantMessage, ToolMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
-from openjiuwen.harness.rails.task_memory_rail import (
-    TaskMemoryRail,
+from openjiuwen.harness.rails.evolution.context_evolution_rail import (
+    ContextEvolutionRail,
 )
 from openjiuwen.extensions.context_evolver.service import (
     SummarizeTrajectoriesInput,
@@ -138,7 +137,7 @@ def _make_middleware(
 ):
     cfg = summarize_cfg or _SummarizeCfg()
     svc = memory_service or _make_memory_service()
-    return TaskMemoryRail(
+    return ContextEvolutionRail(
         user_id=user_id,
         memory_service=svc,
         inject_memories_in_context=inject,
@@ -182,7 +181,7 @@ class TestInit:
     def test_auto_summarize_defaults():
         """auto_summarize defaults to True; matts_mode defaults to 'none'."""
         svc = _make_memory_service()
-        mw = TaskMemoryRail(user_id="u", memory_service=svc)
+        mw = ContextEvolutionRail(user_id="u", memory_service=svc)
         assert mw.auto_summarize is True
         assert mw.auto_summarize_matts_mode == "none"
 
@@ -207,7 +206,7 @@ class TestInit:
     def test_load_memories_called_on_init():
         """memory_service.load_memories is called with user_id during __init__."""
         svc = _make_memory_service()
-        mw = TaskMemoryRail(user_id="alice", memory_service=svc)
+        mw = ContextEvolutionRail(user_id="alice", memory_service=svc)
         svc.load_memories.assert_called_once_with("alice")
 
 
@@ -515,7 +514,7 @@ class TestAutoSummarize:
         svc = _make_memory_service()
         mw = _make_middleware(memory_service=svc, summarize_cfg=_SummarizeCfg(enabled=False))
         with patch(
-            "openjiuwen.harness.rails.task_memory_rail._summarize_trajectories",
+            "openjiuwen.harness.rails.evolution.context_evolution_rail._summarize_trajectories",
             new=AsyncMock(),
         ) as mock_summ:
             ctx = _make_ctx(query="test")
@@ -531,10 +530,10 @@ class TestAutoSummarize:
         mw = _make_middleware(memory_service=svc, summarize_cfg=_SummarizeCfg(enabled=True))
         mw.extract_trajectory = MagicMock(return_value="USER: test\nTHOUGHT: ok")
         with patch(
-            "openjiuwen.harness.rails.task_memory_rail._evaluate_trial",
+            "openjiuwen.harness.rails.evolution.context_evolution_rail._evaluate_trial",
             return_value=("success", 1),
         ), patch(
-            "openjiuwen.harness.rails.task_memory_rail._summarize_trajectories",
+            "openjiuwen.harness.rails.evolution.context_evolution_rail._summarize_trajectories",
             new=AsyncMock(return_value={"memory": []}),
         ) as mock_summ:
             ctx = _make_ctx(query="my question")
@@ -554,10 +553,10 @@ class TestAutoSummarize:
         mw = _make_middleware(memory_service=svc, summarize_cfg=_SummarizeCfg(enabled=True))
         mw.extract_trajectory = MagicMock(return_value="USER: test\nTHOUGHT: ok")
         with patch(
-            "openjiuwen.harness.rails.task_memory_rail._evaluate_trial",
+            "openjiuwen.harness.rails.evolution.context_evolution_rail._evaluate_trial",
             return_value=("success", 1),
         ), patch(
-            "openjiuwen.harness.rails.task_memory_rail._summarize_trajectories",
+            "openjiuwen.harness.rails.evolution.context_evolution_rail._summarize_trajectories",
             new=AsyncMock(return_value={"memory": []}),
         ) as mock_summ:
             for i in range(2):
@@ -574,10 +573,10 @@ class TestAutoSummarize:
         mw = _make_middleware(memory_service=svc, summarize_cfg=_SummarizeCfg(enabled=True))
         mw.extract_trajectory = MagicMock(return_value="USER: q\nTHOUGHT: a")
         with patch(
-            "openjiuwen.harness.rails.task_memory_rail._evaluate_trial",
+            "openjiuwen.harness.rails.evolution.context_evolution_rail._evaluate_trial",
             return_value=("failure", 0),
         ) as mock_eval, patch(
-            "openjiuwen.harness.rails.task_memory_rail._summarize_trajectories",
+            "openjiuwen.harness.rails.evolution.context_evolution_rail._summarize_trajectories",
             new=AsyncMock(return_value={"memory": []}),
         ) as mock_summ:
             ctx = _make_ctx(query="q")
@@ -597,7 +596,7 @@ class TestAutoSummarize:
         mw = _make_middleware(memory_service=svc, summarize_cfg=_SummarizeCfg(enabled=True))
         mw.extract_trajectory = MagicMock(return_value=None)
         with patch(
-            "openjiuwen.harness.rails.task_memory_rail._summarize_trajectories",
+            "openjiuwen.harness.rails.evolution.context_evolution_rail._summarize_trajectories",
             new=AsyncMock(),
         ) as mock_summ:
             ctx = _make_ctx(query="test")
@@ -612,7 +611,7 @@ class TestAutoSummarize:
         svc = _make_memory_service()
         mw = _make_middleware(memory_service=svc, summarize_cfg=_SummarizeCfg(enabled=True))
         with patch(
-            "openjiuwen.harness.rails.task_memory_rail._summarize_trajectories",
+            "openjiuwen.harness.rails.evolution.context_evolution_rail._summarize_trajectories",
             new=AsyncMock(),
         ) as mock_summ:
             ctx = _make_ctx(query="test")
@@ -873,9 +872,9 @@ class TestMemoryServiceProperties:
 
     @staticmethod
     def test_rail_calls_load_memories_on_init():
-        """load_memories is called with user_id during TaskMemoryRail construction."""
+        """load_memories is called with user_id during ContextEvolutionRail construction."""
         svc = _make_memory_service()
-        mw = TaskMemoryRail(user_id="u", memory_service=svc)
+        mw = ContextEvolutionRail(user_id="u", memory_service=svc)
         svc.load_memories.assert_called_once_with("u")
 
 

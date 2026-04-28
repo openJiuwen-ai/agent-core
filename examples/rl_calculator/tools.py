@@ -5,6 +5,8 @@ Calculator tool definition.
 from openjiuwen.core.common.logging import tool_logger
 from openjiuwen.core.foundation.tool import tool
 
+from simpleeval import simple_eval
+
 
 @tool(
     name="calculator",
@@ -63,7 +65,7 @@ def calculator(expression: str) -> str:
             return ", ".join(f"{var} = {r}" for r in result)
 
         try:
-            result = eval(expr_clean)  # noqa: S307
+            result = simple_eval(expr_clean)  # noqa: S307
             return str(result)
         except Exception as e:
             tool_logger.debug("eval failed for expression %r, falling back to sympy: %s", expr_clean, e)

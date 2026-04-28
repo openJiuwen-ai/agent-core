@@ -49,7 +49,7 @@ from openjiuwen.harness.tools import (
     ReadFileTool, WriteFileTool, EditFileTool,
     GlobTool, ListDirTool,
 )
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from tests.unit_tests.fixtures.mock_llm import (
     MockLLMModel,
     create_text_response,
@@ -185,7 +185,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
             )
 
     def _get_fs_rail(self):
-        return FileSystemRail()
+        return SysOperationRail()
 
     @pytest.mark.asyncio
     @unittest.skip("skip system test")

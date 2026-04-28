@@ -315,20 +315,19 @@ if __name__ == "__main__":
 
 ## class AskUserPayload
 
-Data structure for user input response.
+Data structure for user input response, used to pass user answers when resuming execution.
 
 **Parameters**:
 
-* **answer**(str): User's answer. Default: `""`.
+* **answers**(Dict[str, str]): A dictionary mapping question text to answers. The key is the full question text (`question` field value), and the value is the user's answer. Default: `{}`.
 
 ## class AskUserRequest
 
-Ask user request configuration.
+Ask-user request configuration, inherits from `InterruptRequest`, extends the `questions` field for multi-question mode.
 
 **Parameters**:
 
-* **message**(str): Question to display to the user. Default: `"Please input"`.
-* **payload_schema**(dict): Data structure definition for user input. Default: JSON Schema of `AskUserPayload`.
+* **questions**(List[dict]): List of questions to present to the user, each containing header, question, options, and other fields. Default: `[]`.
 
 ## class AskUserRail
 
@@ -341,6 +340,15 @@ class AskUserRail(BaseInterruptRail)
 **Parameters**:
 
 * **tool_names**(Iterable[str], optional): List of tool names to intercept. Default: `["ask_user"]`.
+
+### Multi-Question Mode
+
+The `ask_user` tool supports multi-question mode, allowing 1-4 questions to be presented to the user at once, each with 2-4 optional choices. In the `InterruptRequest` returned from an interrupt:
+
+* **`questions`**: Display data, containing the full question structure (header, question, options, multi_select, preview, etc.)
+* **`payload_schema`**: User input format definition, describing the JSON Schema of `AskUserPayload` (the input format for answers)
+
+When resuming execution, use the `answers` dictionary to provide answers, where the key is the question text (`question` field value) and the value is the user's selected answer.
 
 **Example**:
 
@@ -370,10 +378,15 @@ async def main():
     print(f"Result type: {result['result_type']}")
     print(f"Interrupt IDs: {result.get('interrupt_ids', [])}")
 
-    # 3. User provides answer
+    # 3. User retrieves question text from questions field and provides answer
     tool_call_id = result['interrupt_ids'][0]
+    state = result['state'][0]
+    payload = state.payload.value
+    questions = payload.questions  # Question list for displaying to user
+    first_question = questions[0]['question']  # Get full question text
+
     interactive_input = InteractiveInput()
-    interactive_input.update(tool_call_id, {"answer": "user_answer.txt"})
+    interactive_input.update(tool_call_id, {"answers": {first_question: "user_answer.txt"}})
 
     # 4. Resume execution
     result = await agent.invoke(

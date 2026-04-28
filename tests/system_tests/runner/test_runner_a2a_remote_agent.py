@@ -8,14 +8,14 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 
+from a2a.client import ClientConfig, ClientFactory
 from a2a.server.agent_execution.agent_executor import AgentExecutor
 from a2a.server.agent_execution.context import RequestContext
-from a2a.server.apps import A2AFastAPIApplication, A2ARESTFastAPIApplication
 from a2a.server.events.event_queue import EventQueue
-from a2a.server.request_handlers.default_request_handler import DefaultRequestHandler
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
 from a2a.server.tasks.inmemory_task_store import InMemoryTaskStore
 from a2a.server.tasks.task_updater import TaskUpdater
-from a2a.client import ClientConfig, ClientFactory
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
@@ -23,13 +23,16 @@ from a2a.types import (
     AgentProvider,
     AgentSkill,
     Part,
+    Task,
+    TaskState,
+    TaskStatus as A2ATaskStatus,
 )
 
+from openjiuwen.core.controller.schema.task import TaskStatus
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
 from openjiuwen.core.runner.drunner.remote_client.remote_client_config import ProtocolEnum
 from openjiuwen.core.single_agent import AgentCard as OJWAgentCard
-from openjiuwen.core.controller.schema.task import TaskStatus
 
 
 class A2AExecutor(AgentExecutor):
@@ -64,6 +67,15 @@ class A2AExecutor(AgentExecutor):
             context_id=context_id,
         )
 
+        await updater.event_queue.enqueue_event(
+            Task(
+                id=task_id,
+                context_id=context_id,
+                status=A2ATaskStatus(state=TaskState.TASK_STATE_SUBMITTED),
+                history=[user_message],
+            )
+        )
+
         await updater.start_work(
             message=updater.new_agent_message(parts=[Part(text="processing")])
         )
@@ -83,6 +95,7 @@ class A2AExecutor(AgentExecutor):
 
 
 def build_test_app() -> FastAPI:
+    app = FastAPI()
     agent_card = AgentCard(
         name="System Test A2A Agent",
         description="A minimal A2A server for runner system tests",
@@ -111,11 +124,6 @@ def build_test_app() -> FastAPI:
                 protocol_version="1.0",
                 url="http://testserver/a2a/jsonrpc/",
             ),
-            AgentInterface(
-                protocol_binding="HTTP+JSON",
-                protocol_version="1.0",
-                url="http://testserver/a2a/rest/",
-            ),
         ],
     )
 
@@ -123,21 +131,20 @@ def build_test_app() -> FastAPI:
     request_handler = DefaultRequestHandler(
         agent_executor=A2AExecutor(),
         task_store=task_store,
+        agent_card=agent_card,
     )
 
-    rest_app = A2ARESTFastAPIApplication(
-        agent_card=agent_card,
-        http_handler=request_handler,
-        enable_v0_3_compat=True,
-    ).build()
-
-    app = FastAPI()
-    A2AFastAPIApplication(
-        agent_card=agent_card,
-        http_handler=request_handler,
-        enable_v0_3_compat=True,
-    ).add_routes_to_app(app, rpc_url="/a2a/jsonrpc/")
-    app.mount("/a2a/rest", rest_app)
+    # a2a-sdk 1.0.0 removed `a2a.server.apps.*`; build routes directly.
+    app.router.routes.extend(
+        create_agent_card_routes(agent_card=agent_card, card_url="/.well-known/agent-card.json")
+    )
+    app.router.routes.extend(
+        create_jsonrpc_routes(
+            request_handler=request_handler,
+            rpc_url="/a2a/jsonrpc/",
+            enable_v0_3_compat=True,
+        )
+    )
     return app
 
 
@@ -169,15 +176,14 @@ async def registered_a2a_remote_agent(a2a_server_app, started_runner, monkeypatc
     class _TestClientFactory(ClientFactory):
         def __init__(self, config: ClientConfig, consumers=None):
             config.httpx_client = httpx_client
-            super().__init__(config, consumers)
+            super().__init__(config)
 
     monkeypatch.setattr("openjiuwen.extensions.a2a.a2a_client.ClientFactory", _TestClientFactory)
 
     agent = RemoteAgent(
         agent_id=agent_id,
         protocol=ProtocolEnum.A2A,
-        config={"url": "http://testserver"},
-        card=remote_card,
+        config={"url": "http://testserver", "kwargs": {"card": remote_card}},
     )
 
     Runner.resource_mgr.add_agent(OJWAgentCard(id=agent_id), agent=agent)

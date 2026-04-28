@@ -14,7 +14,7 @@ from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.workspace.workspace import Workspace
 
@@ -116,7 +116,7 @@ def build_plan_agent_config(
         tools=list(tools or []),
         mcps=list(mcps or []),
         model=model,
-        rails=rails if rails is not None else [FileSystemRail()],
+        rails=rails if rails is not None else [SysOperationRail()],
         skills=skills,
         backend=backend,
         workspace=workspace,
@@ -125,6 +125,7 @@ def build_plan_agent_config(
         prompt_mode=prompt_mode,
         enable_task_loop=enable_task_loop,
         max_iterations=max_iterations,
+        restrict_to_work_dir=False
     )
 
 
@@ -162,7 +163,7 @@ def create_plan_agent(
         tools=tools,
         mcps=mcps,
         subagents=subagents,
-        rails=rails if rails is not None else [FileSystemRail()],
+        rails=rails if rails is not None else [SysOperationRail()],
         enable_task_loop=enable_task_loop,
         max_iterations=max_iterations,
         workspace=workspace,

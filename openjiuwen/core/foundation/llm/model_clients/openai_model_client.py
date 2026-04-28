@@ -195,6 +195,12 @@ class OpenAIModelClient(BaseModelClient):
         if effective_headers:
             params["extra_headers"] = effective_headers
 
+        # OpenAI SDK drops unknown top-level create() args; vLLM needs return_token_ids in JSON body.
+        if "return_token_ids" in params:
+            extra_body = dict(params.get("extra_body") or {})
+            extra_body["return_token_ids"] = params.pop("return_token_ids")
+            params["extra_body"] = extra_body
+
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
@@ -327,12 +333,25 @@ class OpenAIModelClient(BaseModelClient):
             **kwargs
         )
 
+        # OpenAI-compatible streaming responses only include usage on the final
+        # chunk when include_usage is explicitly requested.
+        stream_options = params.get("stream_options")
+        if isinstance(stream_options, dict):
+            stream_options.setdefault("include_usage", True)
+        elif stream_options is None:
+            params["stream_options"] = {"include_usage": True}
+
         effective_headers = self._build_request_headers(
             self._base_headers,
             request_custom_headers,
         )
         if effective_headers:
             params["extra_headers"] = effective_headers
+
+        if "return_token_ids" in params:
+            extra_body = dict(params.get("extra_body") or {})
+            extra_body["return_token_ids"] = params.pop("return_token_ids")
+            params["extra_body"] = extra_body
 
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
@@ -632,13 +651,30 @@ class OpenAIModelClient(BaseModelClient):
                     exception=str(e)
                 )
                 parser_content = None
+        
+        # Extract token IDs if present in response (for return_token_ids support)
+        metadata = {}
+        if hasattr(response, 'prompt_token_ids') and response.prompt_token_ids:
+            metadata['prompt_token_ids'] = response.prompt_token_ids
+        if hasattr(choice, 'token_ids') and choice.token_ids:
+            metadata['completion_token_ids'] = choice.token_ids
+        if hasattr(choice, 'logprobs') and choice.logprobs:
+            logprobs_obj = choice.logprobs
+            if hasattr(logprobs_obj, 'model_dump'):
+                metadata['logprobs'] = logprobs_obj.model_dump()
+            elif hasattr(logprobs_obj, '__dict__'):
+                metadata['logprobs'] = vars(logprobs_obj)
+            else:
+                metadata['logprobs'] = logprobs_obj
+
         return AssistantMessage(
             content=content,
             tool_calls=tool_calls if tool_calls else None,
             usage_metadata=usage_metadata,
             finish_reason="tool_calls" if tool_calls else "stop",
             reasoning_content=reasoning_content,
-            parser_content=parser_content
+            parser_content=parser_content,
+            metadata=metadata
         )
 
     def _parse_stream_chunk(self, chunk: Any) -> Optional[AssistantMessageChunk]:
@@ -650,8 +686,30 @@ class OpenAIModelClient(BaseModelClient):
         Returns:
             AssistantMessageChunk or None
         """
+        # Some OpenAI-compatible providers send a final usage-only chunk with no
+        # choices. Keep that chunk so usage_metadata can propagate to the final
+        # accumulated AssistantMessage.
+        usage_metadata = None
+        if hasattr(chunk, 'usage') and chunk.usage:
+            input_cost, output_cost, total_cost = self._extract_cost_info(chunk.usage)
+            usage_metadata = UsageMetadata(
+                model_name=self.model_config.model_name,
+                input_tokens=getattr(chunk.usage, 'prompt_tokens', 0) or 0,
+                output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
+                total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0,
+                input_cost=input_cost,
+                output_cost=output_cost,
+                total_cost=total_cost,
+            )
+
         if not chunk.choices:
-            return None
+            return AssistantMessageChunk(
+                content="",
+                reasoning_content=None,
+                tool_calls=None,
+                usage_metadata=usage_metadata,
+                finish_reason="null",
+            ) if usage_metadata else None
 
         choice = chunk.choices[0]
         delta = choice.delta
@@ -677,22 +735,6 @@ class OpenAIModelClient(BaseModelClient):
                         index=index
                     )
                     tool_calls.append(tool_call)
-
-        # Build usage_metadata (usually only in the last chunk)
-        usage_metadata = None
-        if hasattr(chunk, 'usage') and chunk.usage:
-            # Extract cost information if available
-            input_cost, output_cost, total_cost = self._extract_cost_info(chunk.usage)
-
-            usage_metadata = UsageMetadata(
-                model_name=self.model_config.model_name,
-                input_tokens=getattr(chunk.usage, 'prompt_tokens', 0) or 0,
-                output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
-                total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0,
-                input_cost=input_cost,
-                output_cost=output_cost,
-                total_cost=total_cost,
-            )
 
         return AssistantMessageChunk(
             content=content,

@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import asyncio
+import json
 import uuid
 from typing import List, Optional, Tuple, Dict, Any
 
@@ -11,7 +12,7 @@ from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.processor.base import ContextProcessor
 from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
-from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, SystemMessage
+from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, SystemMessage, AssistantMessage
 from openjiuwen.core.foundation.tool import ToolInfo, Tool, ToolCard, tool
 from openjiuwen.core.context_engine.base import ModelContext, ContextWindow, ContextStats
 from openjiuwen.core.context_engine.context.message_buffer import ContextMessageBuffer, OffloadMessageBuffer
@@ -325,43 +326,111 @@ class SessionModelContext(ModelContext):
         stat.total_dialogues = len(ContextUtils.find_all_dialogue_round(messages))
         return stat
 
-    def _stat_tools(self, stat: ContextStats, tools: List[ToolInfo]):
-        def count_tools(tools: List[ToolInfo]) -> int:
-            if self._token_counter:
-                return self._token_counter.count_tools(tools)
-            return 0
+    def _count_tool_tokens(self, tool_info: ToolInfo) -> int:
+        """
+        Calculate token count for a single tool, using two-level priority:
+        1. Use _token_counter (if available)
+        2. Fallback: text string length / 4
+        """
+        # Priority 1: Use _token_counter
+        if self._token_counter is not None:
+            return self._token_counter.count_tools([tool_info])
 
+        # Priority 2: Fallback - estimate based on text string length / 4
+        # Calculate text length of tool name + description + parameters
+        text_content = f"{tool_info.name or ''} {tool_info.description or ''}"
+        if tool_info.parameters:
+            # Convert parameters dict to string for estimation
+            text_content += json.dumps(tool_info.parameters, ensure_ascii=False)
+        return len(text_content) // 4
+
+    def _stat_tools(self, stat: ContextStats, tools: List[ToolInfo]):
         stat.tools = len(tools)
-        stat.tool_tokens = count_tools(tools)
+        for t in tools:
+            stat.tool_tokens += self._count_tool_tokens(t)
         stat.total_tokens += stat.tool_tokens
 
-    def _stat_messages(self, stat: ContextStats, messages: List[BaseMessage]):
-        def count_message(message: BaseMessage) -> int:
-            if self._token_counter:
-                return self._token_counter.count_messages([message])
-            return 0
+    def _count_single_message_tokens(self, message: BaseMessage) -> int:
+        """
+        Calculate token count for a single message (without usage_metadata):
+        1. Use _token_counter (if available)
+        2. Fallback: text string length / 4
+        """
+        if self._token_counter is not None:
+            return self._token_counter.count_messages([message])
 
+
+        content = message.content
+        if isinstance(content, str):
+            return len(content) // 4
+        elif isinstance(content, list):
+            # Handle multi-part content
+            total = 0
+            for part in content:
+                if isinstance(part, str):
+                    total += len(part) // 4
+                elif isinstance(part, dict) and "text" in part:
+                    total += len(part["text"]) // 4
+            return total
+        return 0
+
+    def _get_last_assistant_usage_tokens(self, messages: List[BaseMessage]) -> Optional[int]:
+        """
+        Get cumulative token count from the usage_metadata of the last AssistantMessage.
+        usage_metadata.input_tokens is the cumulative value of all conversation inputs
+        (including all messages and tools).
+
+        Returns:
+            input_tokens value (cumulative input tokens), or None if not available
+        """
+        # Search backwards for the last AssistantMessage
+        for msg in reversed(messages):
+            if isinstance(msg, AssistantMessage) and msg.usage_metadata is not None:
+                usage = msg.usage_metadata
+                if usage.total_tokens > 0:
+                    return usage.total_tokens
+        return None
+
+
+    def _stat_messages(self, stat: ContextStats, messages: List[BaseMessage]):
         stat.total_messages = len(messages)
+        stat.total_dialogues = len(ContextUtils.find_all_dialogue_round(messages))
         for msg in messages:
             if msg.role == "assistant":
                 stat.assistant_messages += 1
-                stat.assistant_message_tokens += count_message(msg)
             elif msg.role == "user":
                 stat.user_messages += 1
-                stat.user_message_tokens += count_message(msg)
             elif msg.role == "system":
                 stat.system_messages += 1
-                stat.system_message_tokens += count_message(msg)
             elif msg.role == "tool":
                 stat.tool_messages += 1
-                stat.tool_message_tokens += count_message(msg)
+
+        # Priority 1: Get cumulative tokens from usage_metadata of the last AssistantMessage
+        usage_tokens = self._get_last_assistant_usage_tokens(messages)
+
+        if usage_tokens is not None:
+            # usage_metadata.input_tokens is cumulative for entire conversation input, use directly
+            stat.total_tokens = usage_tokens
+            return
+
+        # Priority 2/3: Count tokens message by message (TiktokenCounter or fallback)
+        for msg in messages:
+            msg_tokens = self._count_single_message_tokens(msg)
+            if msg.role == "assistant":
+                stat.assistant_message_tokens += msg_tokens
+            elif msg.role == "user":
+                stat.user_message_tokens += msg_tokens
+            elif msg.role == "system":
+                stat.system_message_tokens += msg_tokens
+            elif msg.role == "tool":
+                stat.tool_message_tokens += msg_tokens
+
         stat.total_tokens += (
             stat.assistant_message_tokens +
             stat.user_message_tokens +
             stat.system_message_tokens +
             stat.tool_message_tokens
         )
-        stat.total_dialogues = len(ContextUtils.find_all_dialogue_round(messages))
 
     @staticmethod
     def _validate_and_init_messages(messages: BaseMessage | List[BaseMessage]):

@@ -4,12 +4,7 @@
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import MagicMock, AsyncMock, patch
-
-import pytest
-
-from openjiuwen.harness.rails.external_memory_rail import ExternalMemoryRail
+from openjiuwen.harness.rails.memory.external_memory_rail import ExternalMemoryRail
 from openjiuwen.core.memory.external.provider import MemoryProvider
 
 

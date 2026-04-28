@@ -67,13 +67,13 @@ def _ensure_builtin_rails_registered() -> None:
         SkillUseRail,
         SubagentRail,
     )
-    from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+    from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 
     _RAIL_TYPE_REGISTRY.update({
         "task_planning": TaskPlanningRail,
         "skill_use": SkillUseRail,
         "subagent": SubagentRail,
-        "filesystem": FileSystemRail,
+        "filesystem": SysOperationRail,
     })
 
     # Optional rails: only register when importable.
@@ -490,7 +490,7 @@ class DeepAgentSpec(BaseModel):
             mcps=self.mcps,
             subagents=subagents,
             rails=rails,
-            enable_task_loop=self.enable_task_loop,
+            enable_task_loop=True,
             enable_async_subagent=self.enable_async_subagent,
             add_general_purpose_agent=self.add_general_purpose_agent,
             max_iterations=self.max_iterations,

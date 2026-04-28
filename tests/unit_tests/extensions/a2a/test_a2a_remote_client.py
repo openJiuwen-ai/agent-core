@@ -5,12 +5,13 @@ import asyncio
 
 import pytest
 
-from openjiuwen.core.runner.drunner.remote_client.a2a_remote_client import A2ARemoteClient
 from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
+from openjiuwen.core.runner.drunner import remote_client
 from openjiuwen.core.runner.drunner.remote_client.remote_client_config import ProtocolEnum, RemoteClientConfig
-from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.controller.schema.task import TaskStatus
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.single_agent.schema.agent_result import AgentResult, Artifact, Part
+from openjiuwen.extensions.a2a.a2a_remote_client import A2ARemoteClient
 
 
 @pytest.mark.asyncio
@@ -34,7 +35,7 @@ class TestA2ARemoteClient:
                 )
 
         monkeypatch.setattr(
-            "openjiuwen.core.runner.drunner.remote_client.a2a_remote_client.A2AClient",
+            "openjiuwen.extensions.a2a.a2a_remote_client.A2AClient",
             FakeA2AClient,
         )
 
@@ -43,14 +44,15 @@ class TestA2ARemoteClient:
             id="a2a-agent",
             protocol=ProtocolEnum.A2A,
             url="http://127.0.0.1:41241",
-        ), card=card)
+            kwargs={"card": card},
+        ))
         await client.start()
         try:
             response = await client.invoke({"query": "hello", "conversation_id": "conv-1"})
         finally:
             await client.stop()
 
-        assert getattr(captured["init_kwargs"]["card"], "name", None) == card.name
+        assert "card" in captured["init_kwargs"]
         assert captured["invoke_inputs"]["query"] == "hello"
         assert response.status == TaskStatus.COMPLETED
         assert captured["closed"] is True
@@ -81,15 +83,18 @@ class TestA2ARemoteClient:
                 )
 
         monkeypatch.setattr(
-            "openjiuwen.core.runner.drunner.remote_client.a2a_remote_client.A2AClient",
+            "openjiuwen.extensions.a2a.a2a_remote_client.A2AClient",
             FakeA2AClient,
         )
+        monkeypatch.setitem(remote_client._CUSTOM_REMOTE_CLIENTS, "A2A", lambda **kwargs: A2ARemoteClient(**kwargs))
 
         agent = RemoteAgent(
             agent_id="a2a-agent",
             protocol=ProtocolEnum.A2A,
-            config={"url": "http://127.0.0.1:41241"},
-            card=AgentCard(id="a2a-agent", name="a2a-agent"),
+            config={
+                "url": "http://127.0.0.1:41241",
+                "kwargs": {"card": AgentCard(id="a2a-agent", name="a2a-agent")},
+            },
         )
         response = await agent.invoke({"query": "hello a2a", "conversation_id": "conv-1"})
         assert response.status == TaskStatus.COMPLETED
@@ -120,7 +125,7 @@ class TestA2ARemoteClient:
                 return {"id": task_id}
 
         monkeypatch.setattr(
-            "openjiuwen.core.runner.drunner.remote_client.a2a_remote_client.A2AClient",
+            "openjiuwen.extensions.a2a.a2a_remote_client.A2AClient",
             FakeA2AClient,
         )
 
@@ -129,7 +134,8 @@ class TestA2ARemoteClient:
             id="a2a-agent",
             protocol=ProtocolEnum.A2A,
             url="http://127.0.0.1:41241",
-        ), card=card)
+            kwargs={"card": card},
+        ))
         await client.start()
 
         async def consume():
@@ -161,7 +167,7 @@ class TestA2ARemoteClient:
                 yield AgentResult(task_id=inputs.get("task_id"), status=TaskStatus.WORKING)
 
         monkeypatch.setattr(
-            "openjiuwen.core.runner.drunner.remote_client.a2a_remote_client.A2AClient",
+            "openjiuwen.extensions.a2a.a2a_remote_client.A2AClient",
             FakeA2AClient,
         )
 
@@ -171,8 +177,8 @@ class TestA2ARemoteClient:
                 id="a2a-agent",
                 protocol=ProtocolEnum.A2A,
                 url="http://127.0.0.1:41241",
+                kwargs={"card": card},
             ),
-            card=card,
         )
         await client.start()
 

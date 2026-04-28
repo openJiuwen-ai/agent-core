@@ -5,8 +5,7 @@ from collections.abc import AsyncIterator
 from typing import Any, AsyncGenerator, Dict, Optional
 
 from a2a.client import ClientConfig, ClientFactory
-from a2a.client.client import ClientEvent
-from a2a.types import SendMessageRequest, AgentCard
+from a2a.types import AgentCard, SendMessageRequest, StreamResponse
 
 from openjiuwen.extensions.a2a.a2a_transformer import A2ATransformer
 from openjiuwen.core.single_agent.schema.agent_result import AgentResult
@@ -30,7 +29,7 @@ class A2AClient:
     async def stop(self) -> None:
         await self.client.close()
 
-    def _send_message(self, request: SendMessageRequest) -> AsyncIterator[ClientEvent]:
+    def _send_message(self, request: SendMessageRequest) -> AsyncIterator[StreamResponse]:
         return self.client.send_message(request)
 
     async def invoke(self, inputs: Dict[str, Any]) -> AgentResult:

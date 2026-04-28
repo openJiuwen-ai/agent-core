@@ -10,8 +10,9 @@ trajectory data with optional version isolation.
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol
 
 from openjiuwen.agent_evolving.trajectory.types import Trajectory
 
@@ -202,9 +203,30 @@ class FileTrajectoryStore:
     @staticmethod
     def _trajectory_to_dict(trajectory: Trajectory) -> dict:
         """Convert Trajectory to dict."""
-        from dataclasses import asdict
+        return FileTrajectoryStore._to_json_compatible(trajectory)
 
-        return asdict(trajectory)
+    @staticmethod
+    def _to_json_compatible(obj: Any) -> Any:
+        """Recursively convert values to JSON-compatible data."""
+        if hasattr(obj, "model_dump") and callable(obj.model_dump):
+            return FileTrajectoryStore._to_json_compatible(obj.model_dump())
+
+        if hasattr(obj, "__dataclass_fields__"):
+            return FileTrajectoryStore._to_json_compatible(asdict(obj))
+
+        if isinstance(obj, (list, tuple)):
+            return [FileTrajectoryStore._to_json_compatible(item) for item in obj]
+
+        if isinstance(obj, dict):
+            return {
+                str(key): FileTrajectoryStore._to_json_compatible(value)
+                for key, value in obj.items()
+            }
+
+        if isinstance(obj, (str, int, float, bool)) or obj is None:
+            return obj
+
+        return str(obj)
 
     @staticmethod
     def _dict_to_trajectory(data: dict) -> Optional[Trajectory]:

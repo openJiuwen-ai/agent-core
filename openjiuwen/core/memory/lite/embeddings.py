@@ -6,6 +6,7 @@ import os
 from abc import ABC, abstractmethod
 from typing import List, Optional
 from openjiuwen.core.common.logging import memory_logger as logger
+from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 
 
 class EmbeddingProvider(ABC):
@@ -164,3 +165,21 @@ async def create_embedding_provider(
         "Embedding API key not configured. "
         "Set EMBED_API_KEY environment variable or provide embedding_config parameter."
     )
+
+
+def resolve_embedding_config_from_env(
+    model_name: Optional[str] = None,
+    fallback_base_url: Optional[str] = None,
+    fallback_api_key: Optional[str] = None,
+) -> Optional[EmbeddingConfig]:
+    """
+        Build EmbeddingConfig from environment variables.
+        Reads EMBEDDING_MODEL_NAME, EMBEDDING_BASE_URL and EMBEDDING_API_KEY.
+    """
+
+    model_name = os.getenv("EMBEDDING_MODEL_NAME", model_name)
+    base_url = os.getenv("EMBEDDING_BASE_URL", fallback_base_url)
+    api_key = os.getenv("EMBEDDING_API_KEY", fallback_api_key)
+    if model_name and base_url and api_key:
+        return EmbeddingConfig(model_name=model_name, base_url=base_url, api_key=api_key)
+    return None

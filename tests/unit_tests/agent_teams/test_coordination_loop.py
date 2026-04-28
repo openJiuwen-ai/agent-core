@@ -18,6 +18,7 @@ from openjiuwen.agent_teams.schema.events import (
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
 async def test_message_event_wakes_loop():
     """MESSAGE event triggers wake_callback."""
     woke: list[CoordinationEvent] = []
@@ -44,6 +45,7 @@ async def test_message_event_wakes_loop():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
 async def test_task_event_wakes_loop():
     """TASK_COMPLETED event triggers wake_callback."""
     woke: list[CoordinationEvent] = []
@@ -70,6 +72,7 @@ async def test_task_event_wakes_loop():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_multiple_events_wake_in_order():
     """Events are processed FIFO."""
     woke: list[CoordinationEvent] = []
@@ -103,6 +106,7 @@ async def test_multiple_events_wake_in_order():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_no_callback_does_not_crash():
     """Loop without callback still processes events."""
     loop = CoordinatorLoop(role=TeamRole.LEADER)

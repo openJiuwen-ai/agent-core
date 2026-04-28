@@ -65,6 +65,7 @@ from openjiuwen.harness.task_loop.task_loop_controller import (
     TaskLoopController,
 )
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
+from openjiuwen.harness.security.factory import build_permission_interrupt_rail
 from openjiuwen.harness.tools import SessionToolkit, is_free_search_enabled, is_paid_search_enabled
 
 if TYPE_CHECKING:
@@ -402,6 +403,23 @@ class DeepAgent(BaseAgent):
         if config.enable_task_loop:
             self._pending_rails.append(TaskCompletionRail())
 
+        if isinstance(config.permissions, dict) and config.permissions.get("enabled"):
+            ws_root = None
+            if config.workspace is not None:
+                ws_root = Path(config.workspace.root_path).resolve()
+            model_name = None
+            if config.model is not None:
+                model_name = getattr(config.model, "model_name", None)
+            prail = build_permission_interrupt_rail(
+                permissions=config.permissions,
+                llm=config.model,
+                model_name=model_name,
+                host=config.permission_host,
+                workspace_root=ws_root,
+            )
+            if prail is not None:
+                self._pending_rails.append(prail)
+
     def set_react_agent(
         self,
         react_agent: Any,
@@ -696,7 +714,7 @@ class DeepAgent(BaseAgent):
             )
         else:
             workspace = Workspace(
-                root_path=self._deep_config.workspace.root_path + f"/{subsession_id}",
+                root_path=Path(self._deep_config.workspace.root_path) / subsession_id,
                 language=self._deep_config.language
             )
 
@@ -742,7 +760,8 @@ class DeepAgent(BaseAgent):
             "subagents": None,
             "enable_async_subagent": False,
             "add_general_purpose_agent": False,
-            "enable_plan_mode": spec.enable_plan_mode
+            "enable_plan_mode": spec.enable_plan_mode,
+            "restrict_to_work_dir": spec.restrict_to_work_dir,
         }
 
         if spec.factory_name:
@@ -877,6 +896,27 @@ class DeepAgent(BaseAgent):
             ]
         self._pending_rails.append(rail)
         return self
+
+    def strip_rails_by_type(self, rail_types: tuple[type, ...]) -> int:
+        """Remove queued rails by type and mark registered ones as stale.
+
+        This provides a public API for callers that need to replace built-in rails
+        without touching DeepAgent's internal rail lists directly.
+        """
+        if not rail_types:
+            return 0
+
+        removed = 0
+        before = len(self._pending_rails)
+        self._pending_rails = [r for r in self._pending_rails if not isinstance(r, rail_types)]
+        removed += before - len(self._pending_rails)
+
+        for rail in list(self._registered_rails):
+            if isinstance(rail, rail_types):
+                self._stale_rails.append(rail)
+                removed += 1
+
+        return removed
 
     async def register_rail(self, rail: AgentRail) -> "DeepAgent":
         """Register a rail with selective routing."""
@@ -1419,10 +1459,14 @@ class DeepAgent(BaseAgent):
             )
 
         last_result: Dict[str, Any] = {}
-        async for result in self._run_task_loop(
-            ctx, session
-        ):
-            last_result = result
+        try:
+            async for result in self._run_task_loop(
+                ctx, session
+            ):
+                last_result = result
+        except Exception as e:
+            logger.error(f"Task loop invoke error: {e}", exc_info=True)
+            raise
         return last_result
 
     async def _run_task_loop_stream(
@@ -1466,7 +1510,9 @@ class DeepAgent(BaseAgent):
                 async for result in self._run_task_loop(ctx, session):
                     await self._write_round_result_to_stream(result, session)
             except Exception as e:
-                logger.error(f"Task loop stream error: {e}")
+                logger.error(f"Task loop stream error: {e}", exc_info=True)
+                error_result = {"output": str(e), "result_type": "error"}
+                await self._write_round_result_to_stream(error_result, session)
             finally:
                 # Only close the stream emitter to send END_FRAME,
                 # so stream_iterator() can terminate.

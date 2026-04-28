@@ -29,6 +29,8 @@ from typing import (
     TYPE_CHECKING,
 )
 
+from openjiuwen.core.common.logging import logger
+
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session.agent import Session
@@ -390,11 +392,27 @@ class AgentCallbackContext:
         """
         saved_inputs = self.inputs
         await self.fire(before)
+        exc_to_raise = None
         try:
             yield self
+        except Exception as exc:
+            exc_to_raise = exc
+            self.exception = exc
+            raise
         finally:
             self.inputs = saved_inputs
-            await self.fire(after)
+            try:
+                await self.fire(after)
+            except Exception as callback_exc:
+                if exc_to_raise is not None:
+                    logger.error(
+                        f"{after.value} callback error "
+                        f"(masking original "
+                        f"{type(exc_to_raise).__name__}): {callback_exc}",
+                        exc_info=True
+                    )
+                else:
+                    raise
 
 
 # ================================================================
@@ -588,6 +606,7 @@ def rail(
                 ctx.consume_retry_request()
                 ctx.retry_attempt = attempt
                 ctx.exception = None
+                exc_to_raise = None
                 try:
                     if before:
                         await ctx.fire(before)
@@ -596,9 +615,18 @@ def rail(
                         return None
                     return await fn(self, ctx, *args, **kwargs)
                 except Exception as e:
+                    exc_to_raise = e
                     ctx.exception = e
                     if on_exception:
-                        await ctx.fire(on_exception)
+                        try:
+                            await ctx.fire(on_exception)
+                        except Exception as callback_exc:
+                            logger.error(
+                                f"{on_exception.value} callback error "
+                                f"(masking original "
+                                f"{type(exc_to_raise).__name__}): {callback_exc}",
+                                exc_info=True
+                            )
 
                     retry_request = ctx.consume_retry_request()
                     if not retry_request:
@@ -608,10 +636,22 @@ def rail(
                         await asyncio.sleep(
                             retry_request.delay_seconds
                         )
+                    exc_to_raise = None
                     attempt += 1
                 finally:
                     if after:
-                        await ctx.fire(after)
+                        try:
+                            await ctx.fire(after)
+                        except Exception as callback_exc:
+                            if exc_to_raise is not None:
+                                logger.error(
+                                    f"{after.value} callback error "
+                                    f"(masking original "
+                                    f"{type(exc_to_raise).__name__}): {callback_exc}",
+                                    exc_info=True
+                                )
+                            else:
+                                raise
         events = (before, after, on_exception)
         wrapper.rail_events = events
         return wrapper

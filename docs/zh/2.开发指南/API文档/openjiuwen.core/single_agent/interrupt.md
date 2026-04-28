@@ -11,6 +11,7 @@
 * **message**(str)：提示消息，用于向用户说明需要输入的内容。默认值：`""`。
 * **payload_schema**(dict)：用户输入的数据结构定义，遵循JSON Schema规范。默认值：`{}`。
 * **auto_confirm_key**(str)：自动确认的键值，通常为工具名称，用于自动确认配置。默认值：`""`。
+* **questions**(List[dict], 可选)：结构化问题列表，用于向用户展示多问题模式下的完整问题信息（包含 header、question、options、multi_select、preview 等字段）。默认值：`None`。
 
 ## class ToolCallInterruptRequest
 
@@ -21,6 +22,7 @@
 * **message**(str)：提示消息，用于向用户说明需要输入的内容。默认值：`""`。
 * **payload_schema**(dict)：用户输入的数据结构定义，遵循JSON Schema规范。默认值：`{}`。
 * **auto_confirm_key**(str)：自动确认的键值，通常为工具名称。默认值：`""`。
+* **questions**(List[dict], 可选)：结构化问题列表（继承自[InterruptRequest](#class-interruptrequest)）。默认值：`None`。
 * **tool_name**(str)：触发中断的工具名称。默认值：`""`。
 * **tool_call_id**(str)：工具调用的唯一标识符，由LLM生成。默认值：`""`。
 * **tool_args**(Any)：工具调用的参数。默认值：`None`。

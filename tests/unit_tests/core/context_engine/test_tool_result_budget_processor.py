@@ -119,7 +119,7 @@ class TestToolResultBudgetProcessorFilesystemOffload:
                 (
                     "ToolResultBudgetProcessor",
                     ToolResultBudgetProcessorConfig(
-                        tokens_threshold=100,  # Very low threshold to trigger offload
+                        tokens_threshold=50,  # Very low threshold to trigger offload
                         large_message_threshold=50,
                         trim_size=20,
                     ),
@@ -316,7 +316,7 @@ class TestToolResultBudgetProcessorFilesystemOffload:
                 (
                     "ToolResultBudgetProcessor",
                     ToolResultBudgetProcessorConfig(
-                        tokens_threshold=100,
+                        tokens_threshold=50,
                         large_message_threshold=50,
                         trim_size=20,
                     ),
@@ -542,7 +542,7 @@ class TestToolResultBudgetProcessorRealFilesystem:
                 (
                     "ToolResultBudgetProcessor",
                     ToolResultBudgetProcessorConfig(
-                        tokens_threshold=100,  # Very low threshold to trigger offload
+                        tokens_threshold=50,  # Very low threshold to trigger offload
                         large_message_threshold=50,
                         trim_size=20,
                     ),
@@ -617,7 +617,7 @@ class TestToolResultBudgetProcessorReload:
                 (
                     "ToolResultBudgetProcessor",
                     ToolResultBudgetProcessorConfig(
-                        tokens_threshold=100,
+                        tokens_threshold=50,
                         large_message_threshold=50,
                         trim_size=20,
                     ),

@@ -7,6 +7,7 @@ from typing import Any, Iterable, Optional, Set
 
 from pydantic import BaseModel
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import ToolMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.runner.callback import AbortError
@@ -190,12 +191,29 @@ class BaseInterruptRail(AgentRail):
         No alias mapping needed - rail only cares if current tool_call has corresponding user input.
         """
         raw_input = ctx.extra.get(RESUME_USER_INPUT_KEY)
+        logger.info(
+            "[_get_user_input] tool_call_id=%r raw_input_type=%s",
+            tool_call_id, type(raw_input).__name__ if raw_input is not None else "None",
+        )
         if raw_input is None:
             return None
 
         if isinstance(raw_input, InteractiveInput):
+            logger.info(
+                "[_get_user_input] InteractiveInput.user_inputs keys=%r",
+                list(raw_input.user_inputs.keys()),
+            )
             if tool_call_id in raw_input.user_inputs:
+                matched_value = raw_input.user_inputs[tool_call_id]
+                logger.info(
+                    "[_get_user_input] MATCHED! tool_call_id=%r value=%r",
+                    tool_call_id, repr(matched_value)[:200],
+                )
                 return raw_input.user_inputs[tool_call_id]
+            logger.warning(
+                "[_get_user_input] NO MATCH! tool_call_id=%r not in keys=%r",
+                tool_call_id, list(raw_input.user_inputs.keys()),
+            )
             return None
 
         if isinstance(raw_input, dict):

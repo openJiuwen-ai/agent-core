@@ -19,6 +19,7 @@ Updates = Dict[UpdateKey, Any]
 # StepDetail Union Types
 # =============================================================================
 
+
 @dataclass
 class LLMCallDetail:
     """Complete LLM call execution data."""
@@ -28,6 +29,7 @@ class LLMCallDetail:
     response: Optional[Dict[str, Any]] = None
     tools: Optional[List[Dict[str, Any]]] = None
     usage: Optional[Dict[str, Any]] = None
+    meta: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -49,6 +51,7 @@ StepDetail = Union[LLMCallDetail, ToolCallDetail]
 # =============================================================================
 # TrajectoryStep
 # =============================================================================
+
 
 @dataclass
 class TrajectoryStep:
@@ -97,6 +100,7 @@ class TrajectoryStep:
 # Trajectory
 # =============================================================================
 
+
 @dataclass
 class Trajectory:
     """Complete execution trajectory."""
@@ -118,3 +122,9 @@ class Trajectory:
 
     cost: Optional[CostInfo] = None
     """Aggregated cost metrics: input_tokens, output_tokens."""
+
+    meta: Dict[str, Any] = field(default_factory=dict)
+    """Extension metadata for trajectory-level attributes such as:
+    - member_id: team member identifier for trajectory aggregation
+    - member_count: number of members in a combined team trajectory
+    """

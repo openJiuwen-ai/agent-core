@@ -361,16 +361,27 @@ gaussdb+async_gaussdb://username:password@host:port/database
 |---------|---------|-------------|
 | `sqlalchemy` | >= 2.0.41 | Included in project main dependencies |
 | `async-gaussdb` | ~= 0.30.0 | GaussDB async driver (0.30.x compatible), available as optional dependency |
+| `asyncpg` | >= 0.29.0 | PostgreSQL async driver, required by SQLAlchemy's `PGDialect_asyncpg` for error translation (`_asyncpg_error_translate`) and async connection adaptation at runtime |
+
+### Why asyncpg Is Required
+
+Although `GaussDbStore` uses `async_gaussdb` as the primary driver, `asyncpg` is still a required runtime dependency because:
+
+1. **SQLAlchemy asyncpg dialect infrastructure**: `GaussDialectAsyncpg` inherits from `PGDialect_asyncpg` and reuses SQLAlchemy's asyncpg adapter layer (`AsyncAdapt_asyncpg_dbapi`). The error translation mechanism in SQLAlchemy's asyncpg dialect (`_asyncpg_error_translate`) references `asyncpg.exceptions.*` at runtime when database errors occur.
+
+2. **Runtime error handling**: When a database exception is raised during query execution, SQLAlchemy's `AsyncAdapt_asyncpg_connection._handle_exception` accesses `_asyncpg_error_translate`, which performs `import asyncpg` directly. Without `asyncpg` installed, this would cause an `ImportError` during error handling.
+
+3. **Connection adaptation**: `AsyncAdapt_asyncpg_dbapi` provides the async connection adaptation layer required by SQLAlchemy, which relies on asyncpg-compatible interfaces internally.
 
 ### Installation
 
 ```bash
-# Option 1: Install GaussDB optional dependency
+# Option 1: Install GaussDB optional dependency (includes asyncpg)
 pip install openjiuwen[gaussdb]
 
 # Option 2: Install all storage dependencies (recommended)
 pip install openjiuwen[all-storage]
 
-# Option 3: Install driver separately
-pip install async-gaussdb
+# Option 3: Install drivers separately
+pip install async-gaussdb asyncpg
 ```

@@ -21,13 +21,13 @@ from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.single_agent.prompts.builder import SystemPromptBuilder
 from tests.test_logger import logger
 
-
 # ---------------------------------------------------------------------------
 # Section builders
 # ---------------------------------------------------------------------------
 
 
 class TestTeamRoleSection:
+    @pytest.mark.level0
     def test_leader_role_section(self):
         section = build_team_role_section(
             role=TeamRole.LEADER,
@@ -43,6 +43,7 @@ class TestTeamRoleSection:
         assert "你的 member_name: leader1" in content
         assert "create_task" in content  # from leader_policy.md
 
+    @pytest.mark.level0
     def test_teammate_role_section(self):
         section = build_team_role_section(
             role=TeamRole.TEAMMATE,
@@ -52,6 +53,7 @@ class TestTeamRoleSection:
         content = section.render("cn")
         assert "view_task" in content  # from teammate_policy.md
 
+    @pytest.mark.level0
     def test_role_without_member_id(self):
         section = build_team_role_section(
             role=TeamRole.LEADER,
@@ -63,10 +65,11 @@ class TestTeamRoleSection:
 
 
 class TestTeamWorkflowSection:
+    @pytest.mark.level0
     def test_leader_workflow(self):
         section = build_team_workflow_section(
             role=TeamRole.LEADER,
-            predefined_team=False,
+            team_mode="default",
             language="cn",
         )
         assert section is not None
@@ -75,25 +78,40 @@ class TestTeamWorkflowSection:
         assert "# 工作流程" in content
         assert "spawn_member" in content
 
-    def test_leader_predefined_override(self):
+    @pytest.mark.level0
+    def test_leader_workflow_predefined(self):
         section = build_team_workflow_section(
             role=TeamRole.LEADER,
-            predefined_team=True,
+            team_mode="predefined",
             language="cn",
         )
         content = section.render("cn")
         assert "预定义团队模式" in content
 
+    @pytest.mark.level0
+    def test_leader_workflow_hybrid(self):
+        section = build_team_workflow_section(
+            role=TeamRole.LEADER,
+            team_mode="hybrid",
+            language="cn",
+        )
+        assert section is not None
+        content = section.render("cn")
+        assert "混合团队模式" in content
+        assert "spawn_member" in content
+
+    @pytest.mark.level0
     def test_teammate_returns_none(self):
         section = build_team_workflow_section(
             role=TeamRole.TEAMMATE,
-            predefined_team=False,
+            team_mode="default",
             language="cn",
         )
         assert section is None
 
 
 class TestTeamLifecycleSection:
+    @pytest.mark.level0
     def test_leader_temporary(self):
         section = build_team_lifecycle_section(
             role=TeamRole.LEADER,
@@ -106,6 +124,7 @@ class TestTeamLifecycleSection:
         assert "# 团队生命周期" in content
         assert "shutdown_member" in content
 
+    @pytest.mark.level0
     def test_leader_persistent(self):
         section = build_team_lifecycle_section(
             role=TeamRole.LEADER,
@@ -116,6 +135,7 @@ class TestTeamLifecycleSection:
         # persistent template has different content
         assert "# 团队生命周期" in content
 
+    @pytest.mark.level0
     def test_teammate_returns_none(self):
         section = build_team_lifecycle_section(
             role=TeamRole.TEAMMATE,
@@ -126,6 +146,7 @@ class TestTeamLifecycleSection:
 
 
 class TestTeamPersonaSection:
+    @pytest.mark.level0
     def test_with_persona(self):
         section = build_team_persona_section(persona="PM Expert", language="cn")
         assert section is not None
@@ -134,12 +155,14 @@ class TestTeamPersonaSection:
         assert "# 当前人设" in content
         assert "PM Expert" in content
 
+    @pytest.mark.level1
     def test_empty_persona_returns_none(self):
         assert build_team_persona_section(persona="", language="cn") is None
         assert build_team_persona_section(persona=None, language="cn") is None
 
 
 class TestTeamExtraSection:
+    @pytest.mark.level1
     def test_with_base_prompt(self):
         section = build_team_extra_section(base_prompt="Be careful", language="cn")
         assert section is not None
@@ -147,12 +170,14 @@ class TestTeamExtraSection:
         content = section.render("cn")
         assert "Be careful" in content
 
+    @pytest.mark.level1
     def test_empty_returns_none(self):
         assert build_team_extra_section(base_prompt=None, language="cn") is None
         assert build_team_extra_section(base_prompt="   ", language="cn") is None
 
 
 class TestTeamInfoSection:
+    @pytest.mark.level1
     def test_full_info(self):
         section = build_team_info_section(
             team_info={"team_name": "AlphaTeam", "desc": "Build a thing"},
@@ -165,14 +190,19 @@ class TestTeamInfoSection:
         assert "AlphaTeam" in content
         assert "Build a thing" in content
 
+    @pytest.mark.level1
     def test_empty_returns_none(self):
         assert build_team_info_section(team_info=None, language="cn") is None
         assert build_team_info_section(team_info={}, language="cn") is None
-        assert build_team_info_section(
-            team_info={"unrelated": "value"},
-            language="cn",
-        ) is None
+        assert (
+            build_team_info_section(
+                team_info={"unrelated": "value"},
+                language="cn",
+            )
+            is None
+        )
 
+    @pytest.mark.level1
     def test_team_workspace_mount_appended(self):
         section = build_team_info_section(
             team_info={"team_name": "AlphaTeam", "desc": "Build a thing"},
@@ -186,6 +216,7 @@ class TestTeamInfoSection:
         assert "`.team/alpha/`" in content
         assert "`/abs/team-workspace`" in content
 
+    @pytest.mark.level1
     def test_team_workspace_only(self):
         # Workspace info alone (no name/desc) is still enough to emit the
         # section, so the LLM sees the shared workspace hint.
@@ -201,6 +232,7 @@ class TestTeamInfoSection:
 
 
 class TestTeamMembersSection:
+    @pytest.mark.level1
     def test_excludes_self(self):
         section = build_team_members_section(
             team_members=[
@@ -217,6 +249,7 @@ class TestTeamMembersSection:
         assert "Dev" in content
         assert "Leader" not in content
 
+    @pytest.mark.level1
     def test_no_peers_returns_none(self):
         section = build_team_members_section(
             team_members=[{"member_name": "self", "display_name": "Me"}],
@@ -225,12 +258,16 @@ class TestTeamMembersSection:
         )
         assert section is None
 
+    @pytest.mark.level1
     def test_empty_returns_none(self):
-        assert build_team_members_section(
-            team_members=None,
-            self_member_name="x",
-            language="cn",
-        ) is None
+        assert (
+            build_team_members_section(
+                team_members=None,
+                self_member_name="x",
+                language="cn",
+            )
+            is None
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +342,14 @@ class _FakeTeamBackend:
         self.list_members_calls += 1
         return list(self._members)
 
+    def hitt_enabled(self) -> bool:
+        """TeamRail probes this; fake teams never enable HITT."""
+        return False
+
+    def human_agent_names(self) -> frozenset[str]:
+        """TeamRail snapshots the roster here; fake teams are empty."""
+        return frozenset()
+
     # -- Mutators used by tests ----------------------------------------------
 
     def set_team(self, team: _StubTeam | None, mtime: int) -> None:
@@ -321,6 +366,7 @@ class TestTeamRailStaticSections:
     registers role/workflow/lifecycle/persona/extra without touching DB."""
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_leader_rail_registers_static_sections_without_backend(self):
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)
@@ -331,7 +377,7 @@ class TestTeamRailStaticSections:
             member_name="leader1",
             lifecycle="temporary",
             language="cn",
-            predefined_team=False,
+            team_mode="default",
             base_prompt="Stay sharp",
         )
         rail.init(agent)
@@ -351,6 +397,7 @@ class TestTeamRailStaticSections:
         assert TeamSectionName.MEMBERS not in sections
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_teammate_rail_omits_leader_only_sections(self):
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)
@@ -361,7 +408,7 @@ class TestTeamRailStaticSections:
             member_name="dev1",
             lifecycle="temporary",
             language="cn",
-            predefined_team=False,
+            team_mode="default",
             base_prompt=None,
         )
         rail.init(agent)
@@ -379,6 +426,7 @@ class TestTeamRailDynamicSections:
     """Dynamic behaviour driven by the injected ``_FakeTeamBackend``."""
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_first_call_loads_from_db(self):
         backend = _FakeTeamBackend(
             team=_StubTeam("Beta", "Test team"),
@@ -411,6 +459,7 @@ class TestTeamRailDynamicSections:
         logger.info("First call loaded info + members from backend")
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_cache_hit_skips_full_query(self):
         backend = _FakeTeamBackend(
             team=_StubTeam("Beta", "Test"),
@@ -439,6 +488,7 @@ class TestTeamRailDynamicSections:
         logger.info("Cache hit skipped 2 expensive fetches")
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_cache_miss_when_member_added(self):
         backend = _FakeTeamBackend(
             team=_StubTeam("Beta", "Test"),
@@ -471,6 +521,7 @@ class TestTeamRailDynamicSections:
         logger.info("Member roster bump triggered refetch")
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_status_update_does_not_refetch(self):
         """Status changes don't bump mtime (per design), so the cache holds."""
         backend = _FakeTeamBackend(
@@ -495,6 +546,7 @@ class TestTeamRailDynamicSections:
         assert backend.list_members_calls == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_team_workspace_mount_preserved_after_refresh(self):
         backend = _FakeTeamBackend(
             team=_StubTeam("Beta", "Test"),
@@ -526,6 +578,7 @@ class TestTeamRailDynamicSections:
         assert "Beta-renamed" in second
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_priority_order_in_built_prompt(self):
         backend = _FakeTeamBackend(
             team=_StubTeam("T1", "D"),
@@ -555,6 +608,7 @@ class TestTeamRailDynamicSections:
         assert idx_role < idx_workflow < idx_lifecycle < idx_persona < idx_info < idx_members
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_uninit_removes_static_and_dynamic_sections(self):
         backend = _FakeTeamBackend(
             team=_StubTeam("T", "D"),

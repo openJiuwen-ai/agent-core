@@ -16,11 +16,13 @@ HEARTBEAT_SYSTEM_PROMPT_CN = """
 
 当收到心跳检测消息时：
 - 若上方无心跳内容，请精确回复：HEARTBEAT_OK
-- 若上方有心跳内容，请根据内容判断是否有需要处理的事项：
-  - 无事项需要处理，回复：HEARTBEAT_OK
-  - 有事项需要处理，直接回复提醒内容（不要包含 HEARTBEAT_OK）
+- 若上方有心跳内容，必须处理心跳内容的事项并进行回复（不要包含 HEARTBEAT_OK）
 
 系统会识别 HEARTBEAT_OK 作为心跳确认。
+
+重要约束：
+- 若需修改 HEARTBEAT.md 文件，禁止给原本没有 <!-- --> 注释的内容添加注释标记
+- 非注释文本仅可在用户明确要求时修改或删除，否则必须保持原样
 """
 
 HEARTBEAT_SYSTEM_PROMPT_EN = """
@@ -29,11 +31,13 @@ HEARTBEAT_SYSTEM_PROMPT_EN = """
 
 When you receive a heartbeat message:
 - If there is no heartbeat content above, reply exactly: HEARTBEAT_OK
-- If there is heartbeat content above, check if anything needs attention:
-  - Nothing to handle, reply: HEARTBEAT_OK
-  - Something needs attention, reply with the alert content directly (do NOT include HEARTBEAT_OK)
+- If there is heartbeat content above, the matters concerning the heartbeat content must be handled and a reply must be made (do not include HEARTBEAT_OK)
 
 The system recognizes HEARTBEAT_OK as a heartbeat acknowledgment.
+
+Important Constraints:
+- When modifying HEARTBEAT.md, DO NOT add <!-- --> comment markers to content that originally had no such markers
+- Non-commented text may only be modified or deleted when explicitly requested by the user; otherwise preserve it as-is
 """
 
 

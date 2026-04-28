@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel
 
 from openjiuwen.agent_evolving.trajectory.store import (
     FileTrajectoryStore,
@@ -375,3 +376,38 @@ class TestFileTrajectoryStore:
         assert loaded_step.detail.tool_name == "test_tool"
         assert loaded_step.detail.call_args == {"arg": "value"}
         assert loaded_step.detail.call_result == {"result": "success"}
+
+    @staticmethod
+    def test_save_serializes_pydantic_tool_payloads(temp_dir):
+        """File store should serialize Pydantic payloads inside tool details."""
+
+        class Payload(BaseModel):
+            value: str
+
+        store = FileTrajectoryStore(temp_dir)
+        step = TrajectoryStep(
+            kind="tool",
+            detail=ToolCallDetail(
+                tool_name="test_tool",
+                call_args=Payload(value="arg"),
+                call_result=Payload(value="result"),
+            ),
+            meta={"operator_id": "test_tool", "payload": Payload(value="meta")},
+        )
+        traj = Trajectory(
+            execution_id="exec-pydantic",
+            session_id="session1",
+            steps=[step],
+            meta={"summary": Payload(value="trajectory")},
+        )
+
+        store.save(traj)
+        loaded = store.load("exec-pydantic")
+
+        assert loaded is not None
+        loaded_step = loaded.steps[0]
+        assert loaded_step.detail is not None
+        assert loaded_step.detail.call_args == {"value": "arg"}
+        assert loaded_step.detail.call_result == {"value": "result"}
+        assert loaded_step.meta["payload"] == {"value": "meta"}
+        assert loaded.meta["summary"] == {"value": "trajectory"}

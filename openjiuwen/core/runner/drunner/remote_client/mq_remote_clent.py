@@ -43,6 +43,12 @@ class MqRemoteClient(RemoteClient):
         self._started = True
         logger.debug(f"[MqRemoteClient] init success topic: {self.topic}, reply_topic: {self.reply_topic}")
 
+    def is_started(self) -> bool:
+        return self._started
+
+    def is_stopped(self) -> bool:
+        return not self._started
+
     async def stop(self):
         # ReplyTopic handles all collector unregistration
         self._started = False

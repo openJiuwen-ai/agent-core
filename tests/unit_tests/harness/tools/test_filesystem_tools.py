@@ -570,7 +570,7 @@ async def test_edit_file_tool_html_desanitization(sys_op, temp_dir):
 
 
 @pytest.mark.asyncio
-async def test_read_file_tool_text_and_unchanged(sys_op, temp_dir):
+async def test_read_file_tool_text(sys_op, temp_dir):
     write_tool = WriteFileTool(sys_op)
     read_tool = ReadFileTool(sys_op)
     file_path = os.path.join(temp_dir, "max.txt")
@@ -579,14 +579,14 @@ async def test_read_file_tool_text_and_unchanged(sys_op, temp_dir):
 
     first = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 2})
     assert first.success is True
-    assert first.data["unchanged"] is False
     assert first.data["content"].startswith("     1\tbeta")
     assert "     2\tgamma" in first.data["content"]
 
+    # Second read of the same range always returns full content (no dedup).
     second = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 2})
     assert second.success is True
-    assert second.data["unchanged"] is True
-    assert "File unchanged since last read" in second.data["content"]
+    assert second.data["content"].startswith("     1\tbeta")
+    assert "     2\tgamma" in second.data["content"]
 
     # Relative paths resolve against get_cwd(); the file is not in the default cwd.
     relative_missing = await read_tool.invoke({"file_path": "max.txt"})
@@ -596,6 +596,27 @@ async def test_read_file_tool_text_and_unchanged(sys_op, temp_dir):
     set_cwd(temp_dir)
     relative_found = await read_tool.invoke({"file_path": "max.txt"})
     assert relative_found.success is True
+
+
+@pytest.mark.asyncio
+async def test_read_file_tool_image_returns_metadata_not_base64(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "sample.png")
+    png_bytes = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+        b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00"
+        b"\x00\x00\x0cIDATx\x9cc```\x00\x00\x00\x04\x00\x01"
+        b"\xf6\x178U\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    with open(file_path, "wb") as fh:
+        fh.write(png_bytes)
+
+    res = await read_tool.invoke({"file_path": file_path})
+
+    assert res.success is True
+    assert "Image file read:" in res.data["content"]
+    assert "data:image" not in res.data["content"]
+    assert res.data["file_path"] == file_path
 
 
 def test_read_file_tool_capability_flags_keep_backward_compatibility():

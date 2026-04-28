@@ -4,6 +4,7 @@
 import json
 from typing import List, Dict
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import BaseMessage, AssistantMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.context_engine.token.base import TokenCounter
@@ -28,23 +29,38 @@ class TiktokenCounter(TokenCounter):
         "text-embedding-3-large": "cl100k_base",
     }
 
-    __slots__ = ("_enc", "_model")
+    __slots__ = ("_enc", "_model", "_fallback_warning_printed")
 
     def __init__(self, model: str = "gpt-4") -> None:
         import tiktoken
 
         self._model = model
         enc_name = self._MODEL2ENC.get(model, "cl100k_base")
-        self._enc = tiktoken.get_encoding(enc_name)
+        try:
+            self._enc = tiktoken.get_encoding(enc_name)
+            self._fallback_warning_printed = False
+        except Exception:
+            self._enc = None
+            self._fallback_warning_printed = False
 
     # ------------------------------------------------------------------
     # Core interfaces
     # ------------------------------------------------------------------
     def count(self, text: str, *, model: str = "", **kwargs) -> int:
-        try:
-            return len(self._enc.encode(text, disallowed_special=()))
-        except Exception:
-            return len(text) // 4
+        if self._enc is not None:
+            try:
+                return len(self._enc.encode(text, disallowed_special=()))
+            except UnicodeEncodeError:
+                logger.warning(
+                    f"Tiktoken encoding failed for text (len={len(text)}), using len//4 fallback."
+                )
+                return len(text) // 4
+        if not self._fallback_warning_printed:
+            self._fallback_warning_printed = True
+            logger.warning(
+                "Tiktoken initialization failed, using len(text)//4 as fallback for token counting. "
+            )
+        return len(text) // 4
 
     def count_messages(self, messages: List[BaseMessage], *, model: str = "", **kwargs) -> int:
         if not messages:

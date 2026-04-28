@@ -4,7 +4,7 @@
 3 options : parallel / sequential / combined
 
 Provides MaTTS-mode trial runners that work with any ReActAgent without
-requiring ContextEvolvingReActAgent or TaskMemoryRail.
+requiring ContextEvolvingReActAgent or ContextEvolutionRail.
 
 Functions
 ---------
