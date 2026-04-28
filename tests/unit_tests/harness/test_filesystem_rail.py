@@ -11,7 +11,7 @@ from openjiuwen.core.sys_operation import (
     OperationMode,
     SysOperationCard,
 )
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 
 
 class _AbilityManager:
@@ -31,19 +31,19 @@ class _Agent:
         self.system_prompt_builder = type("_Builder", (), {"language": "en"})()
 
 
-def test_filesystem_rail_registers_base_tools(tmp_path):
+def test_sys_operation_rail_registers_base_tools(tmp_path):
     async def _run():
         await Runner.start()
         try:
             card = SysOperationCard(
-                id="test_filesystem_rail_base_tools",
+                id="test_sys_operation_rail_base_tools",
                 mode=OperationMode.LOCAL,
                 work_config=LocalWorkConfig(work_dir=str(tmp_path)),
             )
             Runner.resource_mgr.add_sys_operation(card)
             sys_operation = Runner.resource_mgr.get_sys_operation(card.id)
 
-            rail = FileSystemRail()
+            rail = SysOperationRail()
             rail.set_sys_operation(sys_operation)
             agent = _Agent()
 
@@ -73,19 +73,19 @@ def test_filesystem_rail_registers_base_tools(tmp_path):
     asyncio.run(_run())
 
 
-def test_filesystem_rail_with_code_tool(tmp_path):
+def test_sys_operation_rail_with_code_tool(tmp_path):
     async def _run():
         await Runner.start()
         try:
             card = SysOperationCard(
-                id="test_filesystem_rail_with_code_tool",
+                id="test_sys_operation_rail_with_code_tool",
                 mode=OperationMode.LOCAL,
                 work_config=LocalWorkConfig(work_dir=str(tmp_path)),
             )
             Runner.resource_mgr.add_sys_operation(card)
             sys_operation = Runner.resource_mgr.get_sys_operation(card.id)
 
-            rail = FileSystemRail(with_code_tool=True)
+            rail = SysOperationRail(with_code_tool=True)
             rail.set_sys_operation(sys_operation)
             agent = _Agent()
 

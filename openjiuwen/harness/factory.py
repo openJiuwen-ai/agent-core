@@ -23,7 +23,7 @@ from openjiuwen.harness.rails import (
     SubagentRail,
     TaskPlanningRail,
 )
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness.rails import SysOperationRail
 from openjiuwen.harness.schema.agent_mode import AgentMode
 from openjiuwen.harness.schema.config import (
     AudioModelConfig,
@@ -122,8 +122,8 @@ def _inject_general_purpose_subagent(
         r for r in (rails or [])
         if not isinstance(r, (SubagentRail, SessionRail))
     ]
-    if not any(isinstance(r, FileSystemRail) for r in gp_rails):
-        gp_rails = [FileSystemRail(), *gp_rails]
+    if not any(isinstance(r, SysOperationRail) for r in gp_rails):
+        gp_rails = [SysOperationRail(), *gp_rails]
     gp_rails = gp_rails or None
     effective_subagents.insert(0, SubAgentConfig(
         agent_card=AgentCard(name="general-purpose", description=desc),

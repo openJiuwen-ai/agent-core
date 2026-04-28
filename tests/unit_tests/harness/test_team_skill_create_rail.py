@@ -8,8 +8,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from openjiuwen.harness.rails.evolution_rail import EvolutionTriggerPoint
-from openjiuwen.harness.rails.team_skill_create_rail import TeamSkillCreateRail
+from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionTriggerPoint
+from openjiuwen.harness.rails.skills.team_skill_create_rail import TeamSkillCreateRail
 
 
 def _make_rail(tmp_path, *, auto_trigger=True) -> TeamSkillCreateRail:

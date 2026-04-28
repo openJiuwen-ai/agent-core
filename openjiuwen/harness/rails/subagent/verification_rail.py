@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 # ---------------------------------------------------------------------------
 # Tool allowlist
-# Tools registered by FileSystemRail but NOT in this set will be blocked.
+# Tools registered by SysOperationRail but NOT in this set will be blocked.
 # ---------------------------------------------------------------------------
 
 VERIFICATION_ALLOWED_TOOLS: frozenset[str] = frozenset({
@@ -92,8 +92,8 @@ _REMINDER_CN = """\
 class VerificationRail(DeepAgentRail):
     """Rail that enforces verification-agent constraints.
 
-    Designed to be layered on top of :class:`FileSystemRail`.
-    FileSystemRail registers all filesystem and shell tools; this rail
+    Designed to be layered on top of :class:`SysOperationRail`.
+    SysOperationRail registers all filesystem and shell tools; this rail
     then restricts which of those tools the verification agent may
     actually call, and re-injects a constraint reminder before each
     model turn so the agent cannot forget its role mid-run.
@@ -103,7 +103,7 @@ class VerificationRail(DeepAgentRail):
             Defaults to :data:`VERIFICATION_ALLOWED_TOOLS`.
     """
 
-    priority = 90  # runs after FileSystemRail (100) so tools are already registered
+    priority = 90  # runs after SysOperationRail (100) so tools are already registered
 
     def __init__(self, allowed_tools: frozenset[str] | None = None) -> None:
         super().__init__()

@@ -42,7 +42,7 @@ from openjiuwen.harness.rails import (
 from openjiuwen.harness.rails.lsp_rail import (
     LspRail,
 )
-from openjiuwen.harness.rails.skill_use_rail import (
+from openjiuwen.harness.rails.skills.skill_use_rail import (
     SkillUseRail,
 )
 from openjiuwen.harness.schema.config import (

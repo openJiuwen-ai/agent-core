@@ -21,7 +21,7 @@ from openjiuwen.agent_evolving.signal import (
     EvolutionCategory,
 )
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
-from openjiuwen.harness.rails.skill_evolution_rail import (
+from openjiuwen.harness.rails.evolution.skill_evolution_rail import (
     SkillEvolutionRail,
     _MAX_PROCESSED_SIGNAL_KEYS,
 )
@@ -1162,7 +1162,7 @@ async def test_rewrite_skill_delegates_to_rewriter(tmp_path):
         summary="Test summary",
     )
 
-    with patch("openjiuwen.harness.rails.skill_evolution_rail.SkillRewriter") as MockRewriter:
+    with patch("openjiuwen.harness.rails.evolution.skill_evolution_rail.SkillRewriter") as MockRewriter:
         instance = MockRewriter.return_value
         instance.rewrite = AsyncMock(return_value=mock_result)
 
@@ -1189,7 +1189,7 @@ async def test_rewrite_skill_returns_none_when_no_result(tmp_path):
     """rewrite_skill should return None when rewriter returns None."""
     rail = _make_rail(tmp_path)
 
-    with patch("openjiuwen.harness.rails.skill_evolution_rail.SkillRewriter") as MockRewriter:
+    with patch("openjiuwen.harness.rails.evolution.skill_evolution_rail.SkillRewriter") as MockRewriter:
         instance = MockRewriter.return_value
         instance.rewrite = AsyncMock(return_value=None)
 
@@ -1203,7 +1203,7 @@ async def test_rewrite_skill_uses_default_params(tmp_path):
     """rewrite_skill should use default min_score=0.0 and dry_run=False."""
     rail = _make_rail(tmp_path)
 
-    with patch("openjiuwen.harness.rails.skill_evolution_rail.SkillRewriter") as MockRewriter:
+    with patch("openjiuwen.harness.rails.evolution.skill_evolution_rail.SkillRewriter") as MockRewriter:
         instance = MockRewriter.return_value
         instance.rewrite = AsyncMock(return_value=None)
 
@@ -1234,7 +1234,7 @@ async def test_rewrite_skill_passes_user_query(tmp_path):
         summary="Test summary",
     )
 
-    with patch("openjiuwen.harness.rails.skill_evolution_rail.SkillRewriter") as MockRewriter:
+    with patch("openjiuwen.harness.rails.evolution.skill_evolution_rail.SkillRewriter") as MockRewriter:
         instance = MockRewriter.return_value
         instance.rewrite = AsyncMock(return_value=mock_result)
 
@@ -1270,7 +1270,7 @@ async def test_rewrite_skill_deletes_consumed_records(tmp_path):
         summary="Test summary",
     )
 
-    with patch("openjiuwen.harness.rails.skill_evolution_rail.SkillRewriter") as MockRewriter:
+    with patch("openjiuwen.harness.rails.evolution.skill_evolution_rail.SkillRewriter") as MockRewriter:
         instance = MockRewriter.return_value
         instance.rewrite = AsyncMock(return_value=mock_result)
 
@@ -1297,7 +1297,7 @@ async def test_rewrite_skill_handles_empty_consumed_records(tmp_path):
         summary="Test summary",
     )
 
-    with patch("openjiuwen.harness.rails.skill_evolution_rail.SkillRewriter") as MockRewriter:
+    with patch("openjiuwen.harness.rails.evolution.skill_evolution_rail.SkillRewriter") as MockRewriter:
         instance = MockRewriter.return_value
         instance.rewrite = AsyncMock(return_value=mock_result)
 

@@ -14,7 +14,7 @@ from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.workspace.workspace import Workspace
 
@@ -115,7 +115,7 @@ def create_research_agent(
 ) -> DeepAgent:
     """Create and configure a predefined ResearchAgent instance.
 
-    predefined ResearchAgent is equipped with FileSystemRail and web search tool.
+    predefined ResearchAgent is equipped with SysOperationRail and web search tool.
     You are free to override the configuration.
 
     Args:
@@ -153,7 +153,7 @@ def create_research_agent(
     )
 
     # Full override rule: if user passes tools/rails explicitly, do not inject defaults.
-    final_rails = rails if rails is not None else [FileSystemRail()]
+    final_rails = rails if rails is not None else [SysOperationRail()]
 
     return create_deep_agent(
         model=model,

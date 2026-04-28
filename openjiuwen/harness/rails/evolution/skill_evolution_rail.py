@@ -45,7 +45,7 @@ from openjiuwen.core.operator.skill_call import SkillCallOperator
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
-from openjiuwen.harness.rails.evolution_rail import EvolutionRail
+from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail
 
 _MAX_PROCESSED_SIGNAL_KEYS = 500
 _EVAL_SNIPPET_MAX_MESSAGES = 20

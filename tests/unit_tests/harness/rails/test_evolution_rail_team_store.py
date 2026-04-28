@@ -15,7 +15,7 @@ from openjiuwen.agent_evolving.trajectory.types import (
     TrajectoryStep,
 )
 from openjiuwen.core.single_agent.rail.base import InvokeInputs
-from openjiuwen.harness.rails.evolution_rail import EvolutionRail
+from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail
 
 
 @dataclass

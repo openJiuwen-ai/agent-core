@@ -132,16 +132,16 @@ asyncio.run(main())
 
 ### Enabling automatic diagnostic injection
 
-To activate the `after_tool_call` → `before_model_call` pipeline (described in the next section), add `FileSystemRail` alongside `LspRail`:
+To activate the `after_tool_call` → `before_model_call` pipeline (described in the next section), add `SysOperationRail` alongside `LspRail`:
 
 ```python
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.rails.lsp_rail import LspRail
 from openjiuwen.harness.lsp import InitializeOptions
 
-rails=[
-    FileSystemRail(),                                                          # provides edit_file / write_file
-    LspRail(options=InitializeOptions(cwd="/path/to/repo"), verbose=True),    # LSP + auto-inject
+rails = [
+    SysOperationRail(),  # provides edit_file / write_file
+    LspRail(options=InitializeOptions(cwd="/path/to/repo"), verbose=True),  # LSP + auto-inject
 ]
 ```
 
@@ -375,7 +375,7 @@ The agent will call:
 
 ### Automatic workflow (via `after_tool_call` + `before_model_call`)
 
-When `FileSystemRail` is also attached, the agent can edit files with `edit_file` and receive diagnostic feedback automatically — no `changeFile` or `getDiagnostics` calls needed:
+When `SysOperationRail` is also attached, the agent can edit files with `edit_file` and receive diagnostic feedback automatically — no `changeFile` or `getDiagnostics` calls needed:
 
 ```python
 result = await Runner.run_agent(

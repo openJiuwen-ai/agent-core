@@ -5,13 +5,9 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock
 
-import pytest
-
-from openjiuwen.harness.rails.verification_rail import (
-    VERIFICATION_ALLOWED_TOOLS,
+from openjiuwen.harness.rails.subagent.verification_rail import (
     VerificationRail,
 )
 from openjiuwen.harness.workspace.workspace import Workspace

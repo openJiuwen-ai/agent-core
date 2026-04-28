@@ -23,7 +23,7 @@ def build_permission_interrupt_rail(
     workspace_root: Path | None = None,
 ) -> "PermissionInterruptRail | None":
     """若 ``permissions.enabled`` 为真则创建护栏，否则返回 ``None``。"""
-    from openjiuwen.harness.rails.security_rail.tool_security_rail import PermissionInterruptRail
+    from openjiuwen.harness.rails.security_rail import PermissionInterruptRail
 
     if not isinstance(permissions, dict) or not permissions.get("enabled", False):
         return None

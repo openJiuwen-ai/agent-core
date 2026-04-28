@@ -9,7 +9,7 @@ from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelReques
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
 
 
@@ -32,7 +32,7 @@ def test_build_explore_agent_config_defaults():
     assert spec.system_prompt
     assert isinstance(spec.rails, list)
     assert len(spec.rails) == 1
-    assert isinstance(spec.rails[0], FileSystemRail)
+    assert isinstance(spec.rails[0], SysOperationRail)
 
 
 def test_create_subagent_explore_initializes_tools(tmp_path):

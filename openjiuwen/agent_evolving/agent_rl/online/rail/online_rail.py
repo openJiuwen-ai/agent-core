@@ -11,7 +11,7 @@ from typing import Any, Optional
 
 from openjiuwen.agent_evolving.trajectory import Trajectory
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
-from openjiuwen.harness.rails.evolution_rail import EvolutionRail
+from openjiuwen.harness.rails import EvolutionRail
 
 from .converter import OnlineTrajectoryConverter
 from .llm_response import extract_logprobs, extract_prompt_ids, extract_token_ids

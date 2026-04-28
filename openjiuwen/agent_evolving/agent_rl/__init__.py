@@ -59,11 +59,15 @@ def __getattr__(name):
     if name == "OnlineRLOptimizer":
         from openjiuwen.agent_evolving.agent_rl.optimizer.rl_optimizer import OnlineRLOptimizer
         return OnlineRLOptimizer
+    if name == "RLRail":
+        from openjiuwen.agent_evolving.agent_rl.rl_rail import RLRail
+        return RLRail
+    if name == "RLOnlineRail":
+        from openjiuwen.agent_evolving.agent_rl.online.rail import RLOnlineRail
+        return RLOnlineRail
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-from openjiuwen.agent_evolving.agent_rl.rl_rail import RLRail
-from openjiuwen.agent_evolving.agent_rl.online.rail import RLOnlineRail
 from openjiuwen.agent_evolving.agent_rl.schemas import (
     Rollout,
     RolloutMessage,

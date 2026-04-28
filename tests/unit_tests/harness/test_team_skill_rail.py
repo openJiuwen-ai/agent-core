@@ -24,7 +24,7 @@ from openjiuwen.agent_evolving.trajectory.types import (
     TrajectoryStep,
     ToolCallDetail,
 )
-from openjiuwen.harness.rails.team_skill_rail import TeamSkillRail, UserIntent
+from openjiuwen.harness.rails.skills.team_skill_rail import TeamSkillRail, UserIntent
 
 
 # ============================================================

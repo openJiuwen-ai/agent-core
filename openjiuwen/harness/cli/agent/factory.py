@@ -18,7 +18,7 @@ from uuid import uuid4
 from openjiuwen.core.foundation.llm import init_model
 from openjiuwen.core.runner import Runner
 from openjiuwen.harness import create_deep_agent
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.tools import (
     create_web_tools,
 )
@@ -145,7 +145,7 @@ def _build_memory_rail(cfg: CLIConfig) -> Any:
         from openjiuwen.core.foundation.store.base_embedding import (
             EmbeddingConfig,
         )
-        from openjiuwen.harness.rails.memory_rail import MemoryRail
+        from openjiuwen.harness.rails.memory.memory_rail import MemoryRail
 
         embedding_config = EmbeddingConfig(
             model_name=os.getenv(
@@ -191,8 +191,8 @@ def _build_subagents(
     from openjiuwen.core.single_agent.schema.agent_card import (
         AgentCard,
     )
-    from openjiuwen.harness.rails.filesystem_rail import (
-        FileSystemRail as _SubAgentFSRail,
+    from openjiuwen.harness.rails.sys_operation_rail import (
+        SysOperationRail as _SubAgentFSRail,
     )
     from openjiuwen.harness.schema.config import SubAgentConfig
     from openjiuwen.harness.subagents.code_agent import (
@@ -438,10 +438,10 @@ def create_agent(
 ) -> tuple[Any, TokenTrackingRail]:
     """Create a :class:`DeepAgent` and its :class:`TokenTrackingRail`.
 
-    Uses the harness ``FileSystemRail`` to auto-register file system
+    Uses the harness ``SysOperationRail`` to auto-register file system
     tools (BashTool, ReadFileTool, etc.) and ``SecurityRail`` (auto-
     mounted by ``create_deep_agent``).  Web tools are added manually
-    since they are not part of ``FileSystemRail``.
+    since they are not part of ``SysOperationRail``.
 
     Also integrates:
     - ``ToolTrackingRail`` — emits tool call/result chunks
@@ -480,7 +480,7 @@ def create_agent(
 
     tracker = TokenTrackingRail()
     tool_tracker = ToolTrackingRail()
-    fs_rail = FileSystemRail()
+    fs_rail = SysOperationRail()
 
     # Build rails list
     rails: list[Any] = [tracker, tool_tracker, fs_rail]
@@ -537,7 +537,7 @@ def create_agent(
     # We do NOT add SessionRail manually here — it is
     # auto-injected by the factory.
 
-    # Web tools are not part of FileSystemRail
+    # Web tools are not part of SysOperationRail
     web_tools = create_web_tools(language="en")
 
     # MCP servers from ~/.openjiuwen/mcp.json

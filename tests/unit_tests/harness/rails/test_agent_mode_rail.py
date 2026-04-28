@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import Mock, patch
 
-from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
+from openjiuwen.harness.rails import AgentModeRail
 from openjiuwen.harness.schema.state import DeepAgentState
 
 

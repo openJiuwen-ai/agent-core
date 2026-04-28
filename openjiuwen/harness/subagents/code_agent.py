@@ -17,8 +17,8 @@ from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.subagents.plan_agent import build_plan_agent_config
-from openjiuwen.harness.rails.coding_memory_rail import CodingMemoryRail
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness.rails.memory.coding_memory_rail import CodingMemoryRail
+from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.rails import AskUserRail, ConfirmInterruptRail, AgentModeRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
@@ -192,7 +192,7 @@ def create_code_agent(
 ) -> DeepAgent:
     """Create and configure a predefined CodeAgent instance.
 
-    predefined CodeAgent is equipped with CodeTool and FileSystemRail. You are free to override the configuration.
+    predefined CodeAgent is equipped with CodeTool and SysOperationRail. You are free to override the configuration.
 
     Args:
         model: Pre-constructed Model instance.
@@ -238,7 +238,7 @@ def create_code_agent(
     final_rails = _merge_rails_with_required(
         rails,
         [
-            (FileSystemRail, FileSystemRail),
+            (SysOperationRail, SysOperationRail),
             (AgentModeRail, AgentModeRail),
             (AskUserRail, AskUserRail),
             (ConfirmInterruptRail, lambda: ConfirmInterruptRail(tool_names=["switch_mode"])),

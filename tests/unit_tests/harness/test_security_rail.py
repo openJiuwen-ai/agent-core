@@ -79,7 +79,7 @@ from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.identity import build_identity_section
 from openjiuwen.harness.prompts.sections.safety import build_safety_section
-from openjiuwen.harness.rails.security_rail import SecurityRail
+from openjiuwen.harness.rails import SecurityRail
 
 
 def _make_agent(builder=None):

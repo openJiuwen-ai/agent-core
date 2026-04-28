@@ -43,7 +43,7 @@ from openjiuwen.extensions.context_evolver import (
     TaskMemoryService,
     AddMemoryRequest,
 )
-from openjiuwen.harness.rails import TaskMemoryRail
+from openjiuwen.harness.rails import ContextEvolutionRail
 
 # ---------------------------------------------------------------------------
 # Environment variables — edit these if you don't have a .env file
@@ -101,7 +101,7 @@ def _make_card(agent_id: str, name: str) -> AgentCard:
 
 async def main() -> None:  # noqa: C901
 
-    _banner("TaskMemoryRail — Abilities Demo")
+    _banner("ContextEvolutionRail — Abilities Demo")
     logger.info("Demonstrates A1-A4 plus a WITHOUT vs. WITH comparison.")
 
     # -------------------------------------------------------------------------
@@ -178,16 +178,16 @@ async def main() -> None:  # noqa: C901
         logger.info("  Memory seeded (topic: Python unit testing).")
 
         # =========================================================================
-        # A1 — TaskMemoryRail: Demo
+        # A1 — ContextEvolutionRail: Demo
         # =========================================================================
-        _banner("TaskMemoryRail — Demo")
+        _banner("ContextEvolutionRail — Demo")
 
-        hook = TaskMemoryRail(
+        hook = ContextEvolutionRail(
             user_id=user_id,
             memory_service=memory_service,
         )
 
-        _section("rail (DeepAgent + TaskMemoryRail, auto_summarize=True)")
+        _section("rail (DeepAgent + ContextEvolutionRail, auto_summarize=True)")
         agent_mem = create_deep_agent(
             model=model,
             card=_make_card("mem_agent", "Memory-augmented DeepAgent"),

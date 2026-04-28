@@ -20,8 +20,8 @@ from openjiuwen.core.single_agent.rail.base import (
     ToolCallInputs,
     InvokeInputs,
 )
-from openjiuwen.harness.rails.evolution_rail import EvolutionRail, EvolutionTriggerPoint
-from openjiuwen.harness.rails.trajectory_rail import TrajectoryRail
+from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint
+from openjiuwen.harness.rails.evolution.trajectory_rail import TrajectoryRail
 
 
 @dataclass

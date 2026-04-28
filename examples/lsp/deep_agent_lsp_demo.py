@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 
-本示例演示如何在 DeepAgent 中集成 LspRail 和 FileSystemRail（以 pyright 为例）：
+本示例演示如何在 DeepAgent 中集成 LspRail 和 SysOperationRail（以 pyright 为例）：
 
 Demo 1-8  — LSP 代码导航：
   1. goToDefinition        — 跳转到函数/类定义
@@ -39,7 +39,7 @@ from openjiuwen.core.foundation.llm import init_model
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.factory import create_deep_agent
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.rails.lsp_rail import LspRail
 from openjiuwen.harness.lsp import shutdown_lsp, InitializeOptions
 
@@ -173,7 +173,7 @@ DEMO_QUERIES = [
 
 async def main():
     Psep()
-    safe_print("DeepAgent + LspRail + FileSystemRail 完整示例 — 9 种演示")
+    safe_print("DeepAgent + LspRail + SysOperationRail 完整示例 — 9 种演示")
     safe_print("  Demo 1-8  — LSP 代码导航操作")
     safe_print("  Demo 9    — after_tool_call → LspRail.before_model_call → 诊断注入 → Agent 自动修复")
     Psep()
@@ -195,7 +195,7 @@ async def main():
         verify_ssl=False,
     )
 
-    # FileSystemRail 提供 read_file / edit_file / write_file（Demo 9 需要）
+    # SysOperationRail 提供 read_file / edit_file / write_file（Demo 9 需要）
     # LspRail 提供 LSP 导航工具（Demo 1-8）以及 after_tool_call / before_model_call 钩子（Demo 9）
     agent = create_deep_agent(
         model=model,
@@ -205,7 +205,7 @@ async def main():
         ),
         workspace=str(SAMPLE_CODE),
         rails=[
-            FileSystemRail(),
+            SysOperationRail(),
             LspRail(options=InitializeOptions(cwd=str(SAMPLE_CODE)), verbose=True),
         ],
         max_iterations=10,

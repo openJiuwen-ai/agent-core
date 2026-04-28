@@ -20,7 +20,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.subagents import create_code_agent, create_research_agent
 
@@ -149,7 +149,7 @@ class TestDeepAgentSessionRail(TestDeepAgentE2E):
         subagents = [
             SubAgentConfig(
                 AgentCard(name="research_agent", description="专注于研究调查任务，当用户想要调查某问题时，可使用该代理执行研究工作。每次只给这位研究员一个主题。"),
-                rails=[FileSystemRail()],
+                rails=[SysOperationRail()],
                 system_prompt="你是研究助理，负责围绕用户输入的主题开展调研，仅需返回最终研究结果。"
             )
         ]

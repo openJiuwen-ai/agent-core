@@ -67,13 +67,13 @@ def _ensure_builtin_rails_registered() -> None:
         SkillUseRail,
         SubagentRail,
     )
-    from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+    from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 
     _RAIL_TYPE_REGISTRY.update({
         "task_planning": TaskPlanningRail,
         "skill_use": SkillUseRail,
         "subagent": SubagentRail,
-        "filesystem": FileSystemRail,
+        "filesystem": SysOperationRail,
     })
 
     # Optional rails: only register when importable.

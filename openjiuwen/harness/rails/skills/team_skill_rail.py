@@ -45,7 +45,7 @@ from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.memory.lite.frontmatter import parse_frontmatter
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
-from openjiuwen.harness.rails.evolution_rail import EvolutionRail, EvolutionTriggerPoint
+from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint
 
 _USER_REQUEST_LLM_POLICY = LLMInvokePolicy(
     attempt_timeout_secs=15,

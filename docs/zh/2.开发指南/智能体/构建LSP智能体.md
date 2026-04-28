@@ -132,16 +132,16 @@ asyncio.run(main())
 
 ### 启用自动诊断注入
 
-要激活 `after_tool_call` → `before_model_call` 管道（详见下一节），需同时挂载 `FileSystemRail`：
+要激活 `after_tool_call` → `before_model_call` 管道（详见下一节），需同时挂载 `SysOperationRail`：
 
 ```python
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.rails.lsp_rail import LspRail
 from openjiuwen.harness.lsp import InitializeOptions
 
-rails=[
-    FileSystemRail(),                                                          # 提供 edit_file / write_file
-    LspRail(options=InitializeOptions(cwd="/path/to/repo"), verbose=True),    # LSP + 自动注入
+rails = [
+    SysOperationRail(),  # 提供 edit_file / write_file
+    LspRail(options=InitializeOptions(cwd="/path/to/repo"), verbose=True),  # LSP + 自动注入
 ]
 ```
 
@@ -375,7 +375,7 @@ result = await Runner.run_agent(
 
 ### 自动工作流（通过 `after_tool_call` + `before_model_call`）
 
-同时挂载 `FileSystemRail` 后，智能体可直接使用 `edit_file` 编辑文件并自动获得诊断反馈——无需调用 `changeFile` 或 `getDiagnostics`：
+同时挂载 `SysOperationRail` 后，智能体可直接使用 `edit_file` 编辑文件并自动获得诊断反馈——无需调用 `changeFile` 或 `getDiagnostics`：
 
 ```python
 result = await Runner.run_agent(

@@ -165,13 +165,13 @@ def build_system_prompt(
 
     The result is passed as ``system_prompt`` to ``DeepAgentSpec.build()``,
     which places it in the IDENTITY section of the ``SystemPromptBuilder``.
-    Rails (FileSystemRail, ContextEngineeringRail, etc.) then append
+    Rails (SysOperationRail, ContextEngineeringRail, etc.) then append
     their own sections (tools, safety, runtime) at invoke time.
 
     Final prompt structure at runtime::
 
         [IDENTITY]  team policy + persona + team context  ← this function
-        [TOOLS]     tool descriptions                     ← FileSystemRail etc.
+        [TOOLS]     tool descriptions                     ← SysOperationRail etc.
         [SAFETY]    security rules                        ← SecurityRail
         [RUNTIME]   execution constraints                 ← auto
         ...         other rail-injected sections

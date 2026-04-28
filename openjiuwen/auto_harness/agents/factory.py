@@ -25,13 +25,7 @@ from openjiuwen.auto_harness.prompts.sections import (
 )
 
 if TYPE_CHECKING:
-    from openjiuwen.auto_harness.schema import (
-        AutoHarnessConfig,
-    )
-    from openjiuwen.core.single_agent.rail.base import (
-        AgentRail,
-    )
-    from openjiuwen.harness.deep_agent import DeepAgent
+    pass
 
 _PACKAGE_DIR = Path(__file__).resolve().parent.parent
 _SKILLS_DIR = str(_PACKAGE_DIR / "skills")
@@ -172,8 +166,8 @@ def _build_rails(
     from openjiuwen.harness.cli.rails.tool_tracker import (
         ToolTrackingRail,
     )
-    from openjiuwen.harness.rails.filesystem_rail import (
-        FileSystemRail,
+    from openjiuwen.harness.rails.sys_operation_rail import (
+        SysOperationRail,
     )
     from openjiuwen.harness.rails.lsp_rail import (
         LspRail,
@@ -181,7 +175,7 @@ def _build_rails(
 
     return [
         ToolTrackingRail(),
-        FileSystemRail(),
+        SysOperationRail(),
         AutoHarnessContextRail(preset=True),
         LspRail(),
         AutoHarnessExperienceRail(
@@ -295,8 +289,8 @@ def _build_readonly_rails(
     from openjiuwen.harness.cli.rails.tool_tracker import (
         ToolTrackingRail,
     )
-    from openjiuwen.harness.rails.filesystem_rail import (
-        FileSystemRail,
+    from openjiuwen.harness.rails.sys_operation_rail import (
+        SysOperationRail,
     )
     from openjiuwen.harness.rails.lsp_rail import (
         LspRail,
@@ -304,7 +298,7 @@ def _build_readonly_rails(
 
     return [
         ToolTrackingRail(),
-        FileSystemRail(),
+        SysOperationRail(),
         AutoHarnessContextRail(preset=True),
         LspRail(),
         AutoHarnessExperienceRail(
@@ -319,7 +313,7 @@ def _build_skill_rail(
     skill_names: List[str],
 ) -> "AgentRail":
     """Build a skill rail from package-local and configured skill roots."""
-    from openjiuwen.harness.rails.skill_use_rail import (
+    from openjiuwen.harness.rails.skills.skill_use_rail import (
         SkillUseRail,
     )
 

@@ -17,7 +17,7 @@ from typing import Optional
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
 )
-from openjiuwen.harness.rails.evolution_rail import EvolutionRail
+from openjiuwen.harness.rails import EvolutionRail
 
 
 class RLRail(EvolutionRail):

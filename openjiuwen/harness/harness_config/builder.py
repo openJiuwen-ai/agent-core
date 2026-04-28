@@ -21,7 +21,7 @@ from openjiuwen.harness.harness_config.loader import ResolvedFileSection, Resolv
 from openjiuwen.harness.workspace.workspace import Workspace
 
 if TYPE_CHECKING:
-    from openjiuwen.harness.deep_agent import DeepAgent
+    pass
 
 # ---------------------------------------------------------------------------
 # Builtin tool group registry
@@ -427,7 +427,7 @@ class HarnessConfigBuilder:
 
         # ── 10. Skills → SkillUseRail with resolved absolute paths
         if resources and resources.skills and resources.skills.dirs:
-            from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
+            from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
 
             skill_dirs = [str((resolved.source_path.parent / d).resolve()) for d in resources.skills.dirs]
             mode = resources.skills.mode or "all"

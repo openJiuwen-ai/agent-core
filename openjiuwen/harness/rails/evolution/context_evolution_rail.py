@@ -15,11 +15,11 @@ from openjiuwen.extensions.context_evolver.service import (
 )
 
 # ---------------------------------------------------------------------------
-# TaskMemoryRail
+# ContextEvolutionRail
 # ---------------------------------------------------------------------------
 
 
-class TaskMemoryRail(DeepAgentRail):
+class ContextEvolutionRail(DeepAgentRail):
 
     priority: int = 50  # run before user-defined callbacks (default priority = 100)
 
@@ -62,7 +62,7 @@ class TaskMemoryRail(DeepAgentRail):
         self.memory_service.load_memories(self.user_id)
 
         logger.info(
-            "TaskMemoryRail initialised for user=%s, inject_in_context=%s, "
+            "ContextEvolutionRail initialised for user=%s, inject_in_context=%s, "
             "auto_summarize=%s",
             user_id,
             inject_memories_in_context,
@@ -262,6 +262,6 @@ class TaskMemoryRail(DeepAgentRail):
 
 
 __all__ = [
-    "TaskMemoryRail",
+    "ContextEvolutionRail",
     "SummarizeTrajectoriesInput",
 ]

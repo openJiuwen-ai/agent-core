@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Optional
 
 from openjiuwen.agent_evolving.trajectory import TrajectoryStore
-from openjiuwen.harness.rails.evolution_rail import EvolutionRail
+from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail
 
 
 class TrajectoryRail(EvolutionRail):

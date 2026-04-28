@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from openjiuwen.harness.rails.team_skill_rail import (
+from openjiuwen.harness.rails.skills.team_skill_rail import (
     TeamSignalType,
     TeamSkillRail,
     TrajectoryIssue,

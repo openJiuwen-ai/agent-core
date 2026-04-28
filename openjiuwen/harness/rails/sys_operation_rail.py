@@ -18,7 +18,7 @@ from openjiuwen.harness.tools.filesystem import (
 )
 
 
-class FileSystemRail(DeepAgentRail):
+class SysOperationRail(DeepAgentRail):
     """Rail for registering filesystem, shell and code tools."""
 
     priority = 100
@@ -78,5 +78,5 @@ class FileSystemRail(DeepAgentRail):
 
 
 __all__ = [
-    "FileSystemRail",
+    "SysOperationRail",
 ]

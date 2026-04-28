@@ -47,9 +47,9 @@ from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.security.core import PermissionEngine
 from openjiuwen.harness.security.factory import build_permission_interrupt_rail
 from openjiuwen.harness.security.host import ToolPermissionHost
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.rails.security_rail import SecurityRail
-from openjiuwen.harness.rails.security_rail.tool_security_rail import PermissionInterruptRail
+from openjiuwen.harness.rails.security_rail import PermissionInterruptRail
 
 
 def example_permissions_dict() -> dict:
@@ -207,7 +207,7 @@ async def demo_natural_language_triggers_permission_rail(workspace: Path) -> Non
             language="cn",
             permissions=example_permissions_dict(),
             permission_host=host,
-            rails=[FileSystemRail()],
+            rails=[SysOperationRail()],
         )
         await agent.ensure_initialized()
 
