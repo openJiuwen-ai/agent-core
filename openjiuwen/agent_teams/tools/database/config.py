@@ -3,10 +3,12 @@
 
 """Database configuration classes."""
 
+from enum import StrEnum
+
 from pydantic import BaseModel
 
 
-class DatabaseType:
+class DatabaseType(StrEnum):
     """Supported database types."""
 
     SQLITE = "sqlite"

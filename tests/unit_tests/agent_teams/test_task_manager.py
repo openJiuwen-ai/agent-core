@@ -56,12 +56,12 @@ async def message_bus():
 @pytest_asyncio.fixture
 async def task_manager(db, message_bus):
     """Provide initialized task manager instance"""
-    await db.create_team(
+    await db.team.create_team(
             team_name="test_team",
             display_name="Test Team",
             leader_member_name="leader1"
     )
-    await db.create_member(
+    await db.member.create_member(
             member_name="member1",
             team_name="test_team",
             display_name="member1",
@@ -203,13 +203,13 @@ class TestClaimConflict:
     @pytest.mark.level0
     async def test_claim_by_second_member_reports_conflict_not_transition_error(self, db, message_bus):
         """A second member claiming a held task should fail with the real reason."""
-        await db.create_team(
+        await db.team.create_team(
             team_name="conflict_team",
             display_name="Conflict Team",
             leader_member_name="leader",
         )
         for name in ("m1", "m2"):
-            await db.create_member(
+            await db.member.create_member(
                 member_name=name,
                 team_name="conflict_team",
                 display_name=name,
@@ -311,12 +311,12 @@ class TestTaskCompletionWithDependencyResolution:
         )
         try:
             await database.initialize()
-            await database.create_team(
+            await database.team.create_team(
                 team_name="t",
                 display_name="t",
                 leader_member_name="leader",
             )
-            await database.create_member(
+            await database.member.create_member(
                 member_name="m1",
                 team_name="t",
                 display_name="m1",
@@ -350,8 +350,8 @@ class TestTaskCompletionWithDependencyResolution:
 
             async def hammer():
                 while not stop.is_set():
-                    await database.get_team_tasks("t")
-                    await database.get_team("t")
+                    await database.task.get_team_tasks("t")
+                    await database.team.get_team("t")
                     await asyncio.sleep(0)
 
             hammer_task = asyncio.create_task(hammer())
@@ -361,14 +361,14 @@ class TestTaskCompletionWithDependencyResolution:
                 stop.set()
                 await hammer_task
 
-            count2 = await database.get_task("count-2")
+            count2 = await database.task.get_task("count-2")
             assert count2 is not None
             assert count2.status == TaskStatus.PENDING.value, (
                 f"count-2 should be unblocked after count-1 completion, "
                 f"got status={count2.status!r}"
             )
 
-            unresolved = await database.get_unresolved_dependencies_count("count-2")
+            unresolved = await database.task.get_unresolved_dependencies_count("count-2")
             assert unresolved == 0, (
                 f"count-2 should have 0 unresolved deps, got {unresolved}"
             )

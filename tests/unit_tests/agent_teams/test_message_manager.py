@@ -54,14 +54,14 @@ async def message_bus():
 async def team_messaging(db, message_bus):
     """Create TeamMessageManager instance with in-memory database"""
     # First create a team
-    await db.create_team(
+    await db.team.create_team(
         team_name="test_team_123",
         display_name="Test Team",
         leader_member_name="leader"
     )
     # create member
     agent_card = AgentCard(name="TestAgent").model_dump_json()
-    await db.create_member(
+    await db.member.create_member(
         member_name="member1",
         team_name="test_team_123",
         display_name="Member One",
@@ -69,7 +69,7 @@ async def team_messaging(db, message_bus):
         status="busy"
     )
     agent_card = AgentCard(name="TestAgent").model_dump_json()
-    await db.create_member(
+    await db.member.create_member(
         member_name="member2",
         team_name="test_team_123",
         display_name="Member Two",
@@ -517,8 +517,8 @@ class TestIntegrationScenarios:
     async def test_team_message_isolation(self, db, message_bus):
         """Test that messaging is isolated to a single team"""
         # Create two teams
-        await db.create_team(team_name="team1", display_name="Team 1", leader_member_name="leader1")
-        await db.create_team(team_name="team2", display_name="Team 2", leader_member_name="leader2")
+        await db.team.create_team(team_name="team1", display_name="Team 1", leader_member_name="leader1")
+        await db.team.create_team(team_name="team2", display_name="Team 2", leader_member_name="leader2")
 
         messaging1 = TeamMessageManager(team_name="team1", db=db, messager=message_bus, member_name="leader1")
         messaging2 = TeamMessageManager(team_name="team2", db=db, messager=message_bus, member_name="leader2")

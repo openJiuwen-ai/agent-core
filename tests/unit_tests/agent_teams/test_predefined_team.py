@@ -96,7 +96,7 @@ class TestBuildTeamWithPredefinedMembers:
             leader_desc="PM",
         )
 
-        members = await db.get_team_members("predefined_team")
+        members = await db.member.get_team_members("predefined_team")
         member_ids = {m.member_name for m in members}
         logger.info("Members after build_team: {}", member_ids)
 
@@ -115,8 +115,8 @@ class TestBuildTeamWithPredefinedMembers:
             leader_desc="PM",
         )
 
-        backend_dev = await db.get_member("backend-dev", "predefined_team")
-        frontend_dev = await db.get_member("frontend-dev", "predefined_team")
+        backend_dev = await db.member.get_member("backend-dev", "predefined_team")
+        frontend_dev = await db.member.get_member("frontend-dev", "predefined_team")
 
         assert backend_dev.status == MemberStatus.UNSTARTED.value
         assert frontend_dev.status == MemberStatus.UNSTARTED.value
@@ -133,8 +133,8 @@ class TestBuildTeamWithPredefinedMembers:
             leader_desc="PM",
         )
 
-        backend_dev = await db.get_member("backend-dev", "predefined_team")
-        frontend_dev = await db.get_member("frontend-dev", "predefined_team")
+        backend_dev = await db.member.get_member("backend-dev", "predefined_team")
+        frontend_dev = await db.member.get_member("frontend-dev", "predefined_team")
 
         assert backend_dev.desc == "Senior backend engineer"
         assert backend_dev.prompt == "Check tasks and start working"
@@ -151,7 +151,7 @@ class TestBuildTeamWithPredefinedMembers:
             leader_desc="PM",
         )
 
-        leader = await db.get_member("leader1", "predefined_team")
+        leader = await db.member.get_member("leader1", "predefined_team")
         assert leader.status == MemberStatus.BUSY.value
         assert leader.execution_status == ExecutionStatus.RUNNING.value
 
@@ -179,7 +179,7 @@ class TestBuildTeamWithoutPredefinedMembers:
             leader_desc="PM",
         )
 
-        members = await db.get_team_members("auto_team")
+        members = await db.member.get_team_members("auto_team")
         assert len(members) == 1
         assert members[0].member_name == "leader1"
 

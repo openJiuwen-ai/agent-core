@@ -36,8 +36,8 @@ from openjiuwen.agent_teams.schema.task import (
     NewTaskSpec,
 )
 from openjiuwen.agent_teams.tools.database import (
-    _TASK_DEPENDENCY_REJECT_STATUSES,
-    _TASK_TERMINAL_STATUSES,
+    TASK_DEPENDENCY_REJECT_STATUSES,
+    TASK_TERMINAL_STATUSES,
     detect_cycle_in_adjacency,
 )
 from openjiuwen.agent_teams.tools.models import (
@@ -166,9 +166,15 @@ class InMemoryTeamDatabase:
     All public methods are ``async`` to match TeamDatabase's interface.
     An ``asyncio.Lock`` serialises write operations so concurrent
     coroutines (leader + teammates in the same event loop) stay safe.
+
+    Mirrors ``TeamDatabase``'s DAO-attribute API by exposing ``team`` /
+    ``member`` / ``task`` / ``message`` as self-references — every
+    operation already lives on this class, so ``db.team.create_team(...)``
+    and ``db.create_team(...)`` call the same method.
     """
 
     def __init__(self) -> None:
+        """Initialize the in-memory store and DAO-shaped self-references."""
         self._teams: dict[str, Team] = {}
         self._members: dict[str, TeamMember] = {}
         # Per-session dynamic data
@@ -178,6 +184,13 @@ class InMemoryTeamDatabase:
         self._read_status: dict[tuple[str, str], _MemReadStatus] = {}
         self._lock = asyncio.Lock()
         self._initialized = True
+        # DAO-shaped facade: every operation lives on this class, so the
+        # attribute is just a self-reference. Callers see the same surface
+        # as the SQL-backed TeamDatabase (db.team.create_team, etc.).
+        self.team = self
+        self.member = self
+        self.task = self
+        self.message = self
 
     # ---- helpers ---------------------------------------------------------
 
@@ -239,7 +252,7 @@ class InMemoryTeamDatabase:
     ) -> bool:
         async with self._lock:
             if team_name in self._teams:
-                team_logger.error(f"Team {team_name} already exists")
+                team_logger.error("Team %s already exists", team_name)
                 return False
             now = self.get_current_time()
             self._teams[team_name] = Team(
@@ -251,16 +264,18 @@ class InMemoryTeamDatabase:
                 created=now,
                 updated_at=now,
             )
-            team_logger.info(f"Team {team_name} created")
+            team_logger.info("Team %s created", team_name)
             return True
 
     async def get_team(self, team_name: str) -> Optional[Team]:
         return self._teams.get(team_name)
 
     async def delete_team(self, team_name: str) -> bool:
+        """Delete a team and cascade-purge its members, tasks, and messages."""
         async with self._lock:
             if team_name not in self._teams:
-                return True
+                team_logger.debug("Team %s not found for deletion", team_name)
+                return False
             del self._teams[team_name]
             # Cascade
             self._members = {k: v for k, v in self._members.items() if v.team_name != team_name}
@@ -268,7 +283,7 @@ class InMemoryTeamDatabase:
             self._task_deps = [d for d in self._task_deps if d.team_name != team_name]
             self._messages = [m for m in self._messages if m.team_name != team_name]
             self._read_status = {k: v for k, v in self._read_status.items() if v.team_name != team_name}
-            team_logger.info(f"Team {team_name} deleted")
+            team_logger.info("Team %s deleted", team_name)
             return True
 
     async def get_team_updated_at(self, team_name: str) -> int:
@@ -308,7 +323,7 @@ class InMemoryTeamDatabase:
     ) -> bool:
         async with self._lock:
             if member_name in self._members:
-                team_logger.error(f"Member {member_name} already exists")
+                team_logger.error("Member %s already exists", member_name)
                 return False
             self._members[member_name] = TeamMember(
                 member_name=member_name,
@@ -323,7 +338,7 @@ class InMemoryTeamDatabase:
                 model_ref_json=model_ref_json,
                 updated_at=self.get_current_time(),
             )
-            team_logger.info(f"Member {member_name} created")
+            team_logger.info("Member %s created", member_name)
             return True
 
     async def get_member(self, member_name: str, team_name: str) -> Optional[TeamMember]:
@@ -353,33 +368,30 @@ class InMemoryTeamDatabase:
         async with self._lock:
             member = self._members.get(member_name)
             if not member or member.team_name != team_name:
-                team_logger.error(f"Member {member_name} not found in team {team_name}")
+                team_logger.error("Member %s not found in team %s", member_name, team_name)
                 return False
             if not is_valid_transition(MemberStatus(member.status), MemberStatus(status), MEMBER_TRANSITIONS):
-                team_logger.error(f"Invalid state transition for member {member_name}: {member.status} -> {status}")
+                team_logger.error("Invalid state transition for member %s: %s -> %s", member_name, member.status, status)
                 return False
             member.status = status
-            team_logger.debug(f"Member {member_name} status updated to {status}")
+            team_logger.debug("Member %s status updated to %s", member_name, status)
             return True
 
     async def update_member_execution_status(self, member_name: str, team_name: str, execution_status: str) -> bool:
         async with self._lock:
             member = self._members.get(member_name)
             if not member or member.team_name != team_name:
-                team_logger.error(f"Member {member_name} not found in team {team_name}")
+                team_logger.error("Member %s not found in team %s", member_name, team_name)
                 return False
             if not is_valid_transition(
                 ExecutionStatus(member.execution_status),
                 ExecutionStatus(execution_status),
                 EXECUTION_TRANSITIONS,
             ):
-                team_logger.error(
-                    f"Invalid state transition for member {member_name}: "
-                    f"{member.execution_status} -> {execution_status}"
-                )
+                team_logger.error("Invalid state transition for member %s: %s -> %s", member_name, member.execution_status, execution_status)
                 return False
             member.execution_status = execution_status
-            team_logger.debug(f"Member {member_name} execution status updated to {execution_status}")
+            team_logger.debug("Member %s execution status updated to %s", member_name, execution_status)
             return True
 
     # =====================================================================
@@ -396,7 +408,7 @@ class InMemoryTeamDatabase:
     ) -> bool:
         async with self._lock:
             if task_id in self._tasks:
-                team_logger.error(f"Task {task_id} already exists")
+                team_logger.error("Task %s already exists", task_id)
                 return False
             self._tasks[task_id] = _MemTask(
                 task_id=task_id,
@@ -406,7 +418,7 @@ class InMemoryTeamDatabase:
                 status=status,
                 updated_at=self.get_current_time(),
             )
-            team_logger.info(f"Task {task_id} created")
+            team_logger.info("Task %s created", task_id)
             return True
 
     async def get_task(self, task_id: str) -> Optional[_MemTask]:
@@ -451,71 +463,63 @@ class InMemoryTeamDatabase:
         async with self._lock:
             task = self._tasks.get(task_id)
             if not task:
-                team_logger.error(f"Task {task_id} not found")
+                team_logger.error("Task %s not found", task_id)
                 return False
             # Surface assignee conflicts before the state-transition check so
             # a task already held by another member does not masquerade as an
             # "invalid claimed → claimed transition" error.
             if task.assignee:
-                team_logger.warning(f"Task {task_id} is already claimed by member {task.assignee}")
+                team_logger.warning("Task %s is already claimed by member %s", task_id, task.assignee)
                 return False
             if not is_valid_transition(TaskStatus(task.status), TaskStatus.CLAIMED, TASK_TRANSITIONS):
-                team_logger.error(
-                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.CLAIMED.value}"
-                )
+                team_logger.error("Invalid state transition for task %s: %s -> %s", task_id, task.status, TaskStatus.CLAIMED.value)
                 return False
             task.status = TaskStatus.CLAIMED.value
             task.assignee = member_name
             task.updated_at = self.get_current_time()
-            team_logger.info(f"Task {task_id} claimed by member {member_name}")
+            team_logger.info("Task %s claimed by member %s", task_id, member_name)
             return True
 
     async def reset_task(self, task_id: str) -> Optional[_MemTask]:
         async with self._lock:
             task = self._tasks.get(task_id)
             if not task:
-                team_logger.error(f"Task {task_id} not found")
+                team_logger.error("Task %s not found", task_id)
                 return None
             if task.status != TaskStatus.CLAIMED.value:
-                team_logger.error(
-                    f"Cannot reset task {task_id} with status {task.status}, only CLAIMED tasks can be reset"
-                )
+                team_logger.error("Cannot reset task %s with status %s, only CLAIMED tasks can be reset", task_id, task.status)
                 return None
             if not is_valid_transition(TaskStatus(task.status), TaskStatus.PENDING, TASK_TRANSITIONS):
-                team_logger.error(
-                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.PENDING.value}"
-                )
+                team_logger.error("Invalid state transition for task %s: %s -> %s", task_id, task.status, TaskStatus.PENDING.value)
                 return None
             task.status = TaskStatus.PENDING.value
             task.assignee = None
             task.updated_at = self.get_current_time()
-            team_logger.info(f"Task {task_id} reset to PENDING")
+            team_logger.info("Task %s reset to PENDING", task_id)
             return task
 
     async def approve_plan_task(self, task_id: str) -> Optional[_MemTask]:
         async with self._lock:
             task = self._tasks.get(task_id)
             if not task:
-                team_logger.error(f"Task {task_id} not found")
+                team_logger.error("Task %s not found", task_id)
                 return None
             if not is_valid_transition(TaskStatus(task.status), TaskStatus.PLAN_APPROVED, TASK_TRANSITIONS):
-                team_logger.error(
-                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.PLAN_APPROVED.value}"
-                )
+                team_logger.error("Invalid state transition for task %s: %s -> %s", task_id, task.status, TaskStatus.PLAN_APPROVED.value)
                 return None
             task.status = TaskStatus.PLAN_APPROVED.value
             task.updated_at = self.get_current_time()
-            team_logger.info(f"Task {task_id} approved from CLAIMED to PLAN_APPROVED")
+            team_logger.info("Task %s approved from CLAIMED to PLAN_APPROVED", task_id)
             return task
 
     async def update_task_status(self, task_id: str, status: str) -> bool:
         async with self._lock:
             task = self._tasks.get(task_id)
             if not task:
-                team_logger.error(f"Task {task_id} not found")
+                team_logger.error("Task %s not found", task_id)
                 return False
             if not is_valid_transition(TaskStatus(task.status), TaskStatus(status), TASK_TRANSITIONS):
-                team_logger.error(f"Invalid state transition for task {task_id}: {task.status} -> {status}")
+                team_logger.error("Invalid state transition for task %s: %s -> %s", task_id, task.status, status)
                 return False
             task.status = status
             task.updated_at = self.get_current_time()
@@ -523,17 +527,17 @@ class InMemoryTeamDatabase:
                 for dep in self._task_deps:
                     if dep.depends_on_task_id == task_id and not dep.resolved:
                         dep.resolved = True
-            team_logger.info(f"Task {task_id} status updated to {status}")
+            team_logger.info("Task %s status updated to %s", task_id, status)
             return True
 
     async def update_task(self, task_id: str, title: Optional[str] = None, content: Optional[str] = None) -> bool:
         async with self._lock:
             task = self._tasks.get(task_id)
             if not task:
-                team_logger.error(f"Task {task_id} not found")
+                team_logger.error("Task %s not found", task_id)
                 return False
             if task.status in (TaskStatus.CLAIMED.value, TaskStatus.PLAN_APPROVED.value):
-                team_logger.error(f"Cannot update task {task_id} because it is currently {task.status}")
+                team_logger.error("Cannot update task %s because it is currently %s", task_id, task.status)
                 return False
             if title is not None:
                 task.title = title
@@ -563,12 +567,12 @@ class InMemoryTeamDatabase:
                 task.status = TaskStatus.BLOCKED.value
                 task.updated_at = now
                 refreshed.append(task)
-                team_logger.info(f"Task {tid} blocked ({unresolved} unresolved deps)")
+                team_logger.info("Task %s blocked (%d unresolved deps)", tid, unresolved)
             elif task.status == TaskStatus.BLOCKED.value and unresolved == 0:
                 task.status = TaskStatus.PENDING.value
                 task.updated_at = now
                 refreshed.append(task)
-                team_logger.info(f"Task {tid} unblocked (all deps resolved)")
+                team_logger.info("Task %s unblocked (all deps resolved)", tid)
         return refreshed
 
     def _terminate_task_locked(
@@ -586,20 +590,18 @@ class InMemoryTeamDatabase:
 
         task = self._tasks.get(task_id)
         if task is None:
-            team_logger.error(f"Task {task_id} not found")
+            team_logger.error("Task %s not found", task_id)
             return None
         if task.status == new_status.value:
-            team_logger.debug(f"Task {task_id} already {new_status.value}")
+            team_logger.debug("Task %s already %s", task_id, new_status.value)
             return task, []
         if not is_valid_transition(TaskStatus(task.status), new_status, TASK_TRANSITIONS):
-            team_logger.error(
-                f"Invalid state transition for task {task_id}: {task.status} -> {new_status.value}"
-            )
+            team_logger.error("Invalid state transition for task %s: %s -> %s", task_id, task.status, new_status.value)
             return None
 
         task.status = new_status.value
         task.updated_at = now
-        team_logger.info(f"Task {task_id} {new_status.value} at {now}")
+        team_logger.info("Task %s %s at %s", task_id, new_status.value, now)
 
         downstream_ids: set[str] = set()
         for dep in self._task_deps:
@@ -648,8 +650,8 @@ class InMemoryTeamDatabase:
                 if dst_status is None:
                     return GraphMutationResult.fail(f"Dependency target {dep_id} not found")
                 # Reject when the source (the task gaining a new dep) is already
-                # executing or terminal — see _TASK_DEPENDENCY_REJECT_STATUSES.
-                if tid not in seen_new_ids and src_status in _TASK_DEPENDENCY_REJECT_STATUSES:
+                # executing or terminal — see TASK_DEPENDENCY_REJECT_STATUSES.
+                if tid not in seen_new_ids and src_status in TASK_DEPENDENCY_REJECT_STATUSES:
                     return GraphMutationResult.fail(
                         f"Cannot add dependency to {tid} in terminal or executing status: {src_status}"
                     )
@@ -685,7 +687,7 @@ class InMemoryTeamDatabase:
                 )
             for tid, dep_id in new_edge_set:
                 dep_status = staged_status.get(dep_id) or self._tasks[dep_id].status
-                initial_resolved = dep_status in _TASK_TERMINAL_STATUSES
+                initial_resolved = dep_status in TASK_TERMINAL_STATUSES
                 self._task_deps.append(
                     _MemTaskDep(
                         task_id=tid,
@@ -701,14 +703,9 @@ class InMemoryTeamDatabase:
             refreshed = self._refresh_status_for_tasks(affected_ids, now)
 
             if new_tasks:
-                team_logger.info(
-                    f"Created {len(new_tasks)} task(s); "
-                    f"added {len(new_edge_set)} edge(s); refreshed {len(refreshed)} task(s)"
-                )
+                team_logger.info("Created %d task(s); added %d edge(s); refreshed %d task(s)", len(new_tasks), len(new_edge_set), len(refreshed))
             else:
-                team_logger.info(
-                    f"Added {len(new_edge_set)} edge(s); refreshed {len(refreshed)} task(s)"
-                )
+                team_logger.info("Added %d edge(s); refreshed %d task(s)", len(new_edge_set), len(refreshed))
             return GraphMutationResult.success(refreshed_tasks=list(refreshed))
 
     async def add_task_with_bidirectional_dependencies(
@@ -742,7 +739,7 @@ class InMemoryTeamDatabase:
             add_edges=edges,
         )
         if not result.ok:
-            team_logger.error(f"Failed to create task {task_id}: {result.reason}")
+            team_logger.error("Failed to create task %s: %s", task_id, result.reason)
         return result.ok
 
     async def get_task_dependencies(self, task_id: str) -> List[_MemTaskDep]:
@@ -758,11 +755,11 @@ class InMemoryTeamDatabase:
     async def delete_task(self, task_id: str) -> bool:
         async with self._lock:
             if task_id not in self._tasks:
-                team_logger.debug(f"Task {task_id} not found for deletion")
+                team_logger.debug("Task %s not found for deletion", task_id)
                 return False
             del self._tasks[task_id]
             self._task_deps = [d for d in self._task_deps if d.task_id != task_id and d.depends_on_task_id != task_id]
-            team_logger.info(f"Task {task_id} deleted")
+            team_logger.info("Task %s deleted", task_id)
             return True
 
     async def cancel_task(self, task_id: str) -> Optional[Dict]:
@@ -804,10 +801,7 @@ class InMemoryTeamDatabase:
                     unblocked_by_id[t.task_id] = t
             cancelled_ids = {t.task_id for t in cancelled}
             unblocked_tasks = [t for tid, t in unblocked_by_id.items() if tid not in cancelled_ids]
-            team_logger.info(
-                f"Cancelled {len(cancelled)} tasks for team {team_name}; "
-                f"unblocked {len(unblocked_tasks)}"
-            )
+            team_logger.info("Cancelled %d tasks for team %s; unblocked %d", len(cancelled), team_name, len(unblocked_tasks))
             return {"cancelled_tasks": cancelled, "unblocked_tasks": unblocked_tasks}
 
     async def complete_task(self, task_id: str) -> Optional[Dict]:
@@ -856,7 +850,7 @@ class InMemoryTeamDatabase:
         async with self._lock:
             for m in self._messages:
                 if m.message_id == message_id:
-                    team_logger.error(f"Message {message_id} already exists")
+                    team_logger.error("Message %s already exists", message_id)
                     return False
             self._messages.append(
                 _MemMessage(
@@ -872,7 +866,7 @@ class InMemoryTeamDatabase:
                     is_read=None if broadcast else is_read,
                 )
             )
-            team_logger.debug(f"Message {message_id} created")
+            team_logger.debug("Message %s created", message_id)
             return True
 
     async def get_messages(
@@ -931,10 +925,10 @@ class InMemoryTeamDatabase:
                     msg = m
                     break
             if not msg:
-                team_logger.error(f"Message {message_id} not found")
+                team_logger.error("Message %s not found", message_id)
                 return False
             if member_name not in self._members:
-                team_logger.error(f"Member {member_name} not found")
+                team_logger.error("Member %s not found", member_name)
                 return False
 
             if msg.broadcast:
@@ -950,5 +944,5 @@ class InMemoryTeamDatabase:
                     rs.read_at = msg.timestamp
             else:
                 msg.is_read = True
-            team_logger.debug(f"Message {message_id} marked as read by {member_name}")
+            team_logger.debug("Message %s marked as read by %s", message_id, member_name)
             return True

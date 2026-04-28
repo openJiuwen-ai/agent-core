@@ -189,7 +189,7 @@ async def create_cur_session_tables(engine: AsyncEngine) -> None:
         for model in (task_model, dep_model, message_model, read_status_model):
             await conn.run_sync(model.__table__.create, checkfirst=True)
 
-    team_logger.info(f"Session tables ready for session {session_id}")
+    team_logger.info("Session tables ready for session %s", session_id)
 
 
 async def drop_cur_session_tables(engine: AsyncEngine) -> None:
@@ -219,7 +219,7 @@ async def drop_cur_session_tables(engine: AsyncEngine) -> None:
 
     _clear_session_model_cache(session_id)
 
-    team_logger.info(f"Dropped dynamic tables for session {session_id}")
+    team_logger.info("Dropped dynamic tables for session %s", session_id)
 
 
 async def cleanup_all_runtime_state(

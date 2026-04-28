@@ -76,7 +76,7 @@ class CoordinationManager:
             await configurator.team_backend.db.create_cur_session_tables()
 
         if host.role == TeamRole.LEADER and configurator.team_backend:
-            existing = await configurator.team_backend.db.get_team(configurator.team_backend.team_name)
+            existing = await configurator.team_backend.db.team.get_team(configurator.team_backend.team_name)
             if existing is not None:
                 non_leader_members = await configurator.team_backend.list_members()
                 if non_leader_members and all(m.status == MemberStatus.SHUTDOWN.value for m in non_leader_members):

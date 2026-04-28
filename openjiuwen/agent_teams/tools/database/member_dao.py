@@ -26,6 +26,7 @@ class MemberDao:
     """Data access object for the team_member table."""
 
     def __init__(self, session_local: async_sessionmaker) -> None:
+        """Initialize member DAO with the shared session factory."""
         self._session_local = session_local
 
     async def create_member(
@@ -60,11 +61,11 @@ class MemberDao:
                 )
                 session.add(member)
                 await session.commit()
-                team_logger.info(f"Member {member_name} created")
+                team_logger.info("Member %s created", member_name)
                 return True
             except IntegrityError:
                 await session.rollback()
-                team_logger.error(f"Member {member_name} already exists")
+                team_logger.error("Member %s already exists", member_name)
                 return False
 
     async def get_member(self, member_name: str, team_name: str) -> Optional[TeamMember]:
@@ -124,7 +125,7 @@ class MemberDao:
             )
             member = result.scalar_one_or_none()
             if not member:
-                team_logger.error(f"Member {member_name} not found in team {team_name}")
+                team_logger.error("Member %s not found in team %s", member_name, team_name)
                 return False
 
             if not is_valid_transition(
@@ -132,12 +133,17 @@ class MemberDao:
                 MemberStatus(status),
                 MEMBER_TRANSITIONS,
             ):
-                team_logger.error(f"Invalid state transition for member {member_name}: {member.status} -> {status}")
+                team_logger.error(
+                    "Invalid state transition for member %s: %s -> %s",
+                    member_name,
+                    member.status,
+                    status,
+                )
                 return False
 
             member.status = status
             await session.commit()
-            team_logger.debug(f"Member {member_name} status updated to {status}")
+            team_logger.debug("Member %s status updated to %s", member_name, status)
             return True
 
     async def update_member_execution_status(
@@ -156,7 +162,7 @@ class MemberDao:
             )
             member = result.scalar_one_or_none()
             if not member:
-                team_logger.error(f"Member {member_name} not found in team {team_name}")
+                team_logger.error("Member %s not found in team %s", member_name, team_name)
                 return False
 
             if not is_valid_transition(
@@ -165,12 +171,18 @@ class MemberDao:
                 EXECUTION_TRANSITIONS,
             ):
                 team_logger.error(
-                    f"Invalid state transition for member {member_name}: "
-                    f"{member.execution_status} -> {execution_status}"
+                    "Invalid state transition for member %s: %s -> %s",
+                    member_name,
+                    member.execution_status,
+                    execution_status,
                 )
                 return False
 
             member.execution_status = execution_status
             await session.commit()
-            team_logger.debug(f"Member {member_name} execution status updated to {execution_status}")
+            team_logger.debug(
+                "Member %s execution status updated to %s",
+                member_name,
+                execution_status,
+            )
             return True

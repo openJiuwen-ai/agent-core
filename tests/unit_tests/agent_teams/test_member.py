@@ -61,12 +61,12 @@ async def message_bus():
 @pytest_asyncio.fixture
 async def team_member(db, agent_card, message_bus):
     """Provide initialized TeamMember instance"""
-    await db.create_team(
+    await db.team.create_team(
         team_name="test_team",
         display_name="Test Team",
         leader_member_name="leader1"
     )
-    await db.create_member(
+    await db.member.create_member(
         member_name="member1",
         team_name="test_team",
         display_name="Test Member",
@@ -102,7 +102,7 @@ class TestTeamMemberInit:
     @pytest.mark.level0
     async def test_member_with_optional_fields(self, db, agent_card, message_bus):
         """Test member initialization with optional fields"""
-        await db.create_team(
+        await db.team.create_team(
             team_name="test_team",
             display_name="Test Team",
             leader_member_name="leader1"

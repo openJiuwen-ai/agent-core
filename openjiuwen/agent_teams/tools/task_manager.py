@@ -154,7 +154,7 @@ class TeamTaskManager:
             # Edges + node go through the unified mutation primitive so
             # cycle detection and BLOCKED/PENDING refresh fire as one
             # atomic step.
-            mutation = await self.db.mutate_dependency_graph(
+            mutation = await self.db.task.mutate_dependency_graph(
                 team_name=self.team_name,
                 new_tasks=[
                     NewTaskSpec(
@@ -177,7 +177,7 @@ class TeamTaskManager:
                     break
             team_logger.debug(f"Added task {task_id} with dependencies: {dependencies}")
         else:
-            success = await self.db.create_task(
+            success = await self.db.task.create_task(
                 task_id=task_id,
                 team_name=self.team_name,
                 title=title,
@@ -257,7 +257,7 @@ class TeamTaskManager:
             status = TaskStatus.PENDING.value
 
         # Use database method for atomic operation with cycle detection
-        success = await self.db.add_task_with_bidirectional_dependencies(
+        success = await self.db.task.add_task_with_bidirectional_dependencies(
             task_id=task_id,
             team_name=self.team_name,
             title=title,
@@ -338,7 +338,7 @@ class TeamTaskManager:
         status = TaskStatus.PENDING.value
 
         # Use database method for atomic operation with cycle detection
-        success = await self.db.add_task_with_bidirectional_dependencies(
+        success = await self.db.task.add_task_with_bidirectional_dependencies(
             task_id=task_id,
             team_name=self.team_name,
             title=title,
@@ -429,7 +429,7 @@ class TeamTaskManager:
         deps = await self.get_dependencies(task_id)
         blocked_by = [d.depends_on_task_id for d in deps if not d.resolved]
 
-        downstream = await self.db.get_tasks_depending_on(task_id)
+        downstream = await self.db.task.get_tasks_depending_on(task_id)
         blocks = [t.task_id for t in downstream]
 
         return TaskDetail(
@@ -452,7 +452,7 @@ class TeamTaskManager:
         Returns:
             TeamTask object if found, None otherwise
         """
-        return await self.db.get_task(task_id)
+        return await self.db.task.get_task(task_id)
 
     async def assign(self, task_id: str, assignee: str) -> TaskOpResult:
         """Assign a task to a member and mark it as claimed (Leader only).
@@ -488,7 +488,7 @@ class TeamTaskManager:
                 f"Task {task_id} is already claimed by {task.assignee}; reset the task before reassigning to {assignee}"
             )
 
-        success = await self.db.assign_task(task_id, assignee)
+        success = await self.db.task.assign_task(task_id, assignee)
         if not success:
             return TaskOpResult.fail(
                 f"Database rejected assign for task {task_id} (invalid state transition from {task.status})"
@@ -529,7 +529,7 @@ class TeamTaskManager:
         if not depends_on_ids:
             return TaskOpResult.success()
 
-        mutation = await self.db.mutate_dependency_graph(
+        mutation = await self.db.task.mutate_dependency_graph(
             team_name=self.team_name,
             add_edges=[(task_id, dep_id) for dep_id in depends_on_ids],
         )
@@ -553,7 +553,7 @@ class TeamTaskManager:
         if not task:
             return TaskOpResult.fail(f"Task {task_id} not found")
 
-        member = await self.db.get_member(member_name, self.team_name)
+        member = await self.db.member.get_member(member_name, self.team_name)
         if not member:
             return TaskOpResult.fail(f"Member {member_name} not found in team {self.team_name}")
 
@@ -581,7 +581,7 @@ class TeamTaskManager:
             )
 
         # Claim task
-        success = await self.db.claim_task(task_id, member_name)
+        success = await self.db.task.claim_task(task_id, member_name)
         if not success:
             return TaskOpResult.fail(f"Database rejected claim for task {task_id} (likely a concurrent claim race)")
 
@@ -617,13 +617,13 @@ class TeamTaskManager:
             ``TaskOpResult`` describing the outcome.
         """
         # Get member to check mode
-        member = await self.db.get_member(self.member_name, self.team_name)
+        member = await self.db.member.get_member(self.member_name, self.team_name)
         if not member:
             return TaskOpResult.fail(f"Member {self.member_name} not found in team {self.team_name}")
 
         # Check if member is in PLAN_MODE
         if member.mode == MemberMode.PLAN_MODE.value:
-            task = await self.db.get_task(task_id)
+            task = await self.db.task.get_task(task_id)
             if not task:
                 return TaskOpResult.fail(f"Task {task_id} not found")
 
@@ -636,9 +636,9 @@ class TeamTaskManager:
 
         # Complete task atomically - this handles state validation, dependency resolution,
         # and unblocking dependent tasks in a single transaction to prevent race conditions
-        result = await self.db.complete_task(task_id)
+        result = await self.db.task.complete_task(task_id)
         if not result:
-            current = await self.db.get_task(task_id)
+            current = await self.db.task.get_task(task_id)
             if current is None:
                 return TaskOpResult.fail(f"Task {task_id} not found")
             return TaskOpResult.fail(
@@ -672,7 +672,7 @@ class TeamTaskManager:
             The cancelled task, or ``None`` if the task is missing or
             the transition is invalid.
         """
-        result = await self.db.cancel_task(task_id)
+        result = await self.db.task.cancel_task(task_id)
         if result is None:
             return None
 
@@ -704,7 +704,7 @@ class TeamTaskManager:
             each task that flipped from BLOCKED to PENDING during the
             cascade.
         """
-        result = await self.db.cancel_all_tasks(
+        result = await self.db.task.cancel_all_tasks(
             self.team_name,
             skip_assignees=skip_assignees,
         )
@@ -761,7 +761,7 @@ class TeamTaskManager:
             # Get all tasks
             all_tasks = task_manager.list_tasks()
         """
-        return await self.db.get_team_tasks(self.team_name, status)
+        return await self.db.task.get_team_tasks(self.team_name, status)
 
     async def get_dependencies(self, task_id: str) -> List[TeamTaskDependencyBase]:
         """Get task dependencies
@@ -772,7 +772,7 @@ class TeamTaskManager:
         Returns:
             List of TeamTaskDependency objects
         """
-        return await self.db.get_task_dependencies(task_id)
+        return await self.db.task.get_task_dependencies(task_id)
 
     async def get_claimable_tasks(self) -> List[TeamTaskBase]:
         """Get tasks that can be claimed
@@ -794,7 +794,7 @@ class TeamTaskManager:
         Returns:
             List of Task objects assigned to the member
         """
-        return await self.db.get_tasks_by_assignee(self.team_name, member_name, status)
+        return await self.db.task.get_tasks_by_assignee(self.team_name, member_name, status)
 
     async def update_task(
         self,
@@ -820,7 +820,7 @@ class TeamTaskManager:
         if not task:
             return TaskOpResult.fail(f"Task {task_id} not found")
 
-        success = await self.db.update_task(task_id, title=title, content=content)
+        success = await self.db.task.update_task(task_id, title=title, content=content)
         if not success:
             return TaskOpResult.fail(
                 f"Task {task_id} cannot be edited while in status '{task.status}'; "
@@ -851,11 +851,11 @@ class TeamTaskManager:
         Returns:
             ``TaskOpResult`` describing the outcome.
         """
-        existing = await self.db.get_task(task_id)
+        existing = await self.db.task.get_task(task_id)
         if not existing:
             return TaskOpResult.fail(f"Task {task_id} not found")
 
-        result = await self.db.reset_task(task_id)
+        result = await self.db.task.reset_task(task_id)
         if not result:
             return TaskOpResult.fail(
                 f"Task {task_id} cannot be reset from status '{existing.status}'; only claimed tasks can be reset"
@@ -874,11 +874,11 @@ class TeamTaskManager:
         Returns:
             ``TaskOpResult`` describing the outcome.
         """
-        existing = await self.db.get_task(task_id)
+        existing = await self.db.task.get_task(task_id)
         if not existing:
             return TaskOpResult.fail(f"Task {task_id} not found")
 
-        task = await self.db.approve_plan_task(task_id)
+        task = await self.db.task.approve_plan_task(task_id)
         if not task:
             return TaskOpResult.fail(
                 f"Task {task_id} cannot be plan-approved from status "

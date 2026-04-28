@@ -52,7 +52,7 @@ class RecoveryManager:
                 continue
             team_name = self._configurator.team_name
             if team_name:
-                await team_backend.db.update_member_status(
+                await team_backend.db.member.update_member_status(
                     member.member_name,
                     team_name,
                     MemberStatus.RESTARTING.value,

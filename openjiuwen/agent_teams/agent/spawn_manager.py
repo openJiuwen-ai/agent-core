@@ -139,7 +139,7 @@ class SpawnManager:
         if team_backend:
             team_name = self._configurator.team_name
             if team_name:
-                await team_backend.db.update_member_status(member_name, team_name, MemberStatus.ERROR.value)
+                await team_backend.db.member.update_member_status(member_name, team_name, MemberStatus.ERROR.value)
         return False
 
     async def on_teammate_unhealthy(self, member_name: str) -> None:
@@ -148,7 +148,7 @@ class SpawnManager:
         team_backend = self._configurator.team_backend
         team_name = self._configurator.team_name
         if team_backend and team_name:
-            await team_backend.db.update_member_status(
+            await team_backend.db.member.update_member_status(
                 member_name,
                 team_name,
                 MemberStatus.RESTARTING.value,

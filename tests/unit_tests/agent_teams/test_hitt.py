@@ -225,7 +225,7 @@ async def test_build_team_enable_hitt_registers_human_agent(team_backend, db):
         leader_desc="Leader persona",
         enable_hitt=True,
     )
-    member = await db.get_member(HUMAN_AGENT_MEMBER_NAME, "hitt_team")
+    member = await db.member.get_member(HUMAN_AGENT_MEMBER_NAME, "hitt_team")
     assert member is not None
     assert member.status == MemberStatus.READY.value
     assert member.execution_status == ExecutionStatus.IDLE.value
@@ -242,7 +242,7 @@ async def test_build_team_without_hitt_skips_human_agent(team_backend, db):
         leader_desc="Leader persona",
         enable_hitt=False,
     )
-    member = await db.get_member(HUMAN_AGENT_MEMBER_NAME, "hitt_team")
+    member = await db.member.get_member(HUMAN_AGENT_MEMBER_NAME, "hitt_team")
     assert member is None
     assert team_backend.hitt_enabled() is False
 
@@ -576,7 +576,7 @@ async def test_build_team_registers_every_declared_human_member(
     assert multi_human_backend.is_human_agent("team_leader") is False
     # Both must be persisted as READY members.
     for name in ("human_designer", "human_pm"):
-        member = await db.get_member(name, "multi_hitt_team")
+        member = await db.member.get_member(name, "multi_hitt_team")
         assert member is not None
         assert member.status == MemberStatus.READY.value
 

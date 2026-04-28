@@ -20,8 +20,8 @@ from openjiuwen.agent_teams.schema.task import (
 )
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.agent_teams.tools.database.graph import (
-    _TASK_DEPENDENCY_REJECT_STATUSES,
-    _TASK_TERMINAL_STATUSES,
+    TASK_DEPENDENCY_REJECT_STATUSES,
+    TASK_TERMINAL_STATUSES,
     detect_cycle_in_adjacency,
 )
 from openjiuwen.agent_teams.tools.models import (
@@ -37,6 +37,7 @@ class TaskDao:
     """Data access object for task and task-dependency tables."""
 
     def __init__(self, session_local: async_sessionmaker) -> None:
+        """Initialize task DAO with the shared session factory."""
         self._session_local = session_local
 
     async def create_task(
@@ -61,11 +62,11 @@ class TaskDao:
                 )
                 session.add(task)
                 await session.commit()
-                team_logger.info(f"Task {task_id} created")
+                team_logger.info("Task %s created", task_id)
                 return True
             except IntegrityError as e:
                 await session.rollback()
-                team_logger.error(f"Task {task_id} already exists {e}", e)
+                team_logger.error("Task %s already exists: %s", task_id, e)
                 return False
 
     async def get_task(self, task_id: str) -> Optional[TeamTaskBase]:
@@ -107,10 +108,10 @@ class TaskDao:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
-                team_logger.error(f"Task {task_id} not found")
+                team_logger.error("Task %s not found", task_id)
                 return False
             if task.assignee:
-                team_logger.warning(f"Task {task_id} already assigned to {task.assignee}")
+                team_logger.warning("Task %s already assigned to %s", task_id, task.assignee)
                 return False
             if not is_valid_transition(
                 TaskStatus(task.status),
@@ -118,14 +119,17 @@ class TaskDao:
                 TASK_TRANSITIONS,
             ):
                 team_logger.error(
-                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.CLAIMED.value}"
+                    "Invalid state transition for task %s: %s -> %s",
+                    task_id,
+                    task.status,
+                    TaskStatus.CLAIMED.value,
                 )
                 return False
             task.assignee = member_name
             task.status = TaskStatus.CLAIMED.value
             task.updated_at = get_current_time()
             await session.commit()
-            team_logger.info(f"Task {task_id} assigned to {member_name} (status=claimed)")
+            team_logger.info("Task %s assigned to %s (status=claimed)", task_id, member_name)
             return True
 
     async def claim_task(self, task_id: str, member_name: str) -> bool:
@@ -135,11 +139,11 @@ class TaskDao:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
-                team_logger.error(f"Task {task_id} not found")
+                team_logger.error("Task %s not found", task_id)
                 return False
 
             if task.assignee:
-                team_logger.warning(f"Task {task_id} is already claimed by member {task.assignee}")
+                team_logger.warning("Task %s is already claimed by member %s", task_id, task.assignee)
                 return False
 
             if not is_valid_transition(
@@ -148,7 +152,10 @@ class TaskDao:
                 TASK_TRANSITIONS,
             ):
                 team_logger.error(
-                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.CLAIMED.value}"
+                    "Invalid state transition for task %s: %s -> %s",
+                    task_id,
+                    task.status,
+                    TaskStatus.CLAIMED.value,
                 )
                 return False
 
@@ -156,7 +163,7 @@ class TaskDao:
             task.assignee = member_name
             task.updated_at = get_current_time()
             await session.commit()
-            team_logger.info(f"Task {task_id} claimed by member {member_name}")
+            team_logger.info("Task %s claimed by member %s", task_id, member_name)
             return True
 
     async def reset_task(self, task_id: str) -> Optional[TeamTaskBase]:
@@ -166,12 +173,14 @@ class TaskDao:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
-                team_logger.error(f"Task {task_id} not found")
+                team_logger.error("Task %s not found", task_id)
                 return None
 
             if task.status != TaskStatus.CLAIMED.value:
                 team_logger.error(
-                    f"Cannot reset task {task_id} with status {task.status}, only CLAIMED tasks can be reset"
+                    "Cannot reset task %s with status %s, only CLAIMED tasks can be reset",
+                    task_id,
+                    task.status,
                 )
                 return None
 
@@ -181,7 +190,10 @@ class TaskDao:
                 TASK_TRANSITIONS,
             ):
                 team_logger.error(
-                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.PENDING.value}"
+                    "Invalid state transition for task %s: %s -> %s",
+                    task_id,
+                    task.status,
+                    TaskStatus.PENDING.value,
                 )
                 return None
 
@@ -190,7 +202,7 @@ class TaskDao:
             task.assignee = None
             task.updated_at = get_current_time()
             await session.commit()
-            team_logger.info(f"Task {task_id} reset from {origin_task_status} to PENDING")
+            team_logger.info("Task %s reset from %s to PENDING", task_id, origin_task_status)
 
             return task
 
@@ -201,7 +213,7 @@ class TaskDao:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
-                team_logger.error(f"Task {task_id} not found")
+                team_logger.error("Task %s not found", task_id)
                 return None
 
             if not is_valid_transition(
@@ -210,14 +222,17 @@ class TaskDao:
                 TASK_TRANSITIONS,
             ):
                 team_logger.error(
-                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.PLAN_APPROVED.value}"
+                    "Invalid state transition for task %s: %s -> %s",
+                    task_id,
+                    task.status,
+                    TaskStatus.PLAN_APPROVED.value,
                 )
                 return None
 
             task.status = TaskStatus.PLAN_APPROVED.value
             task.updated_at = get_current_time()
             await session.commit()
-            team_logger.info(f"Task {task_id} approved from CLAIMED to PLAN_APPROVED")
+            team_logger.info("Task %s approved from CLAIMED to PLAN_APPROVED", task_id)
 
             return task
 
@@ -229,7 +244,7 @@ class TaskDao:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
-                team_logger.error(f"Task {task_id} not found")
+                team_logger.error("Task %s not found", task_id)
                 return False
 
             if not is_valid_transition(
@@ -237,7 +252,12 @@ class TaskDao:
                 TaskStatus(status),
                 TASK_TRANSITIONS,
             ):
-                team_logger.error(f"Invalid state transition for task {task_id}: {task.status} -> {status}")
+                team_logger.error(
+                    "Invalid state transition for task %s: %s -> %s",
+                    task_id,
+                    task.status,
+                    status,
+                )
                 return False
 
             now = get_current_time()
@@ -245,7 +265,7 @@ class TaskDao:
             task.updated_at = now
 
             if status == TaskStatus.COMPLETED.value:
-                team_logger.info(f"Task {task_id} completed at {now}")
+                team_logger.info("Task %s completed at %s", task_id, now)
 
                 dep_update_result = await session.execute(
                     update(task_dependency_model)
@@ -257,10 +277,10 @@ class TaskDao:
                 )
                 resolved_count = dep_update_result.rowcount or 0
                 if resolved_count > 0:
-                    team_logger.info(f"Resolved {resolved_count} dependencies for task {task_id}")
+                    team_logger.info("Resolved %d dependencies for task %s", resolved_count, task_id)
 
             await session.commit()
-            team_logger.info(f"Task {task_id} status updated to {status}")
+            team_logger.info("Task %s status updated to %s", task_id, status)
             return True
 
     async def update_task(
@@ -275,14 +295,18 @@ class TaskDao:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
-                team_logger.error(f"Task {task_id} not found")
+                team_logger.error("Task %s not found", task_id)
                 return False
 
             if task.status in (
                 TaskStatus.CLAIMED.value,
                 TaskStatus.PLAN_APPROVED.value,
             ):
-                team_logger.error(f"Cannot update task {task_id} because it is currently {task.status}")
+                team_logger.error(
+                    "Cannot update task %s because it is currently %s",
+                    task_id,
+                    task.status,
+                )
                 return False
 
             updated = False
@@ -295,7 +319,7 @@ class TaskDao:
 
             if updated:
                 await session.commit()
-                team_logger.info(f"Task {task_id} updated")
+                team_logger.info("Task %s updated", task_id)
 
             return True
 
@@ -341,12 +365,12 @@ class TaskDao:
                 task.status = TaskStatus.BLOCKED.value
                 task.updated_at = now
                 refreshed.append(task)
-                team_logger.info(f"Task {task.task_id} blocked ({unresolved} unresolved deps)")
+                team_logger.info("Task %s blocked (%d unresolved deps)", task.task_id, unresolved)
             elif task.status == TaskStatus.BLOCKED.value and unresolved == 0:
                 task.status = TaskStatus.PENDING.value
                 task.updated_at = now
                 refreshed.append(task)
-                team_logger.info(f"Task {task.task_id} unblocked (all deps resolved)")
+                team_logger.info("Task %s unblocked (all deps resolved)", task.task_id)
         return refreshed
 
     async def _terminate_task_in_session(
@@ -366,20 +390,25 @@ class TaskDao:
         result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
         task = result.scalar_one_or_none()
         if task is None:
-            team_logger.error(f"Task {task_id} not found")
+            team_logger.error("Task %s not found", task_id)
             return None
 
         if task.status == new_status.value:
-            team_logger.debug(f"Task {task_id} already {new_status.value}")
+            team_logger.debug("Task %s already %s", task_id, new_status.value)
             return task, []
 
         if not is_valid_transition(TaskStatus(task.status), new_status, TASK_TRANSITIONS):
-            team_logger.error(f"Invalid state transition for task {task_id}: {task.status} -> {new_status.value}")
+            team_logger.error(
+                "Invalid state transition for task %s: %s -> %s",
+                task_id,
+                task.status,
+                new_status.value,
+            )
             return None
 
         task.status = new_status.value
         task.updated_at = now
-        team_logger.info(f"Task {task_id} {new_status.value} at {now}")
+        team_logger.info("Task %s %s at %s", task_id, new_status.value, now)
 
         dep_update_result = await session.execute(
             update(task_dependency_model)
@@ -391,7 +420,7 @@ class TaskDao:
         )
         resolved_count = dep_update_result.rowcount or 0
         if resolved_count > 0:
-            team_logger.info(f"Resolved {resolved_count} dependencies for task {task_id}")
+            team_logger.info("Resolved %d dependencies for task %s", resolved_count, task_id)
 
         downstream_result = await session.execute(
             select(task_dependency_model.task_id).where(task_dependency_model.depends_on_task_id == task_id).distinct()
@@ -460,7 +489,7 @@ class TaskDao:
                         await session.rollback()
                         return GraphMutationResult.fail(f"Dependency target {dep_id} not found")
                     src_status = endpoint_tasks[tid].status
-                    if src_status in _TASK_DEPENDENCY_REJECT_STATUSES:
+                    if src_status in TASK_DEPENDENCY_REJECT_STATUSES:
                         await session.rollback()
                         return GraphMutationResult.fail(
                             f"Cannot add dependency to {tid} in terminal or executing status: {src_status}"
@@ -494,7 +523,7 @@ class TaskDao:
 
                 for tid, dep_id in new_edge_set:
                     dep_status = endpoint_tasks[dep_id].status
-                    initial_resolved = dep_status in _TASK_TERMINAL_STATUSES
+                    initial_resolved = dep_status in TASK_TERMINAL_STATUSES
                     session.add(
                         task_dependency_model(
                             task_id=tid,
@@ -514,20 +543,26 @@ class TaskDao:
 
                 if new_tasks:
                     team_logger.info(
-                        f"Created {len(new_tasks)} task(s); "
-                        f"added {len(new_edge_set)} edge(s); refreshed {len(refreshed)} task(s)"
+                        "Created %d task(s); added %d edge(s); refreshed %d task(s)",
+                        len(new_tasks),
+                        len(new_edge_set),
+                        len(refreshed),
                     )
                 else:
-                    team_logger.info(f"Added {len(new_edge_set)} edge(s); refreshed {len(refreshed)} task(s)")
+                    team_logger.info(
+                        "Added %d edge(s); refreshed %d task(s)",
+                        len(new_edge_set),
+                        len(refreshed),
+                    )
                 return GraphMutationResult.success(refreshed_tasks=list(refreshed))
 
             except IntegrityError as e:
                 await session.rollback()
-                team_logger.error(f"mutate_dependency_graph integrity error: {e}")
+                team_logger.error("mutate_dependency_graph integrity error: %s", e)
                 return GraphMutationResult.fail(f"Integrity error: {e}")
             except Exception as e:
                 await session.rollback()
-                team_logger.error(f"mutate_dependency_graph unexpected error: {e}")
+                team_logger.error("mutate_dependency_graph unexpected error: %s", e)
                 return GraphMutationResult.fail(f"Unexpected error: {e}")
 
     async def add_task_with_bidirectional_dependencies(
@@ -561,7 +596,7 @@ class TaskDao:
             add_edges=edges,
         )
         if not result.ok:
-            team_logger.error(f"Failed to create task {task_id}: {result.reason}")
+            team_logger.error("Failed to create task %s: %s", task_id, result.reason)
         return result.ok
 
     async def get_task_dependencies(self, task_id: str) -> List[TeamTaskDependencyBase]:
@@ -614,12 +649,12 @@ class TaskDao:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
-                team_logger.debug(f"Task {task_id} not found for deletion")
+                team_logger.debug("Task %s not found for deletion", task_id)
                 return False
 
             await session.delete(task)
             await session.commit()
-            team_logger.info(f"Task {task_id} deleted")
+            team_logger.info("Task %s deleted", task_id)
             return True
 
     async def cancel_task(self, task_id: str) -> Optional[Dict]:
@@ -659,7 +694,7 @@ class TaskDao:
             )
             candidates = [(row[0], row[1]) for row in result.all()]
             if not candidates:
-                team_logger.info(f"No active tasks to cancel for team {team_name}")
+                team_logger.info("No active tasks to cancel for team %s", team_name)
                 return {"cancelled_tasks": [], "unblocked_tasks": []}
 
             now = get_current_time()
@@ -667,7 +702,11 @@ class TaskDao:
             unblocked_by_id: Dict[str, TeamTaskBase] = {}
             for task_id, assignee in candidates:
                 if assignee in skip_assignees:
-                    team_logger.debug(f"Skipping task {task_id}: assignee '{assignee}' in skip_assignees")
+                    team_logger.debug(
+                        "Skipping task %s: assignee '%s' in skip_assignees",
+                        task_id,
+                        assignee,
+                    )
                     continue
                 outcome = await self._terminate_task_in_session(
                     session,
@@ -686,7 +725,10 @@ class TaskDao:
             cancelled_ids = {t.task_id for t in cancelled_tasks}
             unblocked_tasks = [t for tid, t in unblocked_by_id.items() if tid not in cancelled_ids]
             team_logger.info(
-                f"Cancelled {len(cancelled_tasks)} tasks for team {team_name}; unblocked {len(unblocked_tasks)}"
+                "Cancelled %d tasks for team %s; unblocked %d",
+                len(cancelled_tasks),
+                team_name,
+                len(unblocked_tasks),
             )
             return {
                 "cancelled_tasks": cancelled_tasks,

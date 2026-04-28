@@ -8,9 +8,9 @@ from typing import Dict, List, Optional
 from openjiuwen.agent_teams.schema.status import TaskStatus
 
 
-_TASK_TERMINAL_STATUSES = frozenset({TaskStatus.COMPLETED.value, TaskStatus.CANCELLED.value})
+TASK_TERMINAL_STATUSES = frozenset({TaskStatus.COMPLETED.value, TaskStatus.CANCELLED.value})
 
-_TASK_DEPENDENCY_REJECT_STATUSES = frozenset(
+TASK_DEPENDENCY_REJECT_STATUSES = frozenset(
     {
         TaskStatus.COMPLETED.value,
         TaskStatus.CANCELLED.value,

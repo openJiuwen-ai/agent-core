@@ -92,7 +92,7 @@ class TeamMessageManager:
         # keep re-firing forever.
         auto_read = to_member_name in self._human_agent_names
 
-        success = await self.db.create_message(
+        success = await self.db.message.create_message(
             message_id=message_id,
             team_name=self.team_name,
             from_member_name=sender,
@@ -139,7 +139,7 @@ class TeamMessageManager:
         sender = from_member_name or self.member_name
         message_id = str(uuid.uuid4())
 
-        success = await self.db.create_message(
+        success = await self.db.message.create_message(
             message_id=message_id,
             team_name=self.team_name,
             from_member_name=sender,
@@ -172,7 +172,7 @@ class TeamMessageManager:
         # unaffected if a member isn't fully registered yet.
         for human_name in self._human_agent_names:
             try:
-                await self.db.mark_message_read(
+                await self.db.message.mark_message_read(
                     message_id=message_id,
                     member_name=human_name,
                 )
@@ -210,7 +210,7 @@ class TeamMessageManager:
             # Get direct messages from a specific sender
             messages = messaging.get_messages(to_member_name="member1", from_member_name="leader")
         """
-        return await self.db.get_messages(
+        return await self.db.message.get_messages(
             team_name=self.team_name,
             to_member_name=to_member_name,
             unread_only=unread_only,
@@ -243,7 +243,7 @@ class TeamMessageManager:
             # Get broadcast messages from a specific sender
             messages = messaging.get_broadcast_messages(member_name="member1", from_member_name="leader")
         """
-        return await self.db.get_broadcast_messages(
+        return await self.db.message.get_broadcast_messages(
             team_name=self.team_name,
             member_name=member_name,
             unread_only=unread_only,
@@ -259,7 +259,7 @@ class TeamMessageManager:
         Returns:
             List of TeamMessage objects
         """
-        return await self.db.get_team_messages(team_name=team_name)
+        return await self.db.message.get_team_messages(team_name=team_name)
 
     async def mark_message_read(self, message_id: str, member_name: str) -> bool:
         """Mark a message as read by a member
@@ -274,7 +274,7 @@ class TeamMessageManager:
         Example:
             success = messaging.mark_message_read(message_id="msg_123", member_name="member1")
         """
-        success = await self.db.mark_message_read(message_id=message_id, member_name=member_name)
+        success = await self.db.message.mark_message_read(message_id=message_id, member_name=member_name)
         if success:
             team_logger.debug(f"Message {message_id} marked as read by {member_name}")
         else:

@@ -28,6 +28,7 @@ class MessageDao:
     """Data access object for message and message-read-status tables."""
 
     def __init__(self, session_local: async_sessionmaker) -> None:
+        """Initialize message DAO with the shared session factory."""
         self._session_local = session_local
 
     async def get_message(self, message_id: str) -> Optional[TeamMessageBase]:
@@ -73,23 +74,28 @@ class MessageDao:
                     )
                     session.add(message)
                     await session.commit()
-                    team_logger.info(f"Message {message_id} created")
+                    team_logger.info("Message %s created", message_id)
                     return True
                 except IntegrityError as e:
                     await session.rollback()
-                    team_logger.error(f"Failed to create {message_id}, reason is {e}")
+                    team_logger.error("Failed to create %s, reason is %s", message_id, e)
                     return False
                 except OperationalError as e:
                     await session.rollback()
                     if attempt < _DB_RETRY_ATTEMPTS - 1:
                         delay = _DB_RETRY_BASE_DELAY * (2**attempt)
                         team_logger.warning(
-                            f"Database locked on create_message (attempt {attempt + 1}), retrying in {delay}s"
+                            "Database locked on create_message (attempt %d), retrying in %ss",
+                            attempt + 1,
+                            delay,
                         )
                         await asyncio.sleep(delay)
                     else:
                         team_logger.error(
-                            f"Failed to create message {message_id} after {_DB_RETRY_ATTEMPTS} attempts: {e}"
+                            "Failed to create message %s after %d attempts: %s",
+                            message_id,
+                            _DB_RETRY_ATTEMPTS,
+                            e,
                         )
                         return False
         return False
@@ -181,12 +187,12 @@ class MessageDao:
             result = await session.execute(select(message_model).where(message_model.message_id == message_id))
             message = result.scalar_one_or_none()
             if not message:
-                team_logger.error(f"Message {message_id} not found")
+                team_logger.error("Message %s not found", message_id)
                 return False
 
             if member_name == "user":
                 if message.broadcast:
-                    team_logger.error(f"'user' pseudo-member cannot read broadcast message {message_id}")
+                    team_logger.error("'user' pseudo-member cannot read broadcast message %s", message_id)
                     return False
             else:
                 result = await session.execute(
@@ -197,7 +203,7 @@ class MessageDao:
                 )
                 member = result.scalar_one_or_none()
                 if not member:
-                    team_logger.error(f"Member {member_name} not found")
+                    team_logger.error("Member %s not found", member_name)
                     return False
 
             if message.broadcast:
@@ -222,5 +228,5 @@ class MessageDao:
 
             await session.commit()
 
-            team_logger.info(f"Message {message_id} marked as read by {member_name}")
+            team_logger.info("Message %s marked as read by %s", message_id, member_name)
             return True

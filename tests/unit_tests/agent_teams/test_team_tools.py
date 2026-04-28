@@ -78,7 +78,7 @@ async def message_bus():
 async def agent_team(db, message_bus):
     """Provide initialized AgentTeam instance with pre-created team"""
     team_id = "test_team"
-    await db.create_team(
+    await db.team.create_team(
         team_name=team_id,
         display_name="Test Team",
         leader_member_name="leader1"
@@ -145,11 +145,11 @@ class TestBuildTeamTool:
         assert result.success is True
         assert result.error is None
         # Verify team was created in database
-        team_info = await db.get_team("test_team")
+        team_info = await db.team.get_team("test_team")
         assert team_info.display_name == "My Team"
         assert team_info.desc == "Test team description"
         # Verify leader was registered as a member
-        leader = await db.get_member("leader1", "test_team")
+        leader = await db.member.get_member("leader1", "test_team")
         assert leader is not None
         assert leader.display_name == "Lead"
 
@@ -166,7 +166,7 @@ class TestBuildTeamTool:
         })
 
         assert result.success is True
-        team_info = await db.get_team("test_team")
+        team_info = await db.team.get_team("test_team")
         assert team_info.display_name == "Minimal Team"
         assert team_info.desc == "A minimal team"
 
@@ -192,8 +192,8 @@ class TestCleanTeamTool:
             agent_card=sample_agent_card
         )
         # Shutdown member
-        await db.update_member_status("member1", "test_team", MemberStatus.SHUTDOWN_REQUESTED.value)
-        await db.update_member_status("member1", "test_team", MemberStatus.SHUTDOWN.value)
+        await db.member.update_member_status("member1", "test_team", MemberStatus.SHUTDOWN_REQUESTED.value)
+        await db.member.update_member_status("member1", "test_team", MemberStatus.SHUTDOWN.value)
 
         tool = CleanTeamTool(agent_team, t)
         result = await tool.invoke({})
@@ -577,8 +577,8 @@ class TestUpdateTaskTool:
     @pytest.mark.level1
     async def test_cancel_all_tasks(self, agent_team, t, db):
         """Test cancel all tasks via task_id='*'"""
-        await db.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
 
         tool = UpdateTaskTool(agent_team, t)
         result = await tool.invoke({"task_id": "*", "status": "cancelled"})
@@ -590,7 +590,7 @@ class TestUpdateTaskTool:
     @pytest.mark.level1
     async def test_assign_task(self, agent_team, t, sample_agent_card, db):
         """Test assigning a task to a member"""
-        await db.create_member(
+        await db.member.create_member(
             member_name="dev-1",
             team_name="test_team",
             display_name="Dev",
@@ -617,7 +617,7 @@ class TestUpdateTaskTool:
     async def test_assign_reassigns_to_new_member(self, agent_team, t, sample_agent_card, db):
         """Reassigning a claimed task cancels the old owner and binds the new one."""
         for member_name in ("dev-1", "dev-2"):
-            await db.create_member(
+            await db.member.create_member(
                 member_name=member_name,
                 team_name="test_team",
                 display_name=member_name,
@@ -625,7 +625,7 @@ class TestUpdateTaskTool:
                 status=MemberStatus.READY,
             )
         task = await agent_team.task_manager.add(title="Task", content="Content")
-        await db.assign_task(task.task_id, "dev-1")
+        await db.task.assign_task(task.task_id, "dev-1")
 
         tool = UpdateTaskTool(agent_team, t)
         result = await tool.invoke({
@@ -786,9 +786,9 @@ class TestViewTaskToolV2:
     @pytest.mark.level1
     async def test_invoke_list_tasks_by_status(self, agent_team, t, db):
         """Test list action returns summary with blocked_by, no content"""
-        await db.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
-        await db.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
+        await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
 
         tool = ViewTaskToolV2(agent_team.task_manager, t)
         result = await tool.invoke({"action": "list", "status": "pending"})
@@ -805,9 +805,9 @@ class TestViewTaskToolV2:
     @pytest.mark.level1
     async def test_invoke_default_action_is_list(self, agent_team, t, db):
         """Test default action is list (returns all tasks, not just pending)"""
-        await db.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
-        await db.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
+        await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
 
         tool = ViewTaskToolV2(agent_team.task_manager, t)
         result = await tool.invoke({})
@@ -819,9 +819,9 @@ class TestViewTaskToolV2:
     @pytest.mark.level1
     async def test_invoke_claimable(self, agent_team, t, db):
         """Test claimable action returns only pending tasks"""
-        await db.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
-        await db.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
+        await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
 
         tool = ViewTaskToolV2(agent_team.task_manager, t)
         result = await tool.invoke({"action": "claimable"})
@@ -852,7 +852,7 @@ class TestClaimTaskTool:
     @pytest.mark.level1
     async def test_claim_via_status(self, agent_team, t, sample_agent_card, db):
         """Test claiming a task by setting status=claimed"""
-        await db.create_member(
+        await db.member.create_member(
             member_name="leader1",
             team_name="test_team",
             display_name="Leader",
@@ -874,7 +874,7 @@ class TestClaimTaskTool:
     async def test_complete_via_status(self, agent_team, t, sample_agent_card, db):
         """Test completing a task by setting status=completed"""
         from openjiuwen.agent_teams.schema.status import MemberMode
-        await db.create_member(
+        await db.member.create_member(
             member_name="leader1",
             team_name="test_team",
             display_name="Leader",
