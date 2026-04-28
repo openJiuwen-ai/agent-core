@@ -198,6 +198,7 @@ def build_explore_agent_config(
         prompt_mode=prompt_mode,
         enable_task_loop=enable_task_loop,
         max_iterations=max_iterations,
+        restrict_to_work_dir=False
     )
 
 
