@@ -1,7 +1,18 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Task and task-dependency data access object."""
+"""Task and task-dependency data access object.
+
+The module is organised in two layers:
+
+* Top-level helpers — pure SQL primitives that take an explicit
+  ``session`` and operate on the dynamic per-session task / dependency
+  tables. They have no implicit state and serve as the building blocks
+  for the higher-level ``TaskDao`` methods.
+* ``TaskDao`` class — owns the session factory and exposes the public
+  CRUD / state-machine / graph-mutation surface. Methods are thin
+  transaction shells over the helpers above.
+"""
 
 from typing import Dict, Iterable, List, Optional
 
@@ -31,6 +42,278 @@ from openjiuwen.agent_teams.tools.models import (
     _get_task_model,
 )
 from openjiuwen.core.common.logging import team_logger
+
+
+# ---------------------------------------------------------------------------
+# Internal control-flow signal for graph-mutation step failures.
+#
+# Each helper in the mutation pipeline raises this on a business-rule
+# rejection (duplicate id, missing endpoint, cycle, …). The single try
+# block in ``mutate_dependency_graph`` catches it once and converts
+# ``reason`` to a ``GraphMutationResult.fail``. Keeping this internal
+# avoids tuple-typed ``(data, error)`` returns that obscure the
+# step-by-step pipeline.
+# ---------------------------------------------------------------------------
+
+
+class _MutationFailure(Exception):
+    """Internal signal: a graph-mutation step rejected the request."""
+
+    def __init__(self, reason: str) -> None:
+        """Store the human-readable failure reason."""
+        super().__init__(reason)
+        self.reason = reason
+
+
+# ---------------------------------------------------------------------------
+# Pure SQL helpers (no instance state).
+# ---------------------------------------------------------------------------
+
+
+async def _refresh_status_in_session(
+    session: AsyncSession,
+    task_ids: Iterable[str],
+    now: int,
+) -> List[TeamTaskBase]:
+    """Recompute PENDING/BLOCKED status for tasks based on unresolved deps."""
+    unique_ids = list({tid for tid in task_ids if tid})
+    if not unique_ids:
+        return []
+
+    team_task_model = _get_task_model()
+    task_dependency_model = _get_task_dependency_model()
+
+    tasks_result = await session.execute(select(team_task_model).where(team_task_model.task_id.in_(unique_ids)))
+    candidates = [
+        t for t in tasks_result.scalars().all() if t.status in (TaskStatus.PENDING.value, TaskStatus.BLOCKED.value)
+    ]
+    if not candidates:
+        return []
+
+    candidate_ids = [t.task_id for t in candidates]
+    unresolved_result = await session.execute(
+        select(
+            task_dependency_model.task_id,
+            func.count().label("unresolved"),
+        )
+        .where(
+            task_dependency_model.task_id.in_(candidate_ids),
+            task_dependency_model.resolved.is_(False),
+        )
+        .group_by(task_dependency_model.task_id)
+    )
+    unresolved_by_task: Dict[str, int] = {row[0]: row[1] for row in unresolved_result.all()}
+
+    refreshed: List[TeamTaskBase] = []
+    for task in candidates:
+        unresolved = unresolved_by_task.get(task.task_id, 0)
+        if task.status == TaskStatus.PENDING.value and unresolved > 0:
+            task.status = TaskStatus.BLOCKED.value
+            task.updated_at = now
+            refreshed.append(task)
+            team_logger.info("Task %s blocked (%d unresolved deps)", task.task_id, unresolved)
+        elif task.status == TaskStatus.BLOCKED.value and unresolved == 0:
+            task.status = TaskStatus.PENDING.value
+            task.updated_at = now
+            refreshed.append(task)
+            team_logger.info("Task %s unblocked (all deps resolved)", task.task_id)
+    return refreshed
+
+
+async def _terminate_task_in_session(
+    session: AsyncSession,
+    task_id: str,
+    new_status: TaskStatus,
+    now: int,
+) -> Optional[tuple[TeamTaskBase, List[TeamTaskBase]]]:
+    """Terminate a task and propagate dependency resolution downstream."""
+    if new_status not in (TaskStatus.COMPLETED, TaskStatus.CANCELLED):
+        raise ValueError(f"_terminate_task_in_session expects a terminal status, got {new_status}")
+
+    team_task_model = _get_task_model()
+    task_dependency_model = _get_task_dependency_model()
+
+    result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
+    task = result.scalar_one_or_none()
+    if task is None:
+        team_logger.error("Task %s not found", task_id)
+        return None
+
+    if task.status == new_status.value:
+        team_logger.debug("Task %s already %s", task_id, new_status.value)
+        return task, []
+
+    if not is_valid_transition(TaskStatus(task.status), new_status, TASK_TRANSITIONS):
+        team_logger.error(
+            "Invalid state transition for task %s: %s -> %s",
+            task_id,
+            task.status,
+            new_status.value,
+        )
+        return None
+
+    task.status = new_status.value
+    task.updated_at = now
+    team_logger.info("Task %s %s at %s", task_id, new_status.value, now)
+
+    dep_update_result = await session.execute(
+        update(task_dependency_model)
+        .where(
+            task_dependency_model.depends_on_task_id == task_id,
+            task_dependency_model.resolved.is_(False),
+        )
+        .values(resolved=True)
+    )
+    resolved_count = dep_update_result.rowcount or 0
+    if resolved_count > 0:
+        team_logger.info("Resolved %d dependencies for task %s", resolved_count, task_id)
+
+    downstream_result = await session.execute(
+        select(task_dependency_model.task_id).where(task_dependency_model.depends_on_task_id == task_id).distinct()
+    )
+    downstream_ids = {row[0] for row in downstream_result.all()}
+
+    refreshed = await _refresh_status_in_session(session, downstream_ids, now)
+    return task, refreshed
+
+
+async def _stage_new_tasks(
+    session: AsyncSession,
+    team_name: str,
+    new_tasks: List[NewTaskSpec],
+    now: int,
+) -> None:
+    """Insert new task rows, raising ``_MutationFailure`` on duplicate id."""
+    if not new_tasks:
+        return
+
+    team_task_model = _get_task_model()
+    seen_ids: set[str] = set()
+    for spec in new_tasks:
+        if spec.task_id in seen_ids:
+            raise _MutationFailure(f"Duplicate task_id {spec.task_id} in new_tasks")
+        seen_ids.add(spec.task_id)
+        session.add(
+            team_task_model(
+                task_id=spec.task_id,
+                team_name=team_name,
+                title=spec.title,
+                content=spec.content,
+                status=spec.initial_status,
+                updated_at=now,
+            )
+        )
+    await session.flush()
+
+
+async def _load_endpoints_and_validate(
+    session: AsyncSession,
+    add_edges: List[tuple[str, str]],
+) -> Dict[str, TeamTaskBase]:
+    """Resolve every edge endpoint and reject invalid sources.
+
+    Raises:
+        _MutationFailure: when an endpoint is missing or the edge source
+            is in a status that forbids new dependencies (terminal or
+            already executing — see ``TASK_DEPENDENCY_REJECT_STATUSES``).
+    """
+    if not add_edges:
+        return {}
+
+    team_task_model = _get_task_model()
+    edge_endpoints: set[str] = set()
+    for tid, dep_id in add_edges:
+        edge_endpoints.add(tid)
+        edge_endpoints.add(dep_id)
+
+    endpoint_result = await session.execute(
+        select(team_task_model).where(team_task_model.task_id.in_(list(edge_endpoints)))
+    )
+    endpoint_tasks: Dict[str, TeamTaskBase] = {t.task_id: t for t in endpoint_result.scalars().all()}
+
+    for tid, dep_id in add_edges:
+        if tid not in endpoint_tasks:
+            raise _MutationFailure(f"Task {tid} not found")
+        if dep_id not in endpoint_tasks:
+            raise _MutationFailure(f"Dependency target {dep_id} not found")
+        src_status = endpoint_tasks[tid].status
+        if src_status in TASK_DEPENDENCY_REJECT_STATUSES:
+            raise _MutationFailure(
+                f"Cannot add dependency to {tid} in terminal or executing status: {src_status}"
+            )
+    return endpoint_tasks
+
+
+async def _check_cycle_and_compute_new_edges(
+    session: AsyncSession,
+    team_name: str,
+    add_edges: List[tuple[str, str]],
+) -> set[tuple[str, str]]:
+    """Compute edges to insert, dropping duplicates and rejecting cycles.
+
+    Builds the post-mutation adjacency from existing-edges + add_edges,
+    then runs a single cycle check on the union.
+
+    Raises:
+        _MutationFailure: when applying ``add_edges`` would introduce a
+            cycle.
+    """
+    task_dependency_model = _get_task_dependency_model()
+    existing_edges_rows = (
+        await session.execute(
+            select(
+                task_dependency_model.task_id,
+                task_dependency_model.depends_on_task_id,
+            ).where(task_dependency_model.team_name == team_name)
+        )
+    ).all()
+    existing_edge_set: set[tuple[str, str]] = {(row[0], row[1]) for row in existing_edges_rows}
+    adjacency: Dict[str, List[str]] = {}
+    for src, dst in existing_edge_set:
+        adjacency.setdefault(src, []).append(dst)
+
+    new_edge_set: set[tuple[str, str]] = set()
+    for tid, dep_id in add_edges:
+        edge = (tid, dep_id)
+        if edge in existing_edge_set or edge in new_edge_set:
+            continue
+        new_edge_set.add(edge)
+        adjacency.setdefault(tid, []).append(dep_id)
+
+    cycle = detect_cycle_in_adjacency(adjacency)
+    if cycle is not None:
+        raise _MutationFailure(f"Circular dependency detected: {' -> '.join(cycle)}")
+    return new_edge_set
+
+
+async def _apply_new_edges(
+    session: AsyncSession,
+    team_name: str,
+    new_edge_set: set[tuple[str, str]],
+    endpoint_tasks: Dict[str, TeamTaskBase],
+) -> None:
+    """Insert dependency rows for the freshly computed new edges."""
+    if not new_edge_set:
+        return
+
+    task_dependency_model = _get_task_dependency_model()
+    for tid, dep_id in new_edge_set:
+        dep_status = endpoint_tasks[dep_id].status
+        initial_resolved = dep_status in TASK_TERMINAL_STATUSES
+        session.add(
+            task_dependency_model(
+                task_id=tid,
+                depends_on_task_id=dep_id,
+                team_name=team_name,
+                resolved=initial_resolved,
+            )
+        )
+    await session.flush()
+
+
+# ---------------------------------------------------------------------------
+# TaskDao — public surface
+# ---------------------------------------------------------------------------
 
 
 class TaskDao:
@@ -298,113 +581,6 @@ class TaskDao:
 
             return True
 
-    async def _refresh_status_in_session(
-        self,
-        session: AsyncSession,
-        task_ids: Iterable[str],
-        now: int,
-    ) -> List[TeamTaskBase]:
-        """Recompute PENDING/BLOCKED status for tasks based on unresolved deps."""
-        unique_ids = list({tid for tid in task_ids if tid})
-        if not unique_ids:
-            return []
-
-        team_task_model = _get_task_model()
-        task_dependency_model = _get_task_dependency_model()
-
-        tasks_result = await session.execute(select(team_task_model).where(team_task_model.task_id.in_(unique_ids)))
-        candidates = [
-            t for t in tasks_result.scalars().all() if t.status in (TaskStatus.PENDING.value, TaskStatus.BLOCKED.value)
-        ]
-        if not candidates:
-            return []
-
-        candidate_ids = [t.task_id for t in candidates]
-        unresolved_result = await session.execute(
-            select(
-                task_dependency_model.task_id,
-                func.count().label("unresolved"),
-            )
-            .where(
-                task_dependency_model.task_id.in_(candidate_ids),
-                task_dependency_model.resolved.is_(False),
-            )
-            .group_by(task_dependency_model.task_id)
-        )
-        unresolved_by_task: Dict[str, int] = {row[0]: row[1] for row in unresolved_result.all()}
-
-        refreshed: List[TeamTaskBase] = []
-        for task in candidates:
-            unresolved = unresolved_by_task.get(task.task_id, 0)
-            if task.status == TaskStatus.PENDING.value and unresolved > 0:
-                task.status = TaskStatus.BLOCKED.value
-                task.updated_at = now
-                refreshed.append(task)
-                team_logger.info("Task %s blocked (%d unresolved deps)", task.task_id, unresolved)
-            elif task.status == TaskStatus.BLOCKED.value and unresolved == 0:
-                task.status = TaskStatus.PENDING.value
-                task.updated_at = now
-                refreshed.append(task)
-                team_logger.info("Task %s unblocked (all deps resolved)", task.task_id)
-        return refreshed
-
-    async def _terminate_task_in_session(
-        self,
-        session: AsyncSession,
-        task_id: str,
-        new_status: TaskStatus,
-        now: int,
-    ) -> Optional[tuple[TeamTaskBase, List[TeamTaskBase]]]:
-        """Terminate a task and propagate dependency resolution downstream."""
-        if new_status not in (TaskStatus.COMPLETED, TaskStatus.CANCELLED):
-            raise ValueError(f"_terminate_task_in_session expects a terminal status, got {new_status}")
-
-        team_task_model = _get_task_model()
-        task_dependency_model = _get_task_dependency_model()
-
-        result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
-        task = result.scalar_one_or_none()
-        if task is None:
-            team_logger.error("Task %s not found", task_id)
-            return None
-
-        if task.status == new_status.value:
-            team_logger.debug("Task %s already %s", task_id, new_status.value)
-            return task, []
-
-        if not is_valid_transition(TaskStatus(task.status), new_status, TASK_TRANSITIONS):
-            team_logger.error(
-                "Invalid state transition for task %s: %s -> %s",
-                task_id,
-                task.status,
-                new_status.value,
-            )
-            return None
-
-        task.status = new_status.value
-        task.updated_at = now
-        team_logger.info("Task %s %s at %s", task_id, new_status.value, now)
-
-        dep_update_result = await session.execute(
-            update(task_dependency_model)
-            .where(
-                task_dependency_model.depends_on_task_id == task_id,
-                task_dependency_model.resolved.is_(False),
-            )
-            .values(resolved=True)
-        )
-        resolved_count = dep_update_result.rowcount or 0
-        if resolved_count > 0:
-            team_logger.info("Resolved %d dependencies for task %s", resolved_count, task_id)
-
-        downstream_result = await session.execute(
-            select(task_dependency_model.task_id).where(task_dependency_model.depends_on_task_id == task_id).distinct()
-        )
-        downstream_ids = {row[0] for row in downstream_result.all()}
-
-        refreshed = await self._refresh_status_in_session(session, downstream_ids, now)
-        return task, refreshed
-
     async def mutate_dependency_graph(
         self,
         team_name: str,
@@ -412,107 +588,28 @@ class TaskDao:
         new_tasks: Optional[List[NewTaskSpec]] = None,
         add_edges: Optional[List[tuple[str, str]]] = None,
     ) -> GraphMutationResult:
-        """Atomic dependency-graph mutation: insert nodes and/or edges."""
+        """Atomic dependency-graph mutation: insert nodes and/or edges.
+
+        The body is a five-step pipeline kept inside one transaction;
+        each step lives in a top-level helper. Business-rule rejections
+        flow through ``_MutationFailure``, caught once at the bottom.
+        """
         new_tasks = list(new_tasks or [])
         add_edges = list(add_edges or [])
         if not new_tasks and not add_edges:
             return GraphMutationResult.success()
 
-        team_task_model = _get_task_model()
-        task_dependency_model = _get_task_dependency_model()
-
         async with self._session_local() as session:
             try:
                 now = get_current_time()
-
-                seen_new_ids: set[str] = set()
-                for spec in new_tasks:
-                    if spec.task_id in seen_new_ids:
-                        await session.rollback()
-                        return GraphMutationResult.fail(f"Duplicate task_id {spec.task_id} in new_tasks")
-                    seen_new_ids.add(spec.task_id)
-                    session.add(
-                        team_task_model(
-                            task_id=spec.task_id,
-                            team_name=team_name,
-                            title=spec.title,
-                            content=spec.content,
-                            status=spec.initial_status,
-                            updated_at=now,
-                        )
-                    )
-                if new_tasks:
-                    await session.flush()
-
-                edge_endpoints: set[str] = set()
-                for tid, dep_id in add_edges:
-                    edge_endpoints.add(tid)
-                    edge_endpoints.add(dep_id)
-
-                endpoint_tasks: Dict[str, TeamTaskBase] = {}
-                if edge_endpoints:
-                    endpoint_result = await session.execute(
-                        select(team_task_model).where(team_task_model.task_id.in_(list(edge_endpoints)))
-                    )
-                    endpoint_tasks = {t.task_id: t for t in endpoint_result.scalars().all()}
-
-                for tid, dep_id in add_edges:
-                    if tid not in endpoint_tasks:
-                        await session.rollback()
-                        return GraphMutationResult.fail(f"Task {tid} not found")
-                    if dep_id not in endpoint_tasks:
-                        await session.rollback()
-                        return GraphMutationResult.fail(f"Dependency target {dep_id} not found")
-                    src_status = endpoint_tasks[tid].status
-                    if src_status in TASK_DEPENDENCY_REJECT_STATUSES:
-                        await session.rollback()
-                        return GraphMutationResult.fail(
-                            f"Cannot add dependency to {tid} in terminal or executing status: {src_status}"
-                        )
-
-                existing_edges_rows = (
-                    await session.execute(
-                        select(
-                            task_dependency_model.task_id,
-                            task_dependency_model.depends_on_task_id,
-                        ).where(task_dependency_model.team_name == team_name)
-                    )
-                ).all()
-                existing_edge_set: set[tuple[str, str]] = {(row[0], row[1]) for row in existing_edges_rows}
-                adjacency: Dict[str, List[str]] = {}
-                for src, dst in existing_edge_set:
-                    adjacency.setdefault(src, []).append(dst)
-
-                new_edge_set: set[tuple[str, str]] = set()
-                for tid, dep_id in add_edges:
-                    edge = (tid, dep_id)
-                    if edge in existing_edge_set or edge in new_edge_set:
-                        continue
-                    new_edge_set.add(edge)
-                    adjacency.setdefault(tid, []).append(dep_id)
-
-                cycle = detect_cycle_in_adjacency(adjacency)
-                if cycle is not None:
-                    await session.rollback()
-                    return GraphMutationResult.fail(f"Circular dependency detected: {' -> '.join(cycle)}")
-
-                for tid, dep_id in new_edge_set:
-                    dep_status = endpoint_tasks[dep_id].status
-                    initial_resolved = dep_status in TASK_TERMINAL_STATUSES
-                    session.add(
-                        task_dependency_model(
-                            task_id=tid,
-                            depends_on_task_id=dep_id,
-                            team_name=team_name,
-                            resolved=initial_resolved,
-                        )
-                    )
-                if new_edge_set:
-                    await session.flush()
+                await _stage_new_tasks(session, team_name, new_tasks, now)
+                endpoint_tasks = await _load_endpoints_and_validate(session, add_edges)
+                new_edge_set = await _check_cycle_and_compute_new_edges(session, team_name, add_edges)
+                await _apply_new_edges(session, team_name, new_edge_set, endpoint_tasks)
 
                 affected_ids: set[str] = {spec.task_id for spec in new_tasks}
                 affected_ids.update(tid for tid, _ in new_edge_set)
-                refreshed = await self._refresh_status_in_session(session, affected_ids, now)
+                refreshed = await _refresh_status_in_session(session, affected_ids, now)
 
                 await session.commit()
 
@@ -531,6 +628,9 @@ class TaskDao:
                     )
                 return GraphMutationResult.success(refreshed_tasks=list(refreshed))
 
+            except _MutationFailure as e:
+                await session.rollback()
+                return GraphMutationResult.fail(e.reason)
             except IntegrityError as e:
                 await session.rollback()
                 team_logger.error("mutate_dependency_graph integrity error: %s", e)
@@ -636,7 +736,7 @@ class TaskDao:
         """Cancel a task atomically and unblock dependent tasks."""
         async with self._session_local() as session:
             now = get_current_time()
-            outcome = await self._terminate_task_in_session(
+            outcome = await _terminate_task_in_session(
                 session,
                 task_id=task_id,
                 new_status=TaskStatus.CANCELLED,
@@ -683,7 +783,7 @@ class TaskDao:
                         assignee,
                     )
                     continue
-                outcome = await self._terminate_task_in_session(
+                outcome = await _terminate_task_in_session(
                     session,
                     task_id=task_id,
                     new_status=TaskStatus.CANCELLED,
@@ -714,7 +814,7 @@ class TaskDao:
         """Complete a task atomically and unblock dependent tasks."""
         async with self._session_local() as session:
             now = get_current_time()
-            outcome = await self._terminate_task_in_session(
+            outcome = await _terminate_task_in_session(
                 session,
                 task_id=task_id,
                 new_status=TaskStatus.COMPLETED,
@@ -741,7 +841,7 @@ class TaskDao:
                 return []
 
             now = get_current_time()
-            refreshed = await self._refresh_status_in_session(session, blocked_ids, now)
+            refreshed = await _refresh_status_in_session(session, blocked_ids, now)
             await session.commit()
             return refreshed
 

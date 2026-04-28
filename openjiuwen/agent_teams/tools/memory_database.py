@@ -546,7 +546,7 @@ class InMemoryTeamDatabase:
             return True
 
     def _refresh_status_for_tasks(self, task_ids: Iterable[str], now: int) -> List[_MemTask]:
-        """In-memory mirror of ``TeamDatabase._refresh_status_in_session``.
+        """In-memory mirror of the SQL ``_refresh_status_in_session`` helper.
 
         Caller must hold ``self._lock``. Same rules: PENDING with
         unresolved deps becomes BLOCKED; BLOCKED with no unresolved deps
@@ -581,7 +581,7 @@ class InMemoryTeamDatabase:
         new_status: TaskStatus,
         now: int,
     ) -> Optional[tuple[_MemTask, List[_MemTask]]]:
-        """In-memory mirror of ``TeamDatabase._terminate_task_in_session``.
+        """In-memory mirror of the SQL ``_terminate_task_in_session`` helper.
 
         Caller must hold ``self._lock``.
         """
