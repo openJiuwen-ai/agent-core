@@ -7,11 +7,11 @@ from typing import (
     Any,
     AsyncIterator,
     Optional,
+    TYPE_CHECKING,
     Union,
 )
 
 import anyio
-
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import LogEventType, runner_logger as logger
@@ -34,7 +34,10 @@ from openjiuwen.core.runner.runner_config import (
 from openjiuwen.core.session import Config
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.agent_team import create_agent_team_session
-from openjiuwen.core.session.stream import BaseStreamMode
+from openjiuwen.core.session.stream import (
+    BaseStreamMode,
+    OutputSchema,
+)
 from openjiuwen.core.runner.spawn import (
     MessageType,
     SpawnAgentConfig,
@@ -55,6 +58,10 @@ from openjiuwen.core.workflow import (
     Session as WorkflowSession,
     Workflow,
 )
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_teams.runtime_manager import TeamRuntimeManager
+    from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 
 
 class _RunnerImpl:
@@ -96,6 +103,7 @@ class _RunnerImpl:
         self._root_task_group_owner = None
         self._root_task_group_ready = None
         self._root_task_group_stop = None
+        self._team_runtime_manager: Optional["TeamRuntimeManager"] = None
 
     @property
     def resource_mgr(self) -> ResourceMgr:
@@ -116,6 +124,14 @@ class _RunnerImpl:
     def callback_framework(self) -> AsyncCallbackFramework:
         """Get the callback framework for asynchronous callbacks."""
         return self._callback_framework
+
+    def _get_team_runtime_manager(self) -> "TeamRuntimeManager":
+        """Lazily create TeamRuntimeManager to avoid import cycles during child bootstrap."""
+        if self._team_runtime_manager is None:
+            from openjiuwen.agent_teams.runtime_manager import TeamRuntimeManager
+
+            self._team_runtime_manager = TeamRuntimeManager()
+        return self._team_runtime_manager
 
     @staticmethod
     def _is_remote_agent(agent_instance: Any) -> bool:
@@ -425,7 +441,7 @@ class _RunnerImpl:
                 await agent_session.post_run()
 
     async def run_agent_team(self,
-                             agent_team: Union[str, 'BaseTeam', BaseAgent],
+                             agent_team: Union[str, 'BaseTeam', BaseAgent, 'TeamAgentSpec'],
                              inputs: Any,
                              *,
                              session: Optional[str | AgentTeamSession] = None,
@@ -446,6 +462,21 @@ class _RunnerImpl:
             envs: Environment variables or configuration overrides
         """
         with self._root_task_group_scope():
+            if self._is_team_agent_spec(agent_team):
+                activation = await self._get_team_runtime_manager().activate(agent_team, session, inputs)
+                try:
+                    if activation.activation_kind in {"same_session", "invalid_session"}:
+                        logger.warning(
+                            "run_agent_team short-circuited for team/session "
+                            "({}, {}), activation_kind={}",
+                            agent_team.team_name,
+                            activation.session.get_session_id(),
+                            activation.activation_kind,
+                        )
+                        return None
+                    return await activation.agent.invoke(inputs, session=activation.session)
+                finally:
+                    await activation.session.post_run()
             agent_team_instance = await self._prepare_agent_team(agent_team)
             agent_team_session = self._create_agent_team_session(agent_team_instance, session)
             await agent_team_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
@@ -460,7 +491,7 @@ class _RunnerImpl:
                 await agent_team_session.post_run()
 
     async def run_agent_team_streaming(self,
-                                       agent_team: Union[str, 'BaseTeam', BaseAgent],
+                                       agent_team: Union[str, 'BaseTeam', BaseAgent, 'TeamAgentSpec'],
                                        inputs: Any,
                                        *,
                                        session: Optional[str | AgentTeamSession] = None,
@@ -484,6 +515,29 @@ class _RunnerImpl:
             envs: Environment variables or configuration overrides
         """
         with self._root_task_group_scope():
+            if self._is_team_agent_spec(agent_team):
+                activation = await self._get_team_runtime_manager().activate(agent_team, session, inputs)
+                try:
+                    if activation.activation_kind in {"same_session", "invalid_session"}:
+                        logger.warning(
+                            "run_agent_team_streaming short-circuited for team/session "
+                            "({}, {}), activation_kind={}",
+                            agent_team.team_name,
+                            activation.session.get_session_id(),
+                            activation.activation_kind,
+                        )
+                        return
+                    if activation.activation_kind is not None:
+                        yield self._build_team_runtime_ready_chunk(
+                            team_name=agent_team.team_name,
+                            session_id=activation.session.get_session_id(),
+                            activation_kind=activation.activation_kind,
+                        )
+                    async for chunk in activation.agent.stream(inputs, session=activation.session):
+                        yield chunk
+                finally:
+                    await activation.session.post_run()
+                return
             agent_team_instance = await self._prepare_agent_team(agent_team)
             agent_team_session = self._create_agent_team_session(agent_team_instance, session)
             await agent_team_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
@@ -506,6 +560,51 @@ class _RunnerImpl:
             session_id: ID of the session to clean up
         """
         await CheckpointerFactory.get_checkpointer().release(session_id)
+
+    async def interact_agent_team(
+        self,
+        user_input: str,
+        *,
+        team_name: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> bool:
+        """Deliver user input to the current active TeamAgent runtime owned by Runner."""
+        return await self._get_team_runtime_manager().interact(
+            user_input,
+            team_name=team_name,
+            session_id=session_id,
+        )
+
+    async def pause_agent_team(
+        self,
+        *,
+        team_name: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> bool:
+        """Pause the current active TeamAgent runtime owned by Runner."""
+        return await self._get_team_runtime_manager().pause(team_name=team_name, session_id=session_id)
+
+    async def delete_agent_team(
+        self,
+        *,
+        team_name: str,
+        session_ids: list[str],
+    ) -> bool:
+        """Delete a team and release all supplied sessions."""
+        return await self._get_team_runtime_manager().delete_team(team_name=team_name, session_ids=session_ids)
+
+    async def pause(self, *, team_name: Optional[str] = None, session_id: Optional[str] = None) -> bool:
+        """Backward-compatible alias for pause_agent_team()."""
+        return await self.pause_agent_team(team_name=team_name, session_id=session_id)
+
+    async def delete_team(
+        self,
+        *,
+        team_name: str,
+        session_ids: list[str],
+    ) -> bool:
+        """Backward-compatible alias for delete_agent_team()."""
+        return await self.delete_agent_team(team_name=team_name, session_ids=session_ids)
 
     @classmethod
     def _is_called_by_agent(cls, session: AgentSession) -> bool:
@@ -700,6 +799,32 @@ class _RunnerImpl:
         if isinstance(session, str):
             return create_agent_team_session(session_id=session, team_id=team_id)
         return create_agent_team_session(team_id=team_id)
+
+    @staticmethod
+    def _is_team_agent_spec(agent_team: object) -> bool:
+        try:
+            from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
+        except ImportError:
+            return False
+        return isinstance(agent_team, TeamAgentSpec)
+
+    @staticmethod
+    def _build_team_runtime_ready_chunk(
+        *,
+        team_name: str,
+        session_id: str,
+        activation_kind: str,
+    ) -> OutputSchema:
+        return OutputSchema(
+            type="message",
+            index=0,
+            payload={
+                "event_type": "team.runtime_ready",
+                "team_name": team_name,
+                "session_id": session_id,
+                "activation_kind": activation_kind,
+            },
+        )
 
     @staticmethod
     def _create_agent_session(agent, session_id):
@@ -990,7 +1115,7 @@ class Runner:
     @classmethod
     async def run_agent_team(
         cls,
-        agent_team: Union[str, 'BaseTeam', BaseAgent],
+        agent_team: Union[str, 'BaseTeam', BaseAgent, 'TeamAgentSpec'],
         inputs: Any,
         *,
         session: Optional[str | AgentTeamSession] = None,
@@ -1021,7 +1146,7 @@ class Runner:
     @classmethod
     async def run_agent_team_streaming(
         cls,
-        agent_team: Union[str, 'BaseTeam', BaseAgent],
+        agent_team: Union[str, 'BaseTeam', BaseAgent, 'TeamAgentSpec'],
         inputs: Any,
         *,
         session: Optional[str | AgentTeamSession] = None,
@@ -1063,3 +1188,58 @@ class Runner:
             session_id: ID of the session to clean up
         """
         await GLOBAL_RUNNER.release(session_id)
+
+    @classmethod
+    async def interact_agent_team(
+        cls,
+        user_input: str,
+        *,
+        team_name: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> bool:
+        """Deliver user input to the current active TeamAgent runtime owned by Runner."""
+        return await GLOBAL_RUNNER.interact_agent_team(
+            user_input,
+            team_name=team_name,
+            session_id=session_id,
+        )
+
+    @classmethod
+    async def pause_agent_team(
+        cls,
+        *,
+        team_name: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> bool:
+        """Pause the current active TeamAgent runtime owned by Runner."""
+        return await GLOBAL_RUNNER.pause_agent_team(team_name=team_name, session_id=session_id)
+
+    @classmethod
+    async def delete_agent_team(
+        cls,
+        *,
+        team_name: str,
+        session_ids: list[str],
+    ) -> bool:
+        """Delete a team and release all supplied sessions."""
+        return await GLOBAL_RUNNER.delete_agent_team(team_name=team_name, session_ids=session_ids)
+
+    @classmethod
+    async def pause(
+        cls,
+        *,
+        team_name: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> bool:
+        """Backward-compatible alias for pause_agent_team()."""
+        return await GLOBAL_RUNNER.pause_agent_team(team_name=team_name, session_id=session_id)
+
+    @classmethod
+    async def delete_team(
+        cls,
+        *,
+        team_name: str,
+        session_ids: list[str],
+    ) -> bool:
+        """Backward-compatible alias for delete_agent_team()."""
+        return await GLOBAL_RUNNER.delete_agent_team(team_name=team_name, session_ids=session_ids)

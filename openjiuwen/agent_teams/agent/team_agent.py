@@ -261,6 +261,15 @@ class TeamAgent(BaseAgent):
         return self._task_manager
 
     @property
+    def session_id(self) -> Optional[str]:
+        """Return the current session ID."""
+        return self._session_id
+
+    def set_session_id(self, session_id: Optional[str]) -> None:
+        """Set the session ID for this agent."""
+        self._session_id = session_id
+
+    @property
     def team_backend(self) -> Optional[TeamBackend]:
         """Return the team backend, if configured."""
         return self._team_backend
@@ -1131,6 +1140,10 @@ class TeamAgent(BaseAgent):
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
 
+    async def pause_coordination(self) -> None:
+        """Pause coordination without tearing down teammate processes."""
+        await self._pause_coordination()
+
     async def _pause_coordination(self) -> None:
         """Pause coordination for persistent teams.
 
@@ -1168,6 +1181,10 @@ class TeamAgent(BaseAgent):
             await self._coordination_loop.stop()
         self._close_stream()
         self._team_session = None
+
+    async def stop_coordination(self) -> None:
+        """Stop coordination and shut down all spawned teammates."""
+        await self._stop_coordination()
 
     async def _stop_coordination(self) -> None:
         """Stop the coordination loop, send sentinel, and unsubscribe."""
@@ -1360,6 +1377,7 @@ class TeamAgent(BaseAgent):
         message: Any,
     ) -> None:
         """Execute one DeepAgent stream round via Runner."""
+        cancelled = False
         if self._deep_agent and self._deep_agent.deep_config and self._deep_agent.deep_config.workspace:
             from openjiuwen.core.sys_operation.cwd import init_cwd
 
@@ -1381,31 +1399,35 @@ class TeamAgent(BaseAgent):
             # transition it to SHUTDOWN once the round loop unwinds.
             if self._team_member is None or await self._team_member.status() != MemberStatus.SHUTDOWN_REQUESTED:
                 await self._update_status(MemberStatus.READY)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         except BaseException as e:
             team_logger.error("Failed to execute deep agent, {}", e, exc_info=True)
             await self._update_status(MemberStatus.ERROR)
         finally:
             self._agent_task = None
-            next_resume = self._dequeue_valid_interrupt_resume()
-            if next_resume is not None and self._stream_queue is not None:
-                await self._start_agent(next_resume)
-            elif self._pending_inputs and self._stream_queue is not None:
-                # Drain the entire queue into one round. Combining avoids
-                # an O(N) chain of round-restarts when several inputs land
-                # in the same transition window; anything arriving after
-                # the new round begins streaming goes directly through
-                # ``steer`` and never re-enters the queue, so it converges.
-                drained = self._pending_inputs
-                self._pending_inputs = []
-                if len(drained) == 1:
-                    combined = drained[0]
+            if not cancelled:
+                next_resume = self._dequeue_valid_interrupt_resume()
+                if next_resume is not None and self._stream_queue is not None:
+                    await self._start_agent(next_resume)
+                elif self._pending_inputs and self._stream_queue is not None:
+                    # Drain the entire queue into one round. Combining avoids
+                    # an O(N) chain of round-restarts when several inputs land
+                    # in the same transition window; anything arriving after
+                    # the new round begins streaming goes directly through
+                    # ``steer`` and never re-enters the queue, so it converges.
+                    drained = self._pending_inputs
+                    self._pending_inputs = []
+                    if len(drained) == 1:
+                        combined = drained[0]
+                    else:
+                        combined = "\n\n---\n\n".join(item if isinstance(item, str) else str(item) for item in drained)
+                    await self._start_agent(combined)
                 else:
-                    combined = "\n\n---\n\n".join(item if isinstance(item, str) else str(item) for item in drained)
-                await self._start_agent(combined)
-            else:
-                await self._wake_mailbox_if_interrupt_cleared()
-                if self._team_member and await self._team_member.status() == MemberStatus.SHUTDOWN_REQUESTED:
-                    self._close_stream()
+                    await self._wake_mailbox_if_interrupt_cleared()
+                    if self._team_member and await self._team_member.status() == MemberStatus.SHUTDOWN_REQUESTED:
+                        self._close_stream()
 
     async def _stream_one_round(
         self,
@@ -1909,6 +1931,7 @@ class TeamAgent(BaseAgent):
                 await self.spawn_teammate(
                     ctx,
                     initial_message=initial_message,
+                    session=self._session_id,
                     spawn_config=spawn_config,
                 )
                 await self._publish_restart_event(member_name, attempt)
@@ -1923,6 +1946,61 @@ class TeamAgent(BaseAgent):
         if self._team_backend:
             await self._team_backend.db.update_member_status(member_name, self._team_name(), MemberStatus.ERROR.value)
         return False
+
+    async def _mark_teammate_restarting_for_session_switch(
+        self,
+        member_name: str,
+        current_status: MemberStatus,
+    ) -> bool:
+        """Move a live teammate into a restartable status for session rebind.
+
+        Session switching must only tear down the live runtime and re-spawn it
+        under the new session; team rows and old session data stay intact.
+        ``READY``/``BUSY`` cannot transition directly to ``RESTARTING``, so we
+        normalize through ``ERROR`` first when needed.
+        """
+        if not self._team_backend:
+            return False
+
+        team_name = self._team_name()
+        if team_name is None:
+            return False
+
+        db = self._team_backend.db
+
+        if current_status == MemberStatus.RESTARTING:
+            return True
+
+        if current_status not in {MemberStatus.ERROR, MemberStatus.SHUTDOWN}:
+            updated = await db.update_member_status(
+                member_name,
+                team_name,
+                MemberStatus.ERROR.value,
+            )
+            if not updated:
+                team_logger.warning(
+                    "Failed to move teammate {} from {} to ERROR before session rebind",
+                    member_name,
+                    current_status.value,
+                )
+                return False
+            current_status = MemberStatus.ERROR
+
+        if current_status == MemberStatus.RESTARTING:
+            return True
+
+        updated = await db.update_member_status(
+            member_name,
+            team_name,
+            MemberStatus.RESTARTING.value,
+        )
+        if not updated:
+            team_logger.warning(
+                "Failed to move teammate {} into RESTARTING during session rebind",
+                member_name,
+            )
+            return False
+        return True
 
     async def _publish_restart_event(self, member_name: str, restart_count: int) -> None:
         """Publish MemberRestartedEvent on the team topic."""
@@ -1949,12 +2027,67 @@ class TeamAgent(BaseAgent):
         except Exception as e:
             team_logger.error("Failed to publish restart event for {}: {}", member_name, e)
 
+    async def recover_for_existing_session(self, session) -> None:
+        """Recover an existing session checkpoint on a running TeamAgent.
+
+        Unlike recover_agent_team which creates a new agent, this method
+        reuses the current agent and assumes session.pre_run() has already
+        been called to restore checkpoint state. This avoids unnecessary
+        teammate restarts when switching between sessions of the same team.
+
+        Args:
+            session: The session to recover (pre_run already called, checkpoint
+                validated by _resolve_session_checkpoint).
+        """
+        from openjiuwen.agent_teams.spawn.context import set_session_id
+
+        recoverable_members: list[tuple[str, MemberStatus]] = []
+        if self.role == TeamRole.LEADER and self._team_backend:
+            members = await self._team_backend.list_members()
+            leader_member_name = self._member_name()
+            live_teammates = {
+                member_name
+                for member_name, handle in self._spawned_handles.items()
+                if member_name != leader_member_name and handle is not None
+            }
+            for member in members:
+                if member.member_name not in live_teammates:
+                    continue
+                member_status = MemberStatus(member.status)
+                if member_status in {MemberStatus.UNSTARTED, MemberStatus.SHUTDOWN}:
+                    continue
+                recoverable_members.append((member.member_name, member_status))
+
+        await self._stop_coordination()
+
+        self._session_id = session.get_session_id()
+        set_session_id(self._session_id)
+        self._team_session = session if isinstance(session, AgentTeamSession) else None
+
+        if self._team_backend:
+            await self._team_backend.db.create_cur_session_tables()
+
+        if self._spec and self.role == TeamRole.LEADER:
+            self._persist_leader_config(session)
+
+        if self.role != TeamRole.LEADER or not self._team_backend:
+            return
+
+        for member_name, member_status in recoverable_members:
+            if not await self._mark_teammate_restarting_for_session_switch(
+                member_name,
+                member_status,
+            ):
+                continue
+            await self._restart_teammate(member_name)
+
     async def resume_for_new_session(self, session) -> None:
         """Prepare a persistent team for a new session.
 
         Switches the session context, creates new dynamic tables for
-        the new session (tasks, messages), and persists leader config.
-        Existing teammate processes and DB member records are retained.
+        the new session (tasks, messages), persists leader config, and
+        rebinds live teammate runtimes to the new session without deleting
+        old team/session data.
 
         Args:
             session: The new session to attach to.
@@ -1970,6 +2103,33 @@ class TeamAgent(BaseAgent):
 
         if self._spec and self.role == TeamRole.LEADER:
             self._persist_leader_config(session)
+
+        if self.role != TeamRole.LEADER or not self._team_backend:
+            return
+
+        members = await self._team_backend.list_members()
+        leader_member_name = self._member_name()
+        live_teammates = {
+            member_name
+            for member_name, handle in self._spawned_handles.items()
+            if member_name != leader_member_name and handle is not None
+        }
+
+        for member in members:
+            if member.member_name not in live_teammates:
+                continue
+
+            member_status = MemberStatus(member.status)
+            if member_status in {MemberStatus.UNSTARTED, MemberStatus.SHUTDOWN}:
+                continue
+
+            await self._cleanup_teammate(member.member_name)
+            if not await self._mark_teammate_restarting_for_session_switch(
+                member.member_name,
+                member_status,
+            ):
+                continue
+            await self._restart_teammate(member.member_name)
 
     async def recover_team(self) -> list[str]:
         """Re-launch every teammate from database state.
@@ -2080,6 +2240,7 @@ class TeamAgent(BaseAgent):
         allocator_state = state.get("model_allocator_state")
         if allocator_state:
             agent.restore_allocator_state(allocator_state)
+        agent.set_session_id(session.get_session_id())
         return agent
 
 
