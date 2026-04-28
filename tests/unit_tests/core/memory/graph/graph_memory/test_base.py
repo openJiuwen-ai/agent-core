@@ -646,7 +646,7 @@ class TestInvokeLlm:
         template.name = "extract_entity"
         template.format.return_value.content = [{"role": "user", "content": "query"}]
         await getattr(mem, "_invoke_llm")({}, template)
-        assert mock_logger.debug.called
+        assert mock_logger.info.called
 
 
 class TestPrepareEpisodes:
