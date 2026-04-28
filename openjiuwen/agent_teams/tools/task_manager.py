@@ -478,6 +478,13 @@ class TeamTaskManager:
         if not task:
             return TaskOpResult.fail(f"Task {task_id} not found")
 
+        # Validate the assignee is a real team member. The DB column has no
+        # FK to team_member, so a typo here would silently leave the task
+        # bound to a name nobody serves; surface it at this layer instead.
+        member = await self.db.member.get_member(assignee, self.team_name)
+        if not member:
+            return TaskOpResult.fail(f"Member {assignee} not found in team {self.team_name}")
+
         # Idempotent re-assign: same member, status already claimed → no-op success.
         if task.assignee == assignee and task.status == TaskStatus.CLAIMED.value:
             team_logger.debug(f"Task {task_id} already assigned to {assignee}; no-op")

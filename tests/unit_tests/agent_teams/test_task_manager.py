@@ -1076,3 +1076,35 @@ async def test_cancel_unblocks_downstream_at_manager_layer(task_manager):
 
     refreshed = await task_manager.get(downstream.task_id)
     assert refreshed.status == TaskStatus.PENDING.value
+
+
+class TestAssign:
+    """Test leader-driven task assignment."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_assign_to_existing_member_succeeds(self, task_manager):
+        """Happy path: assigning a pending task to a real member binds it."""
+        task = await task_manager.add(title="T", content="c")
+
+        result = await task_manager.assign(task.task_id, "member1")
+
+        assert result.ok
+        refreshed = await task_manager.get(task.task_id)
+        assert refreshed.status == TaskStatus.CLAIMED.value
+        assert refreshed.assignee == "member1"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_assign_to_unknown_member_fails_at_manager_layer(self, task_manager):
+        """Assignee must exist in team_member, otherwise the task would
+        silently bind to a name no one serves (assignee has no DB FK)."""
+        task = await task_manager.add(title="T", content="c")
+
+        result = await task_manager.assign(task.task_id, "ghost")
+
+        assert not result.ok
+        assert "ghost" in result.reason
+        refreshed = await task_manager.get(task.task_id)
+        assert refreshed.status == TaskStatus.PENDING.value
+        assert refreshed.assignee is None
