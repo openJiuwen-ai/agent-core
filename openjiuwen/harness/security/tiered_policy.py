@@ -8,13 +8,14 @@ import logging
 import re
 import sys
 from dataclasses import dataclass
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from openjiuwen.harness.security.models import PermissionLevel
-from openjiuwen.harness.security.patterns import match_path, match_wildcard
+from openjiuwen.harness.security.patterns import PathMatcher, match_wildcard
 from openjiuwen.harness.security.shell_ast import (
     ShellAstParseResult,
     parse_shell_for_permission,
@@ -22,10 +23,9 @@ from openjiuwen.harness.security.shell_ast import (
 
 logger = logging.getLogger(__name__)
 
-_STRICT_ORDER = {PermissionLevel.DENY: 0, PermissionLevel.ASK: 1, PermissionLevel.ALLOW: 2}
+_TIERED_PATH_MATCHER = PathMatcher()
 
-# ``permissions.schema`` / ``version`` 识别为分层策略（含旧别名）
-_TIERED_POLICY_SCHEMA_KEYS = frozenset({"tiered_policy", "v_cc", "v4.2"})
+_STRICT_ORDER = {PermissionLevel.DENY: 0, PermissionLevel.ASK: 1, PermissionLevel.ALLOW: 2}
 
 # 规则内 tools 必须同类（与产品设计一致）
 _SHELL_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal"})
@@ -108,29 +108,6 @@ def get_builtin_security_rules() -> list[dict[str, Any]]:
     rules = [r for r in (data.get("rules") or []) if isinstance(r, dict)]
     _BUILTIN_RULES_CACHE = (key, mtime, rules)
     return rules
-
-
-def collect_builtin_permission_rail_tool_names() -> list[str]:
-    """内置规则中出现的工具名（供护栏合并）。"""
-    names: set[str] = set()
-    for rule in get_builtin_security_rules():
-        raw_tools = rule.get("tools") or []
-        if isinstance(raw_tools, str):
-            raw_tools = [raw_tools]
-        if isinstance(raw_tools, list):
-            for item in raw_tools:
-                if isinstance(item, str) and item.strip():
-                    names.add(item.strip())
-    return sorted(names)
-
-
-def permissions_schema_is_tiered_policy(config: dict[str, Any]) -> bool:
-    """``permissions.schema`` / ``permissions.version`` 为 tiered_policy（或兼容 v_cc / v4.2）时启用."""
-    raw = config.get("schema") or config.get("version")
-    if not isinstance(raw, str):
-        return False
-    key = raw.strip().lower().replace(" ", "")
-    return key in _TIERED_POLICY_SCHEMA_KEYS
 
 
 def _parse_level(value: str) -> PermissionLevel:
@@ -240,7 +217,7 @@ def _path_pattern_matches(pattern: str, value: str) -> bool:
         except re.error:
             logger.warning("[PermissionEngine] permission.tiered_policy.invalid_path_regex expr=%r", expr)
             return False
-    return match_path(p, value)
+    return _TIERED_PATH_MATCHER.match_path(p, value)
 
 
 def _tool_arg_value_looks_like_path(arg_key: str, value: str) -> bool:
@@ -385,7 +362,7 @@ def _baseline_level(tools_cfg: dict[str, Any], tool_name: str) -> tuple[Permissi
     if isinstance(raw, dict) and isinstance(raw.get("*"), str):
         try:
             logger.warning(
-                "[PermissionEngine] permission.tiered_policy.legacy_tool_dict tool=%s using=asterisk_only",
+                "[PermissionEngine] permission.tiered_policy.tools_dict_non_scalar tool=%s using=asterisk_only",
                 tool_name,
             )
             return _parse_level(raw["*"]), f"tools.{tool_name}.*"
@@ -529,7 +506,7 @@ def _aggregate_subcommand_results(
 
 
 def evaluate_tiered_policy(
-        permission_config: dict[str, Any],
+        permission_config: Mapping[str, Any],
         tool_name: str,
         tool_args: dict[str, Any],
 ) -> tuple[PermissionLevel, str]:

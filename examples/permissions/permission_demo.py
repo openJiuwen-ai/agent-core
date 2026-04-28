@@ -7,25 +7,25 @@ DeepAgent 工具权限与安全提示示例（仅依赖 openjiuwen）。
 
 1. **SecurityRail（提示层）**  
    ``create_deep_agent`` 默认会挂载
-   :class:`openjiuwen.harness.rails.security_rail.SecurityRail`，在模型调用前注入安全相关系统提示。
+   :class:`openjiuwen.harness.rails.security.SecurityRail`，在模型调用前注入安全相关系统提示。
 
 2. **工具权限护栏（执行层）**  
    ``DeepAgentConfig.permissions`` 且 ``enabled: true`` 时，会挂载
-   :class:`openjiuwen.harness.rails.security_rail.tool_security_rail.PermissionInterruptRail`，
+   :class:`openjiuwen.harness.rails.security.tool_security_rail.PermissionInterruptRail`，
    在 ``before_tool_call`` 上判定 **allow / ask / deny**；``ask`` 走 Confirm 中断（需会话侧继续交互）。
 
 宿主注入：:class:`openjiuwen.harness.security.host.ToolPermissionHost`
-（``get_permissions_snapshot``、``request_acp_permission``、``persist_allow_rule``、
+（``get_permissions_snapshot``、``request_permission_confirmation``、``persist_allow_rule``、
 ``resolve_workspace_dir``、``permission_yaml_path`` 等）。YAML 落盘路径以
-``permission_yaml_path`` 或 :func:`openjiuwen.harness.security.patterns.set_agent_config_yaml_path_provider`
-为准，不依赖环境变量。
+``permission_yaml_path`` 为准；未设置则内置 YAML 持久化无法解析路径。不依赖环境变量。
 
 运行（在仓库根目录）::
 
     uv run python examples/permissions/permission_demo.py
 
 无 **API_KEY** 时：仅跑引擎判定与 DeepAgent 挂载检查。  
-有 **API_KEY** 时：额外跑「自然语言 → 模型调用 read_file → 命中 ASK 权限」演示（需网络调用模型）。
+有 **API_KEY** 时：额外跑「自然语言 → ``read_file`` → 权限 ASK 中断 → ``InteractiveInput``
+批准 → 继续执行直至 ``answer``」完整演示（需网络；模型须能输出原生 ``tool_calls``）。
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 # 允许从任意工作目录直接执行本脚本
@@ -42,15 +43,16 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.session import InteractiveInput
+from openjiuwen.core.single_agent.interrupt.response import ToolCallInterruptRequest
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.security.core import PermissionEngine
 from openjiuwen.harness.security.factory import build_permission_interrupt_rail
 from openjiuwen.harness.security.host import ToolPermissionHost
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
-from openjiuwen.harness.rails.security_rail import SecurityRail
-from openjiuwen.harness.rails.security_rail import PermissionInterruptRail
-
+from openjiuwen.harness.rails.security import SecurityRail
+from openjiuwen.harness.rails.security import PermissionInterruptRail
 
 def example_permissions_dict() -> dict:
     """最小 ``permissions``（分层策略），read_file 为 ASK 以便演示护栏。"""
@@ -86,7 +88,6 @@ def demo_sync_permission_engine(workspace: Path) -> None:
     level, rule = engine.evaluate_global_policy_directly(
         "read_file",
         {"path": str(workspace / "notes.txt")},
-        channel_id="web",
     )
     print("[Sync] evaluate_global_policy_directly(read_file) ->", level, "| rule:", rule)
 
@@ -97,7 +98,6 @@ async def demo_async_check_permission(workspace: Path) -> None:
     result = await engine.check_permission(
         "read_file",
         {"path": str(workspace / "notes.txt")},
-        channel_id="web",
     )
     print(
         "[Async] check_permission ->",
@@ -166,11 +166,31 @@ def demo_standalone_rail_factory(workspace: Path) -> None:
     print("[Factory] build_permission_interrupt_rail ->", type(rail).__name__)
 
 
-async def demo_natural_language_triggers_permission_rail(workspace: Path) -> None:
-    """自然语言 → LLM 选择 read_file → ``PermissionInterruptRail`` 在 ASK 上介入。
+def _nl_summarize_dict_result(prefix: str, result: dict) -> None:
+    """打印 Runner.run_agent 返回 dict 的关键字段（便于演示）。"""
+    rt = result.get("result_type")
+    print(f"{prefix} result_type={rt!r} keys={sorted(result.keys())}")
+    for key in ("output", "error", "status", "interrupt_ids", "state"):
+        if key not in result or result[key] is None:
+            continue
+        val = result[key]
+        if key == "state" and isinstance(val, list):
+            print(f"{prefix}   {key}: len={len(val)}")
+            continue
+        snippet = val
+        if isinstance(snippet, str) and len(snippet) > 500:
+            snippet = snippet[:500] + "..."
+        print(f"{prefix}   {key}:", snippet)
 
-    需要 ``API_KEY``（及可选 ``MODEL_NAME`` / ``API_BASE``）。若策略为 ASK，运行结果可能包含
-    中断/待确认状态，由 Runner 与会话实现决定；本示例只打印返回结构便于观察。
+
+async def demo_natural_language_triggers_permission_rail(workspace: Path) -> None:
+    """自然语言 → LLM 发起 ``read_file`` → ``PermissionInterruptRail`` 在 ASK 上中断 → 用户批准 → 读完文件。
+
+    需要 ``API_KEY``（及可选 ``MODEL_NAME`` / ``API_BASE``）。必须使用 **同一**
+    ``conversation_id`` 做第二轮 ``InteractiveInput`` 恢复，否则会话对不上。
+
+    若首轮直接 ``answer`` 而无 ``interrupt``：常见原因是模型未按 OpenAI 风格输出
+    原生 ``tool_calls``（伪 XML / 纯文本描述工具），护栏 ``before_tool_call`` 不会触发。
     """
     api_key = os.getenv("API_KEY", "").strip()
     if not api_key:
@@ -193,6 +213,7 @@ async def demo_natural_language_triggers_permission_rail(workspace: Path) -> Non
 
     cfg_yaml = Path(tempfile.gettempdir()) / "openjiuwen_permission_demo_config.yaml"
     host = example_permission_host(workspace, cfg_yaml)
+    conversation_id = f"perm_nl_{uuid.uuid4().hex[:12]}"
 
     await Runner.start()
     try:
@@ -203,39 +224,85 @@ async def demo_natural_language_triggers_permission_rail(workspace: Path) -> Non
                 description="通过自然语言读文件以触发权限检查",
             ),
             workspace=str(workspace),
-            max_iterations=5,
+            max_iterations=8,
             language="cn",
             permissions=example_permissions_dict(),
             permission_host=host,
             rails=[SysOperationRail()],
+            system_prompt=(
+                "你是编程助手。用户要求读文件时，你必须调用 read_file 工具（使用参数 "
+                "file_path，相对路径即可，例如 notes.txt），不要用纯文字假装已读取。"
+            ),
         )
         await agent.ensure_initialized()
 
         query = (
             "工作区根目录下有一个文件 notes.txt。"
-            "请**必须**使用 read_file 工具读取该文件的完整内容，"
-            "然后把读到的原文逐字输出，不要省略。"
+            "请只调用 read_file 工具读取该文件完整内容，然后把读到的原文逐字写在回复里，不要省略。"
         )
-        query = (
-            "在当前演示工作区根目录下有一个文件 notes.txt。请按顺序完成："
-            "1）用 list_files 列出工作区根目录的文件名；"
-            "2）用 read_file 读取 notes.txt 的完整原文；"
-            "3）用 grep 在 notes.txt 中搜索子串 permission。"
-            "每一步都必须实际调用对应工具，不要省略。"
-        )
-        print("[NL] query:", query[:80], "...")
-        result = await Runner.run_agent(agent, {"query": query})
+        print("[NL] conversation_id:", conversation_id)
+        print("[NL] model:", model_name, "| query:", query[:100], "...")
 
-        if isinstance(result, dict):
-            print("[NL] run_agent 返回 dict，keys:", sorted(result.keys()))
-            for key in ("output", "error", "status", "interrupt", "__interaction__"):
-                if key in result and result[key] is not None:
-                    snippet = result[key]
-                    if isinstance(snippet, str) and len(snippet) > 400:
-                        snippet = snippet[:400] + "..."
-                    print(f"[NL]   {key}:", snippet)
+        inputs_round1 = {"query": query, "conversation_id": conversation_id}
+        result1 = await Runner.run_agent(agent, inputs_round1)
+
+        if not isinstance(result1, dict):
+            print("[NL] 首轮返回非 dict:", type(result1).__name__, result1)
+            return
+
+        _nl_summarize_dict_result("[NL] 首轮", result1)
+
+        if result1.get("result_type") != "interrupt":
+            print(
+                "[NL] 未出现 interrupt：模型可能未产生可执行的原生 tool_calls，"
+                "或首轮已完成读文件（例如策略未命中 ASK）。可换支持 function calling 的模型或调高 max_iterations。"
+            )
+            return
+
+        interrupt_ids = result1.get("interrupt_ids") or []
+        state_list = result1.get("state") or []
+        if not interrupt_ids:
+            print("[NL] interrupt 但 interrupt_ids 为空，无法演示恢复。")
+            return
+
+        tool_call_id = interrupt_ids[0]
+        raw = state_list[0].payload.value if state_list and hasattr(state_list[0], "payload") else None
+        if isinstance(raw, ToolCallInterruptRequest):
+            print(
+                "[NL] 中断工具:",
+                raw.tool_name,
+                "| message 预览:",
+                (raw.message or "")[:120].replace("\n", " "),
+                "...",
+            )
+            if raw.tool_name != "read_file":
+                print("[NL] 提示：当前中断不是 read_file，本演示仍按 ConfirmPayload 批准一次。")
+
+        interactive = InteractiveInput()
+        interactive.update(
+            tool_call_id,
+            {"approved": True, "feedback": "", "auto_confirm": False},
+        )
+        inputs_round2 = {"query": interactive, "conversation_id": conversation_id}
+        print("[NL] 第二轮：提交 InteractiveInput 批准本次 read_file …")
+        result2 = await Runner.run_agent(agent, inputs_round2)
+
+        if not isinstance(result2, dict):
+            print("[NL] 次轮返回非 dict:", type(result2).__name__, result2)
+            return
+
+        _nl_summarize_dict_result("[NL] 次轮", result2)
+
+        if result2.get("result_type") == "answer":
+            out = result2.get("output")
+            if isinstance(out, str) and "permission_demo secret" in out:
+                print("[NL] ✓ 已读到 notes.txt 中的演示内容（权限护栏 ASK → 批准后执行）。")
+            else:
+                print("[NL] 次轮为 answer；请检查 output 是否包含预期文件内容。")
+        elif result2.get("result_type") == "interrupt":
+            print("[NL] 次轮仍为 interrupt：可能还有其它工具待确认，可继续用 InteractiveInput 处理。")
         else:
-            print("[NL] run_agent 返回:", type(result).__name__, result)
+            print("[NL] 次轮 result_type:", result2.get("result_type"))
     finally:
         await Runner.stop()
 
