@@ -858,11 +858,58 @@ class ReActAgent(BaseAgent):
 
         results = await self.ability_manager.execute(ctx=ctx, tool_call=tool_calls, session=session)
 
-        for _, tool_message in results:
+        multimodal_messages: List[UserMessage] = []
+        for tool_result, tool_message in results:
             if tool_message is not None:
                 await context.add_messages(tool_message)
 
+            multimodal_messages.extend(
+                self._build_multimodal_tool_result_messages(tool_result)
+            )
+
+        for multimodal_message in multimodal_messages:
+            await context.add_messages(multimodal_message)
+
         return results
+
+    @staticmethod
+    def _build_multimodal_tool_result_messages(tool_result: Any) -> List[UserMessage]:
+        data = getattr(tool_result, "data", None)
+        if not isinstance(data, dict):
+            return []
+
+        multimodal_items = data.get("multimodal")
+        if not isinstance(multimodal_items, list):
+            return []
+
+        messages: List[UserMessage] = []
+        for item in multimodal_items:
+            if not isinstance(item, dict) or item.get("type") != "image":
+                continue
+
+            data_url = item.get("data_url")
+            if not isinstance(data_url, str) or not data_url.startswith("data:image/"):
+                continue
+
+            source_path = str(item.get("source_path") or "unknown image")
+            messages.append(
+                UserMessage(
+                    content=[
+                        {
+                            "type": "text",
+                            "text": f"Image loaded from read_file: {source_path}",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": data_url,
+                            },
+                        },
+                    ]
+                )
+            )
+
+        return messages
 
     def _is_interrupted(self, tool_result: Any) -> bool:
         """Detect whether a tool result signals workflow interruption."""
