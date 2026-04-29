@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List
 
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.single_agent.skills.remote_skill_util import GitHubTree, RemoteSkillUtil
@@ -55,7 +55,7 @@ class SkillUtil:
         """
         return self._remote_skill_util
 
-    async def register_skills(self, skill_path: str, agent: "BaseAgent", session_id: str = None) -> bool:
+    async def register_skills(self, skill_path: str | List[str], agent: "BaseAgent", session_id: str = None) -> bool:
         """Register skills.
 
         This method registers the skill at the given path.
@@ -70,6 +70,10 @@ class SkillUtil:
         Returns:
             bool: True if registration was successful.
         """
+        if isinstance(skill_path, list):
+            for item in skill_path:
+                await self._skill_manager.register(Path(item), session_id)
+            return True
         await self._skill_manager.register(Path(skill_path), session_id)
         return True
 
@@ -106,7 +110,7 @@ class SkillUtil:
             skills_info.append(
                 f"{index}.Skill name: {skill.name}; "
                 f"Skill description: {skill.description}; "
-                f"Skill directory file path: {skill.directory}"
+                f"Skill directory: {skill.directory}"
             )
         skill_text = skill_prompt.format({"skills": "\n".join(skills_info)}).content
         return system_prompt + "\n" + skill_text
