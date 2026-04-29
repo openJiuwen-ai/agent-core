@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import signal
 from pathlib import Path
@@ -281,3 +282,73 @@ def test_print_launch_summary_works_without_gateway_mode(tmp_path: Path, caplog)
     assert 'Gateway proxy' in caplog.text
     assert 'Trajectory mode: feedback_level' in caplog.text
     assert 'Gateway mode' not in caplog.text
+
+
+def test_ensure_workspace_writes_web_user_headers(monkeypatch, tmp_path: Path):
+    from openjiuwen.agent_evolving.agent_rl.online.launcher.workspace import ensure_workspace
+
+    monkeypatch.setenv('WEB_USER_ID', 'alice')
+    monkeypatch.delenv('RL_ONLINE_TENANT_ID', raising=False)
+    config_env = tmp_path / 'config' / '.env'
+    config_env.parent.mkdir(parents=True)
+    config_env.write_text('', encoding='utf-8')
+
+    ensure_workspace(
+        config_env=config_env,
+        gateway_url='http://127.0.0.1:18080/v1',
+        model_name='model-a',
+        model_path='/tmp/model',
+        trajectory_mode='feedback_level',
+        trajectory_gateway_url='http://127.0.0.1:18080',
+        trajectory_batch_size=4,
+    )
+
+    values = dict(
+        line.split('=', 1)
+        for line in config_env.read_text(encoding='utf-8').splitlines()
+        if '=' in line
+    )
+    assert values['WEB_USER_ID'] == '"alice"'
+    assert values['RL_ONLINE_TENANT_ID'] == '"alice"'
+    assert json.loads(values['CUSTOM_HEADERS'].strip("'")) == {'x-user-id': 'alice'}
+
+
+def test_start_jiuwenclaw_passes_web_user_headers(monkeypatch, tmp_path: Path):
+    from openjiuwen.agent_evolving.agent_rl.online.launcher.services import start_jiuwenclaw
+
+    calls = []
+
+    class _StartedProc:
+        pid = 123
+
+    def _fake_popen(cmd, **kwargs):
+        calls.append({'cmd': cmd, **kwargs})
+        return _StartedProc()
+
+    monkeypatch.setenv('WEB_USER_ID', 'bob')
+    monkeypatch.delenv('RL_ONLINE_TENANT_ID', raising=False)
+    monkeypatch.setattr(
+        'openjiuwen.agent_evolving.agent_rl.online.launcher.services.subprocess.Popen',
+        _fake_popen,
+    )
+
+    app_proc, web_proc = start_jiuwenclaw(
+        jiuwenclaw_repo=tmp_path / 'jiuwenclaw',
+        workspace_root=tmp_path / 'workspace',
+        trajectory_gateway_url='http://127.0.0.1:18080',
+        model_path='/tmp/model',
+        trajectory_mode='feedback_level',
+        trajectory_batch_size=4,
+        app_host='127.0.0.1',
+        ws_port=19000,
+        web_host='127.0.0.1',
+        web_port=5173,
+    )
+
+    assert app_proc.pid == 123
+    assert web_proc is None
+    assert len(calls) == 1
+    env = calls[0]['env']
+    assert env['WEB_USER_ID'] == 'bob'
+    assert env['RL_ONLINE_TENANT_ID'] == 'bob'
+    assert json.loads(env['CUSTOM_HEADERS']) == {'x-user-id': 'bob'}

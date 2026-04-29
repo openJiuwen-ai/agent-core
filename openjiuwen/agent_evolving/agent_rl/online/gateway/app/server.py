@@ -40,7 +40,7 @@ async def _forward_chat_completions(
     t0 = time.perf_counter()
     trace_id = resolve_trace_id(request)
     messages = require_messages(body)
-    require_user_id(request)
+    require_user_id(request, config)
     upstream_headers = build_upstream_headers(request, llm_api_key=config.llm_api_key)
 
     logger.debug(
@@ -139,7 +139,8 @@ def build_gateway_app(
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"invalid json: {exc}") from exc
 
-        _inject_latest_lora(body=body, user_id=request.headers.get("x-user-id", "anonymous"), lora_repo=lora_repo)
+        user_id = require_user_id(request, config)
+        _inject_latest_lora(body=body, user_id=user_id, lora_repo=lora_repo)
 
         client_wants_stream = bool(body.pop("stream", False))
 

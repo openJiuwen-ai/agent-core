@@ -10,6 +10,8 @@ from typing import Any
 
 from fastapi import HTTPException, Request
 
+_SINGLE_USER_DEFAULT_ID = "jiuwenclaw-web"
+
 
 def resolve_trace_id(request: Request) -> str:
     """Return request trace id from header or synthesize one."""
@@ -27,9 +29,11 @@ def require_messages(body: dict[str, Any]) -> list[dict[str, Any]]:
     return messages
 
 
-def require_user_id(request: Request) -> str:
+def require_user_id(request: Request, config: Any) -> str:
     """Validate online-training user identity header."""
     user_id = str(request.headers.get("x-user-id") or "").strip()
+    if not user_id and bool(getattr(config, "single_user_default", False)):
+        user_id = _SINGLE_USER_DEFAULT_ID
     if not user_id:
         raise HTTPException(
             status_code=400,

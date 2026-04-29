@@ -22,9 +22,11 @@ class RailBatchIngestor:
         *,
         pending_judge_store: Any,
         judge_dispatcher: Any,
+        default_user_id: str = "",
     ) -> None:
         self._pending_judge_store = pending_judge_store
         self._judge_dispatcher = judge_dispatcher
+        self._default_user_id = default_user_id
 
     async def ingest_rail_batch(self, payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("protocol_version") != "rail-v1":
@@ -52,7 +54,7 @@ class RailBatchIngestor:
                     first_error = "samples must contain only objects"
                 continue
             try:
-                normalized = self._normalize_rail_sample(payload, sample)
+                normalized = self._normalize_rail_sample(payload, sample, default_user_id=self._default_user_id)
             except Exception as exc:
                 rejected += 1
                 if first_error is None:
@@ -80,7 +82,12 @@ class RailBatchIngestor:
         }
 
     @staticmethod
-    def _normalize_rail_sample(payload: dict[str, Any], sample: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_rail_sample(
+        payload: dict[str, Any],
+        sample: dict[str, Any],
+        *,
+        default_user_id: str = "",
+    ) -> dict[str, Any]:
         session_id = str(sample.get("session_id") or payload.get("session_id") or "")
         trajectory_id = str(sample.get("trajectory_id") or payload.get("trajectory_id") or "")
         step_index = int(sample.get("step_index") or 0)
@@ -114,6 +121,7 @@ class RailBatchIngestor:
             or payload.get("user_id")
             or payload.get("tenant_id")
             or sample.get("tenant_id")
+            or default_user_id
             or ""
         ).strip()
         if not user_id:
