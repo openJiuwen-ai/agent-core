@@ -70,6 +70,12 @@ Built-in tools available to `DeepAgent`. Tools are registered via `ToolCard` ent
 | `ListSkillTool` | List available learned skills. |
 | `SkillTool` | Get the relevant skill file for a skill |
 
+### Human-in-the-Loop
+
+| Tool | Description |
+|---|---|
+| `AskUserTool` | Ask user questions to gather info, clarify ambiguity, or make decisions (HITL scenario) |
+
 ### Session Management
 
 | Tool | Description |

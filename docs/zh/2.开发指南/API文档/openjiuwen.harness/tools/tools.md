@@ -76,6 +76,12 @@ DeepAgent 内置工具实现。所有工具通过 Rails 或 `create_deep_agent()
 | `SearchToolsTool` | 搜索可用工具（渐进式工具暴露） |
 | `LoadToolsTool` | 加载指定工具（渐进式工具暴露） |
 
+### 人机交互工具
+
+| 工具 | 说明 |
+|---|---|
+| `AskUserTool` | 向用户提问以收集信息、澄清歧义或做出决策（HITL 场景） |
+
 ### 定时任务工具
 
 | 工具 | 说明 |

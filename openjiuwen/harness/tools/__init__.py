@@ -62,6 +62,7 @@ from openjiuwen.harness.tools.agent_control import (
     create_task_tool,
 )
 from openjiuwen.harness.tools.lsp_tool import LspTool
+from openjiuwen.harness.tools.ask_user import AskUserTool
 from openjiuwen.harness.prompts.tools.lsp_tool import LspToolMetadataProvider
 
 __all__ = [
@@ -122,4 +123,5 @@ __all__ = [
     "build_session_tools",
     "TaskTool",
     "create_task_tool",
+    "AskUserTool",
 ]
