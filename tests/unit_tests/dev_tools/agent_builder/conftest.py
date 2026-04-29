@@ -15,7 +15,6 @@ from openjiuwen.core.foundation.llm import (
     ModelRequestConfig,
     UserMessage,
 )
-from openjiuwen.core.foundation.llm.model import _CLIENT_TYPE_REGISTRY
 from openjiuwen.core.foundation.tool import ToolInfo
 
 
