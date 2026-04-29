@@ -10,8 +10,8 @@ from dataclasses import dataclass
 
 @dataclass
 class GatewayConfig:
+    port: int
     host: str = "127.0.0.1"
-    port: int = 18080
 
     llm_url: str = "http://127.0.0.1:18000"
     judge_url: str = "http://127.0.0.1:18001"

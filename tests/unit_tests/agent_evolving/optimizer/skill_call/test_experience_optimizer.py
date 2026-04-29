@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionContext,
     EvolutionPatch,
@@ -91,6 +92,18 @@ class TestConversationSnippet:
 
 class TestSkillExperienceOptimizerGenerate:
     @staticmethod
+    def test_generate_records_llm_policy_property_returns_configured_policy():
+        policy = LLMInvokePolicy(attempt_timeout_secs=12, total_budget_secs=36, max_attempts=2)
+        optimizer = SkillExperienceOptimizer(
+            llm=MagicMock(),
+            model="dummy",
+            language="en",
+            generate_records_llm_policy=policy,
+        )
+
+        assert optimizer.generate_records_llm_policy is policy
+
+    @staticmethod
     @pytest.mark.asyncio
     async def test_generate_returns_empty_when_no_signals():
         optimizer = SkillExperienceOptimizer(llm=MagicMock(), model="dummy", language="cn")
@@ -151,7 +164,7 @@ class TestSkillExperienceOptimizerGenerate:
         assert len(records) == 2
         assert records[0].change.content == "A"
         assert records[1].change.content == "B"
-        assert llm.invoke.await_args_list[0].kwargs["timeout"] == 45
+        assert llm.invoke.await_args_list[0].kwargs["timeout"] == 60
 
     @staticmethod
     @pytest.mark.asyncio
@@ -189,6 +202,39 @@ class TestSkillExperienceOptimizerGenerate:
         optimizer.update_llm(llm="new", model="m2")
         assert optimizer._llm == "new"
         assert optimizer._model == "m2"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_generate_uses_custom_llm_policy():
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            return_value=SimpleNamespace(
+                content='[{"action":"append","target":"body","section":"Troubleshooting","content":"A"}]'
+            )
+        )
+        optimizer = SkillExperienceOptimizer(
+            llm=llm,
+            model="dummy",
+            language="en",
+            generate_records_llm_policy=LLMInvokePolicy(
+                attempt_timeout_secs=12,
+                total_budget_secs=36,
+                max_attempts=2,
+            ),
+        )
+        ctx = EvolutionContext(
+            skill_name="skill-a",
+            signals=[make_signal("s1")],
+            skill_content="# skill",
+            messages=[{"role": "user", "content": "hello"}],
+            existing_desc_records=[],
+            existing_body_records=[],
+        )
+
+        records = await optimizer.generate_records(ctx)
+
+        assert len(records) == 1
+        assert llm.invoke.await_args_list[0].kwargs["timeout"] == 12
 
 
 class TestParsing:

@@ -19,6 +19,18 @@ class PulsarConfig(BaseModel):
     url: Optional[str] = None
     max_workers: int = 8
 
+    def __repr__(self) -> str:
+        from openjiuwen.core.common.utils.url_utils import redact_url_password
+
+        url = redact_url_password(self.url) if self.url else None
+        return f"PulsarConfig(url={url!r}, max_workers={self.max_workers})"
+
+    def __str__(self) -> str:
+        from openjiuwen.core.common.utils.url_utils import redact_url_password
+
+        url = redact_url_password(self.url) if self.url else None
+        return f"url={url!r} max_workers={self.max_workers}"
+
 
 class MessageQueueConfig(BaseModel):
     """Message Queue Configuration"""

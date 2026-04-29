@@ -7,7 +7,7 @@ inference:
   model_path: /path/to/your/model
   model_name: Qwen3-4B-Thinking-2507
   host: 127.0.0.1
-  port: 18002
+  port: ???
   gpu_ids: "0,1"
   tp: 2
   existing_url: null
@@ -32,7 +32,7 @@ judge:
   model_path: ${inference.model_path}
   model_name: ${inference.model_name}
   host: 127.0.0.1
-  port: 18003
+  port: ???
   gpu_ids: "2,3"
   tp: 2
   existing_url: null
@@ -49,8 +49,8 @@ judge:
 
 gateway:
   host: 127.0.0.1
-  port: 18080
-  redis_url: redis://127.0.0.1:6379/0
+  port: ???
+  redis_url: ???
   record_dir: records
   log_level: info
   health_timeout: 30
@@ -70,8 +70,8 @@ training:
 
 jiuwen:
   enabled: true
-  agent_server_port: 18092
+  agent_server_port: ???
   app_host: 127.0.0.1
-  ws_port: 19000
+  ws_port: ???
   web_host: 127.0.0.1
-  web_port: 5173
+  web_port: ???

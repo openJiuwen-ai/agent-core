@@ -319,9 +319,9 @@ _TRAJECTORY_PATCH_PROMPT = {"cn": _TRAJECTORY_PATCH_PROMPT_CN, "en": _TRAJECTORY
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*\n(.*?)```", re.DOTALL)
 
 _TEAM_SKILL_PATCH_LLM_POLICY = LLMInvokePolicy(
-    attempt_timeout_secs=40,
-    total_budget_secs=75,
-    max_attempts=2,
+    attempt_timeout_secs=120,
+    total_budget_secs=420,
+    max_attempts=3,
 )
 
 _PATCH_RETRY_SKILL_CONTENT_CHARS = 3000
@@ -391,11 +391,13 @@ class TeamSkillOptimizer:
         model: str,
         language: str = "cn",
         debug_dir: Optional[str] = None,
+        patch_llm_policy: LLMInvokePolicy = _TEAM_SKILL_PATCH_LLM_POLICY,
     ) -> None:
         self._llm = llm
         self._model = model
         self._language = language
         self._debug_dir = debug_dir
+        self._patch_llm_policy = patch_llm_policy
 
     # Public properties for external access
     @property
@@ -412,6 +414,11 @@ class TeamSkillOptimizer:
     def model(self) -> str:
         """Get the model name."""
         return self._model
+
+    @property
+    def patch_llm_policy(self) -> LLMInvokePolicy:
+        """Get the configured patch generation policy."""
+        return self._patch_llm_policy
 
     def update_llm(self, llm: Model, model: str) -> None:
         self._llm = llm
@@ -452,7 +459,7 @@ class TeamSkillOptimizer:
         raw = await self._call_llm(
             prompt,
             retry_prompt=retry_prompt,
-            policy=_TEAM_SKILL_PATCH_LLM_POLICY,
+            policy=self._patch_llm_policy,
             is_result_usable=lambda text: self._parse_json(text) is not None,
         )
         elapsed = time.time() - t0
@@ -460,8 +467,7 @@ class TeamSkillOptimizer:
 
         parsed = self._parse_json(raw)
         if not parsed:
-            logger.warning("[TeamSkillOptimizer] patch: failed to parse LLM response")
-            return None
+            raise ValueError("TeamSkill patch response could not be parsed as JSON")
         if not parsed.get("need_patch"):
             reason = parsed.get("reason", "N/A")
             logger.info("[TeamSkillOptimizer] patch: no patch needed for '%s', reason: %s", skill_name, reason)
@@ -470,8 +476,7 @@ class TeamSkillOptimizer:
         section = parsed.get("section", "Instructions")
         content = parsed.get("content", "")
         if not content.strip():
-            logger.warning("[TeamSkillOptimizer] patch: LLM returned empty content")
-            return None
+            raise ValueError("TeamSkill patch response contained empty content")
 
         logger.info(
             "[TeamSkillOptimizer] patch: generated for section='%s', content_len=%d",
@@ -530,7 +535,7 @@ class TeamSkillOptimizer:
         raw = await self._call_llm(
             prompt,
             retry_prompt=retry_prompt,
-            policy=_TEAM_SKILL_PATCH_LLM_POLICY,
+            policy=self._patch_llm_policy,
             is_result_usable=lambda text: self._parse_json(text) is not None,
         )
         elapsed = time.time() - t0
@@ -541,14 +546,12 @@ class TeamSkillOptimizer:
 
         parsed = self._parse_json(raw)
         if not parsed:
-            logger.warning("[TeamSkillOptimizer] user_patch: failed to parse LLM response")
-            return None
+            raise ValueError("TeamSkill user patch response could not be parsed as JSON")
 
         section = parsed.get("section", "Instructions")
         content = parsed.get("content", "")
         if not content.strip():
-            logger.warning("[TeamSkillOptimizer] user_patch: LLM returned empty content")
-            return None
+            raise ValueError("TeamSkill user patch response contained empty content")
 
         logger.info(
             "[TeamSkillOptimizer] user_patch: section='%s', content_len=%d (%.1fs)",
@@ -571,6 +574,7 @@ class TeamSkillOptimizer:
         self,
         trajectory: Trajectory,
         skill_name: str,
+        current_skill_content: str,
         trajectory_issues: list[dict],
     ) -> Optional[EvolutionRecord]:
         """Generate a patch based on trajectory issue analysis."""
@@ -581,15 +585,22 @@ class TeamSkillOptimizer:
             return None
 
         issues_text = json.dumps(trajectory_issues, ensure_ascii=False, indent=2) if trajectory_issues else "N/A"
+        logger.info(
+            "[TeamSkillOptimizer] trajectory_patch: skill='%s', summary_len=%d, content_len=%d, issues_len=%d",
+            skill_name,
+            len(summary),
+            len(current_skill_content),
+            len(issues_text),
+        )
 
         prompt_template = _TRAJECTORY_PATCH_PROMPT.get(self._language, _TRAJECTORY_PATCH_PROMPT_EN)
         prompt = prompt_template.format(
-            skill_content="(see current skill content)",
+            skill_content=current_skill_content[:15000],
             trajectory_summary=summary,
             trajectory_issues=issues_text[:5000],
         )
         retry_prompt = prompt_template.format(
-            skill_content="(see current skill content)",
+            skill_content=current_skill_content[:_PATCH_RETRY_SKILL_CONTENT_CHARS],
             trajectory_summary=summary[:_PATCH_RETRY_TRAJECTORY_CHARS],
             trajectory_issues=issues_text[:_TRAJECTORY_ISSUES_RETRY_CHARS],
         )
@@ -598,7 +609,7 @@ class TeamSkillOptimizer:
         raw = await self._call_llm(
             prompt,
             retry_prompt=retry_prompt,
-            policy=_TEAM_SKILL_PATCH_LLM_POLICY,
+            policy=self._patch_llm_policy,
             is_result_usable=lambda text: self._parse_json(text) is not None,
         )
         elapsed = time.time() - t0
@@ -609,8 +620,7 @@ class TeamSkillOptimizer:
 
         parsed = self._parse_json(raw)
         if not parsed:
-            logger.warning("[TeamSkillOptimizer] trajectory_patch: failed to parse LLM response")
-            return None
+            raise ValueError("TeamSkill trajectory patch response could not be parsed as JSON")
 
         if not parsed.get("need_patch"):
             reason = parsed.get("reason", "N/A")
@@ -620,8 +630,7 @@ class TeamSkillOptimizer:
         section = parsed.get("section", "Workflow")
         content = parsed.get("content", "")
         if not content.strip():
-            logger.warning("[TeamSkillOptimizer] trajectory_patch: LLM returned empty content")
-            return None
+            raise ValueError("TeamSkill trajectory patch response contained empty content")
 
         logger.info(
             "[TeamSkillOptimizer] trajectory_patch: section='%s', content_len=%d (%.1fs)",
@@ -730,9 +739,9 @@ class TeamSkillOptimizer:
         is_result_usable: Optional[Callable[[str], bool]] = None,
     ) -> str:
         """Call the LLM and return raw text response."""
+        logger.info("[TeamSkillOptimizer] LLM call start: model=%s, prompt_len=%d", self._model, len(prompt))
+        t0 = time.time()
         try:
-            logger.info("[TeamSkillOptimizer] LLM call start: model=%s, prompt_len=%d", self._model, len(prompt))
-            t0 = time.time()
             if policy is None:
                 response = await self._llm.invoke(
                     messages=[{"role": "user", "content": prompt}],
@@ -753,17 +762,17 @@ class TeamSkillOptimizer:
                     policy=policy,
                     is_result_usable=is_result_usable,
                 )
-            elapsed = time.time() - t0
-
-            logger.info(
-                "[TeamSkillOptimizer] LLM call done: %.1fs, response_len=%d",
-                elapsed,
-                len(result),
-            )
-            return result
         except Exception as exc:
             logger.error("[TeamSkillOptimizer] LLM call failed: %s", exc, exc_info=True)
-            return ""
+            raise
+
+        elapsed = time.time() - t0
+        logger.info(
+            "[TeamSkillOptimizer] LLM call done: %.1fs, response_len=%d",
+            elapsed,
+            len(result),
+        )
+        return result
 
     async def regenerate_body(
         self,

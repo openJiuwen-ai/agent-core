@@ -43,6 +43,7 @@ def build_cli_overrides(args: argparse.Namespace) -> dict[str, object]:
         'ppo_config': 'training.ppo_config',
         'trajectory_batch_size': 'trajectory.batch_size',
         'lora_repo': 'training.lora_repo',
+        'jiuwen_agent_server_port': 'jiuwen.agent_server_port',
         'jiuwen_ws_port': 'jiuwen.ws_port',
         'jiuwen_web_host': 'jiuwen.web_host',
         'jiuwen_web_port': 'jiuwen.web_port',
@@ -94,6 +95,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help='Trajectory env batch size for JiuwenClaw (e.g. TRAJECTORY_BATCH_SIZE)',
     )
     parser.add_argument('--lora-repo', default=None, help='LoRA storage dir (default: ./lora_repo)')
+    parser.add_argument('--jiuwen-agent-server-port', type=int, default=None, help='JiuwenClaw agent server port')
     parser.add_argument(
         '--demo',
         action='store_true',

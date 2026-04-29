@@ -252,7 +252,7 @@ async def test_gateway_trajectory_runtime_rejects_missing_user_id_on_record(tmp_
     from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory import GatewayTrajectoryRuntime
 
     runtime = GatewayTrajectoryRuntime(
-        GatewayConfig(model_id="dummy-model", record_dir=str(tmp_path)),
+        GatewayConfig(port=18080, model_id="dummy-model", record_dir=str(tmp_path)),
         redis=_FakeRedis(),
     )
 

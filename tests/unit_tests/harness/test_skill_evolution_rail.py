@@ -15,12 +15,22 @@ from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionRecord,
     EvolutionTarget,
 )
+from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.agent_evolving.signal import (
     SignalDetector,
     EvolutionSignal,
     EvolutionCategory,
 )
+from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
+from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
+    GENERATE_RECORDS_LLM_POLICY,
+)
+from openjiuwen.agent_evolving.optimizer.skill_call.experience_scorer import (
+    EVALUATE_LLM_POLICY,
+    SIMPLIFY_LLM_POLICY,
+)
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
+from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail
 from openjiuwen.harness.rails.evolution.skill_evolution_rail import (
     SkillEvolutionRail,
     _MAX_PROCESSED_SIGNAL_KEYS,
@@ -117,6 +127,12 @@ def test_parse_messages():
     assert parsed[1]["name"] == "assistant_name"
     assert parsed[1]["tool_calls"][0]["id"] == "tc1"
     assert parsed[1]["tool_calls"][0]["name"] == "read_file"
+
+
+def test_public_llm_policy_constants_are_importable():
+    assert GENERATE_RECORDS_LLM_POLICY.attempt_timeout_secs == 60
+    assert EVALUATE_LLM_POLICY.attempt_timeout_secs == 30
+    assert SIMPLIFY_LLM_POLICY.attempt_timeout_secs == 60
 
 
 def test_properties_and_clear_processed_signals(tmp_path):
@@ -555,6 +571,32 @@ async def test_concurrent_approval_batches_are_independent(tmp_path):
     rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_b)
 
 
+@pytest.mark.asyncio
+async def test_on_approve_does_not_flush_newly_staged_records(tmp_path):
+    """Approving one batch must not flush later staged records for the same skill."""
+    from openjiuwen.core.operator.skill_call import SkillCallOperator
+
+    rail = _make_rail(tmp_path, auto_save=False)
+    approved = _make_record("skill-a", content="approved")
+    staged_later = _make_record("skill-a", content="staged-later")
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+
+    skill_op = SkillCallOperator("skill-a")
+    skill_op._staged_records = [approved]
+    rail._skill_ops["skill-a"] = skill_op
+    rail._evolution_store.append_record = AsyncMock()
+
+    await rail._emit_generated_records(ctx, "skill-a")
+    request_id = (await rail.drain_pending_approval_events())[0].payload["request_id"]
+
+    skill_op._staged_records = [staged_later]
+    await rail.on_approve(request_id)
+
+    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", approved)
+    assert skill_op.staged_records == [staged_later]
+    assert request_id not in rail._pending_approval_snapshots
+
+
 # =============================================================================
 # _infer_primary_skill Tests
 # =============================================================================
@@ -641,6 +683,32 @@ def test_infer_primary_skill_prefers_skills_path_over_legacy_skill_md(tmp_path):
     assert result == "new-skill"
 
 
+def test_is_regular_skill_filters_team_skill(tmp_path):
+    rail = SkillEvolutionRail(
+        skills_dir=str(tmp_path / "skills"),
+        llm=Mock(),
+        model="dummy-model",
+    )
+    rail._evolver = Mock()
+
+    regular_dir = tmp_path / "skills" / "regular-skill"
+    regular_dir.mkdir(parents=True)
+    (regular_dir / "SKILL.md").write_text(
+        "---\nname: regular-skill\nkind: skill\n---\n# Regular",
+        encoding="utf-8",
+    )
+
+    team_dir = tmp_path / "skills" / "team-skill"
+    team_dir.mkdir(parents=True)
+    (team_dir / "SKILL.md").write_text(
+        "---\nname: team-skill\nkind: team-skill\n---\n# Team",
+        encoding="utf-8",
+    )
+
+    assert rail._is_regular_skill("regular-skill") is True
+    assert rail._is_regular_skill("team-skill") is False
+
+
 # =============================================================================
 # Zero-signal fallback & unattributed signal tests
 # =============================================================================
@@ -691,6 +759,45 @@ async def test_run_evolution_zero_signals_no_primary_skill_returns(tmp_path):
     await rail.run_evolution(None, AgentCallbackContext(agent=None, inputs=None, session=None))
 
     rail._generate_experience_for_skill.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_filters_team_skills_from_detection(tmp_path):
+    rail = SkillEvolutionRail(
+        skills_dir=str(tmp_path / "skills"),
+        llm=Mock(),
+        model="dummy-model",
+        auto_scan=True,
+        auto_save=True,
+    )
+    rail._evolver = Mock()
+
+    regular_dir = tmp_path / "skills" / "skill-a"
+    regular_dir.mkdir(parents=True)
+    (regular_dir / "SKILL.md").write_text(
+        "---\nname: skill-a\nkind: skill\n---\n# Skill A",
+        encoding="utf-8",
+    )
+
+    team_dir = tmp_path / "skills" / "team-skill-a"
+    team_dir.mkdir(parents=True)
+    (team_dir / "SKILL.md").write_text(
+        "---\nname: team-skill-a\nkind: team-skill\n---\n# Team Skill A",
+        encoding="utf-8",
+    )
+
+    parsed_messages = [{"role": "user", "content": "hi"}]
+    rail._collect_parsed_messages = AsyncMock(return_value=parsed_messages)
+    rail._evolution_store = EvolutionStore(str(tmp_path / "skills"))
+    rail._evolution_store.list_skill_names = Mock(return_value=["skill-a", "team-skill-a"])
+    rail._detect_signals = Mock(return_value=[])
+    rail._infer_primary_skill = Mock(return_value=None)
+    rail._generate_experience_for_skill = AsyncMock()
+
+    await rail.run_evolution(None, AgentCallbackContext(agent=None, inputs=None, session=None))
+
+    rail._detect_signals.assert_called_once_with(parsed_messages, ["skill-a"])
+    rail._infer_primary_skill.assert_called_once_with(parsed_messages, ["skill-a"])
 
 
 @pytest.mark.asyncio
@@ -752,6 +859,64 @@ def test_init_valid_params_no_error():
         eval_interval=3,
     )
     assert rail._eval_interval == 3
+
+
+def test_init_accepts_custom_policies_and_timeout():
+    generate_policy = LLMInvokePolicy(
+        attempt_timeout_secs=9,
+        total_budget_secs=27,
+        max_attempts=2,
+    )
+    evaluate_policy = LLMInvokePolicy(
+        attempt_timeout_secs=11,
+        total_budget_secs=33,
+        max_attempts=2,
+    )
+    simplify_policy = LLMInvokePolicy(
+        attempt_timeout_secs=13,
+        total_budget_secs=39,
+        max_attempts=2,
+    )
+    rail = SkillEvolutionRail(
+        skills_dir="skills",
+        llm=Mock(),
+        model="m",
+        evolution_total_timeout_secs=555.0,
+        generate_records_llm_policy=generate_policy,
+        evaluate_llm_policy=evaluate_policy,
+        simplify_llm_policy=simplify_policy,
+    )
+
+    assert rail.evolution_total_timeout_secs == 555.0
+    assert rail.generate_records_llm_policy is generate_policy
+    assert rail.evaluate_llm_policy is evaluate_policy
+    assert rail.simplify_llm_policy is simplify_policy
+    assert rail.evolution_config["generate_records_llm_policy"] is generate_policy
+    assert rail.evolution_config["evolution_total_timeout_secs"] == 555.0
+
+
+def test_update_llm_refreshes_fresh_optimizer_references(tmp_path):
+    rail = _make_rail(tmp_path)
+    rail._scorer = Mock()
+    new_llm = Mock()
+
+    rail.update_llm(new_llm, "new-model")
+
+    rail._evolver.update_llm.assert_called_once_with(new_llm, "new-model")
+    rail._scorer.update_llm.assert_called_once_with(new_llm, "new-model")
+    assert rail._optimizer_llm is new_llm
+    assert rail._optimizer_model == "new-model"
+
+
+@pytest.mark.asyncio
+async def test_drain_pending_approval_events_defaults_to_total_timeout(tmp_path):
+    rail = _make_rail(tmp_path)
+    rail._evolution_total_timeout_secs = 321.0
+
+    with patch.object(EvolutionRail, "drain_pending_approval_events", new=AsyncMock(return_value=[])) as mocked:
+        await rail.drain_pending_approval_events(wait=True)
+
+    mocked.assert_awaited_once_with(wait=True, timeout=321.0)
 
 
 # =============================================================================
@@ -1324,6 +1489,7 @@ async def test_request_rebuild_archives_before_building_prompt(tmp_path):
     rail._evolution_store.skill_exists = Mock(return_value=True)
     rail._evolution_store.archive_skill_body = AsyncMock(return_value="SKILL.v20260426_172600.md")
     rail._evolution_store.archive_evolutions = AsyncMock(return_value="evolutions.v20260426_172600.json")
+    rail._evolution_store.clear_evolutions = AsyncMock()
     rail._evolution_store.load_full_evolution_log = AsyncMock(
         return_value=Mock(entries=[mock_record])
     )
@@ -1333,6 +1499,7 @@ async def test_request_rebuild_archives_before_building_prompt(tmp_path):
     # Archive operations should be called BEFORE prompt is built
     rail._evolution_store.archive_skill_body.assert_called_once_with("test-skill")
     rail._evolution_store.archive_evolutions.assert_called_once_with("test-skill")
+    rail._evolution_store.clear_evolutions.assert_called_once_with("test-skill")
 
     # Should return prompt (not None)
     assert result is not None
@@ -1373,6 +1540,7 @@ async def test_request_rebuild_filters_low_score_records(tmp_path):
     rail._evolution_store.skill_exists = Mock(return_value=True)
     rail._evolution_store.archive_skill_body = AsyncMock(return_value="SKILL.v1.md")
     rail._evolution_store.archive_evolutions = AsyncMock(return_value="evolutions.v1.json")
+    rail._evolution_store.clear_evolutions = AsyncMock()
     rail._evolution_store.load_full_evolution_log = AsyncMock(
         return_value=Mock(entries=[high_record, low_record])
     )
@@ -1384,6 +1552,7 @@ async def test_request_rebuild_filters_low_score_records(tmp_path):
     assert "good experience" in result
     # Low score record should be filtered out
     assert "bad experience" not in result
+    rail._evolution_store.clear_evolutions.assert_called_once_with("test-skill")
 
 
 @pytest.mark.asyncio
@@ -1398,6 +1567,7 @@ async def test_request_rebuild_continues_on_archive_failure(tmp_path):
     rail._evolution_store.skill_exists = Mock(return_value=True)
     rail._evolution_store.archive_skill_body = AsyncMock(side_effect=RuntimeError("disk full"))
     rail._evolution_store.archive_evolutions = AsyncMock(return_value=None)
+    rail._evolution_store.clear_evolutions = AsyncMock()
     rail._evolution_store.load_full_evolution_log = AsyncMock(
         return_value=Mock(entries=[high_record])
     )
@@ -1407,4 +1577,4 @@ async def test_request_rebuild_continues_on_archive_failure(tmp_path):
     # Should still return prompt even if archive failed
     assert result is not None
     rail._evolution_store.load_full_evolution_log.assert_called_once_with("test-skill")
-
+    rail._evolution_store.clear_evolutions.assert_not_called()
