@@ -19,6 +19,7 @@ from openjiuwen.core.single_agent.schema.agent_card import (
 )
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.schema.agent_mode import AgentMode
+from openjiuwen.harness.security.models import PermissionsSection
 from openjiuwen.harness.workspace.workspace import (
     Workspace,
 )
@@ -176,8 +177,9 @@ class DeepAgentConfig:
         enable_plan_mode: Whether to enable plan mode.
         permissions: Tool permission policy dict (enabled, tools, rules, …); when
             enabled, DeepAgent mounts PermissionInterruptRail automatically.
-        permission_host: Optional ToolPermissionHost callbacks (YAML path, ACP,
-            workspace, hot-reload snapshot).
+            常见键结构见 :class:`openjiuwen.harness.security.models.PermissionsSection`。
+        permission_host: Optional ToolPermissionHost callbacks (YAML path,
+            workspace, hot-reload snapshot, hosted confirmation).
     """
 
     model: Optional[Model] = None
@@ -220,7 +222,7 @@ class DeepAgentConfig:
     default_mode: AgentMode = AgentMode.NORMAL
 
     # Tool permission guardrail (tiered_policy / interrupt confirm)
-    permissions: dict[str, Any] | None = None
+    permissions: PermissionsSection | None = None
     permission_host: Any = None
 
 

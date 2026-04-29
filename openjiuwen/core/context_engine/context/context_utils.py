@@ -3,8 +3,49 @@
 
 from typing import Optional, List, Dict, Any
 import json
+import uuid
 
-from openjiuwen.core.foundation.llm import BaseMessage
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.context_engine.base import ContextWindow
+from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, AssistantMessage
+
+
+CONTEXT_MESSAGE_ID_KEY = "context_message_id"
+DEFAULT_CONTEXT_MAX_TOKENS = 200000
+
+MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS: Dict[str, int] = {
+    # GLM
+    "glm-5": 200000,
+    "glm-4-long": 200000,
+    "glm-4": 128000,
+    "glm-4-9b-chat-1m": 1048576,
+    # OpenAI GPT
+    "gpt-5.4": 1100000,
+    "gpt-4o": 128000,
+    "gpt-4o-mini": 128000,
+    "gpt-4-turbo": 128000,
+    "gpt-3.5-turbo": 16384,
+    # DeepSeek
+    "deepseek-v3": 128000,
+    "deepseek-chat": 65536,
+    # Anthropic Claude
+    "claude-opus-4.6": 1000000,
+    "claude-sonnet-4.6": 1000000,
+    "claude-haiku-4.6": 200000,
+    # Google Gemini
+    "gemini-3.1-pro": 2000000,
+    "gemini-2.5-pro": 1000000,
+    "gemini-2.5-flash": 1000000,
+    # Meta Llama
+    "llama-4-maverick": 1000000,
+    "llama-4-scout": 10000000,
+    # Qwen
+    "qwen-max": 32000,
+    "qwen-plus": 131072,
+    "qwen-turbo": 8192,
+    "qwen-long": 1000000,
+}
 
 
 class ContextUtils:
@@ -14,8 +55,91 @@ class ContextUtils:
     """
 
     @staticmethod
+    def validate_messages(messages: BaseMessage | List[BaseMessage]) -> None:
+        if isinstance(messages, BaseMessage):
+            return
+        if isinstance(messages, list):
+            for msg in messages:
+                if not isinstance(msg, BaseMessage):
+                    raise build_error(
+                        StatusCode.CONTEXT_MESSAGE_INVALID,
+                        error_msg="messages should be a BaseMessage or a list of BaseMessage"
+                    )
+            return
+        raise build_error(
+            StatusCode.CONTEXT_MESSAGE_INVALID,
+            error_msg="messages should be a BaseMessage or a list of BaseMessage"
+        )
+
+    @staticmethod
+    def ensure_context_message_ids(messages: List[BaseMessage]) -> List[BaseMessage]:
+        for msg in messages:
+            metadata = getattr(msg, "metadata", None)
+            if not isinstance(metadata, dict):
+                metadata = {}
+                setattr(msg, "metadata", metadata)
+            if not metadata.get(CONTEXT_MESSAGE_ID_KEY):
+                metadata[CONTEXT_MESSAGE_ID_KEY] = uuid.uuid4().hex
+        return messages
+
+    @staticmethod
+    def validate_and_fix_context_window(context_window: ContextWindow) -> None:
+        messages: List[BaseMessage] = context_window.context_messages
+        if not messages:
+            return
+
+        first_non_tool = 0
+        while first_non_tool < len(messages) and isinstance(messages[first_non_tool], ToolMessage):
+            first_non_tool += 1
+
+        if first_non_tool == len(messages):
+            context_window.context_messages = []
+            return
+
+        if first_non_tool > 0:
+            context_window.context_messages = messages[first_non_tool:]
+
+    @staticmethod
+    def resolve_context_max(
+        model_name: Optional[str] = None,
+        fallback_context_window_tokens: Optional[int] = None,
+        model_context_window_tokens: Optional[Dict[str, int]] = None,
+    ) -> int:
+        """Resolve the maximum context window size in tokens.
+
+        Priority order:
+        1. Explicit ``fallback_context_window_tokens`` if set and positive.
+        2. Look up ``model_name`` in ``model_context_window_tokens`` dict.
+        3. Look up ``model_name`` in the built-in ``MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS`` dict.
+        4. Return ``DEFAULT_CONTEXT_MAX_TOKENS`` (200000).
+        """
+        if isinstance(fallback_context_window_tokens, int) and fallback_context_window_tokens > 0:
+            return fallback_context_window_tokens
+
+        if isinstance(model_name, str) and model_name:
+            if model_context_window_tokens:
+                value = model_context_window_tokens.get(model_name)
+                if isinstance(value, int) and value > 0:
+                    return value
+            builtin = MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS.get(model_name)
+            if isinstance(builtin, int) and builtin > 0:
+                return builtin
+
+        return DEFAULT_CONTEXT_MAX_TOKENS
+
+    @staticmethod
+    def is_compression_processor(processor: Any) -> bool:
+        processor_type = processor.processor_type().lower()
+        module_name = processor.__class__.__module__.lower()
+        return (
+            "compressor" in processor_type
+            or "compact" in processor_type
+            or ".processor.compressor." in module_name
+        )
+
+    @staticmethod
     def find_last_ai_message_without_tool_call(
-            messages: List[BaseMessage],
+        messages: List[BaseMessage],
     ) -> Optional[int]:
         """
         Return the index of the most-recent **assistant** message that
@@ -229,8 +353,6 @@ class ContextUtils:
         Returns:
             The matching tool_call object, or None if not found.
         """
-        from openjiuwen.core.foundation.llm import ToolMessage, AssistantMessage
-
         if not isinstance(message, ToolMessage):
             return None
         tool_call_id = getattr(message, "tool_call_id", None)

@@ -111,6 +111,30 @@ def _extract_text(value: Any) -> str:
     return str(value)
 
 
+def _coerce_logprobs(value: Any) -> Optional[list[float]]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        out: list[float] = []
+        for item in value:
+            try:
+                out.append(float(item))
+            except (TypeError, ValueError):
+                continue
+        return out or None
+    content = value.get("content") if isinstance(value, dict) else getattr(value, "content", None)
+    if isinstance(content, list):
+        out = []
+        for item in content:
+            try:
+                logprob = item.get("logprob") if isinstance(item, dict) else getattr(item, "logprob")
+                out.append(float(logprob))
+            except (AttributeError, TypeError, ValueError):
+                continue
+        return out or None
+    return None
+
+
 def _fingerprint_payload(messages: list[dict[str, Any]], tools: Any) -> dict[str, Any]:
     raw = json.dumps(
         {"messages": messages, "tools": _json_value(tools)},
@@ -208,9 +232,16 @@ class OnlineTrajectoryConverter:
             detail_meta = dict(getattr(detail, "meta", {}) or {})
             provider_response_json = detail_meta.get("provider_response_json")
             token_source = provider_response_json or detail.response
-            response_tokens = step.token_ids or extract_token_ids(token_source)
-            prompt_ids = step.meta.get("prompt_ids") or extract_prompt_ids(token_source)
-            logprobs = step.log_probs or extract_logprobs(token_source)
+            # Prefer top-level step fields populated during trajectory
+            # collection; fall back to ``provider_response_json`` (vLLM raw
+            # payload) or any token data still on ``detail.response``.
+            response_tokens = step.completion_token_ids or extract_token_ids(token_source)
+            prompt_ids = (
+                step.prompt_token_ids
+                or step.meta.get("prompt_ids")
+                or extract_prompt_ids(token_source)
+            )
+            logprobs = _coerce_logprobs(step.logprobs) or extract_logprobs(token_source)
             sample = PerTurnSample(
                 trajectory_id=trajectory_id,
                 step_index=step_index,

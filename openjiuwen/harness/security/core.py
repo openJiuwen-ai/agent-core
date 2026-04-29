@@ -12,12 +12,10 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
-from openjiuwen.harness.security.checker import (
-    ExternalDirectoryChecker,
-    ToolPermissionChecker,
-)
+from openjiuwen.harness.security.checker import ExternalDirectoryChecker
+from openjiuwen.harness.security.models import PermissionsSection
 from openjiuwen.harness.security.models import (
     PermissionLevel,
     PermissionResult,
@@ -26,7 +24,6 @@ from openjiuwen.harness.security.tiered_policy import (
     evaluate_tiered_policy,
     matched_rule_uses_approval_override,
     maybe_escalate_shell_operators,
-    permissions_schema_is_tiered_policy,
     strictest as tiered_policy_strictest,
 )
 
@@ -38,29 +35,28 @@ class PermissionEngine:
 
     def __init__(
         self,
-        config: dict | None = None,
+        config: PermissionsSection | dict[str, Any] | None = None,
         llm: Any = None,
         model_name: str | None = None,
         workspace_root: Path | None = None,
     ):
-        self.config = config or {}
+        # 运行时为可变 dict；TypedDict 仅作入参形状说明
+        self.config: dict[str, Any] = cast(dict[str, Any], config or {})
         self._enabled = self.config.get("enabled", True)
-        self._channel_enforce: Callable[[str], bool] | None = None
+        self._permission_checks_active: Callable[[], bool] | None = None
         self._llm = llm
         self._model_name = model_name
         self._workspace_root = workspace_root
-        self._tool_checker = ToolPermissionChecker(self.config)
         self._external_checker = ExternalDirectoryChecker(
             self.config, workspace_root=self._workspace_root
         )
 
     # ---------- 配置 ----------
 
-    def update_config(self, config: dict):
+    def update_config(self, config: PermissionsSection | dict[str, Any]) -> None:
         """热更新配置."""
-        self.config = config
+        self.config = cast(dict[str, Any], config)
         self._enabled = config.get("enabled", True)
-        self._tool_checker = ToolPermissionChecker(config)
         self._external_checker = ExternalDirectoryChecker(
             config, workspace_root=self._workspace_root
         )
@@ -74,34 +70,32 @@ class PermissionEngine:
     def enabled(self) -> bool:
         return self._enabled
 
-    def set_channel_enforce(self, enforce: Callable[[str], bool] | None) -> None:
-        """由宿主 / :class:`PermissionInterruptRail` 注入：是否对某 ``channel_id`` 执行权限校验。"""
-        self._channel_enforce = enforce
+    def set_permission_checks_active(self, fn: Callable[[], bool] | None) -> None:
+        """由宿主 / :class:`PermissionInterruptRail` 注入：当前上下文是否应执行工具权限校验。"""
+        self._permission_checks_active = fn
 
     def check_tool_permission_directly(
         self,
         tool_name: str,
         tool_args: dict[str, Any],
-        channel_id: str = "web",
     ) -> tuple[PermissionLevel | None, str | None]:
-        """直接检查工具权限，不受 enabled 开关和 channel 限制.
+        """直接检查工具权限，不受 enabled 开关与宿主「是否校验」短路影响.
 
         用于 owner_scopes 等需要获取原始权限级别的场景。
 
         Returns:
             (permission_level, matched_rule) - 权限级别可能为 None（无匹配规则）.
         """
-        return self.evaluate_global_policy_directly(tool_name, tool_args, channel_id)
+        return self.evaluate_global_policy_directly(tool_name, tool_args)
 
     def evaluate_global_policy_directly(
         self,
         tool_name: str,
         tool_args: dict[str, Any],
-        channel_id: str = "web",
         *,
         include_external_directory: bool = True,
     ) -> tuple[PermissionLevel | None, str | None]:
-        """直接评估全局权限，不受 enabled/channel 短路影响。"""
+        """直接评估全局权限，不受 enabled 与宿主「是否校验」短路影响。"""
         if not isinstance(tool_args, dict):
             logger.warning(
                 "[PermissionEngine] direct tool_args is not a dict (type=%s), using {}",
@@ -110,15 +104,12 @@ class PermissionEngine:
             tool_args = {}
 
         matched_rule: str | None = None
-        if permissions_schema_is_tiered_policy(self.config):
-            permission, matched_rule = evaluate_tiered_policy(self.config, tool_name, tool_args)
-            if matched_rule == "tiered_policy:fallback(no_config)":
-                permission = None
-                matched_rule = None
-            elif not matched_rule_uses_approval_override(matched_rule):
-                permission = maybe_escalate_shell_operators(tool_name, tool_args, permission)
-        else:
-            permission, matched_rule = self._tool_checker.check_tool(tool_name, tool_args, channel_id)
+        permission, matched_rule = evaluate_tiered_policy(self.config, tool_name, tool_args)
+        if matched_rule == "tiered_policy:fallback(no_config)":
+            permission = None
+            matched_rule = None
+        elif not matched_rule_uses_approval_override(matched_rule):
+            permission = maybe_escalate_shell_operators(tool_name, tool_args, permission)
 
         if include_external_directory:
             ext_result = self._external_checker.check_external_paths(tool_name, tool_args)
@@ -138,8 +129,6 @@ class PermissionEngine:
         self,
         tool_name: str,
         tool_args: dict[str, Any],
-        channel_id: str = "web",
-        session_id: str | None = None,
     ) -> PermissionResult:
         """检查工具调用权限.
 
@@ -147,8 +136,9 @@ class PermissionEngine:
             PermissionResult 包含权限级别和匹配规则.
         """
         logger.info(
-            "[PermissionEngine] permission.check.start tool=%s channel=%s enabled=%s",
-            tool_name, channel_id, self._enabled,
+            "[PermissionEngine] permission.check.start tool=%s enabled=%s",
+            tool_name,
+            self._enabled,
         )
 
         if not self._enabled:
@@ -158,18 +148,14 @@ class PermissionEngine:
                 reason="Permission system is disabled",
             )
 
-        normalized_channel = (channel_id or "").strip() or "web"
-        enforce = self._channel_enforce
-        # 未注入 ``set_channel_enforce`` 时不在 harness 内按通道白名单短路；宿主（如 jiuwenclaw）可注入谓词。
-        channel_ok = enforce(normalized_channel) if enforce is not None else True
-        if not channel_ok:
+        active_fn = self._permission_checks_active
+        if active_fn is not None and not active_fn():
             logger.info(
-                "[PermissionEngine] permission.check.skip reason=channel_disabled channel=%s",
-                normalized_channel,
+                "[PermissionEngine] permission.check.skip reason=permission_checks_inactive decision=allow",
             )
             return PermissionResult(
                 permission=PermissionLevel.ALLOW,
-                reason=f"Skipped for channel: {normalized_channel}",
+                reason="Tool permission checks are inactive for this context",
             )
 
         if not isinstance(tool_args, dict):
@@ -179,12 +165,11 @@ class PermissionEngine:
             )
             tool_args = {}
 
-        # 1. 工具级 + 参数规则 + 默认（legacy 或 tiered_policy）
+        # 1. 工具级 + 参数规则 + 默认（分层策略 evaluate_tiered_policy）
         external_paths: list[str] | None = None
         permission, matched_rule = self.evaluate_global_policy_directly(
             tool_name,
             tool_args,
-            channel_id,
             include_external_directory=False,
         )
         if permission is None:
@@ -222,15 +207,13 @@ class PermissionEngine:
             permission=permission,
             matched_rule=matched_rule,
             reason=self._get_reason(permission, tool_name, matched_rule),
-            risk=None,
             external_paths=external_paths,
         )
 
         logger.info(
-            "[PermissionEngine] permission.check.final tool=%s channel=%s permission=%s matched_rule=%s "
+            "[PermissionEngine] permission.check.final tool=%s permission=%s matched_rule=%s "
             "external_paths=%s",
             tool_name,
-            channel_id,
             permission.value,
             matched_rule,
             external_paths or [],
@@ -248,31 +231,3 @@ class PermissionEngine:
         if permission == PermissionLevel.DENY:
             return f"Denied by rule: {matched_rule}"
         return f"Approval required for {tool_name} (rule: {matched_rule})"
-
-
-# ----- 全局单例 -----
-_permission_engine: PermissionEngine | None = None
-
-
-def init_permission_engine(config: dict | None = None) -> PermissionEngine:
-    """初始化全局权限引擎."""
-    global _permission_engine
-    if _permission_engine is None:
-        _permission_engine = PermissionEngine(config)
-    if config is not None:
-        _permission_engine.update_config(config)
-    return _permission_engine
-
-
-def get_permission_engine() -> PermissionEngine:
-    """获取全局权限引擎实例 (懒初始化)."""
-    global _permission_engine
-    if _permission_engine is None:
-        _permission_engine = PermissionEngine()
-    return _permission_engine
-
-
-def set_permission_engine(engine: PermissionEngine):
-    """替换全局权限引擎 (测试用)."""
-    global _permission_engine
-    _permission_engine = engine

@@ -39,6 +39,12 @@ class AssistantMessage(BaseMessage):
     finish_reason: str = "null"
     parser_content: Optional[Any] = None
     reasoning_content: Optional[str] = None
+    # Optional token-level fields populated when the provider returns them
+    # (e.g. vLLM with return_token_ids=True / logprobs=True). Used by RL
+    # trajectory collection to skip re-tokenization.
+    prompt_token_ids: Optional[List[int]] = None
+    completion_token_ids: Optional[List[int]] = None
+    logprobs: Optional[Any] = None
 
     @model_validator(mode='before')
     @classmethod
@@ -99,6 +105,12 @@ class AssistantMessage(BaseMessage):
             result["parser_content"] = self.parser_content
         if self.reasoning_content is not None:
             result["reasoning_content"] = self.reasoning_content
+        if self.prompt_token_ids is not None:
+            result["prompt_token_ids"] = self.prompt_token_ids
+        if self.completion_token_ids is not None:
+            result["completion_token_ids"] = self.completion_token_ids
+        if self.logprobs is not None:
+            result["logprobs"] = self.logprobs
         return result
 
 

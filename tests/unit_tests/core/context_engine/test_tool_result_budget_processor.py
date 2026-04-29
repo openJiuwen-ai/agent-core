@@ -7,9 +7,8 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from typing import List
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -25,6 +24,11 @@ from openjiuwen.core.foundation.llm import (
     ToolCall,
     ToolMessage,
     UserMessage,
+)
+from openjiuwen.core.session.agent import Session
+from tests.unit_tests.core.context_engine._stream_state_helpers import (
+    assert_context_state_pair,
+    capture_context_compression_states,
 )
 
 
@@ -148,6 +152,39 @@ class TestToolResultBudgetProcessorFilesystemOffload:
         assert getattr(tool_msg, "offload_type", None) == "filesystem"
         # Verify write_file was called with correct path (mock test)
         assert_mock_write_file_called(mock_fs, workspace_root, offload_handle)
+
+    @pytest.mark.asyncio
+    async def test_streams_state_when_tool_result_budget_processor_triggers(self):
+        session = Session(session_id="tool-result-budget-stream-session")
+        engine = ContextEngine(ContextEngineConfig(default_window_message_num=100))
+        context = await engine.create_context(
+            context_id="test_ctx",
+            session=session,
+            history_messages=[],
+            processors=[
+                (
+                    "ToolResultBudgetProcessor",
+                    ToolResultBudgetProcessorConfig(
+                        tokens_threshold=50,
+                        large_message_threshold=10,
+                        trim_size=5,
+                    ),
+                )
+            ],
+        )
+
+        _, states = await capture_context_compression_states(
+            session,
+            lambda: context.add_messages([
+                UserMessage(content="Run grep"),
+                AssistantMessage(content="", tool_calls=create_tool_call_list(["tc-stream"])),
+                ToolMessage(content="x" * 500, tool_call_id="tc-stream", name="grep"),
+                AssistantMessage(content="done"),
+            ]),
+        )
+
+        assert_context_state_pair(states, processor_type="ToolResultBudgetProcessor")
+        assert "modified 1 messages" in states[1].summary
 
     @pytest.mark.asyncio
     async def test_offload_to_filesystem_specific_path(self, tmp_path):
@@ -590,7 +627,6 @@ class TestToolResultBudgetProcessorReload:
         from openjiuwen.core.sys_operation import SysOperation, OperationMode
         from openjiuwen.core.sys_operation import SysOperationCard
         from openjiuwen.core.sys_operation.config import LocalWorkConfig
-        from openjiuwen.core.context_engine.context.message_buffer import OffloadMessageBuffer
 
         workspace_root = str(tmp_path / "workspace")
         workspace = MockWorkspace(root_path=workspace_root)

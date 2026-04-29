@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import Optional
+from typing import Dict, Optional
 from pydantic import BaseModel, Field
 
 
@@ -46,6 +46,18 @@ class ContextEngineConfig(BaseModel):
         transparently fetches the full content from storage, injecting it back
         into the active context. When disabled, hints remain as-is in the
         conversation, and offloaded content is never automatically restored.
+
+    context_window_tokens : int, optional
+        Total context window supported by the runtime model, including input and
+        output tokens. Used for context compression telemetry only.
+
+    model_name : str, optional
+        Name of the LLM used by this context. Used to look up the default
+        context window size from ``model_context_window_tokens``.
+
+    model_context_window_tokens : dict[str, int], optional
+        Best-effort fallback mapping from model name to total context window
+        tokens. Explicit runtime values and context_window_tokens take priority.
     """
 
     max_context_message_num: Optional[int] = Field(default=None, gt=0)
@@ -53,3 +65,7 @@ class ContextEngineConfig(BaseModel):
     default_window_round_num: Optional[int] = Field(default=None, gt=0)
     enable_kv_cache_release: bool = Field(default=False)
     enable_reload: bool = Field(default=False)
+    enable_tiktoken_counter: bool = Field(default=False)
+    context_window_tokens: Optional[int] = Field(default=None, gt=0)
+    model_name: Optional[str] = Field(default=None)
+    model_context_window_tokens: Optional[Dict[str, int]] = Field(default=None)

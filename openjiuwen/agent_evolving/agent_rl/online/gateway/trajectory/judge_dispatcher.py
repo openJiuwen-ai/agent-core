@@ -66,7 +66,7 @@ class JudgeDispatcher:
         if not instruction_text:
             instruction_text = feedback
 
-        if feedback.strip() and self._judge_scorer is not None:
+        if self._judge_scorer is not None:
             try:
                 judge = await self._judge_scorer.score(
                     response_text=response_text,

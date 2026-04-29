@@ -12,13 +12,17 @@ from openjiuwen.core.context_engine.processor.offloader.message_offloader import
     MessageOffloaderConfig,
     OMIT_STRING,
 )
-from openjiuwen.core.context_engine.token.base import TokenCounter
-from openjiuwen.core.context_engine.schema.messages import OffloadMixin, OffloadToolMessage
+from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import (
     UserMessage,
     AssistantMessage,
     ToolMessage,
     ToolCall,
+)
+from openjiuwen.core.session.agent import Session
+from tests.unit_tests.core.context_engine._stream_state_helpers import (
+    assert_context_state_pair,
+    capture_context_compression_states,
 )
 
 
@@ -30,12 +34,13 @@ async def create_context_with_offloader(
     offloader_config: MessageOffloaderConfig,
     history_messages=None,
     token_counter=None,
+    session=None,
 ):
     """Create context with MessageOffloader via ContextEngine.create_context."""
     engine = ContextEngine(ContextEngineConfig(default_window_message_num=100))
     return await engine.create_context(
         "test_ctx",
-        None,
+        session,
         history_messages=history_messages or [],
         processors=[("MessageOffloader", offloader_config)],
         token_counter=token_counter,
@@ -146,6 +151,31 @@ class TestMessageOffloader:
             dict(offload_handle=offloaded[0].offload_handle, offload_type="in_memory")
         )
         assert "x" * 100 in reloaded
+
+    @pytest.mark.asyncio
+    async def test_streams_state_when_offload_processor_triggers(self):
+        session = Session(session_id="message-offloader-stream-session")
+        config = MessageOffloaderConfig(
+            messages_threshold=1,
+            tokens_threshold=100000,
+            large_message_threshold=30,
+            trim_size=10,
+            offload_message_type=["tool"],
+            messages_to_keep=None,
+            keep_last_round=False,
+        )
+        ctx = await create_context_with_offloader(config, session=session)
+
+        _, states = await capture_context_compression_states(
+            session,
+            lambda: ctx.add_messages([
+                ToolMessage(content="x" * 100, tool_call_id="tc-stream"),
+                UserMessage(content="trigger"),
+            ]),
+        )
+
+        assert_context_state_pair(states, processor_type="MessageOffloader")
+        assert "modified 1 messages" in states[1].summary
 
     # ---------- tokens_threshold: offload triggered when token count exceeded ----------
     @pytest.mark.asyncio

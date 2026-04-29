@@ -8,8 +8,9 @@ for ASK decisions using the built-in interrupt rail flow.
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, cast
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
@@ -20,13 +21,22 @@ from openjiuwen.harness.rails.interrupt.confirm_rail import (
 )
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.harness.security.checker import TOOL_PERMISSION_CHANNEL_ID
-from openjiuwen.harness.security.core import PermissionEngine, get_permission_engine
-from openjiuwen.harness.security.host import ToolPermissionHost
-from openjiuwen.harness.security.models import PermissionLevel, PermissionResult
+from openjiuwen.harness.security.core import PermissionEngine
+from openjiuwen.harness.security.host import (
+    PermissionConfirmationRequest,
+    PermissionSceneHookInput,
+    ToolPermissionHost,
+)
+from openjiuwen.harness.security.models import (
+    PermissionConfirmResponse,
+    PermissionLevel,
+    PermissionResult,
+)
+from openjiuwen.harness.security.models import PermissionsSection
 from openjiuwen.harness.security.patterns import (
-    persist_external_directory_allow,
-    persist_permission_allow_rule,
+    merge_external_directory_allow_into_permissions,
+    merge_permission_allow_rule_into_permissions,
+    write_permissions_section_to_agent_config_yaml,
 )
 from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
 
@@ -37,14 +47,6 @@ TOOL_NAME_ALIASES = {
     "fetch_webpage": "mcp_fetch_webpage",
     "exec_command": "mcp_exec_command",
 }
-
-
-@dataclass(frozen=True)
-class PermissionConfirmResponse:
-    approved: bool
-    feedback: str = ""
-    auto_confirm: bool = False
-    persist_allow: bool = False
 
 
 class PermissionInterruptRail(ConfirmInterruptRail):
@@ -65,7 +67,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
     def __init__(
         self,
-        config: Optional[dict] = None,
+        config: Optional[PermissionsSection | dict[str, Any]] = None,
         engine: Optional[PermissionEngine] = None,
         tool_names: Optional[Iterable[str]] = None,
         llm: Any = None,
@@ -73,7 +75,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         host: ToolPermissionHost | None = None,
     ) -> None:
         super().__init__(tool_names=tool_names)
-        self._static_config = config or {}
+        self._static_config = cast(dict[str, Any], config or {})
         self._host = host or ToolPermissionHost()
         if engine is not None:
             self._engine = engine
@@ -93,8 +95,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 model_name=model_name,
                 workspace_root=workspace_root,
             )
-        if self._host.channel_permission_enforce is not None:
-            self._engine.set_channel_enforce(self._host.channel_permission_enforce)
+        if self._host.tool_permission_checks_active is not None:
+            self._engine.set_permission_checks_active(self._host.tool_permission_checks_active)
         logger.info(
             "[PermissionEngine] permission.rail.init intercept=all_tools optional_tool_tags=%s "
             "tools_keys=%s llm_enabled=%s model_name=%s",
@@ -183,12 +185,17 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         ctx.extra["_interrupt_decision"] = decision
         self._apply_decision(ctx, tool_call, tool_name, decision)
 
-    def update_config(self, config: dict, tool_names: Optional[Iterable[str]] = None) -> None:
+    def update_config(
+        self,
+        config: PermissionsSection | dict[str, Any],
+        tool_names: Optional[Iterable[str]] = None,
+    ) -> None:
         """Hot-update static permission config；可选 ``tool_names`` 仅更新基类标签集合。"""
-        self._static_config = config
-        self._engine.update_config(config)
-        if self._host.channel_permission_enforce is not None:
-            self._engine.set_channel_enforce(self._host.channel_permission_enforce)
+        cfg_dict = cast(dict[str, Any], config)
+        self._static_config = cfg_dict
+        self._engine.update_config(cfg_dict)
+        if self._host.tool_permission_checks_active is not None:
+            self._engine.set_permission_checks_active(self._host.tool_permission_checks_active)
         if tool_names is not None:
             self._tool_names = {str(x).strip() for x in tool_names if str(x).strip()}
         logger.info(
@@ -196,30 +203,17 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             sorted(self._tool_names),
         )
 
-    def _persist_allow(self, normalized_name: str, tool_args: dict) -> bool:
-        if self._host.persist_allow_rule is not None:
-            try:
-                return bool(self._host.persist_allow_rule(normalized_name, tool_args))
-            except Exception:
-                logger.warning(
-                    "[PermissionEngine] permission.persist.host_failed",
-                    exc_info=True,
-                )
-                return False
-        return persist_permission_allow_rule(
-            normalized_name,
-            tool_args,
-            config_yaml_path=self._host.permission_yaml_path,
-        )
-
-    def _persist_external_directory_allow_if_needed(
-        self, normalized_name: str, tool_args: dict
-    ) -> bool:
-        """当本次调用存在 workspace 外路径且 external_directory 为 ASK 时，写入白名单。"""
+    def _collect_external_directory_persist_paths(
+        self,
+        normalized_name: str,
+        tool_args: dict,
+        permissions_cfg: dict[str, Any] | PermissionsSection,
+    ) -> list[str]:
+        """若本次调用对外部路径为 ASK，返回应写入白名单的路径列表；否则返回空列表。"""
         from openjiuwen.harness.security.checker import ExternalDirectoryChecker
 
         if self._host.resolve_workspace_dir is None:
-            return False
+            return []
         try:
             workspace = self._host.resolve_workspace_dir()
         except Exception:
@@ -227,10 +221,10 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 "[PermissionEngine] permission.persist.external.workspace_resolve_failed",
                 exc_info=True,
             )
-            return False
+            return []
         try:
             checker = ExternalDirectoryChecker(
-                self._engine.config, workspace_root=workspace
+                permissions_cfg, workspace_root=workspace
             )
             ext_result = checker.check_external_paths(normalized_name, tool_args)
         except Exception:
@@ -238,37 +232,57 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 "[PermissionEngine] permission.persist.external.check_failed",
                 exc_info=True,
             )
-            return False
+            return []
         if ext_result is None or ext_result.permission != PermissionLevel.ASK:
-            return False
+            return []
         paths = ext_result.external_paths or []
-        if not paths:
-            return False
-        try:
-            return bool(
-                persist_external_directory_allow(
-                    paths,
-                    config_yaml_path=self._host.permission_yaml_path,
-                )
-            )
-        except Exception:
-            logger.warning(
-                "[PermissionEngine] permission.persist.external.invoke_failed",
-                exc_info=True,
-            )
-            return False
+        return list(paths) if paths else []
 
     def _persist_allow_always(
         self, normalized_name: str, tool_args: dict
     ) -> bool:
-        """工具级「始终允许」与 external_directory 白名单一并尝试落盘。"""
-        persisted = self._persist_allow(normalized_name, tool_args)
-        if self._persist_external_directory_allow_if_needed(normalized_name, tool_args):
-            persisted = True
-        if persisted:
-            mono = get_permission_engine()
-            if mono is not self._engine:
-                self._engine.update_config(dict(mono.config))
+        """工具级「始终允许」与 external_directory 白名单：先合并内存，再写盘。"""
+        cfg = cast(
+            PermissionsSection,
+            deepcopy(self._engine.config),
+        )
+        cfg, ok_tool = merge_permission_allow_rule_into_permissions(
+            cfg, normalized_name, tool_args
+        )
+        ext_paths = self._collect_external_directory_persist_paths(
+            normalized_name, tool_args, cfg
+        )
+        ok_ext = False
+        if ext_paths:
+            cfg, ok_ext = merge_external_directory_allow_into_permissions(cfg, ext_paths)
+        if not ok_tool and not ok_ext:
+            return False
+
+        prev_cfg = deepcopy(self._engine.config)
+        self.update_config(cfg)
+
+        if self._host.persist_allow_rule is not None:
+            try:
+                persisted = bool(
+                    self._host.persist_allow_rule(cast(dict[str, Any], cfg))
+                )
+            except Exception:
+                logger.warning(
+                    "[PermissionEngine] permission.persist.host_failed",
+                    exc_info=True,
+                )
+                persisted = False
+            if not persisted:
+                self.update_config(prev_cfg)
+        else:
+            if not write_permissions_section_to_agent_config_yaml(
+                self._host.permission_yaml_path,
+                cfg,
+            ):
+                self.update_config(prev_cfg)
+                persisted = False
+            else:
+                persisted = True
         return persisted
 
     async def resolve_interrupt(
@@ -293,13 +307,14 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         if self._host.permission_scene_hook is not None:
             try:
                 scene_out = await self._host.permission_scene_hook(
-                    ctx,
-                    tool_call,
-                    user_input,
-                    normalized_name,
-                    tool_args,
-                    self._resolve_channel_id(),
-                    self._engine,
+                    PermissionSceneHookInput(
+                        ctx=ctx,
+                        tool_call=tool_call,
+                        user_input=user_input,
+                        normalized_tool_name=normalized_name,
+                        tool_args=tool_args,
+                        engine=self._engine,
+                    ),
                 )
             except Exception:
                 logger.warning(
@@ -319,9 +334,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 "[PermissionEngine] permission.rail.first_check tool=%s normalized=%s",
                 tool_name, normalized_name
             )
-            # 与磁盘上的 permissions 对齐：persist_cli_trusted_directory 等只更新了全局
-            # PermissionEngine；若此处仍用旧的 _static_config 覆盖引擎，会抹掉刚写入的
-            # approval_overrides / external_directory。
+            # 与磁盘上的 permissions 对齐：若仅写盘未先/未后刷新内存，此处用旧 _static_config
+            # 会抹掉 approval_overrides 等；应提供 get_permissions_snapshot 或在落盘后已 update_config。
             fresh: dict | None = None
             if self._host.get_permissions_snapshot is not None:
                 try:
@@ -334,14 +348,11 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     )
             if isinstance(fresh, dict):
                 self.update_config(fresh)
-            elif self._engine is get_permission_engine():
-                self._static_config = dict(self._engine.config)
             else:
                 self._engine.update_config(self._static_config)
             result = await self._engine.check_permission(
                 tool_name=normalized_name,
                 tool_args=tool_args,
-                channel_id=self._resolve_channel_id(),
             )
 
             if result.permission == PermissionLevel.ALLOW:
@@ -368,52 +379,69 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 )
                 return self.approve()
 
-            resolved_channel = self._resolve_channel_id()
-            if resolved_channel == "acp":
-                confirm_payload = await self._request_acp_permission(
-                    ctx=ctx,
-                    tool_call=tool_call,
-                    result=result,
-                    auto_confirm_key=auto_confirm_key,
+            if self._host.request_permission_confirmation is not None:
+                ext_out = await self._host.request_permission_confirmation(
+                    PermissionConfirmationRequest(
+                        ctx=ctx,
+                        tool_call=tool_call,
+                        result=result,
+                        auto_confirm_key=auto_confirm_key,
+                    ),
                 )
-                if confirm_payload is None:
+                if ext_out != "interrupt":
+                    if ext_out is None:
+                        return self.reject(
+                            tool_result=(
+                                f"[PERMISSION_DENIED] {result.reason or 'Operation requires approval'} "
+                                "(Hosted permission request failed)"
+                            ),
+                        )
+                    if not isinstance(ext_out, PermissionConfirmResponse):
+                        logger.warning(
+                            "[PermissionEngine] permission.hosted_confirm.invalid_type type=%s",
+                            type(ext_out).__name__,
+                        )
+                        return self.reject(
+                            tool_result=(
+                                f"[PERMISSION_DENIED] {result.reason or 'Operation requires approval'} "
+                                "(Invalid hosted permission response)"
+                            ),
+                        )
+                    confirm_payload = ext_out
+                    persisted = False
+                    if confirm_payload.approved and confirm_payload.auto_confirm:
+                        persisted = self._persist_allow_always(normalized_name, tool_args)
+                    logger.info(
+                        "[PermissionEngine] permission.persist.result tool=%s confirm_path=hosted persisted=%s",
+                        tool_name,
+                        persisted,
+                    )
+                    if self._should_store_auto_confirm(
+                        auto_confirm=confirm_payload.auto_confirm,
+                        session=ctx.session,
+                        auto_confirm_key=auto_confirm_key,
+                        persisted=persisted,
+                    ):
+                        self._store_auto_confirm(ctx, auto_confirm_key)
+                    if confirm_payload.approved:
+                        decision = "allow_always" if confirm_payload.auto_confirm else "allow_once"
+                        logger.info(
+                            "[PermissionEngine] permission.user.decision tool=%s confirm_path=hosted "
+                            "decision=%s persisted=%s",
+                            tool_name,
+                            decision,
+                            persisted,
+                        )
+                        return self.approve()
+                    logger.info(
+                        "[PermissionEngine] permission.user.decision tool=%s confirm_path=hosted decision=deny",
+                        tool_name,
+                    )
                     return self.reject(
                         tool_result=(
-                            f"[PERMISSION_DENIED] {result.reason or 'Operation requires approval'} "
-                            "(ACP permission request failed)"
-                        )
+                            confirm_payload.feedback or "[PERMISSION_REJECTED] User rejected the request."
+                        ),
                     )
-                persisted = False
-                if confirm_payload.approved and confirm_payload.persist_allow:
-                    persisted = self._persist_allow_always(normalized_name, tool_args)
-                    logger.info(
-                        "[PermissionEngine] permission.persist.result tool=%s channel=acp persisted=%s",
-                        tool_name,
-                        persisted,
-                    )
-                if self._should_store_auto_confirm(
-                    auto_confirm=confirm_payload.auto_confirm,
-                    session=ctx.session,
-                    auto_confirm_key=auto_confirm_key,
-                    persisted=persisted,
-                ):
-                    self._store_auto_confirm(ctx, auto_confirm_key)
-                if confirm_payload.approved:
-                    decision = "allow_always" if confirm_payload.persist_allow else "allow_once"
-                    logger.info(
-                        "[PermissionEngine] permission.user.decision tool=%s channel=acp decision=%s persisted=%s",
-                        tool_name,
-                        decision,
-                        persisted,
-                    )
-                    return self.approve()
-                logger.info(
-                    "[PermissionEngine] permission.user.decision tool=%s channel=acp decision=deny",
-                    tool_name,
-                )
-                return self.reject(
-                    tool_result=confirm_payload.feedback or "[PERMISSION_REJECTED] User rejected the request."
-                )
 
             logger.info(
                 "[PermissionEngine] permission.interrupt.ask tool=%s matched_rule=%s",
@@ -440,12 +468,12 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             ))
 
         persisted = False
-        if payload.approved and payload.persist_allow:
+        if payload.approved and payload.auto_confirm:
             persisted = self._persist_allow_always(normalized_name, tool_args)
             logger.info(
-                "[PermissionEngine] permission.persist.result tool=%s channel=%s persisted=%s",
+                "[PermissionEngine] permission.persist.result tool=%s confirm_path=%s persisted=%s",
                 tool_name,
-                self._resolve_channel_id(),
+                self._confirm_path_label(),
                 persisted,
             )
 
@@ -458,20 +486,20 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             self._store_auto_confirm(ctx, auto_confirm_key)
 
         if payload.approved:
-            decision = "allow_always" if payload.persist_allow else "allow_once"
+            decision = "allow_always" if payload.auto_confirm else "allow_once"
             logger.info(
-                "[PermissionEngine] permission.user.decision tool=%s channel=%s decision=%s persisted=%s",
+                "[PermissionEngine] permission.user.decision tool=%s confirm_path=%s decision=%s persisted=%s",
                 tool_name,
-                self._resolve_channel_id(),
+                self._confirm_path_label(),
                 decision,
                 persisted,
             )
             return self.approve()
 
         logger.info(
-            "[PermissionEngine] permission.user.decision tool=%s channel=%s decision=deny",
+            "[PermissionEngine] permission.user.decision tool=%s confirm_path=%s decision=deny",
             tool_name,
-            self._resolve_channel_id(),
+            self._confirm_path_label(),
         )
         return self.reject(tool_result=payload.feedback or "[PERMISSION_REJECTED] User rejected the request.")
 
@@ -509,7 +537,6 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 approved=payload.approved,
                 feedback=payload.feedback,
                 auto_confirm=payload.auto_confirm,
-                persist_allow=bool(user_input.get("persist_allow", False)),
             )
         if isinstance(user_input, str):
             try:
@@ -521,9 +548,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return PermissionInterruptRail._parse_confirm_payload(raw_payload)
         return None
 
-    @staticmethod
-    def _resolve_channel_id() -> str:
-        return TOOL_PERMISSION_CHANNEL_ID.get() or "web"
+    def _confirm_path_label(self) -> str:
+        return "hosted" if self._host.request_permission_confirmation is not None else "interrupt"
 
     @staticmethod
     def _is_auto_confirmed(auto_confirm_config: Optional[dict], tool_name: str) -> bool:
@@ -568,157 +594,6 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         return None
 
     @staticmethod
-    def _tool_kind_for_permission(tool_name: str) -> str:
-        if tool_name in {"bash", "mcp_exec_command", "create_terminal", "exec_command"}:
-            return "execute"
-        if tool_name in {"read_file", "read_text_file", "memory_get"}:
-            return "read"
-        if tool_name in {"write_file", "write_text_file", "edit_file", "write"}:
-            return "edit"
-        if tool_name in {"grep", "glob_file_search", "mcp_free_search", "mcp_paid_search"}:
-            return "search"
-        if tool_name in {"fetch_webpage", "mcp_fetch_webpage"}:
-            return "fetch"
-        return "other"
-
-    def _build_acp_permission_request(
-        self,
-        tool_call: Optional[ToolCall],
-        result: PermissionResult,
-    ) -> dict[str, Any]:
-        tool_name = tool_call.name if tool_call else ""
-        tool_args = self._parse_tool_args(tool_call)
-        tool_call_id = str(getattr(tool_call, "id", "") or f"permission_{tool_name or 'tool'}").strip()
-
-        title = f"Approve `{tool_name}`"
-        if result.reason:
-            title = f"{title}: {result.reason}"
-
-        request: dict[str, Any] = {
-            "toolCall": {
-                "toolCallId": tool_call_id,
-                "title": title,
-                "kind": self._tool_kind_for_permission(tool_name),
-                "status": "pending",
-            },
-            "options": [
-                {
-                    "optionId": "allow-once",
-                    "name": "Allow once",
-                    "kind": "allow_once",
-                },
-                {
-                    "optionId": "allow-always",
-                    "name": "Always allow",
-                    "kind": "allow_always",
-                },
-                {
-                    "optionId": "reject-once",
-                    "name": "Reject",
-                    "kind": "reject_once",
-                },
-            ],
-        }
-        if tool_args:
-            request["toolCall"]["rawInput"] = tool_args
-        return request
-
-    async def _request_acp_permission(
-        self,
-        ctx: AgentCallbackContext,
-        tool_call: Optional[ToolCall],
-        result: PermissionResult,
-        auto_confirm_key: str,
-    ) -> PermissionConfirmResponse | None:
-        session_id = self._resolve_session_id(ctx)
-        if not session_id:
-            logger.warning("[PermissionEngine] permission.acp.request_skipped reason=missing_session_id")
-            return None
-
-        if self._host.request_acp_permission is None:
-            logger.warning("[PermissionEngine] permission.acp.unconfigured reason=no_host_callback")
-            return None
-
-        request_params = self._build_acp_permission_request(tool_call, result)
-        logger.info(
-            "[PermissionEngine] permission.acp.request_start session_id=%s tool=%s auto_confirm_key=%s",
-            session_id,
-            tool_call.name if tool_call else "",
-            auto_confirm_key,
-        )
-        try:
-            response = await self._host.request_acp_permission(
-                session_id,
-                request_params,
-            )
-        except Exception as exc:
-            logger.warning("[PermissionEngine] permission.acp.request_failed error=%s", exc)
-            return None
-
-        if not isinstance(response, dict):
-            logger.warning("[PermissionEngine] permission.acp.invalid_response response=%s", response)
-            return None
-
-        if isinstance(response.get("error"), dict):
-            err = response["error"]
-            message = str(err.get("message") or "Permission request failed")
-            logger.warning("[PermissionEngine] permission.acp.error_response message=%s", message)
-            return PermissionConfirmResponse(
-                approved=False,
-                auto_confirm=False,
-                feedback=f"[PERMISSION_DENIED] {message}",
-            )
-
-        result_payload = response.get("result") if isinstance(response.get("result"), dict) else {}
-        outcome = result_payload.get("outcome") if isinstance(result_payload.get("outcome"), dict) else {}
-        outcome_kind = str(outcome.get("outcome") or "").strip().lower()
-        option_id = str(outcome.get("optionId") or "").strip().lower()
-
-        if outcome_kind == "selected":
-            if option_id == "allow-once":
-                return PermissionConfirmResponse(approved=True, auto_confirm=False, feedback="")
-            if option_id == "allow-always":
-                return PermissionConfirmResponse(
-                    approved=True,
-                    auto_confirm=True,
-                    persist_allow=True,
-                    feedback="",
-                )
-            if option_id in {"reject-once", "reject-always"}:
-                return PermissionConfirmResponse(
-                    approved=False,
-                    auto_confirm=False,
-                    feedback="[PERMISSION_REJECTED] User rejected the request.",
-                )
-            logger.warning(
-                "[PermissionEngine] permission.acp.unknown_option option_id=%s",
-                option_id,
-            )
-            return PermissionConfirmResponse(
-                approved=False,
-                auto_confirm=False,
-                feedback=f"[PERMISSION_DENIED] Unknown permission option: {option_id or 'empty'}",
-            )
-
-        if outcome_kind == "cancelled":
-            return PermissionConfirmResponse(
-                approved=False,
-                auto_confirm=False,
-                feedback="[PERMISSION_REJECTED] Permission request was cancelled.",
-            )
-
-        logger.warning(
-            "[PermissionEngine] permission.acp.unknown_outcome outcome=%s payload=%s",
-            outcome_kind,
-            result_payload,
-        )
-        return PermissionConfirmResponse(
-            approved=False,
-            auto_confirm=False,
-            feedback="[PERMISSION_DENIED] Invalid ACP permission response.",
-        )
-
-    @staticmethod
     def _format_args_preview(tool_args: dict) -> str:
         try:
             return json.dumps(tool_args, ensure_ascii=False, indent=2)[:1000]
@@ -732,12 +607,10 @@ class PermissionInterruptRail(ConfirmInterruptRail):
     ) -> str:
         tool_name = tool_call.name if tool_call else ""
         tool_args = self._parse_tool_args(tool_call)
-        risk = result.risk or {"level": "中", "icon": "🟡", "explanation": "需要用户确认"}
 
         parts = [
             f"**工具 `{tool_name}` 需要授权才能执行**\n\n",
-            f"**安全风险评估：** {risk.get('icon', '')} **{risk.get('level', '')}风险**\n\n",
-            f"> {risk.get('explanation', '')}\n\n",
+            "请确认是否允许该操作。\n\n",
         ]
 
         args_preview = self._format_args_preview(tool_args)
@@ -766,17 +639,29 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             cmd = tool_args.get("command", tool_args.get("cmd", ""))
             shell_key = self._build_shell_auto_confirm_key(tool_name, str(cmd or ""))
             if shell_key:
-                return f'\n\n> 选择"总是允许"将为当前命令尝试写入持久化允许规则'
+                return (
+                    '\n\n> 若选择「记住 / 总是允许」并提交 ``auto_confirm: true``，'
+                    "将合并权限配置并尝试写回磁盘（与仅本次允许相对）。"
+                )
         if tool_name == "mcp_exec_command":
             cmd = tool_args.get("command", tool_args.get("cmd", ""))
             if self._build_shell_auto_confirm_key(tool_name, str(cmd or "")):
-                return '\n\n> 选择"总是允许"将为当前命令尝试写入持久化允许规则'
+                return (
+                    '\n\n> 若选择「记住 / 总是允许」并提交 ``auto_confirm: true``，'
+                    "将合并权限配置并尝试写回磁盘（与仅本次允许相对）。"
+                )
         if tool_name == "create_terminal":
             cmd = tool_args.get("command", tool_args.get("cmd", ""))
             if self._build_shell_auto_confirm_key(tool_name, str(cmd or "")):
-                return '\n\n> 选择"总是允许"将为当前终端命令尝试写入持久化允许规则'
+                return (
+                    '\n\n> 若选择「记住 / 总是允许」并提交 ``auto_confirm: true``，'
+                    "将合并权限配置并尝试写回磁盘（与仅本次允许相对）。"
+                )
         if auto_confirm_key:
-            return f'\n\n> 选择"总是允许"将自动放行 `{auto_confirm_key}` 调用'
+            return (
+                f'\n\n> 若选择「记住 / 总是允许」并提交 ``auto_confirm: true``，'
+                f"将合并权限配置并写回磁盘；同时可在本会话内自动放行 ``{auto_confirm_key}`` 类调用。"
+            )
         return ""
 
 

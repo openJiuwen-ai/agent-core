@@ -523,7 +523,7 @@ class GraphMemory:
             query = params.get("messages", [{}])[-1].get("content")
             debug_msg = f"TEMPLATE {template.name}{sep}{query}{sep}{response.content}"
             with self.thread_lock:
-                memory_logger.debug("Graph Memory LLM Invoke: %s", debug_msg)
+                memory_logger.info("Graph Memory LLM Invoke: %s", debug_msg)
         return response
 
     def _init_state(self, reference_time: Optional[datetime.datetime] = None) -> GraphMemState:

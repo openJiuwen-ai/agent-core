@@ -32,6 +32,7 @@ class ActorManager:
         self._active_producer_ids: dict[str, set[ComponentAbility]] = {}
         self._consumer_dict = _build_reverse_graph(self._stream_edges)
         self._producer_abilities: dict[str, set[ComponentAbility]] = {}
+        self._workflow_session = session
         for consumer_id, producer_ids in self._consumer_dict.items():
             consumer_stream_ability = [ability for ability in workflow_spec.comp_configs[consumer_id].abilities if
                                        ability in [ComponentAbility.COLLECT, ComponentAbility.TRANSFORM]]
@@ -61,6 +62,13 @@ class ActorManager:
         abilities = self._active_producer_ids.get(producer_id, set())
         abilities.add(ability)
         self._active_producer_ids[producer_id] = abilities
+
+    def mark_producer_done(self, producer_id: str):
+        finished_stream_nodes = self._workflow_session.state().get_workflow_state("finished_stream_nodes") or []
+        if producer_id not in finished_stream_nodes:
+            finished_stream_nodes.append(producer_id)
+        self._workflow_session.state().update_and_commit_workflow_state(
+            {"finished_stream_nodes": finished_stream_nodes})
 
     def _get_actor(self, consumer_id: str) -> StreamActor:
         return self._streams[consumer_id]
@@ -92,7 +100,11 @@ class ActorManager:
     async def consume(self, consumer_id: str, ability: ComponentAbility, schema: dict,
                       stream_callback: Callable[[dict], Awaitable[None]] = None) -> dict:
         producer_ids = self._consumer_dict.get(consumer_id, [])
+        finished_stream_nodes = self._workflow_session.state().get_workflow_state("finished_stream_nodes") or []
+
         for producer_id in producer_ids:
+            if producer_id not in finished_stream_nodes:
+                continue
             all_abilities = self._producer_abilities.get(producer_id)
             active_abilities = self._active_producer_ids.get(producer_id, set())
             if not active_abilities:

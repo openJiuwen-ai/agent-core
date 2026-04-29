@@ -19,6 +19,11 @@ from openjiuwen.core.foundation.llm import (
     ToolMessage,
     ToolCall,
 )
+from openjiuwen.core.session.agent import Session
+from tests.unit_tests.core.context_engine._stream_state_helpers import (
+    assert_context_state_pair,
+    capture_context_compression_states,
+)
 
 
 def create_tool_call_list(ids: List[str], names: List[str] = None) -> List[ToolCall]:
@@ -32,12 +37,13 @@ async def create_context_with_compressor(
     compressor_config: CurrentRoundCompressorConfig,
     history_messages=None,
     token_counter=None,
+    session=None,
 ):
     """Create context with CurrentRoundCompressor via ContextEngine.create_context."""
     engine = ContextEngine(ContextEngineConfig(default_window_message_num=100))
     return await engine.create_context(
         "test_ctx",
-        None,
+        session,
         history_messages=history_messages or [],
         processors=[("CurrentRoundCompressor", compressor_config)],
         token_counter=token_counter,
@@ -112,6 +118,47 @@ class TestCurrentRoundCompressor:
             # After compression, the large tool message should be replaced with OffloadMixin
             offloaded = [m for m in result if isinstance(m, offload_type)]
             assert len(offloaded) == 1
+
+    @pytest.mark.asyncio
+    async def test_streams_state_when_current_round_compressor_triggers(self):
+        mock_response = MagicMock()
+        mock_response.content = "Compressed: tool execution result."
+        mock_token_counter = create_length_token_counter()
+        session = Session(session_id="current-round-compressor-stream-session")
+
+        with patch(
+            "openjiuwen.core.context_engine.processor.compressor.current_round_compressor.Model"
+        ) as mock_model_cls:
+            mock_model = MagicMock()
+            mock_model.invoke = AsyncMock(return_value=mock_response)
+            mock_model_cls.return_value = mock_model
+
+            config = CurrentRoundCompressorConfig(
+                tokens_threshold=100000,
+                min_selected_tokens_for_compression=10000,
+                messages_to_keep=2,
+            )
+            ctx = await create_context_with_compressor(
+                config,
+                token_counter=mock_token_counter,
+                session=session,
+            )
+
+            _, states = await capture_context_compression_states(
+                session,
+                lambda: ctx.add_messages([
+                    UserMessage(content="First message" * 100),
+                    AssistantMessage(content="", tool_calls=create_tool_call_list(["tc-stream"], ["_add_2025"])),
+                    ToolMessage(content="large tool result1 " * 10000, tool_call_id="tc-stream"),
+                    AssistantMessage(content="done1"),
+                    AssistantMessage(content="", tool_calls=create_tool_call_list(["tc-stream1"], ["_add_2025"])),
+                    ToolMessage(content="large tool result2 " * 10000, tool_call_id="tc-stream1"),
+                    AssistantMessage(content="done2"),
+                ]),
+            )
+
+        assert_context_state_pair(states, processor_type="CurrentRoundCompressor")
+        assert "modified" in states[1].summary
 
     @pytest.mark.asyncio
     async def test_compression_with_assistant_and_tool_messages(self):

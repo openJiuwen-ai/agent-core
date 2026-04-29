@@ -60,8 +60,14 @@ class TrajectoryStep:
     Field categories:
     - Core execution facts: kind, error, timestamps
     - Structured detail: detail (LLMCallDetail | ToolCallDetail | None)
-    - Post-injection: reward, log_probs, token_ids (filled after creation)
+    - Post-injection: reward, logprobs, prompt_token_ids,
+      completion_token_ids (filled during collection)
     - Extension: meta (operator_id, invoke relationships, etc.)
+
+    Token-level fields (``prompt_token_ids`` / ``completion_token_ids`` /
+    ``logprobs``) are lifted out of the LLM response by the trajectory
+    collection module and stripped from ``detail.response`` to avoid
+    duplicate storage.
     """
 
     kind: StepKind
@@ -80,11 +86,14 @@ class TrajectoryStep:
     reward: Optional[float] = None
     """Scalar reward from PRM or SignalDetector."""
 
-    log_probs: Optional[List[float]] = None
-    """Token log probabilities. Only for kind='llm'."""
+    prompt_token_ids: Optional[List[int]] = None
+    """Prompt token IDs lifted from the LLM response. Only for kind='llm'."""
 
-    token_ids: Optional[List[int]] = None
-    """Response token IDs. Only for kind='llm'."""
+    completion_token_ids: Optional[List[int]] = None
+    """Response (completion) token IDs lifted from the LLM response. Only for kind='llm'."""
+
+    logprobs: Optional[Any] = None
+    """Token log probabilities lifted from the LLM response. Only for kind='llm'."""
 
     meta: Dict[str, Any] = field(default_factory=dict)
     """Extension metadata including:

@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""构建 :class:`openjiuwen.harness.rails.security_rail.tool_security_rail.PermissionInterruptRail`。"""
+"""构建 :class:`openjiuwen.harness.rails.security.tool_security_rail.PermissionInterruptRail`。"""
 
 from __future__ import annotations
 
@@ -10,12 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.harness.security.core import PermissionEngine
+from openjiuwen.harness.security.models import PermissionsSection
 from openjiuwen.harness.security.host import ToolPermissionHost
 
 
 def build_permission_interrupt_rail(
     *,
-    permissions: dict[str, Any],
+    permissions: PermissionsSection,
     llm: Any = None,
     model_name: str | None = None,
     engine: PermissionEngine | None = None,
@@ -23,7 +24,7 @@ def build_permission_interrupt_rail(
     workspace_root: Path | None = None,
 ) -> "PermissionInterruptRail | None":
     """若 ``permissions.enabled`` 为真则创建护栏，否则返回 ``None``。"""
-    from openjiuwen.harness.rails.security_rail import PermissionInterruptRail
+    from openjiuwen.harness.rails.security import PermissionInterruptRail
 
     if not isinstance(permissions, dict) or not permissions.get("enabled", False):
         return None

@@ -298,6 +298,37 @@ def test_online_trajectory_converter_reads_prompt_and_response_token_ids_from_re
     assert batch.samples[0].response_tokens == [4, 5]
 
 
+def test_online_trajectory_converter_normalizes_streaming_logprobs_for_gateway():
+    from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.rail_ingest import RailBatchIngestor
+    from openjiuwen.agent_evolving.agent_rl.online.rail.converter import OnlineTrajectoryConverter
+
+    trajectory = Trajectory(
+        execution_id="traj-stream",
+        session_id="session-1",
+        source="online",
+        steps=[
+            TrajectoryStep(
+                kind="llm",
+                detail=LLMCallDetail(
+                    model="m1",
+                    messages=[{"role": "user", "content": "hello"}],
+                    response={"role": "assistant", "content": "pong"},
+                ),
+                prompt_token_ids=[1, 2, 3],
+                completion_token_ids=[4, 5],
+                logprobs={"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
+            ),
+        ],
+    )
+
+    batch = OnlineTrajectoryConverter(tenant_id="user-1").convert(trajectory).to_dict()
+    normalized = RailBatchIngestor._normalize_rail_sample(batch, batch["samples"][0])
+
+    assert normalized["trajectory"]["prompt_ids"] == [1, 2, 3]
+    assert normalized["trajectory"]["response_ids"] == [4, 5]
+    assert normalized["trajectory"]["response_logprobs"] == [-0.1, -0.2]
+
+
 def test_online_trajectory_converter_tolerates_message_model_dump_failure():
     from openjiuwen.agent_evolving.agent_rl.online.rail.converter import OnlineTrajectoryConverter
 

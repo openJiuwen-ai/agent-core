@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.context_engine import ContextEngineConfig
+from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
+from openjiuwen.core.context_engine.processor.base import ContextEvent
 from openjiuwen.core.context_engine.processor.offloader.message_summary_offloader import (
     MessageSummaryOffloader,
     MessageSummaryOffloaderConfig,
@@ -21,6 +22,11 @@ from openjiuwen.core.foundation.llm import (
     SystemMessage,
     ModelRequestConfig,
     ModelClientConfig
+)
+from openjiuwen.core.session.agent import Session
+from tests.unit_tests.core.context_engine._stream_state_helpers import (
+    assert_context_state_pair,
+    capture_context_compression_states,
 )
 
 
@@ -62,6 +68,50 @@ class TestMessageSummaryOffloader:
             api_key="test-key",
             api_base="http://test.api.com"
         )
+
+    @pytest.mark.asyncio
+    async def test_streams_state_when_message_summary_offloader_triggers(self):
+        session = Session(session_id="message-summary-offloader-stream-session")
+        config = MessageSummaryOffloaderConfig(
+            messages_threshold=1,
+            large_message_threshold=10,
+            trim_size=5,
+            offload_message_type=["user"],
+            messages_to_keep=None,
+            keep_last_round=False,
+        )
+
+        with (patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model')
+              as mock_model_class):
+            mock_model_instance = MagicMock()
+            mock_model_instance.invoke = AsyncMock(return_value=AssistantMessage(content="summarized content"))
+            mock_model_class.return_value = mock_model_instance
+            engine = ContextEngine(ContextEngineConfig(default_window_message_num=100))
+            context = await engine.create_context(
+                "test_ctx",
+                session,
+                history_messages=[],
+                processors=[("MessageSummaryOffloader", config)],
+            )
+            processor = context._processors[0]  # type: ignore[attr-defined]
+            processor.trigger_add_messages = AsyncMock(return_value=True)  # type: ignore[method-assign]
+            processor.on_add_messages = AsyncMock(
+                return_value=(
+                    ContextEvent(event_type=processor.processor_type(), messages_to_modify=[0]),
+                    [UserMessage(content="trigger")],
+                )
+            )  # type: ignore[method-assign]
+
+            _, states = await capture_context_compression_states(
+                session,
+                lambda: context.add_messages([
+                    UserMessage(content="x" * 100),
+                    UserMessage(content="trigger"),
+                ]),
+            )
+
+        assert_context_state_pair(states, processor_type="MessageSummaryOffloader")
+        assert "modified 1 messages" in states[1].summary
 
     @pytest.mark.asyncio
     async def test_init_with_default_config(self, default_config):

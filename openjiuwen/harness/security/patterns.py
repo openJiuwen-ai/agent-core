@@ -14,18 +14,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 import logging
 import os
 import re
 import sys
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+
+
 from urllib.parse import urlparse
-
 import yaml
-
+from openjiuwen.harness.security.models import PermissionsSection
 from openjiuwen.harness.security.suggestions import (
     PermissionSuggestion,
     build_permission_suggestions,
@@ -33,47 +34,24 @@ from openjiuwen.harness.security.suggestions import (
 
 logger = logging.getLogger(__name__)
 
-_agent_config_yaml_path_provider: Callable[[], Path | None] | None = None
-
-
-def set_agent_config_yaml_path_provider(
-    fn: Callable[[], Path | None] | None,
-) -> None:
-    """注册返回 agent ``config.yaml`` 绝对路径的回调，供 ``persist_*`` 写入。"""
-    global _agent_config_yaml_path_provider
-    _agent_config_yaml_path_provider = fn
-
 
 def _resolve_agent_config_yaml_path(explicit: Path | None) -> Path | None:
     """解析落盘用的 agent 配置文件路径。
 
-    顺序：显式 ``config_yaml_path``（``ToolPermissionHost.permission_yaml_path``）→
-    :func:`set_agent_config_yaml_path_provider`。不读取环境变量，避免与宿主注入路径混用。
+    仅使用显式 ``config_yaml_path``（如 ``ToolPermissionHost.permission_yaml_path`` 传入
+    ``write_permissions_section_to_agent_config_yaml`` / ``persist_cli_trusted_directory``）。
+    未提供则无法解析。不读取环境变量，避免与宿主注入路径混用。
     """
-    if explicit is not None:
-        p = Path(explicit).expanduser().resolve()
-        if p.is_file():
-            return p
-        try:
-            if p.parent.is_dir():
-                return p
-        except OSError:
-            return None
+    if explicit is None:
         return None
-    if _agent_config_yaml_path_provider is not None:
-        try:
-            p = _agent_config_yaml_path_provider()
-            if p is not None:
-                pp = Path(p).expanduser().resolve()
-                if pp.is_file():
-                    return pp
-                if pp.parent.is_dir():
-                    return pp
-        except Exception:
-            logger.debug(
-                "[PermissionEngine] permission.persist.provider_failed",
-                exc_info=True,
-            )
+    p = Path(explicit).expanduser().resolve()
+    if p.is_file():
+        return p
+    try:
+        if p.parent.is_dir():
+            return p
+    except OSError:
+        return None
     return None
 
 
@@ -93,23 +71,22 @@ def _save_agent_config_root(path: Path, data: dict[str, Any]) -> None:
         )
 
 
-def _load_agent_config_for_persist(cfg_path: Path) -> dict[str, Any] | None:
-    """加载整份 agent YAML；若文件尚不存在，则用全局权限引擎配置引导航（仅含 ``permissions``）。"""
+def _load_agent_config_for_persist(
+    cfg_path: Path,
+    *,
+    fallback_permissions: PermissionsSection | None = None,
+) -> dict[str, Any] | None:
+    """加载整份 agent YAML；若文件尚不存在，则用 ``fallback_permissions`` 生成仅含 ``permissions`` 的草稿。"""
     if cfg_path.is_file():
         return _load_agent_config_root(cfg_path)
-    from copy import deepcopy
 
-    from openjiuwen.harness.security.core import get_permission_engine
-
-    eng = get_permission_engine()
-    cfg = getattr(eng, "config", None)
-    if not isinstance(cfg, dict) or not cfg:
+    if not isinstance(fallback_permissions, dict) or not fallback_permissions:
         logger.warning(
-            "[PermissionEngine] permission.persist.abort reason=new_yaml_requires_engine_permissions path=%s",
+            "[PermissionEngine] permission.persist.abort reason=new_yaml_requires_fallback_permissions path=%s",
             cfg_path,
         )
         return None
-    return {"permissions": deepcopy(cfg)}
+    return {"permissions": deepcopy(fallback_permissions)}
 
 
 _SHELL_APPROVAL_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal"})
@@ -273,29 +250,6 @@ class CommandMatcher:
         return any(self.match_command(p, command) for p in patterns)
 
 
-# ----- 全局便捷函数 -----
-_pattern_matcher = PatternMatcher()
-_path_matcher = PathMatcher()
-_url_matcher = URLMatcher()
-_command_matcher = CommandMatcher()
-
-
-def match_pattern(pattern: str, value: str) -> bool:
-    return _pattern_matcher.match(pattern, value)
-
-
-def match_path(pattern: str, path: str | Path) -> bool:
-    return _path_matcher.match_path(pattern, path)
-
-
-def match_url(pattern: str, url: str) -> bool:
-    return _url_matcher.match_url(pattern, url)
-
-
-def match_command(pattern: str, command: str) -> bool:
-    return _command_matcher.match_command(pattern, command)
-
-
 def build_command_allow_pattern(cmd: str) -> str:
     """构建匹配完整命令的通配符模式.
 
@@ -320,173 +274,8 @@ def contains_path(parent: str | Path, child: str | Path) -> bool:
 # ---------- 权限规则持久化 ----------
 
 
-def persist_permission_allow_rule(
-    tool_name: str,
-    tool_args: dict | str,
-    *,
-    config_yaml_path: Path | None = None,
-) -> bool:
-    """用户选择「总是允许」时，将 allow 规则写入 agent 配置文件（YAML）。
-
-    解析路径顺序：显式 ``config_yaml_path``（通常即 ``ToolPermissionHost.permission_yaml_path``）→
-    :func:`set_agent_config_yaml_path_provider`。不依赖环境变量。
-    未解析到路径、或目标 YAML 尚不存在且无法从引擎引导航时返回 ``False``（不抛异常）。
-
-    For mcp_exec_command with a command arg, adds a wildcard pattern.
-    For other tools, sets the tool to 'allow'.
-    """
-    if isinstance(tool_args, str):
-        try:
-            tool_args = json.loads(tool_args)
-        except Exception:
-            tool_args = {}
-
-    logger.info(
-        "[PermissionEngine] permission.persist.start tool=%s tool_args_type=%s tool_args=%s",
-        tool_name,
-        type(tool_args).__name__,
-        str(tool_args)[:200],
-    )
-
-    try:
-        from openjiuwen.harness.security.core import get_permission_engine
-        from openjiuwen.harness.security.models import PermissionLevel
-        from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
-        from openjiuwen.harness.security.tiered_policy import (
-            evaluate_tiered_policy,
-            permissions_schema_is_tiered_policy,
-        )
-
-        cfg_path = _resolve_agent_config_yaml_path(config_yaml_path)
-        if cfg_path is None:
-            logger.warning(
-                "[PermissionEngine] permission.persist.abort tool=%s reason=no_config_yaml_path",
-                tool_name,
-            )
-            return False
-
-        logger.debug("[PermissionEngine] permission.persist.config_path path=%s", cfg_path)
-        data = _load_agent_config_for_persist(cfg_path)
-        if data is None:
-            return False
-        permissions = data.get("permissions")
-        if permissions is None:
-            logger.warning(
-                "[PermissionEngine] permission.persist.abort tool=%s reason=no_permissions_section",
-                tool_name,
-            )
-            return False
-        if permissions_schema_is_tiered_policy(permissions):
-            current_permission, _matched_rule = evaluate_tiered_policy(
-                permissions, tool_name, tool_args,
-            )
-            if current_permission != PermissionLevel.ASK:
-                logger.warning(
-                    "[PermissionEngine] permission.persist.skip tool=%s reason=current_permission_not_ask current=%s",
-                    tool_name,
-                    current_permission.value,
-                )
-                return False
-            shell_ast_result = None
-            if tool_name in _SHELL_APPROVAL_TOOLS:
-                shell_ast_result = parse_shell_for_permission(
-                    str(tool_args.get("command", "") or tool_args.get("cmd", "") or "").strip()
-                )
-            suggestions = build_permission_suggestions(
-                tool_name,
-                tool_args,
-                shell_ast_result=shell_ast_result,
-            )
-            persisted = _persist_tiered_approval_override_suggestions(permissions, suggestions)
-            if persisted:
-                logger.info(
-                    "[PermissionEngine] permission.persist.write tool=%s target=approval_overrides persisted=true",
-                    tool_name,
-                )
-            else:
-                logger.warning(
-                    "[PermissionEngine] permission.persist.skip tool=%s reason=no_safe_suggestion",
-                    tool_name,
-                )
-                return False
-        else:
-            _persist_legacy_allow_rule(permissions, tool_name, tool_args)
-            persisted = True
-
-        _save_agent_config_root(cfg_path, data)
-        logger.info("[PermissionEngine] permission.persist.write tool=%s target=config_yaml persisted=true", tool_name)
-
-        verify_data = _load_agent_config_root(cfg_path)
-        engine = get_permission_engine()
-        engine.update_config(verify_data.get("permissions", {}))
-        logger.info("[PermissionEngine] permission.persist.reload tool=%s reloaded=true", tool_name)
-        return persisted
-
-    except Exception:
-        logger.error("[PermissionEngine] permission.persist.failed tool=%s", tool_name, exc_info=True)
-        return False
-
-
-def _persist_legacy_allow_rule(permissions: dict, tool_name: str, tool_args: dict) -> None:
-    tools_section = permissions.get("tools")
-    if tools_section is None:
-        permissions["tools"] = {}
-        tools_section = permissions["tools"]
-
-    if tool_name == "mcp_exec_command":
-        cmd = str(tool_args.get("command", tool_args.get("cmd", "")))
-        logger.debug("[PermissionEngine] permission.persist.legacy.command tool=%s command=%s", tool_name, cmd)
-        if cmd:
-            new_pattern = build_command_allow_pattern(cmd)
-            logger.debug(
-                "[PermissionEngine] permission.persist.legacy.pattern tool=%s pattern=%s",
-                tool_name,
-                new_pattern,
-            )
-
-            tool_entry = tools_section.get("mcp_exec_command")
-            if not isinstance(tool_entry, dict):
-                tools_section["mcp_exec_command"] = {"*": "ask", "patterns": {}}
-                tool_entry = tools_section["mcp_exec_command"]
-
-            patterns = tool_entry.get("patterns")
-            if patterns is None:
-                tool_entry["patterns"] = {}
-                patterns = tool_entry["patterns"]
-
-            if isinstance(patterns, dict):
-                if new_pattern in patterns:
-                    logger.info(
-                        "[PermissionEngine] permission.persist.legacy.skip tool=%s reason=pattern_exists pattern=%s",
-                        tool_name,
-                        new_pattern,
-                    )
-                    return
-                patterns[new_pattern] = "allow"
-            else:
-                for p in patterns:
-                    if isinstance(p, dict) and p.get("pattern") == new_pattern:
-                        logger.info(
-                            "[PermissionEngine] permission.persist.legacy.skip "
-                            "tool=%s reason=pattern_exists pattern=%s",
-                            tool_name,
-                            new_pattern,
-                        )
-                        return
-                patterns.append({"pattern": new_pattern, "permission": "allow"})
-            logger.info(
-                "[PermissionEngine] permission.persist.legacy.write tool=%s pattern=%s",
-                tool_name,
-                new_pattern,
-            )
-            return
-
-    tools_section[tool_name] = "allow"
-    logger.info("[PermissionEngine] permission.persist.legacy.write tool=%s action=allow", tool_name)
-
-
 def _persist_tiered_approval_override_suggestions(
-    permissions: dict,
+    permissions: PermissionsSection,
     suggestions: list[PermissionSuggestion],
 ) -> bool:
     if not suggestions:
@@ -552,7 +341,6 @@ def _ensure_single_allow_override(
         "match_type": match_type,
         "pattern": pattern,
         "action": action,
-        "source": "user_approval",
     })
     return True
 
@@ -575,77 +363,125 @@ def _build_approval_override_id(tool_name: str, match_type: str, pattern: str) -
     return collapsed[:120]
 
 
-def persist_external_directory_allow(
-    paths: list[str],
-    *,
-    config_yaml_path: Path | None = None,
+def write_permissions_section_to_agent_config_yaml(
+    config_yaml_path: Path | None,
+    permissions: PermissionsSection | dict[str, Any],
 ) -> bool:
-    """用户选择「总是允许」外部路径时，写入 external_directory 配置.
-
-    Returns:
-        True if the YAML was written and the permission engine config was reloaded.
-    """
-    if not paths:
+    """将 ``permissions`` 整段写入 agent YAML（保留其它顶层键；文件不存在则新建仅含 permissions 的根）。"""
+    cfg_path = _resolve_agent_config_yaml_path(config_yaml_path)
+    if cfg_path is None:
+        logger.warning(
+            "[PermissionEngine] permission.write_yaml.abort reason=no_config_yaml_path",
+        )
         return False
-    logger.info("[PermissionEngine] permission.persist.external.start paths=%s", paths[:3])
     try:
-        from openjiuwen.harness.security.core import get_permission_engine
-
-        cfg_path = _resolve_agent_config_yaml_path(config_yaml_path)
-        if cfg_path is None:
-            logger.warning(
-                "[PermissionEngine] permission.persist.external.abort reason=no_config_yaml_path",
-            )
-            return False
-
-        data = _load_agent_config_for_persist(cfg_path)
-        if data is None:
-            return False
-        permissions = data.get("permissions")
-        if permissions is None:
-            permissions = {}
-            data["permissions"] = permissions
-        ext_cfg = permissions.get("external_directory")
-        if not isinstance(ext_cfg, dict):
-            ext_cfg = {"*": "ask"}
-            permissions["external_directory"] = ext_cfg
-        wrote = False
-        for path_str in paths:
-            path_norm = path_str.replace("\\", "/").rstrip("/")
-            parent = str(Path(path_norm).parent).replace("\\", "/")
-            key = parent if parent and parent != "." else path_norm
-            if key not in ext_cfg or ext_cfg[key] != "allow":
-                ext_cfg[key] = "allow"
-                wrote = True
-                logger.info(
-                    "[PermissionEngine] permission.persist.external.write path=%s action=allow",
-                    key,
-                )
-        if not wrote:
-            logger.info("[PermissionEngine] permission.persist.external.skip reason=all_keys_already_allow")
-            return False
+        if cfg_path.is_file():
+            data = _load_agent_config_root(cfg_path)
+        else:
+            data = {}
+        data["permissions"] = deepcopy(permissions)
         _save_agent_config_root(cfg_path, data)
-        engine = get_permission_engine()
-        engine.update_config(data.get("permissions", {}))
-        logger.info("[PermissionEngine] permission.persist.external.reload reloaded=true")
+        logger.info(
+            "[PermissionEngine] permission.write_yaml.ok path=%s",
+            cfg_path,
+        )
         return True
     except Exception:
-        logger.error("[PermissionEngine] permission.persist.external.failed", exc_info=True)
+        logger.error(
+            "[PermissionEngine] permission.write_yaml.failed path=%s",
+            cfg_path,
+            exc_info=True,
+        )
         return False
+
+
+def merge_external_directory_allow_into_permissions(
+    permissions: PermissionsSection | dict[str, Any],
+    paths: list[str],
+) -> tuple[PermissionsSection, bool]:
+    """在 ``permissions`` 副本上合并外部目录白名单；返回 ``(merged, wrote_any)``。"""
+    if not paths:
+        return cast(PermissionsSection, deepcopy(permissions)), False
+    perms = cast(PermissionsSection, deepcopy(permissions))
+    ext_cfg = perms.get("external_directory")
+    if not isinstance(ext_cfg, dict):
+        ext_cfg = {"*": "ask"}
+        perms["external_directory"] = ext_cfg
+    wrote = False
+    for path_str in paths:
+        path_norm = path_str.replace("\\", "/").rstrip("/")
+        parent = str(Path(path_norm).parent).replace("\\", "/")
+        key = parent if parent and parent != "." else path_norm
+        if key not in ext_cfg or ext_cfg[key] != "allow":
+            ext_cfg[key] = "allow"
+            wrote = True
+            logger.info(
+                "[PermissionEngine] permission.merge.external path=%s action=allow",
+                key,
+            )
+    return cast(PermissionsSection, perms), wrote
+
+
+def merge_permission_allow_rule_into_permissions(
+    permissions: PermissionsSection | dict[str, Any],
+    tool_name: str,
+    tool_args: dict[str, Any],
+) -> tuple[PermissionsSection, bool]:
+    """在 ``permissions`` 副本上合并「始终允许」规则；返回 ``(merged, applied)``。
+
+    ``applied`` 为假表示未写入任何变更（如 tiered 下当前非 ASK 或无安全 suggestion）。
+    """
+    from openjiuwen.harness.security.models import PermissionLevel
+    from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
+    from openjiuwen.harness.security.tiered_policy import evaluate_tiered_policy
+
+    perms = cast(PermissionsSection, deepcopy(permissions))
+    current_permission, _matched_rule = evaluate_tiered_policy(
+        perms, tool_name, tool_args,
+    )
+    if current_permission != PermissionLevel.ASK:
+        logger.warning(
+            "[PermissionEngine] permission.merge.skip tool=%s reason=current_permission_not_ask current=%s",
+            tool_name,
+            current_permission.value,
+        )
+        return cast(PermissionsSection, perms), False
+    shell_ast_result = None
+    if tool_name in _SHELL_APPROVAL_TOOLS:
+        shell_ast_result = parse_shell_for_permission(
+            str(tool_args.get("command", "") or tool_args.get("cmd", "") or "").strip()
+        )
+    suggestions = build_permission_suggestions(
+        tool_name,
+        tool_args,
+        shell_ast_result=shell_ast_result,
+    )
+    if not _persist_tiered_approval_override_suggestions(perms, suggestions):
+        logger.warning(
+            "[PermissionEngine] permission.merge.skip tool=%s reason=no_safe_suggestion",
+            tool_name,
+        )
+        return cast(PermissionsSection, perms), False
+    logger.info(
+        "[PermissionEngine] permission.merge.ok tool=%s target=approval_overrides",
+        tool_name,
+    )
+    return cast(PermissionsSection, perms), True
 
 
 def persist_cli_trusted_directory(
     raw_path: str,
     *,
     config_yaml_path: Path | None = None,
+    bootstrap_permissions: PermissionsSection | None = None,
 ) -> dict[str, Any]:
     """CLI ``command.add_dir``：全局信任目录子树。
 
-    写入 ``permissions.external_directory``（以目录路径为前缀键），并在 ``tiered_policy`` 下追加
+    写入 ``permissions.external_directory``（以目录路径为前缀键），并追加
     ``approval_overrides``（路径类工具一条、shell 类工具一条），以便同时消除外部路径维度的 ASK
     与参数级 ASK。
 
-    ``remember`` 由调用方忽略；本函数始终落盘。
+    不更新内存中的引擎；新建 YAML 时可传 ``bootstrap_permissions``。``remember`` 由调用方忽略；本函数始终落盘。
     """
     if not isinstance(raw_path, str) or not raw_path.strip():
         return {"ok": False, "error": "path is empty"}
@@ -660,20 +496,26 @@ def persist_cli_trusted_directory(
         return {"ok": False, "error": "path resolves to empty"}
 
     try:
-        from openjiuwen.harness.security.core import get_permission_engine
         from openjiuwen.harness.security.tiered_policy import (
             _PATH_TOOLS,
             _SHELL_TOOLS,
-            permissions_schema_is_tiered_policy,
         )
 
         cfg_path = _resolve_agent_config_yaml_path(config_yaml_path)
         if cfg_path is None:
-            return {"ok": False, "error": "no agent config yaml path (explicit or provider)"}
+            return {"ok": False, "error": "no agent config yaml path (pass config_yaml_path)"}
 
-        data = _load_agent_config_for_persist(cfg_path)
+        data = _load_agent_config_for_persist(
+            cfg_path, fallback_permissions=bootstrap_permissions
+        )
         if data is None:
-            return {"ok": False, "error": "cannot bootstrap yaml (missing file and empty engine config)"}
+            return {
+                "ok": False,
+                "error": (
+                    "cannot bootstrap yaml (missing file; pass bootstrap_permissions with "
+                    "non-empty permissions dict)"
+                ),
+            }
         permissions = data.get("permissions")
         if permissions is None:
             permissions = {}
@@ -694,66 +536,56 @@ def persist_cli_trusted_directory(
         # 仅用正斜杠路径；反斜杠写入 YAML 双引号后易被解析成 \U 等非法正则转义，匹配改由 tiered 对 command 做 \→/ 归一化
         shell_pattern = "re:" + rf".*{re.escape(posix)}.*"
 
-        tiered = permissions_schema_is_tiered_policy(permissions)
         suffix = hashlib.sha256(dir_norm.encode("utf-8")).hexdigest()[:16]
         path_override_id = f"cli_trusted_path_{suffix}"
         shell_override_id = f"cli_trusted_shell_{suffix}"
 
-        if tiered:
-            overrides = permissions.get("approval_overrides")
-            if not isinstance(overrides, list):
-                overrides = []
-                permissions["approval_overrides"] = overrides
+        overrides = permissions.get("approval_overrides")
+        if not isinstance(overrides, list):
+            overrides = []
+            permissions["approval_overrides"] = overrides
 
-            def _has_id(oid: str) -> bool:
-                for r in overrides:
-                    if isinstance(r, dict) and r.get("id") == oid:
-                        return True
-                return False
+        def _has_id(oid: str) -> bool:
+            for r in overrides:
+                if isinstance(r, dict) and r.get("id") == oid:
+                    return True
+            return False
 
-            path_tools = sorted(_PATH_TOOLS)
-            if not _has_id(path_override_id):
-                overrides.append({
-                    "id": path_override_id,
-                    "tools": path_tools,
-                    "match_type": "path",
-                    "pattern": path_pattern,
-                    "action": "allow",
-                    "source": "cli_add_dir",
-                })
-                logger.info(
-                    "[PermissionEngine] permission.persist.cli_add_dir.override.write target=path id=%s",
-                    path_override_id,
-                )
+        path_tools = sorted(_PATH_TOOLS)
+        if not _has_id(path_override_id):
+            overrides.append({
+                "id": path_override_id,
+                "tools": path_tools,
+                "match_type": "path",
+                "pattern": path_pattern,
+                "action": "allow",
+            })
+            logger.info(
+                "[PermissionEngine] permission.persist.cli_add_dir.override.write target=path id=%s",
+                path_override_id,
+            )
 
-            shell_tools = sorted(_SHELL_TOOLS)
-            if not _has_id(shell_override_id):
-                overrides.append({
-                    "id": shell_override_id,
-                    "tools": shell_tools,
-                    "match_type": "command",
-                    "pattern": shell_pattern,
-                    "action": "allow",
-                    "source": "cli_add_dir",
-                })
-                logger.info(
-                    "[PermissionEngine] permission.persist.cli_add_dir.override.write target=shell id=%s",
-                    shell_override_id,
-                )
-        else:
-            logger.warning(
-                "[PermissionEngine] permission.persist.cli_add_dir.skip reason=not_tiered_policy",
+        shell_tools = sorted(_SHELL_TOOLS)
+        if not _has_id(shell_override_id):
+            overrides.append({
+                "id": shell_override_id,
+                "tools": shell_tools,
+                "match_type": "command",
+                "pattern": shell_pattern,
+                "action": "allow",
+            })
+            logger.info(
+                "[PermissionEngine] permission.persist.cli_add_dir.override.write target=shell id=%s",
+                shell_override_id,
             )
 
         _save_agent_config_root(cfg_path, data)
-        engine = get_permission_engine()
-        engine.update_config(data.get("permissions", {}))
         return {
             "ok": True,
             "normalized": dir_norm,
             "path_pattern": path_pattern,
             "shell_pattern": shell_pattern,
-            "tiered_overrides": tiered,
+            "tiered_overrides": True,
         }
     except Exception as e:  # noqa: BLE001
         logger.exception("[PermissionEngine] permission.persist.cli_add_dir.failed error=%s", e)

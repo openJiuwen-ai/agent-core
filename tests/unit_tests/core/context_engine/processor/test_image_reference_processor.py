@@ -5,13 +5,18 @@ from pathlib import Path
 
 import pytest
 
-from openjiuwen.core.context_engine import ContextWindow
+from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig, ContextWindow
 from openjiuwen.core.context_engine.processor.multimodal.image_reference_processor import (
     ImageReferenceProcessor,
     ImageReferenceProcessorConfig,
 )
 from openjiuwen.core.foundation.llm import ToolMessage, UserMessage
+from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.rails import ImageReferenceRail
+from tests.unit_tests.core.context_engine._stream_state_helpers import (
+    assert_context_state_pair,
+    capture_context_compression_states,
+)
 
 
 _PNG_BYTES = (
@@ -51,6 +56,30 @@ async def test_user_image_path_is_expanded_only_in_context_window(tmp_path: Path
     image_parts = _image_parts(user_message)
     assert len(image_parts) == 1
     assert image_parts[0]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+@pytest.mark.asyncio
+async def test_streams_state_when_image_reference_processor_triggers(tmp_path: Path):
+    image_path = _write_png(tmp_path, "stream.png")
+    session = Session(session_id="image-reference-stream-session")
+    engine = ContextEngine(ContextEngineConfig(default_window_message_num=100))
+    context = await engine.create_context(
+        "test_ctx",
+        session,
+        history_messages=[UserMessage(content=f"Please inspect {image_path}")],
+        processors=[("ImageReferenceProcessor", ImageReferenceProcessorConfig())],
+    )
+
+    _, states = await capture_context_compression_states(
+        session,
+        lambda: context.get_context_window(),
+    )
+
+    assert_context_state_pair(
+        states,
+        processor_type="ImageReferenceProcessor",
+        phase="get_context_window",
+    )
 
 
 @pytest.mark.asyncio

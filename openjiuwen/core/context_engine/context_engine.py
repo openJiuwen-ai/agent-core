@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Optional, Tuple
 import functools
 
 from pydantic import BaseModel
@@ -85,7 +85,7 @@ class ContextEngine:
         full_context_id = f"{session_id}_{context_id}"
         if full_context_id in self._context_pool:
             context = self._context_pool.get(full_context_id)
-            setattr(context, "_session_ref", session)
+            context.set_session_ref(session)
             self._load_state_from_session(context, session, history_messages)
             return context
 
@@ -105,10 +105,10 @@ class ContextEngine:
             history_messages=history_messages or [],
             processors=processor_instances,
             token_counter=token_counter,
+            session_ref=session,
             workspace=self._workspace,
             sys_operation=self._sys_operation,
         )
-        setattr(context, "_session_ref", session)
         self._load_state_from_session(context, session, history_messages)
         self._context_pool[full_context_id] = context
         return context

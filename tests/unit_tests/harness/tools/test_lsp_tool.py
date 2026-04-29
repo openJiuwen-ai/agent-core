@@ -889,3 +889,233 @@ class TestLspToolIntegration:
 
         assert result["success"] is False
         assert "error" in result
+
+
+# ============================================================================
+# 9. nearest_root tests (@registry.py)
+# ============================================================================
+
+@pytest.mark.asyncio
+class TestNearestRoot:
+    """Tests for nearest_root function (openjiuwen.harness.lsp.servers.registry)"""
+
+    async def test_file_in_cwd_should_find_root(self, tmp_path, monkeypatch):
+        """
+        Scenario 1: File is in CWD (start_dir == stop) should still find project root.
+
+        Regression test: when start_dir.resolve() == stop.resolve(),
+        the loop should still check the current directory first, not skip it directly.
+        """
+        monkeypatch.chdir(tmp_path)
+
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'test'\n")
+        test_file = tmp_path / "test.py"
+        test_file.write_text("x = 1\n")
+
+        from openjiuwen.harness.lsp.servers.registry import nearest_root
+
+        find = nearest_root(
+            include_patterns=["pyproject.toml"],
+            exclude_patterns=None,
+        )
+
+        result = await find(str(test_file))
+        assert result == str(tmp_path.resolve())
+
+    async def test_root_with_git_and_pyproject_should_return_correct_root(self, tmp_path, monkeypatch):
+        """
+        Scenario 2: Project root contains both .git and pyproject.toml should return correct root.
+
+        Regression test: during upward traversal, include_patterns should be checked before exclude_patterns.
+        A directory with both .git (exclude) and pyproject.toml (include) should be treated as
+        a valid project root, not blocked by exclude_pattern.
+        """
+        monkeypatch.chdir(tmp_path)
+
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'test'\n")
+        test_file = tmp_path / "src" / "test.py"
+        test_file.parent.mkdir()
+        test_file.write_text("x = 1\n")
+
+        from openjiuwen.harness.lsp.servers.registry import nearest_root
+
+        find = nearest_root(
+            include_patterns=["pyproject.toml"],
+            exclude_patterns=[".git", "node_modules"],
+        )
+
+        result = await find(str(test_file))
+        assert result == str(tmp_path.resolve())
+
+    async def test_traverse_upward_finds_parent_root(self, tmp_path, monkeypatch):
+        """When file is in a subdirectory, should traverse upward to find parent with include_pattern"""
+        from openjiuwen.harness.lsp.servers.registry import nearest_root
+
+        root = tmp_path / "project"
+        root.mkdir()
+        (root / "pyproject.toml").write_text("[project]\nname = 'test'\n")
+        subdir = root / "src" / "module"
+        subdir.mkdir(parents=True)
+        test_file = subdir / "test.py"
+        test_file.write_text("x = 1\n")
+
+        find = nearest_root(
+            include_patterns=["pyproject.toml"],
+            exclude_patterns=None,
+        )
+
+        result = await find(str(test_file))
+        assert result == str(root.resolve())
+
+    async def test_exclude_pattern_stops_traversal(self, tmp_path, monkeypatch):
+        """Directory matching exclude_pattern (and no include_pattern) should stop traversal and return None"""
+        monkeypatch.chdir(tmp_path)
+
+        from openjiuwen.harness.lsp.servers.registry import nearest_root
+
+        parent = tmp_path / "parent"
+        parent.mkdir()
+        (parent / ".venv").mkdir()
+        test_file = parent / "test.py"
+        test_file.write_text("x = 1\n")
+
+        find = nearest_root(
+            include_patterns=["pyproject.toml"],
+            exclude_patterns=[".venv"],
+        )
+
+        result = await find(str(test_file))
+        assert result is None
+
+    async def test_no_root_found_returns_none(self, tmp_path, monkeypatch):
+        """When no include_pattern matches, should return None"""
+        monkeypatch.chdir(tmp_path)
+
+        from openjiuwen.harness.lsp.servers.registry import nearest_root
+
+        test_file = tmp_path / "test.py"
+        test_file.write_text("x = 1\n")
+
+        find = nearest_root(
+            include_patterns=["pyproject.toml", "setup.py", ".git"],
+            exclude_patterns=None,
+        )
+
+        result = await find(str(test_file))
+        assert result is None
+
+    async def test_invalid_file_path_returns_none(self):
+        """Invalid file_path (e.g. deleted) should return None without raising"""
+        from openjiuwen.harness.lsp.servers.registry import nearest_root
+
+        find = nearest_root(
+            include_patterns=["pyproject.toml"],
+            exclude_patterns=None,
+        )
+
+        result = await find("/nonexistent/deleted/file.py")
+        assert result is None
+
+    async def test_multiple_include_patterns(self, tmp_path, monkeypatch):
+        """Multiple include_patterns should be checked in order, returning on first match"""
+        monkeypatch.chdir(tmp_path)
+
+        from openjiuwen.harness.lsp.servers.registry import nearest_root
+
+        (tmp_path / "setup.py").write_text("from setuptools import setup\n")
+        test_file = tmp_path / "test.py"
+        test_file.write_text("x = 1\n")
+
+        find = nearest_root(
+            include_patterns=["pyproject.toml", "setup.py", "Makefile"],
+            exclude_patterns=None,
+        )
+
+        result = await find(str(test_file))
+        assert result == str(tmp_path.resolve())
+
+    async def test_stop_dir_honored(self, tmp_path, monkeypatch):
+        """Search within stop_dir boundary should return the nearest project root"""
+        from openjiuwen.harness.lsp.servers.registry import nearest_root
+
+        outer = tmp_path / "outer"
+        outer.mkdir()
+        inner = outer / "inner"
+        inner.mkdir()
+        (inner / "pyproject.toml").write_text("[project]\nname = 'inner'\n")
+        src = inner / "src"
+        src.mkdir()
+        test_file = src / "test.py"
+        test_file.write_text("x = 1\n")
+
+        find = nearest_root(
+            include_patterns=["pyproject.toml"],
+            exclude_patterns=None,
+            stop_dir=str(outer),
+        )
+
+        result = await find(str(test_file))
+        assert result == str(inner.resolve())
+
+    async def test_stop_dir_without_include_returns_none(self, tmp_path, monkeypatch):
+        """When stop_dir itself contains no include_pattern, should return None"""
+        monkeypatch.chdir(tmp_path)
+
+        from openjiuwen.harness.lsp.servers.registry import nearest_root
+
+        stop = tmp_path / "workspace"
+        stop.mkdir()
+        (stop / "random.txt").write_text("not a project\n")
+        test_file = stop / "file.py"
+        test_file.write_text("x = 1\n")
+
+        find = nearest_root(
+            include_patterns=["pyproject.toml", "setup.py"],
+            exclude_patterns=None,
+            stop_dir=str(stop),
+        )
+
+        result = await find(str(test_file))
+        assert result is None
+
+    async def test_file_directly_in_root(self, tmp_path, monkeypatch):
+        """File directly in project root should also find the root"""
+        monkeypatch.chdir(tmp_path)
+
+        from openjiuwen.harness.lsp.servers.registry import nearest_root
+
+        (tmp_path / "package.json").write_text('{"name": "test"}')
+        test_file = tmp_path / "index.js"
+        test_file.write_text("const x = 1;\n")
+
+        find = nearest_root(
+            include_patterns=["package.json"],
+            exclude_patterns=None,
+        )
+
+        result = await find(str(test_file))
+        assert result == str(tmp_path.resolve())
+
+    async def test_nested_project_with_intermediate_git(self, tmp_path, monkeypatch):
+        """Nested project: inner has .git but start_dir has include_pattern, should return start_dir"""
+        monkeypatch.chdir(tmp_path)
+
+        from openjiuwen.harness.lsp.servers.registry import nearest_root
+
+        outer = tmp_path / "outer"
+        outer.mkdir()
+        (outer / ".git").mkdir()
+        inner = outer / "inner"
+        inner.mkdir()
+        (inner / "package.json").write_text('{"name": "inner"}')
+        test_file = inner / "index.js"
+        test_file.write_text("const x = 1;\n")
+
+        find = nearest_root(
+            include_patterns=["package.json"],
+            exclude_patterns=[".git"],
+        )
+
+        result = await find(str(test_file))
+        assert result == str(inner.resolve())

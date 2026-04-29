@@ -89,16 +89,8 @@ class RolloutEncoder:
         *, should_log=False, total_turns=1, ground_truth=""
     ) -> RolloutWithReward:
         """Build a single input-output rollout sample."""
-        pre_pid = pre_rid = None
-        resp = rollout.output_response
-        if isinstance(resp, dict):
-            meta = resp.get("metadata")
-            if isinstance(meta, dict):
-                pid = meta.get("prompt_token_ids")
-                rid = meta.get("completion_token_ids")
-                if isinstance(pid, list) and isinstance(rid, list):
-                    if pid and rid:
-                        pre_pid, pre_rid = pid, rid
+        pre_pid = rollout.input_prompt_ids
+        pre_rid = rollout.output_response_ids
         if pre_pid and pre_rid:
             if should_log:
                 logger.info(

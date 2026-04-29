@@ -417,6 +417,8 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             # raise error when has stream call but no stream data in
             raise build_error(StatusCode.GRAPH_VERTEX_STREAM_CALL_ERROR, reason="no stream data in",
                               node_id=self._node_id)
+        if self._session.actor_manager():
+            self._session.actor_manager().mark_producer_done(self._node_id)
 
         # 4. when the component output is in streaming mode, send an end tracer frame with empty outputs.
         await self.__trace_component_done__()

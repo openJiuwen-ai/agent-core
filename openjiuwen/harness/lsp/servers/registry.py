@@ -38,16 +38,30 @@ def nearest_root(
                 return None
             stop = (Path(stop_dir) if stop_dir else Path.cwd()).resolve()
 
-            current = start_dir
-            while current != stop and current.parent != current:
+            # Always check the starting directory first, regardless of stop_dir.
+            # This ensures we find project roots even when:
+            # 1. The file is directly in the CWD (where start_dir == stop)
+            # 2. The starting directory contains exclude_patterns like .git
+            #    (project roots typically ARE in .git directories)
+            for pattern in include_patterns:
+                if (start_dir / pattern).exists():
+                    return str(start_dir)
+
+            # Then traverse upward, applying exclude_patterns as intended
+            # (stop before entering directories with .git, etc.)
+            current = start_dir.parent
+            while current.parent != current:
+                for pattern in include_patterns:
+                    if (current / pattern).exists():
+                        return str(current)
+
+                if current == stop:
+                    return None
+
                 if exclude_patterns:
                     for pattern in exclude_patterns:
                         if (current / pattern).exists():
                             return None
-
-                for pattern in include_patterns:
-                    if pattern in {p.name for p in current.iterdir()}:
-                        return str(current)
 
                 current = current.parent
 
