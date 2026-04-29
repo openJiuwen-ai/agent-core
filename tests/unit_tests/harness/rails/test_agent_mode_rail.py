@@ -19,7 +19,7 @@ class _ToolInfo:
 
 class _PromptBuilder:
     def __init__(self) -> None:
-        self.language = "cn"
+        self.language = "en"
         self.added_sections = []
         self.removed_sections = []
 
