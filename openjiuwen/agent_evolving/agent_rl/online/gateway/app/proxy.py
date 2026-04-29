@@ -20,8 +20,8 @@ def create_app():
 def main() -> None:
     """CLI entry-point."""
     parser = argparse.ArgumentParser(description="Online-RL Gateway")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=18080)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--llm-url", default="http://127.0.0.1:18000")
     parser.add_argument("--judge-url", default="")
     parser.add_argument("--model-id", default="")

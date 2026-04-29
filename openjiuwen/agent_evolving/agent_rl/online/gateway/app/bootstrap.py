@@ -26,12 +26,19 @@ def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default)
 
 
+def _env_required(key: str) -> str:
+    value = os.environ.get(key, "").strip()
+    if not value:
+        raise ValueError(f"{key} is required")
+    return value
+
+
 def _build_config_from_env() -> GatewayConfig:
     """Build config purely from environment variables (for uvicorn factory mode)."""
     inference_url = _env("INFERENCE_URL", _env("LLM_URL", "http://127.0.0.1:18000"))
     return GatewayConfig(
-        host=_env("GATEWAY_HOST", "0.0.0.0"),
-        port=int(_env("GATEWAY_PORT", "18080")),
+        host=_env("GATEWAY_HOST", "127.0.0.1"),
+        port=int(_env_required("GATEWAY_PORT")),
         llm_url=inference_url,
         judge_url=_env("JUDGE_URL", inference_url),
         model_id=_env("MODEL_ID", _env("SERVED_MODEL_NAME", "")),

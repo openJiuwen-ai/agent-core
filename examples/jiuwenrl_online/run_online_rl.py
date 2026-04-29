@@ -6,19 +6,23 @@
 from __future__ import annotations
 
 import logging
-import sys
+import importlib.util
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
-AGENT_CORE_ROOT = (_SCRIPT_DIR / '..' / '..').resolve()
-REPO_ROOT = AGENT_CORE_ROOT.parent
-JIUWENCLAW_REPO = REPO_ROOT / 'jiuwenclaw'
 WORKSPACE = Path.home() / '.jiuwenclaw'
 CONFIG_ENV = WORKSPACE / 'config' / '.env'
 
-for p in [str(JIUWENCLAW_REPO), str(AGENT_CORE_ROOT)]:
-    if p not in sys.path:
-        sys.path.insert(0, p)
+
+def _package_parent(package_name: str) -> Path:
+    spec = importlib.util.find_spec(package_name)
+    if spec is None or spec.origin is None:
+        raise RuntimeError(f'{package_name} is not importable. Install it with pip install -e . or pip install *.whl.')
+    return Path(spec.origin).resolve().parent.parent
+
+
+AGENT_CORE_ROOT = _package_parent('openjiuwen')
+JIUWENCLAW_REPO = _package_parent('jiuwenclaw')
 
 from openjiuwen.agent_evolving.agent_rl.online.launcher.cli import build_arg_parser, build_cli_overrides  # noqa: E402
 from openjiuwen.agent_evolving.agent_rl.online.launcher.loader import load_runtime_config  # noqa: E402
