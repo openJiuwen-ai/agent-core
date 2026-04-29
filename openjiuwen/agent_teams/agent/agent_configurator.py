@@ -120,8 +120,8 @@ class AgentConfigurator:
 
         self.tool_cards = self.register_team_tools(spec, ctx, self.messager, on_teammate_created=on_teammate_created)
 
+    @staticmethod
     def create_workspace_manager(
-        self,
         spec: TeamAgentSpec,
         ctx: TeamRuntimeContext,
     ) -> TeamWorkspaceManager:
@@ -323,8 +323,8 @@ class AgentConfigurator:
         )
         return TeamMemoryManager(params)
 
+    @staticmethod
     def resolve_agent_spec(
-        self,
         spec: TeamAgentSpec,
         role: TeamRole,
         member_name: Optional[str] = None,

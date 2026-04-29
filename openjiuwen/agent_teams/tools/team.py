@@ -76,9 +76,7 @@ class TeamBackend:
         messager: Messager,
         teammate_mode: MemberMode = MemberMode.BUILD_MODE,
         predefined_members: list[TeamMemberSpec] | None = None,
-        model_config_allocator: Optional[
-            Callable[[Optional[str]], Optional["Allocation"]]
-        ] = None,
+        model_config_allocator: Optional[Callable[[Optional[str]], Optional["Allocation"]]] = None,
         leader_allocation: Optional["Allocation"] = None,
     ):
         """Initialize agent team manager.
@@ -220,9 +218,7 @@ class TeamBackend:
 
         import json as _json
 
-        model_ref_json: Optional[str] = (
-            _json.dumps(allocation.to_db_ref()) if allocation is not None else None
-        )
+        model_ref_json: Optional[str] = _json.dumps(allocation.to_db_ref()) if allocation is not None else None
 
         success = await self.db.member.create_member(
             member_name=member_name,
@@ -470,7 +466,9 @@ class TeamBackend:
         )
 
         # Update member status in database (team management layer)
-        success = await self.db.member.update_member_status(member_name, self.team_name, MemberStatus.SHUTDOWN_REQUESTED.value)
+        success = await self.db.member.update_member_status(
+            member_name, self.team_name, MemberStatus.SHUTDOWN_REQUESTED.value
+        )
         if not success:
             return MemberOpResult.fail(f"Database rejected status update for member {member_name}")
 
@@ -855,11 +853,7 @@ class TeamBackend:
                 name=member_spec.display_name,
                 description=member_spec.persona,
             )
-            allocation = (
-                self._allocate_model_config(member_spec.model_name)
-                if self._allocate_model_config
-                else None
-            )
+            allocation = self._allocate_model_config(member_spec.model_name) if self._allocate_model_config else None
             await self.spawn_member(
                 member_name=member_spec.member_name,
                 display_name=member_spec.display_name,
@@ -937,9 +931,7 @@ class TeamBackend:
             mode=MemberMode.BUILD_MODE,
         )
         if not result.ok:
-            team_logger.warning(
-                f"Failed to register human agent '{member_name}' for team {team_name}: {result.reason}"
-            )
+            team_logger.warning(f"Failed to register human agent '{member_name}' for team {team_name}: {result.reason}")
             return
 
         # Mutate the shared set in place so TeamMessageManager (which

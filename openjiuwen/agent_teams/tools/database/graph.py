@@ -49,7 +49,7 @@ def detect_cycle_in_adjacency(
     cycle: Optional[List[str]] = None
 
     for root in list(color.keys()):
-        if color[root] != white:
+        if color.get(root, white) != white:
             continue
         path: List[str] = [root]
         color[root] = gray

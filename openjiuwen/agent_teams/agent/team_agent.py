@@ -171,6 +171,59 @@ class TeamAgent(BaseAgent):
         """Set the session ID for this agent."""
         self._session_manager.session_id = session_id
 
+    @property
+    def configurator(self) -> AgentConfigurator:
+        """Return the agent configurator."""
+        return self._configurator
+
+    @property
+    def session_manager(self) -> SessionManager:
+        """Return the session manager."""
+        return self._session_manager
+
+    @property
+    def recovery_manager(self) -> RecoveryManager:
+        """Return the recovery manager."""
+        return self._recovery_manager
+
+    @property
+    def spawn_manager(self) -> SpawnManager:
+        """Return the spawn manager."""
+        return self._spawn_manager
+
+    @property
+    def stream_controller(self) -> StreamController:
+        """Return the stream controller."""
+        return self._stream_controller
+
+    @property
+    def event_listeners(self) -> list:
+        """Return the registered event listeners."""
+        return self._event_listeners
+
+    @property
+    def team_member(self) -> Optional[TeamMember]:
+        """Return the TeamMember handle for this agent, if set."""
+        return self._team_member
+
+    @property
+    def pending_user_query(self) -> str:
+        """Return the pending user query string."""
+        return self._pending_user_query
+
+    @property
+    def team_name(self) -> Optional[str]:
+        """Return the team name from the runtime context."""
+        return self._configurator.team_name
+
+    async def update_status(self, status: MemberStatus) -> None:
+        """Update the member status in the database."""
+        await self._update_status(status)
+
+    def persist_allocator_state(self) -> None:
+        """Persist the model allocator state to the current session."""
+        self._persist_allocator_state()
+
     # ------------------------------------------------------------------
     # Event listeners
     # ------------------------------------------------------------------

@@ -371,7 +371,9 @@ class InMemoryTeamDatabase:
                 team_logger.error("Member %s not found in team %s", member_name, team_name)
                 return False
             if not is_valid_transition(MemberStatus(member.status), MemberStatus(status), MEMBER_TRANSITIONS):
-                team_logger.error("Invalid state transition for member %s: %s -> %s", member_name, member.status, status)
+                team_logger.error(
+                    "Invalid state transition for member %s: %s -> %s", member_name, member.status, status
+                )
                 return False
             member.status = status
             team_logger.debug("Member %s status updated to %s", member_name, status)
@@ -388,7 +390,12 @@ class InMemoryTeamDatabase:
                 ExecutionStatus(execution_status),
                 EXECUTION_TRANSITIONS,
             ):
-                team_logger.error("Invalid state transition for member %s: %s -> %s", member_name, member.execution_status, execution_status)
+                team_logger.error(
+                    "Invalid state transition for member %s: %s -> %s",
+                    member_name,
+                    member.execution_status,
+                    execution_status,
+                )
                 return False
             member.execution_status = execution_status
             team_logger.debug("Member %s execution status updated to %s", member_name, execution_status)
@@ -472,7 +479,9 @@ class InMemoryTeamDatabase:
                 team_logger.warning("Task %s is already claimed by member %s", task_id, task.assignee)
                 return False
             if not is_valid_transition(TaskStatus(task.status), TaskStatus.CLAIMED, TASK_TRANSITIONS):
-                team_logger.error("Invalid state transition for task %s: %s -> %s", task_id, task.status, TaskStatus.CLAIMED.value)
+                team_logger.error(
+                    "Invalid state transition for task %s: %s -> %s", task_id, task.status, TaskStatus.CLAIMED.value
+                )
                 return False
             task.status = TaskStatus.CLAIMED.value
             task.assignee = member_name
@@ -487,10 +496,14 @@ class InMemoryTeamDatabase:
                 team_logger.error("Task %s not found", task_id)
                 return None
             if task.status != TaskStatus.CLAIMED.value:
-                team_logger.error("Cannot reset task %s with status %s, only CLAIMED tasks can be reset", task_id, task.status)
+                team_logger.error(
+                    "Cannot reset task %s with status %s, only CLAIMED tasks can be reset", task_id, task.status
+                )
                 return None
             if not is_valid_transition(TaskStatus(task.status), TaskStatus.PENDING, TASK_TRANSITIONS):
-                team_logger.error("Invalid state transition for task %s: %s -> %s", task_id, task.status, TaskStatus.PENDING.value)
+                team_logger.error(
+                    "Invalid state transition for task %s: %s -> %s", task_id, task.status, TaskStatus.PENDING.value
+                )
                 return None
             task.status = TaskStatus.PENDING.value
             task.assignee = None
@@ -505,7 +518,12 @@ class InMemoryTeamDatabase:
                 team_logger.error("Task %s not found", task_id)
                 return None
             if not is_valid_transition(TaskStatus(task.status), TaskStatus.PLAN_APPROVED, TASK_TRANSITIONS):
-                team_logger.error("Invalid state transition for task %s: %s -> %s", task_id, task.status, TaskStatus.PLAN_APPROVED.value)
+                team_logger.error(
+                    "Invalid state transition for task %s: %s -> %s",
+                    task_id,
+                    task.status,
+                    TaskStatus.PLAN_APPROVED.value,
+                )
                 return None
             task.status = TaskStatus.PLAN_APPROVED.value
             task.updated_at = self.get_current_time()
@@ -703,7 +721,12 @@ class InMemoryTeamDatabase:
             refreshed = self._refresh_status_for_tasks(affected_ids, now)
 
             if new_tasks:
-                team_logger.info("Created %d task(s); added %d edge(s); refreshed %d task(s)", len(new_tasks), len(new_edge_set), len(refreshed))
+                team_logger.info(
+                    "Created %d task(s); added %d edge(s); refreshed %d task(s)",
+                    len(new_tasks),
+                    len(new_edge_set),
+                    len(refreshed),
+                )
             else:
                 team_logger.info("Added %d edge(s); refreshed %d task(s)", len(new_edge_set), len(refreshed))
             return GraphMutationResult.success(refreshed_tasks=list(refreshed))
@@ -787,9 +810,7 @@ class InMemoryTeamDatabase:
             candidate_ids = [
                 t.task_id
                 for t in self._tasks.values()
-                if t.team_name == team_name
-                and t.status not in already_terminal
-                and t.assignee not in skip_assignees
+                if t.team_name == team_name and t.status not in already_terminal and t.assignee not in skip_assignees
             ]
             for tid in candidate_ids:
                 outcome = self._terminate_task_locked(tid, TaskStatus.CANCELLED, now)
@@ -801,7 +822,9 @@ class InMemoryTeamDatabase:
                     unblocked_by_id[t.task_id] = t
             cancelled_ids = {t.task_id for t in cancelled}
             unblocked_tasks = [t for tid, t in unblocked_by_id.items() if tid not in cancelled_ids]
-            team_logger.info("Cancelled %d tasks for team %s; unblocked %d", len(cancelled), team_name, len(unblocked_tasks))
+            team_logger.info(
+                "Cancelled %d tasks for team %s; unblocked %d", len(cancelled), team_name, len(unblocked_tasks)
+            )
             return {"cancelled_tasks": cancelled, "unblocked_tasks": unblocked_tasks}
 
     async def complete_task(self, task_id: str) -> Optional[Dict]:
