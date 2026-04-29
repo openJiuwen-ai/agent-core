@@ -73,6 +73,7 @@ class StreamController:
         status_updater: Callable[[MemberStatus], Any],
         execution_updater: Callable[[ExecutionStatus], Any],
         team_member_getter: Callable[[], Any],
+        session_id_getter: Callable[[], Optional[str]],
         wake_mailbox_callback: Optional[Callable[[], Any]] = None,
     ):
         self._get_deep_agent = deep_agent_getter
@@ -80,6 +81,7 @@ class StreamController:
         self._update_status = status_updater
         self._update_execution = execution_updater
         self._get_team_member = team_member_getter
+        self._get_session_id = session_id_getter
         self._wake_mailbox_callback = wake_mailbox_callback
 
         self.stream_queue: Optional[asyncio.Queue] = None
@@ -87,7 +89,6 @@ class StreamController:
         self.streaming_active: bool = False
         self.pending_interrupt_resumes: list[InteractiveInput] = []
         self.pending_inputs: list[Any] = []
-        self.session_id: Optional[str] = None
 
     def is_agent_running(self) -> bool:
         return self.streaming_active
@@ -215,7 +216,7 @@ class StreamController:
             async for chunk in Runner.run_agent_streaming(
                 deep_agent,
                 inputs,
-                session=self.session_id,
+                session=self._get_session_id(),
             ):
                 if error_seen:
                     continue

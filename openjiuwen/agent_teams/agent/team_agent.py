@@ -74,7 +74,6 @@ class TeamAgent(BaseAgent):
         self._dispatcher = None
         self._event_listeners: list = []
         self._team_member: Optional[TeamMember] = None
-        self._first_iter_gate = None
         self._pending_user_query: str = ""
 
         self._spawn_manager = SpawnManager(
@@ -96,6 +95,7 @@ class TeamAgent(BaseAgent):
             status_updater=self._update_status,
             execution_updater=self._update_execution,
             team_member_getter=lambda: self._team_member,
+            session_id_getter=lambda: self._session_manager.session_id,
             wake_mailbox_callback=self._wake_mailbox_if_interrupt_cleared,
         )
         self._coordination_manager = CoordinationManager(self)
@@ -288,10 +288,6 @@ class TeamAgent(BaseAgent):
 
     def _setup_agent(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> None:
         self._configurator.setup_agent(spec, ctx)
-
-        from openjiuwen.agent_teams.agent.rails import FirstIterationGate
-
-        self._first_iter_gate = FirstIterationGate()
 
         if ctx.role == TeamRole.TEAMMATE and ctx.member_name and self._configurator.team_backend:
             self._team_member = TeamMember(

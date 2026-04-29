@@ -427,6 +427,7 @@ async def test_team_agent_cancelled_round_does_not_restart_follow_up():
         status_updater=_noop,
         execution_updater=_noop,
         team_member_getter=lambda: None,
+        session_id_getter=lambda: None,
     )
     sc.stream_queue = object()
     sc.pending_inputs = ["follow-up"]

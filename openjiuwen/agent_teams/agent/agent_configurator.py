@@ -47,6 +47,7 @@ from openjiuwen.harness.prompts import resolve_language as _resolve_language
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.model_allocator import Allocation, ModelAllocator
+    from openjiuwen.agent_teams.agent.rails import FirstIterationGate
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.worktree.manager import WorktreeManager
     from openjiuwen.core.memory.team.manager import TeamMemoryManager
@@ -88,6 +89,7 @@ class AgentConfigurator:
         self.member_port_map: dict[str, int] = {}
         self.teammate_port_counter: int = 0
         self.memory_manager: Optional[TeamMemoryManager] = None
+        self.first_iter_gate: Optional[FirstIterationGate] = None
 
     def configure(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> DeepAgent:
         """Main entry point: configure infrastructure and build DeepAgent."""
@@ -224,8 +226,8 @@ class AgentConfigurator:
 
         from openjiuwen.agent_teams.agent.rails import FirstIterationGate
 
-        first_iter_gate = FirstIterationGate()
-        self.deep_agent.add_rail(first_iter_gate)
+        self.first_iter_gate = FirstIterationGate()
+        self.deep_agent.add_rail(self.first_iter_gate)
 
         if self.workspace_manager:
             from openjiuwen.agent_teams.team_workspace.rails import TeamWorkspaceRail

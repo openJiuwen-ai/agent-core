@@ -75,9 +75,9 @@ def _make_stream_controller_stub() -> StreamController:
         status_updater=_noop_status,
         execution_updater=_record_execution,
         team_member_getter=lambda: None,
+        session_id_getter=lambda: "sess-1",
     )
     sc.stream_queue = asyncio.Queue()
-    sc.session_id = "sess-1"
     sc._execution_log = execution_log  # type: ignore[attr-defined]
     return sc
 

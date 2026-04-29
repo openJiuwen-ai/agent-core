@@ -224,9 +224,10 @@ class CoordinationManager:
         host = self._host
         if host.role == TeamRole.LEADER:
             return
-        if host._first_iter_gate is None or host._coordination_loop is None:
+        gate = host._configurator.first_iter_gate
+        if gate is None or host._coordination_loop is None:
             return
-        await host._first_iter_gate.wait()
+        await gate.wait()
         await host._coordination_loop.enqueue(
             InnerEventMessage(event_type=InnerEventType.POLL_MAILBOX),
         )

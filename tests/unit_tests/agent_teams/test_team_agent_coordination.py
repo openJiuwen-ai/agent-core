@@ -781,3 +781,31 @@ async def test_teammate_round_completion_wakes_mailbox_after_interrupt_clears():
     agent._coordination_loop.enqueue.assert_awaited_once()
     event = agent._coordination_loop.enqueue.await_args.args[0]
     assert event.event_type == InnerEventType.POLL_MAILBOX
+
+
+@pytest.mark.level0
+def test_first_iter_gate_single_instance_registered_on_deep_agent():
+    """Regression: gate awaited by coordination must be the same instance
+    registered as a deep_agent rail. A previous refactor created two gates
+    -- registered one, awaited the other -- causing teammates to hang on
+    the initial mailbox poll forever.
+    """
+    agent = _make_leader()
+    gate = agent._configurator.first_iter_gate
+    assert gate is not None
+    assert agent.deep_agent is not None
+    all_rails = list(agent.deep_agent._pending_rails) + list(agent.deep_agent._registered_rails)
+    assert gate in all_rails
+
+
+@pytest.mark.level0
+def test_streaming_session_id_reads_from_session_manager():
+    """Regression: StreamController must read session_id from SessionManager
+    via getter, not a stale local field. Previously StreamController.session_id
+    was initialized None and never assigned, so every streaming round ran
+    with session=None and persistent teams lost cross-round state.
+    """
+    agent = _make_leader()
+    assert agent._stream_controller._get_session_id() is None
+    agent._session_manager.session_id = "sess-xyz"
+    assert agent._stream_controller._get_session_id() == "sess-xyz"
