@@ -10,6 +10,8 @@ module for local file-based persistent storage.
 
 import asyncio
 import shelve
+import time
+import logging
 from pathlib import Path
 from typing import (
     List,
@@ -20,6 +22,11 @@ from openjiuwen.core.foundation.store.base_kv_store import (
     BaseKVStore,
     BasedKVStorePipeline,
 )
+
+logger = logging.getLogger(__name__)
+
+EXCLUSIVE_EXPIRY_KEY = "exclusive_expiry"
+EXCLUSIVE_VALUE_KEY = "exclusive_value"
 
 
 class ShelveStore(BaseKVStore):
@@ -67,11 +74,42 @@ class ShelveStore(BaseKVStore):
         """Atomically set a key-value pair only if the key does not already exist."""
 
         def _exclusive_set():
+            now = time.time()
             with self._get_db() as db:
                 if key in db:
-                    return False
-                db[key] = value
+                    existing = db[key]
+                    logger.debug(
+                        "exclusive_set: key=%r already exists, type=%s, value=%r",
+                        key, type(existing).__name__, existing,
+                    )
+                    if isinstance(existing, dict) and EXCLUSIVE_EXPIRY_KEY in existing:
+                        old_expire = existing.get(EXCLUSIVE_EXPIRY_KEY)
+                        if old_expire is None or old_expire > now:
+                            logger.debug(
+                                "exclusive_set: key=%r not expired, "
+                                "old_expire=%s, now=%.3f, remaining=%.3fs",
+                                key, old_expire, now,
+                                (old_expire - now) if old_expire else None,
+                            )
+                            return False
+                        else:
+                            logger.debug(
+                                "exclusive_set: key=%r expired, old_expire=%s, now=%.3f, allowing overwrite",
+                                key, old_expire, now,
+                            )
+                    else:
+                        logger.debug(
+                            "exclusive_set: key=%r exists but not exclusive format, denying set",
+                            key,
+                        )
+                        return False
+                expire_at = now + expiry if expiry else None
+                db[key] = {EXCLUSIVE_VALUE_KEY: value, EXCLUSIVE_EXPIRY_KEY: expire_at}
                 db.sync()
+                logger.debug(
+                    "exclusive_set: key=%r set successfully, expire_at=%s",
+                    key, expire_at,
+                )
                 return True
 
         return await self._run_in_thread(_exclusive_set)
@@ -81,7 +119,22 @@ class ShelveStore(BaseKVStore):
 
         def _get():
             with self._get_db() as db:
-                return db.get(key)
+                val = db.get(key)
+                if val is None:
+                    return None
+                if isinstance(val, dict) and EXCLUSIVE_VALUE_KEY in val:
+                    logger.debug(
+                        "get: key=%r found exclusive format, returning inner value, "
+                        "expire_at=%s, inner_value_type=%s",
+                        key, val.get(EXCLUSIVE_EXPIRY_KEY),
+                        type(val.get(EXCLUSIVE_VALUE_KEY)).__name__,
+                    )
+                    return val.get(EXCLUSIVE_VALUE_KEY, "")
+                logger.debug(
+                    "get: key=%r found raw format, type=%s",
+                    key, type(val).__name__,
+                )
+                return val
 
         return await self._run_in_thread(_get)
 
