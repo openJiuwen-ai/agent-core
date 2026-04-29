@@ -41,6 +41,16 @@ class MockAgent:
         self.agent_callback_manager = None
 
 
+class MockMessageContext:
+    """Minimal context object exposing get_messages()."""
+
+    def __init__(self, messages: list[dict]):
+        self._messages = messages
+
+    def get_messages(self):
+        return self._messages
+
+
 class TestEvolutionRail(IsolatedAsyncioTestCase):
     """Tests for EvolutionRail base class."""
 
@@ -578,15 +588,21 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
     async def test_snapshot_for_evolution_default_returns_trajectory(self):
         """Base class _snapshot_for_evolution returns dict with trajectory."""
         rail = EvolutionRail(trajectory_store=self.store)
-        ctx = self._create_ctx(
-            AgentCallbackEvent.AFTER_INVOKE,
-            InvokeInputs(query="test", conversation_id="conv_snap"),
+        ctx = AgentCallbackContext(
+            agent=MockAgent(card=MockAgentCard(id="test_agent")),
+            event=AgentCallbackEvent.AFTER_INVOKE,
+            inputs=InvokeInputs(query="test", conversation_id="conv_snap"),
+            context=MockMessageContext(messages=[{"role": "user", "content": "improve the workflow"}]),
         )
         result = await rail._snapshot_for_evolution(
             Trajectory(execution_id="test", steps=[], session_id="test", source="online"), ctx
         )
         self.assertIsNotNone(result)
         self.assertIn("trajectory", result)
+        self.assertEqual(
+            result["parsed_messages"],
+            [{"role": "user", "content": "improve the workflow"}],
+        )
 
     async def test_safe_run_evolution_catches_exceptions(self):
         """_safe_run_evolution catches and logs exceptions."""

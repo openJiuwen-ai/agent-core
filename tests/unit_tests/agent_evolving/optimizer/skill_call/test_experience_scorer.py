@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionPatch,
     EvolutionRecord,
@@ -243,6 +244,20 @@ class TestUpdateScore:
 
 
 class TestExperienceScorerEvaluate:
+    def test_policy_properties_return_configured_values(self):
+        evaluate_policy = LLMInvokePolicy(attempt_timeout_secs=11, total_budget_secs=33, max_attempts=2)
+        simplify_policy = LLMInvokePolicy(attempt_timeout_secs=17, total_budget_secs=51, max_attempts=2)
+        scorer = ExperienceScorer(
+            llm=Mock(),
+            model="test-model",
+            language="en",
+            evaluate_llm_policy=evaluate_policy,
+            simplify_llm_policy=simplify_policy,
+        )
+
+        assert scorer.evaluate_llm_policy is evaluate_policy
+        assert scorer.simplify_llm_policy is simplify_policy
+
     def _make_scorer(self, response_json: str) -> ExperienceScorer:
         llm = Mock()
         llm.invoke = AsyncMock(return_value=SimpleNamespace(content=response_json))
@@ -298,6 +313,32 @@ class TestExperienceScorerEvaluate:
         assert result[0]["record_id"] == "ev_abc"
         assert llm.invoke.await_count == 2
 
+    @pytest.mark.asyncio
+    async def test_uses_custom_evaluate_policy(self):
+        llm = Mock()
+        llm.invoke = AsyncMock(
+            return_value=SimpleNamespace(
+                content='[{"record_id":"ev_abc","used":true,"positive":true,"negative":false}]'
+            )
+        )
+        scorer = ExperienceScorer(
+            llm=llm,
+            model="test",
+            language="en",
+            evaluate_llm_policy=LLMInvokePolicy(
+                attempt_timeout_secs=11,
+                total_budget_secs=33,
+                max_attempts=2,
+            ),
+        )
+        record = _make_record()
+        record.id = "ev_abc"
+
+        result = await scorer.evaluate("snippet", [record])
+
+        assert len(result) == 1
+        assert llm.invoke.await_args_list[0].kwargs["timeout"] == 11
+
 
 class TestExperienceScorerSimplify:
     def _make_scorer(self, response_json: str) -> ExperienceScorer:
@@ -344,6 +385,28 @@ class TestExperienceScorerSimplify:
         assert len(result) == 1
         assert result[0]["action"] == "KEEP"
         assert llm.invoke.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_uses_custom_simplify_policy(self):
+        llm = Mock()
+        llm.invoke = AsyncMock(
+            return_value=SimpleNamespace(content='[{"action":"KEEP","record_id":"ev_1","reason":"ok"}]')
+        )
+        scorer = ExperienceScorer(
+            llm=llm,
+            model="test",
+            language="cn",
+            simplify_llm_policy=LLMInvokePolicy(
+                attempt_timeout_secs=17,
+                total_budget_secs=51,
+                max_attempts=2,
+            ),
+        )
+
+        result = await scorer.simplify("skill-a", "summary", [_make_record()])
+
+        assert len(result) == 1
+        assert llm.invoke.await_args_list[0].kwargs["timeout"] == 17
 
 
 class TestExecuteSimplifyActions:

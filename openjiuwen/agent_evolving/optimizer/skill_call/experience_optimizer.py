@@ -34,10 +34,10 @@ INITIAL_SCORE_BY_SIGNAL = {
     "conversation_review": 0.50,
 }
 
-_GENERATE_RECORDS_LLM_POLICY = LLMInvokePolicy(
-    attempt_timeout_secs=45,
-    total_budget_secs=90,
-    max_attempts=2,
+GENERATE_RECORDS_LLM_POLICY = LLMInvokePolicy(
+    attempt_timeout_secs=60,
+    total_budget_secs=180,
+    max_attempts=3,
 )
 _RETRY_PARSE_TIMEOUT_SECS = 20
 
@@ -621,11 +621,23 @@ class SkillExperienceOptimizer(BaseOptimizer):
 
     domain = "skill_experience"
 
-    def __init__(self, llm: Model, model: str, language: str = "cn") -> None:
+    def __init__(
+        self,
+        llm: Model,
+        model: str,
+        language: str = "cn",
+        generate_records_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY,
+    ) -> None:
         super().__init__()
         self._llm = llm
         self._model = model
         self._language = language
+        self._generate_records_llm_policy = generate_records_llm_policy
+
+    @property
+    def generate_records_llm_policy(self) -> LLMInvokePolicy:
+        """Get the configured record generation policy."""
+        return self._generate_records_llm_policy
 
     @staticmethod
     def default_targets() -> List[str]:
@@ -713,7 +725,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
                 model=self._model,
                 prompt=prompt,
                 retry_prompt=retry_prompt,
-                policy=_GENERATE_RECORDS_LLM_POLICY,
+                policy=self._generate_records_llm_policy,
             )
         except BaseError as exc:
             logger.error("[SkillExperienceOptimizer] LLM call failed: %s", exc)

@@ -16,15 +16,17 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryStore
+from openjiuwen.agent_evolving.trajectory import TrajectoryBuilder
 from openjiuwen.agent_evolving.trajectory.types import (
     LLMCallDetail,
     Trajectory,
     TrajectoryStep,
     ToolCallDetail,
 )
-from openjiuwen.harness.rails.skills.team_skill_rail import TeamSkillRail, UserIntent
+from openjiuwen.harness.rails.skills.team_skill_rail import TeamSkillRail, TrajectoryIssue, UserIntent
 
 
 # ============================================================
@@ -106,6 +108,14 @@ class _MockCtx:
     session: Any = None
     context: Any = None
     extra: dict = field(default_factory=dict)
+
+
+class _MsgContext:
+    def __init__(self, messages=None):
+        self._messages = list(messages) if messages else []
+
+    def get_messages(self):
+        return self._messages
 
 
 # ============================================================
@@ -214,6 +224,109 @@ async def test_patch_path():
 
 
 @pytest.mark.asyncio
+async def test_run_evolution_passes_current_skill_content_to_trajectory_patch():
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        skill_dir = tmp / "deep-research-to-ppt"
+        skill_dir.mkdir(parents=True)
+        skill_content = (
+            "---\nname: deep-research-to-ppt\nkind: team-skill\n---\n"
+            "# Deep Research\n## Workflow\nKeep the reviewer handoff explicit."
+        )
+        (skill_dir / "SKILL.md").write_text(skill_content, encoding="utf-8")
+
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=MockLLM(),
+            model="mock-model",
+            auto_save=False,
+            async_evolution=False,
+        )
+
+        captured: dict[str, Any] = {}
+
+        async def _detect_user_request(_messages, _content):
+            return None
+
+        async def _detect_trajectory_issues(_trajectory, _content):
+            return [TrajectoryIssue(issue_type="coordination", description="handoff gap")]
+
+        async def _generate_trajectory_patch(captured_trajectory, used_skill, current_content, issues):
+            captured["trajectory"] = captured_trajectory
+            captured["skill"] = used_skill
+            captured["current_content"] = current_content
+            captured["issues"] = issues
+            return None
+
+        rail._detect_user_request = _detect_user_request
+        rail._detect_trajectory_issues = _detect_trajectory_issues
+        rail._optimizer.generate_trajectory_patch = _generate_trajectory_patch
+
+        await rail.run_evolution(build_patch_trajectory("deep-research-to-ppt"), _MockCtx())
+
+        assert captured["skill"] == "deep-research-to-ppt"
+        assert captured["current_content"] == skill_content
+        assert captured["issues"] == [
+            {
+                "issue_type": "coordination",
+                "description": "handoff gap",
+                "affected_role": "",
+                "severity": "medium",
+            }
+        ]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_async_snapshot_messages_are_preserved_for_team_evolution():
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        skill_dir = tmp / "deep-research-to-ppt"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: deep-research-to-ppt\nkind: team-skill\n---\n# Deep Research\nWorkflow here.",
+            encoding="utf-8",
+        )
+
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=MockLLM(),
+            model="mock-model",
+            auto_save=False,
+            async_evolution=True,
+        )
+
+        trajectory = build_patch_trajectory("deep-research-to-ppt")
+        ctx = _MockCtx(context=_MsgContext(messages=[{"role": "user", "content": "请优化协作流程"}]))
+        snapshot = await rail._snapshot_for_evolution(trajectory, ctx)
+
+        captured: dict[str, Any] = {}
+
+        async def _detect_trajectory_issues(captured_trajectory, _content):
+            captured["trajectory"] = captured_trajectory
+            return [TrajectoryIssue(issue_type="workflow", description="需要优化")]
+
+        async def _generate_trajectory_patch(captured_trajectory, used_skill, _content, _issues):
+            captured["patch_trajectory"] = captured_trajectory
+            captured["skill"] = used_skill
+            return None
+
+        rail._detect_user_request = AsyncMock(side_effect=AssertionError("should not be called"))
+        rail._detect_trajectory_issues = _detect_trajectory_issues
+        rail._optimizer.generate_trajectory_patch = _generate_trajectory_patch
+
+        await rail.run_evolution(trajectory, ctx=None, snapshot=snapshot)
+
+        assert snapshot["parsed_messages"] == [{"role": "user", "content": "请优化协作流程"}]
+        assert captured["skill"] == "deep-research-to-ppt"
+        assert captured["trajectory"] is trajectory
+        assert captured["patch_trajectory"] is trajectory
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
 async def test_patch_auto_save():
     """Test: auto_save=True → patch persisted immediately without approval."""
     tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
@@ -262,14 +375,12 @@ async def test_notify_team_completed_without_view_task():
             async_evolution=False,
         )
 
-        from openjiuwen.agent_evolving.trajectory import TrajectoryBuilder
         rail._builder = TrajectoryBuilder(session_id="test-session", source="online")
-        rail._evolution_triggered = False
 
         result = await rail.notify_team_completed(ctx=None)
 
         assert result is True
-        assert rail._evolution_triggered is True
+        assert rail._evolution_in_progress is False
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -287,15 +398,13 @@ async def test_notify_team_completed_idempotent():
             async_evolution=False,
         )
 
-        from openjiuwen.agent_evolving.trajectory import TrajectoryBuilder
         rail._builder = TrajectoryBuilder(session_id="test-session", source="online")
-        rail._evolution_triggered = False
 
         result1 = await rail.notify_team_completed(ctx=None)
         result2 = await rail.notify_team_completed(ctx=None)
 
         assert result1 is True
-        assert result2 is False
+        assert result2 is True
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -312,12 +421,94 @@ async def test_notify_team_completed_no_trajectory():
             model="mock-model",
             async_evolution=False,
         )
-        rail._evolution_triggered = False
 
         result = await rail.notify_team_completed(ctx=None)
 
         assert result is False
+        assert rail._evolution_in_progress is False
         assert mock_llm.call_count == 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_notify_team_completed_blocks_only_while_async_evolution_runs():
+    """Async evolution should be re-entrant after completion, but not while running."""
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        skill_dir = tmp / "deep-research-to-ppt"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: deep-research-to-ppt\nkind: team-skill\n---\n# Deep Research",
+            encoding="utf-8",
+        )
+
+        mock_llm = MockLLM()
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=mock_llm,
+            model="mock-model",
+            auto_save=False,
+            async_evolution=True,
+        )
+        rail._builder = TrajectoryBuilder(session_id="test-session", source="online")
+        for step in build_patch_trajectory("deep-research-to-ppt").steps:
+            rail._builder.record_step(step)
+
+        result1 = await rail.notify_team_completed(ctx=None)
+        result2 = await rail.notify_team_completed(ctx=None)
+        events1 = await rail.drain_pending_approval_events(wait=True, timeout=5.0)
+        result3 = await rail.notify_team_completed(ctx=None)
+        events2 = await rail.drain_pending_approval_events(wait=True, timeout=5.0)
+
+        assert result1 is True
+        assert result2 is False
+        assert result3 is True
+        assert rail._evolution_in_progress is False
+        assert any(event.type == "chat.ask_user_question" for event in events1)
+        assert any(event.type == "chat.ask_user_question" for event in events2)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+class FailingLLM:
+    """LLM stub that always times out to force a visible evolution failure."""
+
+    async def invoke(self, messages: list, model: str = "", **kwargs) -> Any:
+        raise asyncio.TimeoutError("request timed out")
+
+
+@pytest.mark.asyncio
+async def test_async_evolution_failure_is_buffered_and_visible():
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        skill_dir = tmp / "deep-research-to-ppt"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: deep-research-to-ppt\nkind: team-skill\n---\n# Deep Research",
+            encoding="utf-8",
+        )
+
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=FailingLLM(),
+            model="mock-model",
+            auto_save=False,
+            async_evolution=True,
+        )
+        rail._builder = TrajectoryBuilder(session_id="test-session", source="online")
+        for step in build_patch_trajectory("deep-research-to-ppt").steps:
+            rail._builder.record_step(step)
+
+        result = await rail.notify_team_completed(ctx=None)
+        await rail.drain_pending_approval_events(wait=True, timeout=5.0)
+        outcomes = rail.drain_evolution_outcomes()
+
+        assert result is True
+        assert rail._evolution_in_progress is False
+        assert outcomes
+        assert outcomes[-1]["status"] == "failed"
+        assert "team skill evolution failed" in outcomes[-1]["message"]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -495,17 +686,12 @@ async def test_run_evolution_keeps_full_leader_trajectory():
 
         captured: dict[str, Trajectory] = {}
 
-        async def _detect_user_request(_messages, _content):
-            return UserIntent(is_improvement=True, intent="keep leader full")
-
-        async def _generate_user_patch(captured_trajectory, used_skill, intent):
+        async def _detect_trajectory_issues(captured_trajectory, _content):
             captured["trajectory"] = captured_trajectory
-            captured["skill"] = used_skill
-            captured["intent"] = intent
-            return None
+            return [TrajectoryIssue(issue_type="workflow", description="keep leader full")]
 
-        rail._detect_user_request = _detect_user_request
-        rail._optimizer.generate_user_patch = _generate_user_patch
+        rail._detect_trajectory_issues = _detect_trajectory_issues
+        rail._optimizer.generate_trajectory_patch = AsyncMock(return_value=None)
 
         trajectory = Trajectory(
             execution_id="test-003",

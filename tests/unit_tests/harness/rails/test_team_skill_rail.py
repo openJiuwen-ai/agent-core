@@ -8,6 +8,19 @@ from __future__ import annotations
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from openjiuwen.agent_evolving.checkpointing.types import (
+    EvolutionPatch,
+    EvolutionRecord,
+    EvolutionTarget,
+    PendingChange,
+)
+from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
+from openjiuwen.agent_evolving.optimizer.skill_call.experience_scorer import (
+    EVALUATE_LLM_POLICY,
+    SIMPLIFY_LLM_POLICY,
+)
+from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail
 from openjiuwen.harness.rails.skills.team_skill_rail import (
     TeamSignalType,
     TeamSkillRail,
@@ -21,6 +34,11 @@ def test_team_signal_type_enum():
     """TeamSignalType enum must have expected values."""
     assert TeamSignalType.USER_REQUEST.value == "user_request"
     assert TeamSignalType.TRAJECTORY_ISSUE.value == "trajectory_issue"
+
+
+def test_public_llm_policy_constants_are_importable():
+    assert EVALUATE_LLM_POLICY.attempt_timeout_secs == 30
+    assert SIMPLIFY_LLM_POLICY.attempt_timeout_secs == 60
 
 
 def test_user_intent_dataclass():
@@ -52,9 +70,70 @@ def test_trajectory_issue_dataclass():
     assert default_issue.affected_role == ""
 
 
+def test_init_accepts_custom_llm_policies_and_timeout(tmp_path):
+    """TeamSkillRail should propagate custom policies and total timeout."""
+    evaluate_policy = LLMInvokePolicy(
+        attempt_timeout_secs=19,
+        total_budget_secs=57,
+        max_attempts=2,
+    )
+    simplify_policy = LLMInvokePolicy(
+        attempt_timeout_secs=23,
+        total_budget_secs=69,
+        max_attempts=2,
+    )
+    rail = TeamSkillRail(
+        skills_dir=str(tmp_path),
+        llm=MagicMock(),
+        model="test-model",
+        user_request_llm_policy=LLMInvokePolicy(
+            attempt_timeout_secs=7,
+            total_budget_secs=21,
+            max_attempts=2,
+        ),
+        trajectory_issue_llm_policy=LLMInvokePolicy(
+            attempt_timeout_secs=13,
+            total_budget_secs=39,
+            max_attempts=2,
+        ),
+        patch_llm_policy=LLMInvokePolicy(
+            attempt_timeout_secs=17,
+            total_budget_secs=51,
+            max_attempts=2,
+        ),
+        evaluate_llm_policy=evaluate_policy,
+        simplify_llm_policy=simplify_policy,
+        evolution_total_timeout_secs=555.0,
+    )
+
+    assert rail.user_request_llm_policy.attempt_timeout_secs == 7
+    assert rail.trajectory_issue_llm_policy.attempt_timeout_secs == 13
+    assert rail.patch_llm_policy.attempt_timeout_secs == 17
+    assert rail.evaluate_llm_policy is evaluate_policy
+    assert rail.simplify_llm_policy is simplify_policy
+    assert rail.evolution_total_timeout_secs == 555.0
+    assert rail.evolution_config["patch_llm_policy"] is rail.patch_llm_policy
+    assert rail.evolution_config["evolution_total_timeout_secs"] == 555.0
+
+
+@pytest.mark.asyncio
+async def test_drain_pending_approval_events_defaults_to_total_timeout(tmp_path):
+    rail = TeamSkillRail(
+        skills_dir=str(tmp_path),
+        llm=MagicMock(),
+        model="test-model",
+        evolution_total_timeout_secs=444.0,
+    )
+
+    with patch.object(EvolutionRail, "drain_pending_approval_events", new=AsyncMock(return_value=[])) as mocked:
+        await rail.drain_pending_approval_events(wait=True)
+
+    mocked.assert_awaited_once_with(wait=True, timeout=444.0)
+
+
 @pytest.mark.asyncio
 async def test_detect_user_request_retries_on_invalid_response():
-    """_detect_user_request 首次坏结果时应重试。"""
+    """_detect_user_request should retry after an invalid first response."""
     import json
 
     mock_optimizer = MagicMock()
@@ -79,6 +158,125 @@ async def test_detect_user_request_retries_on_invalid_response():
 
         assert result == UserIntent(is_improvement=True, intent="增加 reviewer")
         assert mock_optimizer.llm.invoke.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_uses_passive_trajectory_analysis_only():
+    """notify_team_completed/run_evolution should not infer user intent from messages."""
+    with patch.object(TeamSkillRail, "__init__", lambda self, *args, **kwargs: None):
+        rail = TeamSkillRail.__new__(TeamSkillRail)
+        rail._team_trajectory_store = None
+        rail._team_id = None
+        rail._pending_evolution_outcomes = []
+        rail._evolution_in_progress = True
+        rail._store = MagicMock()
+        rail._store.read_skill_content = AsyncMock(return_value="team skill content")
+        rail._detect_used_team_skill = MagicMock(return_value="team-skill-a")
+        rail._detect_user_request = AsyncMock(return_value=UserIntent(True, "should not be used"))
+        rail._detect_trajectory_issues = AsyncMock(
+            return_value=[TrajectoryIssue(issue_type="workflow", description="needs constraints")]
+        )
+        rail._optimizer = MagicMock()
+        rail._optimizer.generate_trajectory_patch = AsyncMock(return_value="patch-record")
+        rail._optimizer.generate_user_patch = AsyncMock()
+        rail._handle_patch_record = AsyncMock()
+        rail._emit_progress = MagicMock()
+
+        await rail.run_evolution(
+            Trajectory(execution_id="e1", session_id="s1", source="online", steps=[]),
+            snapshot={"parsed_messages": [{"role": "user", "content": "please improve"}]},
+        )
+
+        rail._detect_user_request.assert_not_awaited()
+        rail._detect_trajectory_issues.assert_awaited_once()
+        rail._optimizer.generate_user_patch.assert_not_awaited()
+        rail._optimizer.generate_trajectory_patch.assert_awaited_once()
+        rail._handle_patch_record.assert_awaited_once_with("patch-record", "team-skill-a")
+
+
+@pytest.mark.asyncio
+async def test_on_approve_patch_partial_failure_retains_request_for_retry():
+    record_1 = EvolutionRecord.make(
+        source="team-skill",
+        context="ctx",
+        change=EvolutionPatch(
+            section="Workflow",
+            action="append",
+            content="first",
+            target=EvolutionTarget.BODY,
+        ),
+    )
+    record_2 = EvolutionRecord.make(
+        source="team-skill",
+        context="ctx",
+        change=EvolutionPatch(
+            section="Workflow",
+            action="append",
+            content="second",
+            target=EvolutionTarget.BODY,
+        ),
+    )
+    pending = PendingChange.make("team-skill-a", [record_1, record_2])
+
+    with patch.object(TeamSkillRail, "__init__", lambda self, *args, **kwargs: None):
+        rail = TeamSkillRail.__new__(TeamSkillRail)
+        rail._pending_patch_snapshots = {pending.change_id: pending}
+        rail._patch_skill_ops = {}
+        rail._store = MagicMock()
+        rail._store.append_record = AsyncMock(side_effect=[None, OSError("disk full")])
+
+        await rail.on_approve_patch(pending.change_id)
+
+        assert pending.change_id in rail._pending_patch_snapshots
+        assert rail._pending_patch_snapshots[pending.change_id].payload == [record_2]
+
+        rail._store.append_record = AsyncMock()
+        await rail.on_approve_patch(pending.change_id)
+
+        rail._store.append_record.assert_awaited_once_with("team-skill-a", record_2)
+        assert pending.change_id not in rail._pending_patch_snapshots
+
+
+@pytest.mark.asyncio
+async def test_on_approve_patch_does_not_touch_other_requests():
+    record_1 = EvolutionRecord.make(
+        source="team-skill",
+        context="ctx",
+        change=EvolutionPatch(
+            section="Workflow",
+            action="append",
+            content="batch-1",
+            target=EvolutionTarget.BODY,
+        ),
+    )
+    record_2 = EvolutionRecord.make(
+        source="team-skill",
+        context="ctx",
+        change=EvolutionPatch(
+            section="Workflow",
+            action="append",
+            content="batch-2",
+            target=EvolutionTarget.BODY,
+        ),
+    )
+    pending_1 = PendingChange.make("team-skill-a", [record_1])
+    pending_2 = PendingChange.make("team-skill-a", [record_2])
+
+    with patch.object(TeamSkillRail, "__init__", lambda self, *args, **kwargs: None):
+        rail = TeamSkillRail.__new__(TeamSkillRail)
+        rail._pending_patch_snapshots = {
+            pending_1.change_id: pending_1,
+            pending_2.change_id: pending_2,
+        }
+        rail._patch_skill_ops = {}
+        rail._store = MagicMock()
+        rail._store.append_record = AsyncMock()
+
+        await rail.on_approve_patch(pending_1.change_id)
+
+        rail._store.append_record.assert_awaited_once_with("team-skill-a", record_1)
+        assert pending_1.change_id not in rail._pending_patch_snapshots
+        assert rail._pending_patch_snapshots[pending_2.change_id].payload == [record_2]
 
 
 @pytest.mark.asyncio
@@ -234,6 +432,7 @@ async def test_request_rebuild_archives_before_building_prompt():
     mock_store.skill_exists.return_value = True
     mock_store.archive_skill_body = AsyncMock(return_value="SKILL.v20260426_171500.md")
     mock_store.archive_evolutions = AsyncMock(return_value="evolutions.v20260426_171500.json")
+    mock_store.clear_evolutions = AsyncMock()
     mock_store.load_full_evolution_log = AsyncMock(
         return_value=MagicMock(entries=[mock_record, mock_low_score_record])
     )
@@ -250,6 +449,7 @@ async def test_request_rebuild_archives_before_building_prompt():
         # Archive operations should be called BEFORE prompt is built
         mock_store.archive_skill_body.assert_called_once_with("test-team-skill")
         mock_store.archive_evolutions.assert_called_once_with("test-team-skill")
+        mock_store.clear_evolutions.assert_called_once_with("test-team-skill")
 
         # Returns the followup text
         assert result is not None
@@ -283,6 +483,7 @@ async def test_request_rebuild_continues_on_archive_failure():
     mock_store.skill_exists.return_value = True
     mock_store.archive_skill_body = AsyncMock(side_effect=RuntimeError("disk full"))
     mock_store.archive_evolutions = AsyncMock(return_value=None)
+    mock_store.clear_evolutions = AsyncMock()
     mock_store.load_full_evolution_log = AsyncMock(
         return_value=MagicMock(entries=[mock_record])
     )
@@ -299,6 +500,7 @@ async def test_request_rebuild_continues_on_archive_failure():
         # Should still return prompt even if archive failed
         assert result is not None
         mock_store.load_full_evolution_log.assert_called_once_with("test-team-skill")
+        mock_store.clear_evolutions.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -306,11 +508,11 @@ async def test_request_rebuild_continues_on_archive_failure():
 # ---------------------------------------------------------------------------
 
 class TestDetectTrajectoryIssues:
-    """_detect_trajectory_issues 边界情况测试。"""
+    """Edge-case tests for _detect_trajectory_issues."""
 
     @pytest.mark.asyncio
-    async def test_returns_empty_on_llm_failure(self):
-        """LLM 调用失败应返回空列表。"""
+    async def test_raises_on_llm_failure(self):
+        """An LLM invocation failure should remain observable to callers."""
         mock_optimizer = MagicMock()
         mock_optimizer.language = "cn"
         mock_optimizer.llm = MagicMock()
@@ -321,13 +523,12 @@ class TestDetectTrajectoryIssues:
             rail = TeamSkillRail.__new__(TeamSkillRail)
             rail._optimizer = mock_optimizer
 
-            issues = await rail._detect_trajectory_issues(MagicMock(), "skill content")
-
-            assert issues == []
+            with pytest.raises(BaseError):
+                await rail._detect_trajectory_issues(MagicMock(), "skill content")
 
     @pytest.mark.asyncio
-    async def test_returns_empty_on_non_list_json(self):
-        """LLM 返回非列表 JSON 应返回空列表。"""
+    async def test_raises_on_non_list_json(self):
+        """A non-list JSON response should remain observable to callers."""
         mock_optimizer = MagicMock()
         mock_optimizer.language = "cn"
         mock_optimizer.llm = MagicMock()
@@ -340,13 +541,12 @@ class TestDetectTrajectoryIssues:
             rail = TeamSkillRail.__new__(TeamSkillRail)
             rail._optimizer = mock_optimizer
 
-            issues = await rail._detect_trajectory_issues(MagicMock(), "skill content")
-
-            assert issues == []
+            with pytest.raises(BaseError):
+                await rail._detect_trajectory_issues(MagicMock(), "skill content")
 
     @pytest.mark.asyncio
     async def test_retries_when_first_response_is_invalid_json(self):
-        """首次返回坏 JSON 时应重试并解析问题列表。"""
+        """The helper should retry after an invalid first response."""
         import json
 
         mock_optimizer = MagicMock()

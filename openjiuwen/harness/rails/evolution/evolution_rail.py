@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from openjiuwen.agent_evolving.trajectory import (
     Trajectory,
@@ -419,7 +419,68 @@ class EvolutionRail(DeepAgentRail):
         Subclasses override to capture additional data (e.g. parsed_messages,
         session state). Called in after_invoke before spawning background task.
         """
-        return {"trajectory": trajectory}
+        return {
+            "trajectory": trajectory,
+            "parsed_messages": await self._collect_parsed_messages_from_ctx(ctx),
+        }
+
+    async def _collect_callback_messages(self, ctx: AgentCallbackContext) -> List[Any]:
+        """Collect callback-visible messages while ctx/session are still alive."""
+        messages: List[Any] = []
+
+        if ctx.context is not None:
+            try:
+                messages = list(ctx.context.get_messages())
+            except Exception as exc:
+                logger.debug("[EvolutionRail] read ctx.context messages failed: %s", exc)
+
+        if not messages and ctx.session is not None:
+            agent_obj = ctx.agent
+            inner_agent = getattr(agent_obj, "_react_agent", None)
+            if inner_agent is not None and hasattr(inner_agent, "context_engine"):
+                try:
+                    context = await inner_agent.context_engine.create_context(session=ctx.session)
+                    messages = list(context.get_messages())
+                except Exception as exc:
+                    logger.debug("[EvolutionRail] load messages from inner context_engine failed: %s", exc)
+
+        return messages
+
+    @classmethod
+    def _normalize_callback_messages(cls, messages: List[Any]) -> List[dict]:
+        """Normalize callback-visible messages into JSON-safe dicts."""
+        result: List[dict] = []
+        for message in messages:
+            if isinstance(message, dict):
+                result.append(message)
+                continue
+
+            role = getattr(message, "role", "")
+            content = str(getattr(message, "content", "") or "")
+
+            item: dict[str, Any] = {"role": role, "content": content}
+
+            tool_calls = getattr(message, "tool_calls", None)
+            if tool_calls:
+                item["tool_calls"] = [
+                    {
+                        "id": getattr(tool_call, "id", ""),
+                        "name": getattr(tool_call, "name", ""),
+                        "arguments": getattr(tool_call, "arguments", ""),
+                    }
+                    for tool_call in tool_calls
+                ]
+
+            name = getattr(message, "name", None)
+            if name:
+                item["name"] = name
+
+            result.append(item)
+        return result
+
+    async def _collect_parsed_messages_from_ctx(self, ctx: AgentCallbackContext) -> List[dict]:
+        """Collect and normalize callback-visible messages for async snapshots."""
+        return self._normalize_callback_messages(await self._collect_callback_messages(ctx))
 
     async def _safe_run_evolution(self, snapshot: dict) -> None:
         """Phase 2: Safely execute evolution in background.
