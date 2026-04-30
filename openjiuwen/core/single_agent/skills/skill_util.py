@@ -70,11 +70,8 @@ class SkillUtil:
         Returns:
             bool: True if registration was successful.
         """
-        if isinstance(skill_path, list):
-            for item in skill_path:
-                await self._skill_manager.register(Path(item), session_id)
-            return True
-        await self._skill_manager.register(Path(skill_path), session_id)
+        paths = [Path(item) for item in skill_path] if isinstance(skill_path, list) else [Path(skill_path)]
+        await self._skill_manager.register(paths, session_id)
         return True
 
     async def register_remote_skills(self, skills_dir: str, github_tree: GitHubTree, token: str = "") -> None:
