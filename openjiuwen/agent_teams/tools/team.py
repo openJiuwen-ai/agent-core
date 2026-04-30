@@ -18,7 +18,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
-    from openjiuwen.agent_teams.agent.model_allocator import Allocation
+    from openjiuwen.agent_teams.models.allocator import Allocation
     from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
 
 from openjiuwen.agent_teams.constants import HUMAN_AGENT_MEMBER_NAME
@@ -42,7 +42,7 @@ from openjiuwen.agent_teams.schema.status import (
     TaskStatus,
 )
 from openjiuwen.agent_teams.schema.team import MemberOpResult, TeamMemberSpec, TeamRole
-from openjiuwen.agent_teams.spawn.context import get_session_id
+from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.tools.database import (
     Team,
     TeamDatabase,

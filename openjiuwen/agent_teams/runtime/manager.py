@@ -1,14 +1,24 @@
 # coding: utf-8
-"""Internal runtime owner for TeamAgent sessions."""
+"""Runner-scoped owner of the active TeamAgent runtime.
+
+Holds the in-process single-active-team singleton state and dispatches
+between the four recovery paths exposed by ``agent_teams.factory``.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import (
     Optional,
     TYPE_CHECKING,
 )
 
+from openjiuwen.agent_teams.factory import (
+    recover_agent_team,
+    recover_for_existing_session,
+    resume_persistent_team,
+)
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session.agent_team import (
@@ -22,13 +32,34 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 
 
+class TeamActivationKind(str, Enum):
+    """Outcome of resolving a TeamAgent runtime for a (team, session) pair.
+
+    Inherits from ``str`` so existing payload consumers that compare against
+    raw strings (e.g. ``chunk.payload["activation_kind"] == "create"``)
+    keep working without conversion.
+    """
+
+    CREATE = "create"
+    RECOVER = "recover"
+    RESUME = "resume"
+    RESUME_PAUSED = "resume_paused"
+    SAME_SESSION = "same_session"
+    INVALID_SESSION = "invalid_session"
+
+    @property
+    def is_short_circuit(self) -> bool:
+        """Whether the caller should skip invoke / stream after activation."""
+        return self in (TeamActivationKind.SAME_SESSION, TeamActivationKind.INVALID_SESSION)
+
+
 @dataclass(slots=True)
 class TeamRuntimeActivation:
     """Resolved team runtime and activation metadata."""
 
     agent: "TeamAgent"
     session: AgentTeamSession
-    activation_kind: Optional[str]
+    activation_kind: Optional[TeamActivationKind]
 
 
 @dataclass(slots=True)
@@ -82,12 +113,12 @@ class TeamRuntimeManager:
         if self._active_agent is not None and self._active_team_name == team_name:
             if self._active_session_id == session_id:
                 if self._active_paused:
-                    await team_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
+                    await self._pre_run_with_inputs(team_session, inputs)
                     self._active_paused = False
                     return TeamRuntimeActivation(
                         agent=self._active_agent,
                         session=team_session,
-                        activation_kind="resume_paused",
+                        activation_kind=TeamActivationKind.RESUME_PAUSED,
                     )
                 team_logger.warning(
                     "run_agent_team_streaming called with active team/session "
@@ -98,19 +129,17 @@ class TeamRuntimeManager:
                 return TeamRuntimeActivation(
                     agent=self._active_agent,
                     session=team_session,
-                    activation_kind="same_session",
+                    activation_kind=TeamActivationKind.SAME_SESSION,
                 )
 
             session_resolution = await self._resolve_session_checkpoint(team_session, team_name)
             if session_resolution.kind == "recoverable":
-                from openjiuwen.agent_teams.factory import recover_for_existing_session
-
                 await recover_for_existing_session(self._active_agent, team_session)
                 self._set_active(team_name, session_id, self._active_agent)
                 return TeamRuntimeActivation(
                     agent=self._active_agent,
                     session=team_session,
-                    activation_kind="recover",
+                    activation_kind=TeamActivationKind.RECOVER,
                 )
             if session_resolution.kind == "invalid":
                 team_logger.warning(
@@ -122,18 +151,16 @@ class TeamRuntimeManager:
                 return TeamRuntimeActivation(
                     agent=self._active_agent,
                     session=team_session,
-                    activation_kind="invalid_session",
+                    activation_kind=TeamActivationKind.INVALID_SESSION,
                 )
 
-            from openjiuwen.agent_teams.factory import resume_persistent_team
-
-            await team_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
+            await self._pre_run_with_inputs(team_session, inputs)
             await resume_persistent_team(self._active_agent, team_session)
             self._set_active(team_name, session_id, self._active_agent)
             return TeamRuntimeActivation(
                 agent=self._active_agent,
                 session=team_session,
-                activation_kind="resume",
+                activation_kind=TeamActivationKind.RESUME,
             )
 
         if self._active_agent is not None:
@@ -141,10 +168,8 @@ class TeamRuntimeManager:
 
         session_resolution = await self._resolve_session_checkpoint(team_session, team_name)
         if session_resolution.kind == "recoverable":
-            from openjiuwen.agent_teams.factory import recover_agent_team
-
             agent = await recover_agent_team(team_session)
-            activation_kind = "recover"
+            activation_kind = TeamActivationKind.RECOVER
         elif session_resolution.kind == "invalid":
             team_logger.warning(
                 "Refusing to create team {} on existing invalid session {}: {}",
@@ -155,12 +180,12 @@ class TeamRuntimeManager:
             return TeamRuntimeActivation(
                 agent=self._active_agent,
                 session=team_session,
-                activation_kind="invalid_session",
+                activation_kind=TeamActivationKind.INVALID_SESSION,
             )
         else:
-            await team_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
+            await self._pre_run_with_inputs(team_session, inputs)
             agent = spec.build()
-            activation_kind = "create"
+            activation_kind = TeamActivationKind.CREATE
 
         self._set_active(team_name, session_id, agent)
         return TeamRuntimeActivation(agent=agent, session=team_session, activation_kind=activation_kind)
@@ -361,16 +386,21 @@ class TeamRuntimeManager:
         return create_agent_team_session(team_id=spec.team_name)
 
     @staticmethod
+    async def _pre_run_with_inputs(session: AgentTeamSession, inputs: object) -> None:
+        """Run ``session.pre_run`` only forwarding ``inputs`` when it's a dict."""
+        await session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
+
+    @staticmethod
     async def _resolve_session_checkpoint(
-            session: AgentTeamSession,
+        session: AgentTeamSession,
         team_name: str,
     ) -> TeamSessionResolution:
         checkpointer = CheckpointerFactory.get_checkpointer()
-        if not await checkpointer.session_exists(session.get_session_id()):
-            await session.pre_run()
+        session_exists = await checkpointer.session_exists(session.get_session_id())
+        await session.pre_run()
+        if not session_exists:
             return TeamSessionResolution(kind="missing")
 
-        await session.pre_run()
         checkpoint_team_name = session.get_state("team_name")
         if checkpoint_team_name is None:
             return TeamSessionResolution(

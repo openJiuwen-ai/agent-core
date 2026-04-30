@@ -16,9 +16,17 @@ from unittest.mock import (
 
 import pytest
 
+from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
-from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
-from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.schema.blueprint import (
+    DeepAgentSpec,
+    TeamAgentSpec,
+)
+from openjiuwen.agent_teams.schema.team import (
+    TeamRole,
+    TeamRuntimeContext,
+    TeamSpec,
+)
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent_team import create_agent_team_session
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
@@ -158,12 +166,16 @@ async def test_runner_team_runtime_manager_resumes_new_session_and_recovers_hist
         await agent.recover_for_existing_session(session)
         return agent
 
-    with patch.object(TeamAgentSpec, "build", return_value=active_agent), patch(
-        "openjiuwen.agent_teams.factory.resume_persistent_team",
-        side_effect=_resume,
-    ), patch(
-        "openjiuwen.agent_teams.factory.recover_for_existing_session",
-        side_effect=_recover_existing,
+    with (
+        patch.object(TeamAgentSpec, "build", return_value=active_agent),
+        patch(
+            "openjiuwen.agent_teams.runtime.manager.resume_persistent_team",
+            side_effect=_resume,
+        ),
+        patch(
+            "openjiuwen.agent_teams.runtime.manager.recover_for_existing_session",
+            side_effect=_recover_existing,
+        ),
     ):
         first_chunks = [
             chunk
@@ -388,9 +400,11 @@ async def test_runner_interact_pause_and_delete_agent_team_route_through_team_ru
     fake_db.team = AsyncMock()
     fake_db.team.delete_team = AsyncMock(return_value=True)
 
-    with patch.object(TeamAgentSpec, "build", return_value=agent), \
-         patch("openjiuwen.agent_teams.runtime_manager.TeamRuntimeManager.resolve_team_session_metadata", return_value=metadata), \
-         patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db", return_value=fake_db):
+    with (
+        patch.object(TeamAgentSpec, "build", return_value=agent),
+        patch("openjiuwen.agent_teams.runtime_manager.TeamRuntimeManager.resolve_team_session_metadata", return_value=metadata), \
+         patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db", return_value=fake_db),
+    ):
         async for _ in Runner.run_agent_team_streaming(
             agent_team=spec,
             inputs={"query": "hello"},
@@ -398,11 +412,14 @@ async def test_runner_interact_pause_and_delete_agent_team_route_through_team_ru
         ):
             pass
 
-        assert await Runner.interact_agent_team(
-            "follow-up",
-            team_name="delete_team",
-            session_id=session_id,
-        ) is True
+        assert (
+            await Runner.interact_agent_team(
+                "follow-up",
+                team_name="delete_team",
+                session_id=session_id,
+            )
+            is True
+        )
         assert agent.interactions == ["follow-up"]
 
         assert await Runner.pause_agent_team(team_name="delete_team", session_id=session_id) is True
@@ -428,14 +445,17 @@ async def test_team_agent_cancelled_round_does_not_restart_follow_up():
     async def _noop(*_a, **_kw):
         return None
 
+    from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
+    from openjiuwen.agent_teams.agent.state import TeamAgentState
+
     fake_deep_agent = SimpleNamespace(deep_config=None)
+    fake_blueprint = SimpleNamespace(member_name="leader")
     sc = StreamController(
-        deep_agent_getter=lambda: fake_deep_agent,
-        member_name_getter=lambda: "leader",
+        blueprint_getter=lambda: fake_blueprint,
+        state=TeamAgentState(),
+        resources=PrivateAgentResources(deep_agent=fake_deep_agent),
         status_updater=_noop,
         execution_updater=_noop,
-        team_member_getter=lambda: None,
-        session_id_getter=lambda: None,
     )
     sc.stream_queue = object()
     sc.pending_inputs = ["follow-up"]
@@ -454,10 +474,14 @@ async def test_team_agent_cancelled_round_does_not_restart_follow_up():
 async def test_team_agent_resume_for_new_session_rebinds_only_live_teammates():
     leader_card = AgentCard(id=f"leader_{uuid.uuid4().hex}", name="leader", description="leader")
     agent = TeamAgent(card=leader_card)
-    agent._configurator.ctx = SimpleNamespace(
-        role=TeamRole.LEADER,
-        member_name="leader",
-        team_spec=SimpleNamespace(team_name="persistent_team"),
+    team_spec = TeamSpec(team_name="persistent_team", display_name="persistent_team")
+    ctx = TeamRuntimeContext(role=TeamRole.LEADER, member_name="leader", team_spec=team_spec)
+    agent._configurator._blueprint = TeamAgentBlueprint(
+        card=leader_card,
+        spec=TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="persistent_team"),
+        ctx=ctx,
+        role_policy="",
+        language="en",
     )
 
     fake_db = AsyncMock()
@@ -511,10 +535,14 @@ async def test_team_agent_resume_for_new_session_rebinds_only_live_teammates():
 async def test_team_agent_recover_for_existing_session_rebinds_live_teammates():
     leader_card = AgentCard(id=f"leader_{uuid.uuid4().hex}", name="leader", description="leader")
     agent = TeamAgent(card=leader_card)
-    agent._configurator.ctx = SimpleNamespace(
-        role=TeamRole.LEADER,
-        member_name="leader",
-        team_spec=SimpleNamespace(team_name="persistent_team"),
+    team_spec = TeamSpec(team_name="persistent_team", display_name="persistent_team")
+    ctx = TeamRuntimeContext(role=TeamRole.LEADER, member_name="leader", team_spec=team_spec)
+    agent._configurator._blueprint = TeamAgentBlueprint(
+        card=leader_card,
+        spec=TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="persistent_team"),
+        ctx=ctx,
+        role_policy="",
+        language="en",
     )
 
     fake_db = AsyncMock()
@@ -536,7 +564,7 @@ async def test_team_agent_recover_for_existing_session_rebinds_live_teammates():
         "worker_busy": object(),
         "worker_ready": object(),
     }
-    agent._coordination_manager.stop = AsyncMock()
+    agent._coordination.stop = AsyncMock()
     agent._spawn_manager.restart_teammate = AsyncMock(return_value=True)
 
     existing_session = create_agent_team_session(
@@ -547,7 +575,7 @@ async def test_team_agent_recover_for_existing_session_rebinds_live_teammates():
     await agent.recover_for_existing_session(existing_session)
 
     assert agent._session_manager.session_id == existing_session.get_session_id()
-    agent._coordination_manager.stop.assert_awaited_once()
+    agent._coordination.stop.assert_awaited_once()
     fake_db.create_cur_session_tables.assert_awaited_once()
     assert agent._spawn_manager.restart_teammate.await_args_list == [
         call("worker_busy"),
@@ -565,13 +593,13 @@ def test_team_agent_recover_from_session_restores_session_id():
     session_id = f"recover_state_{uuid.uuid4().hex}"
     session = create_agent_team_session(session_id=session_id, team_id="persistent_team")
     session.update_state(
-            {
-                "spec": {
-                    "team_name": "persistent_team",
-                    "agents": {
-                        "leader": {},
-                    },
+        {
+            "spec": {
+                "team_name": "persistent_team",
+                "agents": {
+                    "leader": {},
                 },
+            },
             "context": {
                 "role": "leader",
                 "member_name": "leader",
@@ -636,7 +664,7 @@ class TestTeamRuntimeManagerReleaseSession:
     @pytest.mark.level0
     async def test_release_session_drops_tables_for_inactive_session(self, isolated_checkpointer):
         """release_session should drop dynamic tables for a non-active session."""
-        from openjiuwen.agent_teams.runtime_manager import TeamRuntimeManager, TeamSessionMetadata
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager, TeamSessionMetadata
         from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
 
         manager = TeamRuntimeManager()
@@ -678,7 +706,7 @@ class TestTeamRuntimeManagerReleaseSession:
     @pytest.mark.level0
     async def test_release_session_stops_active_session_coordination(self, isolated_checkpointer):
         """release_session should stop coordination if session is currently active."""
-        from openjiuwen.agent_teams.runtime_manager import TeamRuntimeManager, TeamSessionMetadata
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager, TeamSessionMetadata
         from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
 
         manager = TeamRuntimeManager()
@@ -715,7 +743,7 @@ class TestTeamRuntimeManagerReleaseSession:
     @pytest.mark.level0
     async def test_release_session_empty_session_id_returns_early(self):
         """release_session should return early for empty session_id."""
-        from openjiuwen.agent_teams.runtime_manager import TeamRuntimeManager
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 
         manager = TeamRuntimeManager()
         # Should not raise or do anything
@@ -726,7 +754,7 @@ class TestTeamRuntimeManagerReleaseSession:
     @pytest.mark.level1
     async def test_release_session_raises_on_missing_context(self, isolated_checkpointer):
         """release_session should raise RuntimeError if context is missing."""
-        from openjiuwen.agent_teams.runtime_manager import TeamRuntimeManager
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 
         manager = TeamRuntimeManager()
         session_id = f"release_no_context_{uuid.uuid4().hex}"
@@ -750,7 +778,7 @@ class TestTeamRuntimeManagerDeleteTeam:
     @pytest.mark.level1
     async def test_delete_team_fetches_db_config_from_session(self, isolated_checkpointer):
         """delete_team should fetch db_config from session state."""
-        from openjiuwen.agent_teams.runtime_manager import TeamRuntimeManager, TeamSessionMetadata
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager, TeamSessionMetadata
         from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
 
         manager = TeamRuntimeManager()
@@ -780,7 +808,7 @@ class TestTeamRuntimeManagerDeleteTeam:
     @pytest.mark.level0
     async def test_delete_team_stops_active_runtime(self):
         """delete_team should stop active runtime if team matches."""
-        from openjiuwen.agent_teams.runtime_manager import TeamRuntimeManager, TeamSessionMetadata
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager, TeamSessionMetadata
         from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
 
         manager = TeamRuntimeManager()
@@ -808,7 +836,7 @@ class TestTeamRuntimeManagerDeleteTeam:
         metadata = TeamSessionMetadata(team_name=team_name, db_config=db_config)
         with patch("openjiuwen.agent_teams.runtime_manager.TeamRuntimeManager.resolve_team_session_metadata", return_value=metadata), \
              patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db", return_value=fake_db), \
-             patch("openjiuwen.agent_teams.runtime_manager.CheckpointerFactory.get_checkpointer", return_value=fake_checkpointer):
+             patch("openjiuwen.agent_teams.runtime.manager.CheckpointerFactory.get_checkpointer", return_value=fake_checkpointer):
             result = await manager.delete_team(team_name, [session_id])
 
         assert result is True

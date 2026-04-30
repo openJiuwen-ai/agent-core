@@ -14,6 +14,7 @@ from openjiuwen.core.session.agent_team import Session as AgentTeamSession
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.agent_configurator import AgentConfigurator
     from openjiuwen.agent_teams.agent.recovery_manager import RecoveryManager
+    from openjiuwen.agent_teams.agent.state import TeamAgentState
 
 
 class SessionManager:
@@ -27,38 +28,38 @@ class SessionManager:
 
     def __init__(
         self,
+        *,
+        state: "TeamAgentState",
         configurator: AgentConfigurator,
         recovery_manager: RecoveryManager,
     ):
+        self._state = state
         self._configurator = configurator
         self._recovery_manager = recovery_manager
 
-        self._session_id: Optional[str] = None
-        self._team_session: Optional[AgentTeamSession] = None
-
     @property
     def session_id(self) -> Optional[str]:
-        return self._session_id
+        return self._state.session_id
 
     @session_id.setter
     def session_id(self, value: Optional[str]) -> None:
-        self._session_id = value
+        self._state.session_id = value
 
     @property
     def team_session(self) -> Optional[AgentTeamSession]:
-        return self._team_session
+        return self._state.team_session
 
     @team_session.setter
     def team_session(self, value: Optional[AgentTeamSession]) -> None:
-        self._team_session = value
+        self._state.team_session = value
 
     async def _switch_session(self, session) -> None:
         """Apply the new session id, contextvar, and per-session DB tables."""
-        from openjiuwen.agent_teams.spawn.context import set_session_id
+        from openjiuwen.agent_teams.context import set_session_id
 
-        self._session_id = session.get_session_id()
-        set_session_id(self._session_id)
-        self._team_session = session if isinstance(session, AgentTeamSession) else None
+        self._state.session_id = session.get_session_id()
+        set_session_id(self._state.session_id)
+        self._state.team_session = session if isinstance(session, AgentTeamSession) else None
 
         team_backend = self._configurator.team_backend
         if team_backend:

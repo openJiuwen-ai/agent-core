@@ -13,16 +13,17 @@ from __future__ import annotations
 
 import pytest
 
-from openjiuwen.agent_teams.agent.model_allocator import (
+from openjiuwen.agent_teams.models.allocator import (
     Allocation,
     ByModelNameAllocator,
     RoundRobinModelAllocator,
     build_model_allocator,
     resolve_member_model,
 )
+from openjiuwen.agent_teams.models.pool import ModelPoolEntry
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
-from openjiuwen.agent_teams.schema.team import ModelPoolEntry, TeamSpec
+from openjiuwen.agent_teams.schema.team import TeamSpec
 
 
 def _make_pool(n: int) -> list[ModelPoolEntry]:
@@ -490,6 +491,7 @@ class _StubSession:
 
 
 def _bare_team_agent(allocator):
+    from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
     from openjiuwen.agent_teams.schema.team import (
         TeamRole,
@@ -521,9 +523,15 @@ def _bare_team_agent(allocator):
         member_name="leader",
         team_spec=team_spec,
     )
-    agent = TeamAgent(AgentCard(id="t_leader", name="leader"))
-    agent._configurator.spec = spec
-    agent._configurator.ctx = ctx
+    card = AgentCard(id="t_leader", name="leader")
+    agent = TeamAgent(card)
+    agent._configurator._blueprint = TeamAgentBlueprint(
+        card=card,
+        spec=spec,
+        ctx=ctx,
+        role_policy="",
+        language="en",
+    )
     agent._configurator.model_allocator = allocator
     return agent
 
@@ -576,6 +584,7 @@ def test_persist_allocator_state_no_op_without_session_or_allocator():
 
 
 def test_persist_leader_config_omits_allocator_state_when_no_pool():
+    from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
     from openjiuwen.agent_teams.schema.team import (
         TeamRole,
@@ -591,9 +600,15 @@ def test_persist_leader_config_omits_allocator_state_when_no_pool():
         member_name="leader",
         team_spec=team_spec,
     )
-    agent = TeamAgent(AgentCard(id="t_leader", name="leader"))
-    agent._configurator.spec = spec
-    agent._configurator.ctx = ctx
+    card = AgentCard(id="t_leader", name="leader")
+    agent = TeamAgent(card)
+    agent._configurator._blueprint = TeamAgentBlueprint(
+        card=card,
+        spec=spec,
+        ctx=ctx,
+        role_policy="",
+        language="en",
+    )
     agent._configurator.model_allocator = None
 
     session = _StubSession()
@@ -729,7 +744,7 @@ def test_update_model_pool_replaces_pool_and_resets_allocator():
 
 def test_inherit_pool_ids_preserves_id_for_bit_exact_entry():
     """No-change refresh inherits model_id (cache stays stable when safe)."""
-    from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+    from openjiuwen.agent_teams.models.pool import inherit_pool_ids
 
     old = ModelPoolEntry(
         model_name="gpt-4",
@@ -752,7 +767,7 @@ def test_inherit_pool_ids_preserves_id_for_bit_exact_entry():
 def test_inherit_pool_ids_breaks_inheritance_on_credential_rotation():
     """api_key change yields a fresh model_id so a future cache cannot
     serve a stale client built against the old credential."""
-    from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+    from openjiuwen.agent_teams.models.pool import inherit_pool_ids
 
     old = ModelPoolEntry(
         model_name="gpt-4",
@@ -773,7 +788,7 @@ def test_inherit_pool_ids_breaks_inheritance_on_credential_rotation():
 
 
 def test_inherit_pool_ids_breaks_inheritance_on_base_url_migration():
-    from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+    from openjiuwen.agent_teams.models.pool import inherit_pool_ids
 
     old = ModelPoolEntry(
         model_name="gpt-4",
@@ -794,7 +809,7 @@ def test_inherit_pool_ids_breaks_inheritance_on_base_url_migration():
 def test_inherit_pool_ids_breaks_inheritance_on_metadata_change():
     """Even small config tweaks (timeout) prevent inheritance — they could
     mean a different client object is needed under a future cache."""
-    from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+    from openjiuwen.agent_teams.models.pool import inherit_pool_ids
 
     old = ModelPoolEntry(
         model_name="gpt-4",
@@ -815,7 +830,7 @@ def test_inherit_pool_ids_breaks_inheritance_on_metadata_change():
 
 
 def test_inherit_pool_ids_keeps_own_id_for_truly_new_endpoint():
-    from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+    from openjiuwen.agent_teams.models.pool import inherit_pool_ids
 
     old = ModelPoolEntry(
         model_name="gpt-4",
@@ -835,7 +850,7 @@ def test_inherit_pool_ids_keeps_own_id_for_truly_new_endpoint():
 
 def test_inherit_pool_ids_signature_match_is_order_independent():
     """Bit-exact pairs match by signature regardless of pool order."""
-    from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+    from openjiuwen.agent_teams.models.pool import inherit_pool_ids
 
     old = [
         ModelPoolEntry(model_name="gpt-4", api_key="K1", api_base_url="http://x", api_provider="OpenAI"),
@@ -855,7 +870,7 @@ def test_inherit_pool_ids_signature_match_is_order_independent():
 def test_inherit_pool_ids_pairs_one_to_one_when_signatures_collide():
     """If two old entries are byte-identical, two new identical entries
     consume them in pool order — no double-mapping."""
-    from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+    from openjiuwen.agent_teams.models.pool import inherit_pool_ids
 
     # Two genuine duplicates (same signature) on each side.
     old = [
@@ -875,7 +890,7 @@ def test_inherit_pool_ids_pairs_one_to_one_when_signatures_collide():
 
 def test_inherit_pool_ids_drops_removed_endpoints():
     """Removed entries' ids are not transferred anywhere."""
-    from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+    from openjiuwen.agent_teams.models.pool import inherit_pool_ids
 
     old = [
         ModelPoolEntry(model_name="gpt-4", api_key="K", api_base_url="http://a", api_provider="OpenAI"),
@@ -890,7 +905,7 @@ def test_inherit_pool_ids_drops_removed_endpoints():
 
 
 def test_inherit_pool_ids_does_not_mutate_input_lists():
-    from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+    from openjiuwen.agent_teams.models.pool import inherit_pool_ids
 
     old_entry = ModelPoolEntry(
         model_name="gpt-4",
@@ -910,7 +925,7 @@ def test_inherit_pool_ids_does_not_mutate_input_lists():
 
 
 def test_inherit_pool_ids_handles_empty_inputs():
-    from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+    from openjiuwen.agent_teams.models.pool import inherit_pool_ids
 
     assert inherit_pool_ids([], []) == []
     assert inherit_pool_ids([], [_make_named_entry("gpt-4", "a1")]) != []

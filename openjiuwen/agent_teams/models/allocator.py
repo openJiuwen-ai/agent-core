@@ -35,10 +35,12 @@ import hashlib
 from dataclasses import dataclass
 from typing import Optional, Protocol, TYPE_CHECKING, runtime_checkable
 
+from openjiuwen.agent_teams.models.pool import ModelPoolEntry
+
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
     from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
-    from openjiuwen.agent_teams.schema.team import ModelPoolEntry, TeamSpec
+    from openjiuwen.agent_teams.schema.team import TeamSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +52,7 @@ class Allocation:
     so call sites never touch the entry directly.
     """
 
-    entry: "ModelPoolEntry"
+    entry: ModelPoolEntry
     group_index: int
 
     def to_team_model_config(self) -> "TeamModelConfig":
@@ -115,7 +117,7 @@ class ModelAllocator(Protocol):
         ...
 
 
-def _pool_digest(pool: list["ModelPoolEntry"]) -> str:
+def _pool_digest(pool: list[ModelPoolEntry]) -> str:
     """Stable digest of a pool's structural shape.
 
     Captures (model_name, api_base_url) per entry in order. Changes to
@@ -133,7 +135,7 @@ def _pool_digest(pool: list["ModelPoolEntry"]) -> str:
     return h.hexdigest()
 
 
-def _group_index_of(entry: "ModelPoolEntry", group: list["ModelPoolEntry"]) -> int:
+def _group_index_of(entry: ModelPoolEntry, group: list[ModelPoolEntry]) -> int:
     """Return ``entry``'s position within ``group`` by reference identity."""
     for i, candidate in enumerate(group):
         if candidate is entry:
@@ -149,14 +151,14 @@ class RoundRobinModelAllocator:
     entries spreads members evenly across endpoints.
     """
 
-    def __init__(self, pool: list["ModelPoolEntry"]) -> None:
+    def __init__(self, pool: list[ModelPoolEntry]) -> None:
         """Initialize with the pool entries to rotate over."""
         self._pool = list(pool)
         self._pool_digest = _pool_digest(self._pool)
         self._index = 0
         # Pre-compute name → list-of-entries so group_index lookups
         # don't rescan the pool on every allocation.
-        self._groups: dict[str, list["ModelPoolEntry"]] = {}
+        self._groups: dict[str, list[ModelPoolEntry]] = {}
         for entry in self._pool:
             self._groups.setdefault(entry.model_name, []).append(entry)
 
@@ -206,9 +208,9 @@ class ByModelNameAllocator:
     member then resolves its model from its per-agent spec instead.
     """
 
-    def __init__(self, pool: list["ModelPoolEntry"]) -> None:
+    def __init__(self, pool: list[ModelPoolEntry]) -> None:
         """Initialize from the pool, partitioning entries by model_name."""
-        self._groups: dict[str, list["ModelPoolEntry"]] = {}
+        self._groups: dict[str, list[ModelPoolEntry]] = {}
         for entry in pool:
             self._groups.setdefault(entry.model_name, []).append(entry)
         self._pool_digest = _pool_digest(list(pool))

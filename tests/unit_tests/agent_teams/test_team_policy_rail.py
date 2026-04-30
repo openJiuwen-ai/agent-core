@@ -1,13 +1,12 @@
 # coding: utf-8
 
-"""Tests for TeamRail and its section builders."""
+"""Tests for TeamPolicyRail and its section builders."""
 
 from __future__ import annotations
 
 import pytest
 
-from openjiuwen.agent_teams.agent.team_rail import (
-    TeamRail,
+from openjiuwen.agent_teams.prompts import (
     TeamSectionName,
     build_team_extra_section,
     build_team_info_section,
@@ -17,6 +16,7 @@ from openjiuwen.agent_teams.agent.team_rail import (
     build_team_role_section,
     build_team_workflow_section,
 )
+from openjiuwen.agent_teams.rails import TeamPolicyRail
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.single_agent.prompts.builder import SystemPromptBuilder
 from tests.test_logger import logger
@@ -271,7 +271,7 @@ class TestTeamMembersSection:
 
 
 # ---------------------------------------------------------------------------
-# TeamRail
+# TeamPolicyRail
 # ---------------------------------------------------------------------------
 
 
@@ -303,7 +303,7 @@ class _StubTeam:
 class _FakeTeamBackend:
     """In-memory TeamBackend that tracks call counts.
 
-    Mirrors the four TeamBackend methods that ``TeamRail`` consumes:
+    Mirrors the four TeamBackend methods that ``TeamPolicyRail`` consumes:
     ``get_team_updated_at``, ``get_members_max_updated_at``,
     ``get_team_info``, ``list_members``.  Lets tests assert that the
     cache short-circuits expensive calls when the mtime probe is stable.
@@ -343,11 +343,11 @@ class _FakeTeamBackend:
         return list(self._members)
 
     def hitt_enabled(self) -> bool:
-        """TeamRail probes this; fake teams never enable HITT."""
+        """TeamPolicyRail probes this; fake teams never enable HITT."""
         return False
 
     def human_agent_names(self) -> frozenset[str]:
-        """TeamRail snapshots the roster here; fake teams are empty."""
+        """TeamPolicyRail snapshots the roster here; fake teams are empty."""
         return frozenset()
 
     # -- Mutators used by tests ----------------------------------------------
@@ -361,7 +361,7 @@ class _FakeTeamBackend:
         self._members_mtime = mtime
 
 
-class TestTeamRailStaticSections:
+class TestTeamPolicyRailStaticSections:
     """Static-only behaviour (team_backend is None) -- the rail still
     registers role/workflow/lifecycle/persona/extra without touching DB."""
 
@@ -371,7 +371,7 @@ class TestTeamRailStaticSections:
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)
 
-        rail = TeamRail(
+        rail = TeamPolicyRail(
             role=TeamRole.LEADER,
             persona="PM Expert",
             member_name="leader1",
@@ -402,7 +402,7 @@ class TestTeamRailStaticSections:
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)
 
-        rail = TeamRail(
+        rail = TeamPolicyRail(
             role=TeamRole.TEAMMATE,
             persona="Coder",
             member_name="dev1",
@@ -422,7 +422,7 @@ class TestTeamRailStaticSections:
         assert TeamSectionName.PERSONA in sections
 
 
-class TestTeamRailDynamicSections:
+class TestTeamPolicyRailDynamicSections:
     """Dynamic behaviour driven by the injected ``_FakeTeamBackend``."""
 
     @pytest.mark.asyncio
@@ -437,7 +437,7 @@ class TestTeamRailDynamicSections:
         )
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)
-        rail = TeamRail(
+        rail = TeamPolicyRail(
             role=TeamRole.LEADER,
             persona="PM",
             member_name="leader1",
@@ -467,7 +467,7 @@ class TestTeamRailDynamicSections:
         )
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)
-        rail = TeamRail(
+        rail = TeamPolicyRail(
             role=TeamRole.LEADER,
             persona="PM",
             member_name="leader1",
@@ -497,7 +497,7 @@ class TestTeamRailDynamicSections:
         )
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)
-        rail = TeamRail(
+        rail = TeamPolicyRail(
             role=TeamRole.LEADER,
             persona="PM",
             member_name="leader1",
@@ -531,7 +531,7 @@ class TestTeamRailDynamicSections:
         )
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)
-        rail = TeamRail(
+        rail = TeamPolicyRail(
             role=TeamRole.LEADER,
             persona="PM",
             member_name="leader1",
@@ -554,7 +554,7 @@ class TestTeamRailDynamicSections:
         )
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)
-        rail = TeamRail(
+        rail = TeamPolicyRail(
             role=TeamRole.LEADER,
             persona="PM",
             member_name="leader1",
@@ -586,7 +586,7 @@ class TestTeamRailDynamicSections:
         )
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)
-        rail = TeamRail(
+        rail = TeamPolicyRail(
             role=TeamRole.LEADER,
             persona="PM",
             member_name="leader1",
@@ -616,7 +616,7 @@ class TestTeamRailDynamicSections:
         )
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)
-        rail = TeamRail(
+        rail = TeamPolicyRail(
             role=TeamRole.LEADER,
             persona="PM",
             member_name="leader1",

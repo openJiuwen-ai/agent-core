@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from openjiuwen.agent_teams.agent.policy import (
+from openjiuwen.agent_teams.prompts import (
     build_system_prompt,
     role_policy,
 )

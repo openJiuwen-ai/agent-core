@@ -1,56 +1,21 @@
 # coding: utf-8
-"""Rails for TeamAgent coordination."""
+"""TeamToolApprovalRail — leader-side approval for teammate tool calls."""
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Iterable, Optional
 
-
-from openjiuwen.agent_teams import Messager
+from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.tools.database import TeamDatabase
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
+from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt import InterruptRequest
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails import ConfirmInterruptRail
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload
-from openjiuwen.harness.rails.interrupt.interrupt_base import (
-    InterruptDecision,
-)
-from openjiuwen.core.common.logging import team_logger
+from openjiuwen.harness.rails.interrupt.interrupt_base import InterruptDecision
 
-
-class FirstIterationGate(AgentRail):
-    """Signals when the agent enters its first task-loop iteration.
-
-    External code can ``await gate.wait()`` to block until
-    the agent is actually inside its loop and ready to
-    receive steer / follow_up inputs.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._event = asyncio.Event()
-
-    async def wait(self) -> None:
-        """Block until the first iteration has started."""
-        await self._event.wait()
-
-    @property
-    def is_ready(self) -> bool:
-        return self._event.is_set()
-
-    async def before_task_iteration(self, ctx: AgentCallbackContext) -> None:
-        if not self._event.is_set():
-            self._event.set()
-
-    def reset(self) -> None:
-        """Reset the gate for a new round."""
-        self._event.clear()
-
-
-# ============== Tool Approval Rail ==============
 
 class TeamToolApprovalRail(ConfirmInterruptRail):
     """Tool approval rail for team coordination.
@@ -105,15 +70,19 @@ class TeamToolApprovalRail(ConfirmInterruptRail):
         self.team_name = team_name
         self.member_name = member_name
         self.leader_member_name = leader_member_name
-        self.message_manager = TeamMessageManager(team_name=team_name, member_name=member_name, db=db,
-                                                  messager=messager)
+        self.message_manager = TeamMessageManager(
+            team_name=team_name,
+            member_name=member_name,
+            db=db,
+            messager=messager,
+        )
 
     async def resolve_interrupt(
-            self,
-            ctx: AgentCallbackContext,
-            tool_call: Optional[ToolCall],
-            user_input: Optional[Any],
-            auto_confirm_config: Optional[dict] = None,
+        self,
+        ctx: AgentCallbackContext,
+        tool_call: Optional[ToolCall],
+        user_input: Optional[Any],
+        auto_confirm_config: Optional[dict] = None,
     ) -> InterruptDecision:
         """Resolve tool approval interrupt with team coordination.
 
@@ -161,10 +130,12 @@ class TeamToolApprovalRail(ConfirmInterruptRail):
             )
 
             # Send message to leader
-            team_logger.info(f"Sending tool approval request to leader for {tool_name} (call_id: {tool_call_id})")
+            team_logger.info(
+                f"Sending tool approval request to leader for {tool_name} (call_id: {tool_call_id})"
+            )
             message_id = await self.message_manager.send_message(
                 content=message,
-                to_member_name=self.leader_member_name
+                to_member_name=self.leader_member_name,
             )
 
             if not message_id:
@@ -205,7 +176,9 @@ class TeamToolApprovalRail(ConfirmInterruptRail):
             return self.approve()
 
         feedback = payload.feedback or "Tool call rejected by leader"
-        team_logger.info(f"Tool {tool_name} rejected by leader for member {self.member_name}: {feedback}")
+        team_logger.info(
+            f"Tool {tool_name} rejected by leader for member {self.member_name}: {feedback}"
+        )
         return self.reject(tool_result=feedback)
 
     @staticmethod
@@ -214,3 +187,6 @@ class TeamToolApprovalRail(ConfirmInterruptRail):
         if config is None:
             return False
         return config.get(key, False)
+
+
+__all__ = ["TeamToolApprovalRail"]

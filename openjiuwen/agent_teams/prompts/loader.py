@@ -1,5 +1,10 @@
 # coding: utf-8
-"""Template loader for agent-teams policy prompts."""
+"""Markdown template loader for agent-team prompts.
+
+Kept in its own module so ``policy`` / ``sections`` can depend on the
+loader without forcing the package ``__init__`` to be ready first.
+"""
+
 from __future__ import annotations
 
 from functools import cache
@@ -13,7 +18,7 @@ _DEFAULT_LANGUAGE = "cn"
 
 @cache
 def _load(name: str, language: str | None = None) -> PromptTemplate:
-    """Load a .md template, optionally from a language subdirectory."""
+    """Load a markdown template, optionally from a language subdirectory."""
     if language:
         path = _PROMPTS_DIR / language / f"{name}.md"
     else:
@@ -29,3 +34,6 @@ def load_template(name: str, language: str = _DEFAULT_LANGUAGE) -> PromptTemplat
 def load_shared_template(name: str) -> PromptTemplate:
     """Load a language-independent template from ``<name>.md``."""
     return _load(name)
+
+
+__all__ = ["load_shared_template", "load_template"]

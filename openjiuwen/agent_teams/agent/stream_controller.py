@@ -8,6 +8,7 @@ import contextlib
 import re
 import traceback
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     Optional,
@@ -24,7 +25,11 @@ from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
-from openjiuwen.harness.deep_agent import DeepAgent
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
+    from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
+    from openjiuwen.agent_teams.agent.state import TeamAgentState
 
 _MAX_RETRY_ATTEMPTS = 10
 _RETRYABLE_ERROR_CODES = {181001}
@@ -68,20 +73,19 @@ class StreamController:
 
     def __init__(
         self,
-        deep_agent_getter: Callable[[], Optional[DeepAgent]],
-        member_name_getter: Callable[[], Optional[str]],
+        *,
+        blueprint_getter: Callable[[], Optional["TeamAgentBlueprint"]],
+        state: "TeamAgentState",
+        resources: "PrivateAgentResources",
         status_updater: Callable[[MemberStatus], Any],
         execution_updater: Callable[[ExecutionStatus], Any],
-        team_member_getter: Callable[[], Any],
-        session_id_getter: Callable[[], Optional[str]],
         wake_mailbox_callback: Optional[Callable[[], Any]] = None,
     ):
-        self._get_deep_agent = deep_agent_getter
-        self._get_member_name = member_name_getter
+        self._get_blueprint = blueprint_getter
+        self._state = state
+        self._resources = resources
         self._update_status = status_updater
         self._update_execution = execution_updater
-        self._get_team_member = team_member_getter
-        self._get_session_id = session_id_getter
         self._wake_mailbox_callback = wake_mailbox_callback
 
         self.stream_queue: Optional[asyncio.Queue] = None
@@ -90,6 +94,10 @@ class StreamController:
         self.pending_interrupt_resumes: list[InteractiveInput] = []
         self.pending_inputs: list[Any] = []
 
+    def _member_name(self) -> Optional[str]:
+        bp = self._get_blueprint()
+        return bp.member_name if bp else None
+
     def is_agent_running(self) -> bool:
         return self.streaming_active
 
@@ -97,33 +105,33 @@ class StreamController:
         return self.agent_task is not None and not self.agent_task.done()
 
     def has_pending_interrupt(self) -> bool:
-        deep_agent = self._get_deep_agent()
+        deep_agent = self._resources.deep_agent
         session = deep_agent.loop_session if deep_agent else None
         if session is None:
             return False
         return session.get_state(INTERRUPTION_KEY) is not None
 
     async def start_round(self, content: Any) -> None:
-        deep_agent = self._get_deep_agent()
+        deep_agent = self._resources.deep_agent
         if deep_agent is None or self.stream_queue is None:
             return
         preview = content if isinstance(content, str) else type(content).__name__
-        team_logger.info("[{}] start_agent: {:.120}", self._get_member_name() or "?", str(preview))
+        team_logger.info("[{}] start_agent: {:.120}", self._member_name() or "?", str(preview))
         self.agent_task = asyncio.create_task(
             self._run_one_round(content),
         )
         self.agent_task.add_done_callback(self._log_agent_task_exception)
 
     async def steer(self, content: str) -> None:
-        deep_agent = self._get_deep_agent()
+        deep_agent = self._resources.deep_agent
         if deep_agent is not None:
-            team_logger.debug("[{}] steer: {:.120}", self._get_member_name() or "?", content)
+            team_logger.debug("[{}] steer: {:.120}", self._member_name() or "?", content)
             await deep_agent.steer(content)
 
     async def follow_up(self, content: str) -> None:
-        deep_agent = self._get_deep_agent()
+        deep_agent = self._resources.deep_agent
         if deep_agent is not None:
-            team_logger.debug("[{}] follow_up: {:.120}", self._get_member_name() or "?", content)
+            team_logger.debug("[{}] follow_up: {:.120}", self._member_name() or "?", content)
             await deep_agent.follow_up(content)
 
     async def cancel_agent(self) -> None:
@@ -154,12 +162,12 @@ class StreamController:
             return
         team_logger.exception(
             "[{}] _run_one_round task crashed silently",
-            self._get_member_name() or "?",
+            self._member_name() or "?",
             stacktrace="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
         )
 
     async def _run_one_round(self, message: Any) -> None:
-        deep_agent = self._get_deep_agent()
+        deep_agent = self._resources.deep_agent
         if deep_agent and deep_agent.deep_config and deep_agent.deep_config.workspace:
             from openjiuwen.core.sys_operation.cwd import init_cwd
 
@@ -171,7 +179,7 @@ class StreamController:
         cancelled = False
         try:
             await self._execute_round(message)
-            team_member = self._get_team_member()
+            team_member = self._state.team_member
             if team_member is None or await team_member.status() != MemberStatus.SHUTDOWN_REQUESTED:
                 await self._update_status(MemberStatus.READY)
         except asyncio.CancelledError:
@@ -195,18 +203,16 @@ class StreamController:
                     if len(drained) == 1:
                         combined = drained[0]
                     else:
-                        combined = "\n\n---\n\n".join(
-                            item if isinstance(item, str) else str(item) for item in drained
-                        )
+                        combined = "\n\n---\n\n".join(item if isinstance(item, str) else str(item) for item in drained)
                     await self.start_round(combined)
                 else:
                     await self._wake_mailbox_if_interrupt_cleared()
-                    team_member = self._get_team_member()
+                    team_member = self._state.team_member
                     if team_member and await team_member.status() == MemberStatus.SHUTDOWN_REQUESTED:
                         self.close_stream()
 
     async def _stream_one_round(self, query: Any) -> Optional[Tuple[Optional[int], str]]:
-        deep_agent = self._get_deep_agent()
+        deep_agent = self._resources.deep_agent
         inputs = {"query": query}
         error_seen = False
         error_code: Optional[int] = None
@@ -216,7 +222,7 @@ class StreamController:
             async for chunk in Runner.run_agent_streaming(
                 deep_agent,
                 inputs,
-                session=self._get_session_id(),
+                session=self._state.session_id,
             ):
                 if error_seen:
                     continue
@@ -291,7 +297,7 @@ class StreamController:
     def is_valid_interrupt_resume(self, user_input: Any) -> bool:
         if not isinstance(user_input, InteractiveInput):
             return False
-        deep_agent = self._get_deep_agent()
+        deep_agent = self._resources.deep_agent
         session = deep_agent.loop_session if deep_agent else None
         if session is None:
             return False

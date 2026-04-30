@@ -27,9 +27,9 @@ from openjiuwen.agent_teams.constants import (
     RESERVED_MEMBER_NAMES,
 )
 from openjiuwen.agent_teams.i18n import t
+from openjiuwen.agent_teams.models.pool import ModelPoolEntry
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import (
-    ModelPoolEntry,
     TeamLifecycle,
     TeamMemberSpec,
     TeamRole,
@@ -278,7 +278,7 @@ class TeamAgentSpec(BaseModel):
         # PerAgentModelAllocator returns ``None`` for the leader and the
         # downstream ``ctx.member_model or agent_spec.model`` fallback in
         # ``TeamAgent._setup_agent`` keeps behavior unchanged.
-        from openjiuwen.agent_teams.agent.model_allocator import build_model_allocator
+        from openjiuwen.agent_teams.models.allocator import build_model_allocator
 
         model_allocator = build_model_allocator(self, team_spec)
         leader_allocation = (

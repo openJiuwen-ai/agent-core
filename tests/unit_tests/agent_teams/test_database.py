@@ -9,7 +9,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import inspect
 
-from openjiuwen.agent_teams.spawn.context import (
+from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
 )

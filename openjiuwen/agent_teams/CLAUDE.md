@@ -4,7 +4,7 @@
 
 本文件是本模块的入口索引。深入细节时跳转到：
 - `tools/CLAUDE.md` — 团队工具设计与描述契约
-- `agent/prompts/CLAUDE.md` — Prompt 模板与语言切换
+- `prompts/CLAUDE.md` — Prompt 模板与语言切换
 
 ## 公开入口（public API）
 
@@ -24,11 +24,16 @@
 agent_teams/
 ├── __init__.py          # 公开 API 聚合导出
 ├── constants.py         # 保留名（user/team_leader/human_agent）集中定义
+├── context.py           # session_id 跨成员/跨模式共享 contextvars
 ├── factory.py           # create_agent_team / resume_persistent_team 便利函数
 ├── i18n.py              # 运行时中/英文字符串（仅装运行时 hard-coded 串）
 ├── paths.py             # 文件系统布局单一真相源
 ├── schema/              # 全部数据模型（Spec / Context / Event / Status / Task）
+├── models/              # 多模型部署原语（ModelPoolEntry / 池继承 / Allocator）
 ├── agent/               # 核心运行时（TeamAgent 本体 + 装配链）
+├── prompts/             # 系统提示词模板、加载器、PromptSection 构造与缓存
+├── rails/               # 团队相关 Rail（系统提示词注入 / 首迭代门 / 工具审批）
+├── runtime/             # Runner 进程内 active team 单例所有者；包住 factory 的四条恢复路径
 ├── interaction/         # 外部交互入口（UserInbox / HumanAgentInbox / @ 路由）
 ├── tools/               # 团队工具（Leader / Teammate / Human Agent 可调用的原子操作）
 ├── messager/            # 消息传输层（inprocess / pyzmq）
@@ -43,16 +48,30 @@ agent_teams/
 | 文件 | 职责 |
 |---|---|
 | `team_agent.py` | `TeamAgent`（单一实现同时承担 Leader / Teammate 角色，内部组合一个 `DeepAgent`） |
-| `coordinator.py` | `CoordinatorLoop` 事件驱动唤醒循环，**不做决策**，只负责 wake-up 和轮询 |
-| `dispatcher.py` | 成员事件 → 运行时通知文本的映射 |
-| `policy.py` | `build_system_prompt` 老装配路径，消费 `prompts/system_prompt.md` |
-| `team_rail.py` | Rail 装配路径（主力），把 prompt 模板拆成多个 `PromptSection` 合并 |
-| `rails.py` | 其它团队相关 Rail |
+| `coordination/` | `CoordinatorLoop` 事件驱动唤醒循环 + dispatcher，**不做决策**，只负责 wake-up 和轮询 |
 | `member.py` | `TeamMember` 成员状态管理 |
-| `model_allocator.py` | spawn 时为成员分配 model 配置的回调机制 |
-| `prompts/` | 语言相关模板（cn/en）+ 语言无关装配壳 `system_prompt.md` |
+| `agent_configurator.py` | DeepAgent 装配，挂载 prompts/ 与 rails/ 子模块（spawn 时复用 `models/` 暴露的 allocator 回调） |
 
-**两条装配路径（`policy` vs `team_rail`）读的是同一批 `.md`**。改正文自动同时生效；结构性变更（占位符、section 拆分）要明确落到哪条路径。详见 `agent/prompts/CLAUDE.md`。
+### prompts/ — 系统提示词
+
+| 文件 | 职责 |
+|---|---|
+| `loader.py` | `load_template` / `load_shared_template`，按语言加载 `.md` |
+| `policy.py` | `role_policy` / `build_system_prompt` 老装配路径，消费 `system_prompt.md` |
+| `sections.py` | `TeamSectionName` + `build_team_*_section` 构造 `PromptSection`（主力路径） |
+| `section_cache.py` | `MtimeSectionCache`：dynamic section 的 mtime 缓存 |
+| `system_prompt.md` | 语言无关的占位符模板 |
+| `cn/` · `en/` | 角色 / 工作流 / 生命周期模板 |
+
+**两条装配路径（`policy.build_system_prompt` vs `sections.build_team_*_section`）读的是同一批 `.md`**。改正文自动同时生效；结构性变更（占位符、section 拆分）要明确落到哪条路径。详见 `prompts/CLAUDE.md`。
+
+### rails/ — 团队 Rail 注入
+
+| 文件 | 职责 |
+|---|---|
+| `team_policy_rail.py` | `TeamPolicyRail`：把 prompts/sections 的 `PromptSection` 注入 `SystemPromptBuilder`；含 `MtimeSectionCache` 驱动的 dynamic section 刷新 |
+| `first_iteration_gate.py` | `FirstIterationGate`：异步信号，等到 agent 真正进入 task loop 才放行 steer / follow_up |
+| `tool_approval_rail.py` | `TeamToolApprovalRail`：teammate 调工具时通过消息向 leader 申请审批的中断 rail |
 
 ### schema/ — 数据模型分层
 
@@ -68,6 +87,20 @@ task.py            # TaskSummary / TaskDetail —— 任务返回模型
 - `Spec` 统一含义：**可 JSON 序列化的装配蓝图**。用 `model_dump()` 可跨进程；不放运行时资源引用。
 - `TeamRuntimeContext`：运行时上下文，携带 role / messager_config / db_config 等资源配置，是 `Spec → Runtime` 的边界。
 - 新增 spec 字段要想清楚：**属于装配数据**（放 Spec）还是**运行时资源**（放 Config/Manager/Runtime）。不要让 Spec 持有 `Runner`、`Session`、文件句柄。
+
+### models/ — 多模型部署原语
+
+```
+pool.py        # ModelPoolEntry / inherit_pool_ids —— 池条目数据结构 + 池刷新 model_id 继承
+allocator.py   # Allocation / ModelAllocator(Protocol) / RoundRobinModelAllocator / ByModelNameAllocator
+               # build_model_allocator / resolve_member_model
+```
+
+- `ModelPoolEntry` 是 `TeamSpec.model_pool` 的元素，描述一个 LLM 端点 + 凭证 + provider；通过 `to_team_model_config()` 物化为 `TeamModelConfig`。
+- 持久化身份用 `(model_name, group_index)`，运行时 client 身份用自动 uuid `model_id`；`inherit_pool_ids` 在池刷新时只对 bit-exact 旧条目继承 `model_id`，避免基础设施层缓存到旧凭证的 client。
+- 两条分配策略：`RoundRobinModelAllocator`（线性轮转，无视 `model_name`）/ `ByModelNameAllocator`（按 `model_name` 分组、组内轮转）。新策略实现 `ModelAllocator` 协议即可；`build_model_allocator` 读 `team_spec.model_pool_strategy` 派发。
+- 空池 → `build_model_allocator` 返回 `None` → 走 `TeamAgentSpec.agents` per-agent 模型配置兜底。
+- 新增模型相关原语优先放本目录，避免渗回 `schema/team.py`（schema 层只声明字段引用，实现在 models/）。
 
 ### 基础设施插件化：TransportSpec / StorageSpec
 
@@ -99,7 +132,7 @@ Messager 是点对点 + broadcast 的统一抽象，**任何直接新建 socket 
 
 - `spawn_mode="process"` → `Runner.spawn_agent` 走子进程（跨平台，默认）。
 - `spawn_mode="inprocess"` → `inprocess_spawn` 在同 event loop 启动协程（适合测试或轻量场景）。
-- `context.py` 的 `session_id` contextvars 是两种模式共享的上下文载体。
+- 顶层 `context.py` 的 `session_id` contextvars 是两种模式共享的上下文载体。
 
 ### tools/ — 团队工具集合
 
@@ -108,6 +141,16 @@ Messager 是点对点 + broadcast 的统一抽象，**任何直接新建 socket 
 - `create_team_tools(role=..., teammate_mode=..., exclude_tools=..., lang=...)` 是唯一入口。
 - 工具描述文本是**行为契约**，不是 feature 摘要。长文案放 `tools/locales/descs/<lang>/<tool>.md`。
 - ToolCard ID 统一 `team.{name}` 前缀。
+
+### runtime/ — Runner 进程内 active team 所有者
+
+| 文件 | 职责 |
+|---|---|
+| `manager.py` | `TeamRuntimeManager`：维护 `(active_team, active_session, active_agent, active_paused)` 四元组；`activate()` 基于 checkpoint 派发到 `factory` 的 create / recover / resume / recover_for_existing_session 四条路径 |
+
+- **状态归属是 Runner，不是 team 自身**：每个 Runner 进程同时只跑一个 active team，这是 runner 的策略。
+- **裹住 factory 而不是绕开它**：所有恢复入口都走 `factory.recover_*` / `resume_persistent_team`，不要在 manager 里再写一份恢复逻辑。
+- `Runner` 在 `_get_team_runtime_manager()` 里 lazy import 它，避免子进程 bootstrap 时拉链。
 
 ### team_workspace/ — 共享工作空间
 
@@ -136,7 +179,7 @@ Messager 是点对点 + broadcast 的统一抽象，**任何直接新建 socket 
 2. human_agent 直接 READY，不进入 UNSTARTED/BUSY/SHUTDOWN 流程；唯一工具是 `send_message`。
 3. 一旦 `task.assignee == "human_agent"` 且状态 CLAIMED，`UpdateTaskTool` 拒绝 reassign 和 cancel；批量 cancel 链路也跳过。
 4. 发送给 human_agent 的点对点消息 `is_read=True`；广播后 human_agent 的 `read_at` 立即跟进。
-5. TeamRail 注入 `team_hitt` section（priority=12），按 role 分别给 leader/teammate/human_agent 下达角色特定的行为约束。
+5. TeamPolicyRail 注入 `team_hitt` section（priority=12），按 role 分别给 leader/teammate/human_agent 下达角色特定的行为约束。
 
 ### worktree/ — Git worktree 隔离
 

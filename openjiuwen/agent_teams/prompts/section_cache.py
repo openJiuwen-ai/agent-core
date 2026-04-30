@@ -2,13 +2,13 @@
 
 """mtime-based PromptSection cache.
 
-Generic refresh primitive used by ``TeamRail`` (and any future rail)
-to avoid re-fetching slow data on every model call.  The cache is
+Generic refresh primitive used by ``TeamPolicyRail`` (and any future
+rail) to avoid re-fetching slow data on every model call. The cache is
 unaware of teams or databases -- callers inject:
 
   - ``probe``: an awaitable returning a monotonic integer that
-    increases whenever the underlying data changes (typically a one
-    row SELECT or MAX aggregate).
+    increases whenever the underlying data changes (typically a
+    one-row SELECT or MAX aggregate).
   - ``fetch_and_build``: an awaitable that performs the full data
     fetch and returns the rebuilt :class:`PromptSection` (or ``None``
     when the section should be omitted).

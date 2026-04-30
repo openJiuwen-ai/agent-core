@@ -37,6 +37,7 @@ from openjiuwen.core.common.logging import team_logger
 # Inner event types (local to the coordination layer)
 # ------------------------------------------------------
 
+
 class InnerEventType(str, Enum):
     """Event types generated inside the coordination layer."""
 
@@ -60,7 +61,7 @@ WakeCallback = Callable[[CoordinationEvent], Awaitable[None]]
 """Called with the full event when the loop is woken up."""
 
 
-class CoordinatorLoop:
+class EventBus:
     """Event-driven wake-up loop for team coordination.
 
     Two wake-up paths, same callback:
@@ -119,7 +120,7 @@ class CoordinatorLoop:
         """Start the event loop and polling timer."""
         if self._running:
             return
-        team_logger.info("CoordinatorLoop[{}] starting", self._role.value)
+        team_logger.info("EventBus[{}] starting", self._role.value)
         self._running = True
         self._loop_task = asyncio.create_task(self._run_loop())
         self._mailbox_poll_task = asyncio.create_task(
@@ -133,7 +134,7 @@ class CoordinatorLoop:
         """Stop loops, cancel poll timer, unsubscribe."""
         if not self._running:
             return
-        team_logger.info("CoordinatorLoop[{}] stopping", self._role.value)
+        team_logger.info("EventBus[{}] stopping", self._role.value)
         self._running = False
         # Reset pause flag before touching the poll tasks so partial failures
         # below still leave the state machine consistent: a subsequent start()
@@ -163,8 +164,8 @@ class CoordinatorLoop:
                     timeout=5.0,
                 )
             except (
-                    asyncio.TimeoutError,
-                    asyncio.CancelledError,
+                asyncio.TimeoutError,
+                asyncio.CancelledError,
             ):
                 self._loop_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -179,7 +180,7 @@ class CoordinatorLoop:
         """
         if self._polls_paused:
             return
-        team_logger.info("CoordinatorLoop[{}] pausing polls", self._role.value)
+        team_logger.info("EventBus[{}] pausing polls", self._role.value)
         for task in (self._mailbox_poll_task, self._task_poll_task):
             if task is not None:
                 task.cancel()
@@ -195,7 +196,7 @@ class CoordinatorLoop:
         """Restart periodic poll tasks after a pause."""
         if not self._polls_paused or not self._running:
             return
-        team_logger.info("CoordinatorLoop[{}] resuming polls", self._role.value)
+        team_logger.info("EventBus[{}] resuming polls", self._role.value)
         self._mailbox_poll_task = asyncio.create_task(
             self._poll_loop(InnerEventType.POLL_MAILBOX, self._mailbox_poll_interval),
         )
@@ -231,10 +232,7 @@ class CoordinatorLoop:
             except asyncio.TimeoutError:
                 continue
 
-            if (
-                isinstance(event, InnerEventMessage)
-                and event.event_type == InnerEventType.SHUTDOWN
-            ):
+            if isinstance(event, InnerEventMessage) and event.event_type == InnerEventType.SHUTDOWN:
                 self._event_queue.task_done()
                 break
 
@@ -244,7 +242,7 @@ class CoordinatorLoop:
             except Exception:
                 event_type = getattr(event, "event_type", "unknown")
                 team_logger.exception(
-                    "CoordinatorLoop: error in wake_callback for %s",
+                    "EventBus: error in wake_callback for %s",
                     event_type,
                 )
             finally:
@@ -272,7 +270,7 @@ class CoordinatorLoop:
 
 __all__ = [
     "CoordinationEvent",
-    "CoordinatorLoop",
+    "EventBus",
     "InnerEventMessage",
     "InnerEventType",
     "WakeCallback",

@@ -8,7 +8,7 @@ Houses hard-coded user-facing strings that live inside runtime code paths
 be switched between Chinese and English without source edits.
 
 Modules that already carry their own bilingual dictionaries
-(``agent/team_rail.py``, ``agent/policy.py``) or Markdown-backed
+(``prompts/sections.py``, ``prompts/policy.py``) or Markdown-backed
 descriptions (``tools/locales/``) are intentionally NOT routed through
 this module — they accept a ``language`` argument at call time and
 should continue to do so.

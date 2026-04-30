@@ -1,20 +1,20 @@
 # coding: utf-8
 """Role-aware prompt and policy helpers.
 
-The system prompt is the primary driver of team behavior —
-the CoordinatorLoop only wakes the DeepAgent and injects
-unread messages; all decision logic comes from these prompts.
+The system prompt is the primary driver of team behavior — the
+CoordinatorLoop only wakes the DeepAgent and injects unread messages;
+all decision logic comes from these prompts.
 
 Policy text lives in external Markdown templates under
-``prompts/{cn,en}/`` so that prompt authors can edit them
-without touching Python source.
+``cn/`` and ``en/`` so prompt authors can edit them without touching
+Python source.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from openjiuwen.agent_teams.agent.prompts import (
+from openjiuwen.agent_teams.prompts.loader import (
     load_shared_template,
     load_template,
 )

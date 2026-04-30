@@ -26,7 +26,7 @@ from typing import (
 from pydantic import PrivateAttr
 
 if TYPE_CHECKING:
-    from openjiuwen.agent_teams.agent.model_allocator import Allocation
+    from openjiuwen.agent_teams.models.allocator import Allocation
 
 from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.tools.locales import Translator

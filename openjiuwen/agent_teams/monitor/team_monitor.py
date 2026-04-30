@@ -232,7 +232,7 @@ def create_monitor(team_agent: TeamAgent) -> TeamMonitor:
             fully configured.
     """
     from openjiuwen.agent_teams.schema.team import TeamRole
-    from openjiuwen.agent_teams.spawn.context import get_session_id
+    from openjiuwen.agent_teams.context import get_session_id
 
     if team_agent.role != TeamRole.LEADER:
         raise ValueError("TeamMonitor can only be bound to a leader TeamAgent")

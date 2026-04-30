@@ -12,7 +12,7 @@ from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.status import (
     MemberStatus,
 )
-from openjiuwen.agent_teams.spawn.context import (
+from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
 )

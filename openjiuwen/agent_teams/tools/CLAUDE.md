@@ -159,7 +159,7 @@ Locale files live in `locales/` — flat `STRINGS` dict per language (`cn.py`, `
 Long `_desc` entries can live in Markdown files under `locales/descs/<lang>/<tool_name>.md` instead of the `STRINGS` dict. Markdown files take precedence over dict entries when both exist. This is optional — short descriptions and parameter strings stay in `cn.py`/`en.py`.
 
 - File naming: `descs/cn/build_team.md` → resolves as `build_team._desc` for lang `"cn"`.
-- Files are loaded via `PromptTemplate` (same as `agent/prompts/`) and cached with `@cache`.
+- Files are loaded via `PromptTemplate` (same as `agent_teams/prompts/`) and cached with `@cache`.
 - Supports `{{placeholder}}` interpolation — pass keyword arguments through `t("tool", param="value")`.
 - When migrating a `_desc` from `STRINGS` to a `.md` file, delete the dict entry and leave a comment.
 
@@ -170,7 +170,7 @@ Current `descs/` population: `approve_plan`, `approve_tool`, `build_team`, `clai
 | Layer | Owns | Example file |
 |---|---|---|
 | Tool description (`locales/descs/`) | Operational procedure, call order, workflow steps, anti-patterns, usage scenarios | `build_team.md` |
-| System prompt (`agent/prompts/`) | Role identity, decision principles, state transitions | `leader_policy.md` |
+| System prompt (`agent_teams/prompts/`) | Role identity, decision principles, state transitions | `leader_policy.md` |
 
 Rule: **don't duplicate content across layers**. If the workflow lives in the tool description, the system prompt should not repeat it.
 

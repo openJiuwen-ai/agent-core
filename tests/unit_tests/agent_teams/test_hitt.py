@@ -12,7 +12,7 @@ Covers:
 - Message manager auto-marking messages to/for human_agent as read.
 - ``interaction`` module routing (parse_mention, UserInbox,
   HumanAgentInbox).
-- ``TeamRail.build_team_hitt_section`` role-specific content.
+- ``prompts.sections.build_team_hitt_section`` role-specific content.
 """
 
 from unittest.mock import AsyncMock
@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 
-from openjiuwen.agent_teams.agent.team_rail import build_team_hitt_section
+from openjiuwen.agent_teams.prompts import build_team_hitt_section
 from openjiuwen.agent_teams.constants import (
     HUMAN_AGENT_MEMBER_NAME,
     RESERVED_MEMBER_NAMES,
@@ -48,7 +48,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamMemberSpec,
     TeamRole,
 )
-from openjiuwen.agent_teams.spawn.context import (
+from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
 )

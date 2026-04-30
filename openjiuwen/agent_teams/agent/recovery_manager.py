@@ -11,11 +11,9 @@ from typing import (
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.core.session.agent_team import Session as AgentTeamSession
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.agent_configurator import AgentConfigurator
-    from openjiuwen.agent_teams.agent.session_manager import SessionManager
     from openjiuwen.agent_teams.agent.spawn_manager import SpawnManager
 
 

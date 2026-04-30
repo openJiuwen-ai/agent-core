@@ -6,9 +6,11 @@ from __future__ import annotations
 from typing import (
     TYPE_CHECKING,
     Any,
+    Optional,
 )
 
-from openjiuwen.agent_teams.agent.coordinator import (
+from openjiuwen.agent_teams.agent.coordination.event_bus import (
+    EventBus,
     InnerEventMessage,
     InnerEventType,
 )
@@ -18,42 +20,93 @@ from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session.agent_team import Session as AgentTeamSession
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.agent.coordination.dispatcher import EventDispatcher
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 
 
-class CoordinationManager:
-    """Owns the coordination loop's start/pause/stop lifecycle and the
-    messager transport (subscribe/unsubscribe) wiring.
+class CoordinationKernel:
+    """Owns the coordination subsystem: lifecycle, transport wiring, and
+    inner event ingress.
 
     Holds a back-reference to the owning TeamAgent because the lifecycle
-    coordinates across most of TeamAgent's collaborators (configurator,
-    stream_controller, session_manager, recovery_manager, spawn_manager,
-    coordination_loop, team_member). Centralizing them here keeps
-    TeamAgent focused on the public BaseAgent contract.
+    coordinates across most of TeamAgent's collaborators (stream_controller,
+    session_manager, recovery_manager, spawn_manager, event bus,
+    team_member). Centralizing them here keeps TeamAgent focused on the
+    public BaseAgent contract.
+
+    The internal event bus and dispatcher are constructed and owned here;
+    callers go through this kernel instead of poking at the bus directly.
     """
 
     def __init__(self, host: "TeamAgent") -> None:
         self._host = host
         self._subscribed_topics: list[str] = []
+        self._event_bus: Optional[EventBus] = None
+        self._dispatcher: Optional["EventDispatcher"] = None
+
+    def setup(self, *, role: TeamRole) -> None:
+        """Construct the event bus and dispatcher for the given role.
+
+        Called during TeamAgent.configure() once the role is known. The
+        dispatcher receives ``self._host`` as its DispatcherHost; the
+        bus's wake callback is wired to the dispatcher.
+        """
+        from openjiuwen.agent_teams.agent.coordination.dispatcher import EventDispatcher
+
+        self._dispatcher = EventDispatcher(self._host)
+        self._event_bus = EventBus(role=role, wake_callback=self._dispatcher.dispatch)
+
+    @property
+    def event_bus(self) -> Optional[EventBus]:
+        """Return the event bus instance, or None before setup()."""
+        return self._event_bus
+
+    @property
+    def dispatcher(self) -> Optional["EventDispatcher"]:
+        """Return the event dispatcher, or None before setup()."""
+        return self._dispatcher
 
     @property
     def subscribed_topics(self) -> list[str]:
         return self._subscribed_topics
 
+    async def enqueue(self, event: Any) -> None:
+        """Forward an event to the internal event bus."""
+        if self._event_bus is None:
+            return
+        await self._event_bus.enqueue(event)
+
+    async def pause_polls(self) -> None:
+        """Pause periodic polling on the event bus."""
+        if self._event_bus is not None:
+            await self._event_bus.pause_polls()
+
+    async def resume_polls(self) -> None:
+        """Resume periodic polling on the event bus."""
+        if self._event_bus is not None:
+            await self._event_bus.resume_polls()
+
+    @property
+    def is_running(self) -> bool:
+        """Whether the underlying event bus is running."""
+        return self._event_bus is not None and self._event_bus.is_running
+
     async def start(self, session: Any = None) -> None:
         host = self._host
-        if host.coordination_loop is None:
+        if self._event_bus is None:
             return
         member_name = host.member_name or "?"
         team_logger.info("[{}] coordination starting", member_name)
 
         sess_mgr = host.session_manager
         rm = host.recovery_manager
-        configurator = host.configurator
+        infra = host.infra
+        resources = host.resources
+        blueprint = host.blueprint
 
         sess_mgr.session_id = session.get_session_id() if session else None
         if sess_mgr.session_id:
-            from openjiuwen.agent_teams.spawn.context import set_session_id
+            from openjiuwen.agent_teams.context import set_session_id
 
             set_session_id(sess_mgr.session_id)
         from openjiuwen.core.common.logging.utils import set_member_id
@@ -69,52 +122,51 @@ class CoordinationManager:
                     member_name,
                     type(session).__name__,
                 )
-        if session and configurator.spec and host.role == TeamRole.LEADER:
+        if session and blueprint and blueprint.spec and host.role == TeamRole.LEADER:
             rm.persist_leader_config(session)
-        if configurator.team_backend:
-            await configurator.team_backend.db.initialize()
-            await configurator.team_backend.db.create_cur_session_tables()
+        if infra.team_backend:
+            await infra.team_backend.db.initialize()
+            await infra.team_backend.db.create_cur_session_tables()
 
-        if host.role == TeamRole.LEADER and configurator.team_backend:
-            existing = await configurator.team_backend.db.team.get_team(configurator.team_backend.team_name)
+        if host.role == TeamRole.LEADER and infra.team_backend:
+            existing = await infra.team_backend.db.team.get_team(infra.team_backend.team_name)
             if existing is not None:
-                non_leader_members = await configurator.team_backend.list_members()
+                non_leader_members = await infra.team_backend.list_members()
                 if non_leader_members and all(m.status == MemberStatus.SHUTDOWN.value for m in non_leader_members):
                     team_logger.warning(
                         "[{}] team {} found with all teammates in SHUTDOWN — finalizing prior incomplete cleanup",
                         member_name,
-                        configurator.team_backend.team_name,
+                        infra.team_backend.team_name,
                     )
-                    await configurator.team_backend.clean_team()
+                    await infra.team_backend.clean_team()
                 else:
                     await host.recover_team()
 
-        if configurator.workspace_manager and not configurator.workspace_initialized:
-            remote_url = (
-                configurator.spec.workspace.remote_url if configurator.spec and configurator.spec.workspace else None
-            )
-            await configurator.workspace_manager.initialize(remote_url=remote_url)
-            configurator.workspace_initialized = True
+        if infra.workspace_manager and not infra.workspace_initialized:
+            spec = blueprint.spec if blueprint else None
+            remote_url = spec.workspace.remote_url if spec and spec.workspace else None
+            await infra.workspace_manager.initialize(remote_url=remote_url)
+            infra.workspace_initialized = True
 
         # Wire up the team memory toolkit once the DeepAgent and workspace
         # are ready. init_toolkit is idempotent; calling it on every start
         # is safe.
-        memory_manager = configurator.memory_manager
-        if memory_manager and configurator.deep_agent:
+        memory_manager = resources.memory_manager
+        if memory_manager and resources.deep_agent:
             success = await memory_manager.init_toolkit()
             if success:
-                memory_manager.register_tools(configurator.deep_agent)
-                if memory_manager.extraction_model is None and configurator.deep_agent.deep_config:
-                    memory_manager.set_extraction_model(configurator.deep_agent.deep_config.model)
+                memory_manager.register_tools(resources.deep_agent)
+                if memory_manager.extraction_model is None and resources.deep_agent.deep_config:
+                    memory_manager.set_extraction_model(resources.deep_agent.deep_config.model)
                 await memory_manager.load_and_inject(
-                    configurator.deep_agent,
-                    query=host.pending_user_query or "",
+                    resources.deep_agent,
+                    query=host.state.pending_user_query or "",
                 )
 
         await host.update_status(MemberStatus.READY)
-        if not host.coordination_loop.is_running:
-            await host.coordination_loop.start()
-        if configurator.messager:
+        if not self._event_bus.is_running:
+            await self._event_bus.start()
+        if infra.messager:
             team_name = host.team_name
             if team_name and not self._subscribed_topics:
                 await self.subscribe_transport(team_name)
@@ -124,26 +176,27 @@ class CoordinationManager:
         team_logger.info("[{}] coordination pausing (persistent)", host.member_name or "?")
         await self.drain_agent_task()
         host.persist_allocator_state()
-        if host.configurator.messager and host.role == TeamRole.LEADER:
+        messager = host.infra.messager
+        if messager and host.role == TeamRole.LEADER:
             from openjiuwen.agent_teams.schema.events import (
                 EventMessage,
                 TeamStandbyEvent,
                 TeamTopic,
             )
-            from openjiuwen.agent_teams.spawn.context import get_session_id
+            from openjiuwen.agent_teams.context import get_session_id
 
             team_name = host.team_name
             if team_name:
                 try:
-                    await host.configurator.messager.publish(
+                    await messager.publish(
                         topic_id=TeamTopic.TEAM.build(get_session_id(), team_name),
                         message=EventMessage.from_event(TeamStandbyEvent(team_name=team_name)),
                     )
                 except Exception as e:
                     team_logger.error("Failed to publish TEAM_STANDBY: {}", e)
         await self.unsubscribe_transport()
-        if host.coordination_loop:
-            await host.coordination_loop.stop()
+        if self._event_bus:
+            await self._event_bus.stop()
         self.close_stream()
         host.session_manager.team_session = None
 
@@ -155,26 +208,27 @@ class CoordinationManager:
         await self.unsubscribe_transport()
         await host.spawn_manager.cancel_recovery_tasks()
         await host.spawn_manager.shutdown_all_handles()
-        memory_manager = host.configurator.memory_manager
+        memory_manager = host.resources.memory_manager
         if memory_manager:
             await memory_manager.close()
-        if host.coordination_loop is None:
+        if self._event_bus is None:
             return
-        await host.coordination_loop.stop()
+        await self._event_bus.stop()
         self.close_stream()
         host.session_manager.team_session = None
 
     async def subscribe_transport(self, team_name: str) -> None:
         host = self._host
-        if not host.configurator.messager or not host.coordination_loop:
+        messager = host.infra.messager
+        if not messager or not self._event_bus:
             return
         from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
-        from openjiuwen.agent_teams.spawn.context import get_session_id
+        from openjiuwen.agent_teams.context import get_session_id
 
         local_member_name = host.member_name or ""
 
         async def _filter_self(event: EventMessage) -> None:
-            for listener in host.event_listeners:
+            for listener in host.state.event_listeners:
                 try:
                     await listener(event)
                 except Exception as e:
@@ -182,38 +236,42 @@ class CoordinationManager:
             if local_member_name and event.sender_id == local_member_name:
                 team_logger.debug("ignoring self-published event: {}", event.event_type)
                 return
-            await host.coordination_loop.enqueue(event)
+            await self._event_bus.enqueue(event)
 
         session_id = get_session_id()
-        await host.configurator.messager.register_direct_message_handler(
-            host.coordination_loop.enqueue,
-        )
+        await messager.register_direct_message_handler(self._event_bus.enqueue)
         for topic in TeamTopic:
             topic_str = topic.build(session_id, team_name)
-            await host.configurator.messager.subscribe(topic_str, _filter_self)
+            await messager.subscribe(topic_str, _filter_self)
             self._subscribed_topics.append(topic_str)
 
     async def unsubscribe_transport(self) -> None:
         host = self._host
-        if not host.configurator.messager:
+        messager = host.infra.messager
+        if not messager:
             return
         try:
-            await host.configurator.messager.unregister_direct_message_handler()
+            await messager.unregister_direct_message_handler()
         except Exception:
             team_logger.debug("failed to unregister direct message handler during cleanup")
         for topic in self._subscribed_topics:
             try:
-                await host.configurator.messager.unsubscribe(topic)
+                await messager.unsubscribe(topic)
             except Exception:
                 team_logger.debug("failed to unsubscribe topic {} during cleanup", topic)
         self._subscribed_topics.clear()
 
     async def enqueue_user_input(self, inputs: Any) -> None:
-        host = self._host
-        if host.coordination_loop is None:
+        """Push a user-input inner event onto the bus.
+
+        Accepts either a string (used directly as content) or a dict with
+        a 'query' key (used to extract the content). The unified entry
+        point used by both invoke()/stream() and interact().
+        """
+        if self._event_bus is None:
             return
         query = inputs.get("query", "") if isinstance(inputs, dict) else inputs
-        await host.coordination_loop.enqueue(
+        await self._event_bus.enqueue(
             InnerEventMessage(
                 event_type=InnerEventType.USER_INPUT,
                 payload={"content": query},
@@ -224,11 +282,11 @@ class CoordinationManager:
         host = self._host
         if host.role == TeamRole.LEADER:
             return
-        gate = host.configurator.first_iter_gate
-        if gate is None or host.coordination_loop is None:
+        gate = host.resources.first_iter_gate
+        if gate is None or self._event_bus is None:
             return
         await gate.wait()
-        await host.coordination_loop.enqueue(
+        await self._event_bus.enqueue(
             InnerEventMessage(event_type=InnerEventType.POLL_MAILBOX),
         )
 
@@ -244,17 +302,17 @@ class CoordinationManager:
             return
         if host.has_pending_interrupt():
             return
-        if host.coordination_loop is None:
+        if self._event_bus is None:
             return
-        await host.coordination_loop.enqueue(
+        await self._event_bus.enqueue(
             InnerEventMessage(event_type=InnerEventType.POLL_MAILBOX),
         )
 
     async def finalize_round(self) -> None:
         host = self._host
-        team_member = host.team_member
+        team_member = host.state.team_member
         shutdown_requested = team_member is not None and await team_member.status() == MemberStatus.SHUTDOWN_REQUESTED
-        memory_manager = host.configurator.memory_manager
+        memory_manager = host.resources.memory_manager
         if memory_manager:
             await memory_manager.extract_after_round()
         if host.lifecycle == "persistent" and not shutdown_requested:

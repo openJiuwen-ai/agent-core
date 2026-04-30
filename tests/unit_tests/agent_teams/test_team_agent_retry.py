@@ -58,9 +58,13 @@ def _make_stream_controller_stub() -> StreamController:
     """Return a minimal StreamController wired to record execution events.
 
     Uses real status/execution callbacks (no-op or recorder) and synthetic
-    deep_agent / member_name so that ``_execute_round`` can drive the retry
-    loop end to end without requiring a fully bootstrapped TeamAgent.
+    blueprint / state / resources so that ``_execute_round`` can drive
+    the retry loop end to end without requiring a fully bootstrapped
+    TeamAgent.
     """
+    from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
+    from openjiuwen.agent_teams.agent.state import TeamAgentState
+
     execution_log: list[ExecutionStatus] = []
 
     async def _record_execution(status: ExecutionStatus) -> None:
@@ -69,13 +73,16 @@ def _make_stream_controller_stub() -> StreamController:
     async def _noop_status(_: Any) -> None:
         return None
 
+    state = TeamAgentState(session_id="sess-1")
+    resources = PrivateAgentResources(deep_agent=object())  # type: ignore[arg-type]
+    fake_blueprint = SimpleNamespace(member_name="stub")
+
     sc = StreamController(
-        deep_agent_getter=lambda: object(),
-        member_name_getter=lambda: "stub",
+        blueprint_getter=lambda: fake_blueprint,
+        state=state,
+        resources=resources,
         status_updater=_noop_status,
         execution_updater=_record_execution,
-        team_member_getter=lambda: None,
-        session_id_getter=lambda: "sess-1",
     )
     sc.stream_queue = asyncio.Queue()
     sc._execution_log = execution_log  # type: ignore[attr-defined]

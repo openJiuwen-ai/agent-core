@@ -10,7 +10,7 @@ from typing import (
     runtime_checkable,
 )
 
-from openjiuwen.agent_teams.agent.coordinator import (
+from openjiuwen.agent_teams.agent.coordination.event_bus import (
     CoordinationEvent,
     InnerEventMessage,
     InnerEventType,
@@ -23,47 +23,32 @@ from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
-    from openjiuwen.agent_teams.schema.team import TeamSpec
-    from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
-    from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
+    from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
+    from openjiuwen.agent_teams.agent.infra import TeamInfra
 
 
 @runtime_checkable
 class DispatcherHost(Protocol):
     """Contract between EventDispatcher and its owning agent.
 
-    Defines the minimal surface the dispatcher needs to drive
-    coordination — agent internals stay behind this boundary.
+    Splits into:
+    - data access: ``blueprint`` (static config) and ``infra`` (per-process
+      infrastructure including message_manager / task_manager).
+    - behavior callbacks: round control, polling, message delivery.
+
+    The dispatcher reads role / lifecycle / member_name / team_spec /
+    message_manager / task_manager off these two containers directly
+    rather than going through one-off accessor methods on the host.
     """
 
     @property
-    def role(self) -> TeamRole:
-        """Return the current team role."""
+    def blueprint(self) -> "TeamAgentBlueprint":
+        """Return the static assembly blueprint."""
         ...
 
     @property
-    def lifecycle(self) -> str:
-        """Return the team lifecycle mode."""
-        ...
-
-    @property
-    def member_name(self) -> str | None:
-        """Return the current member_name, or None if unassigned."""
-        ...
-
-    @property
-    def message_manager(self) -> TeamMessageManager | None:
-        """Return the bound message manager, or None if not configured."""
-        ...
-
-    @property
-    def task_manager(self) -> TeamTaskManager | None:
-        """Return the bound task manager, or None if not configured."""
-        ...
-
-    @property
-    def team_spec(self) -> TeamSpec | None:
-        """Return the bound team spec, or None if not configured."""
+    def infra(self) -> "TeamInfra":
+        """Return the per-process team infrastructure container."""
         ...
 
     async def has_team_member(self, member_name: str) -> bool:
@@ -181,7 +166,7 @@ class EventDispatcher:
             return
 
         # --- Transport events (cross-process EventMessage) ---
-        member_name = host.member_name
+        member_name = host.blueprint.member_name
         if not member_name:
             team_logger.debug("no member_name, skipping transport event")
             return
@@ -203,7 +188,7 @@ class EventDispatcher:
             # the teardown for temporary leaders is handled by the natural
             # _finalize_round path instead. Skip the leader branch as
             # defense in depth on top of the sender_id self-filter.
-            if host.role == TeamRole.LEADER:
+            if host.blueprint.role == TeamRole.LEADER:
                 team_logger.debug(
                     "[{}] ignoring TEAM_CLEANED on leader path",
                     member_name,
@@ -224,17 +209,17 @@ class EventDispatcher:
             await self._handle_member_event(event)
             return
 
-        if event_type in (TeamEvent.MESSAGE, TeamEvent.BROADCAST) and host.message_manager:
+        if event_type in (TeamEvent.MESSAGE, TeamEvent.BROADCAST) and host.infra.message_manager:
             # Leader auto-acks teammate→user replies. The "user" pseudo-member
             # has no agent process polling its mailbox, so without this the
             # message would stay unread forever and re-fire dispatcher wakes.
-            if host.role == TeamRole.LEADER and event_type == TeamEvent.MESSAGE:
+            if host.blueprint.role == TeamRole.LEADER and event_type == TeamEvent.MESSAGE:
                 await self._ack_user_bound_message(event)
             await host.resume_polls()
             await self._process_unread_messages(member_name)
             return
 
-        if event_type == TeamEvent.TASK_CLAIMED and host.task_manager:
+        if event_type == TeamEvent.TASK_CLAIMED and host.infra.task_manager:
             # Directed assignment from another node (self-claims are
             # filtered upstream via sender_id). Must reach the agent
             # regardless of execution state, so we go through
@@ -254,7 +239,7 @@ class EventDispatcher:
                 await host.deliver_input(content)
                 return
 
-        if event_type in self._TASK_EVENTS and not host.has_in_flight_round() and host.task_manager:
+        if event_type in self._TASK_EVENTS and not host.has_in_flight_round() and host.infra.task_manager:
             # Gate on the task-level check, not ``is_agent_running``: nudging
             # during the pre-stream or finalize window would call
             # ``_start_agent`` and overwrite the still-live ``_agent_task``.
@@ -281,9 +266,9 @@ class EventDispatcher:
             return
 
         if event.event_type == InnerEventType.POLL_TASK:
-            member_name = host.member_name
+            member_name = host.blueprint.member_name
             team_logger.debug("poll task: member_name={}, agent_running={}", member_name, host.is_agent_running())
-            if member_name and host.task_manager:
+            if member_name and host.infra.task_manager:
                 await self._check_stale_claimed_tasks()
                 await self._check_stale_pending_tasks()
                 # if not host.is_agent_running():
@@ -291,9 +276,9 @@ class EventDispatcher:
             return
 
         if event.event_type == InnerEventType.POLL_MAILBOX:
-            member_name = host.member_name
+            member_name = host.blueprint.member_name
             team_logger.debug("poll mailbox: member_name={}", member_name)
-            if member_name and host.message_manager:
+            if member_name and host.infra.message_manager:
                 await self._process_unread_messages(member_name)
 
     # ------------------------------------------------------------------
@@ -318,7 +303,7 @@ class EventDispatcher:
 
     async def _send_user_direct_message(self, to_member_name: str, content: str) -> None:
         """Write a user→member direct message via the user inbox."""
-        mm = self._host.message_manager
+        mm = self._host.infra.message_manager
         if mm is None:
             team_logger.warning("message_manager unavailable, cannot send user direct message")
             return
@@ -335,14 +320,14 @@ class EventDispatcher:
         Teammate: handle cancel events targeting self.
         Leader: observe all other members' lifecycle events.
         """
-        if self._host.role == TeamRole.LEADER:
+        if self._host.blueprint.role == TeamRole.LEADER:
             await self._handle_leader_member_event(event)
         else:
             await self._handle_teammate_member_event(event)
 
     async def _handle_teammate_member_event(self, event: CoordinationEvent) -> None:
         """Handle member events as a teammate — only react to events targeting self."""
-        member_name = self._host.member_name
+        member_name = self._host.blueprint.member_name
         target_id = event.get_payload().member_name
         if target_id is None or target_id != member_name:
             return
@@ -412,8 +397,8 @@ class EventDispatcher:
             return
         if new_status == old_status:
             return
-        task_manager = self._host.task_manager
-        message_manager = self._host.message_manager
+        task_manager = self._host.infra.task_manager
+        message_manager = self._host.infra.message_manager
         if task_manager is None or message_manager is None:
             return
 
@@ -461,7 +446,7 @@ class EventDispatcher:
     async def _handle_tool_approval_result(self, event: CoordinationEvent) -> None:
         """Resume a teammate HITL interrupt from a structured approval event."""
         host = self._host
-        member_name = host.member_name
+        member_name = host.blueprint.member_name
         payload = event.get_payload()
         target_id = payload.member_name
 
@@ -518,7 +503,7 @@ class EventDispatcher:
                 team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
                 await host.deliver_input(text, use_steer=use_steer)
-                await host.message_manager.mark_message_read(msg.message_id, member_name)
+                await host.infra.message_manager.mark_message_read(msg.message_id, member_name)
 
     async def _ack_user_bound_message(self, event: CoordinationEvent) -> None:
         """Mark a teammate→user direct message as read on the user's behalf.
@@ -531,7 +516,7 @@ class EventDispatcher:
         payload: MessageEvent = event.get_payload()
         if payload.to_member_name != "user":
             return
-        mm = self._host.message_manager
+        mm = self._host.infra.message_manager
         if mm is None:
             return
         await mm.mark_message_read(payload.message_id, "user")
@@ -546,7 +531,7 @@ class EventDispatcher:
 
         Returns merged list sorted by timestamp descending (newest first).
         """
-        mm = self._host.message_manager
+        mm = self._host.infra.message_manager
         direct = await mm.get_messages(to_member_name=member_name, unread_only=True)
         broadcasts = await mm.get_broadcast_messages(member_name=member_name, unread_only=True)
         merged = list(direct) + list(broadcasts)
@@ -589,17 +574,17 @@ class EventDispatcher:
                 re-trigger them.
         """
         host = self._host
-        all_tasks = await host.task_manager.list_tasks()
+        all_tasks = await host.infra.task_manager.list_tasks()
         _terminal = {"completed", "cancelled"}
         incomplete = [t for t in all_tasks if t.status not in _terminal]
 
-        if from_poll and host.role == TeamRole.LEADER and not incomplete:
+        if from_poll and host.blueprint.role == TeamRole.LEADER and not incomplete:
             return
 
         team_logger.debug("[{}] nudge_idle_agent: {} incomplete tasks", member_name, len(incomplete))
-        if host.role == TeamRole.LEADER:
+        if host.blueprint.role == TeamRole.LEADER:
             if not incomplete:
-                lifecycle = host.lifecycle
+                lifecycle = host.blueprint.lifecycle
                 if lifecycle == "persistent":
                     prompt = t("dispatcher.all_done_persistent")
                 else:
@@ -631,13 +616,13 @@ class EventDispatcher:
         polls from re-nudging inside the same stale window.
         """
         host = self._host
-        task_manager = host.task_manager
+        task_manager = host.infra.task_manager
         if task_manager is None:
             return
 
         claimed = await task_manager.list_tasks(status=TaskStatus.CLAIMED.value)
-        own_name = host.member_name
-        is_leader = host.role == TeamRole.LEADER
+        own_name = host.blueprint.member_name
+        is_leader = host.blueprint.role == TeamRole.LEADER
         relevant = [t for t in claimed if t.assignee and (t.assignee == own_name or is_leader)]
 
         current_ids = {t.task_id for t in relevant}
@@ -665,9 +650,9 @@ class EventDispatcher:
         """Dispatch a stale-claim nudge to self or to the assigned member."""
         host = self._host
         assignee = task.assignee
-        if assignee and assignee == host.member_name:
+        if assignee and assignee == host.blueprint.member_name:
             await self._self_nudge_stale_claim(task)
-        elif host.role == TeamRole.LEADER and assignee:
+        elif host.blueprint.role == TeamRole.LEADER and assignee:
             await self._leader_nudge_stale_claim(task)
 
     @staticmethod
@@ -686,17 +671,17 @@ class EventDispatcher:
         await host.deliver_input(content)
         team_logger.info(
             "[{}] self-nudged stale claimed task {}",
-            host.member_name,
+            host.blueprint.member_name,
             task.task_id,
         )
 
     async def _leader_nudge_stale_claim(self, task) -> None:
         """Send a direct reminder to the member holding a stale claim."""
         host = self._host
-        if host.message_manager is None:
+        if host.infra.message_manager is None:
             return
         content = self._format_stale_claim_nudge(task)
-        await host.message_manager.send_message(content, task.assignee)
+        await host.infra.message_manager.send_message(content, task.assignee)
         team_logger.info(
             "[leader] nudged {} about stale claimed task {}",
             task.assignee,
@@ -717,9 +702,9 @@ class EventDispatcher:
         stale window.
         """
         host = self._host
-        if host.role != TeamRole.LEADER:
+        if host.blueprint.role != TeamRole.LEADER:
             return
-        task_manager = host.task_manager
+        task_manager = host.infra.task_manager
         if task_manager is None:
             return
 

@@ -37,8 +37,8 @@ from typing import Any
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 
+from openjiuwen.agent_teams.models import ModelPoolEntry
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
-from openjiuwen.agent_teams.schema.team import ModelPoolEntry
 from openjiuwen.core.common.logging.log_config import (
     configure_log,
     configure_log_config,
