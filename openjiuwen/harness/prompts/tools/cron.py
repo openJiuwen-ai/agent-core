@@ -296,8 +296,8 @@ FIELD_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
         "en": "Compatibility timezone field",
     },
     "wake_offset_seconds": {
-        "cn": "兼容层提前唤醒秒数。默认 60，若用户未指定则使用 60 秒。",
-        "en": "Compatibility wake offset in seconds. Default 60; use 60 seconds if user does not specify.",
+        "cn": "兼容层提前唤醒秒数。默认 300，若用户未指定则使用 300 秒。",
+        "en": "Compatibility wake offset in seconds. Default 300; use 300 seconds if user does not specify.",
     },
     "description": {
         "cn": "具体任务内容，到点执行时发给助手。不要包含时间/频率信息（如'每隔40分钟'、'每天9点'）",
@@ -720,8 +720,8 @@ LEGACY_FIELD_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
         "en": "Task content sent to assistant at scheduled time. Do NOT include time/frequency info",
     },
     "wake_offset_seconds": {
-        "cn": "提前多少秒执行，默认 60。若用户未指定，则默认使用 60 秒。",
-        "en": "Wake offset in seconds, default 60. If user does not specify, use 60 seconds by default.",
+        "cn": "提前多少秒执行，默认 300。若用户未指定，则默认使用 300 秒。",
+        "en": "Wake offset in seconds, default 300. If user does not specify, use 300 seconds by default.",
     },
 }
 
@@ -784,7 +784,7 @@ def get_cron_create_job_input_params(language: str = "cn") -> Dict[str, Any]:
             "wake_offset_seconds": {
                 "type": "integer",
                 "description": _legacy_desc("wake_offset_seconds", language),
-                "default": 60,
+                "default": 300,
             },
         },
         "required": ["name", "cron_expr", "timezone", "description"],
