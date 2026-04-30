@@ -129,7 +129,7 @@ Leader 身份配置。
 
 存储层配置。
 
-* **type**(str): 存储类型 — `sqlite` 或 `memory`。
+* **type**(str): 存储类型 — `sqlite`、`postgresql` 或 `memory`。
 * **params**(dict, 可选): 存储参数。默认值：`{}`。
 
 ## function create_agent_team

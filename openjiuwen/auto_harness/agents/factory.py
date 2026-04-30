@@ -25,13 +25,7 @@ from openjiuwen.auto_harness.prompts.sections import (
 )
 
 if TYPE_CHECKING:
-    from openjiuwen.auto_harness.schema import (
-        AutoHarnessConfig,
-    )
-    from openjiuwen.core.single_agent.rail.base import (
-        AgentRail,
-    )
-    from openjiuwen.harness.deep_agent import DeepAgent
+    pass
 
 _PACKAGE_DIR = Path(__file__).resolve().parent.parent
 _SKILLS_DIR = str(_PACKAGE_DIR / "skills")
@@ -61,6 +55,9 @@ def create_auto_harness_agent(
     workspace_override: Optional[str] = None,
     edit_safety_rail: Optional["AgentRail"] = None,
     skill_names: Optional[List[str]] = None,
+    enable_task_loop: bool = True,
+    enable_task_planning: bool = True,
+    enable_progress_repeat: bool = True,
     extra_rails: Optional[List["AgentRail"]] = None,
     extra_tools: Optional[List[Tool | ToolCard]] = None,
 ) -> "DeepAgent":
@@ -80,6 +77,16 @@ def create_auto_harness_agent(
             ],
         )
     )
+    if enable_task_planning:
+        from openjiuwen.harness.rails import (
+            TaskPlanningRail,
+        )
+
+        rails.append(
+            TaskPlanningRail(
+                enable_progress_repeat=enable_progress_repeat
+            )
+        )
     if extra_rails:
         rails.extend(extra_rails)
 
@@ -109,7 +116,8 @@ def create_auto_harness_agent(
         rails=rails or None,
         workspace=workspace,
         language=config.language,
-        enable_task_planning=True,
+        enable_task_loop=enable_task_loop,
+        enable_task_planning=enable_task_planning,
         enable_async_subagent=True,
         max_iterations=config.resolve_agent_iterations(
             "implement", 30
@@ -131,6 +139,9 @@ def create_commit_agent(
         config,
         workspace_override=workspace_override,
         skill_names=["commit", "communicate"],
+        enable_task_loop=False,
+        enable_task_planning=False,
+        enable_progress_repeat=False,
     )
 
 
@@ -155,8 +166,8 @@ def _build_rails(
     from openjiuwen.harness.cli.rails.tool_tracker import (
         ToolTrackingRail,
     )
-    from openjiuwen.harness.rails.filesystem_rail import (
-        FileSystemRail,
+    from openjiuwen.harness.rails.sys_operation_rail import (
+        SysOperationRail,
     )
     from openjiuwen.harness.rails.lsp_rail import (
         LspRail,
@@ -164,7 +175,7 @@ def _build_rails(
 
     return [
         ToolTrackingRail(),
-        FileSystemRail(),
+        SysOperationRail(),
         AutoHarnessContextRail(preset=True),
         LspRail(),
         AutoHarnessExperienceRail(
@@ -278,8 +289,8 @@ def _build_readonly_rails(
     from openjiuwen.harness.cli.rails.tool_tracker import (
         ToolTrackingRail,
     )
-    from openjiuwen.harness.rails.filesystem_rail import (
-        FileSystemRail,
+    from openjiuwen.harness.rails.sys_operation_rail import (
+        SysOperationRail,
     )
     from openjiuwen.harness.rails.lsp_rail import (
         LspRail,
@@ -287,7 +298,7 @@ def _build_readonly_rails(
 
     return [
         ToolTrackingRail(),
-        FileSystemRail(),
+        SysOperationRail(),
         AutoHarnessContextRail(preset=True),
         LspRail(),
         AutoHarnessExperienceRail(
@@ -302,7 +313,7 @@ def _build_skill_rail(
     skill_names: List[str],
 ) -> "AgentRail":
     """Build a skill rail from package-local and configured skill roots."""
-    from openjiuwen.harness.rails.skill_use_rail import (
+    from openjiuwen.harness.rails.skills.skill_use_rail import (
         SkillUseRail,
     )
 
@@ -476,6 +487,36 @@ def create_select_pipeline_agent(
         auto_create_workspace=False,
         sys_operation=_build_trusted_local_sys_operation(
             "auto-harness-select-pipeline"
+        ),
+    )
+
+
+def create_pr_draft_agent(
+    config: "AutoHarnessConfig",
+    *,
+    workspace_override: Optional[str] = None,
+) -> "DeepAgent":
+    """Create the communicate-only agent used for PR drafts."""
+    prompt = _load_prompt("pr_draft.md")
+    rails = _build_readonly_rails(config)
+    rails.append(_build_skill_rail(config, ["communicate"]))
+    workspace = workspace_override or config.workspace
+    return create_deep_agent(
+        model=config.model,
+        card=AgentCard(
+            name="auto-harness-pr-draft",
+            description="根据任务事实生成 GitCode PR draft",
+        ),
+        system_prompt=prompt,
+        rails=rails or None,
+        workspace=workspace,
+        language=config.language,
+        max_iterations=config.resolve_agent_iterations(
+            "pr_draft", 5
+        ),
+        auto_create_workspace=False,
+        sys_operation=_build_trusted_local_sys_operation(
+            "auto-harness-pr-draft"
         ),
     )
 

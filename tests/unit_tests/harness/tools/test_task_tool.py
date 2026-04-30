@@ -16,7 +16,7 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.config import DeepAgentConfig, SubAgentConfig
-from openjiuwen.harness.tools.task_tool import TaskTool, create_task_tool
+from openjiuwen.harness.tools import TaskTool, create_task_tool
 
 
 def _create_dummy_model() -> Model:
@@ -42,6 +42,9 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
         called_inputs: dict[str, str] = {}
 
         class FakeSubAgent:
+            def __init__(self):
+                self.card = AgentCard(name="test_agent", description="test", id="test_id")
+
             async def invoke(self, inputs: dict[str, str]) -> dict[str, str]:
                 called_inputs.update(inputs)
                 return {"output": "done"}
@@ -74,7 +77,7 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(result.success)
-        self.assertEqual(result.data, {"output": "done"})
+        self.assertEqual(result.data, {"output": "done", 'agent_id': 'test_id'})
         self.assertIsNone(result.error)
         self.assertEqual(called_inputs["query"], "run task")
         # task_tool: f"{parent_session_id}_sub_{subagent_type}_{uuid.uuid4().hex[:8]}"
@@ -109,6 +112,9 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
         called_inputs: dict[str, str] = {}
 
         class FakeSubAgent:
+            def __init__(self):
+                self.card = AgentCard(name="test_agent", description="test", id="test_id")
+
             async def invoke(self, inputs: dict[str, str]) -> dict[str, str]:
                 called_inputs.update(inputs)
                 return {"output": "done"}

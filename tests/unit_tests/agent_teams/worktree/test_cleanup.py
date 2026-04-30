@@ -23,26 +23,33 @@ def _reset_cwd_state():
 
 
 class TestIsEphemeralSlug:
+    @pytest.mark.level0
     def test_teammate_hex8(self):
         assert is_ephemeral_slug("teammate-a1b2c3d4") is True
         logger.info("teammate-a1b2c3d4 recognized as ephemeral")
 
+    @pytest.mark.level0
     def test_agent_hex7(self):
         assert is_ephemeral_slug("agent-1234567") is True
         logger.info("agent-1234567 recognized as ephemeral")
 
+    @pytest.mark.level0
     def test_feature_branch_not_ephemeral(self):
         assert is_ephemeral_slug("feature-auth") is False
 
+    @pytest.mark.level0
     def test_arbitrary_slug_not_ephemeral(self):
         assert is_ephemeral_slug("my-worktree") is False
 
+    @pytest.mark.level0
     def test_teammate_too_short(self):
         assert is_ephemeral_slug("teammate-abc") is False
 
+    @pytest.mark.level1
     def test_teammate_uppercase_not_matched(self):
         assert is_ephemeral_slug("teammate-A1B2C3D4") is False
 
+    @pytest.mark.level1
     def test_agent_too_long(self):
         assert is_ephemeral_slug("agent-12345678") is False
         logger.info("Non-ephemeral slugs correctly rejected")
@@ -77,6 +84,7 @@ class TestCleanupStaleWorktrees:
     @patch("openjiuwen.agent_teams.worktree.cleanup.status_porcelain", new_callable=AsyncMock)
     @patch("openjiuwen.agent_teams.worktree.cleanup.has_unpushed_commits", new_callable=AsyncMock)
     @patch("openjiuwen.agent_teams.worktree.cleanup.worktree_prune", new_callable=AsyncMock)
+    @pytest.mark.level1
     async def test_expired_no_changes_removed(
         self, mock_prune, mock_unpushed, mock_status, mock_git_root, mock_backend, wt_dir
     ):
@@ -103,6 +111,7 @@ class TestCleanupStaleWorktrees:
 
     @pytest.mark.asyncio
     @patch("openjiuwen.agent_teams.worktree.cleanup.find_canonical_git_root", new_callable=AsyncMock)
+    @pytest.mark.level1
     async def test_not_expired_skipped(self, mock_git_root, mock_backend, wt_dir):
         repo, wt_base = wt_dir
         mock_git_root.return_value = str(repo)
@@ -123,6 +132,7 @@ class TestCleanupStaleWorktrees:
     @patch("openjiuwen.agent_teams.worktree.cleanup.find_canonical_git_root", new_callable=AsyncMock)
     @patch("openjiuwen.agent_teams.worktree.cleanup.status_porcelain", new_callable=AsyncMock)
     @patch("openjiuwen.agent_teams.worktree.cleanup.has_unpushed_commits", new_callable=AsyncMock)
+    @pytest.mark.level1
     async def test_has_changes_skipped(
         self, mock_unpushed, mock_status, mock_git_root, mock_backend, wt_dir
     ):
@@ -148,6 +158,7 @@ class TestCleanupStaleWorktrees:
     @patch("openjiuwen.agent_teams.worktree.cleanup.find_canonical_git_root", new_callable=AsyncMock)
     @patch("openjiuwen.agent_teams.worktree.cleanup.status_porcelain", new_callable=AsyncMock)
     @patch("openjiuwen.agent_teams.worktree.cleanup.has_unpushed_commits", new_callable=AsyncMock)
+    @pytest.mark.level1
     async def test_has_unpushed_commits_skipped(
         self, mock_unpushed, mock_status, mock_git_root, mock_backend, wt_dir
     ):
@@ -173,6 +184,7 @@ class TestCleanupStaleWorktrees:
     @patch("openjiuwen.agent_teams.worktree.cleanup.find_canonical_git_root", new_callable=AsyncMock)
     @patch("openjiuwen.agent_teams.worktree.cleanup.status_porcelain", new_callable=AsyncMock)
     @patch("openjiuwen.agent_teams.worktree.cleanup.has_unpushed_commits", new_callable=AsyncMock)
+    @pytest.mark.level1
     async def test_current_worktree_skipped(
         self, mock_unpushed, mock_status, mock_git_root, mock_backend, wt_dir
     ):
@@ -198,6 +210,7 @@ class TestCleanupStaleWorktrees:
 
     @pytest.mark.asyncio
     @patch("openjiuwen.agent_teams.worktree.cleanup.find_canonical_git_root", new_callable=AsyncMock)
+    @pytest.mark.level1
     async def test_no_repo_returns_zero(self, mock_git_root, mock_backend):
         mock_git_root.return_value = None
 

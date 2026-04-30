@@ -13,7 +13,7 @@ import pytest
 pytestmark = pytest.mark.skipif(sys.platform == "darwin", reason="PowerShell tests are not supported on macOS")
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.harness.tools.powershell import PowerShellTool
+from openjiuwen.harness.tools import PowerShellTool
 
 
 def _mock_result(*, stdout: str = "", stderr: str = "", exit_code: int = 0) -> SimpleNamespace:

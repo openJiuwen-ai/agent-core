@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import os
+import base64
 import tempfile
 import shutil
 from types import MethodType
@@ -12,14 +13,15 @@ import pytest_asyncio
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.core.sys_operation.cwd import get_cwd, set_cwd
-from openjiuwen.harness.prompts.sections.tools.filesystem import (
+from openjiuwen.harness.prompts.tools.filesystem import (
     get_glob_input_params,
     get_grep_input_params,
 )
-from openjiuwen.harness.tools.filesystem import (
+from openjiuwen.harness.tools import (
     ReadFileTool, WriteFileTool, EditFileTool,
-    GlobTool, ListDirTool, GrepTool, _FILE_READ_REGISTRY,
+    GlobTool, ListDirTool, GrepTool,
 )
+from openjiuwen.harness.tools.filesystem import _FILE_READ_REGISTRY
 
 
 @pytest.fixture
@@ -68,6 +70,25 @@ async def test_file_read_write(sys_op, temp_dir):
     read_partial = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 1})
     assert read_partial.success is True
     assert "第二行" in read_partial.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_image_returns_multimodal_payload(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "one_pixel.png")
+    raw = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+    with open(file_path, "wb") as fh:
+        fh.write(raw)
+
+    read_res = await read_tool.invoke({"file_path": file_path})
+
+    assert read_res.success is True
+    assert "Image file read:" in read_res.data["content"]
+    assert "base64," not in read_res.data["content"]
+    assert read_res.data["multimodal"][0]["type"] == "image"
+    assert read_res.data["multimodal"][0]["data_url"].startswith("data:image/")
 
 
 @pytest.mark.asyncio
@@ -569,7 +590,7 @@ async def test_edit_file_tool_html_desanitization(sys_op, temp_dir):
 
 
 @pytest.mark.asyncio
-async def test_read_file_tool_text_and_unchanged(sys_op, temp_dir):
+async def test_read_file_tool_text(sys_op, temp_dir):
     write_tool = WriteFileTool(sys_op)
     read_tool = ReadFileTool(sys_op)
     file_path = os.path.join(temp_dir, "max.txt")
@@ -578,14 +599,14 @@ async def test_read_file_tool_text_and_unchanged(sys_op, temp_dir):
 
     first = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 2})
     assert first.success is True
-    assert first.data["unchanged"] is False
     assert first.data["content"].startswith("     1\tbeta")
     assert "     2\tgamma" in first.data["content"]
 
+    # Second read of the same range always returns full content (no dedup).
     second = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 2})
     assert second.success is True
-    assert second.data["unchanged"] is True
-    assert "File unchanged since last read" in second.data["content"]
+    assert second.data["content"].startswith("     1\tbeta")
+    assert "     2\tgamma" in second.data["content"]
 
     # Relative paths resolve against get_cwd(); the file is not in the default cwd.
     relative_missing = await read_tool.invoke({"file_path": "max.txt"})

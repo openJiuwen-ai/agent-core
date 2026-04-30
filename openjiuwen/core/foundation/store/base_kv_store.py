@@ -15,7 +15,16 @@ from typing import (
 
 class BaseKVStore(ABC):
     """
-    Abstract base class defining a unified interface for a key-value storage.
+    Abstract base class for all KV-store backends.
+
+    **Plugin authoring**: Stable public API. Third-party packages may
+    subclass this and export the class directly from their package;
+    callers import and instantiate the class directly (there is no
+    ``create_kv_store`` factory — KV stores are used via direct import,
+    not name-based lookup).
+
+    See :class:`openjiuwen.core.foundation.store.base_vector_store.BaseVectorStore`
+    for the plugin contract and compatibility policy.
     """
 
     @abstractmethod

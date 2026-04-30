@@ -8,22 +8,22 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from openjiuwen.harness.prompts.sections.tools import get_tool_input_params
-from openjiuwen.harness.prompts.sections.tools.audio import (
+from openjiuwen.harness.prompts.tools import get_tool_input_params
+from openjiuwen.harness.prompts.tools.audio import (
     get_audio_metadata_input_params,
     get_audio_question_answering_input_params,
     get_audio_transcription_input_params,
 )
-from openjiuwen.harness.prompts.sections.tools.bash import (
+from openjiuwen.harness.prompts.tools.bash import (
     get_bash_input_params,
 )
-from openjiuwen.harness.prompts.sections.tools.powershell import (
+from openjiuwen.harness.prompts.tools.powershell import (
     get_powershell_input_params,
 )
-from openjiuwen.harness.prompts.sections.tools.code import (
+from openjiuwen.harness.prompts.tools.code import (
     get_code_input_params,
 )
-from openjiuwen.harness.prompts.sections.tools.filesystem import (
+from openjiuwen.harness.prompts.tools.filesystem import (
     get_edit_file_input_params,
     get_glob_input_params,
     get_grep_input_params,
@@ -31,36 +31,32 @@ from openjiuwen.harness.prompts.sections.tools.filesystem import (
     get_read_file_input_params,
     get_write_file_input_params,
 )
-from openjiuwen.harness.prompts.sections.tools.list_skill import (
+from openjiuwen.harness.prompts.tools.list_skill import (
     get_list_skill_input_params,
 )
-from openjiuwen.harness.prompts.sections.tools.todo import (
+from openjiuwen.harness.prompts.tools.todo import (
     get_todo_create_input_params,
     get_todo_list_input_params,
     get_todo_modify_input_params,
 )
-from openjiuwen.harness.prompts.sections.tools.vision import (
+from openjiuwen.harness.prompts.tools.vision import (
     get_image_ocr_input_params,
     get_visual_question_answering_input_params,
 )
-from openjiuwen.harness.tools.audio import (
+from openjiuwen.harness.tools import (
     AudioMetadataTool,
     AudioQuestionAnsweringTool,
     AudioTranscriptionTool,
-)
-from openjiuwen.harness.tools.code import CodeTool
-from openjiuwen.harness.tools.filesystem import (
+    CodeTool,
     EditFileTool,
     GlobTool,
     GrepTool,
     ListDirTool,
     ReadFileTool,
     WriteFileTool,
-)
-from openjiuwen.harness.tools.list_skill import ListSkillTool
-from openjiuwen.harness.tools.bash import BashTool
-from openjiuwen.harness.tools.powershell import PowerShellTool
-from openjiuwen.harness.tools.vision import (
+    ListSkillTool,
+    BashTool,
+    PowerShellTool,
     ImageOCRTool,
     VisualQuestionAnsweringTool,
 )

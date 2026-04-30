@@ -3,542 +3,464 @@
 import json
 import unittest
 import uuid
-from datetime import datetime, timezone
 from unittest.mock import patch, MagicMock, mock_open, AsyncMock, PropertyMock
 
-from openjiuwen.core.common.exception.errors import FrameworkError
+from openjiuwen.core.common.exception.errors import FrameworkError, ValidationError
 from openjiuwen.core.common.logging import tool_logger
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.core.sys_operation.fs import BaseFsOperation
-from openjiuwen.harness.tools.todo import (
-    TodoStatus,
+from openjiuwen.harness.schema.task import (
+    STATUS_ICONS,
     TodoItem,
+    TodoStatus,
+)
+from openjiuwen.harness.tools import (
     TodoTool,
     TodoCreateTool,
     TodoListTool,
     TodoModifyTool,
-    STATUS_ICONS
 )
-
-
-def create_mock_file_stream(tell_return=0):
-    """Create mock file stream with valid tell() method"""
-    mock_file = mock_open()
-    mock_file.return_value.tell = MagicMock(return_value=tell_return)
-    type(mock_file.return_value).closed = PropertyMock(return_value=False)
-    return mock_file
+from openjiuwen.harness.tools.todo import TodoGetTool
 
 
 class TestTodoItem(unittest.TestCase):
-    """Test core functionality of TodoItem data class"""
+    """Test core functionality of TodoItem data class."""
 
     def setUp(self):
-        """Initialization before each test case execution"""
         self.test_content = "Test task content"
-        self.test_active_form = "Executing test task content"
-        self.test_status = TodoStatus.PENDING
+        self.test_active_form = "Executing test task"
 
     def test_todo_item_create(self):
-        """Test TodoItem.create method for task creation"""
+        """TodoItem.create sets content, activeForm, status correctly."""
         todo = TodoItem.create(content=self.test_content, active_form=self.test_active_form)
-
-        # Verify attributes
         self.assertEqual(todo.content, self.test_content)
         self.assertEqual(todo.activeForm, self.test_active_form)
         self.assertEqual(todo.status, TodoStatus.PENDING)
-        self.assertEqual(todo.createdAt, todo.updatedAt)
-        # Verify timestamp format complies with ISO 8601
-        self.assertRegex(todo.createdAt, r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(.\d+)?([+-]\d{2}:\d{2})?$')
+        self.assertIsNone(todo.selected_model_id)
 
     def test_todo_item_to_dict(self):
-        """Test TodoItem conversion to dictionary"""
+        """TodoItem.to_dict includes all fields."""
         todo = TodoItem.create(content=self.test_content, active_form=self.test_active_form)
-        todo_dict = todo.to_dict()
-
-        # Verify dictionary structure and values
-        self.assertEqual(todo_dict["content"], self.test_content)
-        self.assertEqual(todo_dict["activeForm"], self.test_active_form)
-        self.assertEqual(todo_dict["status"], TodoStatus.PENDING.value)
-        self.assertEqual(todo_dict["id"], todo.id)
+        d = todo.to_dict()
+        self.assertEqual(d["content"], self.test_content)
+        self.assertEqual(d["activeForm"], self.test_active_form)
+        self.assertEqual(d["status"], TodoStatus.PENDING.value)
+        self.assertEqual(d["id"], todo.id)
 
     def test_todo_item_from_dict(self):
-        """Test creating TodoItem from dictionary"""
-        # Construct test dictionary
+        """TodoItem.from_dict reconstructs the item correctly."""
         test_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat()
         todo_dict = {
             "id": test_id,
             "content": self.test_content,
             "activeForm": self.test_active_form,
+            "description": "",
             "status": TodoStatus.IN_PROGRESS.value,
-            "createdAt": now,
-            "updatedAt": now
+            "depends_on": [],
+            "result_summary": None,
+            "meta_data": None,
+            "selected_model_id": "fast",
         }
-
-        # Create from dictionary
         todo = TodoItem.from_dict(todo_dict)
-
-        # Verify
         self.assertEqual(todo.id, test_id)
+        self.assertEqual(todo.content, self.test_content)
         self.assertEqual(todo.status, TodoStatus.IN_PROGRESS)
-        self.assertEqual(todo.createdAt, now)
+        self.assertEqual(todo.selected_model_id, "fast")
+
+    def test_todo_item_create_with_model_id(self):
+        """TodoItem.create stores selected_model_id."""
+        todo = TodoItem.create(content="task", selected_model_id="smart")
+        self.assertEqual(todo.selected_model_id, "smart")
 
 
 class TestTodoTool(unittest.IsolatedAsyncioTestCase):
-    """Test TodoTool base class functionality"""
+    """Test TodoTool base class persistence operations."""
 
     def setUp(self):
-        """Initialize test environment"""
         self.test_todos = [
             TodoItem.create(content="Task 1", status=TodoStatus.IN_PROGRESS),
-            TodoItem.create(content="Task 2", status=TodoStatus.PENDING)
+            TodoItem.create(content="Task 2", status=TodoStatus.PENDING),
         ]
-
-        # Mock SysOperation
         self.mock_operation = MagicMock(spec=SysOperation)
         self.mock_fs = MagicMock(spec=BaseFsOperation)
         self.mock_operation.fs.return_value = self.mock_fs
         self.mock_fs.read_file = AsyncMock()
         self.mock_fs.write_file = AsyncMock()
-
-        # Mock logger
         self.logger_mocks = {
-            "info": patch.object(tool_logger, 'info', MagicMock()).start(),
-            "error": patch.object(tool_logger, 'error', MagicMock()).start(),
-            "warning": patch.object(tool_logger, 'warning', MagicMock()).start()
+            "info": patch.object(tool_logger, "info", MagicMock()).start(),
+            "error": patch.object(tool_logger, "error", MagicMock()).start(),
+            "warning": patch.object(tool_logger, "warning", MagicMock()).start(),
         }
 
     def tearDown(self):
-        """Clean up mocks"""
         for mock in self.logger_mocks.values():
             mock.stop()
 
     async def test_load_todos_success(self):
-        """Test successful loading of todo list"""
-        # Mock read file return value
+        """load_todos deserializes JSON file into TodoItem list."""
         mock_read_result = MagicMock(
             code=0,
             data=MagicMock(content=json.dumps([todo.to_dict() for todo in self.test_todos]))
         )
         self.mock_fs.read_file.return_value = mock_read_result
-
-        # Create TodoTool instance
         tool = TodoTool(MagicMock(), self.mock_operation)
-
-        # Execute and verify
-        with patch('os.path.abspath', return_value='/mock/absolute/path'), \
-             patch('os.path.isfile', return_value=True):
-            loaded_todos = await tool.load_todos()
-        self.assertEqual(len(loaded_todos), 2)
-        self.assertEqual(loaded_todos[0].content, "Task 1")
-        self.assertEqual(loaded_todos[1].status, TodoStatus.PENDING)
+        with patch("os.path.abspath", return_value="/mock/path"), \
+             patch("os.path.isfile", return_value=True):
+            loaded = await tool.load_todos("test_session")
+        self.assertEqual(len(loaded), 2)
+        self.assertEqual(loaded[0].content, "Task 1")
+        self.assertEqual(loaded[1].status, TodoStatus.PENDING)
 
     async def test_load_todos_read_fail(self):
-        """Test file read failure scenario"""
-        # Mock read file return error code
+        """load_todos raises FrameworkError on read failure."""
         self.mock_fs.read_file.return_value = MagicMock(code=1, data=None)
-
-        # Create TodoTool instance
         tool = TodoTool(MagicMock(), self.mock_operation)
-
-        # Verify exception
-        with self.assertRaises(FrameworkError) as cm:
-            await tool.load_todos()
-        self.assertIn("Failed to load todo list: [182500] todo tool loads failed", str(cm.exception))
+        with patch("os.path.abspath", return_value="/mock/path"), \
+             patch("os.path.isfile", return_value=True):
+            with self.assertRaises(FrameworkError) as cm:
+                await tool.load_todos("test_session")
+        self.assertIn("todo tool loads failed", str(cm.exception))
 
     async def test_save_todos_success(self):
-        """Test successful saving of todo list"""
-        # Mock write file return success
+        """save_todos serializes TodoItem list to JSON file."""
         self.mock_fs.write_file.return_value = MagicMock(code=0)
-
-        # Create TodoTool instance
         tool = TodoTool(MagicMock(), self.mock_operation)
-
-        # Execute save
-        await tool.save_todos(self.test_todos)
-
-        # Verify call parameters
+        await tool.save_todos("test_session", self.test_todos)
         self.mock_fs.write_file.assert_called_once()
         call_args = self.mock_fs.write_file.call_args
-        self.assertIsNotNone(call_args)
         self.assertIn("Task 1", call_args[0][1])
         self.assertEqual(call_args[1].get("mode"), "text")
 
     async def test_save_todos_write_fail(self):
-        """Test file write failure scenario"""
-        # Mock write file return error code
+        """save_todos raises FrameworkError on write failure."""
         self.mock_fs.write_file.return_value = MagicMock(code=1)
-
-        # Create TodoTool instance
         tool = TodoTool(MagicMock(), self.mock_operation)
-
-        # Verify exception
         with self.assertRaises(FrameworkError) as cm:
-            await tool.save_todos(self.test_todos)
+            await tool.save_todos("test_session", self.test_todos)
         self.assertIn("Failed to save todo list, because write_file fail", str(cm.exception))
 
 
 class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
-    """Test TodoCreateTool functionality"""
+    """Test TodoCreateTool functionality."""
 
     def setUp(self):
-        """Initialize test environment"""
-
-        # Mock SysOperation
         self.mock_operation = MagicMock(spec=SysOperation)
         self.mock_fs = MagicMock(spec=BaseFsOperation)
         self.mock_operation.fs.return_value = self.mock_fs
-
-        # Create tool with mock operation
         self.tool = TodoCreateTool(operation=self.mock_operation)
-
-        # Mock persistence methods
         self.tool.load_todos = AsyncMock(return_value=[])
         self.tool.save_todos = AsyncMock()
-
-        # Mock logger
+        self.mock_session = MagicMock()
+        self.mock_session.get_session_id.return_value = "test_session_id"
         self.logger_mocks = {
-            "info": patch.object(tool_logger, 'info', MagicMock()).start(),
-            "error": patch.object(tool_logger, 'error', MagicMock()).start(),
-            "warning": patch.object(tool_logger, 'warning', MagicMock()).start()
+            "info": patch.object(tool_logger, "info", MagicMock()).start(),
+            "error": patch.object(tool_logger, "error", MagicMock()).start(),
+            "warning": patch.object(tool_logger, "warning", MagicMock()).start(),
         }
 
     def tearDown(self):
-        """Clean up mocks"""
         patch.stopall()
 
-    async def test_invoke_create_simplified(self):
-        """Test creating Todo items from mixed separators string"""
-        # Construct input
-        inputs = {
-            "tasks": "Create Task 1；Create Task 2；Create Task 3"
-        }
-
-        # Execute call
-        result = await self.tool.invoke(inputs)
-
-        # Verify
+    async def test_invoke_create_json_array(self):
+        """Creates todos from JSON array."""
+        result = await self.tool.invoke({
+            "tasks": [
+                {"content": "Task 1", "activeForm": "Doing Task 1", "description": "Desc 1"},
+                {"content": "Task 2", "activeForm": "Doing Task 2", "description": "Desc 2"},
+                {"content": "Task 3", "activeForm": "Doing Task 3", "description": "Desc 3"}
+            ]
+        }, session=self.mock_session)
         self.assertIn("Successfully created 3 task(s)", result["message"])
-        self.assertIn("task_id:", result["message"])
-        self.assertIn("Next step: Immediately execute task 'Create Task 1'", result["message"])
+        saved = self.tool.save_todos.call_args[0][1]
+        self.assertEqual(len(saved), 3)
+        self.assertEqual(saved[0].status, TodoStatus.IN_PROGRESS)
+        self.assertEqual(saved[1].status, TodoStatus.PENDING)
 
-        # Verify saved task status: first is IN_PROGRESS, rest are PENDING
-        saved_todos = self.tool.save_todos.call_args[0][0]
-        self.assertEqual(len(saved_todos), 3)
-        self.assertEqual(saved_todos[0].status, TodoStatus.IN_PROGRESS)
-        self.assertEqual(saved_todos[1].status, TodoStatus.PENDING)
-        self.assertEqual(saved_todos[2].status, TodoStatus.PENDING)
-
-    async def test_invoke_create_not_split_by_enumeration_comma(self):
-        """Do not split a single task sentence by Chinese enumeration comma."""
+    async def test_invoke_create_with_chinese_content(self):
+        """Chinese content in task fields works correctly."""
         inputs = {
-            "tasks": (
-                "需求分析：明确项目目标、用户需求及功能边界；"
-                "技术选型：评估并选择合适的技术栈和开发工具；"
-                "实施方案：制定开发计划、分配任务并启动执行"
-            )
+            "tasks": [
+                {"content": "需求分析", "activeForm": "正在分析需求", "description": "明确项目目标、用户需求及功能边界"},
+                {"content": "技术选型", "activeForm": "正在选型", "description": "评估并选择合适的技术栈"},
+                {"content": "实施方案", "activeForm": "正在制定方案", "description": "制定开发计划、分配任务"},
+            ]
         }
-
-        result = await self.tool.invoke(inputs)
-
+        result = await self.tool.invoke(inputs, session=self.mock_session)
         self.assertIn("Successfully created 3 task(s)", result["message"])
-        saved_todos = self.tool.save_todos.call_args[0][0]
-        self.assertEqual(len(saved_todos), 3)
-        self.assertIn("目标、用户需求及功能边界", saved_todos[0].content)
-        self.assertIn("开发计划、分配任务并启动执行", saved_todos[2].content)
+        saved = self.tool.save_todos.call_args[0][1]
+        self.assertEqual(len(saved), 3)
+        self.assertIn("目标、用户需求及功能边界", saved[0].description)
+        self.assertIn("开发计划、分配任务", saved[2].description)
+
+    async def test_invoke_create_json_array(self):
+        """Creates todos from JSON array with selected_model_id."""
+        tasks = [
+            {"content": "Translate doc", "activeForm": "Translating doc", "description": "Translate document to English", "selected_model_id": "fast"},
+            {"content": "Analyze code", "activeForm": "Analyzing code", "description": "Analyze code architecture", "selected_model_id": "smart"},
+        ]
+        result = await self.tool.invoke({"tasks": tasks}, session=self.mock_session)
+        self.assertIn("Successfully created 2 task(s)", result["message"])
+        saved = self.tool.save_todos.call_args[0][1]
+        self.assertEqual(saved[0].selected_model_id, "fast")
+        self.assertEqual(saved[1].selected_model_id, "smart")
+        self.assertEqual(saved[0].status, TodoStatus.IN_PROGRESS)
 
     async def test_invoke_create_empty_tasks(self):
-        """Test error handling for empty task string"""
-        # Construct empty input
-        inputs = {"tasks": "；\n  "}
-
-        # Execute and verify exception
-        with self.assertRaises(Exception) as cm:
-            await self.tool.invoke(inputs)
-        self.assertIn("Task content cannot be empty", str(cm.exception))
+        """Raises error for empty task list."""
+        with self.assertRaises(Exception):
+            await self.tool.invoke({"tasks": []}, session=self.mock_session)
 
     async def test_invoke_missing_tasks_param(self):
-        """Test error handling for missing 'tasks' parameter"""
-        # Construct input without required parameter
-        inputs = {}
+        """Raises error when tasks parameter is missing."""
+        with self.assertRaises(Exception):
+            await self.tool.invoke({}, session=self.mock_session)
 
-        # Execute and verify exception
-        with self.assertRaises(Exception) as cm:
-            await self.tool.invoke(inputs)
-        self.assertIn("Invalid task data", str(cm.exception))
+    async def test_invoke_create_invalid_json_string(self):
+        """Raises error for non-array input (string format no longer supported)."""
+        with self.assertRaises(Exception):
+            await self.tool.invoke({"tasks": "not a valid json array"}, session=self.mock_session)
+
+    async def test_invoke_create_missing_required_field(self):
+        """Raises error when required field (content, activeForm, or description) is missing."""
+        with self.assertRaises(Exception):
+            await self.tool.invoke({"tasks": [{"activeForm": "Doing"}]}, session=self.mock_session)
+        with self.assertRaises(Exception):
+            await self.tool.invoke({"tasks": [{"content": "Task 1"}]}, session=self.mock_session)
+        with self.assertRaises(Exception):
+            await self.tool.invoke({"tasks": [{"content": "Task 1", "activeForm": "Doing"}]}, session=self.mock_session)
 
 
 class TestTodoListTool(unittest.IsolatedAsyncioTestCase):
-    """Test TodoListTool functionality"""
+    """Test TodoListTool functionality."""
 
     def setUp(self):
-        """Initialize test environment"""
-
-        # Mock SysOperation
         self.mock_operation = MagicMock(spec=SysOperation)
         self.mock_fs = MagicMock(spec=BaseFsOperation)
         self.mock_operation.fs.return_value = self.mock_fs
-
-        # Create tool with mock operation
         self.tool = TodoListTool(operation=self.mock_operation)
-
-        # Construct test data
         self.test_todos = [
             TodoItem.create(content="In Progress Task", status=TodoStatus.IN_PROGRESS),
             TodoItem.create(content="Pending Task", status=TodoStatus.PENDING),
             TodoItem.create(content="Completed Task", status=TodoStatus.COMPLETED),
-            TodoItem.create(content="Cancelled Task", status=TodoStatus.CANCELLED)
+            TodoItem.create(content="Cancelled Task", status=TodoStatus.CANCELLED),
         ]
-
-        # Mock persistence methods
         self.tool.load_todos = AsyncMock(return_value=self.test_todos)
-
-        # Mock logger
+        self.mock_session = MagicMock()
+        self.mock_session.get_session_id.return_value = "test_session_id"
         self.logger_mocks = {
-            "info": patch.object(tool_logger, 'info', MagicMock()).start(),
-            "error": patch.object(tool_logger, 'error', MagicMock()).start(),
-            "warning": patch.object(tool_logger, 'warning', MagicMock()).start()
+            "info": patch.object(tool_logger, "info", MagicMock()).start(),
+            "error": patch.object(tool_logger, "error", MagicMock()).start(),
         }
 
     def tearDown(self):
-        """Clean up mocks"""
         patch.stopall()
 
     async def test_invoke_list_success(self):
-        """Test successful listing of todos with grouping"""
-        # Execute call
-        result = await self.tool.invoke({})
-
-        # Verify result
-        self.assertIn("Todo List (Total: 4 items)", result["message"])
-        self.assertIn(f"{STATUS_ICONS[TodoStatus.IN_PROGRESS]} In Progress Task", result["message"])
-        self.assertIn(f"{STATUS_ICONS[TodoStatus.PENDING]} Pending Tasks", result["message"])
-        self.assertIn(f"{STATUS_ICONS[TodoStatus.COMPLETED]} Completed Tasks", result["message"])
-        self.assertIn(f"{STATUS_ICONS[TodoStatus.CANCELLED]} Cancelled Tasks", result["message"])
+        """Returns only active (non-completed, non-cancelled) tasks in simplified format."""
+        result = await self.tool.invoke({}, session=self.mock_session)
+        self.assertIn("tasks", result)
+        tasks = result["tasks"]
+        # Only IN_PROGRESS and PENDING should be returned
+        self.assertEqual(len(tasks), 2)
+        contents = [t["content"] for t in tasks]
+        self.assertIn("In Progress Task", contents)
+        self.assertIn("Pending Task", contents)
+        self.assertNotIn("Completed Task", contents)
+        self.assertNotIn("Cancelled Task", contents)
+        # Each item has id, content, status, depends_on
+        self.assertIn("id", tasks[0])
+        self.assertIn("depends_on", tasks[0])
 
 
 class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
-    """Test TodoModifyTool functionality"""
+    """Test TodoModifyTool functionality."""
 
     def setUp(self):
-        """Initialize test environment"""
-
-        # Mock SysOperation
         self.mock_operation = MagicMock(spec=SysOperation)
         self.mock_fs = MagicMock(spec=BaseFsOperation)
         self.mock_operation.fs.return_value = self.mock_fs
-
-        # Create tool with mock operation
         self.tool = TodoModifyTool(operation=self.mock_operation)
-
-        # Construct test data
         self.test_todos = [
             TodoItem.create(content="Task 1", status=TodoStatus.IN_PROGRESS, active_form="Executing Task 1"),
             TodoItem.create(content="Task 2", status=TodoStatus.PENDING, active_form="Executing Task 2"),
-            TodoItem.create(content="Task 3", status=TodoStatus.PENDING, active_form="Executing Task 3")
+            TodoItem.create(content="Task 3", status=TodoStatus.PENDING, active_form="Executing Task 3"),
         ]
         self.test_todo_ids = [todo.id for todo in self.test_todos]
-
-        # Mock persistence methods
         self.tool.load_todos = AsyncMock(return_value=self.test_todos.copy())
         self.tool.save_todos = AsyncMock()
-
-        # Mock logger
+        self.mock_session = MagicMock()
+        self.mock_session.get_session_id.return_value = "test_session_id"
         self.logger_mocks = {
-            "info": patch.object(tool_logger, 'info', MagicMock()).start(),
-            "error": patch.object(tool_logger, 'error', MagicMock()).start(),
-            "warning": patch.object(tool_logger, 'warning', MagicMock()).start()
+            "info": patch.object(tool_logger, "info", MagicMock()).start(),
+            "error": patch.object(tool_logger, "error", MagicMock()).start(),
+            "warning": patch.object(tool_logger, "warning", MagicMock()).start(),
         }
 
     def tearDown(self):
-        """Clean up mocks"""
         patch.stopall()
 
     async def test_invoke_delete_success(self):
-        """Test successful deletion of todo items"""
-        # Construct input
-        inputs = {
-            "action": "delete",
-            "ids": [self.test_todo_ids[1]]  # Delete Task 2
-        }
-
-        # Execute call
-        result = await self.tool.invoke(inputs)
-
-        # Verify
-        self.assertIn(f"Successfully deleted 1 task(s) (IDs: {self.test_todo_ids[1]})", result["message"])
-        # Verify Task 2 removed from saved list
-        saved_todos = self.tool.save_todos.call_args[0][0]
-        self.assertEqual(len(saved_todos), 2)
-        self.assertEqual(saved_todos[0].content, "Task 1")
-        self.assertEqual(saved_todos[1].content, "Task 3")
+        """Deletes specified task by ID."""
+        result = await self.tool.invoke({"action": "delete", "ids": [self.test_todo_ids[1]]}, session=self.mock_session)
+        self.assertIn(f"Successfully deleted 1 task(s)", result["message"])
+        saved = self.tool.save_todos.call_args[0][1]
+        self.assertEqual(len(saved), 2)
+        self.assertEqual(saved[0].content, "Task 1")
+        self.assertEqual(saved[1].content, "Task 3")
 
     async def test_invoke_delete_nonexistent(self):
-        """Test deletion of nonexistent todo items"""
-        # Construct input
-        inputs = {
-            "action": "delete",
-            "ids": ["nonexistent_id"]
-        }
-
-        # Execute call
-        result = await self.tool.invoke(inputs)
-
-        # Verify
-        self.assertIn("No tasks deleted: None of the provided IDs (nonexistent_id) were found", result["message"])
+        """Returns message when deleting nonexistent ID."""
+        result = await self.tool.invoke({"action": "delete", "ids": ["nonexistent_id"]}, session=self.mock_session)
+        self.assertIn("No tasks deleted", result["message"])
 
     async def test_invoke_update_success(self):
-        """Test successful update of todo items"""
-        # Construct update data
-        update_data = [{
-            "id": self.test_todo_ids[0],
-            "content": "Updated Task 1",
-            "activeForm": "Executing Updated Task 1",
-            "status": TodoStatus.COMPLETED.value
-        }]
-        inputs = {
-            "action": "update",
-            "todos": update_data
-        }
-
-        # Execute call
-        result = await self.tool.invoke(inputs)
-
-        # Verify
+        """Updates task content and status."""
+        update_data = [{"id": self.test_todo_ids[0], "content": "Updated Task 1",
+                        "activeForm": "Executing Updated Task 1", "status": TodoStatus.COMPLETED.value}]
+        result = await self.tool.invoke({"action": "update", "todos": update_data}, session=self.mock_session)
         self.assertIn("Successfully updated 1 task(s)", result["message"])
-        # Verify updated data
-        saved_todos = self.tool.save_todos.call_args[0][0]
-        updated_todo = next(t for t in saved_todos if t.id == self.test_todo_ids[0])
-        self.assertEqual(updated_todo.content, "Updated Task 1")
-        self.assertEqual(updated_todo.status, TodoStatus.COMPLETED)
+        saved = self.tool.save_todos.call_args[0][1]
+        updated = next(t for t in saved if t.id == self.test_todo_ids[0])
+        self.assertEqual(updated.content, "Updated Task 1")
+        self.assertEqual(updated.status, TodoStatus.COMPLETED)
 
     async def test_invoke_update_partial_fields_success(self):
-        """Test partial update (id + status only) keeps existing fields."""
-        inputs = {
+        """Partial update (status only) preserves existing content and activeForm."""
+        result = await self.tool.invoke({
             "action": "update",
-            "todos": [{
-                "id": self.test_todo_ids[0],
-                "status": TodoStatus.COMPLETED.value,
-            }],
-        }
-
-        result = await self.tool.invoke(inputs)
-
+            "todos": [{"id": self.test_todo_ids[0], "status": TodoStatus.COMPLETED.value}],
+        }, session=self.mock_session)
         self.assertIn("Successfully updated 1 task(s)", result["message"])
-        saved_todos = self.tool.save_todos.call_args[0][0]
-        updated_todo = next(
-            t for t in saved_todos if t.id == self.test_todo_ids[0]
-        )
-        self.assertEqual(updated_todo.status, TodoStatus.COMPLETED)
-        self.assertEqual(updated_todo.content, "Task 1")
-        self.assertEqual(updated_todo.activeForm, "Executing Task 1")
+        saved = self.tool.save_todos.call_args[0][1]
+        updated = next(t for t in saved if t.id == self.test_todo_ids[0])
+        self.assertEqual(updated.status, TodoStatus.COMPLETED)
+        self.assertEqual(updated.content, "Task 1")
+        self.assertEqual(updated.activeForm, "Executing Task 1")
+
+    async def test_invoke_update_selected_model_id(self):
+        """Update can change selected_model_id."""
+        result = await self.tool.invoke({
+            "action": "update",
+            "todos": [{"id": self.test_todo_ids[0], "selected_model_id": "smart",
+                       "status": TodoStatus.PENDING.value}],
+        }, session=self.mock_session)
+        self.assertIn("Successfully updated 1 task(s)", result["message"])
+        saved = self.tool.save_todos.call_args[0][1]
+        updated = next(t for t in saved if t.id == self.test_todo_ids[0])
+        self.assertEqual(updated.selected_model_id, "smart")
 
     async def test_invoke_append_success(self):
-        """Test successful appending of new todo items"""
-        # Construct append data
-        new_todo_id = str(uuid.uuid4())
-        append_data = [{
-            "id": new_todo_id,
-            "content": "New Task 4",
-            "activeForm": "Executing New Task 4",
-            "status": TodoStatus.PENDING.value
-        }]
-        inputs = {
+        """Appends new task to end of list."""
+        new_id = str(uuid.uuid4())
+        result = await self.tool.invoke({
             "action": "append",
-            "todos": append_data
-        }
-
-        # Execute call
-        result = await self.tool.invoke(inputs)
-
-        # Verify
-        self.assertIn("Successfully append 1 task(s)", result["message"])
-        saved_todos = self.tool.save_todos.call_args[0][0]
-        self.assertEqual(len(saved_todos), 4)
-        self.assertEqual(saved_todos[-1].id, new_todo_id)
+            "todos": [{"id": new_id, "content": "New Task 4", "activeForm": "Executing New Task 4",
+                       "description": "description of New Task 4", "status": TodoStatus.PENDING.value}],
+        }, session=self.mock_session)
+        self.assertIn("Successfully appended 1 task(s)", result["message"])
+        saved = self.tool.save_todos.call_args[0][1]
+        self.assertEqual(len(saved), 4)
+        self.assertEqual(saved[-1].id, new_id)
 
     async def test_invoke_insert_after_success(self):
-        """Test successful insertion after target task"""
-        # Construct insert data
-        new_todo_id = str(uuid.uuid4())
-        insert_data = [{
-            "id": new_todo_id,
-            "content": "Inserted Task",
-            "activeForm": "Executing Inserted Task",
-            "status": TodoStatus.PENDING.value
-        }]
-        inputs = {
+        """Inserts task after target."""
+        new_id = str(uuid.uuid4())
+        result = await self.tool.invoke({
             "action": "insert_after",
-            "todo_data": {"target_id": self.test_todo_ids[0], "items": insert_data}
-        }
-
-        # Execute call
-        result = await self.tool.invoke(inputs)
-
-        # Verify
-        self.assertIn(f"Successfully inserted 1 task(s) after target task, id: '{self.test_todo_ids[0]}'",
-                      result["message"])
-        saved_todos = self.tool.save_todos.call_args[0][0]
-        self.assertEqual(len(saved_todos), 4)
-        self.assertEqual(saved_todos[1].id, new_todo_id)  # Verify insertion position
+            "todo_data": {"target_id": self.test_todo_ids[0], "items": [
+                {"id": new_id, "content": "Inserted Task", "activeForm": "Executing Inserted Task",
+                 "description": "description of New Task 4", "status": TodoStatus.PENDING.value}
+            ]},
+        }, session=self.mock_session)
+        self.assertIn(f"Successfully inserted 1 task(s) after target task", result["message"])
+        saved = self.tool.save_todos.call_args[0][1]
+        self.assertEqual(len(saved), 4)
+        self.assertEqual(saved[1].id, new_id)
 
     async def test_invoke_insert_before_success(self):
-        """Test successful insertion before target task"""
-        # Construct insert data
-        new_todo_id = str(uuid.uuid4())
-        insert_data = [{
-            "id": new_todo_id,
-            "content": "Inserted Before Task",
-            "activeForm": "Executing Inserted Before Task",
-            "status": TodoStatus.PENDING.value
-        }]
-        inputs = {
+        """Inserts task before target."""
+        new_id = str(uuid.uuid4())
+        result = await self.tool.invoke({
             "action": "insert_before",
-            "todo_data": {"target_id": self.test_todo_ids[1], "items": insert_data}
-        }
-
-        # Execute call
-        result = await self.tool.invoke(inputs)
-
-        # Verify
-        self.assertIn(f"Successfully inserted 1 task(s) before target task, id: '{self.test_todo_ids[1]}'",
-                      result["message"])
-        saved_todos = self.tool.save_todos.call_args[0][0]
-        self.assertEqual(len(saved_todos), 4)
-        self.assertEqual(saved_todos[1].id, new_todo_id)  # Verify insertion position
+            "todo_data": {"target_id": self.test_todo_ids[1], "items": [
+                {"id": new_id, "content": "Inserted Before Task", "activeForm": "Executing",
+                 "description": "description of New Task 4", "status": TodoStatus.PENDING.value}
+            ]},
+        }, session=self.mock_session)
+        self.assertIn(f"Successfully inserted 1 task(s) before target task", result["message"])
+        saved = self.tool.save_todos.call_args[0][1]
+        self.assertEqual(len(saved), 4)
+        self.assertEqual(saved[1].id, new_id)
 
     async def test_invoke_cancel_success(self):
-        """Test successful cancellation of todo items"""
-        # Construct input
-        inputs = {
-            "action": "cancel",
-            "ids": [self.test_todo_ids[1]]  # Cancel Task 2
-        }
-
-        # Execute call
-        result = await self.tool.invoke(inputs)
-
-        # Verify
-        self.assertIn(f"Successfully cancelled 1 task(s) (IDs: {self.test_todo_ids[1]})", result["message"])
-        # Verify Task 2 status changed to CANCELLED
-        saved_todos = self.tool.save_todos.call_args[0][0]
-        self.assertEqual(len(saved_todos), 3)  # Tasks still in list, just status changed
-        cancelled_todo = next(t for t in saved_todos if t.id == self.test_todo_ids[1])
-        self.assertEqual(cancelled_todo.status, TodoStatus.CANCELLED)
+        """Cancels specified task."""
+        result = await self.tool.invoke({"action": "cancel", "ids": [self.test_todo_ids[1]]}, session=self.mock_session)
+        self.assertIn(f"Successfully cancelled 1 task(s)", result["message"])
+        saved = self.tool.save_todos.call_args[0][1]
+        cancelled = next(t for t in saved if t.id == self.test_todo_ids[1])
+        self.assertEqual(cancelled.status, TodoStatus.CANCELLED)
 
     async def test_invoke_cancel_nonexistent(self):
-        """Test cancellation of nonexistent todo items"""
-        # Construct input
-        inputs = {
-            "action": "cancel",
-            "ids": ["nonexistent_id"]
+        """Returns message when cancelling nonexistent ID."""
+        result = await self.tool.invoke({"action": "cancel", "ids": ["nonexistent_id"]}, session=self.mock_session)
+        self.assertIn("No tasks cancelled", result["message"])
+
+
+class TestTodoGetTool(unittest.IsolatedAsyncioTestCase):
+    """Test TodoGetTool functionality."""
+
+    def setUp(self):
+        self.mock_operation = MagicMock(spec=SysOperation)
+        self.mock_fs = MagicMock(spec=BaseFsOperation)
+        self.mock_operation.fs.return_value = self.mock_fs
+        self.tool = TodoGetTool(operation=self.mock_operation)
+        self.test_todos = [
+            TodoItem.create(
+                content="Task 1",
+                status=TodoStatus.IN_PROGRESS,
+                active_form="Executing Task 1",
+                description="Detailed description for Task 1",
+                selected_model_id="smart",
+            ),
+            TodoItem.create(
+                content="Task 2",
+                status=TodoStatus.PENDING,
+                active_form="Executing Task 2",
+                description="Detailed description for Task 2",
+            ),
+        ]
+        self.test_todo_ids = [todo.id for todo in self.test_todos]
+        self.tool.load_todos = AsyncMock(return_value=self.test_todos.copy())
+        self.mock_session = MagicMock()
+        self.mock_session.get_session_id.return_value = "test_session_id"
+        self.logger_mocks = {
+            "info": patch.object(tool_logger, "info", MagicMock()).start(),
+            "error": patch.object(tool_logger, "error", MagicMock()).start(),
         }
 
-        # Execute call
-        result = await self.tool.invoke(inputs)
+    def tearDown(self):
+        patch.stopall()
 
-        # Verify
-        self.assertIn("No tasks cancelled: None of the provided IDs (nonexistent_id) were found", result["message"])
+    async def test_invoke_get_success(self):
+        """Returns full details of a single task by ID."""
+        result = await self.tool.invoke({"id": self.test_todo_ids[0]}, session=self.mock_session)
+        self.assertIn("todo", result)
+        todo = result["todo"]
+        self.assertEqual(todo["id"], self.test_todo_ids[0])
+        self.assertEqual(todo["content"], "Task 1")
+        self.assertEqual(todo["status"], "in_progress")
+        self.assertEqual(todo["description"], "Detailed description for Task 1")
+        self.assertEqual(todo["selected_model_id"], "smart")
+
+    async def test_invoke_get_not_found(self):
+        """Raises error when task ID is not found."""
+        with self.assertRaises(FrameworkError):
+            await self.tool.invoke({"id": "nonexistent_id"}, session=self.mock_session)
+
+    async def test_invoke_get_missing_id(self):
+        """Raises error when id parameter is missing."""
+        with self.assertRaises(ValidationError):
+            await self.tool.invoke({}, session=self.mock_session)
 
 
 if __name__ == "__main__":

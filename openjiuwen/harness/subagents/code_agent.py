@@ -4,9 +4,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from openjiuwen.core.foundation.llm.model import Model
+from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.foundation.tool import Tool, ToolCard, McpServerConfig
 from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
@@ -15,12 +17,12 @@ from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.subagents.plan_agent import build_plan_agent_config
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
-from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRail
-from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
+from openjiuwen.harness.rails.memory.coding_memory_rail import CodingMemoryRail
+from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
+from openjiuwen.harness.rails import AskUserRail, ConfirmInterruptRail, AgentModeRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
-from openjiuwen.harness.workspace.workspace import Workspace
+from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
 
 CODE_AGENT_FACTORY_NAME = "code_agent"
 
@@ -51,6 +53,17 @@ DEFAULT_CODE_AGENT_DESCRIPTION: Dict[str, str] = {
     "cn": DEFAULT_CODE_AGENT_DESCRIPTION_CN,
     "en": DEFAULT_CODE_AGENT_DESCRIPTION_EN,
 }
+
+
+def _resolve_coding_memory_dir(workspace: Optional[str | Workspace]) -> str:
+    """Resolve the coding_memory directory path from the workspace."""
+    if isinstance(workspace, Workspace):
+        node_path = workspace.get_node_path(WorkspaceNode.CODING_MEMORY)
+        if node_path is not None:
+            return str(node_path)
+        return str(Path(workspace.root_path) / "coding_memory")
+    root = workspace if isinstance(workspace, str) else "./"
+    return str(Path(root) / "coding_memory")
 
 
 def _has_agent(subagents: list[SubAgentConfig | DeepAgent], name: str) -> bool:
@@ -121,9 +134,13 @@ def build_code_agent_config(
     sys_operation: Optional[SysOperation] = None,
     language: Optional[str] = None,
     prompt_mode: Optional[str] = None,
+    embedding_config: Optional[EmbeddingConfig] = None,
 ) -> SubAgentConfig:
     """Build a SubAgentConfig that materializes as create_code_agent()."""
     resolved_language = resolve_language(language)
+    factory_kwargs: Dict[str, Any] = {}
+    if embedding_config is not None:
+        factory_kwargs["embedding_config"] = embedding_config
     return SubAgentConfig(
         agent_card=card or AgentCard(
             name="code_agent",
@@ -149,6 +166,7 @@ def build_code_agent_config(
         enable_task_loop=enable_task_loop,
         max_iterations=max_iterations,
         factory_name=CODE_AGENT_FACTORY_NAME,
+        factory_kwargs=factory_kwargs,
     )
 
 
@@ -169,11 +187,12 @@ def create_code_agent(
     sys_operation: Optional[SysOperation] = None,
     language: Optional[str] = None,
     prompt_mode: Optional[str] = None,
+    embedding_config: Optional[EmbeddingConfig] = None,
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create and configure a predefined CodeAgent instance.
 
-    predefined CodeAgent is equipped with CodeTool and FileSystemRail. You are free to override the configuration.
+    predefined CodeAgent is equipped with CodeTool and SysOperationRail. You are free to override the configuration.
 
     Args:
         model: Pre-constructed Model instance.
@@ -219,11 +238,23 @@ def create_code_agent(
     final_rails = _merge_rails_with_required(
         rails,
         [
-            (FileSystemRail, FileSystemRail),
+            (SysOperationRail, SysOperationRail),
             (AgentModeRail, AgentModeRail),
             (AskUserRail, AskUserRail),
+            (ConfirmInterruptRail, lambda: ConfirmInterruptRail(tool_names=["switch_mode"])),
         ],
     )
+
+    # --- CodingMemoryRail ---
+    if embedding_config is not None and not any(isinstance(r, CodingMemoryRail) for r in final_rails):
+        coding_memory_dir = _resolve_coding_memory_dir(workspace)
+        final_rails.append(
+            CodingMemoryRail(
+                coding_memory_dir=coding_memory_dir,
+                embedding_config=embedding_config,
+                language=resolved_language,
+            )
+        )
 
     return create_deep_agent(
         model=model,
@@ -241,6 +272,7 @@ def create_code_agent(
         sys_operation=sys_operation,
         language=resolved_language,
         prompt_mode=prompt_mode,
+        enable_task_planning=True,
         **config_kwargs,
     )
 

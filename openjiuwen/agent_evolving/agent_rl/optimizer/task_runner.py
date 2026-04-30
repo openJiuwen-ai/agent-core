@@ -1,4 +1,5 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import json
 import os
@@ -6,8 +7,12 @@ from abc import abstractmethod
 from typing import Optional
 
 from omegaconf import OmegaConf
-import ray_adapter as ray
-from ray_adapter._private.runtime_env.constants import RAY_JOB_CONFIG_JSON_ENV_VAR
+try:
+    import ray_adapter as ray
+    from ray_adapter._private.runtime_env.constants import RAY_JOB_CONFIG_JSON_ENV_VAR
+except ModuleNotFoundError:
+    import ray
+    from ray._private.runtime_env.constants import RAY_JOB_CONFIG_JSON_ENV_VAR
 from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
 from verl.trainer.ppo.reward import load_reward_manager
@@ -19,10 +24,6 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.agent_evolving.agent_rl.rl_trainer.verl_executor import VerlTrainingExecutor
 
-
-_AGENT_RL_PARENT_DIR = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..")
-)
 
 _AGENT_CORE_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
@@ -50,9 +51,20 @@ def get_ppo_ray_runtime_env() -> dict:
     env_vars = _PPO_RAY_RUNTIME_ENV["env_vars"].copy()
 
     existing_pp = os.environ.get("PYTHONPATH", "")
-    path_parts = [_AGENT_CORE_DIR, _AGENT_RL_PARENT_DIR]
+    path_parts: list[str] = [_AGENT_CORE_DIR]
     if existing_pp:
-        path_parts.append(existing_pp)
+        for raw_entry in existing_pp.split(":"):
+            entry = raw_entry.strip()
+            if not entry:
+                continue
+            normalized = os.path.abspath(entry)
+            # Never prepend the package subdir itself. Doing so exposes
+            # openjiuwen/agent_evolving/signal as a top-level "signal" module
+            # and breaks Ray worker startup when stdlib signal is imported.
+            if normalized.endswith(os.path.join("openjiuwen", "agent_evolving")):
+                continue
+            if normalized not in path_parts:
+                path_parts.append(normalized)
     env_vars["PYTHONPATH"] = ":".join(path_parts)
 
     runtime_env: dict = {
@@ -93,13 +105,20 @@ class BaseTaskRunner:
 
     @classmethod
     def _init_reward_functions(cls, config, tokenizer):
+        import inspect
+
         reward_kwargs = config.reward_model.get("reward_kwargs", {})
-        reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=0, **reward_kwargs
-        )
-        val_reward_fn = load_reward_manager(
-            config, tokenizer, num_examine=1, **reward_kwargs
-        )
+        sig = inspect.signature(load_reward_manager)
+        if "num_examine" in sig.parameters:
+            reward_fn = load_reward_manager(
+                config, tokenizer, num_examine=0, **reward_kwargs
+            )
+            val_reward_fn = load_reward_manager(
+                config, tokenizer, num_examine=1, **reward_kwargs
+            )
+        else:
+            reward_fn = load_reward_manager(config, tokenizer, **reward_kwargs)
+            val_reward_fn = load_reward_manager(config, tokenizer, **reward_kwargs)
         return reward_fn, val_reward_fn
 
     @classmethod
@@ -507,4 +526,3 @@ class OnlineTaskRunner(BaseTaskRunner):
         logger.info("Converted FSDP checkpoint to PEFT LoRA adapter at %s (%d params)",
                      out, len(lora_state_dict))
         return str(out)
-

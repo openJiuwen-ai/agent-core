@@ -4,15 +4,14 @@
 from __future__ import annotations
 
 from typing import Any, Dict
-from unittest.mock import MagicMock
 
 import pytest
 
-from openjiuwen.harness.prompts.sections.tools.base import (
+from openjiuwen.harness.prompts.tools.base import (
     ToolMetadataProvider,
     validate_provider,
 )
-from openjiuwen.harness.prompts.sections.tools import (
+from openjiuwen.harness.prompts.tools import (
     build_tool_card,
     get_tool_description,
     get_tool_input_params,

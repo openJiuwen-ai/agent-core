@@ -110,7 +110,6 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
             enable_task_loop=True,
             max_iterations=24,
             workspace=self._work_dir,
-            enable_task_planning=True
         )
 
         agent.switch_mode(self._session, "plan")
@@ -133,7 +132,7 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bool(plan_path.read_text(encoding="utf-8").strip()))
         first_call_count = len(trace.tool_calls)
 
-        agent.switch_mode(self._session, "auto")
+        agent.switch_mode(self._session, "normal")
         second = await Runner.run_agent(agent, 
             {
                 "query": "按照计划执行把"
@@ -146,7 +145,7 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("enter_plan_mode", second_call_slice)
         self.assertIn("todo_create", second_call_slice)
         state_after_second = agent.load_state(self._session)
-        self.assertEqual(state_after_second.plan_mode.mode, "auto")
+        self.assertEqual(state_after_second.plan_mode.mode, "normal")
 
     @pytest.mark.asyncio
     @unittest.skip("skip system test")
@@ -164,7 +163,6 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
             enable_task_loop=True,
             max_iterations=24,
             workspace=self._work_dir,
-            enable_task_planning=True,
         )
 
         agent.switch_mode(self._session, "plan")
@@ -217,7 +215,7 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bool(content_after_second.strip()))
         self.assertNotEqual(content_after_second, content_after_first)
 
-        agent.switch_mode(self._session, "auto")
+        agent.switch_mode(self._session, "normal")
         third = await Runner.run_agent(agent, 
             {
                 "query": "按照计划执行"
@@ -228,7 +226,7 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
         third_call_slice = trace.tool_calls[second_call_count:]
         self.assertNotIn("enter_plan_mode", third_call_slice)
         state_after_third = agent.load_state(self._session)
-        self.assertEqual(state_after_third.plan_mode.mode, "auto")
+        self.assertEqual(state_after_third.plan_mode.mode, "normal")
 
     @pytest.mark.asyncio
     @unittest.skip("skip system test")
@@ -247,7 +245,6 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
             enable_task_loop=True,
             max_iterations=24,
             workspace=self._work_dir,
-            enable_task_planning=True
         )
 
         agent.switch_mode(self._session, "plan")
@@ -288,7 +285,7 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
 
         first_call_count = len(trace.tool_calls)
 
-        agent.switch_mode(self._session, "auto")
+        agent.switch_mode(self._session, "normal")
         second = await Runner.run_agent(
             agent,
             {
@@ -302,7 +299,7 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("enter_plan_mode", second_call_slice)
         self.assertIn("todo_create", second_call_slice)
         state_after_second = agent.load_state(self._session)
-        self.assertEqual(state_after_second.plan_mode.mode, "auto")
+        self.assertEqual(state_after_second.plan_mode.mode, "normal")
 
     @pytest.mark.asyncio
     @unittest.skip("skip system test")
@@ -319,7 +316,6 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
             enable_task_loop=True,
             max_iterations=24,
             workspace=self._work_dir,
-            enable_task_planning=True,
         )
 
         session_a = create_agent_session(
@@ -412,7 +408,6 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
             enable_task_loop=True,
             max_iterations=24,
             workspace=self._work_dir,
-            enable_task_planning=True,
         )
 
         agent.switch_mode(self._session, "plan")
@@ -466,7 +461,7 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
     @pytest.mark.asyncio
     @unittest.skip("skip system test")
     async def test_query_switch_plan_to_auto_and_execute(self) -> None:
-        """用户query 触发 plan->auto 切换并按计划执行。"""
+        """用户query 触发 plan->normal 切换并按计划执行。"""
         self._require_llm_config()
         trace = ToolTraceRail()
         runtime_model = self._create_real_model()
@@ -479,7 +474,6 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
             enable_task_loop=True,
             max_iterations=24,
             workspace=self._work_dir,
-            enable_task_planning=True,
         )
 
         agent.switch_mode(self._session, "plan")
@@ -508,12 +502,12 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
         self.assertIn("todo_create", second_call_slice)
 
         state_after_second = agent.load_state(self._session)
-        self.assertEqual(state_after_second.plan_mode.mode, "auto")
+        self.assertEqual(state_after_second.plan_mode.mode, "normal")
 
     @pytest.mark.asyncio
     @unittest.skip("skip system test")
     async def test_query_switch_auto_to_plan_and_generate_plan(self) -> None:
-        """用户query 触发 auto->plan 切换并生成计划文件。"""
+        """用户query 触发 normal->plan 切换并生成计划文件。"""
         self._require_llm_config()
         trace = ToolTraceRail()
         runtime_model = self._create_real_model()
@@ -523,10 +517,9 @@ class TestDeepAgentExecuteModeE2E(unittest.IsolatedAsyncioTestCase):
             enable_task_loop=True,
             max_iterations=24,
             workspace=self._work_dir,
-            enable_task_planning=True,
         )
 
-        agent.switch_mode(self._session, "auto")
+        agent.switch_mode(self._session, "normal")
 
         first = await Runner.run_agent(
             agent,

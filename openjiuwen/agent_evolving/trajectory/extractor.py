@@ -78,12 +78,25 @@ class TrajectoryExtractor:
         detail = self._build_detail(span, kind)
         full_meta = self._build_meta(span, base_meta, kind, detail)
 
+        prompt_token_ids: Optional[List[int]] = None
+        completion_token_ids: Optional[List[int]] = None
+        logprobs: Optional[Any] = None
+        if isinstance(detail, LLMCallDetail) and isinstance(detail.response, dict):
+            # Lift token-level fields out of response and strip them to
+            # avoid duplicate storage in the trajectory.
+            prompt_token_ids = detail.response.pop("prompt_token_ids", None)
+            completion_token_ids = detail.response.pop("completion_token_ids", None)
+            logprobs = detail.response.pop("logprobs", None)
+
         return TrajectoryStep(
             kind=kind,
             error=getattr(span, "error", None),
             start_time_ms=_dt_to_ms(getattr(span, "start_time", None)),
             end_time_ms=_dt_to_ms(getattr(span, "end_time", None)),
             detail=detail,
+            prompt_token_ids=prompt_token_ids,
+            completion_token_ids=completion_token_ids,
+            logprobs=logprobs,
             meta=full_meta,
         )
 

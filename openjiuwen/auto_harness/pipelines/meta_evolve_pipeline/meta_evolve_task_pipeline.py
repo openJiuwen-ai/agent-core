@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from openjiuwen.auto_harness.contexts import (
@@ -60,6 +61,9 @@ async def prepare_task_runtime(
     from openjiuwen.auto_harness.rails.edit_safety_rail import (
         EditSafetyRail,
     )
+    from openjiuwen.core.session.agent import (
+        create_agent_session,
+    )
 
     related = await orchestrator.experience_store.search(
         task.topic
@@ -79,9 +83,22 @@ async def prepare_task_runtime(
         workspace_override=wt_path,
         edit_safety_rail=edit_safety_rail,
     )
+    fix_agent = create_auto_harness_agent(
+        orchestrator.config,
+        workspace_override=wt_path,
+        edit_safety_rail=edit_safety_rail,
+        enable_task_loop=False,
+        enable_task_planning=False,
+        enable_progress_repeat=False,
+    )
     commit_agent = create_commit_agent(
         orchestrator.config,
         workspace_override=wt_path,
+    )
+    task_session = create_agent_session(
+        session_id=f"auto-harness-{Path(wt_path).name}",
+        card=getattr(task_agent, "card", None),
+        close_stream_on_post_run=False,
     )
     return TaskRuntime(
         related=related,
@@ -90,6 +107,8 @@ async def prepare_task_runtime(
         preexisting_dirty_files=preexisting_dirty_files,
         task_agent=task_agent,
         commit_agent=commit_agent,
+        task_session=task_session,
+        fix_agent=fix_agent,
     )
 
 

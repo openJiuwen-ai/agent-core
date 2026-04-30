@@ -16,7 +16,7 @@ AgentTeams is a multi-agent collaboration framework that completes complex tasks
 
 ### Architecture Components
 - **Transport**: Handles inter-agent message delivery (supports `inprocess` and `pyzmq`)
-- **Storage**: Persists team state, task lists, and messages (supports `sqlite` and `memory`)
+- **Storage**: Persists team state, task lists, and messages (supports `sqlite`, `postgresql`, and `memory`)
 
 ## Quick Start
 
@@ -94,6 +94,27 @@ leader:
   persona: Project management expert
 ```
 
+### Storage Configuration (SQLite / PostgreSQL)
+
+```yaml
+# SQLite (local file)
+storage:
+  type: sqlite
+  params:
+    connection_string: ./team_data/team.db
+
+# PostgreSQL (recommended for distributed deployment)
+storage:
+  type: postgresql
+  params:
+    connection_string: postgresql+asyncpg://user:password@host:5432/agent_team
+```
+
+Notes:
+- PostgreSQL uses the same `connection_string` field;
+- Ensure the PostgreSQL service is running and reachable before startup;
+- If you install optional extras, include the `postgres` extra (`asyncpg`).
+
 ## Configuration Details
 
 | Config Item | Description |
@@ -123,14 +144,17 @@ async for chunk in Runner.run_agent_team_streaming(
 ### Interactive Mode
 
 ```python
-# Start background streaming task
-stream_task = asyncio.create_task(
-    Runner.run_agent_team_streaming(
+# run_agent_team_streaming() returns an async iterator,
+# so wrap the consumer in a coroutine before create_task().
+async def consume_stream():
+    async for chunk in Runner.run_agent_team_streaming(
         agent_team=leader,
         inputs={"query": "Initial task"},
         session="session_id",
-    )
-)
+    ):
+        print(chunk, end="", flush=True)
+
+stream_task = asyncio.create_task(consume_stream())
 
 # Send follow-up input
 await leader.interact("Additional instruction")

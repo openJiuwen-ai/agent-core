@@ -79,7 +79,6 @@ class TestCodeAgentExecutionModeMock(unittest.IsolatedAsyncioTestCase):
             enable_task_loop=True,
             max_iterations=12,
             workspace=self._work_dir,
-            enable_task_planning=True,
         )
 
     def _prepare_plan_file(self, agent, content: str = "# 初始计划\n- step 1") -> Path:
@@ -95,14 +94,14 @@ class TestCodeAgentExecutionModeMock(unittest.IsolatedAsyncioTestCase):
         plan_path.write_text(content, encoding="utf-8")
         return plan_path
 
-    def _resume_answer(self, interrupt_result: dict, answer: str):
+    def _resume_answer(self, interrupt_result: dict, answer: str, question_text: str = "Question"):
         """复用 ask_user 中断恢复逻辑，避免重复 mock 代码。"""
         self.assertEqual(interrupt_result.get("result_type"), "interrupt")
         interrupt_ids = interrupt_result.get("interrupt_ids", [])
         self.assertEqual(len(interrupt_ids), 1)
 
         interactive_input = InteractiveInput()
-        interactive_input.update(interrupt_ids[0], {"answer": answer})
+        interactive_input.update(interrupt_ids[0], {"answers": {question_text: answer}})
         return interactive_input
 
     @pytest.mark.asyncio
@@ -112,7 +111,7 @@ class TestCodeAgentExecutionModeMock(unittest.IsolatedAsyncioTestCase):
         agent = self._create_agent(trace)
 
         origin_state = agent.load_state(self._session)
-        self.assertEqual(origin_state.plan_mode.mode, "auto")
+        self.assertEqual(origin_state.plan_mode.mode, "normal")
 
         agent.switch_mode(self._session, "plan")
         state = agent.load_state(self._session)
@@ -128,30 +127,16 @@ class TestCodeAgentExecutionModeMock(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("switch_mode", trace.tool_calls)
 
     @pytest.mark.asyncio
-    async def test_query_auto_triggers_switch_mode_from_plan_to_auto(self) -> None:
-        """用户 query 自动触发 switch_mode 工具切换场景。"""
-        trace = ToolTraceRail()
-        agent = self._create_agent(trace)
-        agent.switch_mode(self._session, "plan")
-        self._prepare_plan_file(agent)
-
-        with mock_llm_context() as mock_llm:
-            mock_llm.set_responses([
-                create_tool_call_response("switch_mode", json.dumps({"mode": "auto"}, ensure_ascii=False)),
-                create_text_response("已切换到 auto 模式并开始执行计划。"),
-            ])
-            result = await Runner.run_agent(agent, {"query": "按计划直接执行"}, session=self._session)
-
-        self.assertEqual(result.get("result_type"), "answer")
-        self.assertIn("switch_mode", trace.tool_calls)
-        self.assertEqual(agent.load_state(self._session).plan_mode.mode, "auto")
-
-    @pytest.mark.asyncio
-    async def test_user_interacts_via_ask_user_to_update_plan(self) -> None:
+    async def test_user_interacts_via_ask_user_in_multi_session(self) -> None:
         """用户可通过 ask_user 交互更新计划。"""
         trace = ToolTraceRail()
         agent = self._create_agent(trace)
-        agent.switch_mode(self._session, "plan")
+        session_1 = self._session
+        session_2 = create_agent_session(
+            session_id=session_1.get_session_id(),
+            card=AgentCard(id="code_agent", name="code_agent", description="code agent test session"),
+        )
+        agent.switch_mode(session_1, "plan")
         self._prepare_plan_file(agent, content="# 初始计划\n- 城市待确认")
 
         with mock_llm_context() as mock_llm:
@@ -166,9 +151,47 @@ class TestCodeAgentExecutionModeMock(unittest.IsolatedAsyncioTestCase):
             first = await Runner.run_agent(
                 agent,
                 {"query": "继续完善计划，城市你先问我"},
-                session=self._session,
+                session=session_1,
             )
             interactive_input = self._resume_answer(first, "上海")
+            second = await Runner.run_agent(agent, {"query": interactive_input}, session=session_2)
+
+        self.assertEqual(second.get("result_type"), "answer")
+        self.assertIn("ask_user", trace.tool_calls)
+        self.assertEqual(agent.load_state(session_2).plan_mode.mode, "plan")
+
+    @pytest.mark.asyncio
+    async def test_user_interacts_via_ask_user_to_update_plan(self) -> None:
+        """用户可通过 ask_user 交互更新计划。"""
+        trace = ToolTraceRail()
+        agent = self._create_agent(trace)
+        agent.switch_mode(self._session, "plan")
+        self._prepare_plan_file(agent, content="# 初始计划\n- 城市待确认")
+
+        with mock_llm_context() as mock_llm:
+            mock_llm.set_responses([
+                create_tool_call_response(
+                    "ask_user",
+                    json.dumps({
+                        "questions": [{
+                            "header": "城市",
+                            "question": "你希望展示哪个城市？",
+                            "options": [
+                                {"label": "北京", "description": "展示北京城市信息"},
+                                {"label": "上海", "description": "展示上海城市信息"},
+                            ],
+                        }]
+                    }, ensure_ascii=False),
+                    tool_call_id="ask_city_1",
+                ),
+                create_text_response("收到你的反馈，计划已更新为展示上海城市信息。"),
+            ])
+            first = await Runner.run_agent(
+                agent,
+                {"query": "继续完善计划，城市你先问我"},
+                session=self._session,
+            )
+            interactive_input = self._resume_answer(first, "上海", "你希望展示哪个城市？")
             second = await Runner.run_agent(agent, {"query": interactive_input}, session=self._session)
 
         self.assertEqual(second.get("result_type"), "answer")
@@ -187,7 +210,16 @@ class TestCodeAgentExecutionModeMock(unittest.IsolatedAsyncioTestCase):
             mock_llm.set_responses([
                 create_tool_call_response(
                     "ask_user",
-                    json.dumps({"question": "是否需要天气模块？"}, ensure_ascii=False),
+                    json.dumps({
+                        "questions": [{
+                            "header": "天气",
+                            "question": "是否需要天气模块？",
+                            "options": [
+                                {"label": "需要", "description": "添加天气模块"},
+                                {"label": "不需要", "description": "不添加天气模块"},
+                            ],
+                        }]
+                    }, ensure_ascii=False),
                     tool_call_id="ask_feature_1",
                 ),
                 create_text_response("已记录：需要天气模块。"),
@@ -209,7 +241,7 @@ class TestCodeAgentExecutionModeMock(unittest.IsolatedAsyncioTestCase):
             ])
 
             first = await Runner.run_agent(agent, {"query": "先问我一个问题再继续"}, session=self._session)
-            interactive_input = self._resume_answer(first, "需要")
+            interactive_input = self._resume_answer(first, "需要", "是否需要天气模块？")
             resumed_answer = await Runner.run_agent(agent, {"query": interactive_input}, session=self._session)
             self.assertEqual(resumed_answer.get("result_type"), "answer")
 

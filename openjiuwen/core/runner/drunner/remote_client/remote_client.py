@@ -14,6 +14,12 @@ class RemoteClient(ABC):
     async def stop(self):
         pass
 
+    def is_started(self) -> bool:
+        pass
+
+    def is_stopped(self) -> bool:
+        return not self.is_started()
+
     async def invoke(self, inputs: Dict, timeout: float = None) -> Dict:
         pass
 

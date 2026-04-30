@@ -216,6 +216,7 @@ __marimo__/
 *_tracer.json
 **/logs/
 tests/**/report/
+records/*.jsonl
 
 
 # macOS system files

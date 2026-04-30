@@ -23,6 +23,9 @@ from openjiuwen.auto_harness.infra.parsers import (
     extract_text,
     parse_gaps,
 )
+from openjiuwen.auto_harness.infra.edit_scope import (
+    render_edit_scope,
+)
 from openjiuwen.auto_harness.stages.base import (
     SessionStage,
 )
@@ -190,15 +193,22 @@ async def _build_query(
     check_strategy = await _detect_python_check_strategy(
         workspace
     )
+    edit_scope = render_edit_scope(
+        "本轮评估需要遵守的可落地变更范围"
+    )
     return (
         f"当前日期: {today}\n"
         f"工作目录: {workspace}\n\n"
         f"本轮目标: {config.optimization_goal or '无'}\n\n"
         f"重点竞品: {config.competitor or '无'}\n\n"
+        f"{edit_scope}\n\n"
         f"Python 检查策略建议:\n"
         f"{check_strategy}\n\n"
         f"近期经验:\n{experiences_text}\n\n"
         "请按照你的系统提示执行评估任务。"
+        "你的建议和后续任务候选必须落在上述可落地变更范围内。"
+        "不要把 `openjiuwen/auto_harness/**` 或其他范围外源码目录"
+        " 作为本轮建议修改目标。"
         "优先遵循给出的 Python 检查策略建议，"
         "不要臆测 allowlist 或 Makefile 行为。"
         "如果提供了本轮目标，请围绕该目标缩小评估范围。"
@@ -268,8 +278,8 @@ def _format_python_check_strategy(
             "因为这类命令可能因未选中文件而直接失败。\n"
             "- 改为对这些增量文件显式运行 "
             "`uv run ruff check <files>` 与 `uv run mypy <files>`。\n"
-            "- 若文件较多，聚焦 openjiuwen/auto_harness 和 "
-            "openjiuwen/harness 的相关 Python 文件。"
+            "- 若文件较多，聚焦 openjiuwen/harness 和 "
+            "openjiuwen/core 的相关 Python 文件。"
         )
 
     return (
@@ -463,8 +473,9 @@ async def _collect_source_summary(
     key_dirs = [
         "openjiuwen/core",
         "openjiuwen/harness",
-        "openjiuwen/auto_harness",
         "tests/unit_tests",
+        "examples",
+        "docs",
     ]
     lines: list[str] = []
     for d in key_dirs:

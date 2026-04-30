@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from openjiuwen.core.common.logging import logger
@@ -63,32 +64,61 @@ class SkillCallOperator(Operator):
         if self._on_parameter_updated is not None:
             self._on_parameter_updated(target, items)
 
-    async def flush_to_store(self, store: "EvolutionStore") -> int:
-        """Async: write staged records to EvolutionStore one by one.
+    @dataclass
+    class FlushResult:
+        """Result of flushing an explicit record batch to EvolutionStore."""
 
-        Each record is popped from _staged_records only after its write
-        succeeds. On failure the remaining tail is preserved; the next
-        call retries from the first unwritten record, so no record is
-        written twice.
+        flushed_count: int
+        remaining_records: List[Any]
 
-        Returns count flushed in this call.
+    async def flush_records_to_store(
+        self,
+        store: "EvolutionStore",
+        records: List[Any],
+    ) -> FlushResult:
+        """Async: write only the specified records to EvolutionStore.
+
+        This method is used by approval flows that operate on immutable
+        snapshot batches. It never reads or mutates ``_staged_records``.
         """
+        remaining_records = list(records)
         flushed = 0
-        while self._staged_records:
-            record = self._staged_records[0]
+        while remaining_records:
+            record = remaining_records[0]
             try:
                 await store.append_record(self._skill_name, record)
-                self._staged_records.pop(0)         # dequeue only on success
+                remaining_records.pop(0)
                 self._flushed_records.append(record)
                 flushed += 1
             except Exception as exc:
                 logger.warning(
                     "[SkillCallOperator] flush failed at record %s: %s; "
-                    "%d record(s) remain in staging buffer",
-                    getattr(record, "id", repr(record)), exc, len(self._staged_records),
+                    "%d record(s) remain in explicit batch",
+                    getattr(record, "id", repr(record)), exc, len(remaining_records),
                 )
-                break   # retain remaining records for next retry
-        return flushed
+                break
+
+        return self.FlushResult(
+            flushed_count=flushed,
+            remaining_records=remaining_records,
+        )
+
+    async def flush_to_store(self, store: "EvolutionStore") -> int:
+        """Async: write staged records to EvolutionStore one by one.
+
+        The current staging queue is snapshotted and cleared before any IO.
+        Records staged concurrently while this method awaits store writes are
+        appended to the now-empty live queue and are preserved for the next
+        flush call. If the snapshotted batch partially fails, its unwritten
+        tail is prepended back ahead of any newer staged records.
+
+        Returns count flushed in this call.
+        """
+        snapshot = self.take_snapshot()
+        result = await self.flush_records_to_store(store, snapshot)
+        if result.remaining_records:
+            self._staged_records[:0] = result.remaining_records
+        return result.flushed_count
 
     def discard_staged(self) -> int:
         """Discard all in-memory staged records on user rejection.
@@ -117,14 +147,6 @@ class SkillCallOperator(Operator):
     def staged_records(self) -> List[Any]:
         """Get a copy of current staged records pending approval."""
         return list(self._staged_records)
-
-    def prepend_staged_records(self, records: List[Any]) -> None:
-        """Prepend records to the front of the staging queue.
-
-        Used when re-enqueuing a snapshot after approval failure for retry.
-        The records are inserted at the front, preserving any newly staged records.
-        """
-        self._staged_records[:] = list(records) + self._staged_records
 
     async def refresh_state(self, store: "EvolutionStore") -> None:
         """Load skill content + existing records from store into _cached_state."""

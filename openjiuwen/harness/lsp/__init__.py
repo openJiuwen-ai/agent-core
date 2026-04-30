@@ -11,6 +11,34 @@ from openjiuwen.harness.tools.lsp_tool._schemas import LspOperation
 from openjiuwen.harness.lsp.core.manager import LSPServerManager
 from openjiuwen.harness.lsp.core.utils.constants import MAX_LSP_FILE_SIZE_BYTES
 from openjiuwen.harness.lsp.core.utils.git_ignore import filter_git_ignored_locations
+from openjiuwen.harness.lsp.core.diagnostic_registry import (
+    LspDiagnosticRegistry,
+    LspDiagnosticFile,
+    LspDiagnosticItem,
+    MAX_DIAG_PER_FILE,
+    MAX_DIAG_TOTAL,
+)
+
+
+def get_pending_lsp_diagnostics(
+    max_per_file: int = MAX_DIAG_PER_FILE,
+    max_total: int = MAX_DIAG_TOTAL,
+) -> list[LspDiagnosticFile]:
+    """Return pending LSP diagnostics from the global registry and clear the queue.
+
+    Diagnostics originate from ``textDocument/publishDiagnostics`` notifications
+    emitted by LSP servers after ``textDocument/didOpen`` or
+    ``textDocument/didChange``.  Results are deduplicated across rounds, capped,
+    and sorted by severity (Error first).
+
+    Args:
+        max_per_file: Maximum diagnostics per file URI (default 10).
+        max_total:    Maximum diagnostics across all files (default 30).
+
+    Returns:
+        A list of :class:`LspDiagnosticFile` objects; empty when nothing is pending.
+    """
+    return LspDiagnosticRegistry.get_instance().get_and_clear(max_per_file, max_total)
 
 
 async def initialize_lsp(
@@ -59,6 +87,7 @@ __all__ = [
     "__version__",
     "get_lsp_status",
     "get_lsp_tool",
+    "get_pending_lsp_diagnostics",
     "initialize_lsp",
     "shutdown_lsp",
     "CustomServerConfig",
@@ -69,4 +98,9 @@ __all__ = [
     "LSPServerManager",
     "MAX_LSP_FILE_SIZE_BYTES",
     "filter_git_ignored_locations",
+    "LspDiagnosticRegistry",
+    "LspDiagnosticFile",
+    "LspDiagnosticItem",
+    "MAX_DIAG_PER_FILE",
+    "MAX_DIAG_TOTAL",
 ]

@@ -21,8 +21,7 @@ from openjiuwen.harness.prompts.sections.progressive_tool_rail import (
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.config import DeepAgentConfig
-from openjiuwen.harness.tools.load_tools import LoadToolsTool
-from openjiuwen.harness.tools.search_tools import SearchToolsTool
+from openjiuwen.harness.tools import LoadToolsTool, SearchToolsTool
 
 _VISIBLE_TOOLS_KEY = "__progressive_visible_tool_names__"
 _DISCOVERY_TRACE_KEY = "__progressive_tool_discovery_trace__"

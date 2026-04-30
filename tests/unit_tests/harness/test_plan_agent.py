@@ -11,7 +11,7 @@ from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelReques
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.subagents.plan_agent import (
     DEFAULT_PLAN_AGENT_SYSTEM_PROMPT,
     PLAN_AGENT_DESC,
@@ -83,7 +83,7 @@ class TestBuildPlanAgentConfig:
         assert spec.system_prompt == PLAN_AGENT_SYSTEM_PROMPT_EN
         assert isinstance(spec.rails, list)
         assert len(spec.rails) == 1
-        assert isinstance(spec.rails[0], FileSystemRail)
+        assert isinstance(spec.rails[0], SysOperationRail)
         assert spec.enable_task_loop is False
         assert spec.max_iterations == 25
 
@@ -112,11 +112,11 @@ class TestBuildPlanAgentConfig:
 
         assert spec.rails == []
 
-    def test_none_rails_uses_filesystem_rail(self):
+    def test_none_rails_uses_sys_operation_rail(self):
         spec = build_plan_agent_config(rails=None, language="en")
 
         assert len(spec.rails) == 1
-        assert isinstance(spec.rails[0], FileSystemRail)
+        assert isinstance(spec.rails[0], SysOperationRail)
 
     def test_enable_task_loop_propagates(self):
         spec = build_plan_agent_config(enable_task_loop=True, language="en")
@@ -184,19 +184,19 @@ class TestCreatePlanAgent:
 
         assert agent.deep_config.system_prompt == "my custom prompt"
 
-    def test_filesystem_rail_attached_by_default(self, tmp_path):
+    def test_sys_operation_rail_attached_by_default(self, tmp_path):
         model = _create_dummy_model()
         agent = create_plan_agent(model, workspace=str(tmp_path), language="en")
 
         rail_types = [type(r) for r in agent._pending_rails]
-        assert FileSystemRail in rail_types
+        assert SysOperationRail in rail_types
 
-    def test_custom_empty_rails_removes_filesystem_rail(self, tmp_path):
+    def test_custom_empty_rails_removes_sys_operation_rail(self, tmp_path):
         model = _create_dummy_model()
         agent = create_plan_agent(model, rails=[], workspace=str(tmp_path), language="en")
 
         rail_types = [type(r) for r in agent._pending_rails]
-        assert FileSystemRail not in rail_types
+        assert SysOperationRail not in rail_types
 
     def test_language_cn_sets_cn_prompt(self, tmp_path):
         model = _create_dummy_model()
@@ -232,7 +232,7 @@ class TestPlanAgentAsSubagent:
                 await subagent.ensure_initialized()
 
                 assert subagent.card.name == "plan_agent"
-                # FileSystemRail provides filesystem tools
+                # SysOperationRail provides filesystem tools
                 assert subagent.ability_manager.get("read_file") is not None
                 assert subagent.ability_manager.get("glob") is not None
                 assert subagent.ability_manager.get("grep") is not None

@@ -6,7 +6,8 @@ from __future__ import annotations
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.state import DeepAgentState
 from openjiuwen.harness.schema.task import (
-    TaskItem,
+    TodoItem,
+    TodoStatus,
     TaskPlan,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
@@ -43,12 +44,12 @@ def test_load_empty_state() -> None:
 
 
 def test_save_and_reload_state() -> None:
-    """Round-trip: save → clear → load preserves data."""
+    """Round-trip: save -> clear -> load preserves data."""
     agent = _make_agent()
     session = FakeSession()
     plan = TaskPlan(
         goal="demo",
-        tasks=[TaskItem(id="t1", title="first")],
+        tasks=[TodoItem(id="t1", title="first")],
     )
     state = DeepAgentState(iteration=3, task_plan=plan)
     agent.save_state(session, state)
@@ -60,6 +61,27 @@ def test_save_and_reload_state() -> None:
     assert loaded.task_plan.goal == "demo"
     assert len(loaded.task_plan.tasks) == 1
     assert loaded.task_plan.tasks[0].id == "t1"
+
+
+def test_save_and_reload_state_with_todo_status() -> None:
+    """Round-trip with TodoStatus works."""
+    agent = _make_agent()
+    session = FakeSession()
+    plan = TaskPlan(
+        goal="demo",
+        tasks=[
+            TodoItem(id="t1", title="first", status=TodoStatus.COMPLETED),
+            TodoItem(id="t2", title="second", status=TodoStatus.PENDING),
+        ],
+    )
+    state = DeepAgentState(iteration=3, task_plan=plan)
+    agent.save_state(session, state)
+    agent.clear_state(session)
+
+    loaded = agent.load_state(session)
+    assert loaded.task_plan is not None
+    assert loaded.task_plan.tasks[0].status == TodoStatus.COMPLETED
+    assert loaded.task_plan.tasks[1].status == TodoStatus.PENDING
 
 
 def test_pending_follow_ups_round_trip() -> None:
@@ -85,7 +107,6 @@ def test_pending_follow_ups_defaults_empty() -> None:
     """Legacy state without pending_follow_ups loads as empty list."""
     agent = _make_agent()
     session = FakeSession()
-    # Simulate old-format state (no pending_follow_ups key)
     session.update_state(
         {
             "deepagent": {

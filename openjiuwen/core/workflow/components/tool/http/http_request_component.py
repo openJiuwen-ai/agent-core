@@ -2,9 +2,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, Literal, List, AsyncIterator
+from typing import Dict, Any, Optional, Literal, List, AsyncIterator, Union
 from enum import Enum
 import json
+import ast
 import base64
 import asyncio
 import aiohttp
@@ -69,7 +70,7 @@ class HttpAuthConfig(BaseModel):
 
 class HttpRequestBodyConfig(BaseModel):
     content_type: HttpContentType = HttpContentType.JSON
-    json_data: Optional[Dict[str, Any]] = None
+    json_data: Union[Dict[str, Any], str, None] = None
     form_data: Optional[Dict[str, Any]] = None
     multipart_form: Optional[Dict[str, Any]] = None  # For file uploads
     binary_data: Optional[str] = None  # Reference to binary data
@@ -115,7 +116,7 @@ class HttpRateLimitConfig(BaseModel):
 class HttpRequestParamConfig(BaseModel):
     url: str = Field(..., description="The URL to make the request to")
     method: str = Field(default="GET", description="HTTP method to use")
-    headers: Dict[str, str] = Field(default_factory=dict, description="Request headers")
+    headers: Union[Dict[str, str], str] = Field(default_factory=dict, description="Request headers")
     query_parameters: Dict[str, Any] = Field(default_factory=dict, description="Query parameters")
     body: Optional[HttpRequestBodyConfig] = None
     authentication: Optional[HttpAuthConfig] = None
@@ -166,6 +167,26 @@ class HTTPRequestExecutable(ComponentExecutable):
         result = await self.invoke(inputs, session, context)
         yield result
     
+    @staticmethod
+    def _resolve_placeholders(template: str, inputs: Dict[str, Any]) -> str:
+        """Replace {{key}} placeholders in a template string with input values."""
+        for key, value in inputs.items():
+            placeholder = f"{{{{{key}}}}}"
+            template = template.replace(placeholder, str(value))
+        return template
+
+    @staticmethod
+    def _resolve_template_to_dict(template: str, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """Resolve {{key}} placeholders in a template string and evaluate as a dict."""
+        resolved = HTTPRequestExecutable._resolve_placeholders(template, inputs)
+        try:
+            result = ast.literal_eval(resolved)
+            if isinstance(result, dict):
+                return result
+        except (ValueError, SyntaxError):
+            pass
+        return {}
+
     async def process_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """
         Process the input data and merge with component configuration
@@ -173,39 +194,36 @@ class HTTPRequestExecutable(ComponentExecutable):
         # Merge inputs with component configuration
         # Handle dynamic values in URL, headers, query parameters, etc.
         processed = {}
-        
+
         # Process URL - allow for dynamic values from inputs
-        url = self.request_params.url
-        for key, value in inputs.items():
-            placeholder = f"{{{{{key}}}}}"  # {{key}} format
-            if isinstance(url, str):
-                url = url.replace(placeholder, str(value))
-        processed['url'] = url
-        
+        processed['url'] = self._resolve_placeholders(self.request_params.url, inputs)
+
         # Process method
         method = inputs.get('method', self.request_params.method)
         processed['method'] = method.upper()
-        
-        # Process headers
-        headers = self.request_params.headers.copy()
+
+        # Process headers - support template string or dict
+        raw_headers = self.request_params.headers
+        if isinstance(raw_headers, str):
+            headers = self._resolve_template_to_dict(raw_headers, inputs)
+        else:
+            headers = raw_headers.copy()
         headers.update(inputs.get('headers', {}))
         processed['headers'] = headers
-        
+
         # Process query parameters
         query_params = self.request_params.query_parameters.copy()
-        # Replace placeholders in query parameter values
         for key, value in query_params.items():
             if isinstance(value, str):
-                for input_key, input_value in inputs.items():
-                    placeholder = f"{{{{{input_key}}}}}"  # {{key}} format
-                    value = value.replace(placeholder, str(input_value))
-                query_params[key] = value
+                query_params[key] = self._resolve_placeholders(value, inputs)
         query_params.update(inputs.get('query_parameters', {}))
         processed['query_parameters'] = query_params
-        
+
         # Process body
         body_config = self.request_params.body
         if body_config:
+            if isinstance(body_config.json_data, str):
+                body_config.json_data = self._resolve_template_to_dict(body_config.json_data, inputs)
             processed['body'] = body_config
         else:
             processed['body'] = inputs.get('body', {})

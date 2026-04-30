@@ -6,12 +6,9 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-import pytest
-
 from openjiuwen.core.runner import Runner
 from openjiuwen.harness.schema.config import VisionModelConfig
-from openjiuwen.harness.prompts.sections.tools import build_tool_card
-from openjiuwen.harness.tools.vision import (
+from openjiuwen.harness.tools import (
     ImageOCRTool,
     VisualQuestionAnsweringTool,
     create_vision_tools,
@@ -53,7 +50,7 @@ def test_image_ocr_tool_encodes_local_image(tmp_path: Path, monkeypatch):
         return "detected text"
 
     monkeypatch.setattr(
-        "openjiuwen.harness.tools.vision._invoke_chat_completion",
+        "openjiuwen.harness.tools.multimodal.vision._invoke_chat_completion",
         fake_invoke_chat_completion,
     )
 
@@ -93,7 +90,7 @@ def test_visual_question_answering_tool_uses_ocr_context(monkeypatch):
         return "The sign says SALE 50% OFF.", "mock-model"
 
     monkeypatch.setattr(
-        "openjiuwen.harness.tools.vision._call_vision_model",
+        "openjiuwen.harness.tools.multimodal.vision._call_vision_model",
         fake_call_vision_model,
     )
 
@@ -141,7 +138,7 @@ def test_visual_question_answering_tool_can_skip_ocr(monkeypatch):
         return "A black cat is sitting on a chair.", "mock-model"
 
     monkeypatch.setattr(
-        "openjiuwen.harness.tools.vision._call_vision_model",
+        "openjiuwen.harness.tools.multimodal.vision._call_vision_model",
         fake_call_vision_model,
     )
 

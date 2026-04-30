@@ -93,7 +93,7 @@ class TestEvolutionStoreLogCRUD:
         (skill_dir / "evolutions.json").write_text("{not-json", encoding="utf-8")
 
         store = EvolutionStore(str(root))
-        evo_log = await store._load_full_evolution_log("skill-a")
+        evo_log = await store.load_full_evolution_log("skill-a")
         assert evo_log.skill_id == "skill-a"
         assert evo_log.entries == []
 
@@ -196,7 +196,7 @@ class TestEvolutionStoreSysOperationPath:
         )
         store.sys_operation = SimpleNamespace(fs=lambda: fs_mock)
 
-        text = await store._read_file_text(tmp_path / "x.txt")
+        text = await store.read_file_text(tmp_path / "x.txt")
         assert text == "123"
 
     @staticmethod
@@ -207,7 +207,7 @@ class TestEvolutionStoreSysOperationPath:
         fs_mock.write_file = AsyncMock(return_value=SimpleNamespace(code=0, message="ok"))
         store.sys_operation = SimpleNamespace(fs=lambda: fs_mock)
 
-        await store._write_file_text(tmp_path / "x.txt", "hello")
+        await store.write_file_text(tmp_path / "x.txt", "hello")
         fs_mock.write_file.assert_awaited_once()
 
     @staticmethod
@@ -215,7 +215,7 @@ class TestEvolutionStoreSysOperationPath:
     async def test_write_file_text_without_sys_operation(tmp_path: Path):
         store = EvolutionStore(str(tmp_path))
         target = tmp_path / "x.txt"
-        await store._write_file_text(target, "hello")
+        await store.write_file_text(target, "hello")
         assert target.read_text(encoding="utf-8") == "hello"
 
 
@@ -299,6 +299,54 @@ class TestEvolutionStoreAppendScriptRecord:
         skill_md = (root / "skill-a" / "SKILL.md").read_text(encoding="utf-8")
         assert "evolution-index-start" in skill_md
         assert "Scripts" in skill_md
+
+
+class TestEvolutionStoreConcurrentSafety:
+    """Tests for skill-level semantic locks preventing Read-Modify-Write races."""
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_concurrent_append_record_no_data_loss(tmp_path: Path):
+        """Two coroutines appending to the same skill must not lose records."""
+        root = tmp_path / "skills"
+        prepare_skill(root, "skill-a")
+        store = EvolutionStore(str(root))
+
+        # Create 10 records to append concurrently
+        records = [make_record(f"ev_{i}", content=f"record {i}") for i in range(10)]
+
+        # Run 10 concurrent appends
+        import asyncio
+        await asyncio.gather(*[store.append_record("skill-a", r) for r in records])
+
+        evo_log = await store.load_full_evolution_log("skill-a")
+        assert len(evo_log.entries) == 10, (
+            f"Expected 10 entries, got {len(evo_log.entries)} — data lost due to race condition"
+        )
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_skill_lock_isolation(tmp_path: Path):
+        """Writes to different skills should not block each other."""
+        root = tmp_path / "skills"
+        prepare_skill(root, "skill-a")
+        prepare_skill(root, "skill-b")
+        store = EvolutionStore(str(root))
+
+        rec_a = make_record("ev_a", content="record a")
+        rec_b = make_record("ev_b", content="record b")
+
+        # Both should complete without deadlock
+        import asyncio
+        await asyncio.gather(
+            store.append_record("skill-a", rec_a),
+            store.append_record("skill-b", rec_b),
+        )
+
+        log_a = await store.load_full_evolution_log("skill-a")
+        log_b = await store.load_full_evolution_log("skill-b")
+        assert len(log_a.entries) == 1
+        assert len(log_b.entries) == 1
 
 
 class TestEvolutionStoreRenderMarkdown:

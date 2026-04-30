@@ -11,10 +11,12 @@ import pytest_asyncio
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
-from openjiuwen.harness.tools.bash import BashTool
+from openjiuwen.harness.tools import BashTool
 
 
 # ── fixtures ──────────────────────────────────────────────────
+
+
 
 @pytest_asyncio.fixture(name="sys_op")
 async def sys_op_fixture():

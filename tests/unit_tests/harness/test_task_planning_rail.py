@@ -41,11 +41,8 @@ from openjiuwen.harness.schema.state import (
     DeepAgentState,
 )
 from openjiuwen.harness.schema.task import (
-    TaskItem,
+    ModelUsageRecord,
     TaskPlan,
-    TaskStatus,
-)
-from openjiuwen.harness.tools.todo import (
     TodoItem,
     TodoStatus,
 )
@@ -153,19 +150,16 @@ def _make_ctx(session=None):
 def _make_todos(
     specs: List[tuple],
 ) -> List[TodoItem]:
-    """Build TodoItem list from (content, status) tuples."""
-    from datetime import datetime, timezone
-
-    now = datetime.now(timezone.utc).isoformat()
+    """Build TodoItem list from (title, status[, selected_model_id]) tuples."""
     items = []
-    for content, status in specs:
+    for spec in specs:
+        content, status = spec[0], spec[1]
+        selected_model_id = spec[2] if len(spec) > 2 else None
         items.append(
-            TodoItem(
+            TodoItem.create(
                 content=content,
-                activeForm=f"Executing {content}",
                 status=status,
-                createdAt=now,
-                updatedAt=now,
+                selected_model_id=selected_model_id,
             )
         )
     return items
@@ -173,77 +167,76 @@ def _make_todos(
 
 @pytest.mark.asyncio
 async def test_after_task_iteration_bridges_todos() -> None:
-    """3 todos (1 completed + 2 pending) -> TaskPlan with 3 items."""
+    """_sync_todos_from_plan syncs TaskPlan status to todo file."""
     rail = _make_rail()
     agent = _make_agent(workspace="/tmp/ws")
     rail.init(agent)
 
-    todos = _make_todos([
-        ("task-a", TodoStatus.COMPLETED),
-        ("task-b", TodoStatus.PENDING),
-        ("task-c", TodoStatus.PENDING),
-    ])
+    task_id_a = "task-id-a"
+    task_id_b = "task-id-b"
+    task_id_c = "task-id-c"
 
-    state = DeepAgentState(iteration=1)
-    saved_states: List[DeepAgentState] = []
+    todos = [
+        TodoItem(id=task_id_a, content="task-a", activeForm="Executing task-a", description="", status=TodoStatus.PENDING),
+        TodoItem(id=task_id_b, content="task-b", activeForm="Executing task-b", description="", status=TodoStatus.PENDING),
+        TodoItem(id=task_id_c, content="task-c", activeForm="Executing task-c", description="", status=TodoStatus.PENDING),
+    ]
 
-    def _capture_state(_s: Any, st: DeepAgentState) -> None:
-        saved_states.append(st)
+    plan_tasks = [
+        TodoItem(id=task_id_a, content="task-a", activeForm="Executing task-a", description="", status=TodoStatus.IN_PROGRESS),
+        TodoItem(id=task_id_b, content="task-b", activeForm="Executing task-b", description="", status=TodoStatus.PENDING),
+        TodoItem(id=task_id_c, content="task-c", activeForm="Executing task-c", description="", status=TodoStatus.PENDING),
+    ]
+
+    plan = TaskPlan(goal="test", tasks=plan_tasks)
+    state = DeepAgentState(iteration=1, task_plan=plan)
+    saved_todos: List[TodoItem] = []
+
+    def _capture_saved(session_id: str, todos_list: List[TodoItem]) -> None:
+        saved_todos.extend(todos_list)
 
     ctx = _make_ctx(session=MagicMock())
     ctx.session.get_session_id.return_value = "sess-1"
     ctx.agent.load_state.return_value = state
-    ctx.agent.save_state.side_effect = _capture_state
 
     tool = rail._find_todo_tool()
     assert tool is not None
     tool.load_todos = AsyncMock(return_value=todos)
-    tool.save_todos = AsyncMock()
+    tool.save_todos = AsyncMock(side_effect=_capture_saved)
 
     await rail.after_task_iteration(ctx)
 
-    assert len(saved_states) == 1
-    plan = saved_states[0].task_plan
-    assert plan is not None
-    assert len(plan.tasks) == 3
-    assert plan.tasks[0].status == TaskStatus.COMPLETED
-    assert plan.tasks[1].status == TaskStatus.PENDING
-    assert plan.tasks[2].status == TaskStatus.PENDING
-    tool.save_todos.assert_not_awaited()
+    tool.save_todos.assert_called_once()
+    assert saved_todos[0].status == TodoStatus.IN_PROGRESS
 
 
 @pytest.mark.asyncio
 async def test_after_task_iteration_syncs_todo_status_from_plan() -> None:
-    """Existing plan should be synced back to todo file statuses."""
+    """Todos status is synced from TaskPlan on each iteration."""
     rail = _make_rail()
     agent = _make_agent(workspace="/tmp/ws")
     rail.init(agent)
 
-    todos = _make_todos([
-        ("task-a", TodoStatus.IN_PROGRESS),
-        ("task-b", TodoStatus.PENDING),
-    ])
-    todo_a_id = todos[0].id
-    todo_b_id = todos[1].id
+    task_id_a = "task-id-a"
+    task_id_b = "task-id-b"
 
-    existing_plan = TaskPlan(
-        goal="existing",
-        tasks=[
-            TaskItem(
-                id=todo_a_id,
-                title="task-a",
-                status=TaskStatus.COMPLETED,
-            ),
-            TaskItem(
-                id=todo_b_id,
-                title="task-b",
-                status=TaskStatus.PENDING,
-            ),
-        ],
-    )
-    state = DeepAgentState(
-        iteration=2, task_plan=existing_plan
-    )
+    todos = [
+        TodoItem(id=task_id_a, content="task-a", activeForm="Executing task-a", description="", status=TodoStatus.IN_PROGRESS),
+        TodoItem(id=task_id_b, content="task-b", activeForm="Executing task-b", description="", status=TodoStatus.PENDING),
+    ]
+
+    plan_tasks = [
+        TodoItem(id=task_id_a, content="task-a", activeForm="Executing task-a", description="", status=TodoStatus.COMPLETED),
+        TodoItem(id=task_id_b, content="task-b", activeForm="Executing task-b", description="", status=TodoStatus.PENDING),
+    ]
+
+    plan = TaskPlan(goal="test", tasks=plan_tasks)
+    state = DeepAgentState(iteration=2, task_plan=plan)
+    saved_todos: List[TodoItem] = []
+
+    def _capture_saved(session_id: str, todos_list: List[TodoItem]) -> None:
+        saved_todos.extend(todos_list)
+
     ctx = _make_ctx(session=MagicMock())
     ctx.session.get_session_id.return_value = "sess-sync-1"
     ctx.agent.load_state.return_value = state
@@ -251,40 +244,40 @@ async def test_after_task_iteration_syncs_todo_status_from_plan() -> None:
     tool = rail._find_todo_tool()
     assert tool is not None
     tool.load_todos = AsyncMock(return_value=todos)
-    tool.save_todos = AsyncMock()
+    tool.save_todos = AsyncMock(side_effect=_capture_saved)
 
     await rail.after_task_iteration(ctx)
 
-    tool.save_todos.assert_awaited_once()
-    saved_todos = tool.save_todos.call_args[0][0]
-    status_map = {
-        t.id: t.status for t in saved_todos
-    }
-    assert status_map[todo_a_id] == TodoStatus.COMPLETED
-    assert status_map[todo_b_id] == TodoStatus.PENDING
+    tool.save_todos.assert_called_once()
+    assert saved_todos[0].status == TodoStatus.COMPLETED
+    assert saved_todos[1].status == TodoStatus.PENDING
 
 
 @pytest.mark.asyncio
 async def test_bridge_skips_when_plan_exists() -> None:
-    """Existing plan -> no overwrite."""
+    """Existing plan with no pending tasks -> no overwrite."""
     rail = _make_rail()
     agent = _make_agent(workspace="/tmp/ws")
     rail.init(agent)
 
-    existing_plan = TaskPlan(
-        goal="existing",
-        tasks=[TaskItem(title="old-task")],
-    )
-    state = DeepAgentState(
-        iteration=1, task_plan=existing_plan
-    )
+    existing_todos = _make_todos([
+        ("old-task", TodoStatus.COMPLETED),
+    ])
+    existing_plan = TaskPlan(goal="existing", tasks=existing_todos)
+    state = DeepAgentState(iteration=1, task_plan=existing_plan)
 
     ctx = _make_ctx(session=MagicMock())
     ctx.session.get_session_id.return_value = "sess-2"
     ctx.agent.load_state.return_value = state
 
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=existing_todos)
+    tool.save_todos = AsyncMock()
+
     await rail.after_task_iteration(ctx)
 
+    # No save_state called since no pending tasks and plan already exists
     assert state.task_plan is existing_plan
 
 
@@ -325,7 +318,7 @@ async def test_bridge_skips_when_no_session() -> None:
 
 @pytest.mark.asyncio
 async def test_bridge_skips_when_no_pending() -> None:
-    """All COMPLETED -> no TaskPlan created."""
+    """All COMPLETED/IN_PROGRESS with existing plan -> no overwrite."""
     rail = _make_rail()
     agent = _make_agent(workspace="/tmp/ws")
     rail.init(agent)
@@ -334,8 +327,9 @@ async def test_bridge_skips_when_no_pending() -> None:
         ("done-a", TodoStatus.COMPLETED),
         ("done-b", TodoStatus.IN_PROGRESS),
     ])
-
-    state = DeepAgentState(iteration=1)
+    # Pre-existing plan with no pending tasks
+    existing_plan = TaskPlan(goal="existing", tasks=todos)
+    state = DeepAgentState(iteration=1, task_plan=existing_plan)
     ctx = _make_ctx(session=MagicMock())
     ctx.session.get_session_id.return_value = "sess-5"
     ctx.agent.load_state.return_value = state
@@ -346,7 +340,8 @@ async def test_bridge_skips_when_no_pending() -> None:
 
     await rail.after_task_iteration(ctx)
 
-    assert state.task_plan is None
+    # Plan not overwritten since no pending tasks and plan already exists
+    assert state.task_plan is existing_plan
 
 
 @pytest.mark.asyncio
@@ -594,16 +589,20 @@ def test_format_task_content_without_in_progress() -> None:
 
 
 # ================================================================
-# _to_todo_status tests
+# TaskPlan with TodoItem tests
 # ================================================================
 
 
-def test_to_todo_status_mapping() -> None:
-    """_to_todo_status maps TaskStatus to TodoStatus correctly."""
-    assert TaskPlanningRail._to_todo_status(TaskStatus.PENDING) == TodoStatus.PENDING
-    assert TaskPlanningRail._to_todo_status(TaskStatus.IN_PROGRESS) == TodoStatus.IN_PROGRESS
-    assert TaskPlanningRail._to_todo_status(TaskStatus.FAILED) == TodoStatus.CANCELLED
-    assert TaskPlanningRail._to_todo_status(TaskStatus.COMPLETED) == TodoStatus.COMPLETED
+def test_task_plan_uses_todo_item() -> None:
+    """TaskPlan.tasks now holds TodoItem instances directly."""
+    todos = _make_todos([
+        ("task-a", TodoStatus.PENDING),
+        ("task-b", TodoStatus.IN_PROGRESS),
+    ])
+    plan = TaskPlan(goal="test", tasks=todos)
+    assert len(plan.tasks) == 2
+    assert isinstance(plan.tasks[0], TodoItem)
+    assert plan.tasks[1].status == TodoStatus.IN_PROGRESS
 
 
 # ================================================================
@@ -671,3 +670,209 @@ def test_build_progress_reminder_user_prompt_with_task_content_chinese() -> None
     assert tasks in prompt
     assert in_progress_task in prompt
     assert "正在执行的任务" in prompt
+
+
+# ================================================================
+# Model selection tests
+# ================================================================
+
+from unittest.mock import patch
+
+
+from openjiuwen.core.foundation.llm import Model
+
+
+def _make_mock_model(client_id: str) -> Model:
+    """Create a mock Model with model_client_config.client_id."""
+    from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
+    return Model(
+        model_client_config=ModelClientConfig(
+            client_provider="OpenAI",
+            api_key="mock-key",
+            api_base="mock-base",
+            client_id=client_id,
+            verify_ssl=False,
+        ),
+        model_config=ModelRequestConfig(model="mock-model"),
+    )
+
+
+def test_model_selection_default_is_none() -> None:
+    """TaskPlanningRail._model_selection defaults to empty dict."""
+    rail = TaskPlanningRail()
+    assert rail._model_selection == {}
+
+
+def test_model_selection_stored_on_init() -> None:
+    """model_selection passed to __init__ is stored."""
+    fast_model = _make_mock_model("fast")
+    smart_model = _make_mock_model("smart")
+    model_selection = {
+        fast_model: "cheap model for simple tasks",
+        smart_model: "premium model for complex tasks",
+    }
+    rail = TaskPlanningRail(model_selection=model_selection)
+    assert rail._model_selection == model_selection
+    assert rail._model_id_to_model["fast"] == fast_model
+    assert rail._model_id_to_model["smart"] == smart_model
+
+
+@pytest.mark.asyncio
+async def test_before_model_call_switches_model_for_in_progress_task() -> None:
+    """before_model_call calls set_llm with the model matching selected_model_id."""
+    fast_model = _make_mock_model("fast")
+    smart_model = _make_mock_model("smart")
+    rail = _make_rail()
+    rail._model_selection = {
+        fast_model: "cheap model",
+        smart_model: "premium model",
+    }
+    rail._model_id_to_model = {
+        "fast": fast_model,
+        "smart": smart_model,
+    }
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    todos = _make_todos([
+        ("task-a", TodoStatus.IN_PROGRESS, "fast"),
+        ("task-b", TodoStatus.PENDING),
+    ])
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=todos)
+
+    ctx = _make_ctx(session=MagicMock())
+    ctx.session.get_session_id.return_value = "sess-model-switch"
+    ctx.agent.set_llm = MagicMock()
+    ctx.agent._llm = MagicMock()
+    rail.system_prompt_builder = MagicMock()
+    rail.system_prompt_builder.language = "en"
+
+    await rail.before_model_call(ctx)
+
+    ctx.agent.set_llm.assert_called_once_with(fast_model)
+
+
+@pytest.mark.asyncio
+async def test_before_model_call_restores_default_when_no_model_id() -> None:
+    """before_model_call restores default model when task has no selected_model_id."""
+    fast_model = _make_mock_model("fast")
+    default_model = MagicMock()
+    rail = _make_rail()
+    rail._model_selection = {fast_model: "cheap model"}
+    rail._model_id_to_model = {"fast": fast_model}
+    rail._default_llm = default_model
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    todos = _make_todos([
+        ("task-a", TodoStatus.IN_PROGRESS),  # no selected_model_id
+    ])
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=todos)
+
+    ctx = _make_ctx(session=MagicMock())
+    ctx.session.get_session_id.return_value = "sess-default-restore"
+    ctx.agent.set_llm = MagicMock()
+    ctx.agent._llm = MagicMock()
+    rail.system_prompt_builder = MagicMock()
+    rail.system_prompt_builder.language = "en"
+
+    await rail.before_model_call(ctx)
+
+    ctx.agent.set_llm.assert_called_once_with(default_model)
+
+
+@pytest.mark.asyncio
+async def test_before_model_call_no_switch_when_model_selection_empty() -> None:
+    """before_model_call skips model switching when _model_selection is empty."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx(session=MagicMock())
+    ctx.agent.set_llm = MagicMock()
+    rail.system_prompt_builder = MagicMock()
+    rail.system_prompt_builder.language = "en"
+
+    await rail.before_model_call(ctx)
+
+    ctx.agent.set_llm.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_after_model_call_accumulates_usage() -> None:
+    """after_model_call accumulates token usage into _usage_records."""
+    fast_model = _make_mock_model("fast")
+    rail = _make_rail()
+    rail._model_selection = {fast_model: "cheap model"}
+    rail._model_id_to_model = {"fast": fast_model}
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    usage = MagicMock()
+    usage.input_tokens = 100
+    usage.output_tokens = 50
+    response = MagicMock()
+    response.usage_metadata = usage
+
+    ctx = _make_ctx(session=MagicMock())
+    ctx.session.get_session_id.return_value = "sess-usage"
+    ctx.inputs = MagicMock()
+    ctx.inputs.response = response
+    ctx.agent._llm = _make_mock_model("fast")
+
+    await rail.after_model_call(ctx)
+
+    assert "fast" in rail._usage_records
+    assert rail._usage_records["fast"].input_tokens == 100
+    assert rail._usage_records["fast"].output_tokens == 50
+
+    await rail.after_model_call(ctx)
+    assert rail._usage_records["fast"].input_tokens == 200
+    assert rail._usage_records["fast"].output_tokens == 100
+
+
+@pytest.mark.asyncio
+async def test_after_invoke_resets_usage_records() -> None:
+    """after_invoke logs and resets _usage_records."""
+    fast_model = _make_mock_model("fast")
+    rail = _make_rail()
+    rail._model_selection = {fast_model: "cheap model"}
+    rail._model_id_to_model = {"fast": fast_model}
+    rail._usage_records = {"fast": ModelUsageRecord(model_id="fast", input_tokens=200, output_tokens=100)}
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx(session=MagicMock())
+    ctx.session.get_session_id.return_value = "sess-reset"
+
+    await rail.after_invoke(ctx)
+
+    assert rail._usage_records == {}
+
+
+def test_build_todo_section_with_model_selection_injects_prompt() -> None:
+    """build_todo_section includes model selection guidance when model_selection provided."""
+    from openjiuwen.harness.prompts.sections.todo import build_todo_section
+
+    fast_model = _make_mock_model("fast")
+    model_selection = {fast_model: "cheap model"}
+    section = build_todo_section(language="en", model_selection=model_selection)
+    assert section is not None
+    content = section.content.get("en", "")
+    assert "fast" in content
+    assert "Model Selection" in content
+
+
+def test_build_todo_section_without_model_selection_no_model_prompt() -> None:
+    """build_todo_section without model_selection includes warning about not using selected_model_id."""
+    from openjiuwen.harness.prompts.sections.todo import build_todo_section
+
+    section = build_todo_section(language="en")
+    assert section is not None
+    content = section.content.get("en", "")
+    assert "Model Selection Note" in content
+    assert "do NOT use the selected_model_id field" in content

@@ -16,7 +16,7 @@ AgentTeams 是一个多智能体协作框架，通过 Leader（负责人）和 T
 
 ### 架构组件
 - **Transport（传输层）**: 负责智能体间消息传递（支持 `inprocess`、`pyzmq`）
-- **Storage（存储层）**: 持久化团队状态、任务列表和消息（支持 `sqlite`、`memory`）
+- **Storage（存储层）**: 持久化团队状态、任务列表和消息（支持 `sqlite`、`postgresql`、`memory`）
 
 ## 快速开始
 
@@ -94,6 +94,27 @@ leader:
   persona: 项目管理专家
 ```
 
+### 存储配置（SQLite / PostgreSQL）
+
+```yaml
+# SQLite（本地文件）
+storage:
+  type: sqlite
+  params:
+    connection_string: ./team_data/team.db
+
+# PostgreSQL（推荐分布式部署）
+storage:
+  type: postgresql
+  params:
+    connection_string: postgresql+asyncpg://user:password@host:5432/agent_team
+```
+
+说明：
+- `postgresql` 模式使用同一个 `connection_string` 字段；
+- 运行前需确保 PostgreSQL 服务已启动且可访问；
+- 若使用可选依赖安装，请包含 `postgres` extra（`asyncpg`）。
+
 ## 配置详解
 
 以上样例涉及的主要配置项说明：
@@ -125,14 +146,17 @@ async for chunk in Runner.run_agent_team_streaming(
 ### 交互模式
 
 ```python
-# 启动后台流式任务
-stream_task = asyncio.create_task(
-    Runner.run_agent_team_streaming(
+# run_agent_team_streaming() 返回异步迭代器，
+# 不能直接传给 create_task()，需要先包装成协程。
+async def consume_stream():
+    async for chunk in Runner.run_agent_team_streaming(
         agent_team=leader,
         inputs={"query": "初始任务"},
         session="session_id",
-    )
-)
+    ):
+        print(chunk, end="", flush=True)
+
+stream_task = asyncio.create_task(consume_stream())
 
 # 发送后续输入
 await leader.interact("补充指令")

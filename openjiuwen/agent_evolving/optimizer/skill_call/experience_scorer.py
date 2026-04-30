@@ -10,7 +10,13 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord, UsageStats
+from openjiuwen.agent_evolving.optimizer.llm_resilience import (
+    LLMInvokePolicy,
+    invoke_text_with_retry,
+)
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.model import Model
 
 # E/U/F score weights
 W_E = 0.5
@@ -19,6 +25,17 @@ W_F = 0.2
 
 FRESHNESS_HALF_LIFE_DAYS = 90
 STALE_VERSION_PENALTY = 0.7
+
+EVALUATE_LLM_POLICY = LLMInvokePolicy(
+    attempt_timeout_secs=30,
+    total_budget_secs=90,
+    max_attempts=3,
+)
+SIMPLIFY_LLM_POLICY = LLMInvokePolicy(
+    attempt_timeout_secs=60,
+    total_budget_secs=180,
+    max_attempts=3,
+)
 
 
 # Evaluate experience effectiveness from conversation snippet
@@ -275,12 +292,31 @@ def update_score(
 class ExperienceScorer:
     """LLM-based experience scorer and maintainer."""
 
-    def __init__(self, llm: Any, model: str, language: str = "cn") -> None:
+    def __init__(
+        self,
+        llm: Model,
+        model: str,
+        language: str = "cn",
+        evaluate_llm_policy: LLMInvokePolicy = EVALUATE_LLM_POLICY,
+        simplify_llm_policy: LLMInvokePolicy = SIMPLIFY_LLM_POLICY,
+    ) -> None:
         self._llm = llm
         self._model = model
         self._language = language
+        self._evaluate_llm_policy = evaluate_llm_policy
+        self._simplify_llm_policy = simplify_llm_policy
 
-    def update_llm(self, llm: Any, model: str) -> None:
+    @property
+    def evaluate_llm_policy(self) -> LLMInvokePolicy:
+        """Get the configured evaluation policy."""
+        return self._evaluate_llm_policy
+
+    @property
+    def simplify_llm_policy(self) -> LLMInvokePolicy:
+        """Get the configured maintenance policy."""
+        return self._simplify_llm_policy
+
+    def update_llm(self, llm: Model, model: str) -> None:
         """Update runtime llm/model for hot reload."""
         self._llm = llm
         self._model = model
@@ -309,12 +345,14 @@ class ExperienceScorer:
         )
 
         try:
-            response = await self._llm.invoke(
+            raw = await invoke_text_with_retry(
+                llm=self._llm,
                 model=self._model,
-                messages=[{"role": "user", "content": prompt}],
+                prompt=prompt,
+                policy=self._evaluate_llm_policy,
+                is_result_usable=lambda text: self._parse_llm_json(text) is not None,
             )
-            raw = response.content if hasattr(response, "content") else str(response)
-        except Exception as exc:
+        except BaseError as exc:
             logger.error("[ExperienceScorer] evaluate LLM call failed: %s", exc)
             return []
 
@@ -330,6 +368,7 @@ class ExperienceScorer:
         skill_name: str,
         skill_summary: str,
         records: List[EvolutionRecord],
+        user_intent: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Generate maintenance actions for experience library.
 
@@ -337,6 +376,7 @@ class ExperienceScorer:
             skill_name: Name of the skill
             skill_summary: Summary of skill content
             records: Current experience records (should be sorted by score)
+            user_intent: Optional natural-language instructions guiding simplification
 
         Returns:
             List of action dicts with action, record_id, reason, etc.
@@ -350,14 +390,18 @@ class ExperienceScorer:
             skill_summary=skill_summary[:1000],
             scored_experiences=formatted,
         )
+        if user_intent:
+            prompt += f"\n\n**用户意图**: {user_intent}"
 
         try:
-            response = await self._llm.invoke(
+            raw = await invoke_text_with_retry(
+                llm=self._llm,
                 model=self._model,
-                messages=[{"role": "user", "content": prompt}],
+                prompt=prompt,
+                policy=self._simplify_llm_policy,
+                is_result_usable=lambda text: self._parse_llm_json(text) is not None,
             )
-            raw = response.content if hasattr(response, "content") else str(response)
-        except Exception as exc:
+        except BaseError as exc:
             logger.error("[ExperienceScorer] simplify LLM call failed: %s", exc)
             return []
 
@@ -512,6 +556,8 @@ __all__ = [
     "W_F",
     "FRESHNESS_HALF_LIFE_DAYS",
     "STALE_VERSION_PENALTY",
+    "EVALUATE_LLM_POLICY",
+    "SIMPLIFY_LLM_POLICY",
     "calc_effectiveness",
     "calc_utilization",
     "calc_freshness",

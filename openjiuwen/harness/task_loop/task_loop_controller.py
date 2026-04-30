@@ -109,6 +109,16 @@ class TaskLoopController(Controller):
             return queues.drain_follow_up()
         return []
 
+    def enqueue_follow_up(self, msg: str) -> None:
+        """Enqueue a follow-up message for the next outer round.
+
+        Rails can use this to request a continuation or confirmation
+        round without coupling to the handler's queue implementation.
+        """
+        queues = self._get_interaction_queues()
+        if queues is not None:
+            queues.push_follow_up(msg)
+
     def has_follow_up(self) -> bool:
         """Check if follow-up messages are pending.
 

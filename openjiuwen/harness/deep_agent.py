@@ -65,13 +65,14 @@ from openjiuwen.harness.task_loop.task_loop_controller import (
     TaskLoopController,
 )
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
-from openjiuwen.harness.tools.session_tools import SessionToolkit
-from openjiuwen.harness.tools.web_tools import is_free_search_enabled
+from openjiuwen.harness.security.factory import build_permission_interrupt_rail
+from openjiuwen.harness.tools import SessionToolkit, is_free_search_enabled, is_paid_search_enabled
 
 if TYPE_CHECKING:
     from openjiuwen.core.controller.modules.event_queue import (
         EventQueue,
     )
+    from openjiuwen.harness.schema.config import SubAgentConfig
 
 from openjiuwen.harness.prompts import (
     resolve_language,
@@ -151,15 +152,22 @@ class DeepAgent(BaseAgent):
 
     @staticmethod
     def _filter_disabled_tools(config: DeepAgentConfig) -> None:
-        if config.tools is None or is_free_search_enabled():
+        if config.tools is None:
+            return
+        disabled_tool_names: set[str] = set()
+        if not is_free_search_enabled():
+            disabled_tool_names.add("free_search")
+        if not is_paid_search_enabled():
+            disabled_tool_names.add("paid_search")
+        if not disabled_tool_names:
             return
         config.tools = [
             card for card in config.tools
-            if not (isinstance(card, ToolCard) and card.name == "free_search")
+            if not (isinstance(card, ToolCard) and card.name in disabled_tool_names)
         ]
 
     def _unregister_tool_resource(self, card: ToolCard) -> None:
-        if card.name != "free_search":
+        if card.name not in {"free_search", "paid_search"}:
             return
         if not getattr(card, "id", None):
             return
@@ -187,7 +195,7 @@ class DeepAgent(BaseAgent):
                 )
 
     def _ensure_builtin_tool_resource(self, card: ToolCard, config: DeepAgentConfig) -> None:
-        if card.name != "free_search":
+        if card.name not in {"free_search", "paid_search"}:
             return
         existing_tool = Runner.resource_mgr.get_tool(card.id)
         if existing_tool is not None:
@@ -199,9 +207,10 @@ class DeepAgent(BaseAgent):
                 )
             return
 
-        from openjiuwen.harness.tools.web_tools import WebFreeSearchTool
+        from openjiuwen.harness.tools import WebFreeSearchTool, WebPaidSearchTool
 
-        tool = WebFreeSearchTool(language=resolve_language(config.language), card=card)
+        tool_cls = WebPaidSearchTool if card.name == "paid_search" else WebFreeSearchTool
+        tool = tool_cls(language=resolve_language(config.language), card=card)
         result = Runner.resource_mgr.add_tool(tool, tag=self.card.id)
         if result.is_err():
             logger.warning(
@@ -346,6 +355,7 @@ class DeepAgent(BaseAgent):
                 self.ability_manager.remove(name)
             self.ability_manager.add(card)
             self._ensure_builtin_tool_resource(card, config)
+        self.ability_manager.reorder_tools(list(new_by_name))
 
     def _hot_reload_system_prompt(self, config: DeepAgentConfig) -> None:
         """Rebuild the SystemPromptBuilder and update both agents during hot-reconfigure.
@@ -392,6 +402,23 @@ class DeepAgent(BaseAgent):
         # factory's rails= argument.
         if config.enable_task_loop:
             self._pending_rails.append(TaskCompletionRail())
+
+        if isinstance(config.permissions, dict) and config.permissions.get("enabled"):
+            ws_root = None
+            if config.workspace is not None:
+                ws_root = Path(config.workspace.root_path).resolve()
+            model_name = None
+            if config.model is not None:
+                model_name = getattr(config.model, "model_name", None)
+            prail = build_permission_interrupt_rail(
+                permissions=config.permissions,
+                llm=config.model,
+                model_name=model_name,
+                host=config.permission_host,
+                workspace_root=ws_root,
+            )
+            if prail is not None:
+                self._pending_rails.append(prail)
 
     def set_react_agent(
         self,
@@ -687,7 +714,7 @@ class DeepAgent(BaseAgent):
             )
         else:
             workspace = Workspace(
-                root_path=self._deep_config.workspace.root_path + f"/{subsession_id}",
+                root_path=Path(self._deep_config.workspace.root_path) / subsession_id,
                 language=self._deep_config.language
             )
 
@@ -733,7 +760,8 @@ class DeepAgent(BaseAgent):
             "subagents": None,
             "enable_async_subagent": False,
             "add_general_purpose_agent": False,
-            "enable_plan_mode": spec.enable_plan_mode
+            "enable_plan_mode": spec.enable_plan_mode,
+            "restrict_to_work_dir": spec.restrict_to_work_dir,
         }
 
         if spec.factory_name:
@@ -868,6 +896,27 @@ class DeepAgent(BaseAgent):
             ]
         self._pending_rails.append(rail)
         return self
+
+    def strip_rails_by_type(self, rail_types: tuple[type, ...]) -> int:
+        """Remove queued rails by type and mark registered ones as stale.
+
+        This provides a public API for callers that need to replace built-in rails
+        without touching DeepAgent's internal rail lists directly.
+        """
+        if not rail_types:
+            return 0
+
+        removed = 0
+        before = len(self._pending_rails)
+        self._pending_rails = [r for r in self._pending_rails if not isinstance(r, rail_types)]
+        removed += before - len(self._pending_rails)
+
+        for rail in list(self._registered_rails):
+            if isinstance(rail, rail_types):
+                self._stale_rails.append(rail)
+                removed += 1
+
+        return removed
 
     async def register_rail(self, rail: AgentRail) -> "DeepAgent":
         """Register a rail with selective routing."""
@@ -1142,9 +1191,10 @@ class DeepAgent(BaseAgent):
         """
         state = self.load_state(session)
         if state.plan_mode.mode == mode:
-            return
-        if mode == "plan":
             state.plan_mode.pre_plan_mode = state.plan_mode.mode
+            logger.info("[DeepAgent] mode in state is the same, no need to switch, mode: {}".format(mode))
+            return
+        state.plan_mode.pre_plan_mode = state.plan_mode.mode
         state.plan_mode.mode = mode
         self.save_state(session, state)
 
@@ -1158,7 +1208,7 @@ class DeepAgent(BaseAgent):
             session: Current session.
         """
         state = self.load_state(session)
-        state.plan_mode.mode = state.plan_mode.pre_plan_mode or "auto"
+        state.plan_mode.mode = state.plan_mode.pre_plan_mode or "normal"
         state.plan_mode.pre_plan_mode = None
         self.save_state(session, state)
 
@@ -1172,7 +1222,7 @@ class DeepAgent(BaseAgent):
             Resolved ``Path`` to the plan Markdown file, or ``None`` if
             no slug has been set or the workspace is unavailable.
         """
-        from openjiuwen.harness.tools.agent_mode_tools import resolve_plan_file_path
+        from openjiuwen.harness.tools import resolve_plan_file_path
 
         state = self.load_state(session)
         slug = state.plan_mode.plan_slug
@@ -1409,10 +1459,14 @@ class DeepAgent(BaseAgent):
             )
 
         last_result: Dict[str, Any] = {}
-        async for result in self._run_task_loop(
-            ctx, session
-        ):
-            last_result = result
+        try:
+            async for result in self._run_task_loop(
+                ctx, session
+            ):
+                last_result = result
+        except Exception as e:
+            logger.error(f"Task loop invoke error: {e}", exc_info=True)
+            raise
         return last_result
 
     async def _run_task_loop_stream(
@@ -1456,7 +1510,9 @@ class DeepAgent(BaseAgent):
                 async for result in self._run_task_loop(ctx, session):
                     await self._write_round_result_to_stream(result, session)
             except Exception as e:
-                logger.error(f"Task loop stream error: {e}")
+                logger.error(f"Task loop stream error: {e}", exc_info=True)
+                error_result = {"output": str(e), "result_type": "error"}
+                await self._write_round_result_to_stream(error_result, session)
             finally:
                 # Only close the stream emitter to send END_FRAME,
                 # so stream_iterator() can terminate.

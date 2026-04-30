@@ -3,6 +3,8 @@
 
 import fnmatch
 import json
+import os
+import uuid
 from typing import List, Dict, Any, Literal, Tuple, Optional
 from pydantic import BaseModel, Field
 
@@ -14,8 +16,7 @@ from openjiuwen.core.context_engine.processor.base import ContextProcessor, Cont
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
-from openjiuwen.core.foundation.llm import BaseMessage, AssistantMessage, ToolMessage
-from openjiuwen.core.sys_operation import SysOperation
+from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage
 
 
 class MessageOffloaderConfig(BaseModel):
@@ -153,15 +154,30 @@ class MessageOffloader(ContextProcessor):
         extra_fields = message.model_dump()
         extra_fields.pop("role", None)
         extra_fields.pop("content", None)
+        offload_handle, offload_path = self._new_offload_handle_and_path(context)
         offload_message = await self.offload_messages(
             role=message.role,
             content=trimmed_content,
             messages=[message],
             context=context,
+            offload_handle=offload_handle,
+            offload_path=offload_path,
             **extra_fields,
             **kwargs
         )
         return offload_message
+
+    def _new_offload_handle_and_path(self, context: ModelContext) -> tuple[str, str | None]:
+        offload_handle = uuid.uuid4().hex
+        session_id = context.session_id()
+        workspace_dir = context.workspace_dir()
+        file_name = f"{self.processor_type()}_{offload_handle}.json"
+        if workspace_dir:
+            return (
+                offload_handle,
+                os.path.join(workspace_dir, "context", f"{session_id}_context", "offload", file_name),
+            )
+        return offload_handle, None
 
     def load_state(self, state: Dict[str, Any]) -> None:
         return

@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import json
-from typing import Literal, Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -11,8 +11,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.foundation.llm import (
-    BaseMessage, SystemMessage, UserMessage,
-    ModelRequestConfig, ModelClientConfig, Model
+    BaseMessage, UserMessage, ModelRequestConfig, ModelClientConfig, Model
 )
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.processor.offloader.message_offloader import MessageOffloader
@@ -125,8 +124,7 @@ Conversation context:
 {context}
 """
 
-# Default prompt for non-adaptive (simple LLM summary) mode
-# Used when enable_adaptive_compression=False
+# Legacy simple-summary prompt retained only for old serialized references.
 DEFAULT_OFFLOAD_SUMMARY_PROMPT: str = \
     """
     You are a "high-density summarizer".
@@ -144,102 +142,67 @@ class MessageSummaryOffloaderConfig(BaseModel):
     """
     Configuration for MessageSummaryOffloader.
 
-    Extends MessageOffloaderConfig with adaptive compression capabilities.
-    When adaptive mode is enabled, uses LLM to generate context-aware summaries.
-    When disabled, falls back to simple LLM-based summary.
+    Always uses adaptive compression to generate context-aware summaries.
 
-    **Evaluation order (highest → lowest priority):**
-    1. `messages_to_keep` – newest N messages are **immune** to off-loading.
-    2. `keep_last_round` – the latest **user + assistant** turn is **always** kept.
-    3. `messages_threshold` – total message **count** trigger.
-    4. `tokens_threshold` – total **token** trigger (checked after every append).
-    5. `large_message_threshold` – **per-message** token size; larger messages are
-       **preferentially** selected for compression.
+    Triggering is based on newly added messages whose role appears in
+    `offload_message_type` and whose size exceeds
+    `large_message_threshold`.
 
-    Only roles listed in `offload_message_type` are eligible; others are **never** touched.
+    Adaptive compression only evaluates newly added messages.
+    `messages_threshold`, `tokens_threshold`, `messages_to_keep`,
+    and `keep_last_round` do not affect triggering or candidate selection.
     """
-
-    # -------------------------------------------------------------------------
-    # Parameters retained from the original offloader / summary-offloader family
-    # -------------------------------------------------------------------------
 
     messages_threshold: int | None = Field(default=None, gt=0)
-    """Hard ceiling on **message count**.  Exceeding it starts off-loading."""
+    """Compatibility field; adaptive compression does not use message-count triggering."""
 
     tokens_threshold: int = Field(default=20000, gt=0)
-    """Hard ceiling on **accumulated tokens** (tokenizer-dependent).  Checked after each append."""
+    """Compatibility field; adaptive compression uses per-message size checks."""
 
     large_message_threshold: int = Field(default=1000, gt=0)
-    """
-    Token length above which a single message is labelled *large* and 
-    becomes a **preferred** compression candidate.
-    """
+    """Minimum message size for adaptive compression candidates."""
 
     offload_message_type: list[Literal["user", "assistant", "tool"]] = Field(default=["tool"])
-    """White-list of **roles** that may be compressed or off-loaded.  Roles absent here are **protected**."""
+    """Roles eligible for adaptive summary offloading."""
 
     protected_tool_names: list[str] = Field(default=["reload_original_context_messages"])
-    """Tool messages produced by these tools are always kept in full and never offloaded."""
+    """Tool messages produced by these tools are always kept in full in both modes."""
 
     messages_to_keep: int | None = Field(default=None, gt=0)
-    """Guarantee that the **newest** *N* messages are **never** off-loaded."""
+    """Compatibility field; adaptive compression does not preserve a tail by count."""
 
     keep_last_round: bool = Field(default=True)
-    """If *True*, the **latest user–assistant round** (two messages) is **immune** to any off-loading."""
+    """Compatibility field; adaptive compression only evaluates newly added messages."""
 
     model: ModelRequestConfig | None = Field(default=None)
-    """Supplies **tokenizer** and **context-window** limits. If omitted, conservative fall-backs are used."""
+    """Supplies tokenizer and context-window limits for the summary/compression model."""
 
     model_client: ModelClientConfig | None = Field(default=None)
-    """
-    Optional **client-level** settings (endpoint, timeout, retry, headers) 
-    for the model that **performs** the summary/compression.
-    """
+    """Client-level settings for the summary/compression model."""
 
-    customized_summary_prompt: str | None = Field(default=None)
-    """User-supplied **prompt** for the summary model.  If *None*, a built-in prompt is used."""
+    # Advanced prompt, task-extraction, and compression-input settings.
+    summary_max_tokens: int = Field(default=900, gt=0)
+    """Maximum tokens allowed in the generated summary."""
 
-    # -------------------------------------------------------------------------
-    # Adaptive compression specific options
-    # -------------------------------------------------------------------------
+    enable_precise_step: bool = Field(
+        default=False,
+        description="Use the LLM to extract the current task before adaptive compression.",
+    )
+    """Enable a second LLM call that makes adaptive summaries more task-aware."""
 
-    enable_adaptive_compression: bool = Field(default=False)
-    """Whether to enable **adaptive** compression mode.
+    step_summary_max_context_messages: int = Field(
+        default=8,
+        gt=0,
+        description="Maximum recent messages used when extracting the current task.",
+    )
+    """Recent context size used by precise step extraction."""
 
-    When enabled, uses LLM to generate intelligent summaries (extractive or abstractive)
-    based on current task context. When disabled, falls back to the parent class behavior
-    which uses a fixed summary prompt.
-    """
-
-    summary_max_tokens: int = Field(default=1000, gt=0)
-    """Maximum tokens allowed in the generated summary.
-
-    The LLM will attempt to compress the message within this limit.
-    Smaller values save more context space but may lose more information.
-    """
-
-    enable_precise_step: bool = Field(default=False)
-    """Whether to use LLM to precisely extract the current task/step from context.
-
-    When enabled, calls LLM to summarize "what the user wants to do" from recent messages.
-    When disabled, uses a heuristic (last user message) as the task description.
-    Enabling this improves summary relevance but adds one extra LLM call per offloading.
-    """
-
-    step_summary_max_context_messages: int = Field(default=10, gt=0)
-    """Number of recent messages to consider when extracting current task (if enable_precise_step=True).
-
-    More messages give better context but increase the chance of hitting context limits.
-    Fallback logic will retry with fewer messages if overflow errors occur.
-    """
-
-    content_max_chars_for_compression: int = Field(default=100000, gt=0)
-    """Maximum character length of tool output that will be sent to LLM for compression.
-
-    If tool output exceeds this, it will be smartly truncated before compression.
-    This prevents "prompt too long" errors when dealing with extremely large tool outputs.
-    The fallback logic tries: full → truncated → further halved if still too long.
-    """
+    content_max_chars_for_compression: int = Field(
+        default=200000,
+        gt=0,
+        description="Maximum original content characters sent to the compression model before fallback truncation.",
+    )
+    """Input size cap for adaptive compression attempts."""
 
 
 @ContextEngine.register_processor()
@@ -247,13 +210,9 @@ class MessageSummaryOffloader(MessageOffloader):
     """
     Message offloader with intelligent compression capabilities.
 
-    **When enable_adaptive_compression=True:**
-    - Per-message triggering: triggers when individual messages exceed threshold
-    - Task-aware compression: considers current task context when summarizing
-    - Fallback mechanisms: retries with truncated content if LLM context overflows
-
-    **When enable_adaptive_compression=False (default):**
-    - Uses simple LLM summary without task context
+    - Per-message triggering: triggers when newly added eligible messages exceed threshold.
+    - Task-aware compression: considers current task context when summarizing.
+    - Fallback mechanisms: retries with truncated content if LLM context overflows.
     """
 
     def __init__(self, config: MessageSummaryOffloaderConfig):
@@ -278,9 +237,7 @@ class MessageSummaryOffloader(MessageOffloader):
     ) -> bool:
         """Determine whether offloading should be triggered.
 
-        **Behavior:**
-        - When adaptive mode enabled: checks if ANY new message exceeds large_message_threshold
-        - When disabled: delegates to parent's token-based triggering logic
+        Checks whether any newly added eligible message exceeds `large_message_threshold`.
 
         Args:
             context: Current conversation context.
@@ -289,8 +246,6 @@ class MessageSummaryOffloader(MessageOffloader):
         Returns:
             True if offloading should be triggered.
         """
-        if not self.config.enable_adaptive_compression:
-            return await super().trigger_add_messages(context, messages_to_add, **kwargs)
         context_messages = context.get_messages() + messages_to_add
         return any(self._should_offload_message(message, context, context_messages) for message in messages_to_add)
 
@@ -302,9 +257,7 @@ class MessageSummaryOffloader(MessageOffloader):
     ) -> tuple[ContextEvent | None, list[BaseMessage]]:
         """Process messages and offload large ones.
 
-        **Behavior:**
-        - When adaptive mode enabled: only processes newly added messages, not entire context
-        - When disabled: delegates to parent's full-context scanning logic
+        Only processes newly added messages, not the existing context.
 
         Args:
             context: Current conversation context.
@@ -313,9 +266,6 @@ class MessageSummaryOffloader(MessageOffloader):
         Returns:
             Tuple of (event with modified indices, processed messages).
         """
-        if not self.config.enable_adaptive_compression:
-            return await super().on_add_messages(context, messages_to_add, **kwargs)
-
         processed_messages = list(messages_to_add)
         event = ContextEvent(event_type=self.processor_type())
         base_index = len(context)
@@ -323,19 +273,20 @@ class MessageSummaryOffloader(MessageOffloader):
         for index, message in enumerate(messages_to_add):
             if not self._should_offload_message(message, context, context.get_messages() + messages_to_add):
                 continue
-            processed_messages[index] = await self._offload_message_adaptive(message, context)
+            processed_messages[index] = await self._offload_message_adaptive(message, context, **kwargs)
             event.messages_to_modify.append(base_index + index)
 
         if not event.messages_to_modify:
             return None, messages_to_add
         return event, processed_messages
 
-    async def _offload_message(self, message: BaseMessage, context: ModelContext) -> BaseMessage:
-        """Route to appropriate offload method based on configuration.
-
-        **Behavior:**
-        - Routes to adaptive or simple summary based on enable_adaptive_compression flag
-        - Parent uses simple truncation; this class uses LLM-based summarization
+    async def _offload_message(
+            self,
+            message: BaseMessage,
+            context: ModelContext,
+            **kwargs: Any,
+    ) -> BaseMessage:
+        """Offload a message using adaptive compression.
 
         Args:
             message: The message to offload.
@@ -344,47 +295,14 @@ class MessageSummaryOffloader(MessageOffloader):
         Returns:
             The offloaded (summarized) message.
         """
-        if not self.config.enable_adaptive_compression:
-            return await self._offload_message_simple_summary(message, context)
-        return await self._offload_message_adaptive(message, context)
+        return await self._offload_message_adaptive(message, context, **kwargs)
 
-    async def _offload_message_simple_summary(
-            self, message: BaseMessage, context: ModelContext
+    async def _offload_message_adaptive(
+            self,
+            message: BaseMessage,
+            context: ModelContext,
+            **kwargs: Any,
     ) -> BaseMessage:
-        """Generate a simple LLM summary for the message (non-adaptive mode).
-
-        This replicates the original simple summary behavior:
-        uses a fixed system prompt to summarize the message content.
-
-        Args:
-            message: The message to summarize.
-            context: Current conversation context.
-
-        Returns:
-            The summarized message with offload metadata.
-        """
-        prompt = self.config.customized_summary_prompt or DEFAULT_OFFLOAD_SUMMARY_PROMPT
-        system_message = SystemMessage(content=prompt)
-        response = await self._model.invoke(
-            [
-                system_message,
-                UserMessage(content=message.content)
-            ]
-        )
-        summarized_content = response.content
-        extra_fields = message.model_dump()
-        extra_fields.pop("role", None)
-        extra_fields.pop("content", None)
-        offload_message = await self.offload_messages(
-            role=message.role,
-            content=summarized_content,
-            messages=[message],
-            context=context,
-            **extra_fields
-        )
-        return offload_message
-
-    async def _offload_message_adaptive(self, message: BaseMessage, context: ModelContext) -> BaseMessage:
         """Generate task-aware adaptive summary for the message.
 
         **When adaptive mode is enabled:**
@@ -394,7 +312,7 @@ class MessageSummaryOffloader(MessageOffloader):
         - Includes fallback mechanisms for context overflow
 
         Args:
-            message: The tool message to offload.
+            message: The message to offload.
             context: Current conversation context.
 
         Returns:
@@ -440,13 +358,17 @@ class MessageSummaryOffloader(MessageOffloader):
         extra_fields = message.model_dump()
         extra_fields.pop("role", None)
         extra_fields.pop("content", None)
+        offload_handle, offload_path = self._new_offload_handle_and_path(context)
 
         return await self.offload_messages(
             role=message.role,
             content=final_content,
             messages=[message],
             context=context,
+            offload_handle=offload_handle,
+            offload_path=offload_path,
             **extra_fields,
+            **kwargs,
         )
 
     def _should_offload_message(
@@ -458,7 +380,7 @@ class MessageSummaryOffloader(MessageOffloader):
         """Check if a message should be offloaded.
 
         **When adaptive mode is enabled:**
-        - Only processes tool messages (not user/assistant)
+        - Only processes roles configured by offload_message_type
         - Uses token count (if available) or character count
         - Skips messages already marked as offloaded (OffloadMixin)
 
@@ -469,19 +391,13 @@ class MessageSummaryOffloader(MessageOffloader):
         Returns:
             True if the message should be offloaded.
         """
-        if not self.config.enable_adaptive_compression:
-            return super()._should_offload_message(
-                message=message,
-                context_messages=context_messages or context.get_messages(),
-                context=context,
-            )
-        if message.role != "tool":
+        if message.role not in self.config.offload_message_type:
             return False
         if isinstance(message, OffloadMixin):
             return False
         if context_messages is None:
             context_messages = context.get_messages()
-        if self._is_protected_tool_message(message, context_messages):
+        if message.role == "tool" and self._is_protected_tool_message(message, context_messages):
             return False
         length = self._message_size(message, context)
         return length > self.config.large_message_threshold
@@ -885,9 +801,9 @@ class MessageSummaryOffloader(MessageOffloader):
         """Validate configuration.
 
         **Behavior:**
-        - Skips MessageOffloader trim_size validation because this class no longer
-          uses truncation-based offload
-        - Keeps only the validation rules that still make sense
+        - Keeps only the validation rules that apply to summary-based offload.
+        - Does not validate truncation settings because this processor does not
+          expose or use truncation-based offload.
         """
         if not getattr(self, "_config", None):
             return

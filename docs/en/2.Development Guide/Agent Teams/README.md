@@ -4,3 +4,4 @@ AgentTeams is a Leader-Teammate collaboration framework that completes complex t
 
 - [Overview](./Overview.md)
 - [AgentTeams Guide](./AgentTeams.md)
+- [Team Skill Evolution](./Team Skill Evolution.md)

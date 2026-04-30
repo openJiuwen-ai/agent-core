@@ -6,11 +6,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.context_engine import ContextEngineConfig
+from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
+from openjiuwen.core.context_engine.processor.base import ContextEvent
 from openjiuwen.core.context_engine.processor.offloader.message_summary_offloader import (
     MessageSummaryOffloader,
     MessageSummaryOffloaderConfig,
-    DEFAULT_OFFLOAD_SUMMARY_PROMPT
 )
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.context_engine.context.context import SessionModelContext
@@ -18,9 +18,13 @@ from openjiuwen.core.foundation.llm import (
     UserMessage,
     AssistantMessage,
     ToolMessage,
-    SystemMessage,
     ModelRequestConfig,
     ModelClientConfig
+)
+from openjiuwen.core.session.agent import Session
+from tests.unit_tests.core.context_engine._stream_state_helpers import (
+    assert_context_state_pair,
+    capture_context_compression_states,
 )
 
 
@@ -42,7 +46,6 @@ class TestMessageSummaryOffloader:
             offload_message_type=["user", "assistant"],
             messages_to_keep=10,
             keep_last_round=True,
-            customized_summary_prompt="Custom summary prompt"
         )
 
     @pytest.fixture
@@ -62,6 +65,49 @@ class TestMessageSummaryOffloader:
             api_key="test-key",
             api_base="http://test.api.com"
         )
+
+    @pytest.mark.asyncio
+    async def test_streams_state_when_message_summary_offloader_triggers(self):
+        session = Session(session_id="message-summary-offloader-stream-session")
+        config = MessageSummaryOffloaderConfig(
+            messages_threshold=1,
+            large_message_threshold=10,
+            offload_message_type=["user"],
+            messages_to_keep=None,
+            keep_last_round=False,
+        )
+
+        with (patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model')
+              as mock_model_class):
+            mock_model_instance = MagicMock()
+            mock_model_instance.invoke = AsyncMock(return_value=AssistantMessage(content="summarized content"))
+            mock_model_class.return_value = mock_model_instance
+            engine = ContextEngine(ContextEngineConfig(default_window_message_num=100))
+            context = await engine.create_context(
+                "test_ctx",
+                session,
+                history_messages=[],
+                processors=[("MessageSummaryOffloader", config)],
+            )
+            processor = context._processors[0]  # type: ignore[attr-defined]
+            processor.trigger_add_messages = AsyncMock(return_value=True)  # type: ignore[method-assign]
+            processor.on_add_messages = AsyncMock(
+                return_value=(
+                    ContextEvent(event_type=processor.processor_type(), messages_to_modify=[0]),
+                    [UserMessage(content="trigger")],
+                )
+            )  # type: ignore[method-assign]
+
+            _, states = await capture_context_compression_states(
+                session,
+                lambda: context.add_messages([
+                    UserMessage(content="x" * 100),
+                    UserMessage(content="trigger"),
+                ]),
+            )
+
+        assert_context_state_pair(states, processor_type="MessageSummaryOffloader")
+        assert "modified 1 messages" in states[1].summary
 
     @pytest.mark.asyncio
     async def test_init_with_default_config(self, default_config):
@@ -98,8 +144,8 @@ class TestMessageSummaryOffloader:
             )
 
     @pytest.mark.asyncio
-    async def test_offload_message_with_default_prompt(self, default_config):
-        """Test _offload_message method with default prompt"""
+    async def test_offload_message_uses_adaptive_prompt(self, default_config):
+        """Test _offload_message uses the adaptive compression prompt."""
         original_content = "This is a very long message that needs to be summarized. " * 20
         original_message = UserMessage(content=original_content)
         summarized_content = "This is a summarized version of the message."
@@ -125,18 +171,15 @@ class TestMessageSummaryOffloader:
             assert summarized_content in result.content
             assert original_message.content in reload_messages
             
-            # Verify Model.invoke was called correctly
             mock_model_instance.invoke.assert_called_once()
             call_args = mock_model_instance.invoke.call_args[0][0]
-            assert len(call_args) == 2
-            assert isinstance(call_args[0], SystemMessage)
-            assert call_args[0].content == DEFAULT_OFFLOAD_SUMMARY_PROMPT
-            assert isinstance(call_args[1], UserMessage)
-            assert call_args[1].content == original_content
+            assert len(call_args) == 1
+            assert isinstance(call_args[0], UserMessage)
+            assert original_content in call_args[0].content
 
     @pytest.mark.asyncio
-    async def test_offload_message_with_custom_prompt(self, custom_config):
-        """Test _offload_message method with custom prompt"""
+    async def test_offload_message_with_custom_config(self, custom_config):
+        """Test _offload_message with custom compatibility config."""
         original_content = "This is a very long message that needs to be summarized. " * 20
         original_message = AssistantMessage(content=original_content)
         summarized_content = "Custom summarized version."
@@ -162,9 +205,9 @@ class TestMessageSummaryOffloader:
             assert summarized_content in result.content
             assert original_message.content in reload_messages
 
-            # Verify custom prompt was used
             call_args = mock_model_instance.invoke.call_args[0][0]
-            assert call_args[0].content == custom_config.customized_summary_prompt
+            assert len(call_args) == 1
+            assert original_content in call_args[0].content
 
     @pytest.mark.asyncio
     async def test_offload_message_with_different_roles(self, default_config):
@@ -177,11 +220,16 @@ class TestMessageSummaryOffloader:
         
         for original_message, expected_role in test_cases:
             summarized_content = f"Summarized {expected_role} message"
+            response_content = (
+                '{"compression_strategy":"extractive",'
+                f'"summary":"{summarized_content}",'
+                '"offload_data_explanation":{}}'
+            )
             
             with (patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model')
                   as mock_model_class):
                 mock_model_instance = MagicMock()
-                mock_model_instance.invoke = AsyncMock(return_value=AssistantMessage(content=summarized_content))
+                mock_model_instance.invoke = AsyncMock(return_value=AssistantMessage(content=response_content))
                 mock_model_class.return_value = mock_model_instance
                 
                 offloader = MessageSummaryOffloader(default_config)
@@ -266,11 +314,16 @@ class TestMessageSummaryOffloader:
         """Test _offload_message with empty content"""
         original_message = UserMessage(content="")
         summarized_content = "Empty message summary"
+        response_content = (
+            '{"compression_strategy":"extractive",'
+            f'"summary":"{summarized_content}",'
+            '"offload_data_explanation":{}}'
+        )
         
         with (patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model')
               as mock_model_class):
             mock_model_instance = MagicMock()
-            mock_model_instance.invoke = AsyncMock(return_value=AssistantMessage(content=summarized_content))
+            mock_model_instance.invoke = AsyncMock(return_value=AssistantMessage(content=response_content))
             mock_model_class.return_value = mock_model_instance
             
             offloader = MessageSummaryOffloader(default_config)

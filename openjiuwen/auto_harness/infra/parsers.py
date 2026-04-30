@@ -5,6 +5,7 @@
 提供从 agent 文本输出中提取结构化数据的通用函数：
 - ``parse_tasks``: 解析 JSON 任务列表
 - ``parse_learnings``: 解析 JSON 经验列表
+- ``parse_pr_draft``: 解析 PR draft JSON
 - ``parse_gaps``: 解析 markdown 表格中的竞品差距
 - ``extract_text``: 从 OutputSchema chunk 提取文本
 """
@@ -24,9 +25,17 @@ from openjiuwen.auto_harness.schema import (
     Gap,
     OptimizationTask,
     PipelineSelectionArtifact,
+    PullRequestDraft,
 )
 
 logger = logging.getLogger(__name__)
+_ALLOWED_PR_KINDS = {
+    "bug",
+    "task",
+    "feature",
+    "refactor",
+    "clean_code",
+}
 
 
 def parse_tasks(raw: str) -> List[OptimizationTask]:
@@ -110,6 +119,62 @@ def parse_learnings(raw: str) -> List[dict]:
         item for item in items
         if isinstance(item, dict) and "topic" in item
     ]
+
+
+def parse_pr_draft_with_error(
+    raw: str,
+) -> tuple[PullRequestDraft | None, str]:
+    """Parse a PR draft JSON response with detailed errors."""
+    match = re.search(
+        r"```json\s*(.*?)\s*```", raw, re.DOTALL
+    )
+    json_str: str
+    if match:
+        json_str = match.group(1)
+    else:
+        obj_match = re.search(r"\{.*}", raw, re.DOTALL)
+        if not obj_match:
+            return None, "未找到 JSON 对象"
+        json_str = obj_match.group(0)
+
+    try:
+        item = json.loads(json_str)
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse PR draft JSON")
+        return None, "JSON 解析失败"
+    if not isinstance(item, dict):
+        return None, "JSON 顶层必须是对象"
+
+    title = str(item.get("title", "")).strip()
+    body = str(item.get("body", "")).strip()
+    kind = str(item.get("kind", "")).strip()
+    if not kind and body:
+        match = re.search(
+            r"(?m)^/kind\s+([a-z_]+)\s*$",
+            body,
+        )
+        if match:
+            kind = match.group(1).strip()
+    if not title or not body:
+        return None, "缺少 title 或 body"
+    if kind not in _ALLOWED_PR_KINDS:
+        return (
+            None,
+            "kind 必须是 bug/task/feature/refactor/clean_code 之一",
+        )
+    return PullRequestDraft(
+        title=title,
+        body=body,
+        kind=kind,
+    ), ""
+
+
+def parse_pr_draft(
+    raw: str,
+) -> PullRequestDraft | None:
+    """Parse a PR draft JSON response."""
+    draft, _ = parse_pr_draft_with_error(raw)
+    return draft
 
 
 def parse_pipeline_selection(

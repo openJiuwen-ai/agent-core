@@ -104,6 +104,9 @@ class AgentFactory:
         agent = DeepAgent(card=agent_card)
         agent.configure(config)
 
+        # Enable token ID + logprobs for RL trajectory training
+        agent.react_agent.config.llm_return_token_ids = True
+
         # Register tools on DeepAgent (will be shared with inner ReActAgent)
         if self._tools:
             self._register_tools(agent)

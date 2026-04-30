@@ -17,7 +17,8 @@ settings, and `Makefile` defines the common lint/test entry points.
   memory, retrieval, security, and system operations.
 - `openjiuwen/harness/`: coding-agent framework built on core
   primitives; includes prompts, rails, tools, subagents, task loop, and
-  workspace handling.
+  workspace handling. Tool permission engine lives in `openjiuwen/harness/security/`;
+  prompt/tool security rails live in `openjiuwen/harness/rails/security/`.
 - `openjiuwen/extensions/`: optional integrations such as storage,
   checkpointers, sandbox providers, and vendor-specific adapters.
 - `openjiuwen/agent_evolving/` and `openjiuwen/dev_tools/`: optimization,
@@ -69,6 +70,8 @@ Pass `COMMITS=N` to check recent commits instead.
 - Code style: `.claude/rules/code-style.md` and `.claude/rules/python/coding-style.md`
 - Testing: `.claude/rules/testing.md`
 - Security: `.claude/rules/security.md`
+- Error codes (StatusCode / BaseError): `.claude/rules/error-codes.md`
+- Logging: `.claude/rules/logging.md`
 - Git workflow: `.claude/rules/git-workflow.md`
 - Deep operational guides: `.claude/skills/`
 - Permissions and env vars: `.claude/settings.json`

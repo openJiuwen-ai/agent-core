@@ -8,22 +8,22 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from openjiuwen.harness.prompts.sections.tools import get_tool_description
-from openjiuwen.harness.prompts.sections.tools.audio import (
+from openjiuwen.harness.prompts.tools import get_tool_description
+from openjiuwen.harness.prompts.tools.audio import (
     AUDIO_METADATA_DESCRIPTION,
     AUDIO_QUESTION_ANSWERING_DESCRIPTION,
     AUDIO_TRANSCRIPTION_DESCRIPTION,
 )
-from openjiuwen.harness.prompts.sections.tools.bash import (
+from openjiuwen.harness.prompts.tools.bash import (
     DESCRIPTION as BASH_DESCRIPTION,
 )
-from openjiuwen.harness.prompts.sections.tools.powershell import (
+from openjiuwen.harness.prompts.tools.powershell import (
     DESCRIPTION as POWERSHELL_DESCRIPTION,
 )
-from openjiuwen.harness.prompts.sections.tools.code import (
+from openjiuwen.harness.prompts.tools.code import (
     DESCRIPTION as CODE_DESCRIPTION,
 )
-from openjiuwen.harness.prompts.sections.tools.filesystem import (
+from openjiuwen.harness.prompts.tools.filesystem import (
     EDIT_FILE_DESCRIPTION,
     GLOB_DESCRIPTION,
     GREP_DESCRIPTION,
@@ -31,28 +31,27 @@ from openjiuwen.harness.prompts.sections.tools.filesystem import (
     READ_FILE_DESCRIPTION,
     WRITE_FILE_DESCRIPTION,
 )
-from openjiuwen.harness.prompts.sections.tools.list_skill import (
+from openjiuwen.harness.prompts.tools.list_skill import (
     DESCRIPTION as LIST_SKILL_DESCRIPTION,
 )
-from openjiuwen.harness.prompts.sections.tools.todo import (
+from openjiuwen.harness.prompts.tools.todo import (
     TODO_CREATE_DESCRIPTION,
     TODO_LIST_DESCRIPTION,
     TODO_MODIFY_DESCRIPTION,
 )
-from openjiuwen.harness.prompts.sections.tools.vision import (
+from openjiuwen.harness.prompts.tools.vision import (
     IMAGE_OCR_DESCRIPTION,
     VISUAL_QUESTION_ANSWERING_DESCRIPTION,
 )
-from openjiuwen.harness.tools.audio import (
+from openjiuwen.harness.tools import (
     AudioMetadataTool,
     AudioQuestionAnsweringTool,
     AudioTranscriptionTool,
-)
-from openjiuwen.harness.tools.code import CodeTool
-from openjiuwen.harness.tools.filesystem import EditFileTool, ReadFileTool
-from openjiuwen.harness.tools.bash import BashTool
-from openjiuwen.harness.tools.powershell import PowerShellTool
-from openjiuwen.harness.tools.vision import (
+    CodeTool,
+    EditFileTool,
+    ReadFileTool,
+    BashTool,
+    PowerShellTool,
     ImageOCRTool,
     VisualQuestionAnsweringTool,
 )

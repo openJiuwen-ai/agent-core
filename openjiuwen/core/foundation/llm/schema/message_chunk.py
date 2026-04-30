@@ -183,7 +183,7 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
                         merged_tool_calls[-1] = ToolCall(
                             id=last.id or incoming.id,
                             type=last.type or incoming.type,
-                            name=(last.name or "") + (incoming.name or ""),
+                            name=(last.name if last.name else incoming.name) or "",
                             arguments=(last.arguments or "") + (incoming.arguments or ""),
                             index=last.index
                         )
@@ -199,6 +199,17 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
 
         merged_finish_reason = other.finish_reason if other.finish_reason != "null" else self.finish_reason
 
+        # Token-level fields from streaming providers (e.g. vLLM):
+        # - prompt_token_ids only ships in the first chunk; keep whichever side has it.
+        # - completion_token_ids streams as deltas per chunk; concatenate.
+        # - logprobs streams as a per-chunk object (typically with a "content" list);
+        #   merge content lists when both sides are dicts, otherwise prefer the latest.
+        merged_prompt_token_ids = self.prompt_token_ids or other.prompt_token_ids
+        merged_completion_token_ids = _concat_token_ids(
+            self.completion_token_ids, other.completion_token_ids
+        )
+        merged_logprobs = _merge_logprobs(self.logprobs, other.logprobs)
+
         return AssistantMessageChunk(
             role=self.role,
             content=combined_content,
@@ -206,8 +217,49 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
             usage_metadata=other.usage_metadata or self.usage_metadata,
             finish_reason=merged_finish_reason,
             parser_content=other.parser_content or self.parser_content,
-            reasoning_content=(self.reasoning_content or '') + (other.reasoning_content or '')
+            reasoning_content=(self.reasoning_content or '') + (other.reasoning_content or ''),
+            prompt_token_ids=merged_prompt_token_ids,
+            completion_token_ids=merged_completion_token_ids,
+            logprobs=merged_logprobs,
         )
+
+
+def _concat_token_ids(left: Any, right: Any) -> Any:
+    """Concatenate streaming completion_token_ids deltas."""
+    if not left:
+        return right
+    if not right:
+        return left
+    if isinstance(left, list) and isinstance(right, list):
+        return left + right
+    return right
+
+
+def _merge_logprobs(left: Any, right: Any) -> Any:
+    """Merge per-chunk logprobs payloads.
+
+    Streaming providers emit logprobs as ``{"content": [...]}`` per chunk;
+    concatenate the ``content`` lists so the accumulated message exposes
+    the full sequence. Falls back to keeping the latest when shapes differ.
+    """
+    if left is None:
+        return right
+    if right is None:
+        return left
+    if isinstance(left, dict) and isinstance(right, dict):
+        merged = dict(left)
+        for key, right_val in right.items():
+            left_val = merged.get(key)
+            if isinstance(left_val, list) and isinstance(right_val, list):
+                merged[key] = left_val + right_val
+            elif left_val is None:
+                merged[key] = right_val
+            else:
+                merged[key] = right_val
+        return merged
+    if isinstance(left, list) and isinstance(right, list):
+        return left + right
+    return right
 
 
 class ToolMessageChunk(ToolMessage, BaseMessageChunk):

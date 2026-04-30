@@ -6,17 +6,30 @@ import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.harness.tools.web_tools import (
+from openjiuwen.harness.tools import (
     WebFetchWebpageTool,
     WebFreeSearchTool,
     WebPaidSearchTool,
-    _http_request,
     create_web_tools,
     is_free_search_enabled,
+    is_paid_search_enabled,
 )
+from openjiuwen.harness.tools.web_tools import _http_request
 
 
 class TestWebFreeSearchTool:
+    @pytest.fixture(autouse=True)
+    def clear_search_env(self, monkeypatch):
+        for key in (
+            "FREE_SEARCH_DDG_ENABLED",
+            "FREE_SEARCH_BING_ENABLED",
+            "BOCHA_API_KEY",
+            "PERPLEXITY_API_KEY",
+            "SERPER_API_KEY",
+            "JINA_API_KEY",
+        ):
+            monkeypatch.delenv(key, raising=False)
+
     @pytest.fixture
     def tool(self):
         return WebFreeSearchTool(language="cn")
@@ -27,7 +40,9 @@ class TestWebFreeSearchTool:
         assert "[ERROR]: query cannot be empty." in result
 
     @pytest.mark.asyncio
-    async def test_invoke_duckduckgo_success(self, tool):
+    async def test_invoke_duckduckgo_success(self, tool, monkeypatch):
+        monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "true")
+        monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "false")
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.text = """
@@ -43,7 +58,9 @@ class TestWebFreeSearchTool:
         assert "Example Title 1" in result
 
     @pytest.mark.asyncio
-    async def test_invoke_bing_fallback_success(self, tool):
+    async def test_invoke_bing_fallback_success(self, tool, monkeypatch):
+        monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "true")
+        monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "true")
         ddg_response = MagicMock()
         ddg_response.status_code = 500
         ddg_response.text = ""
@@ -116,6 +133,12 @@ class TestWebFreeSearchTool:
         assert "[ERROR]: free search failed:" in result
         assert "all free search engines are disabled" in result
 
+    def test_create_web_tools_omits_free_search_by_default(self):
+        tools = create_web_tools(language="cn")
+
+        assert is_free_search_enabled() is False
+        assert [tool.card.name for tool in tools] == ["fetch_webpage"]
+
     def test_create_web_tools_omits_free_search_when_all_engines_disabled(self, monkeypatch):
         monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "false")
         monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "false")
@@ -134,8 +157,20 @@ class TestWebFreeSearchTool:
         assert is_free_search_enabled() is True
         assert [tool.card.name for tool in tools] == ["free_search", "fetch_webpage"]
 
+    def test_create_web_tools_prioritizes_paid_search_when_configured(self, monkeypatch):
+        monkeypatch.setenv("BOCHA_API_KEY", "test-key")
+        monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "false")
+        monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "true")
+
+        tools = create_web_tools(language="cn")
+
+        assert is_paid_search_enabled() is True
+        assert [tool.card.name for tool in tools] == ["paid_search", "free_search", "fetch_webpage"]
+
     @pytest.mark.asyncio
-    async def test_best_effort_returns_low_quality_bing_rows(self, tool):
+    async def test_best_effort_returns_low_quality_bing_rows(self, tool, monkeypatch):
+        monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "true")
+        monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "true")
         ddg_response = MagicMock()
         ddg_response.status_code = 500
         ddg_response.text = ""

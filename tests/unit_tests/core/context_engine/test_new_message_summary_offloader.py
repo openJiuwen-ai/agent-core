@@ -56,7 +56,6 @@ from openjiuwen.core.context_engine.processor.offloader.message_summary_offloade
     MessageSummaryOffloader,
     MessageSummaryOffloaderConfig,
 )
-from openjiuwen.core.context_engine.processor.offloader.message_offloader import MessageOffloader
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
 
@@ -69,19 +68,10 @@ class TestMessageSummaryOffloader:
     @pytest.fixture
     def adaptive_config(self):
         return MessageSummaryOffloaderConfig(
-            enable_adaptive_compression=True,
             large_message_threshold=10,
             summary_max_tokens=128,
             step_summary_max_context_messages=3,
             content_max_chars_for_compression=60,
-        )
-
-    @pytest.fixture
-    def legacy_config(self):
-        return MessageSummaryOffloaderConfig(
-            enable_adaptive_compression=False,
-            messages_threshold=5,
-            messages_to_keep=2,
         )
 
     @pytest.fixture
@@ -153,30 +143,6 @@ class TestMessageSummaryOffloader:
         assert offload_state[processed[0].offload_handle][0].content == tool_message.content
 
     @staticmethod
-    def test_legacy_mode_delegates_to_parent_hooks(legacy_config, context):
-        with patch("openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model"):
-            offloader = MessageSummaryOffloader(legacy_config)
-
-        tool_message = ToolMessage(content="x" * 100, tool_call_id="call_legacy")
-
-        with patch.object(
-            offloader.__class__.__bases__[0],
-            "trigger_add_messages",
-            new=AsyncMock(return_value=True),
-        ) as trigger_mock:
-            assert asyncio.run(offloader.trigger_add_messages(context, [tool_message])) is True
-            trigger_mock.assert_awaited_once()
-
-        with patch.object(
-            offloader.__class__.__bases__[0],
-            "on_add_messages",
-            new=AsyncMock(return_value=("event", [tool_message])),
-        ) as on_add_mock:
-            event, messages = asyncio.run(offloader.on_add_messages(context, [tool_message]))
-            assert event == "event"
-            assert messages == [tool_message]
-            on_add_mock.assert_awaited_once()
-
     @staticmethod
     def test_get_function_call_from_chain_returns_raw_tool_call(adaptive_config, context):
         with patch("openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model"):
@@ -572,40 +538,10 @@ class TestMessageSummaryOffloader:
         assert step == ""
 
     @staticmethod
-    def test_validate_config_skips_when_adaptive_enabled(adaptive_config):
-        """Test _validate_config skips parent validation in adaptive mode."""
+    def test_validate_config_accepts_adaptive_config(adaptive_config):
+        """Test _validate_config accepts adaptive configuration."""
         with patch("openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model"):
             offloader = MessageSummaryOffloader(adaptive_config)
 
-        # Should not raise even with invalid parent config
-        offloader._validate_config()  # Should pass without error
-
-    @staticmethod
-    def test_validate_config_calls_parent_when_adaptive_disabled(legacy_config):
-        """Test _validate_config validates messages_to_keep in non-adaptive mode."""
-        with patch("openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model"):
-            offloader = MessageSummaryOffloader(legacy_config)
-            # In non-adaptive mode, it should check messages_to_keep config
-            # No exception should be raised for valid config
-            offloader._validate_config()
-            # Test passes if no exception
-
-    @staticmethod
-    def test_non_adaptive_mode_delegates_trigger_to_parent(legacy_config, context):
-        """Test trigger_add_messages delegates to parent in non-adaptive mode."""
-        with patch("openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model"):
-            with patch.object(MessageOffloader, 'trigger_add_messages', return_value=True) as parent_trigger:
-                offloader = MessageSummaryOffloader(legacy_config)
-                result = asyncio.run(offloader.trigger_add_messages(context, []))
-                assert result is True
-                parent_trigger.assert_called_once()
-
-    @staticmethod
-    def test_non_adaptive_mode_delegates_on_add_to_parent(legacy_config, context):
-        """Test on_add_messages delegates to parent in non-adaptive mode."""
-        with patch("openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model"):
-            with patch.object(MessageOffloader, 'on_add_messages', return_value=(None, [])) as parent_on_add:
-                offloader = MessageSummaryOffloader(legacy_config)
-                result = asyncio.run(offloader.on_add_messages(context, []))
-                assert result == (None, [])
+        offloader._validate_config()
 

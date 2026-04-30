@@ -41,6 +41,12 @@ _I18N_LABELS: dict[str, dict[str, str]] = {
     },
 }
 
+_WORKFLOW_TEMPLATES: dict[str, str] = {
+    "default": "leader_workflow",
+    "predefined": "leader_workflow_predefined",
+    "hybrid": "leader_workflow_hybrid",
+}
+
 
 def role_policy(role: TeamRole, language: str = "cn") -> str:
     """Return the base policy string for a role."""
@@ -99,7 +105,7 @@ def _build_team_policy(
     member_name: str | None = None,
     lifecycle: str = "temporary",
     language: str = "cn",
-    predefined_team: bool = False,
+    team_mode: str = "default",
 ) -> str:
     """Build the team-specific policy section (role, persona, team context)."""
     labels = _I18N_LABELS.get(language, _I18N_LABELS["cn"])
@@ -113,7 +119,7 @@ def _build_team_policy(
 
     workflow_section = ""
     if role == TeamRole.LEADER:
-        workflow_name = "leader_predefined_override" if predefined_team else "leader_workflow"
+        workflow_name = _WORKFLOW_TEMPLATES.get(team_mode, "leader_workflow")
         workflow_section = load_template(workflow_name, language).content
 
     lifecycle_section = ""
@@ -153,19 +159,19 @@ def build_system_prompt(
     member_name: str | None = None,
     lifecycle: str = "temporary",
     language: str = "cn",
-    predefined_team: bool = False,
+    team_mode: str = "default",
 ) -> str:
     """Compose the system prompt for one team role.
 
     The result is passed as ``system_prompt`` to ``DeepAgentSpec.build()``,
     which places it in the IDENTITY section of the ``SystemPromptBuilder``.
-    Rails (FileSystemRail, ContextEngineeringRail, etc.) then append
+    Rails (SysOperationRail, ContextEngineeringRail, etc.) then append
     their own sections (tools, safety, runtime) at invoke time.
 
     Final prompt structure at runtime::
 
         [IDENTITY]  team policy + persona + team context  ← this function
-        [TOOLS]     tool descriptions                     ← FileSystemRail etc.
+        [TOOLS]     tool descriptions                     ← SysOperationRail etc.
         [SAFETY]    security rules                        ← SecurityRail
         [RUNTIME]   execution constraints                 ← auto
         ...         other rail-injected sections
@@ -180,7 +186,7 @@ def build_system_prompt(
             from the team members section.
         lifecycle: Team lifecycle mode ("temporary" or "persistent").
         language: Prompt language ("cn" or "en").
-        predefined_team: Whether the team uses predefined members.
+        team_mode: Workflow variant — "default", "predefined", or "hybrid".
     """
     return _build_team_policy(
         role=role,
@@ -191,7 +197,7 @@ def build_system_prompt(
         member_name=member_name,
         lifecycle=lifecycle,
         language=language,
-        predefined_team=predefined_team,
+        team_mode=team_mode,
     )
 
 

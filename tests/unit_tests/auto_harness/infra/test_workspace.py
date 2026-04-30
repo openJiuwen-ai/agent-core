@@ -125,6 +125,224 @@ class TestWorktreeManager:
         assert len(config_calls) == 1
 
     @pytest.mark.asyncio
+    async def test_prepare_deletes_existing_branch_before_add(
+        self, tmp_path,
+    ):
+        local = tmp_path / "local_repo"
+        local.mkdir()
+        cfg = self._make_config(
+            tmp_path, local_repo=str(local),
+        )
+        mgr = WorktreeManager(cfg)
+
+        calls = []
+        branch_ref = (
+            "refs/heads/auto-harness/fix-timeout"
+        )
+
+        async def fake_run_git(*args, cwd, env=None):
+            del cwd, env
+            calls.append(args)
+            if args[:4] == (
+                "show-ref",
+                "--verify",
+                "--quiet",
+                branch_ref,
+            ):
+                return 0, ""
+            if args[:3] == (
+                "worktree",
+                "list",
+                "--porcelain",
+            ):
+                return 0, (
+                    f"worktree {local}\n"
+                    "HEAD deadbeef\n"
+                    "branch refs/heads/develop\n"
+                )
+            if args[:2] == ("worktree", "add"):
+                Path(args[4]).mkdir(
+                    parents=True, exist_ok=True,
+                )
+            if args[:2] == (
+                "remote",
+                "get-url",
+            ):
+                return 1, "not found"
+            return 0, "ok"
+
+        with patch(
+            "openjiuwen.auto_harness.infra.worktree_manager._run_git",
+            side_effect=fake_run_git,
+        ):
+            await mgr.prepare("fix timeout")
+
+        prune_idx = calls.index(
+            ("worktree", "prune")
+        )
+        show_ref_idx = calls.index(
+            (
+                "show-ref",
+                "--verify",
+                "--quiet",
+                branch_ref,
+            )
+        )
+        delete_idx = calls.index(
+            (
+                "branch",
+                "-D",
+                "auto-harness/fix-timeout",
+            )
+        )
+        add_idx = next(
+            idx
+            for idx, call in enumerate(calls)
+            if call[:2] == ("worktree", "add")
+        )
+        assert prune_idx < show_ref_idx < delete_idx < add_idx
+
+    @pytest.mark.asyncio
+    async def test_prepare_removes_managed_worktree_for_existing_branch(
+        self, tmp_path,
+    ):
+        local = tmp_path / "local_repo"
+        local.mkdir()
+        cfg = self._make_config(
+            tmp_path, local_repo=str(local),
+        )
+        mgr = WorktreeManager(cfg)
+
+        calls = []
+        branch_ref = (
+            "refs/heads/auto-harness/fix-timeout"
+        )
+        stale_wt = (
+            Path(cfg.worktrees_dir)
+            / "old-fix-timeout"
+        )
+
+        async def fake_run_git(*args, cwd, env=None):
+            del cwd, env
+            calls.append(args)
+            if args[:4] == (
+                "show-ref",
+                "--verify",
+                "--quiet",
+                branch_ref,
+            ):
+                return 0, ""
+            if args[:3] == (
+                "worktree",
+                "list",
+                "--porcelain",
+            ):
+                return 0, (
+                    f"worktree {stale_wt}\n"
+                    "HEAD deadbeef\n"
+                    f"branch {branch_ref}\n"
+                )
+            if args[:2] == ("worktree", "add"):
+                Path(args[4]).mkdir(
+                    parents=True, exist_ok=True,
+                )
+            if args[:2] == (
+                "remote",
+                "get-url",
+            ):
+                return 1, "not found"
+            return 0, "ok"
+
+        with patch(
+            "openjiuwen.auto_harness.infra.worktree_manager._run_git",
+            side_effect=fake_run_git,
+        ):
+            await mgr.prepare("fix timeout")
+
+        remove_idx = calls.index(
+            (
+                "worktree",
+                "remove",
+                "--force",
+                str(stale_wt),
+            )
+        )
+        delete_idx = calls.index(
+            (
+                "branch",
+                "-D",
+                "auto-harness/fix-timeout",
+            )
+        )
+        add_idx = next(
+            idx
+            for idx, call in enumerate(calls)
+            if call[:2] == ("worktree", "add")
+        )
+        assert remove_idx < delete_idx < add_idx
+
+    @pytest.mark.asyncio
+    async def test_prepare_rejects_unmanaged_worktree_for_existing_branch(
+        self, tmp_path,
+    ):
+        local = tmp_path / "local_repo"
+        local.mkdir()
+        cfg = self._make_config(
+            tmp_path, local_repo=str(local),
+        )
+        mgr = WorktreeManager(cfg)
+
+        calls = []
+        branch_ref = (
+            "refs/heads/auto-harness/fix-timeout"
+        )
+        unmanaged_wt = (
+            tmp_path / "foreign" / "fix-timeout"
+        )
+
+        async def fake_run_git(*args, cwd, env=None):
+            del cwd, env
+            calls.append(args)
+            if args[:4] == (
+                "show-ref",
+                "--verify",
+                "--quiet",
+                branch_ref,
+            ):
+                return 0, ""
+            if args[:3] == (
+                "worktree",
+                "list",
+                "--porcelain",
+            ):
+                return 0, (
+                    f"worktree {unmanaged_wt}\n"
+                    "HEAD deadbeef\n"
+                    f"branch {branch_ref}\n"
+                )
+            return 0, "ok"
+
+        with patch(
+            "openjiuwen.auto_harness.infra.worktree_manager._run_git",
+            side_effect=fake_run_git,
+        ):
+            with pytest.raises(
+                RuntimeError,
+                match="unmanaged worktree",
+            ):
+                await mgr.prepare("fix timeout")
+
+        assert (
+            "branch",
+            "-D",
+            "auto-harness/fix-timeout",
+        ) not in calls
+        assert not any(
+            call[:2] == ("worktree", "add")
+            for call in calls
+        )
+
+    @pytest.mark.asyncio
     async def test_prepare_without_local_repo_clones(
         self, tmp_path,
     ):

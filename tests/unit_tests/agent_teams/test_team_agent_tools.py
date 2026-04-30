@@ -1,6 +1,9 @@
 # coding: utf-8
 """Tests for role-based tool registration."""
+
 from __future__ import annotations
+
+import pytest
 
 from openjiuwen.agent_teams import create_agent_team
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
@@ -25,15 +28,19 @@ def _dummy_agents() -> dict[str, DeepAgentSpec]:
     return {"leader": DeepAgentSpec()}
 
 
-_PYZMQ_TRANSPORT = TransportSpec(type="pyzmq", params={
-    "team_id": "test",
-    "node_id": "team_leader",
-})
+_PYZMQ_TRANSPORT = TransportSpec(
+    type="pyzmq",
+    params={
+        "team_id": "test",
+        "node_id": "team_leader",
+    },
+)
 
 
 # === Leader gets full tool set ===
 
 
+@pytest.mark.level0
 def test_leader_gets_management_tools():
     """Leader should have team management and
     messaging tools."""
@@ -53,6 +60,7 @@ def test_leader_gets_management_tools():
 # === Teammate gets execution-only tools ===
 
 
+@pytest.mark.level0
 def test_teammate_gets_execution_tools():
     """Teammate should have task execution and
     messaging tools but not management-only tools."""
@@ -66,17 +74,19 @@ def test_teammate_gets_execution_tools():
         member_id="dev-1",
         name="Dev",
         persona="dev",
-        team_spec=leader._ctx.team_spec,
-        messager_config=leader._ctx.messager_config,
-        db_config=leader._ctx.db_config,
+        team_spec=leader._configurator.ctx.team_spec,
+        messager_config=leader._configurator.ctx.messager_config,
+        db_config=leader._configurator.ctx.db_config,
     )
-    card = leader.card.model_copy(update={
-        "id": "dev-1",
-        "name": "Dev",
-        "description": "Teammate: dev",
-    })
+    card = leader.card.model_copy(
+        update={
+            "id": "dev-1",
+            "name": "Dev",
+            "description": "Teammate: dev",
+        }
+    )
     teammate = TeamAgent(card)
-    teammate.configure(leader._spec, ctx)
+    teammate.configure(leader._configurator.spec, ctx)
     names = _tool_names(teammate)
 
     # Execution tools present
@@ -93,6 +103,7 @@ def test_teammate_gets_execution_tools():
 # === Manager instances are stored ===
 
 
+@pytest.mark.level1
 def test_task_and_message_managers_are_stored():
     """After configuration, _task_manager and
     _message_manager should be set on the
@@ -102,10 +113,11 @@ def test_task_and_message_managers_are_stored():
         team_name="test",
         transport=_PYZMQ_TRANSPORT,
     )
-    assert leader._task_manager is not None
-    assert leader._message_manager is not None
+    assert leader._configurator.task_manager is not None
+    assert leader._configurator.message_manager is not None
 
 
+@pytest.mark.level1
 def test_teammate_registers_tool_approval_rail_from_deep_agent_spec():
     """Configured teammate approval tools should attach TeamToolApprovalRail."""
     leader = create_agent_team(
@@ -121,17 +133,19 @@ def test_teammate_registers_tool_approval_rail_from_deep_agent_spec():
         member_id="dev-1",
         name="Dev",
         persona="dev",
-        team_spec=leader._ctx.team_spec,
-        messager_config=leader._ctx.messager_config,
-        db_config=leader._ctx.db_config,
+        team_spec=leader._configurator.ctx.team_spec,
+        messager_config=leader._configurator.ctx.messager_config,
+        db_config=leader._configurator.ctx.db_config,
     )
-    card = leader.card.model_copy(update={
-        "id": "dev-1",
-        "name": "Dev",
-        "description": "Teammate: dev",
-    })
+    card = leader.card.model_copy(
+        update={
+            "id": "dev-1",
+            "name": "Dev",
+            "description": "Teammate: dev",
+        }
+    )
     teammate = TeamAgent(card)
-    teammate.configure(leader._spec, ctx)
+    teammate.configure(leader._configurator.spec, ctx)
 
     rail_names = {type(r).__name__ for r in teammate.deep_agent._pending_rails}
     assert "TeamToolApprovalRail" in rail_names

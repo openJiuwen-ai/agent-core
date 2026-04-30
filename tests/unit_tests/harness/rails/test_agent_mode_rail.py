@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import Mock, patch
 
-from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
+from openjiuwen.harness.rails import AgentModeRail
 from openjiuwen.harness.schema.state import DeepAgentState
 
 
@@ -19,7 +19,7 @@ class _ToolInfo:
 
 class _PromptBuilder:
     def __init__(self) -> None:
-        self.language = "cn"
+        self.language = "en"
         self.added_sections = []
         self.removed_sections = []
 

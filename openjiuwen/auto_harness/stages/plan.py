@@ -17,6 +17,9 @@ from openjiuwen.auto_harness.infra.parsers import (
     extract_text,
     parse_tasks,
 )
+from openjiuwen.auto_harness.infra.edit_scope import (
+    render_edit_scope,
+)
 from openjiuwen.auto_harness.stages.base import (
     SessionStage,
 )
@@ -79,6 +82,11 @@ class PlanStage(SessionStage):
                 f"规划原始输出已保存: {path}"
             )
         tasks = parse_tasks(plan_text)
+        if len(tasks) > 1:
+            tasks = tasks[:1]
+            messages.append(
+                "规划阶段只保留最高优先级的 1 个任务"
+            )
         if not tasks:
             messages.append("规划阶段未生成任务，session 结束")
         yield StageResult(
@@ -134,16 +142,25 @@ async def _build_plan_query(
         f"{e.summary}"
         for e in recent
     ) or "无"
+    edit_scope = render_edit_scope(
+        "本轮任务规划必须遵守的范围"
+    )
 
     return (
         f"本轮目标:\n"
         f"{config.optimization_goal or '无'}\n\n"
         f"重点竞品:\n"
         f"{config.competitor or '无'}\n\n"
+        f"{edit_scope}\n\n"
         f"评估报告:\n{assessment}\n\n"
         f"近期经验:\n{experiences_text}\n\n"
-        f"最大任务数: "
+        f"配置任务上限: "
         f"{config.max_tasks_per_session}\n"
+        "规划阶段实际输出上限: 1\n"
         f"自驱动槽位: "
         f"{config.self_driven_slots}\n"
+        "你本轮只能输出 1 个最高优先级任务，不要输出多个候选。"
+        "你输出的每个任务 `files` 都必须只包含上述范围内的路径。"
+        "如果某个候选任务需要改动范围外源码目录，直接丢弃该任务，"
+        "不要输出到计划里。\n"
     )

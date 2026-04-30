@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 import re
 
 from zoneinfo import ZoneInfo
@@ -18,6 +18,10 @@ from openjiuwen.harness.prompts.workspace_content.workspace_header import (
     CONTEXT_FILES,
 )
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
+from openjiuwen.harness.prompts.sections import SectionName
+
+if TYPE_CHECKING:
+    from openjiuwen.harness.prompts.builder import PromptSection
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +242,7 @@ async def build_context_section(
     )
 
     return PromptSection(
-        name="context",
+        name=SectionName.CONTEXT,
         content={language: content},
         priority=80,
     )
@@ -328,6 +332,7 @@ def build_tools_content(
     )
 
     summary_overrides_cn = {
+        "paid_search": "付费联网搜索（配置 API 时优先使用）",
         "free_search": "免费搜索（DuckDuckGo 等）",
         "fetch_webpage": "抓取网页文本内容",
         "image_ocr": "读取图片中的文字",
@@ -346,6 +351,7 @@ def build_tools_content(
         "task_tool": "启动临时子代理处理复杂任务",
     }
     summary_overrides_en = {
+        "paid_search": "Paid web search (preferred when configured)",
         "free_search": "Free web search",
         "fetch_webpage": "Fetch webpage text",
         "image_ocr": "Read text from images",
@@ -374,6 +380,7 @@ def build_tools_content(
     rendered_names: set[str] = set()
 
     preferred_order = [
+        "paid_search",
         "free_search",
         "fetch_webpage",
         "image_ocr",
@@ -523,7 +530,7 @@ def build_tools_section(
         return None
 
     return PromptSection(
-        name="tools",
+        name=SectionName.TOOLS,
         content={language: content},
         priority=30,
     )

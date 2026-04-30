@@ -21,7 +21,6 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.callback.events import LLMCallEvents, ToolCallEvents, WorkflowEvents
 from openjiuwen.core.workflow.workflow import Workflow
 
-
 # === Echo implementations ===
 
 
@@ -72,7 +71,7 @@ def _make_workflow() -> _EchoWorkflow:
     return _EchoWorkflow()
 
 
-def _make_model(monkeypatch):
+def _make_model(mocker):
     from openjiuwen.core.foundation.llm.model import Model
     model_config = ModelRequestConfig()
     client_config = ModelClientConfig(
@@ -81,7 +80,7 @@ def _make_model(monkeypatch):
         api_base="https://example.com",
     )
     echo = _EchoModelClient(model_config, client_config)
-    monkeypatch.setattr(Model, "_create_model_client", lambda self, cfg: echo)
+    mocker.patch("openjiuwen.core.foundation.llm.model.create_model_client", return_value=echo)
     return Model(model_client_config=client_config, model_config=model_config)
 
 
@@ -285,10 +284,10 @@ async def test_workflow_stream_callbacks():
 
 
 @pytest.mark.asyncio
-async def test_model_invoke_callbacks(monkeypatch):
+async def test_model_invoke_callbacks(mocker):
     """Model invoke: transform and normal callbacks both fire with correct values."""
     fw = Runner.callback_framework
-    model = _make_model(monkeypatch)
+    model = _make_model(mocker)
     out_received = []
 
     @fw.on_transform(LLMCallEvents.LLM_INVOKE_OUTPUT)
@@ -305,10 +304,10 @@ async def test_model_invoke_callbacks(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_model_stream_callbacks(monkeypatch):
+async def test_model_stream_callbacks(mocker):
     """Model stream: transform and normal callbacks both fire per item with correct values."""
     fw = Runner.callback_framework
-    model = _make_model(monkeypatch)
+    model = _make_model(mocker)
     received = []
 
     @fw.on_transform(LLMCallEvents.LLM_STREAM_OUTPUT)
@@ -355,10 +354,10 @@ async def test_trigger_and_transform_fire_in_order():
 
 
 @pytest.mark.asyncio
-async def test_model_invoke_extra_kwargs_injected(monkeypatch):
+async def test_model_invoke_extra_kwargs_injected(mocker):
     """model_config and model_client_config are present in LLM_INVOKE_INPUT handler kwargs."""
     fw = Runner.callback_framework
-    model = _make_model(monkeypatch)
+    model = _make_model(mocker)
     captured = {}
 
     @fw.on(LLMCallEvents.LLM_INVOKE_INPUT)
@@ -373,10 +372,10 @@ async def test_model_invoke_extra_kwargs_injected(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_model_stream_extra_kwargs_injected(monkeypatch):
+async def test_model_stream_extra_kwargs_injected(mocker):
     """model_config and model_client_config are present in LLM_STREAM_OUTPUT per-item handler kwargs."""
     fw = Runner.callback_framework
-    model = _make_model(monkeypatch)
+    model = _make_model(mocker)
     captured = {}
 
     @fw.on(LLMCallEvents.LLM_STREAM_OUTPUT)

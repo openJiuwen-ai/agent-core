@@ -8,20 +8,39 @@ from typing import Any, Dict, List, Tuple
 
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
+from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage
 
 
+MICRO_COMPACT_CLEARED_MARKER = "[Old tool result content cleared]"
+
+
 class MicroCompactProcessorConfig(BaseModel):
     """Clear stale tool results while keeping recent ones per tool."""
 
-    trigger_threshold: int = Field(default=5, gt=0)
-    compactable_tool_names: list[str] = Field(default=["grep", "glob", "read_file", "web_search", "web_fetch"])
-    keep_recent_per_tool: int = Field(default=15, ge=0)
-    cleared_marker: str = Field(default="[Old tool result content cleared]")
+    trigger_threshold: int = Field(
+        default=5,
+        gt=0,
+        description=(
+            "Clear stale results only after a tool has more than this many clearable results beyond the kept tail."
+        ),
+    )
+    compactable_tool_names: list[str] = Field(
+        default=["grep", "glob", "read_file", "web_search", "web_fetch"],
+        description="Tool names whose older ToolMessage contents may be cleared.",
+    )
+    keep_recent_per_tool: int = Field(
+        default=15,
+        ge=0,
+        description="Number of most-recent ToolMessage contents preserved for each compactable tool.",
+    )
+    cleared_marker: str = Field(
+        default=MICRO_COMPACT_CLEARED_MARKER,
+        description="Replacement content used when clearing stale ToolMessage contents.",
+    )
 
 
 @ContextEngine.register_processor()
@@ -48,7 +67,10 @@ class MicroCompactProcessor(ContextProcessor):
         **kwargs: Any,
     ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
         all_messages = context.get_messages() + messages_to_add
-        indices_to_clear = self._collect_flat_indices_for_compact(all_messages)
+        indices_to_clear = self._collect_flat_indices_for_compact(
+            all_messages,
+            force=kwargs.get("force", False),
+        )
 
         if not indices_to_clear:
             return None, messages_to_add
@@ -97,12 +119,18 @@ class MicroCompactProcessor(ContextProcessor):
     def _collect_flat_indices_for_compact(
         self,
         messages: List[BaseMessage],
+        *,
+        force: bool = False,
     ) -> List[int]:
         grouped = self._collect_compactable_indices_by_tool(messages)
         result = []
         for indices in grouped.values():
-            if len(indices) > self._config.trigger_threshold + self._config.keep_recent_per_tool:
-                result.extend(indices[: self._config.keep_recent_per_tool])
+            threshold = self._config.keep_recent_per_tool if force else (
+                self._config.trigger_threshold + self._config.keep_recent_per_tool
+            )
+            if len(indices) > threshold:
+                result.extend(indices[:-self._config.keep_recent_per_tool] if self._config.keep_recent_per_tool
+                              else indices)
         return result
 
     def load_state(self, state: Dict[str, Any]) -> None:

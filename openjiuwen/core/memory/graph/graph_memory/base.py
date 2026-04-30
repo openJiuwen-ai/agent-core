@@ -523,7 +523,7 @@ class GraphMemory:
             query = params.get("messages", [{}])[-1].get("content")
             debug_msg = f"TEMPLATE {template.name}{sep}{query}{sep}{response.content}"
             with self.thread_lock:
-                memory_logger.debug("Graph Memory LLM Invoke: %s", debug_msg)
+                memory_logger.info("Graph Memory LLM Invoke: %s", debug_msg)
         return response
 
     def _init_state(self, reference_time: Optional[datetime.datetime] = None) -> GraphMemState:
@@ -674,6 +674,7 @@ class GraphMemory:
                 language=search_config.language,
                 query_embedding=query_embedding,
                 reranker=self.reranker if search_config.rerank else None,
+                min_score=search_config.min_score,
             )
         ).get(col)
 
@@ -1037,17 +1038,34 @@ class GraphMemory:
         """Run relation recall + LLM dedupe per relation and record which relation UUIDs to remove in state."""
         state.tasks.clear()
         dedupe_relation_tasks = []
-        for relation, emb in zip(relations, relation_embed_results):
+
+        def _endpoint_to_entity_dict(endpoint: BaseGraphObject | str) -> dict:
+            """Relation.lhs/rhs may be Entity objects or UUID strings; prompts need entity dicts."""
+            if isinstance(endpoint, BaseGraphObject):
+                return endpoint.model_dump()
+            ent = state.lookup_table.entities.get(endpoint)
+            if ent is not None:
+                return ent.model_dump()
+            raise build_error(
+                StatusCode.MEMORY_STORE_VALIDATION_INVALID,
+                store_type=_STORE_TYPE,
+                error_msg=(
+                    f"The entity UUID {endpoint!r} is not present in lookup "
+                    "table while building relation dedupe prompts."
+                ),
+            )
+
+        for new_relation, emb in zip(relations, relation_embed_results):
             current_relations: list[Relation] = []
             lhs_rhs = [
                 e if isinstance(e, str) else (e.uuid if e.content.strip() else None)
-                for e in (relation.lhs, relation.rhs)
+                for e in (new_relation.lhs, new_relation.rhs)
             ]
             if not all(lhs_rhs):
                 continue
             result = (
                 await self.db_backend.search(
-                    relation.content,
+                    new_relation.content,
                     k=state.strategy.recall_relation.top_k,
                     collection=RELATION_COLLECTION,
                     ranker_config=state.strategy.recall_relation.rank_config,
@@ -1064,20 +1082,23 @@ class GraphMemory:
                 result = [r for r in result if r.get("distance", 0.0) <= state.strategy.recall_relation.min_score]
 
             for r in result:
-                relation = state.retrieved_relations[r["uuid"]] = state.lookup_table.get_relation(r)
-                current_relations.append(relation)
+                retrieved_rel = state.retrieved_relations[r["uuid"]] = state.lookup_table.get_relation(r)
+                current_relations.append(retrieved_rel)
 
             if current_relations:
                 prompt_relation_dedupe = extraction_prompts.dedupe_relation_list(
                     content=content,
-                    relation=relation,
+                    relation=new_relation,
                     existing_relations=current_relations,
-                    existing_entities=[relation.lhs.model_dump(), relation.rhs.model_dump()],
+                    existing_entities=[
+                        _endpoint_to_entity_dict(new_relation.lhs),
+                        _endpoint_to_entity_dict(new_relation.rhs),
+                    ],
                     history=state.history,
                     language=state.prompting.language,
                 )
                 state.tasks.append(asyncio.create_task(self._invoke_llm(*prompt_relation_dedupe)))
-                dedupe_relation_tasks.append((relation, current_relations, state.tasks[-1]))
+                dedupe_relation_tasks.append((new_relation, current_relations, state.tasks[-1]))
         if state.tasks:
             await asyncio.wait(state.tasks)
             state.tasks.clear()

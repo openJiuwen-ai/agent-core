@@ -194,6 +194,9 @@ class BaseModelClient(ABC):
                     })
                 msg_dict["tool_calls"] = tool_calls_list
 
+                if msg.reasoning_content:
+                    msg_dict["reasoning_content"] = msg.reasoning_content
+
             # Handle tool_call_id for ToolMessage
             if isinstance(msg, ToolMessage):
                 msg_dict["tool_call_id"] = msg.tool_call_id

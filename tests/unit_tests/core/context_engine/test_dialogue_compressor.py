@@ -5,16 +5,56 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
     DialogueCompressor,
-    DialogueCompressorConfig,
+    DialogueCompressorConfig as _DialogueCompressorConfig,
     _DIALOGUE_MEMORY_BLOCK_MARKER,
 )
-from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage, UserMessage
+from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
+    ModelClientConfig,
+    ModelRequestConfig,
+    ToolCall,
+    ToolMessage,
+    UserMessage,
+)
+from openjiuwen.core.session.agent import Session
+from tests.unit_tests.core.context_engine._stream_state_helpers import (
+    assert_context_state_pair,
+    capture_context_compression_states,
+)
 
 
 def create_tool_call_list(ids: list[str]) -> list[ToolCall]:
     return [ToolCall(id=tool_call_id, name="test-tool", type="function", arguments="") for tool_call_id in ids]
+
+
+def DialogueCompressorConfig(**kwargs):
+    return _DialogueCompressorConfig(
+        model=ModelRequestConfig(model="test-model"),
+        model_client=ModelClientConfig(
+            client_provider="OpenAI",
+            api_key="test-key",
+            api_base="http://test.local",
+            verify_ssl=False,
+        ),
+        **kwargs,
+    )
+
+
+async def create_context_with_dialogue_compressor(
+    config: DialogueCompressorConfig,
+    *,
+    session=None,
+):
+    engine = ContextEngine(ContextEngineConfig(default_window_message_num=100))
+    return await engine.create_context(
+        "test_ctx",
+        session,
+        history_messages=[],
+        processors=[("DialogueCompressor", config)],
+    )
 
 
 class _TestableDialogueCompressor(DialogueCompressor):
@@ -106,6 +146,49 @@ class TestDialogueCompressor:
             assert isinstance(updated_messages[1], UserMessage)
             assert updated_messages[1].content.startswith(_DIALOGUE_MEMORY_BLOCK_MARKER)
             assert "Final Result" in updated_messages[1].content
+
+    @pytest.mark.asyncio
+    async def test_streams_state_when_dialogue_compressor_triggers(self):
+        mock_response = MagicMock()
+        mock_response.parser_content = {
+            "blocks": [
+                {
+                    "block_id": "react_1",
+                    "summary": "Final Result: X.",
+                }
+            ]
+        }
+        mock_response.content = ""
+        session = Session(session_id="dialogue-compressor-stream-session")
+
+        with patch(
+            "openjiuwen.core.context_engine.processor.compressor.dialogue_compressor.Model"
+        ) as mock_model_cls:
+            mock_model = MagicMock()
+            mock_model.invoke = AsyncMock(return_value=mock_response)
+            mock_model_cls.return_value = mock_model
+            ctx = await create_context_with_dialogue_compressor(
+                DialogueCompressorConfig(
+                    messages_threshold=2,
+                    keep_last_round=False,
+                    offload_writeback_enabled=False,
+                ),
+                session=session,
+            )
+            ctx._processors[0]._has_compression_benefit = MagicMock(return_value=True)  # type: ignore[attr-defined]
+
+            _, states = await capture_context_compression_states(
+                session,
+                lambda: ctx.add_messages([
+                    UserMessage(content="Call the tool"),
+                    AssistantMessage(content="", tool_calls=create_tool_call_list(["tc-stream"])),
+                    ToolMessage(content="Tool result: data", tool_call_id="tc-stream"),
+                    AssistantMessage(content="Based on the result, the answer is X."),
+                ]),
+            )
+
+        assert_context_state_pair(states, processor_type="DialogueCompressor")
+        assert "modified 3 messages" in states[1].summary
 
     @pytest.mark.asyncio
     async def test_build_memory_message_offload_falls_back_to_plain_user_message(self):

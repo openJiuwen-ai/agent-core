@@ -7,33 +7,37 @@ from __future__ import annotations
 from typing import Optional, Dict
 
 from openjiuwen.harness.prompts import PromptSection
+from openjiuwen.harness.prompts.sections import SectionName
 
 
 HEARTBEAT_SYSTEM_PROMPT_CN = """
-## Heartbeats
-Heartbeats 内容: 
-{heartbeat}
+## 心跳检测
+{heartbeat_section}
 
-如果收到心跳检测消息（用户消息匹配上述心跳提示词），且没有需要处理的事项，请精确回复：
-HEARTBEAT_OK
+当收到心跳检测消息时：
+- 若上方无心跳内容，请精确回复：HEARTBEAT_OK
+- 若上方有心跳内容，必须处理心跳内容的事项并进行回复（不要包含 HEARTBEAT_OK）
 
-系统会将前导/后缀的 "HEARTBEAT_OK" 视为心跳确认（并可能丢弃它）。
+系统会识别 HEARTBEAT_OK 作为心跳确认。
 
-如果有需要处理的事项，请勿包含 "HEARTBEAT_OK"，直接回复提醒文本。
+重要约束：
+- 若需修改 HEARTBEAT.md 文件，禁止给原本没有 <!-- --> 注释的内容添加注释标记
+- 非注释文本仅可在用户明确要求时修改或删除，否则必须保持原样
 """
 
-
 HEARTBEAT_SYSTEM_PROMPT_EN = """
-## Heartbeats
-Heartbeat content:
-{heartbeat}
+## Heartbeat
+{heartbeat_section}
 
-If you receive a heartbeat poll (a user message matching the heartbeat prompt above), and there is nothing that needs attention, reply exactly:
-HEARTBEAT_OK
+When you receive a heartbeat message:
+- If there is no heartbeat content above, reply exactly: HEARTBEAT_OK
+- If there is heartbeat content above, the matters concerning the heartbeat content must be handled and a reply must be made (do not include HEARTBEAT_OK)
 
-OpenClaw treats a leading/trailing "HEARTBEAT_OK" as a heartbeat ack (and may discard it).
+The system recognizes HEARTBEAT_OK as a heartbeat acknowledgment.
 
-If something needs attention, do NOT include "HEARTBEAT_OK"; reply with the alert text instead.
+Important Constraints:
+- When modifying HEARTBEAT.md, DO NOT add <!-- --> comment markers to content that originally had no such markers
+- Non-commented text may only be modified or deleted when explicitly requested by the user; otherwise preserve it as-is
 """
 
 
@@ -84,9 +88,14 @@ def build_heartbeat_section(
     prompt_content = HEARTBEAT_SYSTEM_PROMPT.get(language, HEARTBEAT_SYSTEM_PROMPT["cn"])
     cleaned_content = _clean_heartbeat_content(heartbeat_content) if heartbeat_content else ""
 
+    if cleaned_content:
+        heartbeat_section = cleaned_content
+    else:
+        heartbeat_section = "（无心跳内容）" if language == "cn" else "(No heartbeat content)"
+
     return PromptSection(
-        name="heartbeat",
-        content={language: prompt_content.format(heartbeat=cleaned_content)},
+        name=SectionName.HEARTBEAT,
+        content={language: prompt_content.format(heartbeat_section=heartbeat_section)},
         priority=80,
     )
 

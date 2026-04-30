@@ -5,17 +5,20 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionContext,
     EvolutionPatch,
     EvolutionRecord,
 )
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
+    SKILL_EXPERIENCE_GENERATE_PROMPT,
     SkillExperienceOptimizer,
     _build_conversation_snippet,
     _build_context,
@@ -89,6 +92,18 @@ class TestConversationSnippet:
 
 class TestSkillExperienceOptimizerGenerate:
     @staticmethod
+    def test_generate_records_llm_policy_property_returns_configured_policy():
+        policy = LLMInvokePolicy(attempt_timeout_secs=12, total_budget_secs=36, max_attempts=2)
+        optimizer = SkillExperienceOptimizer(
+            llm=MagicMock(),
+            model="dummy",
+            language="en",
+            generate_records_llm_policy=policy,
+        )
+
+        assert optimizer.generate_records_llm_policy is policy
+
+    @staticmethod
     @pytest.mark.asyncio
     async def test_generate_returns_empty_when_no_signals():
         optimizer = SkillExperienceOptimizer(llm=MagicMock(), model="dummy", language="cn")
@@ -149,6 +164,37 @@ class TestSkillExperienceOptimizerGenerate:
         assert len(records) == 2
         assert records[0].change.content == "A"
         assert records[1].change.content == "B"
+        assert llm.invoke.await_args_list[0].kwargs["timeout"] == 60
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_generate_retries_with_shorter_prompt_after_timeout():
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            side_effect=[
+                asyncio.TimeoutError("request timed out"),
+                SimpleNamespace(
+                    content='[{"action":"append","target":"body","section":"Troubleshooting","content":"A"}]'
+                ),
+            ]
+        )
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
+        ctx = EvolutionContext(
+            skill_name="skill-a",
+            signals=[make_signal("s1"), make_signal("s2"), make_signal("s3")],
+            skill_content="# Skill\n" + ("content\n" * 3000),
+            messages=[{"role": "user", "content": "hello " * 400}] * 12,
+            existing_desc_records=[make_record("ev_d1", "desc old"), make_record("ev_d2", "desc old 2")],
+            existing_body_records=[make_record("ev_b1", "body old"), make_record("ev_b2", "body old 2")],
+            user_query="query " * 200,
+        )
+
+        records = await optimizer.generate_records(ctx)
+
+        assert len(records) == 1
+        first_prompt = llm.invoke.await_args_list[0].kwargs["messages"][0]["content"]
+        second_prompt = llm.invoke.await_args_list[1].kwargs["messages"][0]["content"]
+        assert len(second_prompt) < len(first_prompt)
 
     @staticmethod
     def test_update_llm_updates_runtime_references():
@@ -156,6 +202,39 @@ class TestSkillExperienceOptimizerGenerate:
         optimizer.update_llm(llm="new", model="m2")
         assert optimizer._llm == "new"
         assert optimizer._model == "m2"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_generate_uses_custom_llm_policy():
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            return_value=SimpleNamespace(
+                content='[{"action":"append","target":"body","section":"Troubleshooting","content":"A"}]'
+            )
+        )
+        optimizer = SkillExperienceOptimizer(
+            llm=llm,
+            model="dummy",
+            language="en",
+            generate_records_llm_policy=LLMInvokePolicy(
+                attempt_timeout_secs=12,
+                total_budget_secs=36,
+                max_attempts=2,
+            ),
+        )
+        ctx = EvolutionContext(
+            skill_name="skill-a",
+            signals=[make_signal("s1")],
+            skill_content="# skill",
+            messages=[{"role": "user", "content": "hello"}],
+            existing_desc_records=[],
+            existing_body_records=[],
+        )
+
+        records = await optimizer.generate_records(ctx)
+
+        assert len(records) == 1
+        assert llm.invoke.await_args_list[0].kwargs["timeout"] == 12
 
 
 class TestParsing:
@@ -170,11 +249,7 @@ class TestParsing:
         assert len(patches) == 1
         assert patches[0].merge_target is None
 
-        mixed = (
-            "prefix text "
-            "{\"action\":\"append\",\"target\":\"invalid\","
-            "\"section\":\"NotExist\",\"content\":\"X\"} suffix"
-        )
+        mixed = 'prefix text {"action":"append","target":"invalid","section":"NotExist","content":"X"} suffix'
         patches2 = _parse_llm_response(mixed)
         assert len(patches2) == 1
         assert patches2[0].section == "Troubleshooting"
@@ -192,15 +267,17 @@ class TestParsing:
 
     @staticmethod
     def test_parse_single_patch_with_script_fields():
-        patch = _parse_single_patch({
-            "action": "append",
-            "target": "script",
-            "section": "Scripts",
-            "content": "import os",
-            "script_filename": "setup.py",
-            "script_language": "python",
-            "script_purpose": "environment setup",
-        })
+        patch = _parse_single_patch(
+            {
+                "action": "append",
+                "target": "script",
+                "section": "Scripts",
+                "content": "import os",
+                "script_filename": "setup.py",
+                "script_language": "python",
+                "script_purpose": "environment setup",
+            }
+        )
         assert patch.target == EvolutionTarget.SCRIPT
         assert patch.script_filename == "setup.py"
         assert patch.script_language == "python"
@@ -290,13 +367,14 @@ class TestFixJsonText:
         fixed = _fix_json_text(text)
         assert "//" not in fixed
         import json
+
         assert json.loads(fixed) == [{"a": 1}]
 
 
 class TestExtractJson:
     @staticmethod
     def test_direct_parse():
-        assert _extract_json('[1, 2]') == [1, 2]
+        assert _extract_json("[1, 2]") == [1, 2]
 
     @staticmethod
     def test_with_markdown_fence():
@@ -367,7 +445,9 @@ class TestConversationSnippetTruncation:
     def test_recency_bias_last_messages_get_more_budget():
         messages = [{"role": "user", "content": "x" * 400} for _ in range(10)]
         snippet = _build_conversation_snippet(
-            messages, content_preview_chars=200, language="cn",
+            messages,
+            content_preview_chars=200,
+            language="cn",
         )
         lines = snippet.strip().split("\n")
         last_line = lines[-1]
@@ -386,28 +466,26 @@ class TestRetryParse:
             )
         )
         optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
-        patches = await optimizer.retry_parse(
+        patches, retry_raw = await optimizer.retry_parse(
             broken_raw='[{"action":"append" invalid json}]',
             original_prompt="original prompt here",
         )
         assert len(patches) == 1
         assert patches[0].content == "fixed"
+        assert retry_raw  # raw output returned for progressive retry
         call_args = llm.invoke.call_args
         prompt_sent = call_args.kwargs["messages"][0]["content"]
         assert "修复" in prompt_sent or "invalid json" in prompt_sent
+        assert call_args.kwargs["timeout"] == 20
 
     @staticmethod
     @pytest.mark.asyncio
     async def test_retry_on_truncated_uses_original_prompt():
         llm = MagicMock()
-        llm.invoke = AsyncMock(
-            return_value=SimpleNamespace(
-                content='[{"action":"skip","skip_reason":"irrelevant"}]'
-            )
-        )
+        llm.invoke = AsyncMock(return_value=SimpleNamespace(content='[{"action":"skip","skip_reason":"irrelevant"}]'))
         optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
         truncated_raw = '[{"action":"append","target":"body","section":"Troubleshooting","content":"partial'
-        patches = await optimizer.retry_parse(
+        patches, _ = await optimizer.retry_parse(
             broken_raw=truncated_raw,
             original_prompt="THE ORIGINAL PROMPT",
         )
@@ -422,8 +500,9 @@ class TestRetryParse:
         llm = MagicMock()
         llm.invoke = AsyncMock(return_value=SimpleNamespace(content="still broken"))
         optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
-        patches = await optimizer.retry_parse("bad", original_prompt="p")
-        assert patches == []
+        patches, retry_raw = await optimizer.retry_parse("bad", original_prompt="p")
+        assert patches is None
+        assert retry_raw == "still broken"  # raw returned for caller
 
     @staticmethod
     @pytest.mark.asyncio
@@ -431,8 +510,164 @@ class TestRetryParse:
         llm = MagicMock()
         llm.invoke = AsyncMock(side_effect=RuntimeError("network"))
         optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
-        patches = await optimizer.retry_parse("bad", original_prompt="p")
-        assert patches == []
+        patches, retry_raw = await optimizer.retry_parse("bad", original_prompt="p")
+        assert patches is None
+        assert retry_raw == ""
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_retry_passes_parse_error_to_fix_prompt():
+        llm = MagicMock()
+        llm.invoke = AsyncMock(return_value=SimpleNamespace(content='[{"action":"skip","skip_reason":"irrelevant"}]'))
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
+        await optimizer.retry_parse(
+            broken_raw="not json at all",
+            original_prompt="orig",
+            parse_error="Expecting value: line 1 column 1",
+        )
+        prompt_sent = llm.invoke.call_args.kwargs["messages"][0]["content"]
+        assert "Expecting value: line 1 column 1" in prompt_sent
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_retry_truncated_attempt_3_gives_up():
+        llm = MagicMock()
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
+        truncated_raw = '[{"action":"append","target":"body"'
+        patches, retry_raw = await optimizer.retry_parse(
+            broken_raw=truncated_raw,
+            original_prompt="orig",
+            attempt_number=3,
+        )
+        assert patches is None
+        assert retry_raw == truncated_raw
+        assert llm.invoke.call_count == 0
+
+
+class TestGenerateRecordsRetry:
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_empty_array_does_not_trigger_retry():
+        llm = MagicMock()
+        llm.invoke = AsyncMock(return_value=SimpleNamespace(content="[]"))
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
+        ctx = EvolutionContext(
+            skill_name="skill-a",
+            signals=[make_signal()],
+            skill_content="",
+            messages=[],
+            existing_desc_records=[],
+            existing_body_records=[],
+            user_query="",
+        )
+        records = await optimizer.generate_records(ctx)
+        assert records == []
+        assert llm.invoke.call_count == 1  # only initial call, no retry
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_retry_passes_parse_error_in_prompt():
+        call_count = 0
+
+        async def fake_invoke(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return SimpleNamespace(content="not json at all")
+            return SimpleNamespace(
+                content='[{"action":"append","target":"body","section":"Troubleshooting","content":"recovered"}]'
+            )
+
+        llm = MagicMock()
+        llm.invoke = fake_invoke
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
+        ctx = EvolutionContext(
+            skill_name="skill-a",
+            signals=[make_signal()],
+            skill_content="",
+            messages=[],
+            existing_desc_records=[],
+            existing_body_records=[],
+            user_query="",
+        )
+        records = await optimizer.generate_records(ctx)
+        assert call_count == 2  # initial + 1 retry
+        assert len(records) == 1
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_progressive_raw_update_on_double_failure():
+        """When both retries fail, last_raw is updated from each retry_parse return."""
+        call_count = 0
+        prompts_sent = []
+
+        async def fake_invoke(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            prompts_sent.append(kwargs["messages"][0]["content"])
+            if call_count == 1:
+                return SimpleNamespace(content="broken1")
+            if call_count == 2:
+                return SimpleNamespace(content="broken2")
+            return SimpleNamespace(
+                content='[{"action":"append","target":"body","section":"Examples","content":"final"}]'
+            )
+
+        llm = MagicMock()
+        llm.invoke = fake_invoke
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
+        ctx = EvolutionContext(
+            skill_name="skill-a",
+            signals=[make_signal()],
+            skill_content="",
+            messages=[],
+            existing_desc_records=[],
+            existing_body_records=[],
+            user_query="",
+        )
+        records = await optimizer.generate_records(ctx)
+        assert call_count == 3  # initial + 2 retries
+        assert len(records) == 1
+        assert records[0].change.content == "final"
+        # Verify attempt 3 got the strict fix prompt (contains "严格要求")
+        assert "严格要求" in prompts_sent[2]
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_timeout_fallback_prompt_is_preserved_for_truncated_retry_regeneration():
+        prompts_sent = []
+
+        async def fake_invoke(**kwargs):
+            prompts_sent.append(kwargs["messages"][0]["content"])
+            if len(prompts_sent) == 1:
+                raise asyncio.TimeoutError("request timed out")
+            if len(prompts_sent) == 2:
+                return SimpleNamespace(
+                    content='[{"action":"append","target":"body","section":"Troubleshooting","content":"partial'
+                )
+            return SimpleNamespace(
+                content='[{"action":"append","target":"body","section":"Troubleshooting","content":"final"}]'
+            )
+
+        llm = MagicMock()
+        llm.invoke = fake_invoke
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
+        ctx = EvolutionContext(
+            skill_name="skill-a",
+            signals=[make_signal("s1"), make_signal("s2"), make_signal("s3")],
+            skill_content="# Skill\n" + ("content\n" * 3000),
+            messages=[{"role": "user", "content": "hello " * 400}] * 12,
+            existing_desc_records=[make_record("ev_d1", "desc old"), make_record("ev_d2", "desc old 2")],
+            existing_body_records=[make_record("ev_b1", "body old"), make_record("ev_b2", "body old 2")],
+            user_query="query " * 200,
+        )
+
+        records = await optimizer.generate_records(ctx)
+
+        assert len(records) == 1
+        assert len(prompts_sent) == 3
+        assert len(prompts_sent[1]) < len(prompts_sent[0])
+        assert prompts_sent[2] == prompts_sent[1]
 
 
 class TestScriptLimit:
@@ -467,3 +702,32 @@ class TestScriptLimit:
         assert len(script_recs) == 1
         assert text_recs[0].change.content == "A"
         assert text_recs[1].change.content == "B"
+
+
+class TestPromptRoleConstraints:
+    """SKILL_EXPERIENCE_GENERATE_PROMPT must contain role constraints and Collaboration section."""
+
+    @staticmethod
+    def test_role_constraint_in_cn_prompt():
+        """中文 prompt 必须包含角色约束段落。"""
+        prompt = SKILL_EXPERIENCE_GENERATE_PROMPT["cn"]
+        assert "角色约束" in prompt
+        assert "演进经验必须遵从 Agent 的角色能力和主要任务目标" in prompt
+
+    @staticmethod
+    def test_role_constraint_in_en_prompt():
+        """英文 prompt 必须包含角色约束段落。"""
+        prompt = SKILL_EXPERIENCE_GENERATE_PROMPT["en"]
+        assert "Role Constraints" in prompt or "role constraints" in prompt.lower()
+
+    @staticmethod
+    def test_collaboration_section_in_cn_prompt():
+        """中文 prompt 的 section 参考列表必须包含 Collaboration。"""
+        prompt = SKILL_EXPERIENCE_GENERATE_PROMPT["cn"]
+        assert "Collaboration" in prompt
+
+    @staticmethod
+    def test_collaboration_section_in_en_prompt():
+        """英文 prompt 的 section 参考列表必须包含 Collaboration。"""
+        prompt = SKILL_EXPERIENCE_GENERATE_PROMPT["en"]
+        assert "Collaboration" in prompt

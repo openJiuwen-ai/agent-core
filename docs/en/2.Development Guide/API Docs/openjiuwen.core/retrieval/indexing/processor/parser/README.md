@@ -14,6 +14,7 @@
 | **JSONParser** | JSON parser. | [json_parser.md](./json_parser.md) |
 | **PDFParser** | PDF parser. | [pdf_parser.md](./pdf_parser.md) |
 | **TxtMdParser** | Text and Markdown parser. | [txt_md_parser.md](./txt_md_parser.md) |
+| **HTMLFileParser** | Local HTML file parser (.html/.htm). | [html_file_parser.md](./html_file_parser.md) |
 | **WebPageParser** | Generic web page parser (blog, article URLs). | [web_page_parser.md](./web_page_parser.md) |
 | **WeChatArticleParser** | WeChat official account article parser. | [wechat_article_parser.md](./wechat_article_parser.md) |
 | **WordParser** | Word document parser. | [word_parser.md](./word_parser.md) |

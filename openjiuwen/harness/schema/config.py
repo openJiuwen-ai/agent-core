@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from openjiuwen.core.foundation.llm.model import Model
 
@@ -19,6 +19,7 @@ from openjiuwen.core.single_agent.schema.agent_card import (
 )
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.schema.agent_mode import AgentMode
+from openjiuwen.harness.security.models import PermissionsSection
 from openjiuwen.harness.workspace.workspace import (
     Workspace,
 )
@@ -174,6 +175,11 @@ class DeepAgentConfig:
             single task-loop iteration to complete.
             Used by the outer loop's wait_completion().
         enable_plan_mode: Whether to enable plan mode.
+        permissions: Tool permission policy dict (enabled, tools, rules, …); when
+            enabled, DeepAgent mounts PermissionInterruptRail automatically.
+            常见键结构见 :class:`openjiuwen.harness.security.models.PermissionsSection`。
+        permission_host: Optional ToolPermissionHost callbacks (YAML path,
+            workspace, hot-reload snapshot, hosted confirmation).
     """
 
     model: Optional[Model] = None
@@ -189,6 +195,7 @@ class DeepAgentConfig:
     mcps: Optional[List[McpServerConfig]] = None
     workspace: Optional[Workspace] = None
     skills: Optional[Union[str, List[str]]] = None
+    enable_skill_discovery: bool = False
     backend: Optional[Any] = None
     sys_operation: Optional[SysOperation] = None
     auto_create_workspace: bool = True
@@ -199,6 +206,7 @@ class DeepAgentConfig:
     audio_model_config: Optional[AudioModelConfig] = None
     rails: Optional[List[AgentRail]] = None
     enable_plan_mode: bool = False
+    model_selection: Optional[Dict[Model, str]] = None
 
     # Progressive tool exposure config
     progressive_tool_enabled: bool = False
@@ -211,7 +219,11 @@ class DeepAgentConfig:
     progressive_tool_max_loaded_tools: int = 12
 
     # Plan mode config
-    default_mode: AgentMode = AgentMode.AUTO
+    default_mode: AgentMode = AgentMode.NORMAL
+
+    # Tool permission guardrail (tiered_policy / interrupt confirm)
+    permissions: PermissionsSection | None = None
+    permission_host: Any = None
 
 
 @dataclass
@@ -235,3 +247,4 @@ class SubAgentConfig:
     factory_name: Optional[str] = None
     factory_kwargs: dict[str, Any] = field(default_factory=dict)
     enable_plan_mode: bool = False
+    restrict_to_work_dir: bool = True

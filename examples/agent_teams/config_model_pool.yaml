@@ -1,0 +1,226 @@
+# Agent Team E2E — multi-type model pool configuration
+#
+# Demonstrates two allocation strategies:
+#   round_robin     — linear rotation across every pool entry in order
+#   by_model_name   — fair distribution across model-name groups first
+#
+# All sensitive values come from environment variables:
+#   POOL_OPENROUTER_BASE      — OpenRouter base URL (shared by OpenRouter models)
+#   POOL_GLM51_KEY_1/2        — z-ai/glm-5.1 (OpenRouter)
+#   POOL_MIMO_KEY_1/2         — xiaomi/mimo-v2-pro (OpenRouter)
+#   POOL_MINIMAX25_KEY_1/2    — minimax/minimax-m2.5 (OpenRouter)
+#   POOL_MINIMAX27_KEY_1/2    — minimax/minimax-m2.7 (OpenRouter)
+#   POOL_KIMI26_KEY_1/2       — moonshotai/kimi-k2.6 (OpenRouter)
+#   POOL_KIMI25_KEY_1/2       — moonshotai/kimi-k2.5 (OpenRouter)
+#   POOL_GLM5_BASE            — ZhipuAI OpenAI-compatible endpoint
+#   POOL_GLM5_KEY             — glm-5 (OpenAI direct)
+#   POOL_GLM47_KEY            — glm-4.7 (OpenAI direct)
+
+team_name: model_pool_team
+lifecycle: persistent
+teammate_mode: build_mode
+spawn_mode: inprocess
+
+leader:
+  member_name: team_leader
+  display_name: TeamLeader
+  persona: "资深技术项目经理，擅长拆解工程任务并协调并行开发"
+  # by_model_name strategy requires leader.model_name to point at one
+  # of the pool's model_name values; below is the first pool entry.
+  model_name: glm-5
+
+# ---------------------------------------------------------------------------
+# Multi-type model pool — 6 OpenRouter models × 2 + 2 OpenAI direct = 14 entries
+#
+# by_model_name strategy: each model family gets an equal allocation share
+# regardless of how many endpoints back it; within a group, round-robin.
+# ---------------------------------------------------------------------------
+model_pool_strategy: by_model_name
+
+x-openrouter-client: &openrouter_client
+  timeout: 120
+  verify_ssl: false
+
+x-default-request: &default_request
+  temperature: 0.2
+  top_p: 0.9
+
+model_pool:
+  # --- ZhipuAI direct (OpenAI-compatible) ---
+  - model_name: glm-5
+    api_key: "${POOL_GLM5_KEY}"
+    api_base_url: "${POOL_GLM5_BASE}"
+    api_provider: OpenAI
+    description: "GLM-5 direct endpoint"
+    metadata:
+      client: *openrouter_client
+      request: *default_request
+
+#  - model_name: ep-20260306101215-m8krh
+#    api_key: "${POOL_GLM47_KEY}"
+#    api_base_url: "${POOL_GLM47_BASE}"
+#    api_provider: OpenAI
+#    description: "GLM-4.7 direct endpoint"
+#    metadata:
+#      client: *openrouter_client
+#      request: *default_request
+  # --- z-ai/glm-5.1 ---
+  - model_name: z-ai/glm-5.1
+    api_key: "${POOL_GLM51_KEY_1}"
+    api_base_url: "${POOL_OPENROUTER_BASE}"
+    api_provider: OpenRouter
+    description: "GLM-5.1 endpoint 1"
+    metadata:
+      client: *openrouter_client
+      request: *default_request
+
+  - model_name: z-ai/glm-5.1
+    api_key: "${POOL_GLM51_KEY_2}"
+    api_base_url: "${POOL_OPENROUTER_BASE}"
+    api_provider: OpenRouter
+    description: "GLM-5.1 endpoint 2"
+    metadata:
+      client: *openrouter_client
+      request: *default_request
+
+  # --- xiaomi/mimo-v2-pro ---
+  - model_name: xiaomi/mimo-v2-pro
+    api_key: "${POOL_MIMO_KEY_1}"
+    api_base_url: "${POOL_OPENROUTER_BASE}"
+    api_provider: OpenRouter
+    description: "MiMo-v2-Pro endpoint 1"
+    metadata:
+      client: *openrouter_client
+      request: *default_request
+
+  - model_name: xiaomi/mimo-v2-pro
+    api_key: "${POOL_MIMO_KEY_2}"
+    api_base_url: "${POOL_OPENROUTER_BASE}"
+    api_provider: OpenRouter
+    description: "MiMo-v2-Pro endpoint 2"
+    metadata:
+      client: *openrouter_client
+      request: *default_request
+
+  # --- minimax/minimax-m2.5 ---
+  - model_name: minimax/minimax-m2.5
+    api_key: "${POOL_MINIMAX25_KEY_1}"
+    api_base_url: "${POOL_OPENROUTER_BASE}"
+    api_provider: OpenRouter
+    description: "MiniMax-M2.5 endpoint 1"
+    metadata:
+      client: *openrouter_client
+      request: *default_request
+
+  - model_name: minimax/minimax-m2.5
+    api_key: "${POOL_MINIMAX25_KEY_2}"
+    api_base_url: "${POOL_OPENROUTER_BASE}"
+    api_provider: OpenRouter
+    description: "MiniMax-M2.5 endpoint 2"
+    metadata:
+      client: *openrouter_client
+      request: *default_request
+
+  # --- minimax/minimax-m2.7 ---
+  - model_name: minimax/minimax-m2.7
+    api_key: "${POOL_MINIMAX27_KEY_1}"
+    api_base_url: "${POOL_OPENROUTER_BASE}"
+    api_provider: OpenRouter
+    description: "MiniMax-M2.7 endpoint 1"
+    metadata:
+      client: *openrouter_client
+      request: *default_request
+
+  - model_name: minimax/minimax-m2.7
+    api_key: "${POOL_MINIMAX27_KEY_2}"
+    api_base_url: "${POOL_OPENROUTER_BASE}"
+    api_provider: OpenRouter
+    description: "MiniMax-M2.7 endpoint 2"
+    metadata:
+      client: *openrouter_client
+      request: *default_request
+
+  # --- moonshotai/kimi-k2.6 ---
+  - model_name: moonshotai/kimi-k2.6
+    api_key: "${POOL_KIMI26_KEY_1}"
+    api_base_url: "${POOL_OPENROUTER_BASE}"
+    api_provider: OpenRouter
+    description: "Kimi-K2.6 endpoint 1"
+    metadata:
+      client: *openrouter_client
+      request: *default_request
+
+  - model_name: moonshotai/kimi-k2.6
+    api_key: "${POOL_KIMI26_KEY_2}"
+    api_base_url: "${POOL_OPENROUTER_BASE}"
+    api_provider: OpenRouter
+    description: "Kimi-K2.6 endpoint 2"
+    metadata:
+      client: *openrouter_client
+      request: *default_request
+
+  # --- moonshotai/kimi-k2.5 ---
+  - model_name: moonshotai/kimi-k2.5
+    api_key: "${POOL_KIMI25_KEY_1}"
+    api_base_url: "${POOL_OPENROUTER_BASE}"
+    api_provider: OpenRouter
+    description: "Kimi-K2.5 endpoint 1"
+    metadata:
+      client: *openrouter_client
+      request: *default_request
+
+  - model_name: moonshotai/kimi-k2.5
+    api_key: "${POOL_KIMI25_KEY_2}"
+    api_base_url: "${POOL_OPENROUTER_BASE}"
+    api_provider: OpenRouter
+    description: "Kimi-K2.5 endpoint 2"
+    metadata:
+      client: *openrouter_client
+      request: *default_request
+
+
+
+# ---------------------------------------------------------------------------
+# Shared agent spec anchors
+# ---------------------------------------------------------------------------
+
+x-shared-agent-spec: &shared_agent_spec
+  max_iterations: 50
+  completion_timeout: 300.0
+  language: cn
+  enable_task_planning: false
+  enable_async_subagent: false
+  restrict_to_sandbox: false
+  rails:
+    - type: filesystem
+
+# ---------------------------------------------------------------------------
+# Agent specifications
+# (model field is intentionally omitted — pool allocator fills it in)
+# ---------------------------------------------------------------------------
+agents:
+  leader:
+    <<: *shared_agent_spec
+
+  teammate:
+    <<: *shared_agent_spec
+
+# ---------------------------------------------------------------------------
+# Infrastructure
+# ---------------------------------------------------------------------------
+transport:
+  type: inprocess
+
+storage:
+  type: sqlite
+
+# ---------------------------------------------------------------------------
+# Runtime (consumed by agent_team_model_pool_e2e.py, not part of TeamAgentSpec)
+# ---------------------------------------------------------------------------
+runtime:
+  session_id: model_pool_session
+  initial_query: >-
+    当前模型池共配置了 6 种模型（z-ai/glm-5.1、xiaomi/mimo-v2-pro、
+    minimax/minimax-m2.5、minimax/minimax-m2.7、moonshotai/kimi-k2.6、moonshotai/kimi-k2.5），每种模型都有2个
+    采用 by_model_name 策略均匀分配。请拉起 12 名队员，每人均匀分配所有的模型，不用创建任务，不要在成员信息和描述中体现分配的模型名称，直接广播收集大家的回复，所有人单点发送leader禁止广播
+    让每位队员报告自己的编号和所使用的模型名称。

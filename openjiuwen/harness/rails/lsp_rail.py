@@ -48,6 +48,7 @@ class LspRail(DeepAgentRail):
     def __init__(
         self,
         options: "InitializeOptions | None" = None,
+        verbose: bool = False,
     ) -> None:
         """Initialize LspRail.
 
@@ -55,11 +56,16 @@ class LspRail(DeepAgentRail):
             options: Optional LSP initialization options.
                 If not provided, uses default configuration with
                 cwd from workspace or current working directory.
+            verbose: When True, every ``before_model_call`` diagnostic snapshot
+                is appended to a timestamped file under ``logs/logs/`` in the
+                project root, created fresh on each run.
         """
         super().__init__()
         self.options = options
+        self.verbose = verbose
         self._lsp_tool: "Tool | None" = None
         self._initialized = False
+        self._log_file: "Path | None" = None
 
     def init(self, agent: Any) -> None:
         """Initialize LSP subsystem and register LspTool on the agent.
@@ -74,7 +80,7 @@ class LspRail(DeepAgentRail):
             agent: The DeepAgent instance to register tools on.
         """
         from openjiuwen.harness.deep_agent import DeepAgent
-        from openjiuwen.harness.tools.lsp_tool import LspTool
+        from openjiuwen.harness.tools import LspTool
 
         # 类型检查：仅在 DeepAgent 上生效
         if not (
@@ -100,6 +106,23 @@ class LspRail(DeepAgentRail):
                 effective_cwd = str(self.workspace.root_path)
             except Exception as exc:
                 logger.warning("LspRail: failed to get workspace root: %s", exc)
+
+        # Create a fresh timestamped log file for this run (verbose mode only)
+        if self.verbose:
+            from datetime import datetime, timezone
+            from pathlib import Path as _Path
+            _log_dir = _Path(__file__).parent.parent.parent.parent / "logs" / "logs" / "lsp"
+            try:
+                _log_dir.mkdir(parents=True, exist_ok=True)
+                _now = datetime.now(tz=timezone.utc)
+                self._log_file = _log_dir / f"lsp_{_now.strftime('%Y%m%d_%H%M%S')}.log"
+                self._log_file.write_text(
+                    f"# LspRail diagnostic log — run started {_now.isoformat()}\n\n",
+                    encoding="utf-8",
+                )
+                logger.info("LspRail: diagnostic log file: %s", self._log_file)
+            except Exception as exc:
+                logger.warning("LspRail: failed to create log file: %s", exc)
 
         # 如果 options 中没有 cwd，则构建一个
         import asyncio
@@ -243,8 +266,142 @@ class LspRail(DeepAgentRail):
             logger.info("LspRail: LSP subsystem shutdown successfully")
         except Exception as exc:
             logger.warning("LspRail: failed to shutdown LSP subsystem: %s", exc)
+    
+    # Tool names that modify file content and should trigger LSP re-analysis.
+    _WRITE_TOOL_NAMES: frozenset[str] = frozenset({"edit_file", "write_file"})
+
+    async def after_tool_call(self, ctx: Any) -> None:
+        """Trigger LSP re-analysis after a file-write or file-edit tool call.
+
+        When ``edit_file`` or ``write_file`` finishes, sends
+        ``textDocument/didChange`` to the LSP server so it re-analyses the
+        updated content and emits fresh ``publishDiagnostics`` notifications.
+        The call is fire-and-forget — diagnostics can be retrieved later via
+        ``get_pending_lsp_diagnostics()``.
+        """
+        inputs = ctx.inputs
+        tool_name = getattr(inputs, "tool_name", "")
+        if tool_name not in self._WRITE_TOOL_NAMES:
+            return
+
+        tool_args = getattr(inputs, "tool_args", None) or {}
+        if isinstance(tool_args, str):
+            import json
+            try:
+                tool_args = json.loads(tool_args)
+            except Exception:
+                tool_args = {}
+        file_path = tool_args.get("file_path", "") if isinstance(tool_args, dict) else ""
+        if not file_path:
+            return
+
+        import asyncio
+        from openjiuwen.harness.lsp.core.manager import LSPServerManager
+
+        manager = LSPServerManager.get_instance()
+        if manager is None:
+            return
+
+        # Resolve to absolute path now (on the calling thread) so _trigger
+        # always works regardless of cwd changes inside the coroutine.
+        from pathlib import Path as _Path
+        _p = _Path(file_path)
+        if _p.is_absolute():
+            resolved_path = str(_p.resolve())
+        else:
+            _root = self.workspace.root_path if self.workspace else None
+            resolved_path = str((_Path(_root) / _p).resolve() if _root else (_Path.cwd() / _p).resolve())
+
+        async def _trigger() -> None:
+            try:
+                from pathlib import Path
+                from openjiuwen.harness.lsp.core.utils.file_uri import path_to_file_uri
+                ext = Path(resolved_path).suffix.lower()
+                language_id = "python" if ext in {".py", ".pyi"} else ext.lstrip(".") or "plaintext"
+                # Some servers (e.g. pyright) require a prior didOpen before they
+                # accept didChange.  Send didOpen first when the file is unknown.
+                uri = path_to_file_uri(resolved_path)
+                if not manager.is_file_open(uri):
+                    await manager.open_file(resolved_path, language_id)
+                else:
+                    await manager.change_file(resolved_path, language_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("LspRail: post-edit diagnostic trigger failed for %s: %s", resolved_path, exc)
+
+        asyncio.ensure_future(_trigger())
 
     # -- lifecycle hooks --
+
+    async def before_model_call(self, ctx: Any) -> None:
+        """Inject pending LSP diagnostics into the message list before the LLM call.
+        If ``after_tool_call`` fired an LSP re-analysis after an ``edit_file`` or
+        ``write_file``, pyright will have published diagnostics to
+        ``LspDiagnosticRegistry`` by the time the next model call begins.  This
+        hook drains those diagnostics and appends a ``UserMessage`` so the LLM
+        sees the errors without the agent having to call any diagnostic tool
+        explicitly.
+        """
+        from openjiuwen.harness.lsp import get_pending_lsp_diagnostics
+
+        diagnostics = get_pending_lsp_diagnostics()
+        if not diagnostics:
+            return
+
+        if self.verbose:
+            self._write_diagnostics_info(diagnostics)
+
+        messages = getattr(ctx.inputs, "messages", None)
+        if messages is None:
+            return
+
+        text = self._format_diagnostics(diagnostics)
+        if not text:
+            return
+
+        try:
+            from openjiuwen.core.foundation.llm.schema.message import UserMessage
+            messages.append(UserMessage(content=text))
+            logger.debug("LspRail: injected %d diagnostic file(s) into model context", len(diagnostics))
+        except Exception as exc:
+            logger.debug("LspRail: failed to inject diagnostics into messages: %s", exc)
+
+    def _write_diagnostics_info(self, diagnostics: list) -> None:
+        """Append LSP diagnostics to the run's log file (verbose mode)."""
+        if self._log_file is None:
+            return
+        try:
+            sev_labels = {1: "Error", 2: "Warning", 3: "Info", 4: "Hint"}
+            with self._log_file.open("a", encoding="utf-8") as fh:
+                for f in diagnostics:
+                    file_label = f.local_path if f.local_path else f.uri
+                    fh.write(f"[before_model_call] server={f.server_name!r}  local_path={file_label!r}\n")
+                    for d in f.diagnostics:
+                        sev = sev_labels.get(d.severity, f"S{d.severity}")
+                        line = d.range.get("start", {}).get("line", 0) + 1
+                        char = d.range.get("start", {}).get("character", 0) + 1
+                        code = f" ({d.code})" if d.code else ""
+                        msg = d.message.splitlines()[0]
+                        fh.write(f"  [{sev}] line {line}, col {char}{code}  {msg}\n")
+                    fh.write("\n")
+        except Exception as exc:
+            logger.debug("LspRail: failed to write diagnostics to log file: %s", exc)
+
+    @staticmethod
+    def _format_diagnostics(diagnostics: list) -> str:
+        """Format LSP diagnostic entries into a concise user-message string."""
+        sev_labels = {1: "Error", 2: "Warning", 3: "Info", 4: "Hint"}
+        lines: list[str] = ["[LSP Diagnostics] The following issues were detected after the last file edit:"]
+        for f in diagnostics:
+            file_label = f.local_path if f.local_path else f.uri
+            lines.append(f"\nFile: {file_label}")
+            for d in f.diagnostics:
+                sev = sev_labels.get(d.severity, f"S{d.severity}")
+                line = d.range.get("start", {}).get("line", 0) + 1
+                char = d.range.get("start", {}).get("character", 0) + 1
+                code = f" ({d.code})" if d.code else ""
+                lines.append(f"  [{sev}] line {line}, col {char}{code}  {d.message}")
+        lines.append("\nPlease review and fix these issues.")
+        return "\n".join(lines)
 
 
 __all__ = [

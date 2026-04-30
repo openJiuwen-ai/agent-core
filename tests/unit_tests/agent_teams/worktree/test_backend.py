@@ -23,6 +23,7 @@ def _wt_target(tmp_path, slug: str) -> str:
 
 class TestGitBackendCreate:
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_create_new_worktree(self, tmp_git_repo: str, worktree_config: WorktreeConfig, tmp_path):
         backend = GitBackend(worktree_config)
         target = _wt_target(tmp_path, "test-slug")
@@ -35,6 +36,7 @@ class TestGitBackendCreate:
         logger.info("GitBackend.create new worktree: path=%s", result.worktree_path)
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_create_fast_recovery(self, tmp_git_repo: str, worktree_config: WorktreeConfig, tmp_path):
         backend = GitBackend(worktree_config)
         target = _wt_target(tmp_path, "recover-slug")
@@ -50,6 +52,7 @@ class TestGitBackendCreate:
 
 class TestGitBackendRemove:
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_remove_existing(self, tmp_git_repo: str, worktree_config: WorktreeConfig, tmp_path):
         backend = GitBackend(worktree_config)
         target = _wt_target(tmp_path, "remove-me")
@@ -61,6 +64,7 @@ class TestGitBackendRemove:
         logger.info("GitBackend.remove succeeded")
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_remove_nonexistent_raises(self, tmp_git_repo: str, worktree_config: WorktreeConfig):
         """Removing a non-existent worktree raises FileNotFoundError
         because git subprocess cannot chdir into it."""
@@ -72,6 +76,7 @@ class TestGitBackendRemove:
 
 class TestGitBackendExists:
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_exists_true(self, tmp_git_repo: str, worktree_config: WorktreeConfig, tmp_path):
         backend = GitBackend(worktree_config)
         target = _wt_target(tmp_path, "exists-check")
@@ -80,6 +85,7 @@ class TestGitBackendExists:
         logger.info("GitBackend.exists returns True for valid worktree")
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_exists_false(self, worktree_config: WorktreeConfig):
         backend = GitBackend(worktree_config)
         assert await backend.exists("/tmp/nonexistent-path") is False
@@ -87,11 +93,13 @@ class TestGitBackendExists:
 
 
 class TestCreateBackend:
+    @pytest.mark.level1
     def test_git_backend(self):
         backend = create_backend("git")
         assert isinstance(backend, GitBackend)
         logger.info("create_backend('git') returns GitBackend")
 
+    @pytest.mark.level1
     def test_unknown_backend_raises(self):
         with pytest.raises(ValueError, match="Unknown worktree backend"):
             create_backend("nonexistent-backend")
@@ -99,6 +107,7 @@ class TestCreateBackend:
 
 
 class TestRegisterWorktreeBackend:
+    @pytest.mark.level1
     def test_register_custom(self):
         original_keys = set(_BACKEND_REGISTRY.keys())
 
@@ -118,6 +127,7 @@ class TestRegisterWorktreeBackend:
 
 
 class TestWorktreeBackendProtocol:
+    @pytest.mark.level1
     def test_git_backend_is_worktree_backend(self):
         backend = GitBackend()
         assert isinstance(backend, WorktreeBackend)

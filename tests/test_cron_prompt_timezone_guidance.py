@@ -1,11 +1,11 @@
 import unittest
 
-from openjiuwen.harness.prompts.sections.tools import build_tool_card
-from openjiuwen.harness.prompts.sections.tools.cron import (
+from openjiuwen.harness.prompts.tools import build_tool_card
+from openjiuwen.harness.prompts.tools.cron import (
     DESCRIPTION,
     FIELD_DESCRIPTIONS,
 )
-from openjiuwen.harness.tools.cron import (
+from openjiuwen.harness.tools import (
     CronToolContext,
     create_cron_tools,
 )

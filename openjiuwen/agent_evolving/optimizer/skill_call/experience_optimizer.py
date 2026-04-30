@@ -16,9 +16,15 @@ from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionTarget,
 )
 from openjiuwen.agent_evolving.optimizer.base import BaseOptimizer
+from openjiuwen.agent_evolving.optimizer.llm_resilience import (
+    LLMInvokePolicy,
+    invoke_text_with_retry_and_prompt,
+)
 from openjiuwen.agent_evolving.signal.base import EvolutionSignal
 from openjiuwen.agent_evolving.trajectory.types import Updates
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.model import Model
 
 # Initial score mapping by signal type
 INITIAL_SCORE_BY_SIGNAL = {
@@ -28,81 +34,28 @@ INITIAL_SCORE_BY_SIGNAL = {
     "conversation_review": 0.50,
 }
 
-NEW_SKILL_PROPOSAL_PROMPT_CN = """\
-你是一个 Skill 设计专家。根据对话历史，判断是否值得创建一个新的 Skill 来封装这个工作流。
-
-## 对话历史
-{conversation_snippet}
-
-## 现有 Skill 列表
-{existing_skill_names}
-
-## 判断标准
-1. 对话包含复杂的多步骤工作流
-2. 工作流具有通用性和可复用性
-3. 现有 Skill 无法覆盖此场景
-4. 工作流涉及特定工具组合或特定领域知识
-
-## 输出格式
-如果值得创建新 Skill，输出：
-```json
-{{
-  "should_create": true,
-  "name": "建议的 Skill 名称（英文，短横线连接）",
-  "description": "一句话描述 Skill 用途",
-  "body": "完整的 Skill 内容（Instructions、Examples 等）",
-  "reason": "为什么值得创建这个 Skill"
-}}
-```
-
-如果不值得创建，输出：
-```json
-{{"should_create": false}}
-```
-
-只输出 JSON，不要其他内容。"""
-
-NEW_SKILL_PROPOSAL_PROMPT_EN = """\
-You are a Skill design expert. Based on the conversation history, determine whether it's worth creating a new Skill to encapsulate this workflow.
-
-## Conversation History
-{conversation_snippet}
-
-## Existing Skill Names
-{existing_skill_names}
-
-## Criteria
-1. The conversation contains a complex multi-step workflow
-2. The workflow has generality and reusability
-3. Existing Skills cannot cover this scenario
-4. The workflow involves specific tool combinations or domain knowledge
-
-## Output Format
-If a new Skill is worth creating, output:
-```json
-{{
-  "should_create": true,
-  "name": "Suggested Skill name (English, kebab-case)",
-  "description": "One-sentence description of Skill purpose",
-  "body": "Complete Skill content (Instructions, Examples, etc.)",
-  "reason": "Why this Skill is worth creating"
-}}
-```
-
-If not worth creating, output:
-```json
-{{"should_create": false}}
-```
-
-Output only JSON, no other content."""
-
-NEW_SKILL_PROPOSAL_PROMPT: Dict[str, str] = {
-    "cn": NEW_SKILL_PROPOSAL_PROMPT_CN,
-    "en": NEW_SKILL_PROPOSAL_PROMPT_EN,
-}
+GENERATE_RECORDS_LLM_POLICY = LLMInvokePolicy(
+    attempt_timeout_secs=60,
+    total_budget_secs=180,
+    max_attempts=3,
+)
+_RETRY_PARSE_TIMEOUT_SECS = 20
 
 SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
 你是一个 Skill 优化专家。根据对话中发现的问题信号和对话历史，为 Skill 生成演进经验。
+
+## 输出格式（最重要）
+你的回复必须是一个合法的 JSON 数组，不要任何其他内容。
+- 不要使用 Markdown 代码块（```）包裹
+- 不要添加解释性文字
+- JSON 转义规则：字符串内换行用 \\n，引号用 \\"，制表符用 \\t
+- 数组内每个对象必须包含 action 字段（"append" 或 "skip"）
+
+## 角色约束
+演进经验必须遵从 Agent 的角色能力和主要任务目标：
+- 经验应当增强角色核心能力，而非引入角色职责之外的行为
+- 从角色的主要任务出发，生成有价值的演进经验
+- 避免生成与角色无关或超出角色能力范围的建议
 
 ## 输入信息
 
@@ -178,6 +131,8 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
 - execution_failure / workaround 类：通常归入 Troubleshooting
 - user_correction / 流程偏差类：通常归入 Instructions 或 Examples
 - script_artifact 类：归入 Scripts
+- collaboration_send / collaboration_claim / collaboration_view / collaboration_receive / collaboration_failure 类：
+  归入 Collaboration（记录 AgentSkill 作为 TeamSkill 成员时的协作经验，如发送消息、认领任务、接收上下文等）
 
 ## 内容生成规范
 1. 语言一致：输出语言必须与 Skill 完全一致（中文 Skill 输出中文，英文 Skill 输出英文）
@@ -197,7 +152,7 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
     "action": "append | skip",
     "skip_reason": "irrelevant | duplicate | low_priority（仅 action 为 skip 时填写，否则为 null）",
     "target": "description | body | script",
-    "section": "Instructions | Examples | Troubleshooting | Scripts",
+    "section": "Instructions | Examples | Troubleshooting | Scripts | Collaboration",
     "content": "Markdown 内容或脚本源码（仅 action 为 append 时填写）",
     "merge_target": "ev_xxxxxxxx 或 null",
     "script_filename": "文件名（仅 target 为 script 时填写，如 generate_chart.py）",
@@ -208,6 +163,19 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
 
 SKILL_EXPERIENCE_GENERATE_PROMPT_EN = """\
 You are a Skill optimization expert. Based on problem signals discovered in the conversation and the conversation history, generate evolution experiences for the Skill.
+
+## Output Format (MOST IMPORTANT)
+Your response must be a valid JSON array, nothing else.
+- Do NOT wrap in Markdown code blocks (```)
+- Do NOT add explanatory text
+- JSON escaping: use \\n for newlines, \\" for quotes, \\t for tabs inside strings
+- Every object in the array must include an "action" field ("append" or "skip")
+
+## Role Constraints
+Evolution experiences must respect the Agent's role capabilities and primary objectives:
+- Experiences should enhance core role capabilities, not introduce behaviors outside the role's responsibilities
+- Generate valuable experiences from the role's primary mission perspective
+- Avoid generating suggestions unrelated to or beyond the role's capabilities
 
 ## Input Information
 
@@ -283,6 +251,9 @@ Determine the experience's target layer (target) and section (section), then gen
 - execution_failure / workaround types: Usually belong to Troubleshooting
 - user_correction / process deviation types: Usually belong to Instructions or Examples
 - script_artifact types: Belong to Scripts
+- collaboration_send / collaboration_claim / collaboration_view / collaboration_receive / collaboration_failure types:
+  Belong to Collaboration (records AgentSkill collaboration experiences when acting as TeamSkill member,
+  e.g., sending messages, claiming tasks, receiving context, etc.)
 
 ## Content Generation Guidelines
 1. Language consistency: Output language must match the Skill exactly (Chinese Skill outputs Chinese, English Skill outputs English)
@@ -302,7 +273,7 @@ Output only the following JSON array, nothing else (even if there is only one en
     "action": "append | skip",
     "skip_reason": "irrelevant | duplicate | low_priority (fill only when action is skip, otherwise null)",
     "target": "description | body | script",
-    "section": "Instructions | Examples | Troubleshooting | Scripts",
+    "section": "Instructions | Examples | Troubleshooting | Scripts | Collaboration",
     "content": "Markdown content or script source code (fill only when action is append)",
     "merge_target": "ev_xxxxxxxx or null",
     "script_filename": "filename (only when target is script, e.g. generate_chart.py)",
@@ -421,7 +392,8 @@ def _preview_section(section: str, preview_chars: int = _SECTION_PREVIEW_CHARS) 
 
 def _fix_json_text(text: str) -> str:
     """Apply common fixes to malformed JSON produced by LLMs."""
-    text = re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.MULTILINE)
+    text = text.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
     text = re.sub(r"```\s*$", "", text, flags=re.MULTILINE)
     text = re.sub(r"//[^\n]*", "", text)
     text = re.sub(r",\s*([}\]])", r"\1", text)
@@ -450,6 +422,7 @@ def _extract_json(raw: str) -> Optional[Any]:
     if result is not None:
         return result
 
+    # Step 3: regex extract outer [ ... ] or { ... } from already-fixed text
     for pattern in (r"\[[\s\S]*\]", r"\{[\s\S]*\}"):
         matched = re.search(pattern, fixed)
         if matched:
@@ -462,6 +435,38 @@ def _extract_json(raw: str) -> Optional[Any]:
                 return result
 
     return None
+
+
+def _extract_json_with_error(raw: str) -> tuple[Any, str] | tuple[None, str]:
+    """Like _extract_json but also returns the last parse error message."""
+    raw = raw.strip()
+    if not raw:
+        return None, "empty response"
+
+    last_error = "unknown"
+    result = _try_parse(raw)
+    if result is not None:
+        return result, ""
+
+    fixed = _fix_json_text(raw)
+    result = _try_parse(fixed)
+    if result is not None:
+        return result, ""
+
+    for pattern in (r"\[[\s\S]*\]", r"\{[\s\S]*\}"):
+        matched = re.search(pattern, fixed)
+        if matched:
+            result = _try_parse(matched.group(0))
+            if result is not None:
+                return result, ""
+            refixed = _fix_json_text(matched.group(0))
+            try:
+                parsed = json.loads(refixed)
+                return parsed, ""
+            except json.JSONDecodeError as e:
+                last_error = str(e)
+
+    return None, last_error
 
 
 _CONTEXT_MAX_CHARS = 500
@@ -496,6 +501,12 @@ def _build_existing_summary(records: List[EvolutionRecord], label: str = "") -> 
         prefix = f"[{label}] " if label else ""
         lines.append(f"- {prefix}[{record.id}] [{record.change.section}] {record.change.content}")
     return "\n".join(lines)
+
+
+def _limit_summary_lines(summary: str, max_lines: int) -> str:
+    if not summary or max_lines <= 0:
+        return ""
+    return "\n".join(summary.splitlines()[:max_lines])
 
 
 def _parse_single_patch(data: dict) -> Optional[EvolutionPatch]:
@@ -555,6 +566,9 @@ _JSON_FIX_PROMPT = """\
 你上次的输出不是合法 JSON，请修复并重新输出。
 只输出修复后的 JSON 数组，不要任何解释文字。
 
+## 解析错误
+{parse_error}
+
 ## 目标格式
 [
   {{
@@ -573,6 +587,29 @@ _JSON_FIX_PROMPT = """\
 ## 原始输出（请从中提取并修复）
 {broken_output}"""
 
+_JSON_FIX_PROMPT_STRICT = """\
+你的 JSON 输出多次解析失败。请完全重新生成。
+
+## 解析错误
+{parse_error}
+
+## 上次输出预览
+{broken_preview}
+
+## 严格要求
+1. 只输出一个 JSON 数组，以 [ 开头，以 ] 结尾
+2. 不要任何解释文字、不要 Markdown 代码块
+3. 所有字符串内的换行必须写成 \\n
+4. 所有字符串内的引号必须写成 \\"
+5. 不要用单引号，只用双引号
+
+## 正确格式示例
+[
+  {{"action":"append","target":"body","section":"Troubleshooting","content":"## 标题\\n- 要点1\\n- 要点2","merge_target":null}},
+  {{"action":"skip","skip_reason":"irrelevant","target":null,"section":null,"content":null,"merge_target":null}}
+]
+"""
+
 
 class SkillExperienceOptimizer(BaseOptimizer):
     """Online Skill experience optimizer.
@@ -584,11 +621,23 @@ class SkillExperienceOptimizer(BaseOptimizer):
 
     domain = "skill_experience"
 
-    def __init__(self, llm: Any, model: str, language: str = "cn") -> None:
+    def __init__(
+        self,
+        llm: Model,
+        model: str,
+        language: str = "cn",
+        generate_records_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY,
+    ) -> None:
         super().__init__()
         self._llm = llm
         self._model = model
         self._language = language
+        self._generate_records_llm_policy = generate_records_llm_policy
+
+    @property
+    def generate_records_llm_policy(self) -> LLMInvokePolicy:
+        """Get the configured record generation policy."""
+        return self._generate_records_llm_policy
 
     @staticmethod
     def default_targets() -> List[str]:
@@ -653,21 +702,68 @@ class SkillExperienceOptimizer(BaseOptimizer):
             existing_body_summary=body_summary or ("无已有记录" if self._language == "cn" else "No existing records"),
             user_query=ctx.user_query or ("无" if self._language == "cn" else "None"),
         )
+        retry_prompt = SKILL_EXPERIENCE_GENERATE_PROMPT[self._language].format(
+            skill_content=_summarize_skill_content(ctx.skill_content, max_chars=2500),
+            signals_json=json.dumps([signal.to_dict() for signal in ctx.signals], ensure_ascii=False),
+            conversation_snippet=_build_conversation_snippet(
+                ctx.messages,
+                max_messages=10,
+                content_preview_chars=100,
+                language=self._language,
+            ).strip(),
+            existing_desc_summary=_limit_summary_lines(desc_summary, 2)
+            or ("无已有记录" if self._language == "cn" else "No existing records"),
+            existing_body_summary=_limit_summary_lines(body_summary, 2)
+            or ("无已有记录" if self._language == "cn" else "No existing records"),
+            user_query=(ctx.user_query[:500] if ctx.user_query else ("无" if self._language == "cn" else "None")),
+        )
 
         logger.info("[SkillExperienceOptimizer] calling LLM (skill=%s)", ctx.skill_name)
         try:
-            response = await self._llm.invoke(
+            raw, prompt_used = await invoke_text_with_retry_and_prompt(
+                llm=self._llm,
                 model=self._model,
-                messages=[{"role": "user", "content": prompt}],
+                prompt=prompt,
+                retry_prompt=retry_prompt,
+                policy=self._generate_records_llm_policy,
             )
-            raw = response.content if hasattr(response, "content") else str(response)
-        except Exception as exc:
+        except BaseError as exc:
             logger.error("[SkillExperienceOptimizer] LLM call failed: %s", exc)
             return []
 
-        patches = _parse_llm_response(raw)
+        data, last_error = _extract_json_with_error(raw)
+        if data is not None:
+            items = data if isinstance(data, list) else [data]
+            patches: List[EvolutionPatch] = []
+            for item in items:
+                if isinstance(item, dict):
+                    p = _parse_single_patch(item)
+                    if p is not None:
+                        patches.append(p)
+        else:
+            patches = None
+        last_raw = raw
+        for attempt in range(2, 4):  # attempts 2 and 3
+            if patches is not None:
+                break
+            logger.warning(
+                "[SkillExperienceOptimizer] parse failed, retry attempt %d/3 (skill=%s)",
+                attempt,
+                ctx.skill_name,
+            )
+            result = await self.retry_parse(
+                broken_raw=last_raw,
+                original_prompt=prompt_used,
+                attempt_number=attempt,
+                parse_error=last_error,
+            )
+            patches, retry_raw = result
+            if retry_raw:
+                last_raw = retry_raw
+                _, last_error = _extract_json_with_error(retry_raw)
         if patches is None:
-            patches = await self.retry_parse(raw, original_prompt=prompt)
+            logger.warning("[SkillExperienceOptimizer] all retries exhausted, returning no records")
+            return []
         source = ctx.signals[0].signal_type
         merged_context = _build_context(ctx.signals)
         text_records: List[EvolutionRecord] = []
@@ -708,94 +804,73 @@ class SkillExperienceOptimizer(BaseOptimizer):
             )
         return text_records + script_records
 
-    async def retry_parse(self, broken_raw: str, original_prompt: str) -> List[EvolutionPatch]:
-        """One-shot retry: fix JSON if malformed, or regenerate if truncated."""
+    async def retry_parse(
+        self,
+        broken_raw: str,
+        original_prompt: str,
+        attempt_number: int = 1,
+        parse_error: str = "",
+    ) -> tuple[List[EvolutionPatch] | None, str]:
+        """Retry parsing: fix JSON if malformed, or regenerate if truncated.
+
+        Args:
+            broken_raw: The raw LLM output that failed parsing.
+            original_prompt: The original prompt used for generation.
+            attempt_number: Which retry attempt this is (2 or 3). Affects strategy.
+            parse_error: Specific error message from json.loads.
+
+        Returns:
+            (patches, retry_raw) where patches is None on failure,
+            [] on successful empty parse, or a non-empty list.
+            retry_raw is the raw LLM output for progressive retries.
+        """
         truncated = _looks_truncated(broken_raw)
+
         if truncated:
+            if attempt_number >= 3:
+                logger.warning("[SkillExperienceOptimizer] output still truncated on attempt 3, giving up")
+                return None, broken_raw
             logger.warning("[SkillExperienceOptimizer] output appears truncated, retrying full regeneration")
             retry_prompt = original_prompt
+        elif attempt_number >= 3:
+            logger.warning(
+                "[SkillExperienceOptimizer] JSON malformed (attempt %d), using strict fix prompt",
+                attempt_number,
+            )
+            error_detail = parse_error or "无法解析为合法 JSON"
+            retry_prompt = _JSON_FIX_PROMPT_STRICT.format(
+                parse_error=error_detail,
+                broken_preview=broken_raw[:500],
+            )
         else:
             logger.warning(
                 "[SkillExperienceOptimizer] JSON malformed, requesting fix (preview: %s)",
                 broken_raw[:200],
             )
-            retry_prompt = _JSON_FIX_PROMPT.format(broken_output=broken_raw)
+            error_detail = parse_error or "JSON 解析失败"
+            retry_prompt = _JSON_FIX_PROMPT.format(parse_error=error_detail, broken_output=broken_raw)
 
         try:
             response = await self._llm.invoke(
                 model=self._model,
                 messages=[{"role": "user", "content": retry_prompt}],
+                temperature=0.1,
+                timeout=_RETRY_PARSE_TIMEOUT_SECS,
             )
             retry_raw = response.content if hasattr(response, "content") else str(response)
         except Exception as exc:
             logger.error("[SkillExperienceOptimizer] retry LLM call failed: %s", exc)
-            return []
+            return None, ""
 
         patches = _parse_llm_response(retry_raw)
         if patches is None:
-            strategy = "regeneration" if truncated else "fix"
+            strategy = "regeneration" if truncated else ("strict_fix" if attempt_number >= 3 else "fix")
             logger.warning("[SkillExperienceOptimizer] retry (%s) also failed, giving up", strategy)
-            return []
+            return None, retry_raw
         logger.info("[SkillExperienceOptimizer] retry succeeded, got %d patches", len(patches))
-        return patches
+        return patches, retry_raw
 
-    def update_llm(self, llm: Any, model: str) -> None:
+    def update_llm(self, llm: Model, model: str) -> None:
         """Update runtime llm/model for hot reload."""
         self._llm = llm
         self._model = model
-
-    async def generate_new_skill_proposal(
-        self,
-        messages: List[dict],
-        existing_skill_names: List[str],
-    ) -> Optional[Dict[str, Any]]:
-        """Generate a new skill proposal based on conversation history.
-
-        Args:
-            messages: Conversation messages
-            existing_skill_names: List of existing skill names
-
-        Returns:
-            Proposal dict with name, description, body, reason if should_create=True,
-            None otherwise
-        """
-        conversation_snippet = _build_conversation_snippet(messages, language=self._language)
-        prompt = NEW_SKILL_PROPOSAL_PROMPT[self._language].format(
-            conversation_snippet=conversation_snippet,
-            existing_skill_names=", ".join(existing_skill_names) if existing_skill_names else "(none)",
-        )
-
-        logger.info("[SkillExperienceOptimizer] generating new skill proposal")
-        try:
-            response = await self._llm.invoke(
-                model=self._model,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = response.content if hasattr(response, "content") else str(response)
-        except Exception as exc:
-            logger.error("[SkillExperienceOptimizer] new skill proposal LLM call failed: %s", exc)
-            return None
-
-        data = _extract_json(raw)
-        if data is None:
-            logger.warning("[SkillExperienceOptimizer] failed to parse new skill proposal response")
-            return None
-
-        if not data.get("should_create"):
-            logger.info("[SkillExperienceOptimizer] LLM decided not to create new skill")
-            return None
-
-        required_fields = ["name", "description", "body", "reason"]
-        for field in required_fields:
-            if field not in data:
-                logger.warning(
-                    "[SkillExperienceOptimizer] new skill proposal missing field: %s",
-                    field,
-                )
-                return None
-
-        logger.info(
-            "[SkillExperienceOptimizer] generated new skill proposal: %s",
-            data["name"],
-        )
-        return data

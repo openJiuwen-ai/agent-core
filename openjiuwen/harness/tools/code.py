@@ -6,7 +6,7 @@ from typing import Dict, Any, AsyncIterator, Optional
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import SysOperation
-from openjiuwen.harness.prompts.sections.tools import build_tool_card
+from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
 

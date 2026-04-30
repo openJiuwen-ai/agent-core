@@ -116,6 +116,10 @@ class ToolMgr:
     def get_mcp_server_ids(self, server_name: str):
         return self._mcp_server_name_to_ids.get(server_name, [])
 
+    def get_mcp_client(self, server_id: str) -> Optional[McpClient]:
+        resource = self._mcp_server_resources.get(server_id)
+        return resource.client if resource else None
+
     def get_mcp_server_config(self, server_id: str) -> Optional[McpServerConfig]:
         resource = self._mcp_server_resources.get(server_id)
         return deepcopy(resource.config) if resource else None

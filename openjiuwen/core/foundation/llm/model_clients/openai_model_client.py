@@ -195,6 +195,12 @@ class OpenAIModelClient(BaseModelClient):
         if effective_headers:
             params["extra_headers"] = effective_headers
 
+        # OpenAI SDK drops unknown top-level create() args; vLLM needs return_token_ids in JSON body.
+        if "return_token_ids" in params:
+            extra_body = dict(params.get("extra_body") or {})
+            extra_body["return_token_ids"] = params.pop("return_token_ids")
+            params["extra_body"] = extra_body
+
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
@@ -327,12 +333,25 @@ class OpenAIModelClient(BaseModelClient):
             **kwargs
         )
 
+        # OpenAI-compatible streaming responses only include usage on the final
+        # chunk when include_usage is explicitly requested.
+        stream_options = params.get("stream_options")
+        if isinstance(stream_options, dict):
+            stream_options.setdefault("include_usage", True)
+        elif stream_options is None:
+            params["stream_options"] = {"include_usage": True}
+
         effective_headers = self._build_request_headers(
             self._base_headers,
             request_custom_headers,
         )
         if effective_headers:
             params["extra_headers"] = effective_headers
+
+        if "return_token_ids" in params:
+            extra_body = dict(params.get("extra_body") or {})
+            extra_body["return_token_ids"] = params.pop("return_token_ids")
+            params["extra_body"] = extra_body
 
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
@@ -517,7 +536,10 @@ class OpenAIModelClient(BaseModelClient):
                     tool_calls=parsed_chunk.tool_calls,
                     usage_metadata=parsed_chunk.usage_metadata,
                     finish_reason=parsed_chunk.finish_reason,
-                    parser_content=parser_content  # Has value when parsing succeeds, otherwise None
+                    parser_content=parser_content,  # Has value when parsing succeeds, otherwise None
+                    prompt_token_ids=parsed_chunk.prompt_token_ids,
+                    completion_token_ids=parsed_chunk.completion_token_ids,
+                    logprobs=parsed_chunk.logprobs,
                 )
 
                 yield chunk_with_parser
@@ -632,14 +654,36 @@ class OpenAIModelClient(BaseModelClient):
                     exception=str(e)
                 )
                 parser_content = None
+        
+        prompt_token_ids = getattr(response, 'prompt_token_ids', None) or None
+        completion_token_ids = getattr(choice, 'token_ids', None) or None
+        logprobs = self._normalize_logprobs(getattr(choice, 'logprobs', None))
+
         return AssistantMessage(
             content=content,
             tool_calls=tool_calls if tool_calls else None,
             usage_metadata=usage_metadata,
             finish_reason="tool_calls" if tool_calls else "stop",
             reasoning_content=reasoning_content,
-            parser_content=parser_content
+            parser_content=parser_content,
+            prompt_token_ids=prompt_token_ids,
+            completion_token_ids=completion_token_ids,
+            logprobs=logprobs,
         )
+
+    @staticmethod
+    def _normalize_logprobs(logprobs_obj: Any) -> Optional[Any]:
+        """Convert provider logprobs object to a JSON-serializable form.
+
+        Returns None when the provider did not include logprobs.
+        """
+        if not logprobs_obj:
+            return None
+        if hasattr(logprobs_obj, 'model_dump'):
+            return logprobs_obj.model_dump()
+        if hasattr(logprobs_obj, '__dict__'):
+            return vars(logprobs_obj)
+        return logprobs_obj
 
     def _parse_stream_chunk(self, chunk: Any) -> Optional[AssistantMessageChunk]:
         """Parse OpenAI streaming response chunk
@@ -650,7 +694,36 @@ class OpenAIModelClient(BaseModelClient):
         Returns:
             AssistantMessageChunk or None
         """
+        # Some OpenAI-compatible providers send a final usage-only chunk with no
+        # choices. Keep that chunk so usage_metadata can propagate to the final
+        # accumulated AssistantMessage.
+        usage_metadata = None
+        if hasattr(chunk, 'usage') and chunk.usage:
+            input_cost, output_cost, total_cost = self._extract_cost_info(chunk.usage)
+            usage_metadata = UsageMetadata(
+                model_name=self.model_config.model_name,
+                input_tokens=getattr(chunk.usage, 'prompt_tokens', 0) or 0,
+                output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
+                total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0,
+                input_cost=input_cost,
+                output_cost=output_cost,
+                total_cost=total_cost,
+            )
+
+        # vLLM's return_token_ids streams prompt_token_ids only on the first
+        # chunk at the top level; surface it whether or not choices is empty.
+        prompt_token_ids = getattr(chunk, 'prompt_token_ids', None) or None
+
         if not chunk.choices:
+            if usage_metadata or prompt_token_ids:
+                return AssistantMessageChunk(
+                    content="",
+                    reasoning_content=None,
+                    tool_calls=None,
+                    usage_metadata=usage_metadata,
+                    finish_reason="null",
+                    prompt_token_ids=prompt_token_ids,
+                )
             return None
 
         choice = chunk.choices[0]
@@ -678,26 +751,21 @@ class OpenAIModelClient(BaseModelClient):
                     )
                     tool_calls.append(tool_call)
 
-        # Build usage_metadata (usually only in the last chunk)
-        usage_metadata = None
-        if hasattr(chunk, 'usage') and chunk.usage:
-            # Extract cost information if available
-            input_cost, output_cost, total_cost = self._extract_cost_info(chunk.usage)
-
-            usage_metadata = UsageMetadata(
-                model_name=self.model_config.model_name,
-                input_tokens=getattr(chunk.usage, 'prompt_tokens', 0) or 0,
-                output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
-                total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0,
-                input_cost=input_cost,
-                output_cost=output_cost,
-                total_cost=total_cost,
-            )
+        # vLLM emits delta token IDs and per-chunk logprobs alongside content;
+        # accumulate via AssistantMessageChunk.__add__ so the final message
+        # carries the full sequences.
+        completion_token_ids = (
+            getattr(choice, 'token_ids', None) or getattr(delta, 'token_ids', None) or None
+        )
+        logprobs = self._normalize_logprobs(getattr(choice, 'logprobs', None))
 
         return AssistantMessageChunk(
             content=content,
             reasoning_content=reasoning_content,
             tool_calls=tool_calls if tool_calls else None,
             usage_metadata=usage_metadata,
-            finish_reason=choice.finish_reason or "null"
+            finish_reason=choice.finish_reason or "null",
+            prompt_token_ids=prompt_token_ids,
+            completion_token_ids=completion_token_ids,
+            logprobs=logprobs,
         )

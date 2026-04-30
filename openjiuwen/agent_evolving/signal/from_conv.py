@@ -17,8 +17,10 @@ from openjiuwen.agent_evolving.signal.base import (
 from openjiuwen.agent_evolving.trajectory.types import (
     LLMCallDetail,
     Trajectory,
+    TrajectoryStep,
     ToolCallDetail,
 )
+from openjiuwen.agent_evolving.trajectory.aggregator import CROSS_MEMBER_META_KEYS
 
 
 def _get_field(obj: object, key: str, default: object = "") -> object:
@@ -95,6 +97,26 @@ _EXEC_CONTENT_KEYS = (
     "command", "cmd", "shell_command",
 )
 
+# ===== Collaboration Signal Detection =====
+# Collaboration signal types
+_COLLABORATION_SIGNAL_TYPES = frozenset({
+    "collaboration_send",    # send_message to other member
+    "collaboration_claim",   # claim_task by teammate
+    "collaboration_view",    # view_task status check
+    "collaboration_receive", # receive context from parent_invoke_id
+    "collaboration_failure", # collaboration-related error/timeout
+})
+
+# Collaboration failure pattern
+_COLLABORATION_FAILURE_PATTERN = re.compile(
+    r"member.*failed|member.*error|member.*timeout"
+    r"|invoke.*exception|spawn.*failed"
+    r"|task.*error|task.*timeout"
+    r"|collaboration.*failed"
+    r"|协作.*失败|成员.*异常|任务.*超时",
+    re.IGNORECASE,
+)
+
 
 class ConversationSignalDetector:
     """Extract evolution signals from Trajectory or message list.
@@ -124,11 +146,17 @@ class ConversationSignalDetector:
         Returns:
             List of deduplicated EvolutionSignal.
         """
+        signals: List[EvolutionSignal] = []
+
         if isinstance(trajectory_or_messages, Trajectory):
             messages = self._convert_trajectory_to_messages(trajectory_or_messages)
+            signals.extend(self._detect_from_messages(messages))
+            # Detect collaboration signals if in team member context
+            signals.extend(self._detect_collaboration_signals(trajectory_or_messages))
         else:
-            messages = trajectory_or_messages
-        return self._detect_from_messages(messages)
+            signals.extend(self._detect_from_messages(trajectory_or_messages))
+
+        return self._deduplicate(signals)
 
     @staticmethod
     def _convert_trajectory_to_messages(trajectory: Trajectory) -> List[dict]:
@@ -272,7 +300,7 @@ class ConversationSignalDetector:
                         )
                     )
 
-        return self._deduplicate(signals)
+        return signals
 
     @staticmethod
     def _classify_type(skill_name: Optional[str]) -> EvolutionCategory:
@@ -331,6 +359,226 @@ class ConversationSignalDetector:
             if isinstance(value, str) and len(value.strip()) > 20:
                 return value
         return ""
+
+    def _detect_collaboration_signals(self, trajectory: Trajectory) -> List[EvolutionSignal]:
+        """Detect collaboration signals for AgentSkill in TeamSkill member context.
+
+        Only triggers when trajectory is from a TeamSkill member execution.
+        Returns empty list if not in team member context.
+
+        Args:
+            trajectory: Trajectory object to analyze.
+
+        Returns:
+            List of collaboration EvolutionSignal.
+        """
+        if not self._is_team_member_context(trajectory):
+            return []
+
+        signals: List[EvolutionSignal] = []
+        meta = trajectory.meta or {}
+        member_id = meta.get("member_id", "unknown")
+
+        # Build skill read history from trajectory steps
+        skill_read_history: List[Tuple[int, str]] = []
+        for idx, step in enumerate(trajectory.steps):
+            if step.kind == "llm" and isinstance(step.detail, LLMCallDetail):
+                for msg in step.detail.messages:
+                    tool_calls = msg.get("tool_calls", [])
+                    if tool_calls:
+                        skill_name = self._detect_skill_from_tool_calls(tool_calls)
+                        if skill_name:
+                            skill_read_history.append((idx, skill_name))
+
+        for step in trajectory.steps:
+            if step.kind != "tool" or not isinstance(step.detail, ToolCallDetail):
+                continue
+
+            tool_name = step.detail.tool_name.lower() if step.detail.tool_name else ""
+            step_meta = step.meta or {}
+
+            # Resolve active skill for this step
+            active_skill = self._resolve_active_skill_for_step(
+                step, trajectory.steps, skill_read_history
+            )
+
+            # 1. Detect send_message
+            if tool_name == "send_message":
+                call_args = str(step.detail.call_args or "")
+                to_member = self._extract_to_member(call_args)
+                if to_member and to_member != member_id:
+                    signals.append(
+                        EvolutionSignal(
+                            signal_type="collaboration_send",
+                            evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
+                            section="Collaboration",
+                            excerpt=f"发送消息给成员 {to_member}",
+                            tool_name=tool_name,
+                            skill_name=active_skill,
+                            context={"from_member": member_id, "to_member": to_member},
+                        )
+                    )
+
+            # 2. Detect claim_task
+            if tool_name == "claim_task":
+                call_args = str(step.detail.call_args or "")
+                task_id = self._extract_task_id(call_args)
+                if task_id:
+                    signals.append(
+                        EvolutionSignal(
+                            signal_type="collaboration_claim",
+                            evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
+                            section="Collaboration",
+                            excerpt=f"认领任务 {task_id}",
+                            tool_name=tool_name,
+                            skill_name=active_skill,
+                            context={"member_id": member_id, "task_id": task_id},
+                        )
+                    )
+
+            # 3. Detect view_task (indirect collaboration)
+            if tool_name == "view_task":
+                signals.append(
+                    EvolutionSignal(
+                        signal_type="collaboration_view",
+                        evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
+                        section="Collaboration",
+                        excerpt="查看团队任务状态",
+                        tool_name=tool_name,
+                        skill_name=active_skill,
+                        context={"member_id": member_id},
+                    )
+                )
+
+            # 4. Detect parent_invoke_id (receive context from other member)
+            if "parent_invoke_id" in step_meta:
+                parent_id = step_meta.get("parent_invoke_id", "")
+                signals.append(
+                    EvolutionSignal(
+                        signal_type="collaboration_receive",
+                        evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
+                        section="Collaboration",
+                        excerpt=f"接收来自 {parent_id} 的上下文/结果",
+                        skill_name=active_skill,
+                        context={"member_id": member_id, "parent_invoke_id": parent_id},
+                    )
+                )
+
+            # 5. Detect collaboration failure
+            content = str(step.detail.call_result or "")
+            match = _COLLABORATION_FAILURE_PATTERN.search(content)
+            if match:
+                excerpt = _extract_around_match(content, match)
+                signals.append(
+                    EvolutionSignal(
+                        signal_type="collaboration_failure",
+                        evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
+                        section="Collaboration",
+                        excerpt=excerpt,
+                        tool_name=tool_name,
+                        skill_name=active_skill,
+                        context={"member_id": member_id},
+                    )
+                )
+
+        return signals
+
+    @staticmethod
+    def _is_team_member_context(trajectory: Trajectory) -> bool:
+        """Check if trajectory is from a TeamSkill member execution context.
+
+        Args:
+            trajectory: Trajectory to check.
+
+        Returns:
+            True if in team member context, False otherwise.
+        """
+        meta = trajectory.meta or {}
+        # Has member_id and not in standalone mode
+        if "member_id" in meta and meta.get("source") != "standalone":
+            return True
+        # Or has any cross-member meta keys
+        return any(key in meta for key in CROSS_MEMBER_META_KEYS)
+
+    @staticmethod
+    def _resolve_active_skill_for_step(
+        step: TrajectoryStep,
+        all_steps: List[TrajectoryStep],
+        skill_read_history: List[Tuple[int, str]],
+    ) -> Optional[str]:
+        """Resolve active skill for a trajectory step.
+
+        Args:
+            step: Current step.
+            all_steps: All steps in trajectory.
+            skill_read_history: List of (step_idx, skill_name) from skill reads.
+
+        Returns:
+            Skill name if found, None otherwise.
+        """
+        # Find step index
+        step_idx = all_steps.index(step) if step in all_steps else -1
+        if step_idx < 0:
+            return None
+
+        # Resolve from skill read history
+        for idx, name in reversed(skill_read_history):
+            if idx <= step_idx:
+                return name
+        return None
+
+    @staticmethod
+    def _extract_to_member(call_args: str) -> Optional[str]:
+        """Extract to_member_name from send_message call_args.
+
+        Args:
+            call_args: String representation of call arguments.
+
+        Returns:
+            to_member_name if found, None otherwise.
+        """
+        # Try JSON parse
+        try:
+            args_dict = json.loads(call_args) if call_args else {}
+            if isinstance(args_dict, dict):
+                return args_dict.get("to_member_name") or args_dict.get("to")
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Try regex extract
+        patterns = [
+            r"to_member_name[\"']?\s*[:=]\s*[\"']([^\"']+)[\"']",
+            r"to[\"']?\s*[:=]\s*[\"']([^\"']+)[\"']",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, call_args)
+            if match:
+                return match.group(1)
+        return None
+
+    @staticmethod
+    def _extract_task_id(call_args: str) -> Optional[str]:
+        """Extract task_id from claim_task call_args.
+
+        Args:
+            call_args: String representation of call arguments.
+
+        Returns:
+            task_id if found, None otherwise.
+        """
+        # Try JSON parse
+        try:
+            args_dict = json.loads(call_args) if call_args else {}
+            if isinstance(args_dict, dict):
+                return args_dict.get("task_id")
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Try regex extract
+        match = re.search(r"task_id[\"']?\s*[:=]\s*[\"']([^\"']+)[\"']", call_args)
+        if match:
+            return match.group(1)
+        return None
 
     @staticmethod
     def _deduplicate(signals: List[EvolutionSignal]) -> List[EvolutionSignal]:

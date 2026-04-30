@@ -2,9 +2,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import pytest
 
-from openjiuwen.harness.tools.bash._semantics import (
+from openjiuwen.harness.tools.shell.bash._semantics import (
     CommandKind,
-    ExitCodeMeaning,
     classify_command,
     interpret_exit_code,
     is_read_only,

@@ -8,7 +8,9 @@ from typing import Dict, List, Optional
 from openjiuwen.harness.prompts.workspace_content.workspace_header import (
     WORKSPACE_HEADER,
     DIRECTORY_DESCRIPTIONS,
+    IMPORTANT_FILES,
 )
+from openjiuwen.harness.prompts.sections import SectionName
 
 
 # ---------------------------------------------------------------------------
@@ -166,15 +168,12 @@ async def build_workspace_content(
     root_path = str(getattr(workspace, "root_path", "") or "")
 
     header = WORKSPACE_HEADER.get(language, WORKSPACE_HEADER["cn"])
+    important_files = IMPORTANT_FILES.get(language, IMPORTANT_FILES["cn"])
 
     if language == "cn":
-        path_line = (
-            f"你的工作目录是：`{root_path}`\n"
-        )
+        path_line = f"你的工作目录是：`{root_path}`\n\n{important_files}"
     else:
-        path_line = (
-            f"Your working directory is: `{root_path}`\n"
-        )
+        path_line = f"Your working directory is: `{root_path}`\n\n{important_files}"
 
     return header + path_line
 
@@ -202,7 +201,7 @@ async def build_workspace_section(
     content = await build_workspace_content(sys_operation, workspace, language)
 
     return PromptSection(
-        name="workspace",
+        name=SectionName.WORKSPACE,
         content={language: content},
         priority=70,
     )

@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Dict
 from os import PathLike
 
 from openjiuwen.core.common.logging import logger
@@ -23,6 +23,7 @@ from openjiuwen.harness.rails import (
     SubagentRail,
     TaskPlanningRail,
 )
+from openjiuwen.harness.rails import SysOperationRail
 from openjiuwen.harness.schema.agent_mode import AgentMode
 from openjiuwen.harness.schema.config import (
     AudioModelConfig,
@@ -32,8 +33,8 @@ from openjiuwen.harness.schema.config import (
 )
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.harness.prompts import resolve_language
-from openjiuwen.harness.prompts.sections.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
-from openjiuwen.harness.tools.web_tools import is_free_search_enabled
+from openjiuwen.harness.prompts.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
+from openjiuwen.harness.tools import is_free_search_enabled
 
 
 def _is_disabled_free_search_tool(tool: Tool | ToolCard) -> bool:
@@ -120,7 +121,10 @@ def _inject_general_purpose_subagent(
     gp_rails = [
         r for r in (rails or [])
         if not isinstance(r, (SubagentRail, SessionRail))
-    ] or None
+    ]
+    if not any(isinstance(r, SysOperationRail) for r in gp_rails):
+        gp_rails = [SysOperationRail(), *gp_rails]
+    gp_rails = gp_rails or None
     effective_subagents.insert(0, SubAgentConfig(
         agent_card=AgentCard(name="general-purpose", description=desc),
         system_prompt=system_prompt or "",
@@ -129,6 +133,7 @@ def _inject_general_purpose_subagent(
         model=model,
         skills=skills,
         rails=gp_rails,
+        restrict_to_work_dir=False,
     ))
     return effective_subagents
 
@@ -156,7 +161,8 @@ def create_deep_agent(
     audio_model_config: Optional[AudioModelConfig] = None,
     enable_task_planning: bool = False,
     restrict_to_work_dir: bool = True,
-    default_mode: AgentMode = AgentMode.AUTO,
+    default_mode: AgentMode = AgentMode.NORMAL,
+    model_selection: Optional[Dict[Model, str]] = None,
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create and configure a DeepAgent instance.
@@ -196,7 +202,11 @@ def create_deep_agent(
         enable_task_planning: Enable task_planning_rail.
         restrict_to_work_dir: If True, restrict file access to workspace directory.
             If False, allow access to any path including system root.
-        default_mode: Initial agent mode (``AgentMode.AUTO`` or ``AgentMode.PLAN``).
+        default_mode: Initial agent mode (``AgentMode.NORMAL`` or ``AgentMode.PLAN``).
+        model_selection: Optional model selection config for TaskPlanningRail.
+            Dict mapping Model instance to description string. When provided along with
+            enable_task_planning, TaskPlanningRail will be configured with model selection,
+            allowing different models to be used for different subtasks.
         **config_kwargs: Extra fields forwarded to
             DeepAgentConfig.
 
@@ -314,16 +324,18 @@ def create_deep_agent(
             skills_dirs.append(str(Path(target_path) / "skills"))
         return SkillUseRail(
             skills_dir=skills_dirs,
-            skill_mode="all",
-            enabled_skills=skills,
+            skill_mode="all"
         )
+
+    def _make_task_planning_rail() -> TaskPlanningRail:
+        return TaskPlanningRail(model_selection=model_selection)
 
     default_rails = [
         (SecurityRail, True, lambda: SecurityRail()),
-        (TaskPlanningRail, enable_task_planning, lambda: TaskPlanningRail()),
-        (SkillUseRail, bool(skills), _make_skill_rail),
-        (SessionRail, bool(subagents) and enable_async_subagent, lambda: SessionRail()),
-        (SubagentRail, bool(subagents) and not enable_async_subagent, lambda: SubagentRail()),
+        (TaskPlanningRail, enable_task_planning, _make_task_planning_rail),
+        (SkillUseRail, bool(skills) or config.enable_skill_discovery, _make_skill_rail),
+        (SessionRail, bool(effective_subagents) and enable_async_subagent, lambda: SessionRail()),
+        (SubagentRail, bool(effective_subagents) and not enable_async_subagent, lambda: SubagentRail()),
     ]
     for rail_cls, should_add, make_rail in default_rails:
         if should_add and not _already_provided(rail_cls):

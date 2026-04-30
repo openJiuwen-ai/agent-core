@@ -12,6 +12,11 @@ from openjiuwen.core.context_engine.processor.compressor.micro_compact_processor
     MicroCompactProcessorConfig,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage, UserMessage
+from openjiuwen.core.session.agent import Session
+from tests.unit_tests.core.context_engine._stream_state_helpers import (
+    assert_context_state_pair,
+    capture_context_compression_states,
+)
 
 
 def create_tool_call_list(ids: List[str], names: List[str]) -> List[ToolCall]:
@@ -24,11 +29,12 @@ def create_tool_call_list(ids: List[str], names: List[str]) -> List[ToolCall]:
 async def create_context_with_micro_compact(
     config: MicroCompactProcessorConfig,
     history_messages=None,
+    session=None,
 ):
     engine = ContextEngine(ContextEngineConfig(default_window_message_num=100))
     return await engine.create_context(
         "test_ctx",
-        None,
+        session,
         history_messages=history_messages or [],
         processors=[("MicroCompactProcessor", config)],
     )
@@ -82,15 +88,40 @@ class TestMicroCompactProcessor:
 
         agent_messages = ctx.get_messages()
         tool_messages = [msg for msg in agent_messages if isinstance(msg, ToolMessage)]
-        # First `keep` (1) old message per tool cleared: fc-1 and fc-4
+        # With trigger=1 and keep=1, compaction keeps only the newest tool result per tool name.
         assert [msg.content for msg in tool_messages] == [
             config.cleared_marker,
-            "file-content-2",
+            config.cleared_marker,
             "file-content-3",
             config.cleared_marker,
-            "file-content-5",
+            config.cleared_marker,
             "file-content-6",
         ]
+
+    @pytest.mark.asyncio
+    async def test_streams_state_when_micro_compact_processor_triggers(self):
+        session = Session(session_id="micro-compact-stream-session")
+        config = MicroCompactProcessorConfig(
+            trigger_threshold=1,
+            compactable_tool_names=["read_file"],
+            keep_recent_per_tool=1,
+        )
+        ctx = await create_context_with_micro_compact(config, session=session)
+
+        _, states = await capture_context_compression_states(
+            session,
+            lambda: ctx.add_messages([
+                AssistantMessage(content="", tool_calls=create_tool_call_list(["tc-1"], ["read_file"])),
+                ToolMessage(content="old-content", tool_call_id="tc-1"),
+                AssistantMessage(content="", tool_calls=create_tool_call_list(["tc-2"], ["read_file"])),
+                ToolMessage(content="new-content", tool_call_id="tc-2"),
+                AssistantMessage(content="", tool_calls=create_tool_call_list(["tc-3"], ["read_file"])),
+                ToolMessage(content="newest-content", tool_call_id="tc-3"),
+            ]),
+        )
+
+        assert_context_state_pair(states, processor_type="MicroCompactProcessor")
+        assert "modified" in states[1].summary
 
     @pytest.mark.asyncio
     async def test_keep_recent_per_tool_is_applied_per_tool_name(self):
@@ -140,13 +171,13 @@ class TestMicroCompactProcessor:
 
         agent_messages = ctx.get_messages()
         tool_messages = [msg for msg in agent_messages if isinstance(msg, ToolMessage)]
-        # With trigger=1, keep=1: limit=2. 3 > 2, so clear first 1 per tool.
+        # With trigger=1 and keep=1, compaction clears all but the newest tool result for each tool.
         assert [msg.content for msg in tool_messages] == [
             config.cleared_marker,
-            "read-2",
+            config.cleared_marker,
             "read-3",
             config.cleared_marker,
-            "grep-2",
+            config.cleared_marker,
             "grep-3",
         ]
 

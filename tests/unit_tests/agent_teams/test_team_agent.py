@@ -28,6 +28,7 @@ def _dummy_agents(**overrides) -> dict[str, DeepAgentSpec]:
     return {"leader": DeepAgentSpec(**defaults)}
 
 
+@pytest.mark.level0
 def test_team_agent_leader_policy() -> None:
     leader = create_agent_team(
         _dummy_agents(),
@@ -46,6 +47,7 @@ def test_team_agent_leader_policy() -> None:
     assert "TeamLeader" in role_section.render("cn")
 
 
+@pytest.mark.level0
 def test_spawn_payload_contains_member_identity() -> None:
     leader = create_agent_team(
         _dummy_agents(),
@@ -77,6 +79,7 @@ def test_spawn_payload_contains_member_identity() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_spawn_config_contains_serializable_team_agent_payload() -> None:
     leader = create_agent_team(
         _dummy_agents(workspace=None),
@@ -116,6 +119,7 @@ async def test_spawn_config_contains_serializable_team_agent_payload() -> None:
     assert teammate.runtime_context.messager_config.node_id == "be-1"
 
 
+@pytest.mark.level1
 def test_runtime_context_roundtrips_with_pydantic_serialization() -> None:
     context = TeamRuntimeContext(
         role=TeamRole.LEADER,

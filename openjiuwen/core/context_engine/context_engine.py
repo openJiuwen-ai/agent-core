@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Optional, Tuple
 import functools
 
 from pydantic import BaseModel
@@ -85,7 +85,7 @@ class ContextEngine:
         full_context_id = f"{session_id}_{context_id}"
         if full_context_id in self._context_pool:
             context = self._context_pool.get(full_context_id)
-            setattr(context, "_session_ref", session)
+            context.set_session_ref(session)
             self._load_state_from_session(context, session, history_messages)
             return context
 
@@ -94,6 +94,10 @@ class ContextEngine:
             for processor_type, processor_config in (processors or [])
         ]
 
+        if token_counter is None:
+            from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
+            token_counter = TiktokenCounter()
+
         context = SessionModelContext(
             context_id,
             session_id,
@@ -101,10 +105,10 @@ class ContextEngine:
             history_messages=history_messages or [],
             processors=processor_instances,
             token_counter=token_counter,
+            session_ref=session,
             workspace=self._workspace,
             sys_operation=self._sys_operation,
         )
-        setattr(context, "_session_ref", session)
         self._load_state_from_session(context, session, history_messages)
         self._context_pool[full_context_id] = context
         return context
@@ -127,6 +131,51 @@ class ContextEngine:
         context_id = self._process_context_id(context_id)
         full_context_id = f"{session_id}_{context_id}"
         return self._context_pool.get(full_context_id, None)
+
+    async def compress_context(
+            self,
+            context_id: str = "default_context_id",
+            session: Session = None,
+            *,
+            session_id: str = None,
+            processor_types: List[str] = None,
+            **kwargs,
+    ) -> str:
+        """
+        Actively run registered compression processors for an existing context.
+
+        Args:
+            context_id: Target context identifier.
+            session: Optional session object used to resolve session_id.
+            session_id: Optional explicit session identifier. If both `session`
+                        and `session_id` are provided, `session` takes precedence.
+            processor_types: Optional compression processor allowlist.
+            **kwargs: Extra arguments forwarded to the processor hook.
+
+        Returns:
+            Compression result code:
+            - ``"busy"``: passive compression is already in progress.
+            - ``"compressed"``: active compression ran and changed context.
+            - ``"noop"``: active compression ran but nothing changed, or no
+              compression processor is registered.
+        """
+        resolved_session_id = session.get_session_id() if session else (session_id or "default_session_id")
+        context = self.get_context(context_id=context_id, session_id=resolved_session_id)
+        if context is None:
+            raise build_error(
+                StatusCode.CONTEXT_EXECUTION_ERROR,
+                error_msg=f"cannot find context '{context_id}' in session '{resolved_session_id}'"
+            )
+        if not hasattr(context, "compress_context"):
+            raise build_error(
+                StatusCode.CONTEXT_EXECUTION_ERROR,
+                error_msg=f"context '{context_id}' does not support active compression"
+            )
+        return await context.compress_context(
+            processor_types=processor_types,
+            sys_operation=self._sys_operation,
+            **kwargs,
+        )
 
     async def clear_context(
             self,

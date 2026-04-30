@@ -265,6 +265,16 @@ class TestNewReActAgentAbility(unittest.IsolatedAsyncioTestCase):
         self.assertIn("add", names)
         self.assertIn("multiply", names)
 
+    async def test_list_tool_info_prioritizes_paid_search(self):
+        agent = ReActAgent(card=self.card)
+        agent.ability_manager.add(ToolCard(name="free_search", description="free"))
+        agent.ability_manager.add(ToolCard(name="paid_search", description="paid"))
+
+        tool_infos = await agent.ability_manager.list_tool_info()
+
+        names = [tool_info.name for tool_info in tool_infos]
+        self.assertLess(names.index("paid_search"), names.index("free_search"))
+
 
 class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
     """测试新版 ReActAgent invoke 方法"""

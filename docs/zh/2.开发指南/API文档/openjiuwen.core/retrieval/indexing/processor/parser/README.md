@@ -14,6 +14,7 @@
 | **JSONParser** | JSON 解析器。 | [json_parser.md](./json_parser.md) |
 | **PDFParser** | PDF 解析器。 | [pdf_parser.md](./pdf_parser.md) |
 | **TxtMdParser** | 文本和 Markdown 解析器。 | [txt_md_parser.md](./txt_md_parser.md) |
+| **HTMLFileParser** | 本地 HTML 文件解析器（.html/.htm）。 | [html_file_parser.md](./html_file_parser.md) |
 | **WebPageParser** | 通用网页解析器（博客、文章等 URL）。 | [web_page_parser.md](./web_page_parser.md) |
 | **WeChatArticleParser** | 微信公众号文章解析器。 | [wechat_article_parser.md](./wechat_article_parser.md) |
 | **WordParser** | Word 文档解析器。 | [word_parser.md](./word_parser.md) |

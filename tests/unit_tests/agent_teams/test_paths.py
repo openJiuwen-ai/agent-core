@@ -4,6 +4,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from openjiuwen.agent_teams import paths
 
 
@@ -11,6 +13,7 @@ def teardown_function():
     paths.reset_openjiuwen_home()
 
 
+@pytest.mark.level0
 def test_default_openjiuwen_home(monkeypatch):
     monkeypatch.setattr(paths.Path, "home", lambda: Path("/tmp/test-home"))
 
@@ -20,6 +23,7 @@ def test_default_openjiuwen_home(monkeypatch):
     assert paths.AGENT_TEAMS_HOME == Path("/tmp/test-home/.openjiuwen/.agent_teams")
 
 
+@pytest.mark.level1
 def test_configure_openjiuwen_home_overrides_paths():
     custom_home = Path("/tmp/custom-home/.jiuwenclaw")
     paths.configure_openjiuwen_home(custom_home)
@@ -32,6 +36,7 @@ def test_configure_openjiuwen_home_overrides_paths():
     assert paths.independent_member_workspace("alice") == custom_home / "alice_workspace"
 
 
+@pytest.mark.level1
 def test_reset_openjiuwen_home_restores_default(monkeypatch):
     monkeypatch.setattr(paths.Path, "home", lambda: Path("/tmp/reset-home"))
     paths.configure_openjiuwen_home("/tmp/custom-home/.jiuwenclaw")

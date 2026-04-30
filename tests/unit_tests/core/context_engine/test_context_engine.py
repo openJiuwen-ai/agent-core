@@ -1,12 +1,14 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+import asyncio
 from unittest.mock import (
     MagicMock,
     patch,
 )
 
 import pytest
+from pydantic import BaseModel
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import (
@@ -18,17 +20,47 @@ from openjiuwen.core.context_engine import (
     ContextEngineConfig,
 )
 from openjiuwen.core.context_engine.context.context import SessionModelContext
+from openjiuwen.core.context_engine.processor.base import ContextProcessor
+from openjiuwen.core.context_engine.processor.compressor.micro_compact_processor import MicroCompactProcessorConfig
+from openjiuwen.core.context_engine.processor.offloader.message_offloader import MessageOffloaderConfig
 from openjiuwen.core.context_engine.schema.messages import OffloadUserMessage
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     SystemMessage,
     ToolMessage,
-    UserMessage, BaseMessage,
+    UserMessage, BaseMessage, ToolCall,
 )
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.workflow import create_workflow_session
 from openjiuwen.core.single_agent import AgentCard
+
+
+_blocking_started: asyncio.Event | None = None
+_blocking_release: asyncio.Event | None = None
+
+
+class BlockingCompressorConfig(BaseModel):
+    pass
+
+
+@ContextEngine.register_processor()
+class BlockingCompressor(ContextProcessor):
+    async def trigger_add_messages(self, context, messages_to_add, **kwargs) -> bool:
+        return True
+
+    async def on_add_messages(self, context, messages_to_add, **kwargs):
+        if _blocking_started is not None:
+            _blocking_started.set()
+        if _blocking_release is not None:
+            await _blocking_release.wait()
+        return None, messages_to_add
+
+    def load_state(self, state):
+        return
+
+    def save_state(self):
+        return {}
 
 
 class TestContextEngine:
@@ -212,9 +244,6 @@ class TestContextEngine:
 
     @pytest.mark.asyncio
     async def test_create_context_with_registered_processor(self, engine, session):
-        from openjiuwen.core.context_engine.processor.offloader.message_offloader import (
-            MessageOffloaderConfig
-        )
         config = MessageOffloaderConfig(tokens_threshold=1000, large_message_threshold=500)
         context = await engine.create_context(
             context_id="ctx",
@@ -258,6 +287,122 @@ class TestContextEngine:
                     session=session,
                     processors=[("MessageOffloader", MessageOffloaderConfig())],
                 )
+        assert exc_info.value.code == StatusCode.CONTEXT_EXECUTION_ERROR.code
+
+    @pytest.mark.asyncio
+    async def test_compress_context_force_executes_registered_compressor_ignoring_threshold(self, engine, session):
+        context = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[(
+                "MicroCompactProcessor",
+                MicroCompactProcessorConfig(
+                    trigger_threshold=999,
+                    compactable_tool_names=["grep"],
+                    keep_recent_per_tool=1,
+                    cleared_marker="[CLEARED]",
+                ),
+            )],
+        )
+        messages = [
+            UserMessage(content="search one"),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="call-1", name="grep", type="function", arguments="{}")]),
+            ToolMessage(content="first grep result", tool_call_id="call-1", name="grep"),
+            AssistantMessage(content="done one"),
+            UserMessage(content="search two"),
+            AssistantMessage(content="", tool_calls=[ToolCall(id="call-2", name="grep", type="function", arguments="{}")]),
+            ToolMessage(content="second grep result", tool_call_id="call-2", name="grep"),
+            AssistantMessage(content="done two"),
+        ]
+        await context.add_messages(messages)
+
+        result = await engine.compress_context(context_id="ctx", session=session)
+
+        assert result == "compressed"
+        processed_messages = context.get_messages()
+        assert isinstance(processed_messages[2], ToolMessage)
+        assert processed_messages[2].content == "[CLEARED]"
+        assert processed_messages[6].content == "second grep result"
+
+    @pytest.mark.asyncio
+    async def test_compress_context_returns_busy_message_when_passive_compression_running(self, engine, session):
+        global _blocking_started, _blocking_release
+        _blocking_started = asyncio.Event()
+        _blocking_release = asyncio.Event()
+
+        context = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[("BlockingCompressor", BlockingCompressorConfig())],
+        )
+
+        add_task = asyncio.create_task(context.add_messages([UserMessage(content="hello")]))
+        await _blocking_started.wait()
+
+        result = await engine.compress_context(context_id="ctx", session=session)
+
+        assert result == "busy"
+
+        _blocking_release.set()
+        await add_task
+        _blocking_started = None
+        _blocking_release = None
+
+    @pytest.mark.asyncio
+    async def test_add_messages_skips_passive_compression_when_active_compression_holds_lock(self, engine, session):
+        global _blocking_started, _blocking_release
+        _blocking_started = asyncio.Event()
+        _blocking_release = asyncio.Event()
+
+        context = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[("BlockingCompressor", BlockingCompressorConfig())],
+        )
+
+        compress_task = asyncio.create_task(engine.compress_context(context_id="ctx", session=session))
+        await _blocking_started.wait()
+
+        added_messages = [UserMessage(content="hello during compact")]
+        result = await context.add_messages(added_messages)
+
+        assert result == added_messages
+        assert context.get_messages() == added_messages
+
+        _blocking_release.set()
+        await compress_task
+        _blocking_started = None
+        _blocking_release = None
+
+    @pytest.mark.asyncio
+    async def test_compress_context_returns_noop_when_requested_processors_do_not_match(self, engine, session):
+        await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[(
+                "MicroCompactProcessor",
+                MicroCompactProcessorConfig(
+                    trigger_threshold=999,
+                    compactable_tool_names=["grep"],
+                    keep_recent_per_tool=1,
+                    cleared_marker="[CLEARED]",
+                ),
+            )],
+        )
+
+        result = await engine.compress_context(
+            context_id="ctx",
+            session=session,
+            processor_types=["DialogueCompressor"],
+        )
+
+        assert result == "noop"
+
+    @pytest.mark.asyncio
+    async def test_compress_context_missing_context_raises(self, engine, session):
+        with pytest.raises(BaseError) as exc_info:
+            await engine.compress_context(context_id="missing", session=session)
+
         assert exc_info.value.code == StatusCode.CONTEXT_EXECUTION_ERROR.code
 
     # ---------- get_context supplements ----------

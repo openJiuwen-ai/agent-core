@@ -31,8 +31,7 @@ from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.agent_mode import build_plan_mode_section
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.config import SubAgentConfig
-from openjiuwen.harness.tools.agent_mode_tools import SwitchModeTool, EnterPlanModeTool, ExitPlanModeTool
-from openjiuwen.harness.tools.task_tool import create_task_tool
+from openjiuwen.harness.tools import SwitchModeTool, EnterPlanModeTool, ExitPlanModeTool, create_task_tool
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -44,6 +43,7 @@ if TYPE_CHECKING:
 _TODO_TOOL_NAMES = frozenset({"todo_create", "todo_list", "todo_modify"})
 _SESSION_TOOL_NAMES = frozenset({"sessions_list", "sessions_cancel", "sessions_spawn"})
 _HIDDEN_IN_PLAN = _TODO_TOOL_NAMES | _SESSION_TOOL_NAMES
+_HIDDEN_IN_NORMAL = frozenset({"enter_plan_mode", "exit_plan_mode"})
 
 _PLAN_FILE_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
 
@@ -115,6 +115,12 @@ class AgentModeRail(DeepAgentRail):
 
         logger.info("[AgentModeRail] Registered enter/exit plan mode tools")
 
+    def _language_is_cn(self) -> bool:
+        """True when UI/messages should use Simplified Chinese."""
+        if not self.system_prompt_builder:
+            return True
+        return self.system_prompt_builder.language == "cn"
+
     def uninit(self, agent: "DeepAgent") -> None:
         """Unregister all tools owned by this rail.
 
@@ -147,6 +153,11 @@ class AgentModeRail(DeepAgentRail):
         if plan_state.mode != "plan":
             self.system_prompt_builder.remove_section(SectionName.MODE_INSTRUCTIONS)
             self._sync_task_tool_for_model_tool_inputs(ctx)
+            if isinstance(ctx.inputs.tools, list):
+                ctx.inputs.tools = [
+                    t for t in ctx.inputs.tools
+                    if getattr(t, "name", "") not in _HIDDEN_IN_NORMAL
+                ]
             return
 
         # 1. Inject MODE_INSTRUCTIONS
@@ -250,19 +261,27 @@ class AgentModeRail(DeepAgentRail):
 
         # 3a. Hard-block todo/session tools (belt-and-suspenders)
         if tool_name in _HIDDEN_IN_PLAN:
-            self._reject_tool(
-                ctx,
-                f"[PlanMode] Tool '{tool_name}' is hidden in plan mode.",
-            )
+            if self._language_is_cn():
+                hidden_msg = f"[AgentModeRail] 工具「{tool_name}」在 plan 模式下已隐藏。"
+            else:
+                hidden_msg = (
+                    f"[AgentModeRail] Tool '{tool_name}' is hidden in plan mode."
+                )
+            self._reject_tool(ctx, hidden_msg)
             return
 
         # 3b. Not in whitelist → reject
         if self._allowed_tools and tool_name not in self._allowed_tools:
             logger.info("reject tool call by not in allowed tools")
-            self._reject_tool(
-                ctx,
-                f"[PlanMode] Tool '{tool_name}' is not available in plan mode.",
-            )
+            if self._language_is_cn():
+                allow_msg = (
+                    f"[AgentModeRail] 工具「{tool_name}」不在 plan 模式允许列表中。"
+                )
+            else:
+                allow_msg = (
+                    f"[AgentModeRail] Tool '{tool_name}' is not available in plan mode."
+                )
+            self._reject_tool(ctx, allow_msg)
             return
 
         # 3c. write_file / edit_file → must target plan file only
@@ -272,11 +291,16 @@ class AgentModeRail(DeepAgentRail):
             plan_path_str = str(plan_path) if plan_path else ""
             if not self._is_plan_file(file_path, plan_path_str):
                 logger.info("reject tool call by not in plan file")
-                self._reject_tool(
-                    ctx,
-                    f"[PlanMode] '{tool_name}' can only target the plan file "
-                    f"({plan_path_str}).",
-                )
+                if self._language_is_cn():
+                    plan_file_msg = (
+                        f"[AgentModeRail] 「{tool_name}」仅能用于计划文件（{plan_path_str}）。"
+                    )
+                else:
+                    plan_file_msg = (
+                        f"[AgentModeRail] '{tool_name}' can only target the plan file "
+                        f"({plan_path_str})."
+                    )
+                self._reject_tool(ctx, plan_file_msg)
                 return
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
@@ -395,10 +419,17 @@ class AgentModeRail(DeepAgentRail):
 
         if plan_state.mode != "plan":
             logger.info("reject enter tool because of not plan mode")
-            self._reject_tool(
-                ctx,
-                "[PlanMode] enter_plan_mode can only be called in plan mode.",
-            )
+            if self._language_is_cn():
+                msg = (
+                    "[AgentModeRail] enter_plan_mode 只能在 plan 模式下被调用。"
+                    "请调用 switch_mode 工具切换到 plan 模式。"
+                )
+            else:
+                msg = (
+                    "[AgentModeRail] enter_plan_mode can only be called in plan mode. "
+                    "Use the switch_mode tool to switch to plan mode."
+                )
+            self._reject_tool(ctx, msg)
 
     def _handle_exit(self, ctx: AgentCallbackContext) -> None:
         """Validate mode for exit_plan_mode and pass through if OK.
@@ -411,10 +442,11 @@ class AgentModeRail(DeepAgentRail):
         plan_state = agent.load_state(session).plan_mode
 
         if plan_state.mode != "plan":
-            self._reject_tool(
-                ctx,
-                "[PlanMode] exit_plan_mode can only be called in plan mode.",
-            )
+            if self._language_is_cn():
+                msg = "[AgentModeRail] exit_plan_mode 只能在 plan 模式下被调用。"
+            else:
+                msg = "[AgentModeRail] exit_plan_mode can only be called in plan mode."
+            self._reject_tool(ctx, msg)
 
     def _reject_tool(self, ctx: AgentCallbackContext, error_msg: str) -> None:
         """Lightweight tool rejection — sets _skip_tool and injects error result.

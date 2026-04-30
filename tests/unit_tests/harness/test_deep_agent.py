@@ -26,7 +26,7 @@ from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent, Workspace
 from openjiuwen.harness.deep_agent import DeepAgent
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.schema.config import DeepAgentConfig, SubAgentConfig
 from openjiuwen.harness.subagents import (
     build_code_agent_config,
@@ -43,8 +43,7 @@ from openjiuwen.harness.subagents.research_agent import (
 )
 from openjiuwen.harness.task_loop.task_loop_event_handler import TaskLoopEventHandler
 from openjiuwen.harness.task_loop.loop_coordinator import LoopCoordinator
-from openjiuwen.harness.tools.task_tool import create_task_tool
-from openjiuwen.harness.tools.web_tools import WebFreeSearchTool
+from openjiuwen.harness.tools import WebFreeSearchTool
 
 
 def _create_dummy_model() -> Model:
@@ -418,6 +417,7 @@ async def test_create_deep_agent_factory_public_api() -> None:
         tools=[tool],
         subagents=[subagent],
         rails=[rail],
+        auto_create_workspace=False,
         enable_task_loop=False,
         max_iterations=4,
     )
@@ -442,6 +442,7 @@ def test_create_deep_agent_registers_tool_instances() -> None:
         agent = create_deep_agent(
             model=_create_dummy_model(),
             tools=[tool],
+            auto_create_workspace=False,
         )
 
         assert isinstance(agent, DeepAgent)
@@ -459,6 +460,7 @@ def test_create_deep_agent_skips_free_search_when_all_free_engines_disabled(monk
     agent = create_deep_agent(
         model=_create_dummy_model(),
         tools=[tool],
+        auto_create_workspace=False,
     )
 
     assert agent.ability_manager.get("free_search") is None
@@ -473,6 +475,7 @@ def test_deep_agent_hot_reload_removes_and_restores_free_search(monkeypatch) -> 
     agent = create_deep_agent(
         model=_create_dummy_model(),
         tools=[tool],
+        auto_create_workspace=False,
     )
 
     try:
@@ -503,10 +506,12 @@ def test_create_deep_agent_reuses_same_tool_instance_across_agents() -> None:
         first_agent = create_deep_agent(
             model=_create_dummy_model(),
             tools=[tool],
+            auto_create_workspace=False,
         )
         second_agent = create_deep_agent(
             model=_create_dummy_model(),
             tools=[tool],
+            auto_create_workspace=False,
         )
 
         assert isinstance(first_agent, DeepAgent)
@@ -524,12 +529,14 @@ def test_create_deep_agent_rejects_conflicting_tool_instances_with_same_id() -> 
         create_deep_agent(
             model=_create_dummy_model(),
             tools=[first_tool],
+            auto_create_workspace=False,
         )
 
         with pytest.raises(ValueError, match="different tool instance"):
             create_deep_agent(
                 model=_create_dummy_model(),
                 tools=[second_tool],
+                auto_create_workspace=False,
             )
     finally:
         Runner.resource_mgr.remove_tool(first_tool.card.id)
@@ -565,6 +572,7 @@ async def test_create_deep_agent_registers_mcps_on_first_invoke() -> None:
         agent = create_deep_agent(
             model=_create_dummy_model(),
             mcps=[mcp_config],
+            auto_create_workspace=False,
             enable_task_loop=False,
         )
         fake_react = FakeReactAgent()
@@ -632,6 +640,7 @@ async def test_create_deep_agent_reuses_registered_mcps_with_same_config() -> No
         agent = create_deep_agent(
             model=_create_dummy_model(),
             mcps=[mcp_config],
+            auto_create_workspace=False,
             enable_task_loop=False,
         )
         fake_react = FakeReactAgent()
@@ -668,6 +677,7 @@ async def test_create_deep_agent_rejects_conflicting_registered_mcp_config() -> 
         agent = create_deep_agent(
             model=_create_dummy_model(),
             mcps=[mcp_config],
+            auto_create_workspace=False,
             enable_task_loop=False,
         )
         agent.set_react_agent(FakeReactAgent(), initialized=False)
@@ -678,7 +688,11 @@ async def test_create_deep_agent_rejects_conflicting_registered_mcp_config() -> 
 
 def test_create_deep_agent_with_custom_card() -> None:
     custom_card = AgentCard(name="custom_deep", description="custom")
-    agent = create_deep_agent(model=_create_dummy_model(), card=custom_card)
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=custom_card,
+        auto_create_workspace=False,
+    )
 
     assert isinstance(agent, DeepAgent)
     assert agent.card is custom_card
@@ -688,6 +702,7 @@ def test_create_deep_agent_auto_add_task_planning_rail() -> None:
     """Test that TaskPlanningRail is auto-added when enable_task_loop=True."""
     agent = create_deep_agent(
         model=_create_dummy_model(),
+        auto_create_workspace=False,
         enable_task_planning=True,
     )
 
@@ -711,6 +726,7 @@ async def test_hot_reconfigure_preserves_task_tool_from_subagent_rail() -> None:
         model=_create_dummy_model(),
         tools=[tool],
         subagents=[subagent],
+        auto_create_workspace=False,
         enable_task_loop=False,
     )
     fake_react = FakeReactAgent()
@@ -733,13 +749,14 @@ async def test_hot_reconfigure_preserves_task_tool_from_subagent_rail() -> None:
     assert agent.ability_manager.get("task_tool") is not None
 
 
-def test_create_deep_agent_auto_add_skill_rail() -> None:
+def test_create_deep_agent_auto_add_skill_rail(tmp_path) -> None:
     """Test that SkillUseRail is auto-added when skills parameter is provided."""
     skills = ["name", "test_skill", "description", "test"]
+    workspace_root = tmp_path / "team_member_workspace"
     agent = create_deep_agent(
         model=_create_dummy_model(),
         skills=skills,
-        workspace=Workspace(root_path="./team_member_workspace"),
+        workspace=Workspace(root_path=str(workspace_root)),
     )
 
     pending_rails = agent._pending_rails
@@ -751,8 +768,42 @@ def test_create_deep_agent_auto_add_skill_rail() -> None:
 
     skill_rail = next(rail for rail in non_null_rails if type(rail).__name__ == "SkillUseRail")
     assert isinstance(skill_rail.skills_dir, list)
-    assert Path(skill_rail.skills_dir[0]) == Path("team_member_workspace") / "skills"
-    assert set(skill_rail.enabled_skills) == set(skills)
+    assert Path(skill_rail.skills_dir[0]) == workspace_root / "skills"
+    # ``skills`` enables the default SkillUseRail but should not be copied into
+    # SkillUseRail.enabled_skills, which would incorrectly filter available skills.
+    assert skill_rail.enabled_skills == set()
+
+
+def test_create_deep_agent_does_not_add_skill_rail_when_skills_empty(tmp_path) -> None:
+    workspace_root = tmp_path / "team_member_workspace"
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        skills=[],
+        workspace=Workspace(root_path=str(workspace_root)),
+    )
+
+    non_null_rails = [rail for rail in agent._pending_rails if rail is not None]
+    rail_types = [type(rail).__name__ for rail in non_null_rails]
+    assert "SkillUseRail" not in rail_types
+
+
+def test_create_deep_agent_auto_add_skill_rail_when_skill_discovery_enabled(tmp_path) -> None:
+    workspace_root = tmp_path / "team_member_workspace"
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        skills=[],
+        workspace=Workspace(root_path=str(workspace_root)),
+        enable_skill_discovery=True,
+    )
+
+    non_null_rails = [rail for rail in agent._pending_rails if rail is not None]
+    rail_types = [type(rail).__name__ for rail in non_null_rails]
+    assert "SkillUseRail" in rail_types
+
+    skill_rail = next(rail for rail in non_null_rails if type(rail).__name__ == "SkillUseRail")
+    assert isinstance(skill_rail.skills_dir, list)
+    assert Path(skill_rail.skills_dir[0]) == workspace_root / "skills"
+    assert skill_rail.enabled_skills == set()
 
 
 def test_create_deep_agent_no_duplicate_task_planning_rail() -> None:
@@ -762,6 +813,7 @@ def test_create_deep_agent_no_duplicate_task_planning_rail() -> None:
     manual_rail = TaskPlanningRail()
     agent = create_deep_agent(
         model=_create_dummy_model(),
+        auto_create_workspace=False,
         enable_task_loop=True,
         rails=[manual_rail],
     )
@@ -781,6 +833,7 @@ def test_create_deep_agent_no_duplicate_skill_rail() -> None:
         model=_create_dummy_model(),
         skills=skills,
         rails=[manual_rail],
+        auto_create_workspace=False,
     )
 
     pending_rails = agent._pending_rails
@@ -801,6 +854,7 @@ def test_create_deep_agent_subclass_skill_rail_not_duplicated() -> None:
         model=_create_dummy_model(),
         skills=skills,
         rails=[custom_rail],
+        auto_create_workspace=False,
     )
 
     skill_rail_count = sum(1 for r in agent._pending_rails if isinstance(r, SkillUseRail))
@@ -819,6 +873,7 @@ def test_create_deep_agent_subclass_task_planning_rail_not_duplicated() -> None:
     custom_rail = _CustomTaskPlanningRail()
     agent = create_deep_agent(
         model=_create_dummy_model(),
+        auto_create_workspace=False,
         enable_task_planning=True,
         rails=[custom_rail],
     )
@@ -834,7 +889,7 @@ def test_create_code_agent_injects_default_code_tool_and_fs_rail() -> None:
 
     assert isinstance(agent, DeepAgent)
     assert agent.card.name == "code_agent"
-    assert any(isinstance(rail, FileSystemRail) for rail in agent._pending_rails)
+    assert any(isinstance(rail, SysOperationRail) for rail in agent._pending_rails)
 
 
 def test_create_code_agent_accepts_explicit_mcps() -> None:
@@ -875,12 +930,13 @@ def test_build_research_agent_config_uses_research_factory() -> None:
     assert spec.rails is None
 
 
-def test_create_subagent_uses_code_agent_factory() -> None:
+def test_create_subagent_uses_code_agent_factory(tmp_path) -> None:
+    workspace_root = tmp_path / "parent_workspace"
     parent = create_deep_agent(
         model=_create_dummy_model(),
         card=AgentCard(name="parent", description="parent"),
         system_prompt="parent prompt",
-        workspace=Workspace(root_path="./parent_workspace"),
+        workspace=Workspace(root_path=str(workspace_root)),
         subagents=[build_code_agent_config(_create_dummy_model(), language="en")],
     )
     factory_result = object()
@@ -897,15 +953,16 @@ def test_create_subagent_uses_code_agent_factory() -> None:
     assert call_kwargs["card"].name == "code_agent"
     assert call_kwargs["tools"] is None
     assert call_kwargs["rails"] is None
-    assert call_kwargs["workspace"].root_path.endswith("/sub_session_id")
+    assert Path(call_kwargs["workspace"].root_path).name == "sub_session_id"
 
 
-def test_create_subagent_uses_research_agent_factory() -> None:
+def test_create_subagent_uses_research_agent_factory(tmp_path) -> None:
+    workspace_root = tmp_path / "parent_workspace"
     parent = create_deep_agent(
         model=_create_dummy_model(),
         card=AgentCard(name="parent", description="parent"),
         system_prompt="parent prompt",
-        workspace=Workspace(root_path="./parent_workspace"),
+        workspace=Workspace(root_path=str(workspace_root)),
         subagents=[build_research_agent_config(_create_dummy_model(), language="en")],
     )
     factory_result = object()
@@ -922,15 +979,15 @@ def test_create_subagent_uses_research_agent_factory() -> None:
     assert call_kwargs["card"].name == "research_agent"
     assert call_kwargs["tools"] is None
     assert call_kwargs["rails"] is None
-    assert call_kwargs["workspace"].root_path.endswith("/sub_session_id")
+    assert Path(call_kwargs["workspace"].root_path).name == "sub_session_id"
 
 
 @pytest.mark.asyncio
-async def test_create_deep_agent_with_restrict_to_work_dir_enabled() -> None:
+async def test_create_deep_agent_with_restrict_to_work_dir_enabled(tmp_path) -> None:
     """Test that restrict_to_work_dir=False results in no sandbox."""
     agent = create_deep_agent(
         model=_create_dummy_model(),
-        workspace=Workspace(root_path="./"),
+        workspace=Workspace(root_path=str(tmp_path)),
         restrict_to_work_dir=False,
     )
 

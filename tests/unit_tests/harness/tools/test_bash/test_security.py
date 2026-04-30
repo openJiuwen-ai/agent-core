@@ -2,8 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import pytest
 
-from openjiuwen.harness.tools.bash._security import (
-    SecurityCheck,
+from openjiuwen.harness.tools.shell.bash._security import (
     check_injection,
     get_destructive_warning,
 )

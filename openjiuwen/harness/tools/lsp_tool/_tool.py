@@ -11,7 +11,7 @@ from pydantic import TypeAdapter
 from openjiuwen.core.common.logging import tool_logger as logger
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import SysOperation
-from openjiuwen.harness.prompts.sections.tools import build_tool_card
+from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.lsp_tool._formatter import format_result
 from openjiuwen.harness.tools.lsp_tool._schemas import LspOperation, LspToolInput
@@ -82,8 +82,9 @@ def build_lsp_tool() -> dict[str, Any]:
         "name": "lsp",
         "description": (
             "LSP (Language Server Protocol) tool providing code navigation features. "
-            "Supports: go to definition, find references, document symbols, workspace symbols, "
-            "find implementations, and call hierarchy. Returns typed, structured results."
+            "Navigation: go to definition, find references, document symbols, workspace symbols, "
+            "find implementations, call hierarchy. "
+            "Returns typed, structured results."
         ),
         "input_schema": {
             "type": "object",
@@ -95,7 +96,7 @@ def build_lsp_tool() -> dict[str, Any]:
                 },
                 "file_path": {
                     "type": "string",
-                    "description": "File path (absolute or relative to workspace root)",
+                    "description": "File path (absolute or relative to workspace root).",
                 },
                 "line": {
                     "type": "integer",
@@ -138,11 +139,14 @@ async def call_lsp_tool(
     except Exception as e:
         return {"success": False, "error": f"Invalid input: {e}", "data": None}
 
-    file_path = _resolve_path(validated.file_path, workspace, operation)
+    op = LspOperation(validated.operation) if isinstance(validated.operation, str) else validated.operation
+
+    file_path_raw = getattr(validated, "file_path", "")
+    file_path = _resolve_path(file_path_raw, workspace, operation)
     if not file_path:
         return {
             "success": False,
-            "error": f"File path could not be resolved: {validated.file_path}",
+            "error": f"File path could not be resolved: {file_path_raw}",
             "data": None,
         }
 
@@ -165,8 +169,6 @@ async def call_lsp_tool(
                 "error": "LSP server manager not initialized and auto-init failed.",
                 "data": None,
             }
-
-    op = LspOperation(validated.operation) if isinstance(validated.operation, str) else validated.operation
 
     effective_file_path = file_path
     if op == LspOperation.WORKSPACE_SYMBOL and not validated.file_path:
@@ -196,6 +198,31 @@ async def call_lsp_tool(
         logger.debug("Failed to open file for LSP didOpen (ignored): %s", exc)
 
     params = _build_lsp_params(validated, file_path)
+
+    # callHierarchy/incomingCalls and outgoingCalls require a CallHierarchyItem
+    # in the "item" field, not a textDocument+position pair.  Obtain the item
+    # by running prepareCallHierarchy first, then swap the params.
+    if op in {LspOperation.INCOMING_CALLS, LspOperation.OUTGOING_CALLS}:
+        try:
+            prepare_result = await server.send_request(
+                method="textDocument/prepareCallHierarchy",
+                params=params,
+            )
+        except Exception as e:
+            return {"success": False, "error": f"prepareCallHierarchy failed: {e}", "data": None}
+
+        if not prepare_result:
+            return {
+                "success": True,
+                "data": {
+                    "operation": str(validated.operation),
+                    "result": "No call hierarchy item found at the given position.",
+                    "file_path": file_path,
+                },
+            }
+
+        call_item = prepare_result[0] if isinstance(prepare_result, list) else prepare_result
+        params = {"item": call_item}
 
     try:
         result = await server.send_request(

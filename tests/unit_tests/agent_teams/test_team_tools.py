@@ -9,6 +9,9 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.messager import Messager
+from openjiuwen.agent_teams.schema.status import (
+    MemberStatus,
+)
 from openjiuwen.agent_teams.spawn.context import (
     reset_session_id,
     set_session_id,
@@ -18,13 +21,11 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
-from openjiuwen.agent_teams.schema.status import (
-    MemberStatus,
-)
+from openjiuwen.agent_teams.tools.locales import Translator, make_translator
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import (
-    ApproveToolCallTool,
     ApprovePlanTool,
+    ApproveToolCallTool,
     BuildTeamTool,
     ClaimTaskTool,
     CleanTeamTool,
@@ -37,9 +38,8 @@ from openjiuwen.agent_teams.tools.team_tools import (
     UpdateTaskTool,
     ViewTaskToolV2,
 )
-from openjiuwen.agent_teams.tools.locales import Translator, make_translator
-from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.harness.tools.base_tool import ToolOutput
 
 
 @pytest.fixture
@@ -78,7 +78,7 @@ async def message_bus():
 async def agent_team(db, message_bus):
     """Provide initialized AgentTeam instance with pre-created team"""
     team_id = "test_team"
-    await db.create_team(
+    await db.team.create_team(
         team_name=team_id,
         display_name="Test Team",
         leader_member_name="leader1"
@@ -120,6 +120,7 @@ def sample_agent_card():
 class TestBuildTeamTool:
     """Test BuildTeamTool"""
 
+    @pytest.mark.level0
     def test_initialization(self, agent_team_without_team, t):
         """Test tool initialization"""
         tool = BuildTeamTool(agent_team_without_team, t)
@@ -130,6 +131,7 @@ class TestBuildTeamTool:
         assert tool.messager == agent_team_without_team.messager
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_invoke_success(self, agent_team_without_team, t, db):
         """Test invoking build team tool successfully"""
         tool = BuildTeamTool(agent_team_without_team, t)
@@ -143,15 +145,16 @@ class TestBuildTeamTool:
         assert result.success is True
         assert result.error is None
         # Verify team was created in database
-        team_info = await db.get_team("test_team")
+        team_info = await db.team.get_team("test_team")
         assert team_info.display_name == "My Team"
         assert team_info.desc == "Test team description"
         # Verify leader was registered as a member
-        leader = await db.get_member("leader1", "test_team")
+        leader = await db.member.get_member("leader1", "test_team")
         assert leader is not None
         assert leader.display_name == "Lead"
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_invoke_with_minimal_args(self, agent_team_without_team, t, db):
         """Test invoking build team tool with minimal arguments"""
         tool = BuildTeamTool(agent_team_without_team, t)
@@ -163,7 +166,7 @@ class TestBuildTeamTool:
         })
 
         assert result.success is True
-        team_info = await db.get_team("test_team")
+        team_info = await db.team.get_team("test_team")
         assert team_info.display_name == "Minimal Team"
         assert team_info.desc == "A minimal team"
 
@@ -171,6 +174,7 @@ class TestBuildTeamTool:
 class TestCleanTeamTool:
     """Test CleanTeamTool"""
 
+    @pytest.mark.level0
     def test_initialization(self, agent_team, t):
         """Test tool initialization"""
         tool = CleanTeamTool(agent_team, t)
@@ -179,6 +183,7 @@ class TestCleanTeamTool:
         assert tool.team == agent_team
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_invoke_success(self, agent_team, t, sample_agent_card, db):
         """Test invoking clean team tool successfully"""
         await agent_team.spawn_member(
@@ -187,8 +192,8 @@ class TestCleanTeamTool:
             agent_card=sample_agent_card
         )
         # Shutdown member
-        await db.update_member_status("member1", "test_team", MemberStatus.SHUTDOWN_REQUESTED.value)
-        await db.update_member_status("member1", "test_team", MemberStatus.SHUTDOWN.value)
+        await db.member.update_member_status("member1", "test_team", MemberStatus.SHUTDOWN_REQUESTED.value)
+        await db.member.update_member_status("member1", "test_team", MemberStatus.SHUTDOWN.value)
 
         tool = CleanTeamTool(agent_team, t)
         result = await tool.invoke({})
@@ -197,6 +202,7 @@ class TestCleanTeamTool:
         assert result.data["team_name"] == agent_team.team_name
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_invoke_fails_when_members_not_shutdown(self, agent_team, t, sample_agent_card):
         """Test invoking clean team tool fails when members not shutdown"""
         await agent_team.spawn_member(
@@ -218,6 +224,7 @@ class TestCleanTeamTool:
 class TestSpawnMemberTool:
     """Test SpawnMemberTool"""
 
+    @pytest.mark.level0
     def test_initialization(self, agent_team, t):
         """Test tool initialization"""
         tool = SpawnMemberTool(agent_team, t)
@@ -226,6 +233,7 @@ class TestSpawnMemberTool:
         assert tool.team == agent_team
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_invoke_success(self, agent_team, t):
         """Test invoking spawn member tool successfully"""
         tool = SpawnMemberTool(agent_team, t)
@@ -243,6 +251,7 @@ class TestSpawnMemberTool:
 class TestShutdownMemberTool:
     """Test ShutdownMemberTool"""
 
+    @pytest.mark.level0
     def test_initialization(self, agent_team, t):
         """Test tool initialization"""
         tool = ShutdownMemberTool(agent_team, t)
@@ -251,6 +260,7 @@ class TestShutdownMemberTool:
         assert tool.team == agent_team
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_invoke_success(self, agent_team, t, sample_agent_card, db):
         """Test invoking shutdown member tool successfully"""
         await agent_team.spawn_member(
@@ -270,6 +280,7 @@ class TestShutdownMemberTool:
         assert result.error is None
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_invoke_with_force(self, agent_team, t, sample_agent_card, db):
         """Test invoking shutdown member tool with force option"""
         await agent_team.spawn_member(
@@ -288,6 +299,7 @@ class TestShutdownMemberTool:
         assert result.success is True
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_invoke_member_not_found(self, agent_team, t):
         """Test invoking shutdown member tool for non-existent member"""
         tool = ShutdownMemberTool(agent_team, t)
@@ -300,6 +312,7 @@ class TestShutdownMemberTool:
 class TestApprovePlanTool:
     """Test ApprovePlanTool"""
 
+    @pytest.mark.level0
     def test_initialization(self, agent_team, t):
         """Test tool initialization"""
         tool = ApprovePlanTool(agent_team, t)
@@ -308,6 +321,7 @@ class TestApprovePlanTool:
         assert tool.team == agent_team
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_invoke_approve(self, agent_team, t, sample_agent_card):
         """Test invoking approve plan tool to approve"""
         await agent_team.spawn_member(
@@ -327,6 +341,7 @@ class TestApprovePlanTool:
         assert result.error is None
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_invoke_reject(self, agent_team, t, sample_agent_card):
         """Test invoking approve plan tool to reject"""
         await agent_team.spawn_member(
@@ -345,6 +360,7 @@ class TestApprovePlanTool:
         assert result.success is True
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_invoke_member_not_found(self, agent_team, t):
         """Test invoking approve plan tool for non-existent member"""
         tool = ApprovePlanTool(agent_team, t)
@@ -359,6 +375,7 @@ class TestApprovePlanTool:
 class TestApproveToolCallTool:
     """Test ApproveToolCallTool."""
 
+    @pytest.mark.level0
     def test_initialization(self, agent_team, t):
         tool = ApproveToolCallTool(agent_team, t)
         assert tool.card.name == "approve_tool"
@@ -366,6 +383,7 @@ class TestApproveToolCallTool:
         assert tool.team == agent_team
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_invoke_approve(self, agent_team, t, sample_agent_card):
         await agent_team.spawn_member(
             member_name="member1",
@@ -389,6 +407,7 @@ class TestApproveToolCallTool:
 class TestListMembersTool:
     """Test ListMembersTool"""
 
+    @pytest.mark.level0
     def test_initialization(self, agent_team, t):
         """Test tool initialization"""
         tool = ListMembersTool(agent_team, t)
@@ -397,6 +416,7 @@ class TestListMembersTool:
         assert tool.team == agent_team
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_invoke_empty(self, agent_team, t):
         """Test invoking list members tool when empty"""
         tool = ListMembersTool(agent_team, t)
@@ -407,6 +427,7 @@ class TestListMembersTool:
         assert result.data["members"] == []
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_invoke_with_members(self, agent_team, t, sample_agent_card):
         """Test invoking list members tool with members"""
         await agent_team.spawn_member(
@@ -436,6 +457,7 @@ class TestListMembersTool:
 class TestTaskCreateTool:
     """Test TaskCreateTool (create tasks)"""
 
+    @pytest.mark.level0
     def test_initialization(self, agent_team, t):
         """Test tool initialization"""
         tool = TaskCreateTool(agent_team, t)
@@ -443,6 +465,7 @@ class TestTaskCreateTool:
         assert tool.card.id == "team.create_task"
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_create_single_task(self, agent_team, t):
         """Test creating a single task"""
         tool = TaskCreateTool(agent_team, t)
@@ -454,6 +477,7 @@ class TestTaskCreateTool:
         assert result.data["title"] == "Task 1"
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_create_batch_tasks(self, agent_team, t):
         """Test batch task creation"""
         tool = TaskCreateTool(agent_team, t)
@@ -471,6 +495,7 @@ class TestTaskCreateTool:
         assert len(result.data["tasks"]) == 3
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_create_empty_tasks(self, agent_team, t):
         """Test with empty tasks list"""
         tool = TaskCreateTool(agent_team, t)
@@ -480,6 +505,7 @@ class TestTaskCreateTool:
         assert result.error is not None
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_create_task_with_depended_by(self, agent_team, t):
         """Test creating a task with reverse dependencies (depended_by)"""
         # Create a base task first
@@ -501,6 +527,7 @@ class TestTaskCreateTool:
 class TestUpdateTaskTool:
     """Test UpdateTaskTool (leader: content update + cancel)"""
 
+    @pytest.mark.level1
     def test_initialization(self, agent_team, t):
         """Test tool initialization"""
         tool = UpdateTaskTool(agent_team, t)
@@ -513,6 +540,7 @@ class TestUpdateTaskTool:
         assert "content" in props
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_update_content(self, agent_team, t):
         """Test updating task content"""
         task = await agent_team.task_manager.add(title="Original", content="Original Content")
@@ -530,6 +558,7 @@ class TestUpdateTaskTool:
         assert "content" in result.data["updated_fields"]
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_cancel_task(self, agent_team, t):
         """Test cancelling a task"""
         task = await agent_team.task_manager.add(title="Task to Cancel", content="Content")
@@ -545,10 +574,11 @@ class TestUpdateTaskTool:
         assert result.data["status"] == "cancelled"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_cancel_all_tasks(self, agent_team, t, db):
         """Test cancel all tasks via task_id='*'"""
-        await db.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
 
         tool = UpdateTaskTool(agent_team, t)
         result = await tool.invoke({"task_id": "*", "status": "cancelled"})
@@ -557,9 +587,10 @@ class TestUpdateTaskTool:
         assert result.data["cancelled_count"] == 2
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_assign_task(self, agent_team, t, sample_agent_card, db):
         """Test assigning a task to a member"""
-        await db.create_member(
+        await db.member.create_member(
             member_name="dev-1",
             team_name="test_team",
             display_name="Dev",
@@ -582,10 +613,11 @@ class TestUpdateTaskTool:
         assert updated.assignee == "dev-1"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_assign_reassigns_to_new_member(self, agent_team, t, sample_agent_card, db):
         """Reassigning a claimed task cancels the old owner and binds the new one."""
         for member_name in ("dev-1", "dev-2"):
-            await db.create_member(
+            await db.member.create_member(
                 member_name=member_name,
                 team_name="test_team",
                 display_name=member_name,
@@ -593,7 +625,7 @@ class TestUpdateTaskTool:
                 status=MemberStatus.READY,
             )
         task = await agent_team.task_manager.add(title="Task", content="Content")
-        await db.assign_task(task.task_id, "dev-1")
+        await db.task.claim_task(task.task_id, "dev-1")
 
         tool = UpdateTaskTool(agent_team, t)
         result = await tool.invoke({
@@ -607,6 +639,7 @@ class TestUpdateTaskTool:
         assert updated.assignee == "dev-2"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_add_dependencies(self, agent_team, t):
         """Test adding dependencies to a task"""
         upstream = await agent_team.task_manager.add(title="Upstream", content="First")
@@ -626,6 +659,7 @@ class TestUpdateTaskTool:
         assert updated.status == "blocked"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_no_update_specified(self, agent_team, t):
         """Test with no update fields"""
         task = await agent_team.task_manager.add(title="Task", content="Content")
@@ -636,10 +670,51 @@ class TestUpdateTaskTool:
         assert result.success is False
         assert "No update specified" in result.error
 
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_add_blocked_by_rejects_cycle(self, agent_team, t):
+        """add_blocked_by must reject edges that would close a cycle.
+
+        Regression guard: this path used to skip cycle detection entirely
+        because it routed through a primitive that was missing the check.
+        """
+        a = await agent_team.task_manager.add(title="A", content="c")
+        b = await agent_team.task_manager.add(title="B", content="c", dependencies=[a.task_id])
+
+        tool = UpdateTaskTool(agent_team, t)
+        # b -> a already; trying to make a -> b would close A -> B -> A.
+        result = await tool.invoke({
+            "task_id": a.task_id,
+            "add_blocked_by": [b.task_id],
+        })
+
+        assert result.success is False
+        assert "Circular dependency" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_cancel_unblocks_downstream(self, agent_team, t):
+        """Cancelling a task via update_task unblocks anything that
+        depended on it. Mirrors the bug-fix coverage in test_database
+        but exercises the full tool boundary."""
+        upstream = await agent_team.task_manager.add(title="Up", content="c")
+        downstream = await agent_team.task_manager.add(
+            title="Down", content="c", dependencies=[upstream.task_id]
+        )
+        assert downstream.status == "blocked"
+
+        tool = UpdateTaskTool(agent_team, t)
+        result = await tool.invoke({"task_id": upstream.task_id, "status": "cancelled"})
+        assert result.success is True
+
+        refreshed = await agent_team.task_manager.get(downstream.task_id)
+        assert refreshed.status == "pending"
+
 
 class TestViewTaskToolV2:
     """Test ViewTaskToolV2 (unified task viewing)"""
 
+    @pytest.mark.level1
     def test_initialization(self, agent_team, t):
         """Test tool initialization"""
         tool = ViewTaskToolV2(agent_team.task_manager, t)
@@ -647,6 +722,7 @@ class TestViewTaskToolV2:
         assert tool.card.id == "team.view_task"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_get_single_task(self, agent_team, t):
         """Test get action returns detail with blocked_by and blocks"""
         tm = agent_team.task_manager
@@ -664,6 +740,7 @@ class TestViewTaskToolV2:
         assert "team_id" not in result.data
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_get_with_dependencies(self, agent_team, t):
         """Test get action returns correct blocked_by and blocks"""
         tm = agent_team.task_manager
@@ -686,6 +763,7 @@ class TestViewTaskToolV2:
         assert downstream.task_id in result.data["blocks"]
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_get_task_not_found(self, agent_team, t):
         """Test get action for a non-existent task"""
         tool = ViewTaskToolV2(agent_team.task_manager, t)
@@ -695,6 +773,7 @@ class TestViewTaskToolV2:
         assert "not found" in result.error.lower()
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_get_without_task_id(self, agent_team, t):
         """Test get action without task_id"""
         tool = ViewTaskToolV2(agent_team.task_manager, t)
@@ -704,11 +783,12 @@ class TestViewTaskToolV2:
         assert result.error is not None
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_list_tasks_by_status(self, agent_team, t, db):
         """Test list action returns summary with blocked_by, no content"""
-        await db.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
-        await db.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
+        await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
 
         tool = ViewTaskToolV2(agent_team.task_manager, t)
         result = await tool.invoke({"action": "list", "status": "pending"})
@@ -722,11 +802,12 @@ class TestViewTaskToolV2:
         assert "team_id" not in task_summary
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_default_action_is_list(self, agent_team, t, db):
         """Test default action is list (returns all tasks, not just pending)"""
-        await db.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
-        await db.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
+        await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
 
         tool = ViewTaskToolV2(agent_team.task_manager, t)
         result = await tool.invoke({})
@@ -735,11 +816,12 @@ class TestViewTaskToolV2:
         assert result.data["count"] == 3
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_claimable(self, agent_team, t, db):
         """Test claimable action returns only pending tasks"""
-        await db.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
-        await db.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
+        await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
 
         tool = ViewTaskToolV2(agent_team.task_manager, t)
         result = await tool.invoke({"action": "claimable"})
@@ -755,6 +837,7 @@ class TestViewTaskToolV2:
 class TestClaimTaskTool:
     """Test ClaimTaskTool (member: claim + complete)"""
 
+    @pytest.mark.level1
     def test_initialization(self, agent_team, t):
         """Test tool initialization"""
         tool = ClaimTaskTool(agent_team.task_manager, t)
@@ -766,9 +849,10 @@ class TestClaimTaskTool:
         assert tool.card.input_params["required"] == ["task_id", "status"]
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_claim_via_status(self, agent_team, t, sample_agent_card, db):
         """Test claiming a task by setting status=claimed"""
-        await db.create_member(
+        await db.member.create_member(
             member_name="leader1",
             team_name="test_team",
             display_name="Leader",
@@ -786,10 +870,11 @@ class TestClaimTaskTool:
         assert result.data["status_change"]["to"] == "claimed"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_complete_via_status(self, agent_team, t, sample_agent_card, db):
         """Test completing a task by setting status=completed"""
         from openjiuwen.agent_teams.schema.status import MemberMode
-        await db.create_member(
+        await db.member.create_member(
             member_name="leader1",
             team_name="test_team",
             display_name="Leader",
@@ -809,6 +894,7 @@ class TestClaimTaskTool:
         assert result.data["status_change"]["to"] == "completed"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_task_not_found(self, agent_team, t):
         """Test updating a non-existent task"""
         tool = ClaimTaskTool(agent_team.task_manager, t)
@@ -825,6 +911,7 @@ class TestClaimTaskTool:
 class TestMappedToolOutput:
     """Test MappedToolOutput and map_result integration"""
 
+    @pytest.mark.level1
     def test_str_returns_mapped_content(self):
         """MappedToolOutput.__str__ returns mapped content, not Pydantic repr"""
         output = MappedToolOutput.from_output(
@@ -836,6 +923,7 @@ class TestMappedToolOutput:
         assert output.success is True
         assert output.data == {"key": "value"}
 
+    @pytest.mark.level1
     def test_claim_task_map_result_completed_guidance(self, agent_team, t):
         """ClaimTaskTool.map_result injects behavior guidance on completion"""
         tool = ClaimTaskTool(agent_team.task_manager, t)
@@ -851,6 +939,7 @@ class TestMappedToolOutput:
         assert "Task #t1 claimed → completed" in result
         assert "view_task" in result
 
+    @pytest.mark.level1
     def test_claim_task_map_result_claimed_no_guidance(self, agent_team, t):
         """ClaimTaskTool.map_result does NOT inject guidance on claim"""
         tool = ClaimTaskTool(agent_team.task_manager, t)
@@ -866,6 +955,7 @@ class TestMappedToolOutput:
         assert "Task #t1 pending → claimed" in result
         assert "view_task" not in result
 
+    @pytest.mark.level1
     def test_view_task_map_result_list(self, agent_team, t):
         """ViewTaskToolV2.map_result formats list view as compact lines"""
         tool = ViewTaskToolV2(agent_team.task_manager, t)
@@ -884,6 +974,7 @@ class TestMappedToolOutput:
         assert "(dev-1)" in result
         assert "[blocked by #t1]" in result
 
+    @pytest.mark.level1
     def test_view_task_map_result_get(self, agent_team, t):
         """ViewTaskToolV2.map_result formats detail view with dependencies"""
         tool = ViewTaskToolV2(agent_team.task_manager, t)
@@ -904,6 +995,7 @@ class TestMappedToolOutput:
         assert "Content: Fix the login bug" in result
         assert "Blocks: #t2, #t3" in result
 
+    @pytest.mark.level1
     def test_send_message_map_result(self, agent_team, t):
         """SendMessageTool.map_result formats routing summary"""
         tool = SendMessageTool(agent_team.message_manager, t)
@@ -913,6 +1005,7 @@ class TestMappedToolOutput:
         )
         assert tool.map_result(output) == "Message sent from leader to dev-1"
 
+    @pytest.mark.level1
     def test_send_message_map_result_broadcast(self, agent_team, t):
         """SendMessageTool.map_result formats broadcast summary"""
         tool = SendMessageTool(agent_team.message_manager, t)
@@ -922,6 +1015,7 @@ class TestMappedToolOutput:
         )
         assert tool.map_result(output) == "Broadcast sent from leader"
 
+    @pytest.mark.level1
     def test_default_map_result_json(self, agent_team, t):
         """TeamTool default map_result returns JSON for data"""
         tool = ListMembersTool(agent_team, t)
@@ -940,6 +1034,7 @@ class TestMappedToolOutput:
 class TestSendMessageTool:
     """Test SendMessageTool (merged send + broadcast)"""
 
+    @pytest.mark.level1
     def test_initialization(self, agent_team, t):
         """Test tool initialization"""
         tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
@@ -951,6 +1046,7 @@ class TestSendMessageTool:
         assert "summary" in props
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_point_to_point(self, agent_team, t):
         """Test point-to-point message"""
         tool = SendMessageTool(agent_team.message_manager, t)
@@ -961,6 +1057,7 @@ class TestSendMessageTool:
         assert result.data["to"] == "member2"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_broadcast(self, agent_team, t):
         """Test broadcast message with to='*'"""
         tool = SendMessageTool(agent_team.message_manager, t)
@@ -970,6 +1067,7 @@ class TestSendMessageTool:
         assert result.data["type"] == "broadcast"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_with_summary(self, agent_team, t):
         """Test message with summary field"""
         tool = SendMessageTool(agent_team.message_manager, t)
@@ -983,6 +1081,7 @@ class TestSendMessageTool:
         assert result.data["summary"] == "assign task-1"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_empty_to(self, agent_team, t):
         """Test validation: empty 'to' field"""
         tool = SendMessageTool(agent_team.message_manager, t)
@@ -992,6 +1091,7 @@ class TestSendMessageTool:
         assert "'to'" in result.error
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_empty_content(self, agent_team, t):
         """Test validation: empty 'content' field"""
         tool = SendMessageTool(agent_team.message_manager, t)
@@ -1001,6 +1101,7 @@ class TestSendMessageTool:
         assert "'content'" in result.error
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_member_not_found(self, agent_team, t):
         """Test validation: target member does not exist"""
         tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
@@ -1017,6 +1118,7 @@ class TestSendMessageTool:
 class TestAddTaskTool:
     """Test AddTaskTool (removed)"""
 
+    @pytest.mark.level1
     def test_placeholder(self):
         pass
 
@@ -1025,6 +1127,7 @@ class TestAddTaskTool:
 class TestAddBatchTasksTool:
     """Test AddBatchTasksTool (removed)"""
 
+    @pytest.mark.level1
     def test_placeholder(self):
         pass
 
@@ -1033,6 +1136,7 @@ class TestAddBatchTasksTool:
 class TestAddTaskWithPriorityTool:
     """Test AddTaskWithPriorityTool (removed)"""
 
+    @pytest.mark.level1
     def test_placeholder(self):
         pass
 
@@ -1041,6 +1145,7 @@ class TestAddTaskWithPriorityTool:
 class TestAddTaskAsTopPriorityTool:
     """Test AddTaskAsTopPriorityTool (removed)"""
 
+    @pytest.mark.level1
     def test_placeholder(self):
         pass
 
@@ -1049,6 +1154,7 @@ class TestAddTaskAsTopPriorityTool:
 class TestCancelTaskTool:
     """Test CancelTaskTool (removed)"""
 
+    @pytest.mark.level1
     def test_placeholder(self):
         pass
 
@@ -1057,6 +1163,7 @@ class TestCancelTaskTool:
 class TestCancelAllTasksTool:
     """Test CancelAllTasksTool (removed)"""
 
+    @pytest.mark.level1
     def test_placeholder(self):
         pass
 
@@ -1065,6 +1172,7 @@ class TestCancelAllTasksTool:
 class TestGetTaskTool:
     """Test GetTaskTool (removed - merged into ViewTaskToolV2)"""
 
+    @pytest.mark.level1
     def test_placeholder(self):
         pass
 
@@ -1073,6 +1181,7 @@ class TestGetTaskTool:
 class TestListTasksTool:
     """Test ListTasksTool (removed - merged into ViewTaskToolV2)"""
 
+    @pytest.mark.level1
     def test_placeholder(self):
         pass
 
@@ -1081,6 +1190,7 @@ class TestListTasksTool:
 class TestGetClaimableTasksTool:
     """Test GetClaimableTasksTool (removed - merged into ViewTaskToolV2)"""
 
+    @pytest.mark.level1
     def test_placeholder(self):
         pass
 
@@ -1089,6 +1199,7 @@ class TestGetClaimableTasksTool:
 class TestUpdateTaskToolLegacy:
     """Test UpdateTaskTool legacy (removed)"""
 
+    @pytest.mark.level1
     def test_placeholder(self):
         pass
 
@@ -1097,6 +1208,7 @@ class TestUpdateTaskToolLegacy:
 class TestGetTeamInfoTool:
     """Test GetTeamInfoTool (removed)"""
 
+    @pytest.mark.level1
     def test_placeholder(self):
         pass
 
@@ -1105,6 +1217,7 @@ class TestGetTeamInfoTool:
 class TestGetMemberTool:
     """Test GetMemberTool (removed)"""
 
+    @pytest.mark.level1
     def test_placeholder(self):
         pass
 
@@ -1113,6 +1226,7 @@ class TestGetMemberTool:
 class TestGetMessagesTool:
     """Test GetMessagesTool (removed)"""
 
+    @pytest.mark.level1
     def test_placeholder(self):
         pass
 
@@ -1121,6 +1235,7 @@ class TestGetMessagesTool:
 class TestMarkMessageReadTool:
     """Test MarkMessageReadTool (removed)"""
 
+    @pytest.mark.level1
     def test_placeholder(self):
         pass
 
@@ -1128,6 +1243,7 @@ class TestMarkMessageReadTool:
 class TestTranslator:
     """Test the i18n translator closure returned by make_translator()."""
 
+    @pytest.mark.level1
     def test_desc_from_markdown_is_returned(self):
         """When a <lang>/<tool>.md exists, it is used for _desc."""
         translate = make_translator("cn")
@@ -1135,6 +1251,7 @@ class TestTranslator:
         desc = translate("build_team")
         assert "build_team" in desc or "组建" in desc
 
+    @pytest.mark.level1
     def test_param_keys_return_strings_dict_entries(self):
         """Non-_desc keys are resolved from the in-module STRINGS dict."""
         translate = make_translator("cn")
@@ -1142,6 +1259,7 @@ class TestTranslator:
         value = translate("send_message", "summary")
         assert value == "5-10 词摘要，用于消息预览和日志"
 
+    @pytest.mark.level1
     def test_missing_desc_raises_file_not_found(self):
         """Unknown tool: no markdown and no STRINGS entry → FileNotFoundError.
 

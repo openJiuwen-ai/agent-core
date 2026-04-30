@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import sys
 from typing import Any, AsyncIterator
 from unittest.mock import AsyncMock
 
@@ -45,6 +46,33 @@ async def _async_iter(
 
 class TestRenderStream:
     """Tests for stream rendering logic."""
+
+    def test_write_terminal_uses_stdout_encoding_with_os_write(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Terminal writes should respect the active stdout encoding."""
+
+        module = sys.modules[render_stream.__module__]
+        payloads: list[tuple[int, bytes]] = []
+
+        class FakeStdout:
+            encoding = "utf-8"
+            errors = "strict"
+
+        monkeypatch.setattr(
+            module,
+            "sys",
+            type("FakeSys", (), {"stdout": FakeStdout()})(),
+        )
+        monkeypatch.setattr(
+            module.os,
+            "write",
+            lambda fd, data: payloads.append((fd, data)),
+        )
+
+        module._write_terminal("中文")
+
+        assert payloads == [(1, "中文".encode("utf-8"))]
 
     @pytest.mark.asyncio
     async def test_llm_output_accumulated(self) -> None:
@@ -297,6 +325,27 @@ class TestRenderStream:
         await render_stream(_async_iter(chunks), console)
         output = buf.getvalue()
         assert "Read 3 lines" in output
+
+    @pytest.mark.asyncio
+    async def test_tool_result_rendered_uses_structured_line_count(self) -> None:
+        """read_file summaries should prefer structured line_count metadata."""
+        chunks = [
+            FakeChunk(
+                "tool_result",
+                0,
+                {
+                    "tool_name": "read_file",
+                    "tool_args": {},
+                    "tool_result": "line one\nline two\nline three\n",
+                    "line_count": 50,
+                },
+            ),
+        ]
+        buf = io.StringIO()
+        console = Console(file=buf)
+        await render_stream(_async_iter(chunks), console)
+        output = buf.getvalue()
+        assert "Read 50 lines" in output
 
     @pytest.mark.asyncio
     async def test_todo_tool_renders_checkboxes(self) -> None:

@@ -825,16 +825,64 @@ def openjiuwen.core.foundation.store.create_vector_store(
 ) -> BaseVectorStore | None
 ```
 
-向量存储工厂函数，根据类型创建相应的向量存储实例。
+向量存储工厂函数，根据类型创建相应的向量存储实例。解析顺序为：
+
+1. **内置后端**：`"chroma"`、`"milvus"`、`"gaussvector"`（固定集合，始终优先）
+2. **显式注册**：通过 `register_vector_store(name, factory)` 在进程内注册的实现
+3. **Entry points**：`openjiuwen.vector_stores` 组下第三方包发布的插件
+
+插件加载失败或构造失败记录 WARNING 日志并返回 `None`，不会抛异常以免坏插件影响整个工厂。
 
 **参数**：
 
-- `store_type: str`：存储类型，支持 `"chroma"`、`"milvus"` 或 `"gaussvector"`
-- `**kwargs: Any`：传递给具体存储实现的额外参数
+- `store_type: str`：存储类型。除内置名外，可为 `register_vector_store` 注册的名或已安装插件 entry_points 声明的名。
+- `**kwargs: Any`：传递给具体存储实现的额外参数。
 
 **返回**：
 
-- `BaseVectorStore | None`：向量存储实例；不支持的类型返回 `None`
+- `BaseVectorStore | None`：向量存储实例；未命中或插件加载失败返回 `None`。
+
+---
+
+## function register_vector_store
+
+```python
+def openjiuwen.core.foundation.store.register_vector_store(
+    name: str,
+    factory: Callable[..., BaseVectorStore],
+) -> None
+```
+
+在进程内显式注册第三方向量存储实现，适合**私有后端**（不通过 PyPI 发包、不走 entry_points 的场景）。注册后通过 `create_vector_store(name, ...)` 即可按名字创建实例。
+
+**参数**：
+
+- `name: str`：在 `create_vector_store(name, ...)` 中使用的后端标识。
+- `factory: Callable[..., BaseVectorStore]`：接受 `**kwargs` 并返回 `BaseVectorStore` 的可调用对象（通常直接传类）。
+
+**行为**：
+
+- 线程安全性：**非线程安全**，应在应用启动阶段、所有 worker 线程启动前调用。
+- 内置名（`chroma` / `milvus` / `gaussvector`）不可被覆盖：对这些名字调用 `register_vector_store` 不会生效（工厂解析时内置始终优先）。
+
+---
+
+## constant VECTOR_STORE_ENTRY_POINT_GROUP
+
+```python
+VECTOR_STORE_ENTRY_POINT_GROUP = "openjiuwen.vector_stores"
+```
+
+第三方向量存储插件所需的 Python entry_points group 名，属于**稳定公共常量**——一旦修改会破坏所有已发布的插件包。
+
+插件作者在自己包的 `pyproject.toml` 中声明：
+
+```toml
+[project.entry-points."openjiuwen.vector_stores"]
+my_backend = "my_package.my_vector_store:MyVectorStore"
+```
+
+用户侧 `pip install my-package` 后，`create_vector_store("my_backend", ...)` 即可创建实例。完整开发指引见[插件开发-存储后端](../../../高阶用法/插件开发-存储后端.md)。
 
 ---
 

@@ -409,6 +409,7 @@ async def _subcmd_run(
                 client_provider=cfg.provider,
                 api_key=cfg.api_key,
                 api_base=cfg.api_base,
+                timeout=config.model_timeout_secs,
                 verify_ssl=False,
             ),
             model_config=ModelRequestConfig(
@@ -1057,7 +1058,7 @@ def _render_interaction(
     Shows different formats for different interrupt types:
 
     - **AskUserRail** (``tool_name == "ask_user"``):
-      prints the question in a user-friendly style.
+      prints questions with options in a user-friendly style.
     - **ConfirmInterruptRail** (other tool names):
       shows which tool wants approval + its arguments.
 
@@ -1066,16 +1067,23 @@ def _render_interaction(
         console: Rich console for output.
     """
     tool_name = getattr(request, "tool_name", "")
-    question = _extract_question_text(request)
 
     if tool_name == "ask_user":
-        # AskUserRail — show the question directly
-        console.print(
-            "\n[bold]Agent needs your input:[/bold]"
-        )
-        console.print(question)
+        questions = getattr(request, "questions", None)
+        console.print("\n[bold]Agent needs your input:[/bold]")
+        if questions:
+            for i, q in enumerate(questions, 1):
+                header = q.get("header", f"Q{i}")
+                question_text = q.get("question", "")
+                options = q.get("options", [])
+
+                console.print(f"\n[cyan]{header}:[/cyan] {question_text}")
+                if options:
+                    for j, opt in enumerate(options, 1):
+                        label = opt.get("label", "")
+                        desc = opt.get("description", "")
+                        console.print(f"  [dim]{j}.[/dim] {label} - {desc}")
     else:
-        # ConfirmInterruptRail — show what tool needs approval
         from openjiuwen.harness.cli.ui.tool_display import (
             get_display_name,
         )
@@ -1085,7 +1093,6 @@ def _render_interaction(
             f"\n[bold yellow]⚠ Approve {display_name}?"
             f"[/bold yellow]"
         )
-        # Show tool arguments for context
         tool_args = getattr(request, "tool_args", None)
         if tool_args:
             import json as _json
@@ -1093,26 +1100,19 @@ def _render_interaction(
             if isinstance(tool_args, str):
                 try:
                     parsed = _json.loads(tool_args)
-                    # Pretty-print dict args
                     for k, v in parsed.items():
                         val = str(v)
                         if len(val) > 200:
                             val = val[:200] + "..."
-                        console.print(
-                            f"[dim]  {k}: {val}[/dim]"
-                        )
+                        console.print(f"[dim]  {k}: {val}[/dim]")
                 except (ValueError, TypeError):
-                    console.print(
-                        f"[dim]  args: {tool_args}[/dim]"
-                    )
+                    console.print(f"[dim]  args: {tool_args}[/dim]")
             elif isinstance(tool_args, dict):
                 for k, v in tool_args.items():
                     val = str(v)
                     if len(val) > 200:
                         val = val[:200] + "..."
-                    console.print(
-                        f"[dim]  {k}: {val}[/dim]"
-                    )
+                    console.print(f"[dim]  {k}: {val}[/dim]")
         console.print(
             "[dim]  (y/yes=approve, n/no=reject,"
             " or type feedback)[/dim]"
@@ -1152,19 +1152,23 @@ async def _collect_interaction_answers(
         request = item.request
         tool_name = getattr(request, "tool_name", "")
 
-        answer = await prompt_session.prompt_async(
-            "Answer> "
-        )
-        answer = answer.strip()
-
         if tool_name == "ask_user":
-            # AskUserRail expects a raw string or
-            # AskUserPayload dict
-            interactive_input.update(
-                iid, {"answer": answer}
-            )
+            questions = getattr(request, "questions", None)
+            if questions:
+                answers = {}
+                for q in questions:
+                    question_text = q.get("question", "")
+                    q_answer = await prompt_session.prompt_async(
+                        f"Answer for '{question_text}'> "
+                    )
+                    answers[question_text] = q_answer.strip()
+                interactive_input.update(iid, {"answers": answers})
+            else:
+                answer = await prompt_session.prompt_async("Answer> ")
+                interactive_input.update(iid, {"answer": answer.strip()})
         else:
-            # ConfirmInterruptRail expects ConfirmPayload
+            answer = await prompt_session.prompt_async("Approve? (y/n)> ")
+            answer = answer.strip()
             approved = answer.lower() in (
                 "y",
                 "yes",

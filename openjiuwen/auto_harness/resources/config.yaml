@@ -39,6 +39,7 @@ budget:
   session_secs: 3600            # 会话总预算（秒）
   cost_limit_usd: 10.0          # 费用上限（美元）
   task_timeout_secs: 1200       # 单任务超时（秒）
+  model_timeout_secs: 300       # 单次 LLM 请求超时（秒），用于实现/修复等长耗时流式调用
   max_tasks_per_session: 3      # 每会话最大任务数
 
 ci_gate:
@@ -56,6 +57,7 @@ agent:
   plan: 15                      # plan agent max_iterations
   select_pipeline: 10           # pipeline selector max_iterations
   eval: 10                      # evaluator max_iterations
+  pr_draft: 5                   # PR draft agent max_iterations
   learnings: 5                  # learnings agent max_iterations
 
 extensions:

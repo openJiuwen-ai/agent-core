@@ -18,7 +18,12 @@ class ToolCallInterruptRequest(InterruptRequest):
 
     Inherits from InterruptRequest and adds tool call context fields.
     Used for serializing interrupt info to user output.
+
+    When the input request is a subclass of InterruptRequest (e.g. AskUserRequest),
+    the subclass's extra fields are preserved via model_dump().
     """
+    model_config = {"extra": "allow"}
+
     tool_name: str = ""
     tool_call_id: str = ""
     tool_args: Any = None
@@ -30,14 +35,16 @@ class ToolCallInterruptRequest(InterruptRequest):
             request: InterruptRequest,
             tool_call: Any,
     ) -> "ToolCallInterruptRequest":
-        """Create ToolCallInterruptRequest from InterruptRequest and ToolCall."""
+        """Create ToolCallInterruptRequest from InterruptRequest and ToolCall.
 
-        return cls(
-            message=request.message,
-            payload_schema=request.payload_schema,
-            auto_confirm_key=request.auto_confirm_key,
+        Preserves all fields from the request, including any extra fields
+        defined in subclasses (e.g. AskUserRequest.questions).
+        """
+        base_fields = request.model_dump()
+        base_fields.update(
             tool_name=tool_call.name if hasattr(tool_call, 'name') else str(tool_call),
             tool_call_id=tool_call.id if hasattr(tool_call, 'id') else "",
             tool_args=tool_call.arguments if hasattr(tool_call, 'arguments') else None,
             index=tool_call.index if hasattr(tool_call, 'index') else None,
         )
+        return cls.model_validate(base_fields)

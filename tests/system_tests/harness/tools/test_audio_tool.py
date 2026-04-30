@@ -38,7 +38,7 @@ def test_create_audio_tools_register_and_invoke(tmp_path: Path, monkeypatch):
         return "A person is speaking.", 1.0
 
     monkeypatch.setattr(
-        "openjiuwen.harness.tools.audio._invoke_audio_question_answering",
+        "openjiuwen.harness.tools.multimodal.audio._invoke_audio_question_answering",
         fake_invoke_audio_question_answering,
     )
 

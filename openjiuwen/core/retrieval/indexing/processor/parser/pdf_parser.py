@@ -47,12 +47,22 @@ class PDFParser(Parser):
             bottom = img["bottom"]
 
             # Crop page to the image region
-            cropped_page = pdf_page.crop((x0, top, x1, bottom))
+            try:
+                cropped_page = pdf_page.crop((x0, top, x1, bottom))
+            except Exception:
+                # If strict cropping fails, try again with `strict=False`
+                logger.warning(
+                    f"Bounding box ({x0}, {top}, {x1}, {bottom}) is not fully within parent page, "
+                    "cropping again with strict=False."
+                )
+                cropped_page = pdf_page.crop((x0, top, x1, bottom), strict=False)
 
             # Convert cropped region to a PIL image
             pil_image = cropped_page.to_image(resolution=300).original
             os.makedirs(output_dir, exist_ok=True)
-            image_path = os.path.join(output_dir, f"{filename}__page_{pdf_page_num}__img_{img_index}.png")
+            image_path = os.path.join(
+                output_dir, f"{filename}__page_{pdf_page_num}__img_{img_index}.png"
+            )
             images.append(image_path)
             pil_image.save(image_path)
         return images

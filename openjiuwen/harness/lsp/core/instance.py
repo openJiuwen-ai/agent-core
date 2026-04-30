@@ -201,6 +201,25 @@ class LSPServerInstance:
             return
         await self._client.send_notification(method, params)
 
+    def add_notification_handler(
+        self, method: str, handler: Callable[[Any], None]
+    ) -> None:
+        """Register *handler* for server-push notifications with the given *method*.
+
+        Delegates to the underlying :class:`LSPClient`.  Safe to call before
+        the server has started — the handler will be installed as soon as the
+        client is created during :meth:`start`.
+
+        If the client is not yet available the call is silently ignored;
+        callers should register handlers after :meth:`start` returns or use
+        :meth:`LSPServerManager._ensure_diagnostic_handler` which is called
+        from :meth:`LSPServerManager.open_file` and
+        :meth:`LSPServerManager.change_file` right before the relevant
+        notification is sent.
+        """
+        if self._client is not None:
+            self._client.add_notification_handler(method, handler)
+
     async def is_healthy(self) -> bool:
         """
         Check whether the server is healthy (running and process still alive).

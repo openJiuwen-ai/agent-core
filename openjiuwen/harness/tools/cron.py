@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
-from openjiuwen.harness.prompts.sections.tools import build_tool_card
+from openjiuwen.harness.prompts.tools import build_tool_card, get_tool_input_params
 
 
 @dataclass(frozen=True)
@@ -93,16 +93,27 @@ def _tool_scope(context: CronToolContext | None) -> str:
     return scope.replace(":", "_")
 
 
-def _make_tool(*, tool_id: str, name: str, description: str, input_params: dict[str, Any], func: Any) -> Tool:
-    return LocalFunction(
-        card=ToolCard(
-            id=tool_id,
-            name=name,
-            description=description,
+def _make_tool(
+    *,
+    name: str,
+    scope: str,
+    language: str,
+    agent_id: str,
+    func: Any,
+    target_schema: dict[str, Any] | None = None,
+) -> Tool:
+    card = build_tool_card(name, f"{name}_{scope}", language, agent_id=agent_id)
+    if target_schema is not None:
+        input_params = get_tool_input_params(name, language)
+        if "properties" in input_params and "targets" in input_params["properties"]:
+            input_params["properties"]["targets"] = target_schema
+        card = ToolCard(
+            id=card.id,
+            name=card.name,
+            description=card.description,
             input_params=input_params,
-        ),
-        func=func,
-    )
+        )
+    return LocalFunction(card=card, func=func)
 
 
 def _target_schema(
@@ -239,135 +250,57 @@ def create_cron_tools(
         return tools
 
     target_schema = _target_schema(target_channels, default_target_channel)
+
     tools.extend(
         [
             _make_tool(
-                tool_id=f"cron_list_jobs_{scope}",
                 name="cron_list_jobs",
-                description="Legacy compatibility tool. List all cron jobs.",
-                input_params={"type": "object", "properties": {}, "required": []},
+                scope=scope,
+                language=language,
+                agent_id=final_agent_id,
                 func=list_jobs_wrapper,
             ),
             _make_tool(
-                tool_id=f"cron_get_job_{scope}",
                 name="cron_get_job",
-                description="Legacy compatibility tool. Get a single cron job by id.",
-                input_params={
-                    "type": "object",
-                    "properties": {
-                        "job_id": {
-                            "type": "string",
-                            "description": "The job id to look up",
-                        }
-                    },
-                    "required": ["job_id"],
-                },
+                scope=scope,
+                language=language,
+                agent_id=final_agent_id,
                 func=get_job_wrapper,
             ),
             _make_tool(
-                tool_id=f"cron_create_job_{scope}",
                 name="cron_create_job",
-                description=(
-                    "Legacy compatibility tool. Create a cron job using flat fields "
-                    "(name, cron_expr, timezone, targets, description, wake_offset_seconds)."
-                ),
-                input_params={
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "任务名称"},
-                        "cron_expr": {
-                            "type": "string",
-                            "description": "Cron 表达式（分 时 日 月 周）",
-                        },
-                        "timezone": {
-                            "type": "string",
-                            "description": "时区，如 Asia/Shanghai",
-                            "default": "Asia/Shanghai",
-                        },
-                        "targets": target_schema,
-                        "enabled": {
-                            "type": "boolean",
-                            "description": "是否启用",
-                            "default": True,
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "具体任务内容，到点执行时发给助手。不要包含时间/频率",
-                        },
-                        "wake_offset_seconds": {
-                            "type": "integer",
-                            "description": "提前多少秒执行，默认 300",
-                            "default": 300,
-                        },
-                    },
-                    "required": ["name", "cron_expr", "timezone", "description"],
-                },
+                scope=scope,
+                language=language,
+                agent_id=final_agent_id,
                 func=create_job_wrapper,
+                target_schema=target_schema,
             ),
             _make_tool(
-                tool_id=f"cron_update_job_{scope}",
                 name="cron_update_job",
-                description="Legacy compatibility tool. Update an existing cron job with a flat patch dict.",
-                input_params={
-                    "type": "object",
-                    "properties": {
-                        "job_id": {"type": "string", "description": "Job id to update"},
-                        "patch": {
-                            "type": "object",
-                            "description": "Fields to update",
-                            "additionalProperties": True,
-                        },
-                    },
-                    "required": ["job_id", "patch"],
-                },
+                scope=scope,
+                language=language,
+                agent_id=final_agent_id,
                 func=update_job_wrapper,
             ),
             _make_tool(
-                tool_id=f"cron_delete_job_{scope}",
                 name="cron_delete_job",
-                description="Legacy compatibility tool. Delete a cron job by id.",
-                input_params={
-                    "type": "object",
-                    "properties": {
-                        "job_id": {"type": "string", "description": "Job id to delete"},
-                    },
-                    "required": ["job_id"],
-                },
+                scope=scope,
+                language=language,
+                agent_id=final_agent_id,
                 func=delete_job_wrapper,
             ),
             _make_tool(
-                tool_id=f"cron_toggle_job_{scope}",
                 name="cron_toggle_job",
-                description="Legacy compatibility tool. Enable or disable a cron job.",
-                input_params={
-                    "type": "object",
-                    "properties": {
-                        "job_id": {"type": "string", "description": "Job id"},
-                        "enabled": {
-                            "type": "boolean",
-                            "description": "Whether to enable the job",
-                        },
-                    },
-                    "required": ["job_id", "enabled"],
-                },
+                scope=scope,
+                language=language,
+                agent_id=final_agent_id,
                 func=toggle_job_wrapper,
             ),
             _make_tool(
-                tool_id=f"cron_preview_job_{scope}",
                 name="cron_preview_job",
-                description="Legacy compatibility tool. Preview next N scheduled run times for a job.",
-                input_params={
-                    "type": "object",
-                    "properties": {
-                        "job_id": {"type": "string", "description": "Job id"},
-                        "count": {
-                            "type": "integer",
-                            "description": "Number of runs to preview (1-50, default 5)",
-                            "default": 5,
-                        },
-                    },
-                    "required": ["job_id"],
-                },
+                scope=scope,
+                language=language,
+                agent_id=final_agent_id,
                 func=preview_job_wrapper,
             ),
         ]

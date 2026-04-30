@@ -59,7 +59,7 @@ class BackendProxy:
         self.llm_timeout_seconds = llm_timeout_seconds
         self.model_name = model_name
         self._backend_servers: List[str] = []
-        self._host: str = "0.0.0.0"
+        self._host: str = "127.0.0.1"
         self._port: int = 0  # auto-assigned
         self._app: Optional[Flask] = None
         self._thread: Optional[threading.Thread] = None

@@ -19,6 +19,7 @@ from openjiuwen.auto_harness.infra.parsers import (
     extract_text,
     parse_gaps,
     parse_learnings,
+    parse_pr_draft,
     parse_tasks,
 )
 from openjiuwen.auto_harness.infra.worktree_manager import (
@@ -35,5 +36,6 @@ __all__ = [
     "extract_text",
     "parse_gaps",
     "parse_learnings",
+    "parse_pr_draft",
     "parse_tasks",
 ]

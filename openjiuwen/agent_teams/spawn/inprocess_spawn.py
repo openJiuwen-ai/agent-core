@@ -6,9 +6,9 @@ from __future__ import annotations
 import asyncio
 import contextvars
 from typing import (
+    TYPE_CHECKING,
     Any,
     Optional,
-    TYPE_CHECKING,
 )
 
 from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
@@ -57,7 +57,7 @@ async def inprocess_spawn(
     )
 
     teammate = _TeamAgent(card)
-    await teammate.configure_team(spec, ctx)
+    teammate.configure(spec, ctx)
 
     query = initial_message or "Join the team and wait for your first assignment."
     inputs: dict[str, Any] = {"query": query}

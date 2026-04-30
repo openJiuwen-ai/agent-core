@@ -12,7 +12,7 @@ import pytest_asyncio
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.harness.workspace.workspace import Workspace
-from openjiuwen.harness.rails.coding_memory_rail import CodingMemoryRail
+from openjiuwen.harness.rails.memory.coding_memory_rail import CodingMemoryRail
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 
 
@@ -119,7 +119,7 @@ class TestCodingMemoryRailE2E:
     @pytest.mark.asyncio
     async def test_auto_recall_with_results(self, coding_memory_test_env):
         """测试自动召回有结果的情况."""
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import AsyncMock
 
         env = coding_memory_test_env
         coding_memory_dir = env["coding_memory_dir"]
