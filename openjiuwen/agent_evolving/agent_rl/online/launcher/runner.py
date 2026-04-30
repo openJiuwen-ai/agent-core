@@ -15,7 +15,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from openjiuwen.agent_evolving.agent_rl.online.launcher.schema import OnlineRLConfig
+from openjiuwen.agent_evolving.agent_rl.config.online_config import OnlineRLConfig
 from openjiuwen.agent_evolving.agent_rl.online.launcher.services import (
     EXISTING_SERVICE_HEALTH_TIMEOUT,
     print_launch_summary,

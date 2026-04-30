@@ -39,7 +39,7 @@ class _FakeScheduler:
 
 
 def test_run_online_rl_loop_signal_shutdown_returns_and_stops_children(monkeypatch, tmp_path: Path):
-    from openjiuwen.agent_evolving.agent_rl.online.launcher.schema import (
+    from openjiuwen.agent_evolving.agent_rl.config.online_config import (
         GatewayServiceConfig,
         JiuwenConfig,
         JudgeConfig,
@@ -193,7 +193,7 @@ def test_run_online_rl_loop_signal_shutdown_returns_and_stops_children(monkeypat
 
 
 def test_print_launch_summary_works_without_gateway_mode(tmp_path: Path, caplog):
-    from openjiuwen.agent_evolving.agent_rl.online.launcher.schema import (
+    from openjiuwen.agent_evolving.agent_rl.config.online_config import (
         GatewayServiceConfig,
         JiuwenConfig,
         JudgeConfig,

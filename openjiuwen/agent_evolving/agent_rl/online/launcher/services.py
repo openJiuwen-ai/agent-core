@@ -13,13 +13,12 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from openjiuwen.agent_evolving.agent_rl.online.launcher.schema import (
+from openjiuwen.agent_evolving.agent_rl.config.online_config import (
     GatewayServiceConfig,
     OnlineRLConfig,
     VLLMServiceConfig,
 )
 from openjiuwen.agent_evolving.agent_rl.online.launcher.workspace import build_trajectory_env_updates
-from openjiuwen.agent_evolving.agent_rl.online.scheduler.ppo_config import resolve_default_ppo_config_path
 
 log = logging.getLogger('online_rl')
 DEFAULT_GATEWAY_APP_FACTORY = 'openjiuwen.agent_evolving.agent_rl.online.gateway.app.proxy:create_app'
@@ -232,7 +231,7 @@ def start_online_training_scheduler(
         notifier=InferenceNotifier(runtime.inference_url),
         nproc_per_node=train_gpu_count,
         training_gpu_ids=cfg.training.gpu_ids,
-        ppo_config_path=cfg.training.ppo_config or str(resolve_default_ppo_config_path()),
+        ppo_config_path=cfg.training.ppo_config,
     )
     scheduler.start()
     return scheduler

@@ -152,7 +152,6 @@ include = ["openjiuwen*"]
 openjiuwen = [
     "**/prompts/**/*.md",
     "**/locales/**/*.md",
-    "**/online/yaml/*.yaml",
 ]
 
 [tool.coverage.run]
