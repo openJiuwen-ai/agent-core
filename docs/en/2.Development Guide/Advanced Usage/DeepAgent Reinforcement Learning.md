@@ -1,6 +1,8 @@
-﻿# ReactAgent Reinforcement Learning
+# DeepAgent Reinforcement Learning
 
-The `openjiuwen.agent_evolving.agent_rl` module provides reinforcement learning training capabilities based on the VERL reinforcement learning framework and the OpenYuanrong distributed computing engine. This tutorial walks through detailed training environment setup and briefly explains how to use this module to train a ReactAgent that solves math problems with a calculator tool.
+The `openjiuwen.agent_evolving.agent_rl` module provides reinforcement learning training capabilities based on the VERL reinforcement learning framework and the OpenYuanrong distributed computing engine. This tutorial walks through detailed training environment setup and briefly explains how to use this module to train a **Harness `DeepAgent`** (`openjiuwen.harness.deep_agent.DeepAgent`) that solves math problems with a calculator tool.
+
+**Runtime note**: Standard rollout uses **`openjiuwen.harness.DeepAgent`** as the outer runtime. [`AgentFactory`](../API%20Docs/openjiuwen.agent_evolving/agent_rl/offline/runtime.md) builds and configures each task's agent with **`DeepAgentConfig`** (single-round rollout: **`enable_task_loop=False`**); tools attach to **`DeepAgent`**. Trajectories are collected with **`RLRail`** via **`register_rail`** on that agent; the inner model loop enables token IDs/logprobs for RL. If you substitute a custom `agent_factory`, the built-in **`TrajectoryCollector`** still expects something that exposes **`register_rail`** / **`invoke`** (for example **`DeepAgent`**).
 
 ## Environment Setup
 

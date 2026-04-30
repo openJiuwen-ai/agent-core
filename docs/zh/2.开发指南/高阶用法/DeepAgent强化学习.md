@@ -1,6 +1,8 @@
-﻿# ReactAgent强化学习
+﻿# DeepAgent 强化学习
 
-`openjiuwen.agent_evolving.agent_rl` 模块提供基于 VERL 强化学习框架和 OpenYuanrong 分布式计算引擎的强化学习训练能力。 本教程提供详细的训练环境配置引导，并简要介绍如何使用该模块训练一个借助计算器工具求解数学题的 ReactAgent。
+`openjiuwen.agent_evolving.agent_rl` 模块提供基于 VERL 强化学习框架和 OpenYuanrong 分布式计算引擎的强化学习训练能力。本教程提供详细的训练环境配置引导，并简要介绍如何使用该模块训练一个配备计算器工具、用于求解数学题的 **Harness `DeepAgent`**（`openjiuwen.harness.deep_agent.DeepAgent`）。
+
+**运行时说明**：默认 rollout 以 **`DeepAgent`** 为外层运行时。[`AgentFactory`](../API文档/openjiuwen.agent_evolving/agent_rl/offline/runtime.md) 按任务构建并配置智能体（**`DeepAgentConfig`**，训练场景下 **`enable_task_loop=False`** 以单轮 rollout）；工具挂在 **`DeepAgent`** 上。轨迹通过在该智能体上注册 **`RLRail`**（**`register_rail`**）采集；内层会为 RL 打开 token id / logprobs。若自定义 `agent_factory`，内置 **`TrajectoryCollector`** 仍要求对象支持 **`register_rail`** / **`invoke`**（例如 **`DeepAgent`**）。
 
 ## 运行环境部署
 
@@ -233,9 +235,9 @@ from openjiuwen.core.foundation.tool import tool
     description="Perform arithmetic calculations, simplify algebraic expressions, and solve equations.",
 )
 def calculator(expression: str) -> str:
-    """Evaluate a math expre术、方程求解等
-    # ...ssion and return the result."""
-    # 实现表达式求值逻辑，支持算
+    """Evaluate a math expression and return the result."""
+    # 实现表达式求值逻辑，支持算术、方程求解等
+    # ...
     return result
 ```
 

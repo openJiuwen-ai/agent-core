@@ -14,7 +14,7 @@ class openjiuwen.agent_evolving.agent_rl.rl_trainer.verl_executor.VerlTrainingEx
 
 * `sleep_rollout` / `wake_up_rollout`：配合异步 rollout 管理器，在相邻训练步之间切换 vLLM 后端地址。
 * `setup_logger` / `log_metrics` / `save_checkpoint` / `load_checkpoint`：实验日志与检查点。
-* 借助 `TrainingDiagnostics`（`monitoring/training_logger.py`）等组件输出按序列聚合的诊断信息。
+* 借助 `TrainingDiagnostics`（`offline/store/metrics_tracker.py`）等组件在 `develop_mode` 下输出按阶段聚合的诊断日志。
 
 **说明**：实例在 verl/Ray 分布式 Worker 内装配；本类不通过 `OfflineRLOptimizer` 作为面向使用者的直接调用入口对外暴露。
 
@@ -28,7 +28,7 @@ class openjiuwen.agent_evolving.agent_rl.offline.main_trainer.MainTrainer(rl_tra
 
 **要点**：
 
-* 内部创建 [`BackendProxy`](./proxy.md)；代理启动后把 **`proxy_url`** 写入可变的 `agent_factory.proxy_url`（见 [`AgentFactory`](./offline/runtime.md)），使 ReActAgent 通过固定基 URL 访问 vLLM。
+* 内部创建 [`BackendProxy`](./proxy.md)；代理启动后把 **`proxy_url`** 写入可变的 `agent_factory.proxy_url`（见 [`AgentFactory`](./offline/runtime.md)），使 **`AgentFactory`** 产出的 rollout 智能体（**`DeepAgent`**）通过固定基 URL 访问 vLLM。
 * **`update_backends(servers)`**：将当前训练步对应的 vLLM 地址列表下发给代理。
 * **`validate()`**：在验证集上执行一轮前向；实现中对验证 `DataLoader` 的 batch 划分有前置假设，详见该类源码中的校验逻辑。
 * **`fit()`**：主训练循环（epoch、进度条、按步训练与可选验证）。

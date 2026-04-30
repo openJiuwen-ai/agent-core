@@ -147,7 +147,7 @@ Set reward function.
 class openjiuwen.agent_evolving.agent_rl.offline.runtime.agent_factory.AgentFactory(system_prompt: str, tools: List[Any], tool_names: List[str], temperature: float, max_new_tokens: int, top_p: float, presence_penalty: float, frequency_penalty: float)
 ```
 
-Callable factory that creates ReActAgent instances for each RL task.
+Callable factory that creates DeepAgent instances for each RL task.
 
 Must set `proxy_url` before first use (set by MainTrainer).
 
@@ -161,11 +161,11 @@ Proxy URL; must be set before creating an Agent.
 
 ### __call__(self, rl_task: RLTask)
 
-Create and configure a ReActAgent instance for the given RL task.
+Create and configure a DeepAgent instance for the given RL task.
 
 **Returns**:
 
-Configured ReActAgent instance.
+Configured DeepAgent instance.
 
 **Exceptions**:
 

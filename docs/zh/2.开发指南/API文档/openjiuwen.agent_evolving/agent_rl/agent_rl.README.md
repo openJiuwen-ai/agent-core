@@ -32,14 +32,15 @@
 | [RolloutPersistence](./offline/store.md) | Rollout 持久化抽象接口。 |
 | [FileRolloutStore](./offline/store.md) | 基于文件的 Rollout 持久化实现。 |
 | [NullRolloutStore](./offline/store.md) | 无操作 Rollout 持久化实现。 |
-| [RLMetricsTracker](./offline/monitoring.md) | RL 训练结构化指标跟踪器。 |
-| [TrainingStepMetrics](./offline/monitoring.md) | 单个训练步指标数据类。 |
+| [RLMetricsTracker](./offline/store.md) | RL 训练结构化指标跟踪器（`metrics_tracker`）。 |
+| [TrainingStepMetrics](./offline/store.md) | 单个训练步指标数据类。 |
+| [TrainingDiagnostics](./offline/store.md) | 开发模式下的训练管线分阶段诊断（`metrics_tracker`）。 |
 | [BackendProxy](./proxy.md) | 反向代理，提供稳定的后端推理 URL。 |
 | [RLRail](./offline/runtime.md) | 继承 `EvolutionRail` 的 RL 轨迹收集 Rail。 |
 | [TrajectoryCollector](./offline/runtime.md) | Agent 轨迹收集封装器。 |
 | [RuntimeExecutor](./offline/runtime.md) | 自包含的单任务执行器。 |
 | [ParallelRuntimeExecutor](./offline/runtime.md) | 并行 rollout 执行引擎。 |
-| [AgentFactory](./offline/runtime.md) | 为每个 RL 任务创建 ReActAgent 实例的工厂。 |
+| [AgentFactory](./offline/runtime.md) | 为每个 RL 任务创建 **DeepAgent** 的可调用工厂。 |
 
 **Functions**：
 
