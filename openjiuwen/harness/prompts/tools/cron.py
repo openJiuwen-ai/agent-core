@@ -16,13 +16,20 @@ DESCRIPTION: Dict[str, str] = {
         "除非用户明确要求，否则不要改写成 Z 或 UTC。"
         "给当前聊天创建提醒时，优先使用 payload.kind=systemEvent 和 sessionTarget=current。"
         "向用户确认创建结果时，优先按 schedule.at 里的原始时区/偏移表述，不要自行改写成 UTC。"
+        "\n\n【重要：cron 表达式格式】只支持7段式(Quartz格式)：秒 分 时 日 月 周 年。"
+        "字段取值范围：秒(0-59)，分(0-59)，时(0-23)，日(1-31)，月(1-12)，周(1-7或?)，年(1970-2099或*)。"
+        "日和周字段：不能同时指定具体值，其中一个必须用?表示'不指定'。"
+        "年份字段：*表示跨年周期，固定年份只在该年执行。"
+        "真正只执行一次：所有字段均为固定值(无*和?)，如'0 30 17 29 4 ? 2026'表示2026年4月29日17:30:00执行一次。"
+        "例：每天9点 -> '0 0 9 * * ? *'；每15分钟 -> '0 */15 * * * ? *'；每周一9点 -> '0 0 9 ? * MON *'。"
+        "注意：一次性任务建议优先使用 schedule.at (ISO8601格式)，cron更适合周期性任务。"
         "\n\n【重要：cron 表达式限制】标准 cron 的 */X 语义是'当字段值能被 X 整除时触发'，"
         "而非'每隔 X 单位触发'。只有当周期单位能被 X 整除时，间隔才是均匀的。"
         "以下是各字段的限制："
-        "\n- 分钟(0-59)：*/X 仅支持 X 整除60的值：1/2/3/4/5/6/10/12/15/20/30。"
+        "\n- 秒/分(0-59)：*/X 仅支持 X 整除60的值：1/2/3/4/5/6/10/12/15/20/30。"
         "  例如 */40 实际在每小时第0分和第40分触发（间隔40分→20分交替），并非每40分钟。"
         "  用户要求'每隔40分钟'时，必须先告知此限制并让用户确认是否接受不均匀间隔，"
-        "或建议改用整除60的间隔（如20分钟或30分钟）。未经用户确认不得直接创建。"
+        "  或建议改用整除60的间隔（如20分钟或30分钟）。未经用户确认不得直接创建。"
         "\n- 小时(0-23)：*/X 仅支持 X 整除24的值：1/2/3/4/6/8/12。"
         "  例如 */5 实际在每天0/5/10/15/20时触发（间隔5h→4h→5h→4h交替），并非每5小时。"
         "  用户要求'每隔5小时'时，必须告知限制并让用户确认，或建议改用整除24的间隔。"
@@ -31,8 +38,8 @@ DESCRIPTION: Dict[str, str] = {
         "  用户要求'每隔X天'时，建议改用'每周X'或指定固定日期（如每月1号、15号）。"
         "\n- 月(1-12)：*/X 仅支持 X 整除12的值：1/2/3/4/6。"
         "  例如 */5 实际在1/5/10月触发，并非每5个月均匀触发。"
-        "\n- 周(0-6)：*/X 仅支持 X 整除7的值：1/7。"
-        "  例如 */2 实际在周一/三/五触发，并非'每隔2周'。"
+        "\n- 周(1-7)：*/X 仅支持 X 整除7的值：1/7。1=SUN,7=SAT。"
+        "  例如 */2 实际在SUN/TUE/THU触发，并非'每隔2周'。"
         "  用户要求'每隔2周'时，应直接指定具体星期几或建议简化为'每周一'。"
         "\n处理'每隔X分钟/小时/天'需求时，务必检查 X 是否整除对应周期单位；"
         "若不整除，必须告知用户限制，让用户确认后再创建，或建议替代方案。"
@@ -48,10 +55,20 @@ DESCRIPTION: Dict[str, str] = {
         "For reminders targeting the current chat, prefer payload.kind=systemEvent with sessionTarget=current. "
         "When confirming a created reminder to the user, prefer the original timezone/offset from schedule.at "
         "instead of rewriting it into UTC."
+        "\n\n[CRITICAL: Cron Expression Format] Only supports 7-field Quartz format: "
+        "second minute hour day month dow year. "
+        "Field ranges: "
+        "second(0-59), minute(0-59), hour(0-23), day(1-31), month(1-12), dow(1-7 or ?), year(1970-2099 or *). "
+        "Day and dow fields: cannot both have specific values; one must be '?' (no specific value). "
+        "Year field: '*' for recurring, fixed year for one-shot within that year. "
+        "True one-shot: all fields fixed (no '*' or '?'), e.g. '0 30 17 29 4 ? 2026' runs once at 2026-04-29 17:30:00."
+        "Examples: daily 9am -> '0 0 9 * * ? *'; every 15min -> '0 */15 * * * ? *'; "
+        "every Monday 9am -> '0 0 9 ? * MON *'. "
+        "Note: for one-shot tasks, prefer schedule.at (ISO8601 format); cron is better for recurring tasks."
         "\n\n[CRITICAL: Cron Expression Limits] Standard cron's */X means 'trigger when the field value "
         "is divisible by X', NOT 'every X units'. Uniform intervals only work when the cycle unit "
         "is divisible by X. Field limits:"
-        "\n- Minute(0-59): */X only works for X dividing 60: 1/2/3/4/5/6/10/12/15/20/30."
+        "\n- Second/Minute(0-59): */X only works for X dividing 60: 1/2/3/4/5/6/10/12/15/20/30."
         "  Example: */40 triggers at minute 0 and 40 each hour (alternating 40min-20min gaps), "
         "NOT every 40 minutes."
         "  When user requests 'every 40 minutes', MUST inform user of this limitation first "
@@ -65,8 +82,8 @@ DESCRIPTION: Dict[str, str] = {
         "  When user requests 'every X days', suggest using 'every week on day X' or fixed dates."
         "\n- Month(1-12): */X only works for X dividing 12: 1/2/3/4/6."
         "  Example: */5 triggers in Jan/May/Oct, NOT uniformly every 5 months."
-        "\n- Weekday(0-6): */X only works for X dividing 7: 1/7."
-        "  Example: */2 triggers on Mon/Wed/Fri, NOT 'every 2 weeks'."
+        "\n- Dow(1-7): */X only works for X dividing 7: 1/7. 1=SUN, 7=SAT."
+        "  Example: */2 triggers on SUN/TUE/THU, NOT 'every 2 weeks'."
         "  When user requests 'every 2 weeks', suggest simplifying to a specific weekday."
         "\nWhen handling 'every X minutes/hours/days' requests, always check if X divides the cycle unit. "
         "If not, MUST inform user of the limitation, let user confirm before creating, or suggest alternatives."
@@ -136,16 +153,20 @@ FIELD_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
     },
     "schedule.expr": {
         "cn": (
-            "cron表达式(分时日月周)。*/X表示当字段值能被X整除时触发，仅当周期能被X整除时间隔均匀。"
-            "分钟仅支持X整除60(1/2/3/4/5/6/10/12/15/20/30)；"
-            "小时仅支持X整除24(1/2/3/4/6/8/12)；日不可靠；月仅支持X整除12(1/2/3/4/6)；周仅支持X整除7(1/7)。"
+            "cron表达式(Quartz格式)。7段式：秒 分 时 日 月 周 年。"
+            "日和周：不能同时指定具体值，其中一个用?。"
+            "年份：*跨年周期，固定年份只在该年执行。"
+            "一次性：所有字段固定值，如'0 0 17 28 3 ? 2026'。"
+            "例：每天9点'0 0 9 * * ? *'；每15分钟'0 */15 * * * ? *'。"
             "详见工具描述。"
         ),
         "en": (
-            "Cron expression (min hour dom month dow). */X triggers when field divisible by X; "
-            "uniform intervals only when cycle divisible by X. "
-            "Minute: X must divide 60; Hour: X must divide 24; Day unreliable; "
-            "Month: X must divide 12; Weekday: X must divide 7. See tool description."
+            "Cron expression (Quartz format). 7-field: second minute hour day month dow year. "
+            "Day/dow: cannot both be specific; use '?' for one. "
+            "Year: '*' for recurring, fixed year limits to that year. "
+            "One-shot: all fields fixed, e.g. '0 0 17 28 3 ? 2026'. "
+            "Examples: daily 9am '0 0 9 * * ? *'; every 15min '0 */15 * * * ? *'. "
+            "See tool description."
         ),
     },
     "schedule.tz": {
@@ -254,15 +275,20 @@ FIELD_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
     },
     "cron_expr": {
         "cn": (
-            "兼容层cron表达式。*/X仅当周期能被X整除时间隔均匀。"
-            "分钟仅支持X整除60(1/2/3/4/5/6/10/12/15/20/30)；"
-            "小时仅支持X整除24(1/2/3/4/6/8/12)；日不可靠；月仅支持X整除12(1/2/3/4/6)；周仅支持X整除7(1/7)。"
+            "兼容层cron表达式(Quartz格式)。7段式：秒 分 时 日 月 周 年。"
+            "日和周：不能同时指定具体值，其中一个用?。"
+            "年份：*跨年周期，固定年份只在该年执行。"
+            "一次性：所有字段固定值，如'0 0 17 28 3 ? 2026'。"
+            "例：每天9点'0 0 9 * * ? *'；每15分钟'0 */15 * * * ? *'。"
             "详见工具描述。"
         ),
         "en": (
-            "Compatibility cron expression. */X only yields uniform intervals when cycle divisible by X. "
-            "Minute: X must divide 60; Hour: X must divide 24; Day unreliable; "
-            "Month: X must divide 12; Weekday: X must divide 7. See tool description."
+            "Compatibility cron expression (Quartz format). 7-field: second minute hour day month dow year. "
+            "Day/dow: cannot both be specific; use '?' for one. "
+            "Year: '*' for recurring, fixed year limits to that year. "
+            "One-shot: all fields fixed, e.g. '0 0 17 28 3 ? 2026'. "
+            "Examples: daily 9am '0 0 9 * * ? *'; every 15min '0 */15 * * * ? *'. "
+            "See tool description."
         ),
     },
     "timezone": {
@@ -270,8 +296,8 @@ FIELD_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
         "en": "Compatibility timezone field",
     },
     "wake_offset_seconds": {
-        "cn": "兼容层提前唤醒秒数",
-        "en": "Compatibility wake offset in seconds",
+        "cn": "兼容层提前唤醒秒数。默认 60，若用户未指定则使用 60 秒。",
+        "en": "Compatibility wake offset in seconds. Default 60; use 60 seconds if user does not specify.",
     },
     "description": {
         "cn": "具体任务内容，到点执行时发给助手。不要包含时间/频率信息（如'每隔40分钟'、'每天9点'）",
@@ -545,9 +571,15 @@ CRON_GET_JOB_DESCRIPTION: Dict[str, str] = {
 CRON_CREATE_JOB_DESCRIPTION_CN = """
 创建新的 cron 定时任务，使用扁平字段（name, cron_expr, timezone, targets, description, wake_offset_seconds）。
 
+【重要：cron 表达式格式】只支持7段式(Quartz格式)：秒 分 时 日 月 周 年。
+日和周字段：不能同时指定具体值，其中一个必须用?表示'不指定'。
+年份字段：*表示跨年周期执行，固定年份只在该年执行。
+真正只执行一次：所有字段均为固定值（无*和?），如'0 0 17 28 3 ? 2026'。
+例：每天9点 -> '0 0 9 * * ? *'；每15分钟 -> '0 */15 * * * ? *'；每周一9点 -> '0 0 9 ? * MON *'。
+
 【重要：cron 表达式限制】标准 cron 的 */X 语义是'当字段值能被 X 整除时触发'，而非'每隔 X 单位触发'。
 只有当周期单位能被 X 整除时，间隔才是均匀的。以下是各字段的限制：
-- 分钟(0-59)：*/X 仅支持 X 整除60的值：1/2/3/4/5/6/10/12/15/20/30。
+- 秒/分(0-59)：*/X 仅支持 X 整除60的值：1/2/3/4/5/6/10/12/15/20/30。
   例如 */40 实际在每小时第0分和第40分触发（间隔40分→20分交替），并非每40分钟。
   用户要求'每隔40分钟'时，必须先告知此限制并让用户确认是否接受不均匀间隔，
   或建议改用整除60的间隔（如20分钟或30分钟）。未经用户确认不得直接创建。
@@ -555,7 +587,7 @@ CRON_CREATE_JOB_DESCRIPTION_CN = """
   例如 */5 实际在每天0/5/10/15/20时触发（间隔5h→4h→5h→4h交替），并非每5小时。
 - 日(1-31)：*/X 不可靠，因为不同月份天数不同（28/29/30/31）。
 - 月(1-12)：*/X 仅支持 X 整除12的值：1/2/3/4/6。
-- 周(0-6)：*/X 仅支持 X 整除7的值：1/7。
+- 周(1-7)：*/X 仅支持 X 整除7的值：1/7。1=SUN,7=SAT。
 
 处理'每隔X分钟/小时/天'需求时，务必检查 X 是否整除对应周期单位；
 若不整除，必须告知用户限制，让用户确认后再创建，或建议替代方案。
@@ -564,9 +596,15 @@ CRON_CREATE_JOB_DESCRIPTION_CN = """
 CRON_CREATE_JOB_DESCRIPTION_EN = """
 Create a new cron job using flat fields (name, cron_expr, timezone, targets, description, wake_offset_seconds).
 
+[CRITICAL: Cron Expression Format] Only supports 7-field Quartz format: second minute hour day month dow year.
+Day and dow fields: cannot both have specific values; one must be '?' (no specific value).
+Year field: '*' for recurring, fixed year for one-shot within that year.
+True one-shot: all fields fixed (no '*' or '?'), e.g. '0 0 17 28 3 ? 2026'.
+Examples: daily 9am -> '0 0 9 * * ? *'; every 15min -> '0 */15 * * * ? *'; every Monday 9am -> '0 0 9 ? * MON *'.
+
 [CRITICAL: Cron Expression Limits] Standard cron's */X means 'trigger when the field value is divisible by X',
 NOT 'every X units'. Uniform intervals only work when the cycle unit is divisible by X. Field limits:
-- Minute(0-59): */X only works for X dividing 60: 1/2/3/4/5/6/10/12/15/20/30.
+- Second/Minute(0-59): */X only works for X dividing 60: 1/2/3/4/5/6/10/12/15/20/30.
   Example: */40 triggers at minute 0 and 40 each hour (alternating 40min-20min gaps), NOT every 40 minutes.
   When user requests 'every 40 minutes', MUST inform user of this limitation first
   and let user confirm whether to accept uneven intervals, or suggest intervals that divide 60.
@@ -575,7 +613,7 @@ NOT 'every X units'. Uniform intervals only work when the cycle unit is divisibl
   Example: */5 triggers at hours 0/5/10/15/20 (alternating 5h-4h gaps), NOT every 5 hours.
 - Day(1-31): */X is unreliable due to varying month lengths (28/29/30/31 days).
 - Month(1-12): */X only works for X dividing 12: 1/2/3/4/6.
-- Weekday(0-6): */X only works for X dividing 7: 1/7.
+- Dow(1-7): */X only works for X dividing 7: 1/7. 1=SUN, 7=SAT.
 
 When handling 'every X minutes/hours/days' requests, always check if X divides the cycle unit.
 If not, MUST inform user and let user confirm before creating.
@@ -649,15 +687,20 @@ LEGACY_FIELD_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
     },
     "cron_expr": {
         "cn": (
-            "Cron表达式。*/X仅当周期能被X整除时间隔均匀。"
-            "分钟仅支持X整除60(1/2/3/4/5/6/10/12/15/20/30)；"
-            "小时仅支持X整除24(1/2/3/4/6/8/12)；日不可靠；月仅支持X整除12(1/2/3/4/6)；周仅支持X整除7(1/7)。"
+            "Cron表达式(Quartz格式)。7段式：秒 分 时 日 月 周 年。"
+            "日和周：不能同时指定具体值，其中一个用?。"
+            "年份：*跨年周期，固定年份只在该年执行。"
+            "一次性：所有字段固定值，如'0 0 17 28 3 ? 2026'。"
+            "例：每天9点'0 0 9 * * ? *'；每15分钟'0 */15 * * * ? *'。"
             "详见工具描述。"
         ),
         "en": (
-            "Cron expression. */X only yields uniform intervals when cycle divisible by X. "
-            "Minute: X must divide 60; Hour: X must divide 24; Day unreliable; "
-            "Month: X must divide 12; Weekday: X must divide 7. See tool description."
+            "Cron expression (Quartz format). 7-field: second minute hour day month dow year. "
+            "Day/dow: cannot both be specific; use '?' for one. "
+            "Year: '*' for recurring, fixed year limits to that year. "
+            "One-shot: all fields fixed, e.g. '0 0 17 28 3 ? 2026'. "
+            "Examples: daily 9am '0 0 9 * * ? *'; every 15min '0 */15 * * * ? *'. "
+            "See tool description."
         ),
     },
     "timezone": {
@@ -677,8 +720,8 @@ LEGACY_FIELD_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
         "en": "Task content sent to assistant at scheduled time. Do NOT include time/frequency info",
     },
     "wake_offset_seconds": {
-        "cn": "提前多少秒执行，默认 300",
-        "en": "Wake offset in seconds, default 300",
+        "cn": "提前多少秒执行，默认 60。若用户未指定，则默认使用 60 秒。",
+        "en": "Wake offset in seconds, default 60. If user does not specify, use 60 seconds by default.",
     },
 }
 
@@ -741,7 +784,7 @@ def get_cron_create_job_input_params(language: str = "cn") -> Dict[str, Any]:
             "wake_offset_seconds": {
                 "type": "integer",
                 "description": _legacy_desc("wake_offset_seconds", language),
-                "default": 300,
+                "default": 60,
             },
         },
         "required": ["name", "cron_expr", "timezone", "description"],
