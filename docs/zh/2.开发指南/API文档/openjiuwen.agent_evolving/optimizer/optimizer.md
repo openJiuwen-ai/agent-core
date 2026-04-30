@@ -129,3 +129,9 @@ class InstructionOptimizer(
 * **model_client_config**(ModelClientConfig)：LLM 客户端配置。
 
 继承自 LLMCallOptimizerBase，targets 默认即 system_prompt、user_prompt；_backward 为每个绑定算子生成文本梯度并写入对应 TextualParameter；_step 根据梯度生成优化后的 system/user 提示词并保持占位符一致，返回 (operator_id, target) -> 新内容的 Updates。
+
+---
+
+## 团队技能优化器
+
+详见 [team_skill_optimizer](team_skill_optimizer.md)。

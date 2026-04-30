@@ -36,6 +36,8 @@ class DeepAgentRail(AgentRail): ...
 | `ContextEngineeringRail` | 上下文工程护栏，在模型调用前动态调整上下文窗口 |
 | `HeartbeatRail` | 心跳护栏，周期性写入 HEARTBEAT.md 状态文件 |
 | `ProgressiveToolRail` | 渐进式工具护栏，根据需要动态暴露/隐藏工具，控制可见工具数量 |
+| `TeamSkillCreateRail` | 团队技能创建护栏，自动检测多 Agent 协作模式并建议创建团队技能 |
+| `TeamSkillRail` | 团队技能演进护栏，支持轨迹分析、用户请求演进、PATCH 生成和审批 |
 
 ---
 

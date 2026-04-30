@@ -59,3 +59,16 @@ AgentTeams is a Leader-Teammate collaboration framework that completes complex t
 # Related Documentation
 
 - [AgentTeams Guide](./AgentTeams.md)
+- [Team Skill Evolution](./Team Skill Evolution.md)
+
+---
+
+# Team Skill Evolution
+
+Team Skill Evolution is an extension of AgentTeams that extracts reusable collaboration patterns from multi-agent execution trajectories:
+
+- **Auto Creation**: `TeamSkillCreateRail` detects collaboration patterns and suggests team skill creation
+- **Online Evolution**: `TeamSkillRail` supports trajectory analysis, user-requested evolution, PATCH generation and approval
+- **Experience Management**: Experience scoring, simplify, and rebuild mechanisms ensure continuous optimization
+
+See [Team Skill Evolution](./Team Skill Evolution.md) for details.
