@@ -41,10 +41,6 @@ from openjiuwen.core.context_engine.processor.compressor.full_compact_processor 
     FullCompactProcessor,
     FullCompactProcessorConfig,
 )
-from openjiuwen.core.context_engine.processor.multimodal.image_reference_processor import (
-    ImageReferenceProcessor,
-    ImageReferenceProcessorConfig,
-)
 
 # context base classes
 _CORE_CLASSES = [
@@ -88,9 +84,6 @@ _PROCESSORS_CLASSES = [
     # full compact processor
     "FullCompactProcessor",
     "FullCompactProcessorConfig",
-    # multimodal image references
-    "ImageReferenceProcessor",
-    "ImageReferenceProcessorConfig",
 ]
 
 

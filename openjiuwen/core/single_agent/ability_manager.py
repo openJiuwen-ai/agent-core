@@ -82,6 +82,20 @@ class AbilityManager:
         self._mcp_servers: Dict[str, McpServerConfig] = {}
         self._context_engine = None
 
+    @staticmethod
+    def _build_tool_message_content(result: Any) -> str:
+        data = getattr(result, "data", None)
+        error = getattr(result, "error", None)
+        success = getattr(result, "success", None)
+
+        if isinstance(data, dict) and "content" in data:
+            return str(data.get("content") or "")
+
+        if success is False and error:
+            return str(error)
+
+        return str(result)
+
     def set_context_engine(self, context_engine) -> None:
         self._context_engine = context_engine
 
@@ -792,7 +806,7 @@ class AbilityManager:
                 ) from e
 
         # Build ToolMessage for successful execution.
-        content = str(result)
+        content = self._build_tool_message_content(result)
         tool_message = ToolMessage(
             content=content,
             tool_call_id=tool_call.id
