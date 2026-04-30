@@ -11,7 +11,7 @@ import asyncio
 import uuid
 from typing import TYPE_CHECKING, Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import multi_agent_logger as logger
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -34,7 +34,10 @@ class MessageBusConfig(BaseModel):
         team_id: Team ID for topic isolation
     """
     max_queue_size: int = 1000
-    process_timeout: Optional[float] = 100000
+    process_timeout: Optional[float] = Field(
+        default=1800.0,
+        description="Message processing timeout in seconds (default: 1800s, enough for nested multi-agent LLM chains)",
+    )
     team_id: Optional[str] = None
 
 
