@@ -561,6 +561,20 @@ class _RunnerImpl:
         """
         await CheckpointerFactory.get_checkpointer().release(session_id)
 
+    async def release_agent_team(self, session_id: str) -> None:
+        """
+        Release resources for an agent team session, including dynamic tables.
+
+        This method cleans up both the checkpointer state and the per-session
+        dynamic tables (tasks, messages, etc.) used by agent teams.
+
+        Args:
+            session_id: ID of the agent team session to clean up
+        """
+        # Clean up dynamic tables BEFORE releasing checkpoint
+        await self._get_team_runtime_manager().release_session(session_id)
+        await CheckpointerFactory.get_checkpointer().release(session_id)
+
     async def interact_agent_team(
         self,
         user_input: str,
@@ -592,19 +606,6 @@ class _RunnerImpl:
     ) -> bool:
         """Delete a team and release all supplied sessions."""
         return await self._get_team_runtime_manager().delete_team(team_name=team_name, session_ids=session_ids)
-
-    async def pause(self, *, team_name: Optional[str] = None, session_id: Optional[str] = None) -> bool:
-        """Backward-compatible alias for pause_agent_team()."""
-        return await self.pause_agent_team(team_name=team_name, session_id=session_id)
-
-    async def delete_team(
-        self,
-        *,
-        team_name: str,
-        session_ids: list[str],
-    ) -> bool:
-        """Backward-compatible alias for delete_agent_team()."""
-        return await self.delete_agent_team(team_name=team_name, session_ids=session_ids)
 
     @classmethod
     def _is_called_by_agent(cls, session: AgentSession) -> bool:
@@ -1190,6 +1191,19 @@ class Runner:
         await GLOBAL_RUNNER.release(session_id)
 
     @classmethod
+    async def release_agent_team(cls, session_id: str) -> None:
+        """
+        Release resources for an agent team session, including dynamic tables.
+
+        This method cleans up both the checkpointer state and the per-session
+        dynamic tables (tasks, messages, etc.) used by agent teams.
+
+        Args:
+            session_id: ID of the agent team session to clean up
+        """
+        await GLOBAL_RUNNER.release_agent_team(session_id)
+
+    @classmethod
     async def interact_agent_team(
         cls,
         user_input: str,
@@ -1222,24 +1236,4 @@ class Runner:
         session_ids: list[str],
     ) -> bool:
         """Delete a team and release all supplied sessions."""
-        return await GLOBAL_RUNNER.delete_agent_team(team_name=team_name, session_ids=session_ids)
-
-    @classmethod
-    async def pause(
-        cls,
-        *,
-        team_name: Optional[str] = None,
-        session_id: Optional[str] = None,
-    ) -> bool:
-        """Backward-compatible alias for pause_agent_team()."""
-        return await GLOBAL_RUNNER.pause_agent_team(team_name=team_name, session_id=session_id)
-
-    @classmethod
-    async def delete_team(
-        cls,
-        *,
-        team_name: str,
-        session_ids: list[str],
-    ) -> bool:
-        """Backward-compatible alias for delete_agent_team()."""
         return await GLOBAL_RUNNER.delete_agent_team(team_name=team_name, session_ids=session_ids)

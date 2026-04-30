@@ -376,13 +376,14 @@ async def test_runner_interact_pause_and_delete_agent_team_route_through_team_ru
     spec = TeamAgentSpec.model_construct(team_name="delete_team", agents={})
     agent = FakeTeamAgent("delete_team", stream_label="team.chunk")
 
-    fake_database = AsyncMock()
-    fake_database.delete_team.return_value = True
+    fake_db = AsyncMock()
+    fake_db.initialize = AsyncMock()
+    fake_db.drop_session_tables_by_id = AsyncMock(return_value=["team_task_xxx"])
+    fake_db.team = AsyncMock()
+    fake_db.team.delete_team = AsyncMock(return_value=True)
 
-    with patch.object(TeamAgentSpec, "build", return_value=agent), patch(
-        "openjiuwen.agent_teams.runtime_manager.TeamDatabase",
-        return_value=fake_database,
-    ):
+    with patch.object(TeamAgentSpec, "build", return_value=agent), \
+         patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db", return_value=fake_db):
         async for _ in Runner.run_agent_team_streaming(
             agent_team=spec,
             inputs={"query": "hello"},
@@ -401,9 +402,9 @@ async def test_runner_interact_pause_and_delete_agent_team_route_through_team_ru
         assert agent.pause_calls == 1
 
         assert await Runner.delete_agent_team(team_name="delete_team", session_ids=[session_id]) is True
-        fake_database.initialize.assert_awaited_once()
-        fake_database.delete_team.assert_awaited_once_with("delete_team")
-        fake_database.close.assert_awaited_once()
+        fake_db.initialize.assert_awaited_once()
+        fake_db.drop_session_tables_by_id.assert_awaited_once_with(session_id)
+        fake_db.team.delete_team.assert_awaited_once_with("delete_team")
 
     assert await isolated_checkpointer.session_exists(session_id) is False
 
@@ -614,3 +615,222 @@ async def test_team_session_forwards_child_stream_output_with_source_tags(isolat
     )
 
     await isolated_checkpointer.release(session_id)
+
+
+# ---------------------------------------------------------------------------
+# TeamRuntimeManager release_session tests
+# ---------------------------------------------------------------------------
+
+
+class TestTeamRuntimeManagerReleaseSession:
+    """Test TeamRuntimeManager.release_session."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_release_session_drops_tables_for_inactive_session(self, isolated_checkpointer):
+        """release_session should drop dynamic tables for a non-active session."""
+        from openjiuwen.agent_teams.runtime_manager import TeamRuntimeManager
+        from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
+
+        manager = TeamRuntimeManager()
+        session_id = f"release_inactive_{uuid.uuid4().hex}"
+
+        # Create a session with db_config in context
+        team_session = create_agent_team_session(session_id=session_id, team_id="release_team")
+        db_config = DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:")
+        await team_session.pre_run()
+        team_session.update_state({
+            "team_name": "release_team",
+            "context": {
+                "role": "leader",
+                "member_name": "leader",
+                "db_config": db_config.model_dump(),
+            },
+        })
+        await team_session.post_run()
+
+        # Mock get_shared_db and drop_session_tables_by_id
+        fake_db = AsyncMock()
+        fake_db.initialize = AsyncMock()
+        fake_db.drop_session_tables_by_id = AsyncMock(return_value=["team_task_xxx"])
+
+        with patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db", return_value=fake_db):
+            await manager.release_session(session_id)
+
+        fake_db.initialize.assert_awaited_once()
+        fake_db.drop_session_tables_by_id.assert_awaited_once_with(session_id)
+
+        # Active session should remain None (no active session was set)
+        assert manager.active_session_id is None
+
+        await isolated_checkpointer.release(session_id)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_release_session_stops_active_session_coordination(self, isolated_checkpointer):
+        """release_session should stop coordination if session is currently active."""
+        from openjiuwen.agent_teams.runtime_manager import TeamRuntimeManager
+        from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
+
+        manager = TeamRuntimeManager()
+        session_id = f"release_active_{uuid.uuid4().hex}"
+        team_name = "active_release_team"
+
+        # Set up an active agent/session
+        fake_agent = FakeTeamAgent(team_name, stream_label="team.chunk")
+        manager._active_team_name = team_name
+        manager._active_session_id = session_id
+        manager._active_agent = fake_agent
+
+        # Create a session with db_config in context
+        team_session = create_agent_team_session(session_id=session_id, team_id=team_name)
+        db_config = DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:")
+        await team_session.pre_run()
+        team_session.update_state({
+            "team_name": team_name,
+            "context": {
+                "role": "leader",
+                "member_name": "leader",
+                "db_config": db_config.model_dump(),
+            },
+        })
+        await team_session.post_run()
+
+        # Mock get_shared_db
+        fake_db = AsyncMock()
+        fake_db.initialize = AsyncMock()
+        fake_db.drop_session_tables_by_id = AsyncMock(return_value=["team_task_xxx"])
+
+        with patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db", return_value=fake_db):
+            await manager.release_session(session_id)
+
+        # Should have called stop_coordination on the agent
+        assert fake_agent.stop_calls == 1
+
+        # Active pointers should be cleared
+        assert manager.active_session_id is None
+        assert manager.active_team_name is None
+        assert manager.active_agent is None
+
+        await isolated_checkpointer.release(session_id)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_release_session_empty_session_id_returns_early(self):
+        """release_session should return early for empty session_id."""
+        from openjiuwen.agent_teams.runtime_manager import TeamRuntimeManager
+
+        manager = TeamRuntimeManager()
+        # Should not raise or do anything
+        await manager.release_session("")
+        await manager.release_session(None)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_release_session_handles_missing_context(self, isolated_checkpointer):
+        """release_session should use default db_config if context is missing."""
+        from openjiuwen.agent_teams.runtime_manager import TeamRuntimeManager
+
+        manager = TeamRuntimeManager()
+        session_id = f"release_no_context_{uuid.uuid4().hex}"
+
+        # Create a session without context
+        team_session = create_agent_team_session(session_id=session_id, team_id="no_context_team")
+        await team_session.pre_run()
+        team_session.update_state({"team_name": "no_context_team"})  # No context
+        await team_session.post_run()
+
+        # Mock get_shared_db
+        fake_db = AsyncMock()
+        fake_db.initialize = AsyncMock()
+        fake_db.drop_session_tables_by_id = AsyncMock(return_value=[])
+
+        with patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db", return_value=fake_db):
+            await manager.release_session(session_id)
+
+        # Should still have called drop_session_tables_by_id with default config
+        fake_db.drop_session_tables_by_id.assert_awaited_once_with(session_id)
+
+        await isolated_checkpointer.release(session_id)
+
+
+class TestTeamRuntimeManagerDeleteTeam:
+    """Test TeamRuntimeManager.delete_team db_config resolution."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_delete_team_fetches_db_config_from_session(self, isolated_checkpointer):
+        """delete_team should fetch db_config from session state."""
+        from openjiuwen.agent_teams.runtime_manager import TeamRuntimeManager
+        from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
+
+        manager = TeamRuntimeManager()
+        session_id = f"delete_team_config_{uuid.uuid4().hex}"
+        team_name = "delete_config_team"
+
+        # Create a session with db_config in context
+        team_session = create_agent_team_session(session_id=session_id, team_id=team_name)
+        db_config = DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string="delete.db")
+        await team_session.pre_run()
+        team_session.update_state({
+            "team_name": team_name,
+            "context": {
+                "role": "leader",
+                "member_name": "leader",
+                "db_config": db_config.model_dump(),
+            },
+        })
+        await team_session.post_run()
+
+        # Mock get_shared_db
+        fake_db = AsyncMock()
+        fake_db.initialize = AsyncMock()
+        fake_db.drop_session_tables_by_id = AsyncMock(return_value=["team_task_xxx"])
+        fake_db.team = AsyncMock()
+        fake_db.team.delete_team = AsyncMock(return_value=True)
+
+        with patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db", return_value=fake_db):
+            result = await manager.delete_team(team_name, [session_id])
+
+        assert result is True
+        fake_db.initialize.assert_awaited_once()
+        fake_db.drop_session_tables_by_id.assert_awaited_once_with(session_id)
+        fake_db.team.delete_team.assert_awaited_once_with(team_name)
+
+        await isolated_checkpointer.release(session_id)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_delete_team_stops_active_runtime(self):
+        """delete_team should stop active runtime if team matches."""
+        from openjiuwen.agent_teams.runtime_manager import TeamRuntimeManager
+
+        manager = TeamRuntimeManager()
+        team_name = "delete_active_team"
+        session_id = f"delete_active_{uuid.uuid4().hex}"
+
+        # Set up an active agent
+        fake_agent = FakeTeamAgent(team_name, stream_label="team.chunk")
+        manager._active_team_name = team_name
+        manager._active_session_id = session_id
+        manager._active_agent = fake_agent
+
+        # Mock get_shared_db and Checkpointer
+        fake_db = AsyncMock()
+        fake_db.initialize = AsyncMock()
+        fake_db.drop_session_tables_by_id = AsyncMock(return_value=[])
+        fake_db.team = AsyncMock()
+        fake_db.team.delete_team = AsyncMock(return_value=True)
+
+        fake_checkpointer = AsyncMock()
+        fake_checkpointer.release = AsyncMock()
+
+        with patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db", return_value=fake_db), \
+             patch("openjiuwen.agent_teams.runtime_manager.CheckpointerFactory.get_checkpointer", return_value=fake_checkpointer):
+            result = await manager.delete_team(team_name, [session_id])
+
+        assert result is True
+        assert fake_agent.stop_calls == 1
+        assert manager.active_agent is None
+        assert manager.active_team_name is None
+        assert manager.active_session_id is None

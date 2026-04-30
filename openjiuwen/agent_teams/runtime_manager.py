@@ -9,10 +9,7 @@ from typing import (
     TYPE_CHECKING,
 )
 
-from openjiuwen.agent_teams.tools.database import (
-    DatabaseConfig,
-    TeamDatabase,
-)
+from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session.agent_team import (
     Session as AgentTeamSession,
@@ -194,29 +191,88 @@ class TeamRuntimeManager:
         self,
         team_name: str,
         session_ids: list[str],
-        *,
-        db_config: Optional[DatabaseConfig] = None,
     ) -> bool:
         """Delete team runtime state, checkpoints, and persisted team metadata."""
         if self._active_team_name == team_name:
             await self._deactivate_active_runtime()
             self._clear_active()
 
+        # Get db_config from session state BEFORE releasing checkpoint
+        db_config = None
+        if session_ids:
+            db_config = await self._get_db_config_from_session(session_ids[0])
+
+        # Get shared db and drop dynamic tables for each session
+        from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
+
+        db = get_shared_db(db_config or DatabaseConfig())
+        await db.initialize()
+        for session_id in session_ids:
+            await db.drop_session_tables_by_id(session_id)
+
+        # Release checkpoints
         checkpointer = CheckpointerFactory.get_checkpointer()
         for session_id in session_ids:
             await checkpointer.release(session_id)
 
-        database = TeamDatabase(db_config or DatabaseConfig())
-        await database.initialize()
-        try:
-            return await database.delete_team(team_name)
-        finally:
-            await database.close()
+        # Delete team row from static table
+        return await db.team.delete_team(team_name)
 
-    def clear_if_matches(self, *, team_name: str, session_id: str) -> None:
-        """Drop active pointers when the current runtime is no longer valid."""
-        if self._active_team_name == team_name and self._active_session_id == session_id:
+    @staticmethod
+    async def _get_db_config_from_session(session_id: str) -> Optional[DatabaseConfig]:
+        """Extract db_config from session state stored in checkpointer."""
+        if not session_id:
+            return None
+
+        session = create_agent_team_session(session_id=session_id)
+        try:
+            await session.pre_run()
+        except Exception as e:
+            team_logger.warning("Failed to restore session state for %s: %s", session_id, e)
+            return None
+
+        state = session.get_state()
+        context_data = state.get("context") if isinstance(state, dict) else None
+        if context_data is None:
+            return None
+
+        from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
+        try:
+            context = TeamRuntimeContext.model_validate(context_data)
+            return context.db_config
+        except Exception as e:
+            team_logger.warning("Failed to parse context for session %s: %s", session_id, e)
+            return None
+
+    async def release_session(self, session_id: str) -> None:
+        """Release per-session dynamic tables for an agent team session.
+
+        If the session is currently active, stops the coordination loop first.
+        Then restores the session state from checkpointer to obtain the db_config,
+        and drops the dynamic tables (tasks, messages, etc.) for that session.
+
+        Raises on failure to ensure caller does not proceed with checkpoint release.
+
+        Args:
+            session_id: Session identifier to clean up.
+        """
+        if not session_id:
+            return
+
+        # If releasing the currently active session, stop coordination and clear
+        if self._active_session_id == session_id:
+            await self._deactivate_active_runtime()
             self._clear_active()
+
+        # Get db_config from session state
+        db_config = await self._get_db_config_from_session(session_id) or DatabaseConfig()
+
+        # Get shared database instance and drop session tables
+        from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
+
+        db = get_shared_db(db_config)
+        await db.initialize()
+        await db.drop_session_tables_by_id(session_id)
 
     @staticmethod
     def _build_session(
@@ -229,9 +285,9 @@ class TeamRuntimeManager:
             return create_agent_team_session(session_id=session, team_id=spec.team_name)
         return create_agent_team_session(team_id=spec.team_name)
 
+    @staticmethod
     async def _resolve_session_checkpoint(
-        self,
-        session: AgentTeamSession,
+            session: AgentTeamSession,
         team_name: str,
     ) -> TeamSessionResolution:
         checkpointer = CheckpointerFactory.get_checkpointer()

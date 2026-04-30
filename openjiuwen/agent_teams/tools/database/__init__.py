@@ -23,6 +23,7 @@ from openjiuwen.agent_teams.tools.database.engine import (
     cleanup_all_runtime_state as _cleanup_all_runtime_state,
     create_cur_session_tables as _create_cur_session_tables,
     drop_cur_session_tables as _drop_cur_session_tables,
+    drop_session_tables_by_id as _drop_session_tables_by_id,
     get_current_time as _get_current_time,
     initialize_engine as _initialize_engine,
 )
@@ -106,6 +107,23 @@ class TeamDatabase:
         if self.engine is None:
             return [], []
         return await _cleanup_all_runtime_state(self.engine)
+
+    async def drop_session_tables_by_id(self, session_id: str) -> list[str]:
+        """Drop dynamic tables for a specific session without active context.
+
+        Used by Runner.release(session_id) to clean up per-session tables
+        after the agent has finished executing.
+
+        Args:
+            session_id: Session identifier to clean up.
+
+        Returns:
+            List of dropped table names.
+        """
+        await self._ensure_initialized()
+        if self.engine is None:
+            return []
+        return await _drop_session_tables_by_id(self.engine, session_id)
 
     async def force_delete_team_session(self, team_name: str) -> bool:
         """Delete a team's persisted row and drop current session tables.
