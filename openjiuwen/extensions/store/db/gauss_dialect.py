@@ -3,6 +3,7 @@
 
 import datetime
 import logging
+import re
 from typing import TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
@@ -24,10 +25,25 @@ def _patch_gaussdb_driver(driver_module):
 
 
 try:
-    from sqlalchemy import String
+    from sqlalchemy import String, event
+    from sqlalchemy.engine import Engine
     from sqlalchemy.dialects.postgresql.asyncpg import PGDialect_asyncpg, AsyncAdapt_asyncpg_dbapi
     from sqlalchemy.dialects.postgresql.base import PGCompiler
     from sqlalchemy.dialects import registry
+
+    # 修复 pg_type 子查询为 NULL
+    @event.listens_for(Engine, "before_cursor_execute", retval=True)
+    def _patch_gaussdb_reflection_sql(*args):
+        conn, _cursor, statement, parameters, _context, _executemany = args
+        if getattr(conn.dialect, "name", "") == "gaussdb":
+            if "pg_type.typcollation" in statement:
+                statement = re.sub(
+                    r"\(\s*SELECT\s+[^)]*?pg_type\.typcollation[^)]*?\)",
+                    "NULL",
+                    statement,
+                    flags=re.IGNORECASE | re.DOTALL
+                )
+        return statement, parameters
 
     class GaussCompiler(PGCompiler):
         def for_update_clause(self, select, **kw):
