@@ -30,10 +30,8 @@ from openjiuwen.core.foundation.llm import (
 )
 from openjiuwen.core.foundation.tool import ToolInfo
 
-
 _COMPRESS_LEVEL = "compress_level"
 ROUND_LEVEL_FALLBACK_MARKER = "[ROUND_LEVEL_MEMORY_BLOCK]"
-DEFAULT_COMPRESSION_CALL_MAX_TOKENS = 32000
 
 DEFAULT_ROUND_COMPRESSION_PROMPT = """\
 You are a Fallback Context Compression Expert for long-running ReAct agent sessions.
@@ -93,45 +91,107 @@ class _CompressTarget:
 
 
 class RoundLevelCompressorConfig(BaseModel):
-    rounds_threshold: int = Field(default=10, gt=1)
-    tokens_threshold: int = Field(default=10000, gt=0)
-    trigger_total_tokens: Optional[int] = Field(default=None, gt=0)
-    target_total_tokens: Optional[int] = Field(default=None, gt=0)
-    compression_call_max_tokens: int = Field(default=DEFAULT_COMPRESSION_CALL_MAX_TOKENS, gt=0)
+    """
+    Configuration for RoundLevelCompressor.
 
-    keep_last_round: bool = Field(default=True)
-    keep_recent_messages: int = Field(default=0, ge=0)
-    messages_to_keep: Optional[int] = Field(default=None, gt=0)
+    Frequently adjusted options are listed first. Advanced phase-budget, marker,
+    truncation, and writeback knobs remain top-level but are grouped below.
+    """
 
-    first_pass_target_tokens: int = Field(default=1800, gt=0)
-    second_pass_target_tokens: int = Field(default=900, gt=0)
-    third_pass_target_tokens: int = Field(default=600, gt=0)
+    trigger_total_tokens: int = Field(
+        default=230000,
+        gt=0,
+        description="Trigger compression when the estimated full context window exceeds this token count.",
+    )
+    """Primary context-window size that starts round-level compression."""
 
-    truncate_head_ratio: float = Field(default=0.2, gt=0.0, lt=1.0)
-    truncated_marker: str = Field(default=TRUNCATED_MARKER)
-    compression_marker: str = Field(default=ROUND_LEVEL_FALLBACK_MARKER)
-    offload_writeback_enabled: bool = Field(default=True)
+    target_total_tokens: int = Field(
+        default=160000,
+        gt=0,
+        description="Target full context-window size after compression completes.",
+    )
+    """Desired maximum context-window size after compression."""
 
-    model: Optional[ModelRequestConfig] = None
-    model_client: Optional[ModelClientConfig] = None
+    keep_recent_messages: int = Field(
+        default=0,
+        ge=0,
+        description="Number of newest messages kept verbatim during add-message compression.",
+    )
+    """Newest raw messages protected from compression for short-term continuity."""
+
+    model: Optional[ModelRequestConfig] = Field(
+        default=None,
+        description="Model request configuration used by the internal compression model.",
+    )
+    """Controls model request options for round-level compression calls."""
+
+    model_client: Optional[ModelClientConfig] = Field(
+        default=None,
+        description="Client configuration for the internal compression model.",
+    )
+    """Selects/configures the model client used by the compressor."""
+
+    # ------------------------------------------------------------------
+    # Advanced compression settings
+    # ------------------------------------------------------------------
+    compression_call_max_tokens: int = Field(
+        default=250000,
+        gt=0,
+        description="Maximum token budget for a single internal compression-model request.",
+    )
+    """Maximum token budget for each LLM compression call."""
+
+    first_pass_target_tokens: int = Field(
+        default=30000,
+        gt=0,
+        description="Target summary size used by the initial round-level compression pass.",
+    )
+    """Target summary tokens for the first, least aggressive compression pass."""
+
+    second_pass_target_tokens: int = Field(
+        default=20000,
+        gt=0,
+        description="Target summary size used by the first aggressive fallback pass.",
+    )
+    """Target summary tokens for the first aggressive fallback pass."""
+
+    third_pass_target_tokens: int = Field(
+        default=10000,
+        gt=0,
+        description="Target summary size used by the final aggressive full-context pass.",
+    )
+    """Target summary tokens for the final aggressive fallback pass."""
+
+    # Advanced truncation and marker settings.
+    truncate_head_ratio: float = Field(
+        default=0.2,
+        gt=0.0,
+        lt=1.0,
+        description="Fraction of retained truncation text taken from the original head.",
+    )
+    """Head/tail split used when hard truncation is the last available fallback."""
+
+    truncated_marker: str = Field(
+        default=TRUNCATED_MARKER,
+        description="Marker inserted where omitted content was removed during hard truncation.",
+    )
+    """Marker text inserted into hard-truncated fallback memory."""
+
+    compression_marker: str = Field(
+        default=ROUND_LEVEL_FALLBACK_MARKER,
+        description="Prefix marker used to identify round-level historical memory blocks.",
+    )
+    """Stable marker that identifies memory blocks produced by this compressor."""
 
 
 @ContextEngine.register_processor()
 class RoundLevelCompressor(ContextProcessor):
     def __init__(self, config: RoundLevelCompressorConfig):
         super().__init__(config)
-        self._target_total_tokens = config.target_total_tokens or 160000
-        if config.trigger_total_tokens is not None:
-            self._trigger_total_tokens = config.trigger_total_tokens
-        elif config.target_total_tokens is None and config.tokens_threshold != 10000:
-            self._trigger_total_tokens = config.tokens_threshold
-        else:
-            self._trigger_total_tokens = 230000
-        if self._trigger_total_tokens < self._target_total_tokens:
-            raise ValueError("trigger_total_tokens must be greater than or equal to target_total_tokens")
-
+        self._target_total_tokens = config.target_total_tokens
+        self._trigger_total_tokens = config.trigger_total_tokens
         self._compression_call_max_tokens = config.compression_call_max_tokens
-        self._keep_recent_messages = config.keep_recent_messages or (config.messages_to_keep or 0)
+        self._keep_recent_messages = config.keep_recent_messages
         self._first_prompt = DEFAULT_ROUND_COMPRESSION_PROMPT
         self._aggressive_prompt = DEFAULT_AGGRESSIVE_ROUND_COMPRESSION_PROMPT
         self._first_pass_target_tokens = config.first_pass_target_tokens
@@ -140,7 +200,6 @@ class RoundLevelCompressor(ContextProcessor):
         self._truncate_head_ratio = config.truncate_head_ratio
         self._truncated_marker = config.truncated_marker
         self._compression_marker = config.compression_marker
-        self._offload_writeback_enabled = config.offload_writeback_enabled
         self._model: Optional[Model] = None
 
     async def trigger_add_messages(
@@ -171,13 +230,6 @@ class RoundLevelCompressor(ContextProcessor):
     ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
         all_messages = context.get_messages() + messages_to_add
         force = kwargs.get("force", False)
-        if not force and self._count_context_window_tokens(
-            system_messages=kwargs.get("system_messages"),
-            context_messages=all_messages,
-            tools=kwargs.get("tools"),
-            context=context,
-        ) <= self._target_total_tokens:
-            return None, messages_to_add
 
         compressed_messages = await self._compress_until_target(
             context_messages=all_messages,
@@ -891,35 +943,10 @@ class RoundLevelCompressor(ContextProcessor):
         context: ModelContext,
     ) -> Optional[BaseMessage]:
         content = self._wrap_memory_block(summary, target.scope)
-        message = await self._build_writeback_message(
-            content=content,
-            source_messages=target.messages,
-            context=context,
-        )
-        if message is None:
-            return None
+        message = UserMessage(content=content)
         if hasattr(message, "metadata"):
             message.metadata[_COMPRESS_LEVEL] = target.next_level
         return message
-
-    async def _build_writeback_message(
-        self,
-        *,
-        content: str,
-        source_messages: List[BaseMessage],
-        context: ModelContext,
-    ) -> Optional[BaseMessage]:
-        if not self._offload_writeback_enabled:
-            return UserMessage(content=content)
-        message = await self.offload_messages(
-            role="user",
-            content=content,
-            messages=source_messages,
-            context=context,
-        )
-        if message is not None:
-            return message
-        return UserMessage(content=content)
 
     def _wrap_memory_block(self, summary: str, scope: str) -> str:
         return (

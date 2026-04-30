@@ -1,6 +1,8 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+from __future__ import annotations
+
 from unittest.mock import MagicMock, AsyncMock, patch
 from typing import List
 
@@ -9,7 +11,7 @@ import pytest
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.processor.compressor.current_round_compressor import (
     CurrentRoundCompressor,
-    CurrentRoundCompressorConfig,
+    CurrentRoundCompressorConfig as _CurrentRoundCompressorConfig,
 )
 from openjiuwen.core.context_engine.schema.messages import OffloadUserMessage, OffloadAssistantMessage, \
     OffloadToolMessage
@@ -18,6 +20,8 @@ from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     ToolMessage,
     ToolCall,
+    ModelClientConfig,
+    ModelRequestConfig,
 )
 from openjiuwen.core.session.agent import Session
 from tests.unit_tests.core.context_engine._stream_state_helpers import (
@@ -68,6 +72,19 @@ def create_length_token_counter():
 offload_type = (OffloadUserMessage, OffloadAssistantMessage, OffloadToolMessage)
 
 
+def CurrentRoundCompressorConfig(**kwargs):
+    return _CurrentRoundCompressorConfig(
+        model=ModelRequestConfig(model="test-model"),
+        model_client=ModelClientConfig(
+            client_provider="OpenAI",
+            api_key="test-key",
+            api_base="http://test.local",
+            verify_ssl=False,
+        ),
+        **kwargs,
+    )
+
+
 class TestCurrentRoundCompressor:
     """CurrentRoundCompressor unit tests: single message compression scenarios."""
 
@@ -115,9 +132,11 @@ class TestCurrentRoundCompressor:
             await ctx.add_messages(msgs)
 
             result = ctx.get_messages()
-            # After compression, the large tool message should be replaced with OffloadMixin
-            offloaded = [m for m in result if isinstance(m, offload_type)]
-            assert len(offloaded) == 1
+            memory_blocks = [
+                m for m in result
+                if isinstance(m, UserMessage) and "[CURRENT_ROUND_MEMORY_BLOCK]" in str(m.content)
+            ]
+            assert len(memory_blocks) == 1
 
     @pytest.mark.asyncio
     async def test_streams_state_when_current_round_compressor_triggers(self):
@@ -200,9 +219,11 @@ class TestCurrentRoundCompressor:
             await ctx.add_messages(msgs)
 
             result = ctx.get_messages()
-            # Verify compression happened
-            offloaded = [m for m in result if isinstance(m, offload_type)]
-            assert len(offloaded) >= 1
+            memory_blocks = [
+                m for m in result
+                if isinstance(m, UserMessage) and "[CURRENT_ROUND_MEMORY_BLOCK]" in str(m.content)
+            ]
+            assert len(memory_blocks) >= 1
 
     @pytest.mark.asyncio
     async def test_compression_with_multi_assistant_and_tool_messages(self):
@@ -244,9 +265,11 @@ class TestCurrentRoundCompressor:
             await ctx.add_messages(msgs)
 
             result = ctx.get_messages()
-            # Verify compression happened
-            offloaded = [m for m in result if isinstance(m, offload_type)]
-            assert len(offloaded) >= 1
+            memory_blocks = [
+                m for m in result
+                if isinstance(m, UserMessage) and "[CURRENT_ROUND_MEMORY_BLOCK]" in str(m.content)
+            ]
+            assert len(memory_blocks) >= 1
 
 
     @pytest.mark.asyncio
@@ -309,34 +332,8 @@ class TestCurrentRoundCompressor:
             # Model.invoke should NOT be called when last message is UserMessage
             mock_model.invoke.assert_not_called()
 
-    @staticmethod
-    def test_protect_tool_call_boundary_excludes_assistant_with_matching_tail_tool_result():
-        messages = [
-            UserMessage(content="question"),
-            AssistantMessage(content="safe-prefix-1"),
-            AssistantMessage(content="safe-prefix-2"),
-            AssistantMessage(content="", tool_calls=create_tool_call_list(["tc-1"], ["tool_a"])),
-            ToolMessage(content="tool result", tool_call_id="tc-1"),
-        ]
-
-        protected_end_idx = CurrentRoundCompressor._protect_tool_call_boundary(messages, 1, 3)
-
-        assert protected_end_idx == 2
-
-    @staticmethod
-    def test_protect_tool_call_boundary_excludes_trailing_assistant_with_tool_calls_without_tail_tool():
-        messages = [
-            UserMessage(content="question"),
-            AssistantMessage(content="safe-prefix"),
-            AssistantMessage(content="", tool_calls=create_tool_call_list(["tc-1"], ["tool_a"])),
-        ]
-
-        protected_end_idx = CurrentRoundCompressor._protect_tool_call_boundary(messages, 1, 2)
-
-        assert protected_end_idx == 1
-
     @pytest.mark.asyncio
-    async def test_multi_compress_keeps_tool_call_and_tool_result_raw_while_compressing_safe_prefix(self):
+    async def test_multi_compress_replaces_selected_span_with_memory_block(self):
         with patch(
             "openjiuwen.core.context_engine.processor.compressor.current_round_compressor.Model",
             MagicMock(return_value=MagicMock()),
@@ -363,7 +360,7 @@ class TestCurrentRoundCompressor:
         compressor.compress_ = AsyncMock(return_value=None)
         compressor._collect_prior_summary_indices = MagicMock(return_value=[])
 
-        updated_messages = await compressor.multi_compress(
+        updated_messages, modified_indices = await compressor.multi_compress(
             context_messages=context_messages,
             last_user_idx=0,
             end_idx=3,
@@ -377,4 +374,5 @@ class TestCurrentRoundCompressor:
         assert updated_messages[2].tool_calls[0].id == "tc-1"
         assert isinstance(updated_messages[3], ToolMessage)
         assert updated_messages[3].tool_call_id == "tc-1"
+        assert modified_indices == [1, 2]
 

@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.context.session_memory_manager import (
     group_completed_api_rounds as group_completed_api_round_ranges,
 )
@@ -76,7 +77,7 @@ def build_skill_reinjected_content(
             continue
         selected_rounds.append([message.model_copy(deep=True) for message in round_messages])
         seen_round_signatures.add(round_signatures)
-        if len(selected_rounds) >= processor.config.reinject_recent_skills:
+        if len(selected_rounds) >= processor.advanced_config.reinject_recent_skills:
             break
 
     selected_rounds.reverse()
@@ -88,7 +89,7 @@ def build_skill_reinjected_content(
         reinjected_messages.append(
             UserMessage(
                 content=(
-                    f"{processor.config.state_marker}\n[SKILLS]\n{processor.truncate_state_text(serialized_round)}"
+                    f"{processor.state_marker}\n[SKILLS]\n{processor.truncate_state_text(serialized_round)}"
                 )
             )
         )
@@ -353,3 +354,85 @@ def message_to_text(message: BaseMessage) -> str:
         return json.dumps(content, ensure_ascii=False)
     except TypeError:
         return str(content)
+
+
+def is_summary_message(message: BaseMessage, summary_marker: str) -> bool:
+    """Return whether a message is a compressed memory block with the given marker."""
+    return (
+        isinstance(message, UserMessage)
+        and isinstance(message.content, str)
+        and message.content.startswith(summary_marker)
+    )
+
+
+def collect_summary_indices(messages: List[BaseMessage], summary_marker: str) -> List[int]:
+    """Return indices of all compressed summary messages with the given marker."""
+    return [i for i, msg in enumerate(messages) if is_summary_message(msg, summary_marker)]
+
+
+def estimate_content_tokens(content: Any) -> int:
+    """Approximate token count when no token counter is available."""
+    if isinstance(content, str):
+        return len(content) // 3
+    try:
+        return len(json.dumps(content, ensure_ascii=False)) // 3
+    except TypeError:
+        return len(str(content)) // 3
+
+
+def count_messages_tokens(messages: List[BaseMessage], token_counter, processor_type: str = "") -> int:
+    """Count tokens with tokenizer-first strategy and character fallback."""
+    if not messages:
+        return 0
+    if token_counter is not None:
+        try:
+            return token_counter.count_messages(messages)
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            prefix = f"[{processor_type}] " if processor_type else ""
+            logger.warning(f"{prefix}token_counter failed, fallback to char-based estimate: {exc}")
+    return sum(estimate_content_tokens(getattr(message, "content", "")) for message in messages)
+
+
+def find_last_completed_api_round_end_idx(
+        messages: List[BaseMessage],
+        start_idx: int,
+        end_idx: int,
+) -> int:
+    """Return absolute end index for the last complete API round in the selected range."""
+    if end_idx < start_idx:
+        return end_idx
+    candidate_messages = messages[start_idx:end_idx + 1]
+    completed_rounds = group_completed_api_round_ranges(candidate_messages)
+    if not completed_rounds:
+        return start_idx - 1
+    _, completed_end = completed_rounds[-1]
+    return start_idx + completed_end - 1
+
+
+def iter_summary_merge_ranges(
+        messages: List[BaseMessage],
+        summary_marker: str,
+        min_blocks: int,
+) -> List[Tuple[int, int]]:
+    """Return contiguous summary-message ranges eligible for second-stage merge."""
+    ranges: List[Tuple[int, int]] = []
+    start_idx: Optional[int] = None
+    previous_idx: Optional[int] = None
+
+    for idx, message in enumerate(messages):
+        if is_summary_message(message, summary_marker):
+            if start_idx is None:
+                start_idx = idx
+            previous_idx = idx
+            continue
+        if start_idx is not None and previous_idx is not None:
+            if previous_idx - start_idx + 1 >= min_blocks:
+                ranges.append((start_idx, previous_idx))
+            start_idx = None
+            previous_idx = None
+
+    if start_idx is not None and previous_idx is not None:
+        if previous_idx - start_idx + 1 >= min_blocks:
+            ranges.append((start_idx, previous_idx))
+
+    return ranges

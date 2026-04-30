@@ -105,14 +105,13 @@ class TestRoundLevelCompressor:
         assert "modified 2 messages" in states[1].summary
 
     @pytest.mark.asyncio
-    async def test_build_memory_message_offload_falls_back_to_plain_user_message(self):
+    async def test_build_memory_message_returns_plain_user_message(self):
         compressor = _TestableRoundLevelCompressor(
             RoundLevelCompressorConfig(
                 trigger_total_tokens=100,
                 target_total_tokens=50,
             )
         )
-        compressor.offload_messages = AsyncMock(return_value=None)
         context = MagicMock()
         target = _CompressTarget(
             block_id="block_1",
@@ -138,7 +137,6 @@ class TestRoundLevelCompressor:
             RoundLevelCompressorConfig(
                 trigger_total_tokens=100,
                 target_total_tokens=50,
-                offload_writeback_enabled=False,
             )
         )
         compressor.compress_until_target_result = [

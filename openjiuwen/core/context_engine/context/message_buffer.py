@@ -1,5 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import glob
 import os
 from typing import List, Optional, Union, Dict
 
@@ -123,29 +124,37 @@ class OffloadMessageBuffer:
         if self._sys_operation is None:
             return []
         # 重建完整文件路径
-        if self._workspace_dir and self._session_id:
-            offload_path = os.path.join(
-                self._workspace_dir, "context", self._session_id + "_context",
-                "offload", offload_handle + ".json"
-            )
-        else:
-            offload_path = offload_handle
-        try:
-            result = await self._sys_operation.fs().read_file(offload_path)
-            if result.code == 0 and result.data:
-                import json
-                payload = json.loads(result.data.content)
-                messages_data = payload.get("messages", [])
-                messages = []
-                for msg_data in messages_data:
-                    try:
-                        messages.append(BaseMessage.model_validate(msg_data))
-                    except Exception as e:
-                        logger.warning(f"Failed to validate message: {e}")
-                return messages
-        except Exception as e:
-            logger.warning(f"Failed to reload messages from filesystem: {e}")
+        for offload_path in self._filesystem_reload_paths(offload_handle):
+            try:
+                result = await self._sys_operation.fs().read_file(offload_path)
+                if result.code == 0 and result.data:
+                    import json
+                    payload = json.loads(result.data.content)
+                    messages_data = payload.get("messages", [])
+                    messages = []
+                    for msg_data in messages_data:
+                        try:
+                            messages.append(BaseMessage.model_validate(msg_data))
+                        except Exception as e:
+                            logger.warning(f"Failed to validate message: {e}")
+                    return messages
+            except Exception as e:
+                logger.warning(f"Failed to reload messages from filesystem: {e}")
         return []
+
+    def _filesystem_reload_paths(self, offload_handle: str) -> List[str]:
+        """Return candidate filesystem paths for an offload handle."""
+        if not (self._workspace_dir and self._session_id):
+            return [offload_handle]
+
+        offload_dir = os.path.join(
+            self._workspace_dir, "context", self._session_id + "_context", "offload"
+        )
+        exact_path = os.path.join(offload_dir, offload_handle + ".json")
+        paths = [exact_path]
+        prefixed_paths = sorted(glob.glob(os.path.join(offload_dir, f"*_{offload_handle}.json")))
+        paths.extend(path for path in prefixed_paths if path not in paths)
+        return paths
 
     def clear(
             self,
