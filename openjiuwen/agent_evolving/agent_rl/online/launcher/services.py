@@ -13,13 +13,12 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from openjiuwen.agent_evolving.agent_rl.online.launcher.schema import (
+from openjiuwen.agent_evolving.agent_rl.config.online_config import (
     GatewayServiceConfig,
     OnlineRLConfig,
     VLLMServiceConfig,
 )
 from openjiuwen.agent_evolving.agent_rl.online.launcher.workspace import build_trajectory_env_updates
-from openjiuwen.agent_evolving.agent_rl.online.scheduler.ppo_config import resolve_default_ppo_config_path
 
 log = logging.getLogger('online_rl')
 DEFAULT_GATEWAY_APP_FACTORY = 'openjiuwen.agent_evolving.agent_rl.online.gateway.app.proxy:create_app'
@@ -180,6 +179,7 @@ def start_gateway(
     env['JUDGE_MODEL'] = judge_model
     env['MODEL_ID'] = model_id
     env['MODEL_PATH'] = model_path
+    env['GATEWAY_HOST'] = gateway_cfg.host
     env['GATEWAY_PORT'] = str(gateway_cfg.port)
     env['RECORD_DIR'] = gateway_cfg.record_dir
     env['REDIS_URL'] = gateway_cfg.redis_url
@@ -231,7 +231,7 @@ def start_online_training_scheduler(
         notifier=InferenceNotifier(runtime.inference_url),
         nproc_per_node=train_gpu_count,
         training_gpu_ids=cfg.training.gpu_ids,
-        ppo_config_path=cfg.training.ppo_config or str(resolve_default_ppo_config_path()),
+        ppo_config_path=cfg.training.ppo_config,
     )
     scheduler.start()
     return scheduler
@@ -244,15 +244,14 @@ def start_jiuwenclaw(
     trajectory_gateway_url: str,
     model_path: str,
     trajectory_mode: str,
-    trajectory_batch_size: int = 8,
-    app_host: str = '127.0.0.1',
-    ws_port: int = 19000,
-    web_host: str = '127.0.0.1',
-    web_port: int = 5173,
+    trajectory_batch_size: int,
+    app_host: str,
+    ws_port: int,
+    web_host: str,
+    web_port: int,
 ) -> tuple[subprocess.Popen, subprocess.Popen | None]:
     """Start JiuwenClaw app + web frontend (if dist exists)."""
     env = os.environ.copy()
-    env['PYTHONPATH'] = f"{jiuwenclaw_repo}:{env.get('PYTHONPATH', '')}".rstrip(':')
     trajectory_tenant_id = os.getenv('RL_ONLINE_TENANT_ID', '').strip() or os.getenv(
         'WEB_USER_ID', 'local-web-user'
     ).strip() or 'local-web-user'

@@ -580,6 +580,7 @@ class TestP2PAbilityManagerExecuteAgentCall:
     def _make_supervisor_and_mgr(send_return=None):
         sv = MagicMock()
         sv.send = AsyncMock(return_value=send_return or {"out": "ok"})
+        sv.runtime = MagicMock(p2p_timeout=1800.0)
         mgr = P2PAbilityManager(supervisor=sv)
         return sv, mgr
 
@@ -668,6 +669,7 @@ class TestP2PAbilityManagerExecuteAgentCall:
         """When supervisor.send raises, execute() returns (None, error ToolMessage)."""
         sv = MagicMock()
         sv.send = AsyncMock(side_effect=RuntimeError("network error"))
+        sv.runtime = MagicMock(p2p_timeout=1800.0)
         mgr = P2PAbilityManager(supervisor=sv)
         mgr.add(_sub_card("fail_ag"))
         session = MagicMock()
@@ -686,6 +688,7 @@ class TestP2PAbilityManagerExecuteAgentCall:
         """Error ToolMessage carries the tool_call_id from the failed call."""
         sv = MagicMock()
         sv.send = AsyncMock(side_effect=RuntimeError("boom"))
+        sv.runtime = MagicMock(p2p_timeout=1800.0)
         mgr = P2PAbilityManager(supervisor=sv)
         mgr.add(_sub_card("fail2"))
         session = MagicMock()
@@ -717,12 +720,13 @@ class TestP2PAbilityManagerParallelDispatch:
         """All agent tool calls in a batch are dispatched via P2P."""
         dispatched = []
 
-        async def mock_send(message, recipient, session_id=None):
+        async def mock_send(message, recipient, session_id=None, timeout=None):
             dispatched.append(recipient)
             return {"from": recipient}
 
         sv = MagicMock()
         sv.send = mock_send
+        sv.runtime = MagicMock(p2p_timeout=1800.0)
         mgr = P2PAbilityManager(supervisor=sv, max_parallel_sub_agents=5)
         mgr.add(_sub_card("s1"))
         mgr.add(_sub_card("s2"))
@@ -743,7 +747,7 @@ class TestP2PAbilityManagerParallelDispatch:
         """Peak concurrent dispatches never exceed max_parallel_sub_agents."""
         active, peak = 0, 0
 
-        async def mock_send(message, recipient, session_id=None):
+        async def mock_send(message, recipient, session_id=None, timeout=None):
             nonlocal active, peak
             active += 1
             peak = max(peak, active)
@@ -754,6 +758,7 @@ class TestP2PAbilityManagerParallelDispatch:
         limit = 2
         sv = MagicMock()
         sv.send = mock_send
+        sv.runtime = MagicMock(p2p_timeout=1800.0)
         mgr = P2PAbilityManager(supervisor=sv, max_parallel_sub_agents=limit)
         for i in range(5):
             mgr.add(_sub_card(f"ag{i}"))
@@ -770,11 +775,12 @@ class TestP2PAbilityManagerParallelDispatch:
         """Results are returned in the original tool_call order."""
         results_map = {"first": "r1", "second": "r2"}
 
-        async def mock_send(message, recipient, session_id=None):
+        async def mock_send(message, recipient, session_id=None, timeout=None):
             return results_map.get(recipient)
 
         sv = MagicMock()
         sv.send = mock_send
+        sv.runtime = MagicMock(p2p_timeout=1800.0)
         mgr = P2PAbilityManager(supervisor=sv, max_parallel_sub_agents=2)
         mgr.add(_sub_card("first"))
         mgr.add(_sub_card("second"))
@@ -796,6 +802,7 @@ class TestP2PAbilityManagerParallelDispatch:
         """Batch with both AgentCard and regular tool calls executes both paths."""
         sv = MagicMock()
         sv.send = AsyncMock(return_value={"agent": "done"})
+        sv.runtime = MagicMock(p2p_timeout=1800.0)
         mgr = P2PAbilityManager(supervisor=sv)
         mgr.add(_sub_card("sub_m"))
         regular = ("reg_val", ToolMessage(content="reg", tool_call_id="tc_r"))

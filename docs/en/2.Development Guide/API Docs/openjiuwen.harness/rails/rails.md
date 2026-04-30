@@ -22,6 +22,8 @@ Built-in guardrails that hook into the `DeepAgent` lifecycle. Rails are register
 | `TaskPlanningRail` | Generates and maintains a structured task plan during the loop. |
 | `AskUserRail` | Pauses the loop to ask the user a clarifying question (interrupt). |
 | `ConfirmInterruptRail` | Requires user confirmation before executing sensitive operations. |
+| `TeamSkillCreateRail` | Auto-detects multi-agent collaboration patterns and suggests team skill creation. |
+| `TeamSkillRail` | Team skill evolution rail supporting trajectory analysis, user-requested evolution, and PATCH generation/approval. |
 
 ## Rail Lifecycle
 

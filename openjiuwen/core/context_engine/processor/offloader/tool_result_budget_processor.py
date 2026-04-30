@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-import json
+import os
+import uuid
 from typing import Any, Dict, List, Literal, Tuple
 
 from pydantic import BaseModel, Field
@@ -23,15 +24,57 @@ PERSISTED_OUTPUT_CLOSING_TAG = "</persisted-output>"
 
 
 class ToolResultBudgetProcessorConfig(BaseModel):
-    """Per-round budget control for large tool results."""
+    """Per-round budget control for large tool results.
 
-    tokens_threshold: int = Field(default=50000, gt=0)
-    large_message_threshold: int = Field(default=10000, gt=0)
-    trim_size: int = Field(default=3000, gt=0)
-    tool_name_allowlist: list[str] | None = Field(default=None)
-    offload_message_type: list[Literal["tool"]] = Field(default=["tool"])
+    This processor does not use the base MessageOffloader trigger/range logic.
+    It keeps `messages_threshold` and `messages_to_keep` only as compatibility
+    placeholders for callers that handle offloader-like configs generically.
+    """
+
+    tokens_threshold: int = Field(
+        default=50000,
+        gt=0,
+        description="Per-round tool result token budget. A dialogue round exceeding it triggers offload.",
+    )
+    """Maximum accumulated tool-result tokens allowed in one dialogue round."""
+
+    large_message_threshold: int = Field(
+        default=10000,
+        gt=0,
+        description="Minimum size for a single tool message to be eligible for offload.",
+    )
+    """Tool messages at or below this size are kept in context."""
+
+    trim_size: int = Field(
+        default=3000,
+        gt=0,
+        description="Number of leading characters kept in the context placeholder after offloading.",
+    )
+    """Preview length retained in the placeholder message."""
+
+    tool_name_allowlist: list[str] | None = Field(
+        default=None,
+        description="Tool names that should never be offloaded regardless of size.",
+    )
+    """Tool names protected from offloading. Set to None to allow all tools."""
+
+    offload_message_type: list[Literal["tool"]] = Field(
+        default=["tool"],
+        description="Compatibility field. Only tool messages are supported by this processor.",
+    )
+    """Compatibility field retained for offloader-like config shape; only ['tool'] is meaningful."""
+
+    offload_file_prefix: str = Field(
+        default="ToolResultBudgetProcessor",
+        description="Processor-specific filename prefix used under the workspace offload directory.",
+    )
+    """Filename prefix used to separate files produced by this processor."""
+
     messages_threshold: int | None = Field(default=None, gt=0)
+    """Compatibility field; this processor does not use message-count triggering."""
+
     messages_to_keep: int | None = Field(default=None, gt=0)
+    """Compatibility field; this processor does not preserve a newest-message tail by count."""
 
 
 @ContextEngine.register_processor()
@@ -208,15 +251,32 @@ class ToolResultBudgetProcessor(MessageOffloader):
     def _is_already_offloaded(message: ToolMessage) -> bool:
         return isinstance(message, OffloadToolMessage)
 
+    def _new_offload_handle_and_path(self, context: ModelContext) -> tuple[str, str | None]:
+        offload_handle = uuid.uuid4().hex
+        session_id = context.session_id()
+        workspace_dir = context.workspace_dir()
+        file_prefix = self.config.offload_file_prefix or self.processor_type()
+        file_name = f"{file_prefix}_{offload_handle}.json"
+        if workspace_dir:
+            offload_path = os.path.join(workspace_dir, "context", f"{session_id}_context", "offload", file_name)
+            return offload_handle, offload_path
+        return offload_handle, None
+
     async def _offload_tool_message(
         self,
         message: ToolMessage,
         context: ModelContext,
     ) -> ToolMessage:
-        preview = message.content[: self.config.trim_size]
-        has_more = len(message.content) > self.config.trim_size
+        content = message.content
+        if not isinstance(content, str):
+            return message
+
+        offload_handle, offload_path = self._new_offload_handle_and_path(context)
+
+        preview = content[: self.config.trim_size]
+        has_more = len(content) > self.config.trim_size
         persisted_content = self._build_persisted_output_message(
-            original_size=len(message.content),
+            original_size=len(content),
             offload_handle="pending",
             preview=preview,
             has_more=has_more,
@@ -231,17 +291,19 @@ class ToolResultBudgetProcessor(MessageOffloader):
             name=message.name,
             metadata=dict(getattr(message, "metadata", {}) or {}),
             sys_operation=self.sys_operation,
+            offload_handle=offload_handle,
+            offload_path=offload_path,
         )
         if offload_message is not None:
             actual_handle = getattr(offload_message, "offload_handle", "unknown")
             actual_offload_type = getattr(offload_message, "offload_type", "unknown")
             offload_message.content = self._build_persisted_output_message(
-                original_size=len(message.content),
-                offload_handle=f"[[OFFLOAD: handle={actual_handle}, type={actual_offload_type}]]",
+                original_size=len(content),
+                offload_handle=f"[[OFFLOAD: handle={actual_handle}, type={actual_offload_type}, path={offload_path}]]",
                 preview=preview,
                 has_more=has_more,
             )
-            return offload_message
+            return offload_message  # type: ignore[return-value]
         return message
 
     @staticmethod
@@ -256,6 +318,7 @@ class ToolResultBudgetProcessor(MessageOffloader):
         return (
             f"{PERSISTED_OUTPUT_TAG}\n"
             f"Output too large ({original_size} bytes)."
+            f"\n{offload_handle}\n"
             f"Preview (first {len(preview)} chars):\n"
             f"{preview}{suffix}"
             f"{PERSISTED_OUTPUT_CLOSING_TAG}"

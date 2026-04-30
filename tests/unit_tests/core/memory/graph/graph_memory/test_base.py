@@ -4,6 +4,7 @@
 """Unit tests for graph_memory base (GraphMemory)"""
 
 import asyncio
+import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -16,11 +17,14 @@ from openjiuwen.core.foundation.store.graph import (
     EPISODE_COLLECTION,
     RELATION_COLLECTION,
     Entity,
+    GraphConfig,
     GraphStoreFactory,
     Relation,
 )
 from openjiuwen.core.foundation.store.graph.config import GraphStoreStorageConfig
+from openjiuwen.core.foundation.store.graph.database_config import GraphStoreIndexConfig
 from openjiuwen.core.foundation.store.graph.result_ranking import WeightedRankConfig
+from openjiuwen.core.foundation.store.vector_fields.milvus_fields import MilvusAUTO
 from openjiuwen.core.memory.config.graph import AddMemStrategy, EpisodeType, SearchConfig
 from openjiuwen.core.memory.graph.extraction.extraction_models import EntityDeclaration
 from openjiuwen.core.memory.graph.graph_memory.base import GraphMemory
@@ -34,6 +38,19 @@ def _make_mock_config():
     config.request_max_retries = 2
     config.embed_batch_size = 10
     return config
+
+
+def _make_graph_config(embed_dim: int = 64):
+    """Build a real GraphConfig for delayed embedder attachment tests."""
+    return GraphConfig(
+        uri="/tmp/test_graph_memory_milvus",
+        name="test_graph_memory_db",
+        timeout=10.0,
+        embed_dim=embed_dim,
+        db_storage_config=GraphStoreStorageConfig(user_id=32),
+        db_embed_config=GraphStoreIndexConfig(index_type=MilvusAUTO(), distance_metric="cosine"),
+        embedding_model=None,
+    )
 
 
 def _make_mock_llm_client(default_content: str = "{}"):
@@ -263,6 +280,69 @@ class TestAddMemory:
         assert hasattr(result, "added_episode")
         assert hasattr(result, "added_entity")
         assert hasattr(result, "added_relation")
+        backend.refresh.assert_called()
+
+    @staticmethod
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.memory.graph.graph_memory.postprocess_graph_objects.ensure_unique_uuids")
+    @patch.object(GraphMemory, "_invoke_llm")
+    async def test_add_memory_after_delayed_attach_with_reference_time(
+        mock_invoke_llm, mock_ensure_uuids
+    ):
+        """GraphMemory can initialize without embedding_model, then attach and add memory."""
+        config = _make_graph_config()
+        mock_client = MagicMock()
+        mock_client.list_databases.return_value = []
+        mock_client.has_collection.return_value = False
+        mock_client.get_collection_stats.return_value = {"row_count": 0}
+        mock_client.list_collections.return_value = []
+        with patch(
+            "openjiuwen.core.foundation.store.graph.milvus.milvus_support.MilvusClient",
+            return_value=mock_client,
+        ):
+            with patch("openjiuwen.core.foundation.store.graph.config.os.makedirs"):
+                mem = GraphMemory(db_config=config, llm_client=_make_mock_llm_client())
+
+        backend = mem.db_backend
+        backend.is_empty = MagicMock(return_value=True)
+        backend.refresh = AsyncMock()
+        backend.add_entity = AsyncMock()
+        backend.add_relation = AsyncMock()
+        backend.add_episode = AsyncMock()
+        backend.delete = AsyncMock()
+        embedder = MagicMock(spec=Embedding)
+        embedder.dimension = config.embed_dim
+        embedder.embed_documents = AsyncMock(
+            side_effect=lambda texts, batch_size: [[0.0] * config.embed_dim for _ in texts]
+        )
+        mem.attach_embedder(embedder)
+
+        def make_msg(content):
+            msg = MagicMock()
+            msg.content = content
+            return msg
+
+        mock_invoke_llm.side_effect = [
+            make_msg('{"extracted_entities": [{"name": "Alice", "entity_type_id": 0}]}'),
+            make_msg('{"extracted_relations": []}'),
+            make_msg('{"extracted_relations": []}'),
+            make_msg('{"summary": "", "attributes": {}}'),
+        ]
+
+        async def _return_ids(backend, ids, collection=None, skip=False):
+            return ids if ids else []
+
+        mock_ensure_uuids.side_effect = _return_ids
+
+        result = await mem.add_memory(
+            EpisodeType.DOCUMENT,
+            "user1",
+            "Short document.",
+            reference_time=datetime.datetime(2025, 1, 1, 12, 0, 0),
+        )
+
+        assert isinstance(result, GraphMemUpdate)
+        assert mem.embedder is embedder
         backend.refresh.assert_called()
 
 

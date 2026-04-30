@@ -71,7 +71,7 @@ async def message_bus():
 async def agent_team(db, message_bus):
     """Provide initialized AgentTeam instance"""
     team_id = "test_team"
-    await db.create_team(
+    await db.team.create_team(
         team_name=team_id,
         display_name="Test Team",
         leader_member_name="leader1"
@@ -110,7 +110,7 @@ class TestAgentTeamInit:
     @pytest.mark.level0
     async def test_agent_team_with_optional_fields(self, db, message_bus):
         """Test AgentTeam with optional description and prompt"""
-        await db.create_team(
+        await db.team.create_team(
             team_name="team_with_optional",
             display_name="Optional Team",
             leader_member_name="leader1",
@@ -158,7 +158,7 @@ class TestSpawnMember:
             agent_card=sample_agent_card
         )
 
-        member = await db.get_member("member1", "test_team")
+        member = await db.member.get_member("member1", "test_team")
         assert member is not None
         assert member.member_name == "member1"
         assert member.display_name == "Member One"
@@ -400,7 +400,7 @@ class TestShutdownMember:
 
         await agent_team.shutdown_member(member_name="member1")
 
-        member = await db.get_member("member1", "test_team")
+        member = await db.member.get_member("member1", "test_team")
         assert member.status == MemberStatus.SHUTDOWN_REQUESTED.value
 
     @pytest.mark.asyncio
@@ -416,7 +416,7 @@ class TestShutdownMember:
 
         # First shutdown
         await agent_team.shutdown_member(member_name="member1")
-        await db.update_member_status("member1", "team1", MemberStatus.SHUTDOWN.value)
+        await db.member.update_member_status("member1", "team1", MemberStatus.SHUTDOWN.value)
 
         # Try to shutdown again
         result = await agent_team.shutdown_member(member_name="member1")
@@ -458,7 +458,7 @@ class TestCancelMember:
             agent_card=sample_agent_card
         )
         # Set member to busy
-        await db.update_member_status("member1", "team1", MemberStatus.BUSY.value)
+        await db.member.update_member_status("member1", "team1", MemberStatus.BUSY.value)
 
         result = await agent_team.cancel_member(member_name="member1")
         assert result is True
@@ -473,7 +473,7 @@ class TestCancelMember:
             agent_card=sample_agent_card
         )
         # Set member to ready (not busy)
-        await db.update_member_status("member1", "team1", MemberStatus.READY.value)
+        await db.member.update_member_status("member1", "team1", MemberStatus.READY.value)
 
         result = await agent_team.cancel_member(member_name="member1")
         assert result is True
@@ -516,8 +516,8 @@ class TestCancelMember:
         # task3 remains unclaimed
 
         # Verify tasks are claimed
-        task1_claimed = await db.get_task(task1.task_id)
-        task2_claimed = await db.get_task(task2.task_id)
+        task1_claimed = await db.task.get_task(task1.task_id)
+        task2_claimed = await db.task.get_task(task2.task_id)
         assert task1_claimed.status == TaskStatus.CLAIMED.value
         assert task2_claimed.status == TaskStatus.CLAIMED.value
         assert task1_claimed.assignee == "member1"
@@ -528,15 +528,15 @@ class TestCancelMember:
         assert result is True
 
         # Verify claimed tasks are reset to PENDING
-        task1_reset = await db.get_task(task1.task_id)
-        task2_reset = await db.get_task(task2.task_id)
+        task1_reset = await db.task.get_task(task1.task_id)
+        task2_reset = await db.task.get_task(task2.task_id)
         assert task1_reset.status == TaskStatus.PENDING.value
         assert task2_reset.status == TaskStatus.PENDING.value
         assert task1_reset.assignee is None
         assert task2_reset.assignee is None
 
         # Verify unclaimed task remains unchanged
-        task3_unchanged = await db.get_task(task3.task_id)
+        task3_unchanged = await db.task.get_task(task3.task_id)
         assert task3_unchanged.status == TaskStatus.PENDING.value
         assert task3_unchanged.assignee is None
 
@@ -560,8 +560,8 @@ class TestCancelMember:
         assert result is True
 
         # Verify tasks remain pending with no assignee
-        task1_after = await db.get_task(task1.task_id)
-        task2_after = await db.get_task(task2.task_id)
+        task1_after = await db.task.get_task(task1.task_id)
+        task2_after = await db.task.get_task(task2.task_id)
         assert task1_after.status == TaskStatus.PENDING.value
         assert task2_after.status == TaskStatus.PENDING.value
         assert task1_after.assignee is None
@@ -588,10 +588,10 @@ class TestCleanTeam:
         )
 
         # Shutdown all members
-        await db.update_member_status("member1", "test_team", MemberStatus.SHUTDOWN_REQUESTED.value)
-        await db.update_member_status("member1", "test_team", MemberStatus.SHUTDOWN.value)
-        await db.update_member_status("member2", "test_team", MemberStatus.SHUTDOWN_REQUESTED.value)
-        await db.update_member_status("member2", "test_team", MemberStatus.SHUTDOWN.value)
+        await db.member.update_member_status("member1", "test_team", MemberStatus.SHUTDOWN_REQUESTED.value)
+        await db.member.update_member_status("member1", "test_team", MemberStatus.SHUTDOWN.value)
+        await db.member.update_member_status("member2", "test_team", MemberStatus.SHUTDOWN_REQUESTED.value)
+        await db.member.update_member_status("member2", "test_team", MemberStatus.SHUTDOWN.value)
 
         result = await agent_team.clean_team()
         assert result is True
@@ -626,7 +626,7 @@ class TestCleanTeam:
         )
 
         # Only shutdown one member
-        await db.update_member_status("member1", "team1", MemberStatus.SHUTDOWN.value)
+        await db.member.update_member_status("member1", "team1", MemberStatus.SHUTDOWN.value)
 
         result = await agent_team.clean_team()
         assert result is False
@@ -715,7 +715,7 @@ class TestGetTeamInfo:
     @pytest.mark.level1
     async def test_get_team_info_with_optional_fields(self, db, message_bus):
         """Test getting team info with optional fields"""
-        await db.create_team(
+        await db.team.create_team(
             team_name="full_team",
             display_name="Full Team",
             leader_member_name="leader1",
@@ -766,7 +766,7 @@ class TestCancelTask:
     async def test_cancel_task_success(self, agent_team, db):
         """Test cancelling a task successfully"""
         # Create a task
-        await db.create_task(
+        await db.task.create_task(
             task_id="task1",
             team_name="test_team",
             title="Test Task",
@@ -778,7 +778,7 @@ class TestCancelTask:
 
         assert result is True
         # Verify task is cancelled
-        task = await db.get_task("task1")
+        task = await db.task.get_task("task1")
         assert task.status == "cancelled"
 
     @pytest.mark.asyncio
@@ -793,14 +793,14 @@ class TestCancelTask:
     async def test_cancel_task_already_cancelled(self, agent_team, db):
         """Test cancelling an already cancelled task"""
         # Create and cancel a task
-        await db.create_task(
+        await db.task.create_task(
             task_id="task1",
             team_name="test_team",
             title="Test Task",
             content="Task content",
             status="pending"
         )
-        await db.update_task_status("task1", "cancelled")
+        await db.task.update_task_status("task1", "cancelled")
 
         # Try to cancel again
         result = await agent_team.cancel_task(task_id="task1")
@@ -811,21 +811,21 @@ class TestCancelTask:
     async def test_cancel_task_with_assignee_sends_notification(self, agent_team, db):
         """Test cancelling a claimed task sends notification to assignee"""
         # Create a task and claim it
-        await db.create_task(
+        await db.task.create_task(
             task_id="task1",
             team_name="test_team",
             title="Test Task",
             content="Task content",
             status="pending"
         )
-        await db.claim_task(task_id="task1", member_name="member1")
+        await db.task.claim_task(task_id="task1", member_name="member1")
 
         result = await agent_team.cancel_task(task_id="task1")
 
         assert result is True
 
         # Verify notification message was sent via database
-        messages = await db.get_messages(team_name="test_team", to_member_name="member1")
+        messages = await db.message.get_messages(team_name="test_team", to_member_name="member1")
         assert len(messages) == 1
         message = messages[0]
         assert "cancelled" in message.content.lower()
@@ -839,7 +839,7 @@ class TestCancelTask:
     async def test_cancel_task_without_assignee_no_notification(self, agent_team, db):
         """Test cancelling an unclaimed task doesn't send notification"""
         # Create an unclaimed task
-        await db.create_task(
+        await db.task.create_task(
             task_id="task1",
             team_name="test_team",
             title="Test Task",
@@ -852,7 +852,7 @@ class TestCancelTask:
         assert result is True
 
         # Verify no notification message was sent
-        messages = await db.get_team_messages(team_name="test_team", broadcast=False)
+        messages = await db.message.get_team_messages(team_name="test_team", broadcast=False)
         cancel_notifications = [m for m in messages if "cancelled" in m["content"].lower()]
         assert len(cancel_notifications) == 0
 
@@ -865,9 +865,9 @@ class TestCancelAllTasks:
     async def test_cancel_all_tasks_success(self, agent_team, db):
         """Test cancelling all tasks successfully"""
         # Create multiple tasks
-        await db.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.create_task("task2", "test_team", "Task 2", "Content 2", "pending")
-        await db.create_task("task3", "test_team", "Task 3", "Content 3", "pending")
+        await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "pending")
+        await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "pending")
 
         # Cancel all tasks
         count = await agent_team.cancel_all_tasks()
@@ -875,15 +875,15 @@ class TestCancelAllTasks:
         assert count == 3
 
         # Verify all tasks are cancelled
-        task1 = await db.get_task("task1")
-        task2 = await db.get_task("task2")
-        task3 = await db.get_task("task3")
+        task1 = await db.task.get_task("task1")
+        task2 = await db.task.get_task("task2")
+        task3 = await db.task.get_task("task3")
         assert task1.status == "cancelled"
         assert task2.status == "cancelled"
         assert task3.status == "cancelled"
 
         # Verify broadcast message was sent
-        messages = await db.get_team_messages(team_name="test_team", broadcast=True)
+        messages = await db.message.get_team_messages(team_name="test_team", broadcast=True)
         assert len(messages) == 1
         assert "All tasks (3) have been cancelled" in messages[0].content
 
@@ -892,11 +892,11 @@ class TestCancelAllTasks:
     async def test_cancel_all_tasks_mixed_status(self, agent_team, db):
         """Test cancelling tasks with mixed statuses"""
         # Create tasks with different statuses
-        await db.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
-        await db.claim_task("task2", "member1")
-        await db.create_task("task3", "test_team", "Task 3", "Content 3", "cancelled")
-        await db.create_task("task4", "test_team", "Task 4", "Content 4", "completed")
+        await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.claim_task("task2", "member1")
+        await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "cancelled")
+        await db.task.create_task("task4", "test_team", "Task 4", "Content 4", "completed")
 
         # Cancel all tasks
         count = await agent_team.cancel_all_tasks()
@@ -905,10 +905,10 @@ class TestCancelAllTasks:
         assert count == 2
 
         # Verify
-        task1 = await db.get_task("task1")
-        task2 = await db.get_task("task2")
-        task3 = await db.get_task("task3")
-        task4 = await db.get_task("task4")
+        task1 = await db.task.get_task("task1")
+        task2 = await db.task.get_task("task2")
+        task3 = await db.task.get_task("task3")
+        task4 = await db.task.get_task("task4")
         assert task1.status == "cancelled"
         assert task2.status == "cancelled"
         assert task3.status == "cancelled"  # Stays cancelled
@@ -919,8 +919,8 @@ class TestCancelAllTasks:
     async def test_cancel_all_tasks_no_active_tasks(self, agent_team, db):
         """Test cancelling when no active tasks"""
         # Only have cancelled and completed tasks
-        await db.create_task("task1", "test_team", "Task 1", "Content 1", "cancelled")
-        await db.create_task("task2", "test_team", "Task 2", "Content 2", "completed")
+        await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "cancelled")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "completed")
 
         # Cancel all tasks
         count = await agent_team.cancel_all_tasks()
@@ -928,7 +928,7 @@ class TestCancelAllTasks:
         assert count == 0
 
         # Verify no broadcast message was sent
-        messages = await db.get_team_messages(team_name="test_team", broadcast=True)
+        messages = await db.message.get_team_messages(team_name="test_team", broadcast=True)
         assert len(messages) == 0
 
     @pytest.mark.asyncio

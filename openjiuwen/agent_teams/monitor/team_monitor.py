@@ -108,7 +108,7 @@ class TeamMonitor:
         Returns:
             TeamInfo or None if the team does not exist.
         """
-        team = await self._db.get_team(self._team_id)
+        team = await self._db.team.get_team(self._team_id)
         if team is None:
             return None
         return TeamInfo.from_internal(team)
@@ -122,7 +122,7 @@ class TeamMonitor:
         Returns:
             List of MemberInfo.
         """
-        members = await self._db.get_team_members(self._team_id, status=status)
+        members = await self._db.member.get_team_members(self._team_id, status=status)
         return [MemberInfo.from_internal(m) for m in members]
 
     async def get_member(self, member_name: str) -> MemberInfo | None:
@@ -134,7 +134,7 @@ class TeamMonitor:
         Returns:
             MemberInfo or None if not found.
         """
-        member = await self._db.get_member(member_name, self._team_id)
+        member = await self._db.member.get_member(member_name, self._team_id)
         if member is None:
             return None
         return MemberInfo.from_internal(member)
@@ -148,7 +148,7 @@ class TeamMonitor:
         Returns:
             List of TaskInfo.
         """
-        tasks = await self._db.get_team_tasks(self._team_id, status=status)
+        tasks = await self._db.task.get_team_tasks(self._team_id, status=status)
         return [TaskInfo.from_internal(t) for t in tasks]
 
     async def get_messages(
@@ -170,13 +170,13 @@ class TeamMonitor:
             List of MessageInfo.
         """
         if to_member is not None:
-            rows = await self._db.get_messages(
+            rows = await self._db.message.get_messages(
                 team_name=self._team_id,
                 to_member_name=to_member,
                 from_member_name=from_member,
             )
         else:
-            rows = await self._db.get_team_messages(team_name=self._team_id)
+            rows = await self._db.message.get_team_messages(team_name=self._team_id)
         return [MessageInfo.from_internal(r) for r in rows]
 
     # ------------------------------------------------------------------

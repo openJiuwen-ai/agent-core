@@ -1,6 +1,5 @@
 # coding: utf-8
 """Unit tests for language propagation through TeamAgentSpec.build()."""
-import pytest
 
 from openjiuwen.agent_teams.schema.blueprint import DeepAgentSpec, TeamAgentSpec
 
@@ -12,19 +11,19 @@ def _make_agent(**kw) -> DeepAgentSpec:
 def test_language_en_propagates_to_team_spec():
     spec = TeamAgentSpec(agents={"leader": _make_agent()}, language="en")
     agent = spec.build()
-    assert agent._ctx.team_spec.language == "en"
+    assert agent._configurator.ctx.team_spec.language == "en"
 
 
 def test_language_none_falls_back_to_cn():
     spec = TeamAgentSpec(agents={"leader": _make_agent()})
     agent = spec.build()
-    assert agent._ctx.team_spec.language == "cn"
+    assert agent._configurator.ctx.team_spec.language == "cn"
 
 
 def test_language_zh_normalizes_to_cn():
     spec = TeamAgentSpec(agents={"leader": _make_agent()}, language="zh")
     agent = spec.build()
-    assert agent._ctx.team_spec.language == "cn"
+    assert agent._configurator.ctx.team_spec.language == "cn"
 
 
 def test_language_propagates_to_deep_agent_spec():

@@ -74,12 +74,12 @@ class TeamMember:
 
     async def status(self) -> MemberStatus:
         """Get current member status"""
-        member_data = await self.db.get_member(self.member_name, self.team_name)
+        member_data = await self.db.member.get_member(self.member_name, self.team_name)
         return MemberStatus(member_data.status) if member_data else None
 
     async def execution_status(self) -> ExecutionStatus:
         """Get current execution status"""
-        member_data = await self.db.get_member(self.member_name, self.team_name)
+        member_data = await self.db.member.get_member(self.member_name, self.team_name)
         return ExecutionStatus(member_data.execution_status) if member_data else None
 
     async def update_status(self, new_status: MemberStatus) -> bool:
@@ -101,7 +101,7 @@ class TeamMember:
         old_status = await self.status()
         if old_status == new_status:
             return True
-        success = await self.db.update_member_status(self.member_name, self.team_name, new_status.value)
+        success = await self.db.member.update_member_status(self.member_name, self.team_name, new_status.value)
 
         if not success:
             team_logger.error(f"Failed to update member status for {self.member_name}: {new_status.value}")
@@ -140,7 +140,7 @@ class TeamMember:
         """
 
         old_status = await self.execution_status()
-        success = await self.db.update_member_execution_status(
+        success = await self.db.member.update_member_execution_status(
             self.member_name,
             self.team_name,
             new_status.value

@@ -2,10 +2,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from typing import Union, List, Optional, AsyncIterator, Type, Dict
 
-from openjiuwen.core.common.clients import get_client_registry
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.foundation.llm.model_clients.dashscope_model_client import DashScopeModelClient
+from openjiuwen.core.foundation.llm.model_clients import create_model_client
 from openjiuwen.core.foundation.llm.schema.message import BaseMessage, AssistantMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.tool import ToolInfo
@@ -17,19 +16,7 @@ from openjiuwen.core.foundation.llm.schema.generation_response import (
     VideoGenerationResponse
 )
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
-from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
-from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client import SiliconFlowModelClient
 from openjiuwen.core.foundation.llm.model_clients.inference_affinity_model_client import InferenceAffinityModelClient
-from openjiuwen.core.foundation.llm.model_clients.deepseek_model_client import DeepSeekModelClient
-
-_CLIENT_TYPE_REGISTRY: Dict[str, Type[BaseModelClient]] = {
-    "OpenAI": OpenAIModelClient,
-    "OpenRouter": OpenAIModelClient,
-    "SiliconFlow": SiliconFlowModelClient,
-    "DashScope": DashScopeModelClient,
-    "DeepSeek": DeepSeekModelClient,
-    "InferenceAffinity": InferenceAffinityModelClient,
-}
 
 
 class Model:
@@ -63,7 +50,7 @@ class Model:
         self._client: Optional[BaseModelClient] = None
 
         if model_client_config is not None:
-            self._client = self._create_model_client(model_client_config)
+            self._client = create_model_client(client_config=model_client_config, model_config=self.model_config)
         else:
             raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
                               error_msg="model client config is none")
@@ -94,37 +81,6 @@ class Model:
         fn = _fw.emit_after(LLMCallEvents.LLM_STREAM_OUTPUT, item_key="result",
                             extra_kwargs=_extra)(fn)
         self._client.stream = fn
-
-    def _create_model_client(self, client_config: ModelClientConfig) -> BaseModelClient:
-        """Create corresponding ModelClient instance based on client_type
-        
-        Args:
-            client_config: Client configuration
-            
-        Returns:
-            BaseModelClient: ModelClient instance
-            
-        Raises:
-            ValueError: When client_provider is not supported
-        """
-        if client_config.client_provider is None:
-            raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
-                              error_msg="model client config client_provider is none")
-        if client_config.client_id is None:
-            raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
-                              error_msg="model client config client_id is none")
-        client_provider = client_config.client_provider.value if hasattr(client_config.client_provider,
-            'value') else client_config.client_provider
-        try:
-            client = get_client_registry().get_client(client_provider, "llm", model_config=self.model_config,
-                                                      model_client_config=client_config)
-        except ValueError as e:
-            supported_types = [name[4:] for name in get_client_registry().list_clients() if name.startswith("llm_")]
-            raise build_error(
-                StatusCode.MODEL_PROVIDER_INVALID,
-                error_msg=f"Unsupported client_provider: '{client_provider}', Supported types: {supported_types}"
-            )
-        return client
 
     async def invoke(
             self,

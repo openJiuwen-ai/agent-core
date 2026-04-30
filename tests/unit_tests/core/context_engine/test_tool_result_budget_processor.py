@@ -329,7 +329,7 @@ class TestToolResultBudgetProcessorFilesystemOffload:
         result = context.get_messages()
         tool_msg = result[2]
 
-        # Verify offload happened with in_memory type
+        # When workspace=None and sys_operation=None, offload falls back to in_memory
         assert tool_msg.content.startswith(PERSISTED_OUTPUT_TAG)
         assert getattr(tool_msg, "offload_type", None) == "in_memory"
 
@@ -605,9 +605,13 @@ class TestToolResultBudgetProcessorRealFilesystem:
         offload_handle = getattr(tool_msg, "offload_handle", None)
         assert offload_handle
 
-        # Verify file was actually created
+        # Verify file was actually created (processor-specific prefix)
         offload_file = os.path.join(
-            workspace_root, "context", f"{session_id}_context", "offload", f"{offload_handle}.json"
+            workspace_root,
+            "context",
+            f"{session_id}_context",
+            "offload",
+            f"ToolResultBudgetProcessor_{offload_handle}.json",
         )
         assert os.path.exists(offload_file), f"Offload file not found: {offload_file}"
 
@@ -691,7 +695,7 @@ class TestToolResultBudgetProcessorReload:
 
     @pytest.mark.asyncio
     async def test_reload_from_in_memory(self, tmp_path):
-        """测试从内存 reload 已 offload 的消息 (sys_operation=None 场景)"""
+        """测试从内存 reload 已 offload 的消息 (workspace=None, sys_operation=None 场景)"""
         engine = ContextEngine(
             ContextEngineConfig(default_window_message_num=100),
             workspace=None,
@@ -727,17 +731,15 @@ class TestToolResultBudgetProcessorReload:
         result = context.get_messages()
         tool_msg = result[2]
 
-        # Verify offload happened with in_memory type
+        # With no workspace, offload falls back to in_memory
         assert tool_msg.content.startswith(PERSISTED_OUTPUT_TAG)
         offload_handle = getattr(tool_msg, "offload_handle", None)
         offload_type = getattr(tool_msg, "offload_type", None)
         assert offload_handle
         assert offload_type == "in_memory"
 
-        # Step 2: Reload from in_memory using buffer directly
+        # Step 2: Reload from in_memory using buffer
         reloaded_messages = await context._offload_message_buffer.reload(offload_handle, offload_type)
-
-        # Verify reload result contains original content
         assert len(reloaded_messages) == 1
         assert "INMEMORY_TOOL_CONTENT_" in reloaded_messages[0].content
         assert "_END_MARKER" in reloaded_messages[0].content

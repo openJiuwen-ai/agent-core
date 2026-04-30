@@ -187,7 +187,7 @@ class TestPersistentTeamBuildTeam:
             leader_desc="PM",
         )
 
-        dev = await db.get_member("dev-1", "persistent_team")
+        dev = await db.member.get_member("dev-1", "persistent_team")
         assert dev.status == MemberStatus.UNSTARTED.value
         logger.info("Persistent team member status after build: {}", dev.status)
 
@@ -202,14 +202,14 @@ class TestPersistentTeamBuildTeam:
             leader_desc="PM",
         )
         # Simulate member starting up
-        await db.update_member_status("dev-1", "persistent_team", MemberStatus.READY.value)
-        dev = await db.get_member("dev-1", "persistent_team")
+        await db.member.update_member_status("dev-1", "persistent_team", MemberStatus.READY.value)
+        dev = await db.member.get_member("dev-1", "persistent_team")
         assert dev.status == MemberStatus.READY.value
 
         # Simulate persistent team resume (READY -> READY)
-        success = await db.update_member_status("dev-1", "persistent_team", MemberStatus.READY.value)
+        success = await db.member.update_member_status("dev-1", "persistent_team", MemberStatus.READY.value)
         assert success
-        dev = await db.get_member("dev-1", "persistent_team")
+        dev = await db.member.get_member("dev-1", "persistent_team")
         assert dev.status == MemberStatus.READY.value
 
 
@@ -236,14 +236,14 @@ class TestResumeForNewSession:
     async def test_new_session_creates_dynamic_tables(self, db_file):
         database, config = db_file
         team_id = "persistent_team"
-        await database.create_team(team_name=team_id, display_name="PT", leader_member_name="leader1")
+        await database.team.create_team(team_name=team_id, display_name="PT", leader_member_name="leader1")
 
         # Switch session
         token = set_session_id("session_2")
         try:
             await database.create_cur_session_tables()
             # Verify team still exists (static table)
-            team = await database.get_team(team_id)
+            team = await database.team.get_team(team_id)
             assert team is not None
             assert team.display_name == "PT"
             logger.info("Team persists across sessions: {}", team.display_name)

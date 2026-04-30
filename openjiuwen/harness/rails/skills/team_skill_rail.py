@@ -29,6 +29,8 @@ from openjiuwen.agent_evolving.optimizer.llm_resilience import (
 )
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_scorer import (
     ExperienceScorer,
+    EVALUATE_LLM_POLICY,
+    SIMPLIFY_LLM_POLICY,
 )
 from openjiuwen.agent_evolving.optimizer.team_skill_optimizer import (
     TeamSkillOptimizer,
@@ -43,20 +45,27 @@ from openjiuwen.agent_evolving.utils import infer_skill_from_texts
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.memory.lite.frontmatter import parse_frontmatter
+from openjiuwen.core.operator.skill_call import SkillCallOperator
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint
 
-_USER_REQUEST_LLM_POLICY = LLMInvokePolicy(
-    attempt_timeout_secs=15,
-    total_budget_secs=30,
-    max_attempts=2,
-)
-_TRAJECTORY_ISSUE_LLM_POLICY = LLMInvokePolicy(
+_TEAM_USER_REQUEST_LLM_POLICY = LLMInvokePolicy(
     attempt_timeout_secs=30,
-    total_budget_secs=60,
-    max_attempts=2,
+    total_budget_secs=90,
+    max_attempts=3,
 )
+_TEAM_TRAJECTORY_ISSUE_LLM_POLICY = LLMInvokePolicy(
+    attempt_timeout_secs=60,
+    total_budget_secs=180,
+    max_attempts=3,
+)
+_TEAM_PATCH_LLM_POLICY = LLMInvokePolicy(
+    attempt_timeout_secs=120,
+    total_budget_secs=420,
+    max_attempts=3,
+)
+_DEFAULT_TEAM_EVOLUTION_TOTAL_TIMEOUT_SECS = 600.0
 
 
 class TeamSignalType(Enum):
@@ -156,6 +165,12 @@ class TeamSkillRail(EvolutionRail):
         async_evolution: bool = True,
         team_id: Optional[str] = None,
         trajectories_dir: Optional[Path] = None,
+        user_request_llm_policy: LLMInvokePolicy = _TEAM_USER_REQUEST_LLM_POLICY,
+        trajectory_issue_llm_policy: LLMInvokePolicy = _TEAM_TRAJECTORY_ISSUE_LLM_POLICY,
+        patch_llm_policy: LLMInvokePolicy = _TEAM_PATCH_LLM_POLICY,
+        evaluate_llm_policy: LLMInvokePolicy = EVALUATE_LLM_POLICY,
+        simplify_llm_policy: LLMInvokePolicy = SIMPLIFY_LLM_POLICY,
+        evolution_total_timeout_secs: float = _DEFAULT_TEAM_EVOLUTION_TOTAL_TIMEOUT_SECS,
     ) -> None:
         super().__init__(
             trajectory_store=trajectory_store,
@@ -171,12 +186,23 @@ class TeamSkillRail(EvolutionRail):
             model,
             language,
             debug_dir=debug_dir,
+            patch_llm_policy=patch_llm_policy,
         )
-        self._scorer = ExperienceScorer(llm, model, language)
+        self._scorer = ExperienceScorer(
+            llm,
+            model,
+            language,
+            evaluate_llm_policy=evaluate_llm_policy,
+            simplify_llm_policy=simplify_llm_policy,
+        )
         self._auto_save = auto_save
+        self._user_request_llm_policy = user_request_llm_policy
+        self._trajectory_issue_llm_policy = trajectory_issue_llm_policy
+        self._evolution_total_timeout_secs = evolution_total_timeout_secs
 
         self._pending_patch_snapshots: dict[str, PendingChange] = {}
-        self._evolution_triggered: bool = False
+        self._patch_skill_ops: dict[str, SkillCallOperator] = {}
+        self._evolution_in_progress: bool = False
         self._team_id = team_id
         self._trajectories_dir = trajectories_dir
 
@@ -197,8 +223,65 @@ class TeamSkillRail(EvolutionRail):
         """Get the experience scorer."""
         return self._scorer
 
+    @property
+    def optimizer(self) -> TeamSkillOptimizer:
+        """Get the team skill optimizer."""
+        return self._optimizer
+
+    @property
+    def user_request_llm_policy(self) -> LLMInvokePolicy:
+        """Get the configured user-intent detection policy."""
+        return self._user_request_llm_policy
+
+    @property
+    def trajectory_issue_llm_policy(self) -> LLMInvokePolicy:
+        """Get the configured trajectory issue detection policy."""
+        return self._trajectory_issue_llm_policy
+
+    @property
+    def patch_llm_policy(self) -> LLMInvokePolicy:
+        """Get the configured patch generation policy."""
+        return self._optimizer.patch_llm_policy
+
+    @property
+    def evaluate_llm_policy(self) -> LLMInvokePolicy:
+        """Get the configured experience evaluation policy."""
+        return self._scorer.evaluate_llm_policy
+
+    @property
+    def simplify_llm_policy(self) -> LLMInvokePolicy:
+        """Get the configured experience maintenance policy."""
+        return self._scorer.simplify_llm_policy
+
+    @property
+    def evolution_total_timeout_secs(self) -> float:
+        """Get the configured background evolution timeout budget."""
+        return self._evolution_total_timeout_secs
+
+    @property
+    def evolution_config(self) -> dict[str, LLMInvokePolicy | float]:
+        """Get the effective evolution configuration."""
+        return {
+            "user_request_llm_policy": self.user_request_llm_policy,
+            "trajectory_issue_llm_policy": self.trajectory_issue_llm_policy,
+            "patch_llm_policy": self.patch_llm_policy,
+            "evaluate_llm_policy": self.evaluate_llm_policy,
+            "simplify_llm_policy": self.simplify_llm_policy,
+            "evolution_total_timeout_secs": self.evolution_total_timeout_secs,
+        }
+
+    async def drain_pending_approval_events(
+        self,
+        wait: bool = False,
+        timeout: Optional[float] = None,
+    ) -> list[OutputSchema]:
+        """Use evolution timeout as the default wait budget for approval draining."""
+        if wait and timeout is None:
+            timeout = self._evolution_total_timeout_secs
+        return await super().drain_pending_approval_events(wait=wait, timeout=timeout)
+
     def _get_evolution_total_timeout_secs(self) -> Optional[float]:
-        return 180.0
+        return self._evolution_total_timeout_secs
 
     # ===== TUI progress helper =====
 
@@ -219,21 +302,26 @@ class TeamSkillRail(EvolutionRail):
     # ===== Lifecycle hooks =====
 
     async def _on_before_invoke(self, ctx: AgentCallbackContext) -> None:
-        # Reset evolution trigger flag on first round of a new session
-        if self._builder is None:
-            self._evolution_triggered = False
+        """No-op hook kept for symmetry with other evolution rails."""
+        return None
 
     async def _snapshot_for_evolution(
         self,
         trajectory: Trajectory,
         ctx: Optional[AgentCallbackContext],
     ) -> Optional[dict]:
-        """Phase 1: TeamSkillRail only needs trajectory (no session dependency)."""
-        return {"trajectory": trajectory, "skill_name": "team-skill"}
+        """Phase 1: Capture trajectory plus callback-visible messages for async evolution."""
+        if ctx is None:
+            return {"trajectory": trajectory, "parsed_messages": [], "skill_name": "team-skill"}
+        snapshot = await super()._snapshot_for_evolution(trajectory, ctx)
+        if snapshot is None:
+            return None
+        snapshot["skill_name"] = "team-skill"
+        return snapshot
 
     async def _on_after_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Detect 'all tasks completed' via view_task result and trigger evolution."""
-        if self._evolution_triggered:
+        if self._evolution_in_progress:
             return
 
         inputs = ctx.inputs
@@ -262,12 +350,12 @@ class TeamSkillRail(EvolutionRail):
 
         In async mode: snapshots data, spawns background task, returns immediately.
         In sync mode: awaits run_evolution directly (backward-compatible).
-        """
-        if self._evolution_triggered:
-            return False
 
-        self._evolution_triggered = True
-        self._emit_progress("all tasks completed, starting evolution analysis...")
+        This entry point only performs passive trajectory-based evolution.
+        Explicit user suggestions must use ``request_user_evolution()``.
+        """
+        if self._evolution_in_progress:
+            return False
 
         if self.builder is None:
             logger.warning(
@@ -275,24 +363,33 @@ class TeamSkillRail(EvolutionRail):
             )
             return False
 
+        self._evolution_in_progress = True
+        self._emit_progress("all tasks completed, starting evolution analysis...")
+
         # Note: trajectory save is handled by EvolutionRail.after_invoke
         trajectory = self.builder.build()
         trajectory.steps = list(trajectory.steps)
 
         if self._async_evolution:
             snapshot = await self._snapshot_for_evolution(trajectory, ctx)
-            if snapshot is not None:
-                from openjiuwen.core.common.background_tasks import create_background_task
+            if snapshot is None:
+                self._evolution_in_progress = False
+                return False
 
-                bg_task = await create_background_task(
-                    self._safe_run_evolution(snapshot),
-                    name="evolution-team-skill",
-                    group="evolution",
-                )
-                self._bg_tasks.add(bg_task)
-                self._bg_tasks = {t for t in self._bg_tasks if not t.done()}
+            from openjiuwen.core.common.background_tasks import create_background_task
+
+            bg_task = await create_background_task(
+                self._safe_run_evolution(snapshot),
+                name="evolution-team-skill",
+                group="evolution",
+            )
+            self._bg_tasks.add(bg_task)
+            self._bg_tasks = {t for t in self._bg_tasks if not t.done()}
         else:
-            await self.run_evolution(trajectory, ctx)
+            try:
+                await self.run_evolution(trajectory, ctx)
+            finally:
+                self._evolution_in_progress = False
 
         self._dump_trajectory_debug(trajectory)
         return True
@@ -317,9 +414,9 @@ class TeamSkillRail(EvolutionRail):
     ) -> None:
         """Triggered when view_task shows all member tasks completed.
 
-        Dual-path signal detection:
-        1. Active: LLM determines if user input contains improvement intent
-        2. Passive: LLM analyzes trajectory for team skill deficiencies
+        Passive signal detection only:
+        - Analyze the completed trajectory for team skill deficiencies
+        - Explicit user suggestions must use ``request_user_evolution()``
         """
         t0 = time.time()
         try:
@@ -348,38 +445,23 @@ class TeamSkillRail(EvolutionRail):
             # Load skill content for signal detection
             current_content = await self._store.read_skill_content(used_skill)
 
-            # Active signal: LLM determines user improvement intent
-            ctx_messages = await self._collect_messages(ctx) if ctx else []
-            user_intent = await self._detect_user_request(ctx_messages, current_content)
+            trajectory_issues = await self._detect_trajectory_issues(
+                trajectory,
+                current_content,
+            )
 
-            # Passive signal: LLM analyzes trajectory issues (only if no active signal)
-            trajectory_issues: list[TrajectoryIssue] = []
-            if not user_intent:
-                trajectory_issues = await self._detect_trajectory_issues(
-                    trajectory,
-                    current_content,
-                )
-
-            if not user_intent and not trajectory_issues:
+            if not trajectory_issues:
                 logger.info("[TeamSkillRail] no signals detected for '%s'", used_skill)
                 self._emit_progress("no evolution signals detected")
                 return
 
-            # Generate patch based on signal type
-            if user_intent:
-                self._emit_progress(f"user improvement intent detected: {user_intent.intent[:100]}")
-                record = await self._optimizer.generate_user_patch(
-                    trajectory,
-                    used_skill,
-                    user_intent.intent,
-                )
-            else:
-                self._emit_progress(f"trajectory issues detected: {len(trajectory_issues)} issues")
-                record = await self._optimizer.generate_trajectory_patch(
-                    trajectory,
-                    used_skill,
-                    [asdict(i) for i in trajectory_issues],
-                )
+            self._emit_progress(f"trajectory issues detected: {len(trajectory_issues)} issues")
+            record = await self._optimizer.generate_trajectory_patch(
+                trajectory,
+                used_skill,
+                current_content,
+                [asdict(i) for i in trajectory_issues],
+            )
 
             if record:
                 await self._handle_patch_record(record, used_skill)
@@ -390,72 +472,42 @@ class TeamSkillRail(EvolutionRail):
             logger.info("[TeamSkillRail] run_evolution completed in %.1fs", elapsed)
         except Exception as exc:
             logger.warning("[TeamSkillRail] run_evolution failed: %s", exc, exc_info=True)
-            self._emit_progress(f"evolution analysis failed: {exc}")
-
-    # ===== PATCH path =====
-
-    async def _handle_patch(
-        self,
-        trajectory: Trajectory,
-        ctx: Optional[AgentCallbackContext],
-        skill_name: str,
-    ) -> None:
-        logger.info("[TeamSkillRail] PATCH: reading current content of '%s'", skill_name)
-        current_content = await self._store.read_skill_content(skill_name)
-        content_len = len(current_content) if current_content else 0
-        logger.info("[TeamSkillRail] PATCH: current content length=%d, calling LLM...", content_len)
-
-        self._emit_progress(f"comparing trajectory against skill '{skill_name}'...")
-
-        t0 = time.time()
-        patch = await self._optimizer.generate_patch(
-            trajectory=trajectory,
-            skill_name=skill_name,
-            current_skill_content=current_content,
-        )
-        elapsed = time.time() - t0
-
-        if not patch:
-            logger.info("[TeamSkillRail] PATCH: LLM found no patch needed for '%s' (%.1fs)", skill_name, elapsed)
-            self._emit_progress(f"no new learnings found for '{skill_name}'")
-            return
-
-        logger.info(
-            "[TeamSkillRail] PATCH generated: section='%s', content_len=%d (%.1fs)",
-            patch.change.section,
-            len(patch.change.content),
-            elapsed,
-        )
-
-        if self._auto_save:
-            await self._store.append_record(skill_name, patch)
-            logger.info("[TeamSkillRail] PATCH auto-saved for '%s'", skill_name)
-            self._emit_progress(f"patch auto-saved to '{skill_name}'")
-        else:
-            pending = PendingChange.make(skill_name, [patch])
-            pending.change_id = f"team_skill_evolve_{uuid.uuid4().hex[:8]}"
-            self._pending_patch_snapshots[pending.change_id] = pending
-            self._emit_patch_approval_event(skill_name, pending)
-            logger.info(
-                "[TeamSkillRail] PATCH buffered for approval: change_id=%s, skill='%s'",
-                pending.change_id,
-                skill_name,
+            self._pending_evolution_outcomes.append(
+                {"status": "failed", "message": f"team skill evolution failed: {exc}"}
             )
-            self._emit_progress(f"patch for '{skill_name}' ready, awaiting your approval")
+            self._emit_progress(f"evolution analysis failed: {exc}")
+        finally:
+            self._evolution_in_progress = False
 
     async def on_approve_patch(self, request_id: str) -> None:
         """Handle approval of PATCH records."""
-        pending = self._pending_patch_snapshots.pop(request_id, None)
+        pending = self._pending_patch_snapshots.get(request_id)
         if not pending:
             logger.warning("[TeamSkillRail] on_approve_patch: unknown request_id=%s", request_id)
             return
 
-        for record in pending.payload:
-            await self._store.append_record(pending.skill_name, record)
+        skill_op = self._patch_skill_ops.setdefault(
+            pending.skill_name,
+            SkillCallOperator(pending.skill_name),
+        )
+        result = await skill_op.flush_records_to_store(self._store, pending.payload)
+        if result.remaining_records:
+            pending.payload[:] = result.remaining_records
+            logger.warning(
+                "[TeamSkillRail] on_approve_patch partial failure: %d/%d patch(es) written for '%s' "
+                "(request=%s); retry on_approve_patch to complete",
+                result.flushed_count,
+                result.flushed_count + len(result.remaining_records),
+                pending.skill_name,
+                request_id,
+            )
+            return
+
+        self._pending_patch_snapshots.pop(request_id, None)
 
         logger.info(
             "[TeamSkillRail] user approved %d patch(es) for '%s'",
-            len(pending.payload),
+            result.flushed_count,
             pending.skill_name,
         )
 
@@ -643,6 +695,7 @@ class TeamSkillRail(EvolutionRail):
             return None
 
         # Step 1: Archive current SKILL.md and evolutions.json BEFORE rebuild
+        evo_archive: Optional[str] = None
         try:
             body_archive = await self._store.archive_skill_body(skill_name)
             if body_archive:
@@ -651,7 +704,14 @@ class TeamSkillRail(EvolutionRail):
                     body_archive,
                     skill_name,
                 )
+        except Exception as exc:
+            logger.warning(
+                "[TeamSkillRail] skill body archive failed for '%s': %s",
+                skill_name,
+                exc,
+            )
 
+        try:
             evo_archive = await self._store.archive_evolutions(skill_name)
             if evo_archive:
                 logger.info(
@@ -659,19 +719,29 @@ class TeamSkillRail(EvolutionRail):
                     evo_archive,
                     skill_name,
                 )
-
-            self._emit_progress(f"archived old version for '{skill_name}'")
         except Exception as exc:
             logger.warning(
-                "[TeamSkillRail] archive failed for '%s': %s",
+                "[TeamSkillRail] evolutions archive failed for '%s': %s",
                 skill_name,
                 exc,
             )
             self._emit_progress(f"archive failed for '{skill_name}': {exc}")
-            # Continue anyway - archive failure shouldn't block rebuild
+
+        if evo_archive:
+            self._emit_progress(f"archived old version for '{skill_name}'")
 
         # Step 2: Build prompt with filtered evolution records
         followup_text = await self._build_rebuild_prompt(skill_name, user_intent, min_score)
+
+        # Step 3: Reset active evolutions after prompt construction succeeds.
+        if evo_archive:
+            await self._store.clear_evolutions(skill_name)
+            logger.info(
+                "[TeamSkillRail] cleared evolutions.json after rebuild request for '%s'",
+                skill_name,
+            )
+            self._emit_progress(f"cleared evolutions for '{skill_name}' after archiving")
+
         logger.info(
             "[TeamSkillRail] rebuild prompt generated for '%s'",
             skill_name,
@@ -689,7 +759,7 @@ class TeamSkillRail(EvolutionRail):
         """User-triggered evolution entry point.
 
         Allows user to explicitly provide improvement suggestions for a team skill,
-        bypassing the passive _detect_user_request() flow.
+        and is the only user-driven team-skill evolution path.
 
         Args:
             skill_name: Target team skill name.
@@ -835,16 +905,17 @@ class TeamSkillRail(EvolutionRail):
         )
 
         try:
+            policy = getattr(self, "_user_request_llm_policy", _TEAM_USER_REQUEST_LLM_POLICY)
             raw = await invoke_text_with_retry(
                 llm=self._optimizer.llm,
                 model=self._optimizer.model,
                 prompt=prompt,
-                policy=_USER_REQUEST_LLM_POLICY,
+                policy=policy,
                 is_result_usable=lambda text: isinstance(TeamSkillOptimizer.parse_json(text), dict),
             )
         except BaseError as exc:
             logger.warning("[TeamSkillRail] _detect_user_request LLM call failed: %s", exc)
-            return None
+            raise
 
         parsed = TeamSkillOptimizer.parse_json(raw)
         if parsed and parsed.get("is_improvement"):
@@ -873,16 +944,17 @@ class TeamSkillRail(EvolutionRail):
         )
 
         try:
+            policy = getattr(self, "_trajectory_issue_llm_policy", _TEAM_TRAJECTORY_ISSUE_LLM_POLICY)
             raw = await invoke_text_with_retry(
                 llm=self._optimizer.llm,
                 model=self._optimizer.model,
                 prompt=prompt,
-                policy=_TRAJECTORY_ISSUE_LLM_POLICY,
+                policy=policy,
                 is_result_usable=lambda text: isinstance(TeamSkillOptimizer.parse_json(text), list),
             )
         except BaseError as exc:
             logger.warning("[TeamSkillRail] _detect_trajectory_issues LLM call failed: %s", exc)
-            return []
+            raise
 
         parsed = TeamSkillOptimizer.parse_json(raw)
         if not parsed or not isinstance(parsed, list):
@@ -908,33 +980,7 @@ class TeamSkillRail(EvolutionRail):
 
     async def _collect_messages(self, ctx: AgentCallbackContext) -> list[dict]:
         """Collect conversation messages from context."""
-        messages: list[Any] = []
-        if ctx.context is not None:
-            try:
-                messages = list(ctx.context.get_messages())
-            except Exception as exc:
-                logger.debug("[TeamSkillRail] failed to get messages from context: %s", exc)
-        if not messages and ctx.session is not None:
-            agent_obj = ctx.agent
-            inner_agent = getattr(agent_obj, "_react_agent", None)
-            if inner_agent is not None and hasattr(inner_agent, "context_engine"):
-                try:
-                    context = await inner_agent.context_engine.create_context(session=ctx.session)
-                    messages = list(context.get_messages())
-                except Exception as exc:
-                    logger.debug("[TeamSkillRail] failed to get messages from context_engine: %s", exc)
-        result = []
-        for msg in messages:
-            if isinstance(msg, dict):
-                result.append(msg)
-            else:
-                result.append(
-                    {
-                        "role": getattr(msg, "role", "unknown"),
-                        "content": str(getattr(msg, "content", "")),
-                    }
-                )
-        return result
+        return await self._collect_parsed_messages_from_ctx(ctx)
 
     async def _handle_patch_record(
         self,

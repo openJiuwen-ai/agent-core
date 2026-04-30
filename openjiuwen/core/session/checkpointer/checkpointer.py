@@ -1,6 +1,7 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+import re
 from abc import (
     ABC,
     abstractmethod,
@@ -20,9 +21,34 @@ from openjiuwen.core.session.checkpointer.base import Checkpointer
 from openjiuwen.core.session.checkpointer.inmemory import InMemoryCheckpointer
 
 
+_URL_PATTERN = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+
+
+def _redact_url_in_value(value):
+    """Recursively redact passwords in URLs within a value (dict, list, or string)."""
+    from openjiuwen.core.common.utils.url_utils import redact_url_password
+
+    if isinstance(value, str) and _URL_PATTERN.match(value):
+        return redact_url_password(value)
+    elif isinstance(value, dict):
+        return {k: _redact_url_in_value(v) for k, v in value.items()}
+    elif isinstance(value, list):
+        return [_redact_url_in_value(item) for item in value]
+    else:
+        return value
+
+
 class CheckpointerConfig(BaseModel):
     type: str = Field(default="in_memory")
     conf: dict = Field(default_factory=dict)
+
+    def __repr__(self) -> str:
+        redacted_conf = _redact_url_in_value(self.conf)
+        return f"CheckpointerConfig(type={self.type!r}, conf={redacted_conf})"
+
+    def __str__(self) -> str:
+        redacted_conf = _redact_url_in_value(self.conf)
+        return f"type={self.type!r} conf={redacted_conf}"
 
 
 class CheckpointerProvider(ABC):

@@ -314,24 +314,24 @@ ray stop --force
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--config` | `online_rl_launcher.yaml` | 启动配置 YAML，未指定时读取包内置默认文件 |
+| `--config` | — | 可选启动配置 YAML；若提供，则在 launcher schema 默认值之上叠加 |
 | **推理 vLLM** | | |
 | `--model-path` | `/path/to/your/model` | 推理基座模型路径 |
 | `--model-name` | `Qwen3-4B-Thinking-2507` | vLLM 注册的模型名 |
 | `--vllm-gpu` | `0,1` | 推理 GPU（逗号分隔） |
 | `--vllm-tp` | `2` | 推理 Tensor Parallel 大小 |
-| `--vllm-port` | `18002` | 推理服务端口 |
+| `--vllm-port` | — | 推理服务端口；直接运行 launcher 时必填 |
 | `--inference-url` | — | 设置后跳过推理 vLLM 启动 |
 | **Judge vLLM** | | |
 | `--judge-model-path` | `/path/to/your/model` | Judge 模型路径 |
 | `--judge-model-name` | `Qwen3-4B-Thinking-2507` | Judge 模型名 |
 | `--judge-gpu` | `2,3` | Judge GPU（逗号分隔） |
 | `--judge-tp` | `2` | Judge Tensor Parallel 大小 |
-| `--judge-port` | `18003` | Judge 服务端口 |
+| `--judge-port` | — | Judge 服务端口；直接运行 launcher 时必填 |
 | `--judge-url` | — | 设置后跳过 Judge vLLM 启动 |
 | **Gateway** | | |
-| `--gateway-port` | `18080` | Gateway 代理端口 |
-| `--redis-url` | `redis://127.0.0.1:6379/0` | RedisTrajectoryStore 地址 |
+| `--gateway-port` | — | Gateway 代理端口；直接运行 launcher 时必填 |
+| `--redis-url` | — | RedisTrajectoryStore 地址；直接运行 launcher 时必填 |
 | **PPO 训练 & 调度** | | |
 | `--threshold` | `4` | RedisTrajectoryStore 触发训练的样本数阈值 |
 | `--scan-interval` | `30` | OnlineTrainingScheduler 扫描间隔（秒） |
@@ -342,11 +342,12 @@ ray stop --force
 | **其他** | | |
 | `--demo` | — | 演示模式兼容标记（不改变运行逻辑） |
 | `--skip-jiuwen` | — | 跳过 JiuwenClaw app/web 启动 |
-| `--jiuwen-ws-port` | `19000` | JiuwenClaw WebSocket 端口 |
+| `--jiuwen-agent-server-port` | — | JiuwenClaw AgentServer 端口；启用 JiuwenClaw 时必填 |
+| `--jiuwen-ws-port` | — | JiuwenClaw WebSocket 端口；启用 JiuwenClaw 时必填 |
 | `--jiuwen-web-host` | `127.0.0.1` | JiuwenClaw Web 前端监听地址 |
-| `--jiuwen-web-port` | `5173` | JiuwenClaw Web 前端端口 |
+| `--jiuwen-web-port` | — | JiuwenClaw Web 前端端口；启用 JiuwenClaw 时必填 |
 
-说明：上表默认值现在由 [`online_rl_launcher.yaml`](/data1/lmy/agentic-rl/JiuWen/agent-core/openjiuwen/agent_evolving/agent_rl/online/yaml/online_rl_launcher.yaml) 提供，`--config` 会在默认 YAML 之上叠加覆盖，命令行参数再覆盖对应字段。
+说明：`run_online_rl.py` 本身不再为端口和 `redis_url` 提供内置默认值；直接运行 launcher 时，需要通过 `--config` 或 CLI 显式提供。示例 `ctl_online_rl.sh` / `ctl_online_rl_local.sh` 会为本地开发补齐一组常用参数：`--vllm-port 18002`、`--judge-port 18003`、`--gateway-port 18080`、`--redis-url redis://127.0.0.1:6379/0`、`--jiuwen-agent-server-port 18092`、`--jiuwen-ws-port 19000`、`--jiuwen-web-port 5173`。
 
 ## 在线 PPO 闭环原理
 

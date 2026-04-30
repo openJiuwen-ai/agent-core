@@ -116,6 +116,12 @@ class MilvusGraphStore(GraphStore):
 
     def attach_embedder(self, embedder: Embedding):
         if isinstance(embedder, Embedding):
+            if self.config.embed_dim != embedder.dimension:
+                raise build_error(
+                    StatusCode.STORE_GRAPH_PARAM_INVALID,
+                    error_msg="MilvusGraphStore has different config.embed_dim and embedder.dimension "
+                    f"({self.config.embed_dim} != {embedder.dimension})",
+                )
             if self._embedder is not None:
                 store_logger.warning(
                     "%s.embedder has been redefined from %s to %s", type(self).__name__, self._embedder, embedder
@@ -418,7 +424,7 @@ class MilvusGraphStore(GraphStore):
                 collection=col,
                 storage_config=self.config.db_storage_config,
                 embed_config=self.config.db_embed_config,
-                dim=self.embedder.dimension,
+                dim=self.embed_dim,
             )
 
             self.client.create_collection(

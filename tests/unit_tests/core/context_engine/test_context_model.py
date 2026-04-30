@@ -776,6 +776,7 @@ class TestModelContext:
         from openjiuwen.core.context_engine.processor.compressor.current_round_compressor import (
             CurrentRoundCompressorConfig,
         )
+        from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
 
         mock_proc = MagicMock()
         mock_proc.processor_type = MagicMock(return_value="MockProcessor")
@@ -787,7 +788,18 @@ class TestModelContext:
             ctx = await engine.create_context(
                 "test",
                 None,
-                processors=[("MockProcessor", CurrentRoundCompressorConfig())],
+                processors=[(
+                    "MockProcessor",
+                    CurrentRoundCompressorConfig(
+                        model=ModelRequestConfig(model="test-model"),
+                        model_client=ModelClientConfig(
+                            client_provider="OpenAI",
+                            api_key="test-key",
+                            api_base="http://test.local",
+                            verify_ssl=False,
+                        ),
+                    ),
+                )],
             )
             await ctx.add_messages([UserMessage(content="msg")])
             assert len(ctx) == 1

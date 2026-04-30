@@ -104,6 +104,13 @@ from openjiuwen.harness.prompts.tools.mcp import (
     ListMcpResourcesMetadataProvider,
     ReadMcpResourceMetadataProvider,
 )
+from openjiuwen.harness.prompts.tools.memory import (
+    EditMemoryMetadataProvider,
+    MemoryGetMetadataProvider,
+    MemorySearchMetadataProvider,
+    ReadMemoryMetadataProvider,
+    WriteMemoryMetadataProvider,
+)
 
 # ---------------------------------------------------------------------------
 # Provider registry
@@ -154,6 +161,11 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     ExitPlanModeMetadataProvider(),
     ListMcpResourcesMetadataProvider(),
     ReadMcpResourceMetadataProvider(),
+    MemorySearchMetadataProvider(),
+    MemoryGetMetadataProvider(),
+    WriteMemoryMetadataProvider(),
+    EditMemoryMetadataProvider(),
+    ReadMemoryMetadataProvider(),
 ]
 
 _REGISTRY: Dict[str, ToolMetadataProvider] = {

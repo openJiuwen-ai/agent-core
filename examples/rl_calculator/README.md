@@ -1,10 +1,10 @@
 ﻿Calculator 强化学习示例
 =======================
 
-请先阅读仓库文档 **[ReactAgent 强化学习](../../docs/zh/2.开发指南/高阶用法/ReactAgent强化学习.md)**，其中说明了详细的 **verl**、**vLLM / vllm-ascend**、OpenYuanrong 等环境与依赖部署，以及通用训练流程。
+请先阅读仓库文档 **[DeepAgent 强化学习](../../docs/zh/2.开发指南/高阶用法/DeepAgent强化学习.md)**，其中说明了详细的 **verl**、**vLLM / vllm-ascend**、OpenYuanrong 等环境与依赖部署，以及通用训练流程。
 
 
-本示例演示如何使用 openjiuwen 的 `openjiuwen.agent_evolving.agent_rl` 模块训练一个借助计算器工具求解数学题的 ReactAgent。
+本示例演示如何使用 openjiuwen 的 `openjiuwen.agent_evolving.agent_rl` 模块训练一个借助计算器工具求解数学题的 DeepAgent（Harness 运行时）。
 
 目录结构
 --------

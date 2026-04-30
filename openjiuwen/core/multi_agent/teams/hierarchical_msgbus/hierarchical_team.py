@@ -60,6 +60,8 @@ class HierarchicalTeam(BaseTeam):
                 f"[{self.__class__.__name__}] Registered supervisor '{card.id}' "
                 f"in team '{self.team_id}'"
             )
+            if self.config.timeout is not None:
+                self.runtime.set_p2p_timeout(self.config.timeout)
         return self
 
     # ------------------------------------------------------------------
@@ -86,6 +88,7 @@ class HierarchicalTeam(BaseTeam):
         self,
         message: Any,
         session: Optional[Session] = None,
+        timeout: Optional[float] = None,
         **kwargs: Any,
     ) -> Any:
         """Run the supervisor and return the final result.
@@ -93,11 +96,18 @@ class HierarchicalTeam(BaseTeam):
         Args:
             message: User input (dict or str).
             session: Session from Runner, or ``None`` to create a fresh one.
+            timeout: Per-call P2P timeout in seconds. Overrides the
+                ``HierarchicalTeamConfig.timeout`` / ``RuntimeConfig.p2p_timeout``
+                defaults for this invocation only. Defaults to ``None``
+                (uses the configured timeout).
 
         Returns:
             Final result returned by the supervisor agent.
         """
         self._assert_ready()
+        # Use config timeout if not provided
+        if timeout is None:
+            timeout = self.config.timeout
         async with standalone_invoke_context(
             self.runtime, self.card, message, session
         ) as (team_session, session_id):
@@ -110,6 +120,7 @@ class HierarchicalTeam(BaseTeam):
                 recipient=self._supervisor_id,
                 sender=self.card.id,
                 session_id=session_id,
+                timeout=timeout,
             )
             logger.debug(
                 f"[{self.__class__.__name__}] invoke end session_id={session_id}"
@@ -120,6 +131,7 @@ class HierarchicalTeam(BaseTeam):
         self,
         message: Any,
         session: Optional[Session] = None,
+        timeout: Optional[float] = None,
         **kwargs: Any,
     ) -> AsyncIterator[Any]:
         """Run the supervisor and stream output chunks.
@@ -127,11 +139,18 @@ class HierarchicalTeam(BaseTeam):
         Args:
             message: User input (dict or str).
             session: Session from Runner, or ``None`` to create a fresh one.
+            timeout: Per-call P2P timeout in seconds. Overrides the
+                ``HierarchicalTeamConfig.timeout`` / ``RuntimeConfig.p2p_timeout``
+                defaults for this invocation only. Defaults to ``None``
+                (uses the configured timeout).
 
         Yields:
             Chunks emitted by the supervisor or sub-agents.
         """
         self._assert_ready()
+        # Use config timeout if not provided
+        if timeout is None:
+            timeout = self.config.timeout
         logger.debug(
             f"[{self.__class__.__name__}] stream start supervisor={self._supervisor_id}"
         )
@@ -142,6 +161,7 @@ class HierarchicalTeam(BaseTeam):
                 recipient=self._supervisor_id,
                 sender=self.card.id,
                 session_id=session_id,
+                timeout=timeout,
             )
             if result is not None:
                 try:

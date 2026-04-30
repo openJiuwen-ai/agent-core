@@ -2,7 +2,7 @@
 """Task view response schemas for view_task tool."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
@@ -114,3 +114,46 @@ class TaskListResult(BaseModel):
 
     tasks: list[TaskSummary]
     count: int
+
+
+@dataclass(frozen=True, slots=True)
+class NewTaskSpec:
+    """A task to be created via ``mutate_dependency_graph``.
+
+    Edges are passed separately via the ``add_edges`` argument so a single
+    atomic mutation can both insert nodes and wire them up. ``initial_status``
+    is the caller-supplied seed; the post-mutation refresh pass may flip it
+    between ``PENDING`` and ``BLOCKED`` based on the resulting edge set.
+    """
+
+    task_id: str
+    title: str
+    content: str
+    initial_status: str
+
+
+@dataclass(frozen=True, slots=True)
+class GraphMutationResult:
+    """Outcome of ``mutate_dependency_graph``.
+
+    On failure ``reason`` carries a human-readable cause (cycle, missing
+    endpoint, terminal-status target). ``refreshed_tasks`` contains the
+    tasks whose status was flipped during the post-mutation refresh pass.
+    """
+
+    ok: bool
+    reason: str = ""
+    refreshed_tasks: list[Any] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+    @classmethod
+    def success(cls, refreshed_tasks: Optional[list[Any]] = None) -> "GraphMutationResult":
+        """Build a successful result, optionally with the refreshed tasks list."""
+        return cls(ok=True, refreshed_tasks=refreshed_tasks or [])
+
+    @classmethod
+    def fail(cls, reason: str) -> "GraphMutationResult":
+        """Build a failure result carrying the human-readable cause."""
+        return cls(ok=False, reason=reason)

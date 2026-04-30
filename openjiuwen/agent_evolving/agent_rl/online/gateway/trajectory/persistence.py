@@ -14,6 +14,8 @@ from .pending_judge_store import PendingJudgeStore
 from .rail_ingest import RailBatchIngestor
 from .sample_recorder import SampleRecorder
 
+_SINGLE_USER_DEFAULT_ID = "jiuwenclaw-web"
+
 
 class GatewayTrajectoryRuntime:
     """Own scored-sample persistence and rail-v1 ingestion wiring."""
@@ -27,6 +29,7 @@ class GatewayTrajectoryRuntime:
         if redis is None:
             raise ValueError("GatewayTrajectoryRuntime requires redis client")
         os.makedirs(config.record_dir, exist_ok=True)
+        self._default_user_id = _SINGLE_USER_DEFAULT_ID if getattr(config, "single_user_default", False) else ""
         self._trajectory_store = RedisTrajectoryStore(redis)
         self._sample_recorder = SampleRecorder(
             sample_file=os.path.join(config.record_dir, "samples.jsonl"),
@@ -55,11 +58,12 @@ class GatewayTrajectoryRuntime:
         self._rail_ingestor = RailBatchIngestor(
             pending_judge_store=self._pending_judge_store,
             judge_dispatcher=judge_dispatcher,
+            default_user_id=self._default_user_id,
         )
 
     async def record_sample(self, sample: dict[str, Any]) -> None:
         normalized = dict(sample)
-        normalized_user_id = str(normalized.get("user_id") or "").strip()
+        normalized_user_id = str(normalized.get("user_id") or self._default_user_id or "").strip()
         if not normalized_user_id:
             raise ValueError("missing user_id; online training requires a stable user id")
         normalized["user_id"] = normalized_user_id

@@ -4,12 +4,12 @@
 from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 from pydantic import BaseModel, Field
-from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt import InterruptRequest
 from openjiuwen.core.single_agent.rail import AgentCallbackContext
 from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.prompts import resolve_language
+from openjiuwen.harness.tools.ask_user import AskUserTool
 from openjiuwen.harness.rails.interrupt.interrupt_base import BaseInterruptRail, InterruptDecision
 
 
@@ -25,24 +25,6 @@ class AskUserPayload(BaseModel):
 class AskUserRequest(InterruptRequest):
     """Ask-user request configuration, extends InterruptRequest with questions."""
     questions: List[dict] = Field(default_factory=list, description="Questions to present to the user")
-
-
-class AskUserTool(Tool):
-    def __init__(self, language: str = "cn", agent_id: Optional[str] = None):
-        super().__init__(
-            build_tool_card(
-                name="ask_user",
-                tool_id="ask_user",
-                language=language,
-                agent_id=agent_id,
-            )
-        )
-
-    async def invoke(self, query, **kwargs):
-        return {}
-
-    async def stream(self, query, **kwargs):
-        yield {}
 
 
 class AskUserRail(BaseInterruptRail):

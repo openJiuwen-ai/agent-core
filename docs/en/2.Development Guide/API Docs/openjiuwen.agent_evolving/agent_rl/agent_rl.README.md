@@ -32,14 +32,15 @@
 | [RolloutPersistence](./offline/store.md) | Rollout persistence abstract interface. |
 | [FileRolloutStore](./offline/store.md) | File-based Rollout persistence implementation. |
 | [NullRolloutStore](./offline/store.md) | No-op Rollout persistence implementation. |
-| [RLMetricsTracker](./offline/monitoring.md) | RL training structured metrics tracker. |
-| [TrainingStepMetrics](./offline/monitoring.md) | Single training step metrics dataclass. |
+| [RLMetricsTracker](./offline/store.md) | Structured RL metrics tracker (`metrics_tracker`). |
+| [TrainingStepMetrics](./offline/store.md) | Single training step metrics dataclass. |
+| [TrainingDiagnostics](./offline/store.md) | Stage-wise training pipeline diagnostics in develop mode (`metrics_tracker`). |
 | [BackendProxy](./proxy.md) | Reverse proxy providing a stable backend inference URL. |
 | [RLRail](./offline/runtime.md) | `EvolutionRail` subclass for RL trajectory collection. |
 | [TrajectoryCollector](./offline/runtime.md) | Agent trajectory collection wrapper. |
 | [RuntimeExecutor](./offline/runtime.md) | Self-contained single-task executor. |
 | [ParallelRuntimeExecutor](./offline/runtime.md) | Parallel rollout execution engine. |
-| [AgentFactory](./offline/runtime.md) | Factory for creating ReActAgent instances for each RL task. |
+| [AgentFactory](./offline/runtime.md) | Factory creating a **DeepAgent** per RL task (see `offline/runtime.md`). |
 
 **Functions**:
 

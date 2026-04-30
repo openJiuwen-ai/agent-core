@@ -11,7 +11,6 @@ from openjiuwen.core.foundation.llm import (
     ModelRequestConfig, ModelClientConfig, AssistantMessage, Model, BaseModelClient,
     BaseMessage, BaseOutputParser, AssistantMessageChunk, UserMessage
 )
-from openjiuwen.core.foundation.llm.model import _CLIENT_TYPE_REGISTRY
 from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
     AudioGenerationResponse
 from openjiuwen.core.foundation.tool import ToolInfo

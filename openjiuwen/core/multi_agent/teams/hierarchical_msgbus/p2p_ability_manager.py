@@ -170,9 +170,13 @@ class P2PAbilityManager(AbilityManager):
 
         session_id = session.get_session_id() if session is not None else None
 
+        # Read timeout from the bound runtime (propagated from HierarchicalTeamConfig.timeout)
+        runtime = getattr(self._supervisor, "runtime", None)
+        timeout = runtime.p2p_timeout if runtime is not None else 1800.0
+
         logger.debug(
             f"[{self.__class__.__name__}] P2P dispatch "
-            f"tool='{tool_name}' agent_id='{agent_card.id}' session_id={session_id!r}"
+            f"tool='{tool_name}' agent_id='{agent_card.id}' session_id={session_id!r} timeout={timeout}s"
         )
 
         try:
@@ -180,6 +184,7 @@ class P2PAbilityManager(AbilityManager):
                 message=tool_args,
                 recipient=agent_card.id,
                 session_id=session_id,
+                timeout=timeout,
             )
         except Exception as exc:
             error_msg = f"P2P dispatch to '{tool_name}' failed: {exc}"

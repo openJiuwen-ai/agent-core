@@ -19,7 +19,8 @@
 | [trajectory](openjiuwen.agent_evolving/trajectory.md) | 轨迹类型与抽取（Trajectory、TracerTrajectoryExtractor、iter_steps 等） |
 | [updater](openjiuwen.agent_evolving/updater.md) | 更新器（Updater、SingleDimUpdater、MultiDimUpdater） |
 | [checkpointing](openjiuwen.agent_evolving/checkpointing.md) | 检查点与恢复（EvolveCheckpoint、FileCheckpointStore、CheckpointManager） |
-| [optimizer](openjiuwen.agent_evolving/optimizer.md) | 优化器（BaseOptimizer、TextualParameter、InstructionOptimizer） |
+| [optimizer](openjiuwen.agent_evolving/optimizer/optimizer.md) | 优化器基类（BaseOptimizer、TextualParameter、InstructionOptimizer） |
+| [team_skill_optimizer](openjiuwen.agent_evolving/optimizer/team_skill_optimizer.md) | 团队技能优化器（TeamSkillOptimizer、PATCH 生成） |
 | [evaluator](openjiuwen.agent_evolving/evaluator.md) | 评估接口与指标（BaseEvaluator、DefaultEvaluator、MetricEvaluator、Metric） |
 | [agent_rl](openjiuwen.agent_evolving/agent_rl/agent_rl.README.md) | 基于 VERL 的 RL 训练（`RLConfig`、`OfflineRLOptimizer`、rollout 编排、奖励注册等） |
 

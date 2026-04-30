@@ -1711,3 +1711,57 @@ async def test_consumer_fast_than_producer_node():
     logger.info(f"result: {stream_chunks}")
     assert len(stream_chunks) == 1
     assert stream_chunks[-1].payload == {'output': {'final_result': 9}}
+
+
+class PrintInputsNode(WorkflowComponent):
+    def __init__(self, node_id):
+        self.node_id = node_id
+
+    async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+        data = inputs["data"]
+        if isinstance(data, dict):
+            data = ';;;'.join([f"{k}:{v}" for k, v in data.items()])
+        logger.info(self.node_id + ": results = " + str(data))
+        return data
+
+async def test_loop_with_stream():
+    loop_group = LoopGroup()
+    loop_group.add_workflow_comp("A", ComputeComponent2(),
+                                 inputs_schema={'a': '${loop.item.a}', 'b': '${loop.item.b}'})
+    loop_group.add_workflow_comp("B", ComputeComponent2(), inputs_schema={'a': '${A.result}', 'b': '${A.result}'})
+
+    loop_group.add_workflow_comp("C", ComputeComponent2(),
+                                 stream_inputs_schema={'a': '${A.a}', 'op': '${A.op}', 'b': '${A.b}',
+                                                       'result': '${A.result}'})
+    loop_group.add_workflow_comp("D", ComputeComponent2(),
+                                 stream_inputs_schema={'data1': {'a': '${C.a}', 'op': '${C.op}',
+                                                                 'b': '${C.b}', 'result': '${C.result}'},
+                                                       'data': {'a': '${B.a}', 'op': '${B.op}',
+                                                                'b': '${B.b}', 'result': '${B.result}'}})
+    loop_group.add_workflow_comp("print", PrintInputsNode("print"),
+                                 inputs_schema={"data": {'final_result': '${D.result_collect}'}})
+
+    loop_group.start_nodes(["A"])
+    loop_group.add_connection("A", "B")
+    loop_group.add_stream_connection("A", "C")
+    loop_group.add_stream_connection("B", "D")
+    loop_group.add_stream_connection("C", "D")
+    loop_group.add_connection("D", "print")
+    loop_group.end_nodes(["print"])
+
+    # main flow
+    flow = Workflow()
+    flow.set_start_comp("start", Start(), inputs_schema={"datas": "${inputs}"})
+    loop_component = LoopComponent(loop_group, output_schema={"prints": "${print}"})
+    flow.add_workflow_comp("loop", loop_component, inputs_schema={"loop_type": "array",
+                                                                  "loop_array": {"item": "${start.datas}"}})
+    flow.set_end_comp("end", End({}), inputs_schema={"end_out": "${loop.prints}"})
+
+    # workflow connection
+    flow.add_connection("start", "loop")
+    flow.add_connection("loop", "end")
+
+    # Process Verification:
+    result = await flow.invoke({"inputs": [{"a": 1, "b": 2}, {"a": 3, "b": 1}]}, create_workflow_session())
+    logger.info(f"result: {result}")
+    assert result.result["output"]['end_out'] == ['final_result:9', 'final_result:12']

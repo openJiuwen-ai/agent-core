@@ -10,7 +10,6 @@ from pydantic import BaseModel
 
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.core.common.logging import logger
-from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.foundation.llm import ModelRequestConfig
 from openjiuwen.core.context_engine import (
@@ -177,19 +176,12 @@ class ContextProcessorRail(DeepAgentRail):
                 (
                     "MessageSummaryOffloader",
                     MessageSummaryOffloaderConfig(
-                        messages_threshold=None,
                         tokens_threshold=60000,
                         large_message_threshold=60000,
                         offload_message_type=["tool"],
                         protected_tool_names=["read_file:*SKILL.md", "reload_original_context_messages"],
                         messages_to_keep=None,
                         keep_last_round=False,
-                        customized_summary_prompt=None,
-                        enable_adaptive_compression=True,
-                        summary_max_tokens=900,
-                        enable_precise_step=False,
-                        step_summary_max_context_messages=8,
-                        content_max_chars_for_compression=200000,
                         model=model_cfg,
                         model_client=model_client_config,
                     ),
@@ -197,12 +189,10 @@ class ContextProcessorRail(DeepAgentRail):
                 (
                     "DialogueCompressor",
                     DialogueCompressorConfig(
-                        messages_threshold=None,
                         tokens_threshold=100000,
                         messages_to_keep=10,
                         keep_last_round=False,
                         compression_target_tokens=1800,
-                        offload_writeback_enabled=False,
                         model=model_cfg,
                         model_client=model_client_config,
                     ),
@@ -212,13 +202,6 @@ class ContextProcessorRail(DeepAgentRail):
                     CurrentRoundCompressorConfig(
                         tokens_threshold=100000,
                         messages_to_keep=3,
-                        min_selected_tokens_for_compression=20000,
-                        compression_target_tokens=4000,
-                        summary_merge_target_tokens=4000,
-                        accumulated_summary_token_limit=20000,
-                        summary_merge_min_blocks=3,
-                        prior_context_window_size=10,
-                        offload_writeback_enabled=False,
                         model=model_cfg,
                         model_client=model_client_config,
                     ),
@@ -226,19 +209,11 @@ class ContextProcessorRail(DeepAgentRail):
                 (
                     "RoundLevelCompressor",
                     RoundLevelCompressorConfig(
-                        rounds_threshold=2,
-                        tokens_threshold=230000,
                         trigger_total_tokens=230000,
                         target_total_tokens=160000,
-                        compression_call_max_tokens=250000,
                         keep_last_round=True,
                         keep_recent_messages=6,
                         messages_to_keep=6,
-                        first_pass_target_tokens=30000,
-                        second_pass_target_tokens=20000,
-                        third_pass_target_tokens=10000,
-                        truncate_head_ratio=0.2,
-                        offload_writeback_enabled=False,
                         model=model_cfg,
                         model_client=model_client_config,
                     )
@@ -280,7 +255,6 @@ class ContextProcessorRail(DeepAgentRail):
         config.context_processors = all_processors
 
         self._all_processors = all_processors
-
         self._system_prompt_builder = getattr(agent, "system_prompt_builder", None)
 
     def uninit(self, agent) -> None:

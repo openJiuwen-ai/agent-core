@@ -103,3 +103,101 @@ Gets all matching steps for specified case and operator.
 **Returns**:
 
 **List[TrajectoryStep]**, matching step list.
+
+---
+
+## class TeamTrajectory
+
+Aggregated team trajectory dataclass for team-level view of a single session.
+
+* **team_id** (str): Team ID.
+* **session_id** (str): Session ID.
+* **combined** (Trajectory): Merged view of all member trajectories, sorted by `start_time_ms`.
+* **members** (Dict[str, Trajectory]): Mapping from member ID to its individual trajectory.
+
+---
+
+## class TeamTrajectoryAggregator
+
+Aggregates team member trajectories into a team-level view.
+
+```text
+class TeamTrajectoryAggregator(
+    *,
+    store: Optional[TrajectoryStore] = None,
+    trajectories_dir: Optional[Path] = None,
+    team_id: str,
+)
+```
+
+**Parameters**:
+
+* **store** (TrajectoryStore, optional): Trajectory store instance.
+* **trajectories_dir** (Path, optional): Trajectory directory path (backward-compatible).
+* **team_id** (str): Team ID.
+
+**Either `store` or `trajectories_dir` must be provided**.
+
+### aggregate(session_id, filter_collaborative) -> TeamTrajectory
+
+Aggregate all member trajectories for the given session.
+
+**Parameters**:
+
+* **session_id** (str): Session ID.
+* **filter_collaborative** (bool): Whether to filter collaboration-relevant steps, defaults to `True`.
+
+**Returns**:
+
+* **TeamTrajectory**: Contains `members` dict and `combined` merged view.
+
+---
+
+## func filter_member_trajectory(trajectory: Trajectory) -> Trajectory
+
+Filter member trajectory to keep only collaboration-relevant steps.
+
+Retains step types:
+
+* Steps with cross-member meta markers (`invoke_id`, `parent_invoke_id`, `child_invokes`)
+* Collaborative tool calls (`view_task`, `claim_task`, `send_message`, etc.)
+* Skill file reads (`read_file` calls containing "skill")
+
+**Parameters**:
+
+* **trajectory** (Trajectory): Member trajectory.
+
+**Returns**:
+
+* **Trajectory**: Filtered trajectory, preserving other fields.
+
+---
+
+## Constants
+
+### COLLABORATIVE_TOOLS
+
+Collaborative tool name set:
+
+```python
+COLLABORATIVE_TOOLS = frozenset({
+    "view_task",
+    "claim_task",
+    "send_message",
+    "workspace_meta",
+    "read_file",
+    "write_file",
+})
+```
+
+### CROSS_MEMBER_META_KEYS
+
+Cross-member interaction meta key set:
+
+```python
+CROSS_MEMBER_META_KEYS = frozenset({
+    "invoke_id",
+    "parent_invoke_id",
+    "child_invokes",
+})
+```

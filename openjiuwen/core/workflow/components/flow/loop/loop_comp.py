@@ -52,6 +52,7 @@ class LoopGroup(BaseWorkflow, Executable):
         self._break_components = []
         self._start_nodes = []
         self._end_nodes = []
+        self._node_ids = []
 
     def add_workflow_comp(
             self,
@@ -79,6 +80,7 @@ class LoopGroup(BaseWorkflow, Executable):
             self._break_components.append(workflow_comp)
         if self._drawable and isinstance(workflow_comp, LoopBreakComponent):
             self._drawable.set_break_node(comp_id)
+        self._node_ids.append(comp_id)
 
     def start_nodes(self, nodes: list[str]) -> Self:
         for node in nodes:
@@ -118,6 +120,11 @@ class LoopGroup(BaseWorkflow, Executable):
                                                   workflow_config=self._workflow_config)
         self.compiled_graph = self.compile(loop_session, context=kwargs.get("context"))
         await self.compiled_graph.invoke(inputs, loop_session)
+        finished_stream_nodes = session.state().get_workflow_state("finished_stream_nodes") or []
+        for node_id in self._node_ids:
+            if node_id in finished_stream_nodes:
+                finished_stream_nodes.remove(node_id)
+        session.state().update_and_commit_workflow_state({"finished_stream_nodes": finished_stream_nodes})
         return None
 
     def skip_trace(self) -> bool:

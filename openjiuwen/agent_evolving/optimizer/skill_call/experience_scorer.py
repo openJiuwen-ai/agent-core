@@ -26,15 +26,15 @@ W_F = 0.2
 FRESHNESS_HALF_LIFE_DAYS = 90
 STALE_VERSION_PENALTY = 0.7
 
-_EVALUATE_LLM_POLICY = LLMInvokePolicy(
-    attempt_timeout_secs=20,
-    total_budget_secs=45,
-    max_attempts=2,
-)
-_SIMPLIFY_LLM_POLICY = LLMInvokePolicy(
+EVALUATE_LLM_POLICY = LLMInvokePolicy(
     attempt_timeout_secs=30,
-    total_budget_secs=60,
-    max_attempts=2,
+    total_budget_secs=90,
+    max_attempts=3,
+)
+SIMPLIFY_LLM_POLICY = LLMInvokePolicy(
+    attempt_timeout_secs=60,
+    total_budget_secs=180,
+    max_attempts=3,
 )
 
 
@@ -292,10 +292,29 @@ def update_score(
 class ExperienceScorer:
     """LLM-based experience scorer and maintainer."""
 
-    def __init__(self, llm: Model, model: str, language: str = "cn") -> None:
+    def __init__(
+        self,
+        llm: Model,
+        model: str,
+        language: str = "cn",
+        evaluate_llm_policy: LLMInvokePolicy = EVALUATE_LLM_POLICY,
+        simplify_llm_policy: LLMInvokePolicy = SIMPLIFY_LLM_POLICY,
+    ) -> None:
         self._llm = llm
         self._model = model
         self._language = language
+        self._evaluate_llm_policy = evaluate_llm_policy
+        self._simplify_llm_policy = simplify_llm_policy
+
+    @property
+    def evaluate_llm_policy(self) -> LLMInvokePolicy:
+        """Get the configured evaluation policy."""
+        return self._evaluate_llm_policy
+
+    @property
+    def simplify_llm_policy(self) -> LLMInvokePolicy:
+        """Get the configured maintenance policy."""
+        return self._simplify_llm_policy
 
     def update_llm(self, llm: Model, model: str) -> None:
         """Update runtime llm/model for hot reload."""
@@ -330,7 +349,7 @@ class ExperienceScorer:
                 llm=self._llm,
                 model=self._model,
                 prompt=prompt,
-                policy=_EVALUATE_LLM_POLICY,
+                policy=self._evaluate_llm_policy,
                 is_result_usable=lambda text: self._parse_llm_json(text) is not None,
             )
         except BaseError as exc:
@@ -379,7 +398,7 @@ class ExperienceScorer:
                 llm=self._llm,
                 model=self._model,
                 prompt=prompt,
-                policy=_SIMPLIFY_LLM_POLICY,
+                policy=self._simplify_llm_policy,
                 is_result_usable=lambda text: self._parse_llm_json(text) is not None,
             )
         except BaseError as exc:
@@ -537,6 +556,8 @@ __all__ = [
     "W_F",
     "FRESHNESS_HALF_LIFE_DAYS",
     "STALE_VERSION_PENALTY",
+    "EVALUATE_LLM_POLICY",
+    "SIMPLIFY_LLM_POLICY",
     "calc_effectiveness",
     "calc_utilization",
     "calc_freshness",

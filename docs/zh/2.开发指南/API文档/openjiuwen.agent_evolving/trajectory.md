@@ -103,3 +103,101 @@
 **返回**：
 
 **List[TrajectoryStep]**，匹配的步骤列表。
+
+---
+
+## class TeamTrajectory
+
+聚合的团队轨迹数据类，用于单个 session 的团队级别视图。
+
+* **team_id** (str): 团队 ID。
+* **session_id** (str): 会话 ID。
+* **combined** (Trajectory): 所有成员轨迹合并后的视图，按 `start_time_ms` 排序。
+* **members** (Dict[str, Trajectory]): 成员 ID 到其独立轨迹的映射。
+
+---
+
+## class TeamTrajectoryAggregator
+
+聚合团队成员轨迹，生成团队级别视图。
+
+```text
+class TeamTrajectoryAggregator(
+    *,
+    store: Optional[TrajectoryStore] = None,
+    trajectories_dir: Optional[Path] = None,
+    team_id: str,
+)
+```
+
+**参数**：
+
+* **store** (TrajectoryStore, 可选): 轨迹存储实例。
+* **trajectories_dir** (Path, 可选): 轨迹目录路径（向后兼容）。
+* **team_id** (str): 团队 ID。
+
+**必须提供 `store` 或 `trajectories_dir` 其中之一**。
+
+### aggregate(session_id, filter_collaborative) -> TeamTrajectory
+
+聚合指定会话的所有成员轨迹。
+
+**参数**：
+
+* **session_id** (str): 会话 ID。
+* **filter_collaborative** (bool): 是否过滤协作相关步骤，默认 `True`。
+
+**返回**：
+
+* **TeamTrajectory**：包含 `members` 字典和 `combined` 合并视图。
+
+---
+
+## func filter_member_trajectory(trajectory: Trajectory) -> Trajectory
+
+过滤成员轨迹，仅保留协作相关步骤。
+
+保留步骤类型：
+
+* 包含跨成员 meta 标记（`invoke_id`、`parent_invoke_id`、`child_invokes`）
+* 协作工具调用（`view_task`、`claim_task`、`send_message` 等）
+* 技能文件读取（包含 "skill" 的 `read_file` 调用）
+
+**参数**：
+
+* **trajectory** (Trajectory): 成员轨迹。
+
+**返回**：
+
+* **Trajectory**: 过滤后的轨迹，保留其他字段。
+
+---
+
+## 常量
+
+### COLLABORATIVE_TOOLS
+
+协作工具名称集合：
+
+```python
+COLLABORATIVE_TOOLS = frozenset({
+    "view_task",
+    "claim_task",
+    "send_message",
+    "workspace_meta",
+    "read_file",
+    "write_file",
+})
+```
+
+### CROSS_MEMBER_META_KEYS
+
+跨成员交互 meta 键集合：
+
+```python
+CROSS_MEMBER_META_KEYS = frozenset({
+    "invoke_id",
+    "parent_invoke_id",
+    "child_invokes",
+})
+```

@@ -11,9 +11,17 @@ from tempfile import TemporaryDirectory
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.processor.base import ContextEvent
 from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
-    FullCompactProcessorConfig,
+    FullCompactProcessorConfig as _FullCompactProcessorConfig,
 )
-from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, ToolCall, ToolMessage, UserMessage
+from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
+    ModelClientConfig,
+    ModelRequestConfig,
+    SystemMessage,
+    ToolCall,
+    ToolMessage,
+    UserMessage,
+)
 from openjiuwen.core.session.agent import Session
 from tests.unit_tests.core.context_engine._stream_state_helpers import (
     assert_context_state_pair,
@@ -23,6 +31,19 @@ from tests.unit_tests.core.context_engine._stream_state_helpers import (
 
 def create_tool_call(tool_call_id: str, name: str, arguments: str = "") -> ToolCall:
     return ToolCall(id=tool_call_id, name=name, type="function", arguments=arguments)
+
+
+def FullCompactProcessorConfig(**kwargs):
+    return _FullCompactProcessorConfig(
+        model=ModelRequestConfig(model="test-model"),
+        model_client=ModelClientConfig(
+            client_provider="OpenAI",
+            api_key="test-key",
+            api_base="http://test.local",
+            verify_ssl=False,
+        ),
+        **kwargs,
+    )
 
 
 async def create_context_with_full_compact(
@@ -104,7 +125,7 @@ class TestFullCompactProcessor:
             processor.config,
             history_messages=[
                 UserMessage(content="before compact"),
-                SystemMessage(content=f"{processor.config.marker}\nConversation compacted"),
+                SystemMessage(content=f"{processor._marker}\nConversation compacted"),
                 UserMessage(content="recent user"),
                 AssistantMessage(content="recent assistant"),
             ],
@@ -262,7 +283,7 @@ class TestFullCompactProcessor:
         assert candidate_messages is not None
         assert session_memory_message is not None
         assert candidate_messages[2:] == []
-        assert session_memory_message.content.startswith(processor.config.session_memory_intro)
+        assert session_memory_message.content.startswith(processor._session_memory_intro)
         assert "updated notes" in session_memory_message.content
 
     def test_select_messages_after_session_memory_prefers_context_message_id(self):

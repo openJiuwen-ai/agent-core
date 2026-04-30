@@ -302,12 +302,18 @@ class ContextProcessor(metaclass=MetaContextProcessor):
             "messages": [msg.model_dump() if hasattr(msg, "model_dump") else str(msg) for msg in messages],
         }
         content_json = json.dumps(message_data, ensure_ascii=False, indent=2)
-        if sys_operation is None:
-            from openjiuwen.core.common.logging import logger
-            logger.warning("_write_offload_to_file: no sys_operation available, falling back to in_memory")
+        try:
+            if sys_operation is None:
+                if not os.path.isabs(file_path):
+                    return False
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                with open(file_path, "w", encoding="utf-8") as file:
+                    file.write(content_json)
+                return True
+            await sys_operation.fs().write_file(file_path, content_json)
+            return True
+        except Exception:
             return False
-        await sys_operation.fs().write_file(file_path, content_json)
-        return True
 
     @staticmethod
     def _api_round(messages: List[BaseMessage]) -> bool:

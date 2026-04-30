@@ -171,11 +171,20 @@ class TestAttachEmbedder:
         setattr(store, "_embedder", _StubEmbedding())
         assert store.embedder.dimension == _StubEmbedding.dimension
         emb = _StubEmbedding()
-        emb.dimension = -1
+        emb.dimension = store.config.embed_dim
         store.attach_embedder(emb)
         assert getattr(store, "_embedder") is emb
         assert store.embedder is emb
-        assert store.embedder.dimension == -1
+        assert store.embedder.dimension == store.config.embed_dim
+
+    @staticmethod
+    def test_attach_embedder_dimension_mismatch_raises(store):
+        """attach_embedder rejects embedders whose dimension differs from config.embed_dim."""
+        setattr(store, "_embedder", None)
+        emb = _StubEmbedding()
+        emb.dimension = store.config.embed_dim + 32
+        with pytest.raises(BaseError, match="config.embed_dim"):
+            store.attach_embedder(emb)
 
     @staticmethod
     def test_attach_embedder_non_embedder_raises(store):
@@ -533,6 +542,26 @@ class TestSearchBfs:
 
 class TestBuildIndices:
     """Tests for _build_indices - load existing collection, rebuild on load error."""
+
+    @staticmethod
+    def test_build_indices_without_embedder_uses_config_embed_dim(mock_client):
+        """When embedding_model is None, collections still initialize with config.embed_dim."""
+        config = _make_config(embed_dim=96, with_embedder=False)
+        with patch(
+            "openjiuwen.core.foundation.store.graph.milvus.milvus_support.MilvusClient",
+            return_value=mock_client,
+        ):
+            with patch("openjiuwen.core.foundation.store.graph.config.os.makedirs"):
+                with patch(
+                    "openjiuwen.core.foundation.store.graph.milvus.milvus_support.generate_schema_and_index",
+                    return_value=(MagicMock(), MagicMock()),
+                ) as generate_schema:
+                    store = MilvusGraphStore(config=config)
+        assert store.embedder is None
+        assert generate_schema.call_count == 3
+        assert all(call.kwargs["dim"] == 96 for call in generate_schema.call_args_list)
+        assert mock_client.create_collection.call_count == 3
+        assert all(call.kwargs["dimension"] == 96 for call in mock_client.create_collection.call_args_list)
 
     @staticmethod
     def test_build_indices_has_collection_loads_it(mock_client):

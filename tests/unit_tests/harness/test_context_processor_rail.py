@@ -162,7 +162,6 @@ async def test_init_preset_defaults(tmp_path: Path):
     assert off.large_message_threshold == 60000
     assert off.offload_message_type == ["tool"]
     assert off.protected_tool_names == ["read_file:*SKILL.md", "reload_original_context_messages"]
-    assert off.enable_adaptive_compression is True
     assert off.summary_max_tokens == 900
 
     # DialogueCompressor tests
@@ -184,10 +183,9 @@ async def test_init_preset_defaults(tmp_path: Path):
     # RoundLevelCompressor tests
     round_lvl = procs.get("RoundLevelCompressor")
     assert round_lvl is not None
-    assert round_lvl.rounds_threshold == 2
-    assert round_lvl.tokens_threshold == 230000
+    assert round_lvl.trigger_total_tokens == 230000
     assert round_lvl.target_total_tokens == 160000
-    assert round_lvl.keep_last_round is True
+    assert round_lvl.keep_recent_messages == 6
 
 
 
@@ -516,13 +514,12 @@ def test_merge_processors_with_model_config():
     ]
     overrides = []
 
-    result = ContextProcessorRail._merge_processors(
+    ContextProcessorRail._merge_processors(
         base, overrides,
         model_config=base_model_cfg,
         model_client_config=None
     )
 
-    cfg = dict(result)["DialogueCompressor"]
     # Processor has model attribute, and it should be set from model_config
     # Note: DialogueCompressorConfig may not have model attribute, check accordingly
 
@@ -533,10 +530,6 @@ def test_merge_processors_with_model_config():
 
 def test_build_preset_processors_without_session_memory(tmp_path: Path):
     """_build_preset_processors should return standard preset when session_memory disabled."""
-    sys_operation = _make_sys_operation(tmp_path)
-    workspace = Workspace(root_path=str(tmp_path))
-    agent = _make_agent(sys_operation, workspace)
-
     rail = ContextProcessorRail(preset=True, session_memory=None)
     presets = rail._build_preset_processors()
 
@@ -552,10 +545,6 @@ def test_build_preset_processors_without_session_memory(tmp_path: Path):
 
 def test_build_preset_processors_with_session_memory(tmp_path: Path):
     """_build_preset_processors should return session memory presets when enabled."""
-    sys_operation = _make_sys_operation(tmp_path)
-    workspace = Workspace(root_path=str(tmp_path))
-    agent = _make_agent(sys_operation, workspace)
-
     session_config = SessionMemoryConfig()
     rail = ContextProcessorRail(preset=True, session_memory=session_config)
     presets = rail._build_preset_processors()
@@ -570,10 +559,6 @@ def test_build_preset_processors_with_session_memory(tmp_path: Path):
 
 def test_build_preset_processors_with_session_memory_dict(tmp_path: Path):
     """_build_preset_processors should accept session_memory as dict."""
-    sys_operation = _make_sys_operation(tmp_path)
-    workspace = Workspace(root_path=str(tmp_path))
-    agent = _make_agent(sys_operation, workspace)
-
     rail = ContextProcessorRail(preset=True, session_memory={"max_history_rounds": 5})
     presets = rail._build_preset_processors()
 
@@ -847,10 +832,6 @@ async def test_after_tool_call_refreshes_state(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_init_with_session_memory_config(tmp_path: Path):
     """ContextProcessorRail should initialize session memory manager when configured."""
-    sys_operation = _make_sys_operation(tmp_path)
-    workspace = Workspace(root_path=str(tmp_path))
-    agent = _make_agent(sys_operation, workspace)
-
     session_config = SessionMemoryConfig(max_history_rounds=10)
     rail = ContextProcessorRail(preset=True, session_memory=session_config)
 
@@ -862,10 +843,6 @@ async def test_init_with_session_memory_config(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_init_with_session_memory_dict(tmp_path: Path):
     """ContextProcessorRail should accept session_memory as dict."""
-    sys_operation = _make_sys_operation(tmp_path)
-    workspace = Workspace(root_path=str(tmp_path))
-    agent = _make_agent(sys_operation, workspace)
-
     rail = ContextProcessorRail(
         preset=True,
         session_memory={"max_history_rounds": 5}
@@ -893,10 +870,6 @@ async def test_uninit_shuts_down_session_memory_manager(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_session_memory_not_enabled_without_config(tmp_path: Path):
     """ContextProcessorRail should not enable session memory when config is None."""
-    sys_operation = _make_sys_operation(tmp_path)
-    workspace = Workspace(root_path=str(tmp_path))
-    agent = _make_agent(sys_operation, workspace)
-
     rail = ContextProcessorRail(preset=True, session_memory=None)
 
     assert rail._session_memory_enabled is False

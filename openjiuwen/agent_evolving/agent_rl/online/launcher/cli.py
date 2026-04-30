@@ -43,6 +43,7 @@ def build_cli_overrides(args: argparse.Namespace) -> dict[str, object]:
         'ppo_config': 'training.ppo_config',
         'trajectory_batch_size': 'trajectory.batch_size',
         'lora_repo': 'training.lora_repo',
+        'jiuwen_agent_server_port': 'jiuwen.agent_server_port',
         'jiuwen_ws_port': 'jiuwen.ws_port',
         'jiuwen_web_host': 'jiuwen.web_host',
         'jiuwen_web_port': 'jiuwen.web_port',
@@ -63,7 +64,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--config',
         default=None,
-        help=f'Runtime config YAML override (default base: built-in {DEFAULT_CONFIG_FILENAME})',
+        help=(
+            f'YAML overlay on built-in defaults from {DEFAULT_CONFIG_FILENAME} '
+            '(optional)'
+        ),
     )
     parser.add_argument('--model-path', default=None, help='Base model path')
     parser.add_argument('--model-name', default=None, help='Model name registered in vLLM')
@@ -85,7 +89,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--ppo-config',
         default=None,
-        help='PPO training config path (default: built-in ppo_online_trainer.yaml)',
+        help=(
+            'Custom Hydra PPO YAML (default: compose verl ``ppo_trainer`` + '
+            'online_config.ONLINE_PPO_VERL_HYDRA_OVERLAY)'
+        ),
     )
     parser.add_argument(
         '--trajectory-batch-size',
@@ -94,6 +101,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help='Trajectory env batch size for JiuwenClaw (e.g. TRAJECTORY_BATCH_SIZE)',
     )
     parser.add_argument('--lora-repo', default=None, help='LoRA storage dir (default: ./lora_repo)')
+    parser.add_argument('--jiuwen-agent-server-port', type=int, default=None, help='JiuwenClaw agent server port')
     parser.add_argument(
         '--demo',
         action='store_true',

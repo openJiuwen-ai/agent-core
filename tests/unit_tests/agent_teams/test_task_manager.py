@@ -10,6 +10,10 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.messager import Messager
+from openjiuwen.agent_teams.schema.status import (
+    MemberMode,
+    TaskStatus,
+)
 from openjiuwen.agent_teams.spawn.context import (
     reset_session_id,
     set_session_id,
@@ -18,10 +22,6 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
     TeamDatabase,
-)
-from openjiuwen.agent_teams.schema.status import (
-    MemberMode,
-    TaskStatus,
 )
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.core.single_agent import AgentCard
@@ -56,12 +56,12 @@ async def message_bus():
 @pytest_asyncio.fixture
 async def task_manager(db, message_bus):
     """Provide initialized task manager instance"""
-    await db.create_team(
+    await db.team.create_team(
             team_name="test_team",
             display_name="Test Team",
             leader_member_name="leader1"
     )
-    await db.create_member(
+    await db.member.create_member(
             member_name="member1",
             team_name="test_team",
             display_name="member1",
@@ -203,13 +203,13 @@ class TestClaimConflict:
     @pytest.mark.level0
     async def test_claim_by_second_member_reports_conflict_not_transition_error(self, db, message_bus):
         """A second member claiming a held task should fail with the real reason."""
-        await db.create_team(
+        await db.team.create_team(
             team_name="conflict_team",
             display_name="Conflict Team",
             leader_member_name="leader",
         )
         for name in ("m1", "m2"):
-            await db.create_member(
+            await db.member.create_member(
                 member_name=name,
                 team_name="conflict_team",
                 display_name=name,
@@ -311,12 +311,12 @@ class TestTaskCompletionWithDependencyResolution:
         )
         try:
             await database.initialize()
-            await database.create_team(
+            await database.team.create_team(
                 team_name="t",
                 display_name="t",
                 leader_member_name="leader",
             )
-            await database.create_member(
+            await database.member.create_member(
                 member_name="m1",
                 team_name="t",
                 display_name="m1",
@@ -350,8 +350,8 @@ class TestTaskCompletionWithDependencyResolution:
 
             async def hammer():
                 while not stop.is_set():
-                    await database.get_team_tasks("t")
-                    await database.get_team("t")
+                    await database.task.get_team_tasks("t")
+                    await database.team.get_team("t")
                     await asyncio.sleep(0)
 
             hammer_task = asyncio.create_task(hammer())
@@ -361,14 +361,14 @@ class TestTaskCompletionWithDependencyResolution:
                 stop.set()
                 await hammer_task
 
-            count2 = await database.get_task("count-2")
+            count2 = await database.task.get_task("count-2")
             assert count2 is not None
             assert count2.status == TaskStatus.PENDING.value, (
                 f"count-2 should be unblocked after count-1 completion, "
                 f"got status={count2.status!r}"
             )
 
-            unresolved = await database.get_unresolved_dependencies_count("count-2")
+            unresolved = await database.task.get_unresolved_dependencies_count("count-2")
             assert unresolved == 0, (
                 f"count-2 should have 0 unresolved deps, got {unresolved}"
             )
@@ -546,14 +546,18 @@ class TestCancel:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_cancel_already_cancelled_task_fails(self, task_manager):
-        """Test that cancelling an already cancelled task fails (invalid state transition)"""
+    async def test_cancel_already_cancelled_task_is_idempotent(self, task_manager):
+        """Cancelling a task that is already CANCELLED is a no-op rather
+        than an error — the unified termination primitive treats the
+        target state as the contract, so a second cancel returns the
+        existing task unchanged."""
         task = await task_manager.add(title="Task 1", content="Content 1")
         await task_manager.cancel(task.task_id)
 
-        # Cannot cancel again
         result = await task_manager.cancel(task.task_id)
-        assert result is None
+        assert result is not None
+        assert result.task_id == task.task_id
+        assert result.status == TaskStatus.CANCELLED.value
 
         updated_task = await task_manager.get(task.task_id)
         assert updated_task.status == TaskStatus.CANCELLED.value
@@ -1004,3 +1008,103 @@ class TestGetTasksByAssignee:
 
         tasks_member2 = await task_manager.get_tasks_by_assignee(member_name="member2")
         assert len(tasks_member2) == 0
+
+
+# ---------------------------------------------------------------------------
+# Dependency-graph mutations through the manager layer.
+#
+# Plain pytest function style. Covers the manager-level guarantees on top
+# of the database primitives: that a cycle bubbles up as TaskOpResult.fail
+# with the diagnostic and that cancel propagates unblocking events.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_add_dependencies_rejects_cycle(task_manager):
+    """add_dependencies surfaces a cycle as a TaskOpResult failure.
+
+    Regression guard: previously add_dependencies skipped cycle detection
+    entirely and silently inserted a cycle-creating edge.
+    """
+    a = await task_manager.add(title="A", content="c")
+    b = await task_manager.add(title="B", content="c", dependencies=[a.task_id])
+
+    # b -> a already; trying to make a -> b would close A -> B -> A.
+    result = await task_manager.add_dependencies(a.task_id, [b.task_id])
+    assert result.ok is False
+    assert "Circular dependency" in result.reason
+
+    # a's dependency table stays empty — the rejected edge did not commit.
+    deps_a = await task_manager.get_dependencies(a.task_id)
+    assert deps_a == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_add_dependencies_refreshes_status(task_manager):
+    """Adding an unresolved dep flips the task from PENDING to BLOCKED."""
+    upstream = await task_manager.add(title="Up", content="c")
+    downstream = await task_manager.add(title="Down", content="c")
+    assert downstream.status == TaskStatus.PENDING.value
+
+    result = await task_manager.add_dependencies(downstream.task_id, [upstream.task_id])
+    assert result.ok is True
+
+    refreshed = await task_manager.get(downstream.task_id)
+    assert refreshed.status == TaskStatus.BLOCKED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_cancel_unblocks_downstream_at_manager_layer(task_manager):
+    """task_manager.cancel propagates downstream unblocking.
+
+    The manager layer must surface the unblocked tasks as published
+    TaskUnblockedEvent messages — this is what wakes the leader's
+    coordinator loop.
+    """
+    upstream = await task_manager.add(title="Up", content="c")
+    downstream = await task_manager.add(
+        title="Down", content="c", dependencies=[upstream.task_id]
+    )
+    assert downstream.status == TaskStatus.BLOCKED.value
+
+    result = await task_manager.cancel(upstream.task_id)
+    assert result is not None
+    assert result.status == TaskStatus.CANCELLED.value
+
+    refreshed = await task_manager.get(downstream.task_id)
+    assert refreshed.status == TaskStatus.PENDING.value
+
+
+class TestAssign:
+    """Test leader-driven task assignment."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_assign_to_existing_member_succeeds(self, task_manager):
+        """Happy path: assigning a pending task to a real member binds it."""
+        task = await task_manager.add(title="T", content="c")
+
+        result = await task_manager.assign(task.task_id, "member1")
+
+        assert result.ok
+        refreshed = await task_manager.get(task.task_id)
+        assert refreshed.status == TaskStatus.CLAIMED.value
+        assert refreshed.assignee == "member1"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_assign_to_unknown_member_fails_at_manager_layer(self, task_manager):
+        """Assignee must exist in team_member, otherwise the task would
+        silently bind to a name no one serves (assignee has no DB FK)."""
+        task = await task_manager.add(title="T", content="c")
+
+        result = await task_manager.assign(task.task_id, "ghost")
+
+        assert not result.ok
+        assert "ghost" in result.reason
+        refreshed = await task_manager.get(task.task_id)
+        assert refreshed.status == TaskStatus.PENDING.value
+        assert refreshed.assignee is None

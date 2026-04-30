@@ -8,10 +8,17 @@ import pytest
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
     DialogueCompressor,
-    DialogueCompressorConfig,
+    DialogueCompressorConfig as _DialogueCompressorConfig,
     _DIALOGUE_MEMORY_BLOCK_MARKER,
 )
-from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage, UserMessage
+from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
+    ModelClientConfig,
+    ModelRequestConfig,
+    ToolCall,
+    ToolMessage,
+    UserMessage,
+)
 from openjiuwen.core.session.agent import Session
 from tests.unit_tests.core.context_engine._stream_state_helpers import (
     assert_context_state_pair,
@@ -21,6 +28,19 @@ from tests.unit_tests.core.context_engine._stream_state_helpers import (
 
 def create_tool_call_list(ids: list[str]) -> list[ToolCall]:
     return [ToolCall(id=tool_call_id, name="test-tool", type="function", arguments="") for tool_call_id in ids]
+
+
+def DialogueCompressorConfig(**kwargs):
+    return _DialogueCompressorConfig(
+        model=ModelRequestConfig(model="test-model"),
+        model_client=ModelClientConfig(
+            client_provider="OpenAI",
+            api_key="test-key",
+            api_base="http://test.local",
+            verify_ssl=False,
+        ),
+        **kwargs,
+    )
 
 
 async def create_context_with_dialogue_compressor(

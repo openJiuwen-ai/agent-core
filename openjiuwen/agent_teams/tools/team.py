@@ -76,9 +76,7 @@ class TeamBackend:
         messager: Messager,
         teammate_mode: MemberMode = MemberMode.BUILD_MODE,
         predefined_members: list[TeamMemberSpec] | None = None,
-        model_config_allocator: Optional[
-            Callable[[Optional[str]], Optional["Allocation"]]
-        ] = None,
+        model_config_allocator: Optional[Callable[[Optional[str]], Optional["Allocation"]]] = None,
         leader_allocation: Optional["Allocation"] = None,
     ):
         """Initialize agent team manager.
@@ -214,17 +212,15 @@ class TeamBackend:
             through to ``ok`` so legacy ``if await spawn_member(...): ...``
             patterns keep working.
         """
-        existing = await self.db.get_member(member_name, self.team_name)
+        existing = await self.db.member.get_member(member_name, self.team_name)
         if existing is not None:
             return MemberOpResult.fail(f"Member {member_name} already exists in team {self.team_name}")
 
         import json as _json
 
-        model_ref_json: Optional[str] = (
-            _json.dumps(allocation.to_db_ref()) if allocation is not None else None
-        )
+        model_ref_json: Optional[str] = _json.dumps(allocation.to_db_ref()) if allocation is not None else None
 
-        success = await self.db.create_member(
+        success = await self.db.member.create_member(
             member_name=member_name,
             team_name=self.team_name,
             display_name=display_name,
@@ -259,7 +255,7 @@ class TeamBackend:
         Returns:
             List of member_names that were started.
         """
-        unstarted = await self.db.get_team_members(self.team_name, status=MemberStatus.UNSTARTED)
+        unstarted = await self.db.member.get_team_members(self.team_name, status=MemberStatus.UNSTARTED)
         started: list[str] = []
         for member in unstarted:
             member_name = member.member_name
@@ -306,7 +302,7 @@ class TeamBackend:
                 feedback="Plan looks good"
             )
         """
-        member_data = await self.db.get_member(member_name, self.team_name)
+        member_data = await self.db.member.get_member(member_name, self.team_name)
         if member_data is None:
             team_logger.error(f"Member {member_name} not found in team {self.team_name}")
             return False
@@ -377,7 +373,7 @@ class TeamBackend:
         auto_confirm: bool = False,
     ) -> bool:
         """Approve or reject one interrupted teammate tool call."""
-        member_data = await self.db.get_member(member_name, self.team_name)
+        member_data = await self.db.member.get_member(member_name, self.team_name)
         if member_data is None:
             team_logger.error(f"Member {member_name} not found in team {self.team_name}")
             return False
@@ -440,7 +436,7 @@ class TeamBackend:
             through to ``ok`` so legacy truthy call sites keep working.
         """
         # Check if member exists in database
-        member_data = await self.db.get_member(member_name, self.team_name)
+        member_data = await self.db.member.get_member(member_name, self.team_name)
         if not member_data:
             return MemberOpResult.fail(f"Member {member_name} not found in team {self.team_name}")
 
@@ -470,7 +466,9 @@ class TeamBackend:
         )
 
         # Update member status in database (team management layer)
-        success = await self.db.update_member_status(member_name, self.team_name, MemberStatus.SHUTDOWN_REQUESTED.value)
+        success = await self.db.member.update_member_status(
+            member_name, self.team_name, MemberStatus.SHUTDOWN_REQUESTED.value
+        )
         if not success:
             return MemberOpResult.fail(f"Database rejected status update for member {member_name}")
 
@@ -518,7 +516,7 @@ class TeamBackend:
             success = team.cancel_member(member_name="member123")
         """
         # Check if member exists in database
-        member_data = await self.db.get_member(member_name, self.team_name)
+        member_data = await self.db.member.get_member(member_name, self.team_name)
         if not member_data:
             team_logger.error(f"Member {member_name} not found in team {self.team_name}")
             return False
@@ -582,7 +580,7 @@ class TeamBackend:
         """
         # Check if all members are shutdown
         all_shutdown = True
-        members = await self.db.get_team_members(self.team_name)
+        members = await self.db.member.get_team_members(self.team_name)
         for member_data in members:
             if member_data.member_name == self.member_name:
                 continue
@@ -597,7 +595,7 @@ class TeamBackend:
             return False
 
         # Delete team from database
-        await self.db.delete_team(self.team_name)
+        await self.db.team.delete_team(self.team_name)
 
         # Remove registered filesystem paths for the team.  TeamAgent
         # registers the actual resolved locations of the team shared
@@ -630,7 +628,7 @@ class TeamBackend:
         persisted session data.
         """
         if shutdown_members:
-            members = await self.db.get_team_members(self.team_name)
+            members = await self.db.member.get_team_members(self.team_name)
             for member_data in members:
                 if member_data.member_name == self.member_name:
                     continue
@@ -664,7 +662,7 @@ class TeamBackend:
         Returns:
             TeamMember info or None
         """
-        return await self.db.get_member(member_name, self.team_name)
+        return await self.db.member.get_member(member_name, self.team_name)
 
     async def list_members(self) -> List[TeamMember]:
         """List all team members
@@ -672,7 +670,7 @@ class TeamBackend:
         Returns:
             List of TeamMember info
         """
-        members = await self.db.get_team_members(self.team_name)
+        members = await self.db.member.get_team_members(self.team_name)
         return [member for member in members if member.member_name != self.member_name]
 
     async def get_team_info(self) -> Optional[Team]:
@@ -681,7 +679,7 @@ class TeamBackend:
         Returns:
             Team information
         """
-        return await self.db.get_team(self.team_name)
+        return await self.db.team.get_team(self.team_name)
 
     async def get_team_updated_at(self) -> int:
         """Probe ``team_info.updated_at`` for change detection.
@@ -692,7 +690,7 @@ class TeamBackend:
         Returns:
             Last update timestamp (ms), or ``0`` when missing.
         """
-        return await self.db.get_team_updated_at(self.team_name)
+        return await self.db.team.get_team_updated_at(self.team_name)
 
     async def get_members_max_updated_at(self) -> int:
         """Probe MAX(``team_member.updated_at``) for the team.
@@ -702,7 +700,7 @@ class TeamBackend:
             members exist.  Status / execution_status updates do not
             bump this value -- only roster mutations do.
         """
-        return await self.db.get_members_max_updated_at(self.team_name)
+        return await self.db.member.get_members_max_updated_at(self.team_name)
 
     async def cancel_task(self, task_id: str) -> bool:
         """Cancel a task and notify assignee if claimed
@@ -815,7 +813,7 @@ class TeamBackend:
         # Create team in database
         team_name = self.team_name
         leader_member_name = self.member_name
-        success = await self.db.create_team(
+        success = await self.db.team.create_team(
             team_name=team_name,
             display_name=display_name,
             leader_member_name=leader_member_name,
@@ -855,11 +853,7 @@ class TeamBackend:
                 name=member_spec.display_name,
                 description=member_spec.persona,
             )
-            allocation = (
-                self._allocate_model_config(member_spec.model_name)
-                if self._allocate_model_config
-                else None
-            )
+            allocation = self._allocate_model_config(member_spec.model_name) if self._allocate_model_config else None
             await self.spawn_member(
                 member_name=member_spec.member_name,
                 display_name=member_spec.display_name,
@@ -937,9 +931,7 @@ class TeamBackend:
             mode=MemberMode.BUILD_MODE,
         )
         if not result.ok:
-            team_logger.warning(
-                f"Failed to register human agent '{member_name}' for team {team_name}: {result.reason}"
-            )
+            team_logger.warning(f"Failed to register human agent '{member_name}' for team {team_name}: {result.reason}")
             return
 
         # Mutate the shared set in place so TeamMessageManager (which

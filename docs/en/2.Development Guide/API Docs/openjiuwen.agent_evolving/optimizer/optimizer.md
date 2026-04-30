@@ -129,3 +129,9 @@ class InstructionOptimizer(
 * **model_client_config**(ModelClientConfig): LLM client configuration.
 
 Inherits from LLMCallOptimizerBase, targets default to system_prompt, user_prompt; _backward generates text gradients for each bound operator and writes to corresponding TextualParameter; _step generates optimized system/user prompts based on gradients and keeps placeholder consistency, returns Updates of (operator_id, target) -> new content.
+
+---
+
+## Team Skill Optimizer
+
+See [team_skill_optimizer](team_skill_optimizer.md) for details.

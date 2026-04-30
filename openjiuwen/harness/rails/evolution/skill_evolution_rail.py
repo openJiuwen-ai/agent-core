@@ -11,9 +11,11 @@ the full conversation context for signal detection and experience extraction.
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
@@ -31,6 +33,13 @@ from openjiuwen.agent_evolving.optimizer.skill_call import (
     SkillRewriteResult,
     update_score,
 )
+from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
+    GENERATE_RECORDS_LLM_POLICY,
+)
+from openjiuwen.agent_evolving.optimizer.skill_call.experience_scorer import (
+    EVALUATE_LLM_POLICY,
+    SIMPLIFY_LLM_POLICY,
+)
 from openjiuwen.agent_evolving.signal import (
     SignalDetector,
     EvolutionSignal,
@@ -45,11 +54,14 @@ from openjiuwen.core.operator.skill_call import SkillCallOperator
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
+from openjiuwen.core.memory.lite.frontmatter import parse_frontmatter
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail
+from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 
 _MAX_PROCESSED_SIGNAL_KEYS = 500
 _EVAL_SNIPPET_MAX_MESSAGES = 20
 _EVAL_SNIPPET_MAX_CONTENT_CHARS = 200
+_DEFAULT_EVOLUTION_TOTAL_TIMEOUT_SECS = 600.0
 
 
 class SkillEvolutionRail(EvolutionRail):
@@ -105,6 +117,10 @@ class SkillEvolutionRail(EvolutionRail):
         trajectory_store: Optional[TrajectoryStore] = None,
         team_trajectory_store: Optional[TrajectoryStore] = None,
         eval_interval: int = 5,
+        evolution_total_timeout_secs: float = _DEFAULT_EVOLUTION_TOTAL_TIMEOUT_SECS,
+        generate_records_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY,
+        evaluate_llm_policy: LLMInvokePolicy = EVALUATE_LLM_POLICY,
+        simplify_llm_policy: LLMInvokePolicy = SIMPLIFY_LLM_POLICY,
     ) -> None:
         """Initialize SkillEvolutionRail.
 
@@ -126,8 +142,19 @@ class SkillEvolutionRail(EvolutionRail):
             team_trajectory_store=team_trajectory_store
         )
         self._evolution_store = EvolutionStore(skills_dir)
-        self._evolver = SkillExperienceOptimizer(llm, model, language)
-        self._scorer = ExperienceScorer(llm, model, language)
+        self._evolver = SkillExperienceOptimizer(
+            llm,
+            model,
+            language,
+            generate_records_llm_policy=generate_records_llm_policy,
+        )
+        self._scorer = ExperienceScorer(
+            llm,
+            model,
+            language,
+            evaluate_llm_policy=evaluate_llm_policy,
+            simplify_llm_policy=simplify_llm_policy,
+        )
         self._auto_scan = auto_scan
         self._processed_signal_keys: set[tuple[str, ...]] = set()
         self._auto_save = auto_save
@@ -139,6 +166,10 @@ class SkillEvolutionRail(EvolutionRail):
         self._optimizer_llm = llm
         self._optimizer_model = model
         self._optimizer_language = language
+        self._generate_records_llm_policy = generate_records_llm_policy
+        self._evaluate_llm_policy = evaluate_llm_policy
+        self._simplify_llm_policy = simplify_llm_policy
+        self._evolution_total_timeout_secs = evolution_total_timeout_secs
         # request_id → PendingChange: stable per-approval-prompt snapshot batches
         self._pending_approval_snapshots: Dict[str, PendingChange] = {}
         # Governance staging: request_id → {kind, skill_name, actions/new_body}
@@ -146,9 +177,6 @@ class SkillEvolutionRail(EvolutionRail):
         # Evaluation settings
         self._eval_interval = eval_interval
         self._language = language
-
-    def _get_evolution_total_timeout_secs(self) -> Optional[float]:
-        return 240.0
 
     @property
     def store(self) -> EvolutionStore:
@@ -171,9 +199,49 @@ class SkillEvolutionRail(EvolutionRail):
         return self._evolver
 
     @property
+    def generate_records_llm_policy(self) -> LLMInvokePolicy:
+        """Get the configured record generation policy."""
+        return self._generate_records_llm_policy
+
+    @property
+    def evaluate_llm_policy(self) -> LLMInvokePolicy:
+        """Get the configured experience evaluation policy."""
+        return self._evaluate_llm_policy
+
+    @property
+    def simplify_llm_policy(self) -> LLMInvokePolicy:
+        """Get the configured experience maintenance policy."""
+        return self._simplify_llm_policy
+
+    @property
+    def evolution_total_timeout_secs(self) -> float:
+        """Get the configured background evolution timeout budget."""
+        return self._evolution_total_timeout_secs
+
+    @property
+    def evolution_config(self) -> Dict[str, Any]:
+        """Get the effective evolution configuration."""
+        return {
+            "generate_records_llm_policy": self.generate_records_llm_policy,
+            "evaluate_llm_policy": self.evaluate_llm_policy,
+            "simplify_llm_policy": self.simplify_llm_policy,
+            "evolution_total_timeout_secs": self.evolution_total_timeout_secs,
+        }
+
+    @property
     def processed_signal_keys(self) -> set[tuple[str, ...]]:
         """Get processed signal fingerprints."""
         return self._processed_signal_keys
+
+    async def drain_pending_approval_events(
+        self,
+        wait: bool = False,
+        timeout: Optional[float] = None,
+    ) -> list[OutputSchema]:
+        """Use evolution timeout as the default wait budget for approval draining."""
+        if wait and timeout is None:
+            timeout = self._evolution_total_timeout_secs
+        return await super().drain_pending_approval_events(wait=wait, timeout=timeout)
 
     @property
     def auto_save(self) -> bool:
@@ -202,6 +270,8 @@ class SkillEvolutionRail(EvolutionRail):
         """Hot-update LLM client and model."""
         self._evolver.update_llm(llm, model)
         self._scorer.update_llm(llm, model)
+        self._optimizer_llm = llm
+        self._optimizer_model = model
 
     def clear_processed_signals(self) -> None:
         """Clear signal fingerprints, typically on conversation boundary."""
@@ -286,8 +356,13 @@ class SkillEvolutionRail(EvolutionRail):
                 logger.info("[SkillEvolutionRail] no parsed messages, skipping")
                 return
 
-            skill_names = self._evolution_store.list_skill_names()
-            logger.info("[SkillEvolutionRail] found %d local skills", len(skill_names))
+            all_skill_names = self._evolution_store.list_skill_names()
+            skill_names = [name for name in all_skill_names if self._is_regular_skill(name)]
+            logger.info(
+                "[SkillEvolutionRail] found %d regular skills (filtered from %d local skills)",
+                len(skill_names),
+                len(all_skill_names),
+            )
 
             signals = self._detect_signals(parsed_messages, skill_names)
             logger.info("[SkillEvolutionRail] detected %d signal(s)", len(signals))
@@ -473,30 +548,7 @@ class SkillEvolutionRail(EvolutionRail):
         )
 
     async def _collect_parsed_messages(self, ctx: AgentCallbackContext) -> List[dict]:
-        messages: List[Any] = []
-
-        # 1) preferred path: context directly carried on callback context
-        if ctx.context is not None:
-            try:
-                messages = list(ctx.context.get_messages())
-            except Exception as exc:
-                logger.debug("[SkillEvolutionRail] read ctx.context messages failed: %s", exc)
-
-        # 2) fallback for DeepAgent outer AFTER_INVOKE hooks: load from inner context engine
-        if not messages and ctx.session is not None:
-            agent_obj = ctx.agent
-            inner_agent = getattr(agent_obj, "_react_agent", None)
-            if inner_agent is not None and hasattr(inner_agent, "context_engine"):
-                try:
-                    context = await inner_agent.context_engine.create_context(session=ctx.session)
-                    messages = list(context.get_messages())
-                except Exception as exc:
-                    logger.debug(
-                        "[SkillEvolutionRail] load messages from inner context_engine failed: %s",
-                        exc,
-                    )
-
-        return self._parse_messages(messages)
+        return await self._collect_parsed_messages_from_ctx(ctx)
 
     def _detect_signals(
         self,
@@ -549,6 +601,35 @@ class SkillEvolutionRail(EvolutionRail):
             texts=texts,
         )
 
+    def _is_regular_skill(self, name: str) -> bool:
+        """Exclude team skills from 1D skill evolution detection.
+
+        If the skill directory cannot be resolved from a mocked or incomplete
+        store, keep the skill eligible rather than silently disabling
+        evolution for it.
+        """
+        skill_dir = self._evolution_store.resolve_skill_dir(name)
+        if skill_dir is None:
+            return True
+
+        if isinstance(skill_dir, str):
+            skill_dir = Path(skill_dir)
+        elif isinstance(skill_dir, os.PathLike):
+            skill_dir = Path(skill_dir)
+        elif not isinstance(skill_dir, Path):
+            return True
+
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.exists():
+            return True
+
+        try:
+            text = skill_md.read_text(encoding="utf-8")
+            frontmatter = parse_frontmatter(text) or {}
+            return frontmatter.get("kind") != "team-skill"
+        except Exception:
+            return True
+
     async def _generate_experience_via_optimizer(
         self,
         skill_name: str,
@@ -574,7 +655,12 @@ class SkillEvolutionRail(EvolutionRail):
         # bind() expects Dict[str, Operator], not a list
         # Create a fresh optimizer per call to avoid race conditions when concurrent
         # after_invoke calls share a single instance (bind() resets internal state).
-        optimizer = SkillExperienceOptimizer(self._optimizer_llm, self._optimizer_model, self._optimizer_language)
+        optimizer = SkillExperienceOptimizer(
+            self._optimizer_llm,
+            self._optimizer_model,
+            self._optimizer_language,
+            generate_records_llm_policy=self._generate_records_llm_policy,
+        )
         optimizer.bind({skill_op.operator_id: skill_op})
         await optimizer.backward(signals)
         updates = optimizer.step()
@@ -589,10 +675,10 @@ class SkillEvolutionRail(EvolutionRail):
         """Called by host when user accepts: flush the snapshotted records.
 
         The ``request_id`` matches ``payload["request_id"]`` from the approval event.
-        Records are re-enqueued into ``SkillCallOperator._staged_records`` and written via
-        ``flush_to_store()``, which pops each record only after a successful write.  On
-        partial failure the unwritten tail is preserved and the ``PendingChange`` entry is
-        kept so the host can retry by calling ``on_approve`` again with the same id.
+        Only the records captured in this approval snapshot are written. On
+        partial failure the unwritten tail is preserved in the same
+        ``PendingChange`` so the host can retry by calling ``on_approve``
+        again with the same id.
         """
         pending = self._pending_approval_snapshots.get(request_id)
         if not pending:
@@ -600,19 +686,15 @@ class SkillEvolutionRail(EvolutionRail):
             return
         skill_name = pending.skill_name
         skill_op = self._skill_ops.setdefault(skill_name, SkillCallOperator(skill_name))
-        # Re-enqueue the snapshot so flush_to_store can use its retry-safe write loop.
-        # Prepend rather than replace to preserve any records staged after the snapshot.
-        skill_op.prepend_staged_records(pending.payload)
-        flushed = await skill_op.flush_to_store(self._evolution_store)
-        if skill_op.staged_records:
-            # Partial failure: keep PendingChange for retry; update payload to remainder
-            pending.payload[:] = skill_op.staged_records
-            skill_op.discard_staged()
+        result = await skill_op.flush_records_to_store(self._evolution_store, pending.payload)
+        flushed = result.flushed_count
+        if result.remaining_records:
+            pending.payload[:] = result.remaining_records
             logger.warning(
                 "[SkillEvolutionRail] on_approve partial failure: %d/%d record(s) written for "
                 "skill=%s (request=%s); retry on_approve to complete",
                 flushed,
-                flushed + len(pending.payload),
+                flushed + len(result.remaining_records),
                 skill_name,
                 request_id,
             )
@@ -851,7 +933,11 @@ class SkillEvolutionRail(EvolutionRail):
         if not self._auto_scan:
             return None
 
-        parsed_messages = await self._collect_parsed_messages(ctx)
+        snapshot = await super()._snapshot_for_evolution(trajectory, ctx)
+        if snapshot is None:
+            return None
+
+        parsed_messages = snapshot["parsed_messages"]
         if not parsed_messages:
             return None
 
@@ -860,13 +946,14 @@ class SkillEvolutionRail(EvolutionRail):
         # Consume session state before ctx becomes invalid
         presented_entries = self._consume_session_eval_state(ctx)
 
-        return {
-            "trajectory": trajectory,
-            "parsed_messages": parsed_messages,
-            "session_id": session_id,
-            "presented_entries": presented_entries,
-            "skill_name": "skill-evolution",
-        }
+        snapshot.update(
+            {
+                "session_id": session_id,
+                "presented_entries": presented_entries,
+                "skill_name": "skill-evolution",
+            }
+        )
+        return snapshot
 
     async def _trigger_async_evaluation(
         self,
@@ -1031,6 +1118,7 @@ class SkillEvolutionRail(EvolutionRail):
             return None
 
         # Step 1: Archive current SKILL.md and evolutions.json BEFORE rebuild
+        evo_archive: Optional[str] = None
         try:
             body_archive = await store.archive_skill_body(skill_name)
             if body_archive:
@@ -1039,7 +1127,14 @@ class SkillEvolutionRail(EvolutionRail):
                     body_archive,
                     skill_name,
                 )
+        except Exception as exc:
+            logger.warning(
+                "[SkillEvolutionRail] skill body archive failed for '%s': %s",
+                skill_name,
+                exc,
+            )
 
+        try:
             evo_archive = await store.archive_evolutions(skill_name)
             if evo_archive:
                 logger.info(
@@ -1047,15 +1142,13 @@ class SkillEvolutionRail(EvolutionRail):
                     evo_archive,
                     skill_name,
                 )
-
-            logger.info("[SkillEvolutionRail] archived old version for '%s'", skill_name)
+                logger.info("[SkillEvolutionRail] archived old version for '%s'", skill_name)
         except Exception as exc:
             logger.warning(
-                "[SkillEvolutionRail] archive failed for '%s': %s",
+                "[SkillEvolutionRail] evolutions archive failed for '%s': %s",
                 skill_name,
                 exc,
             )
-            # Continue anyway - archive failure shouldn't block rebuild
 
         # Step 2: Load and filter evolution records
         records_log = await store.load_full_evolution_log(skill_name)
@@ -1094,11 +1187,21 @@ class SkillEvolutionRail(EvolutionRail):
             min_score,
         )
 
-        return template.format(
+        followup_text = template.format(
             evolution_records=evolution_text,
             user_intent=intent,
             min_score=min_score,
         )
+
+        # Reset active evolutions only after the prompt is successfully built.
+        if evo_archive:
+            await store.clear_evolutions(skill_name)
+            logger.info(
+                "[SkillEvolutionRail] cleared evolutions.json after rebuild request for '%s'",
+                skill_name,
+            )
+
+        return followup_text
 
     @staticmethod
     def _format_evolution_records(records: List[EvolutionRecord]) -> str:
