@@ -134,30 +134,40 @@ class ContainerAgent(CommunicableAgent, BaseAgent):
         return self
 
     async def _invoke_target_with_stream(self, target_agent, agent_input, team_session):
+        """Invoke the target agent and relay its result to *team_session*.
+
+        Uses ``invoke()`` instead of ``stream()`` to avoid the timeout risk that arises
+        when ``write_stream`` calls block inside an async iteration loop.  The relay
+        still reaches listeners via ``team_session.write_stream`` for both single-dict
+        and multi-item (list) results, so callers that stream the team session see
+        output without functional change.
+        """
         agent_session = team_session.create_agent_session(card=target_agent.card)
         self._inject_context_history(agent_session, team_session)
-        chunks = []
+        result = await target_agent.invoke(inputs=agent_input, session=agent_session)
+        if isinstance(result, dict):
+            await team_session.write_stream(result)
+        elif isinstance(result, list):
+            for item in result:
+                if isinstance(item, dict):
+                    await team_session.write_stream(item)
+        await self._save_agent_context(target_agent, agent_session)
+        self._save_context_to_team_session(agent_session, team_session)
+        signal = extract_handoff_signal(result, agent_session)
+        return result, signal
+
+    async def _save_agent_context(self, target_agent, agent_session):
+        """Persist agent context to session state before reading it for handoff detection."""
         try:
-            async for chunk in target_agent.stream(inputs=agent_input, session=agent_session):
-                chunks.append(chunk)
-                try:
-                    payload = chunk if isinstance(chunk, dict) else {"output": chunk}
-                    await team_session.write_stream(payload)
-                except Exception as write_exc:
-                    logger.warning(
-                        f"[{self.__class__.__name__}:{self.card.id}] "
-                        f"write_stream failed for {target_agent.card.id!r}: {write_exc}"
-                    )
-            self._save_context_to_team_session(agent_session, team_session)
-            return chunks[-1] if chunks else {}
-        except NotImplementedError:
-            logger.debug(
-                f"[{self.__class__.__name__}:{self.card.id}] {target_agent.card.id!r} stream() not implemented, "
-                "falling back to invoke()"
+            context_engine = getattr(target_agent, "context_engine", None)
+            if context_engine is not None:
+                await context_engine.save_contexts(agent_session)
+        except Exception as exc:
+            logger.warning(
+                f"[{self.__class__.__name__}:{self.card.id}] "
+                f"failed to save agent context for {target_agent.card.id!r}: {exc}",
+                exc_info=False,
             )
-            result = await target_agent.invoke(inputs=agent_input, session=agent_session)
-            self._save_context_to_team_session(agent_session, team_session)
-            return result
 
     async def stream(self, inputs, session=None, **kwargs):
         result = await self.invoke(inputs=inputs, session=session)
@@ -187,6 +197,7 @@ class ContainerAgent(CommunicableAgent, BaseAgent):
         history = list(inputs.history)
         team_session = inputs.session
         interrupt_signal = None
+        signal = None
         try:
             target_agent = self._get_target_agent()
             self._inject_tools_once(target_agent)
@@ -199,7 +210,7 @@ class ContainerAgent(CommunicableAgent, BaseAgent):
                 f"streaming={team_session is not None}"
             )
             if team_session is not None:
-                result = await self._invoke_target_with_stream(target_agent, agent_input, team_session)
+                result, signal = await self._invoke_target_with_stream(target_agent, agent_input, team_session)
             else:
                 from openjiuwen.core.session.agent import create_agent_session as _create_agent_session
                 agent_session = _create_agent_session(
@@ -207,6 +218,7 @@ class ContainerAgent(CommunicableAgent, BaseAgent):
                     card=target_agent.card,
                 )
                 result = await target_agent.invoke(inputs=agent_input, session=agent_session)
+                signal = extract_handoff_signal(result, agent_session)
             history.append({"agent": target_agent.card.id, "output": result})
             interrupt_signal = extract_interrupt_signal(result=result)
         except Exception as exc:
@@ -229,7 +241,6 @@ class ContainerAgent(CommunicableAgent, BaseAgent):
                                               history=history,
                                               inputs=inputs)
             return {}
-        signal = extract_handoff_signal(result)
         if signal is None:
             logger.info(
                 f"[{self.__class__.__name__}:{self.card.id}] completing session_id={session_id!r} "
