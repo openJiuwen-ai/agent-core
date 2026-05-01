@@ -556,23 +556,23 @@ class _RunnerImpl:
         """
         Release resources associated with a session.
 
+        For agent team sessions, this automatically cleans up dynamic tables
+        (tasks, messages, etc.) in addition to releasing the checkpoint.
+
         Args:
             session_id: ID of the session to clean up
         """
-        await CheckpointerFactory.get_checkpointer().release(session_id)
+        # Check if this is an agent team session
+        from openjiuwen.agent_teams.runtime_manager import TeamRuntimeManager
 
-    async def release_agent_team(self, session_id: str) -> None:
-        """
-        Release resources for an agent team session, including dynamic tables.
+        metadata = await TeamRuntimeManager.resolve_team_session_metadata(session_id)
+        if metadata is not None:
+            # This is an agent team session - clean dynamic tables then checkpoint
+            await self._get_team_runtime_manager().release_session(session_id)
+            await CheckpointerFactory.get_checkpointer().release(session_id)
+            return
 
-        This method cleans up both the checkpointer state and the per-session
-        dynamic tables (tasks, messages, etc.) used by agent teams.
-
-        Args:
-            session_id: ID of the agent team session to clean up
-        """
-        # Clean up dynamic tables BEFORE releasing checkpoint
-        await self._get_team_runtime_manager().release_session(session_id)
+        # Not a team session - simple checkpoint release
         await CheckpointerFactory.get_checkpointer().release(session_id)
 
     async def interact_agent_team(
@@ -1189,19 +1189,6 @@ class Runner:
             session_id: ID of the session to clean up
         """
         await GLOBAL_RUNNER.release(session_id)
-
-    @classmethod
-    async def release_agent_team(cls, session_id: str) -> None:
-        """
-        Release resources for an agent team session, including dynamic tables.
-
-        This method cleans up both the checkpointer state and the per-session
-        dynamic tables (tasks, messages, etc.) used by agent teams.
-
-        Args:
-            session_id: ID of the agent team session to clean up
-        """
-        await GLOBAL_RUNNER.release_agent_team(session_id)
 
     @classmethod
     async def interact_agent_team(
