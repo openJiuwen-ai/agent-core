@@ -160,7 +160,8 @@ omit = ["tests/*"]
 [tool.pytest.ini_options]
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-pythonpath = ["jiuwen"]
+# Repo root so `import openjiuwen` works without extra env (matches docs: PYTHONPATH=.)
+pythonpath = ["."]
 addopts = ["-v", "--html=report/index.html", "--self-contained-html"]
 
 # Formatting & Linting
