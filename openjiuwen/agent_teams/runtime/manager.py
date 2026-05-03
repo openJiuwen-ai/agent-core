@@ -19,6 +19,10 @@ from openjiuwen.agent_teams.factory import (
     recover_for_existing_session,
     resume_persistent_team,
 )
+from openjiuwen.agent_teams.runtime.metadata import (
+    read_team_namespace,
+    read_teams_bucket,
+)
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session.agent_team import (
@@ -168,7 +172,7 @@ class TeamRuntimeManager:
 
         session_resolution = await self._resolve_session_checkpoint(team_session, team_name)
         if session_resolution.kind == "recoverable":
-            agent = await recover_agent_team(team_session)
+            agent = await recover_agent_team(team_session, team_name=team_name)
             activation_kind = TeamActivationKind.RECOVER
         elif session_resolution.kind == "invalid":
             team_logger.warning(
@@ -261,20 +265,23 @@ class TeamRuntimeManager:
     async def resolve_team_session_metadata(session_id: str) -> Optional[TeamSessionMetadata]:
         """Resolve metadata for an agent team session.
 
-        Returns None if the session is not an agent team session (missing team_name,
-        context, or spec). Returns TeamSessionMetadata if it is a valid team session.
-
-        Raises RuntimeError if session appears to be team session but db_config
-        cannot be resolved - this prevents cleaning wrong database.
+        Returns None if the session has no agent team buckets (i.e. not an
+        agent team session). When the session carries one or more team
+        buckets, returns metadata derived from the first parseable bucket
+        — db_config is shared across teams within a session, so any bucket
+        suffices for callers that just need to drop dynamic tables.
 
         Args:
             session_id: Session identifier to resolve.
 
         Returns:
-            TeamSessionMetadata if valid agent team session, None otherwise.
+            TeamSessionMetadata if at least one valid team bucket exists,
+            None otherwise.
 
         Raises:
-            RuntimeError: If session has team_name/context/spec but db_config cannot be obtained.
+            RuntimeError: If a bucket exists but its spec/context cannot be
+                parsed, or db_config is missing - this prevents cleaning
+                wrong database.
         """
         if not session_id:
             return None
@@ -286,55 +293,53 @@ class TeamRuntimeManager:
             team_logger.warning("Failed to restore session state for %s: %s", session_id, e)
             return None
 
-        state = session.get_state()
-        if not isinstance(state, dict):
+        teams = read_teams_bucket(session)
+        if not teams:
             return None
 
-        # Check if this is an agent team session (must have team_name, context, and spec)
-        # agent_teams always persists these three together in recovery_manager
-        team_name = state.get("team_name")
-        context_data = state.get("context")
-        spec_data = state.get("spec")
-        if team_name is None or context_data is None or spec_data is None:
-            return None
+        # Pick any bucket — db_config is session-wide. Sort for determinism.
+        team_name = sorted(teams.keys())[0]
+        bucket = teams[team_name]
+        spec_data = bucket.get("spec")
+        context_data = bucket.get("context")
+        if spec_data is None or context_data is None:
+            raise RuntimeError(
+                f"Session {session_id} has team bucket '{team_name}' "
+                f"missing spec or context"
+            )
 
-        # Validate spec has a valid team_name to confirm it's a TeamAgentSpec-like structure
         from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
+        from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
         try:
             spec = TeamAgentSpec.model_validate(spec_data)
             if spec.team_name != team_name:
                 team_logger.warning(
-                    "Session %s has mismatched team_name in spec vs state: %s vs %s",
+                    "Session %s bucket key '%s' mismatches spec.team_name '%s'",
                     session_id,
-                    spec.team_name,
                     team_name,
-                )
-                raise RuntimeError(
-                    f"Session {session_id} has mismatched team_name: spec={spec.team_name}, state={team_name}"
+                    spec.team_name,
                 )
         except Exception as e:
             team_logger.warning("Failed to parse spec for session %s: %s", session_id, e)
             raise RuntimeError(
-                f"Session {session_id} appears to be team session (team_name={team_name}) "
-                f"but spec parsing failed: {e}"
+                f"Session {session_id} team bucket '{team_name}' "
+                f"spec parsing failed: {e}"
             ) from e
 
-        # Parse context to get db_config
-        from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
         try:
             context = TeamRuntimeContext.model_validate(context_data)
             db_config = context.db_config
         except Exception as e:
             team_logger.warning("Failed to parse context for session %s: %s", session_id, e)
             raise RuntimeError(
-                f"Session {session_id} is team session (team_name={team_name}) "
-                f"but context parsing failed: {e}"
+                f"Session {session_id} team bucket '{team_name}' "
+                f"context parsing failed: {e}"
             ) from e
 
         if db_config is None:
             raise RuntimeError(
-                f"Session {session_id} is team session (team_name={team_name}) "
-                f"but db_config is missing"
+                f"Session {session_id} team bucket '{team_name}' "
+                f"db_config is missing"
             )
 
         return TeamSessionMetadata(team_name=team_name, db_config=db_config)
@@ -401,16 +406,17 @@ class TeamRuntimeManager:
         if not session_exists:
             return TeamSessionResolution(kind="missing")
 
-        checkpoint_team_name = session.get_state("team_name")
-        if checkpoint_team_name is None:
+        bucket = read_team_namespace(session, team_name)
+        if bucket is None:
+            other_teams = sorted(read_teams_bucket(session).keys())
+            if other_teams:
+                return TeamSessionResolution(
+                    kind="missing",
+                    reason=f"session has teams {other_teams!r}, not {team_name!r}",
+                )
             return TeamSessionResolution(
                 kind="invalid",
-                reason="checkpoint has no persisted team_name",
-            )
-        if checkpoint_team_name != team_name:
-            return TeamSessionResolution(
-                kind="invalid",
-                reason=f"checkpoint team_name={checkpoint_team_name!r}",
+                reason="checkpoint has no persisted team buckets",
             )
         return TeamSessionResolution(kind="recoverable")
 

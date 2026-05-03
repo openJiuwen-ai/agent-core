@@ -549,8 +549,8 @@ def test_persist_leader_config_includes_allocator_state():
     session = _StubSession()
     agent._persist_leader_config(session)
 
-    assert "model_allocator_state" in session.state
-    snapshot = session.state["model_allocator_state"]
+    bucket = session.state["teams"]["t"]
+    snapshot = bucket["model_allocator_state"]
     assert snapshot["inner_indexes"] == {"gpt-4": 1, "claude": 1}
     assert "pool_digest" in snapshot
 
@@ -565,8 +565,10 @@ def test_persist_allocator_state_writes_only_allocator_payload():
     agent._session_manager.team_session = session
     agent._persist_allocator_state()
 
-    assert set(session.state) == {"model_allocator_state"}
-    snapshot = session.state["model_allocator_state"]
+    assert set(session.state) == {"teams"}
+    bucket = session.state["teams"]["t"]
+    assert set(bucket) == {"model_allocator_state"}
+    snapshot = bucket["model_allocator_state"]
     assert snapshot["index"] == 2
     assert "pool_digest" in snapshot
 
@@ -614,8 +616,9 @@ def test_persist_leader_config_omits_allocator_state_when_no_pool():
     session = _StubSession()
     agent._persist_leader_config(session)
 
-    assert "model_allocator_state" not in session.state
-    assert "spec" in session.state and "context" in session.state
+    bucket = session.state["teams"]["t"]
+    assert "model_allocator_state" not in bucket
+    assert "spec" in bucket and "context" in bucket
 
 
 def test_leader_spec_carries_model_name_for_pool_allocation():

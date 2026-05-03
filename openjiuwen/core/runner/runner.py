@@ -565,7 +565,7 @@ class _RunnerImpl:
             session_id: ID of the session to clean up
         """
         # Check if this is an agent team session
-        from openjiuwen.agent_teams.runtime_manager import TeamRuntimeManager
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 
         metadata = await TeamRuntimeManager.resolve_team_session_metadata(session_id)
         if metadata is not None:

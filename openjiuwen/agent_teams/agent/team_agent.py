@@ -661,18 +661,32 @@ class TeamAgent(BaseAgent):
         self._recovery_manager.persist_allocator_state(self._session_manager.team_session)
 
     @classmethod
-    def recover_from_session(cls, session) -> "TeamAgent":
+    def recover_from_session(cls, session, team_name: str) -> "TeamAgent":
+        """Reconstruct a leader TeamAgent from a session checkpoint.
+
+        Args:
+            session: Prepared agent team session whose checkpoint was already
+                restored via ``pre_run``.
+            team_name: Identifies which team's bucket to load. A session can
+                hold state for multiple teams; the caller must specify which.
+
+        Raises:
+            ValueError: When the session has no bucket for ``team_name`` or
+                the bucket is missing the leader spec.
+        """
+        from openjiuwen.agent_teams.runtime.metadata import read_team_namespace
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
-        state = session.get_state()
-        spec_data = state.get("spec")
+        bucket = read_team_namespace(session, team_name)
+        if bucket is None:
+            raise ValueError(f"No persisted state for team '{team_name}' in session")
+        spec_data = bucket.get("spec")
         if spec_data is None:
-            raise ValueError("No leader spec found in session state")
+            raise ValueError(f"No leader spec found for team '{team_name}'")
         spec = TeamAgentSpec.model_validate(spec_data)
-        context = TeamRuntimeContext.model_validate(state["context"])
+        context = TeamRuntimeContext.model_validate(bucket["context"])
 
         agent_spec = spec.agents.get(context.role.value) or spec.agents["leader"]
-        team_name = (context.team_spec.team_name if context.team_spec else None) or spec.team_name
         card_id = f"{team_name}_{context.member_name}" if context.member_name else "leader"
         card = agent_spec.card or AgentCard(
             id=card_id,
@@ -680,7 +694,7 @@ class TeamAgent(BaseAgent):
         )
         agent = cls(card)
         agent.configure(spec, context)
-        allocator_state = state.get("model_allocator_state")
+        allocator_state = bucket.get("model_allocator_state")
         if allocator_state:
             agent.restore_allocator_state(allocator_state)
         agent.set_session_id(session.get_session_id())
