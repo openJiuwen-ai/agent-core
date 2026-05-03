@@ -2,6 +2,7 @@
 """
 Simple test to verify the HTTP Request component can be imported and instantiated
 """
+import ast
 import json
 import logging
 import os
@@ -13,7 +14,9 @@ from openjiuwen.core.workflow import (
     HttpComponentConfig,
     HttpRequestParamConfig,
     HttpAdvancedOptionsConfig,
+    HttpRequestBodyConfig,
     HttpRetryConfig,
+    HttpContentType,
     Workflow,
     Start,
     End,
@@ -253,22 +256,6 @@ async def test_retry_count_and_timeout_session_handling():
 @unittest.skip("skip system test")
 @pytest.mark.asyncio
 async def test_http_comp_008():
-    """
-    # !+================================================================
-    # 版权 (C) 2019-2020，华为技术有限公司 2012实验室中央软件院
-    # ==================================================================
-    # @level: level 0
-    # @CaseID: test_http_comp_008
-    # @Description: HTTPRequestComponent进行get请求，设置重试配置
-    # @Precondition: 部署jiuwen开源项目环境
-    # @Step:
-    # 1、配置HttpComponentConfig参数，method设置为get
-    # 2、设置工作流：start -> http -> end
-    # 3、工作流invoke执行
-    # @Result:
-    # 工作流执行异常报错：报错信息是不是可以直接写超时
-    # !!================================================================
-    """
     os.environ['HTTP_SSL_VERIFY'] = 'false'
     config = HttpComponentConfig(
         request_params=HttpRequestParamConfig(
@@ -310,22 +297,6 @@ async def test_http_comp_008():
 @unittest.skip("skip system test")
 @pytest.mark.asyncio
 async def test_http_comp_002():
-    """
-    # !+================================================================
-    # 版权 (C) 2019-2020，华为技术有限公司 2012实验室中央软件院
-    # ==================================================================
-    # @level: level 0
-    # @CaseID: test_http_comp_002
-    # @Description: HTTPRequestComponent进行get请求，请求参数在query_parameters里，ssl不进行验证，end组件不设置模板，invoke模式
-    # @Precondition: 部署jiuwen开源项目环境
-    # @Step:
-    # 1、配置HttpComponentConfig参数，method设置为GET，url中不包含请求参数
-    # 2、设置工作流：start -> http -> end
-    # 3、工作流invoke执行
-    # @Result:
-    # 工作流执行成功，请求结果返回正确。实际参数不能够传递
-    # !!================================================================
-    """
     os.environ['HTTP_SSL_VERIFY'] = 'false'
     config = HttpComponentConfig(
         request_params=HttpRequestParamConfig(
@@ -357,3 +328,47 @@ async def test_http_comp_002():
     result_json = json.loads(http_response.get('body'))
     assert result_json == {'location': '杭州', 'temperature': '18℃ - 26℃', 'condition': '晴'}
     assert http_response.get("ok") == True
+
+
+@unittest.skip("skip system test")
+@pytest.mark.asyncio
+async def test_http_comp_013():
+    os.environ['HTTP_SSL_VERIFY'] = 'false'
+
+    config = HttpComponentConfig(
+        request_params=HttpRequestParamConfig(
+            url="http://localhost:8000/post_weather_with_headers",
+            headers="{{head}}",
+            method="POST",
+            body=HttpRequestBodyConfig(
+                content_type=HttpContentType.JSON,
+                json_data="{{query}}"
+            )
+        )
+    )
+    http_comp = HTTPRequestComponent(config=config)
+
+    flow = Workflow(card=WorkflowCard(name="test_http_comp_013", id="http_comp_012", version="1.0"))
+    start_component = Start()
+    end_component = End({"responseTemplate": "{{http_response}}"})
+
+    flow.set_start_comp("start", start_component, inputs_schema={"query": "${query}", "head": "${head}"})
+    flow.set_end_comp("end", end_component, inputs_schema={"http_response": "${http}"})
+    flow.add_workflow_comp("http", http_comp, inputs_schema={"query": "${start.query}", "head": "${start.head}"})
+
+    flow.add_connection("start", "http")
+    flow.add_connection("http", "end")
+
+    context = create_workflow_session()
+    result = await flow.invoke(inputs={"query": {"location": "杭州", "scenic": "西湖十景", "score": 88.8},
+                                        "head": {"Authorization": "Bearer abc123xyz", "X-API-Key": "my-secret-key"}},
+                                session=context)
+    logger.info(f"Workflow invoke result: {result}")
+    response = result.result
+    http_response = response.get('response')
+    outer_dict = ast.literal_eval(http_response)
+    assert outer_dict.get('statusCode') == 200
+    http_response_json = json.loads(outer_dict.get('body'))
+    assert http_response_json == {'location': '杭州', 'temperature': '18℃ - 26℃', 'condition': '晴', 'score': 88.8,
+                                    'scenic': '西湖十景'}
+    assert outer_dict.get("ok") == True

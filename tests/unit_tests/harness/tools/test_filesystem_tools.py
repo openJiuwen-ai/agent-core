@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import os
+import base64
 import tempfile
 import shutil
 from types import MethodType
@@ -69,6 +70,25 @@ async def test_file_read_write(sys_op, temp_dir):
     read_partial = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 1})
     assert read_partial.success is True
     assert "第二行" in read_partial.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_image_returns_multimodal_payload(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "one_pixel.png")
+    raw = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+    with open(file_path, "wb") as fh:
+        fh.write(raw)
+
+    read_res = await read_tool.invoke({"file_path": file_path})
+
+    assert read_res.success is True
+    assert "Image file read:" in read_res.data["content"]
+    assert "base64," not in read_res.data["content"]
+    assert read_res.data["multimodal"][0]["type"] == "image"
+    assert read_res.data["multimodal"][0]["data_url"].startswith("data:image/")
 
 
 @pytest.mark.asyncio
@@ -596,27 +616,6 @@ async def test_read_file_tool_text(sys_op, temp_dir):
     set_cwd(temp_dir)
     relative_found = await read_tool.invoke({"file_path": "max.txt"})
     assert relative_found.success is True
-
-
-@pytest.mark.asyncio
-async def test_read_file_tool_image_returns_metadata_not_base64(sys_op, temp_dir):
-    read_tool = ReadFileTool(sys_op)
-    file_path = os.path.join(temp_dir, "sample.png")
-    png_bytes = (
-        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
-        b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00"
-        b"\x00\x00\x0cIDATx\x9cc```\x00\x00\x00\x04\x00\x01"
-        b"\xf6\x178U\x00\x00\x00\x00IEND\xaeB`\x82"
-    )
-    with open(file_path, "wb") as fh:
-        fh.write(png_bytes)
-
-    res = await read_tool.invoke({"file_path": file_path})
-
-    assert res.success is True
-    assert "Image file read:" in res.data["content"]
-    assert "data:image" not in res.data["content"]
-    assert res.data["file_path"] == file_path
 
 
 def test_read_file_tool_capability_flags_keep_backward_compatibility():

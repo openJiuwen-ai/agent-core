@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Bilingual text constants for workspace and context sections."""
+
 from __future__ import annotations
 
 from typing import Dict
@@ -14,6 +15,38 @@ WORKSPACE_HEADER_EN = "# Workspace\n\n"
 WORKSPACE_HEADER: Dict[str, str] = {
     "cn": WORKSPACE_HEADER_CN,
     "en": WORKSPACE_HEADER_EN,
+}
+
+
+# ---------------------------------------------------------------------------
+# Important files table
+# ---------------------------------------------------------------------------
+IMPORTANT_FILES_CN = (
+    "## 工作目录下重要文件\n\n"
+    "| 文件 | 用途 | 操作工具 |\n"
+    "|------|------|----------|\n"
+    "| `AGENT.md` | Agent 启动指南 | read_file |\n"
+    "| `IDENTITY.md` | Agent 身份设定 | read_file / edit_file |\n"
+    "| `USER.md` | 用户档案（姓名、职业、爱好等） | read_memory / write_memory / edit_memory |\n"
+    "| `memory/MEMORY.md` | 长期记忆（决策、偏好、持久事实） | read_memory / write_memory / edit_memory |\n"
+    "| `memory/daily_memory/YYYY-MM-DD.md` | 每日会话记录 | read_memory / write_memory / edit_memory |\n"
+)
+
+IMPORTANT_FILES_EN = (
+    "## Important Files in Working Directory\n\n"
+    "| File | Purpose | Tools |\n"
+    "|------|---------|-------|\n"
+    "| `AGENT.md` | Agent startup guide | read_file |\n"
+    "| `IDENTITY.md` | Agent identity settings | read_file / edit_file |\n"
+    "| `USER.md` | User profile (name, occupation, hobbies, etc.) | read_memory / write_memory / edit_memory |\n"
+    "| `memory/MEMORY.md` | Long-term memory (decisions, preferences, persistent facts) "
+    "| read_memory / write_memory / edit_memory |\n"
+    "| `memory/daily_memory/YYYY-MM-DD.md` | Daily session records | read_memory / write_memory / edit_memory |\n"
+)
+
+IMPORTANT_FILES: Dict[str, str] = {
+    "cn": IMPORTANT_FILES_CN,
+    "en": IMPORTANT_FILES_EN,
 }
 
 

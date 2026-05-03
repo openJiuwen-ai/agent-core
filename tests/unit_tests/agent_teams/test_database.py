@@ -2470,6 +2470,216 @@ class TestSessionTables:
             reset_session_id(token)
 
 
+class TestDropSessionTablesById:
+    """Test drop_session_tables_by_id which works without active session context."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_drop_session_tables_by_id_success(self, tmp_path):
+        """Test that drop_session_tables_by_id removes tables for specific session_id."""
+        db_path = tmp_path / "drop_by_id.db"
+        config = DatabaseConfig(
+            db_type=DatabaseType.SQLITE,
+            connection_string=str(db_path),
+        )
+        database = TeamDatabase(config)
+        target_session_id = "target_session_drop"
+        token = set_session_id(target_session_id)
+        try:
+            await database.initialize()
+            await database.team.create_team(
+                "team_drop_by_id",
+                "Drop By ID Team",
+                "leader1",
+            )
+            await database.task.create_task(
+                "task1",
+                "team_drop_by_id",
+                "Task 1",
+                "Content 1",
+                "pending",
+            )
+
+            task = await database.task.get_task("task1")
+            assert task is not None
+            assert task.task_id == "task1"
+
+            # Drop tables using session_id directly (no context needed)
+            reset_session_id(token)
+            dropped = await database.drop_session_tables_by_id(target_session_id)
+
+            suffix = _sanitize_session_id_for_table(target_session_id)
+            assert f"team_task_{suffix}" in dropped
+            assert f"team_task_dependency_{suffix}" in dropped
+            assert f"team_message_{suffix}" in dropped
+            assert f"message_read_status_{suffix}" in dropped
+
+            # Verify tables are gone
+            async with database.engine.begin() as conn:
+                table_names = sorted(
+                    await conn.run_sync(
+                        lambda sync_conn: inspect(sync_conn).get_table_names()
+                    )
+                )
+            assert f"team_task_{suffix}" not in table_names
+
+        finally:
+            await database.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_drop_session_tables_by_id_without_context(self, tmp_path):
+        """Test that drop_session_tables_by_id works without setting session context."""
+        db_path = tmp_path / "drop_no_context.db"
+        config = DatabaseConfig(
+            db_type=DatabaseType.SQLITE,
+            connection_string=str(db_path),
+        )
+        database = TeamDatabase(config)
+        session_id_a = "session_a_no_ctx"
+        session_id_b = "session_b_no_ctx"
+
+        # First, create tables for session_a using context
+        token = set_session_id(session_id_a)
+        try:
+            await database.initialize()
+            await database.team.create_team(
+                "team_no_ctx",
+                "No Context Team",
+                "leader1",
+            )
+            await database.task.create_task(
+                "task_a",
+                "team_no_ctx",
+                "Task A",
+                "Content A",
+                "pending",
+            )
+        finally:
+            reset_session_id(token)
+
+        # Create tables for session_b using context
+        token = set_session_id(session_id_b)
+        try:
+            await database.create_cur_session_tables()
+            await database.task.create_task(
+                "task_b",
+                "team_no_ctx",
+                "Task B",
+                "Content B",
+                "pending",
+            )
+        finally:
+            reset_session_id(token)
+
+        # Now drop session_a tables WITHOUT setting any context
+        dropped_a = await database.drop_session_tables_by_id(session_id_a)
+        suffix_a = _sanitize_session_id_for_table(session_id_a)
+        assert f"team_task_{suffix_a}" in dropped_a
+
+        # Verify session_a tables are gone, session_b tables still exist
+        async with database.engine.begin() as conn:
+            table_names = sorted(
+                await conn.run_sync(
+                    lambda sync_conn: inspect(sync_conn).get_table_names()
+                )
+            )
+        suffix_b = _sanitize_session_id_for_table(session_id_b)
+        assert f"team_task_{suffix_a}" not in table_names
+        assert f"team_task_{suffix_b}" in table_names
+
+        await database.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_drop_session_tables_by_id_multiple_sessions(self, tmp_path):
+        """Test that only specified session's tables are dropped, others preserved."""
+        db_path = tmp_path / "drop_multi_sessions.db"
+        config = DatabaseConfig(
+            db_type=DatabaseType.SQLITE,
+            connection_string=str(db_path),
+        )
+        database = TeamDatabase(config)
+        sessions = ["session_x", "session_y", "session_z"]
+
+        try:
+            await database.initialize()
+            # Create tables for each session
+            for sid in sessions:
+                token = set_session_id(sid)
+                try:
+                    await database.create_cur_session_tables()
+                    await database.team.create_team(
+                        f"team_{sid}",
+                        f"Team {sid}",
+                        "leader1",
+                    )
+                    await database.task.create_task(
+                        f"task_{sid}",
+                        f"team_{sid}",
+                        f"Task {sid}",
+                        f"Content {sid}",
+                        "pending",
+                    )
+                finally:
+                    reset_session_id(token)
+
+            # Drop only session_y tables
+            dropped = await database.drop_session_tables_by_id("session_y")
+            suffix_y = _sanitize_session_id_for_table("session_y")
+            assert f"team_task_{suffix_y}" in dropped
+
+            # Verify session_y tables gone, others preserved
+            async with database.engine.begin() as conn:
+                table_names = sorted(
+                    await conn.run_sync(
+                        lambda sync_conn: inspect(sync_conn).get_table_names()
+                    )
+                )
+            suffix_x = _sanitize_session_id_for_table("session_x")
+            suffix_z = _sanitize_session_id_for_table("session_z")
+
+            assert f"team_task_{suffix_x}" in table_names
+            assert f"team_task_{suffix_y}" not in table_names
+            assert f"team_task_{suffix_z}" in table_names
+
+        finally:
+            await database.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_drop_session_tables_by_id_empty_session_id(self, db_config):
+        """Test that empty session_id returns empty list without error."""
+        database = TeamDatabase(db_config)
+        try:
+            await database.initialize()
+            dropped = await database.drop_session_tables_by_id("")
+            assert dropped == []
+        finally:
+            await database.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_drop_session_tables_by_id_nonexistent_tables(self, tmp_path):
+        """Test that dropping non-existent session tables returns empty list (idempotent)."""
+        db_path = tmp_path / "drop_nonexistent.db"
+        config = DatabaseConfig(
+            db_type=DatabaseType.SQLITE,
+            connection_string=str(db_path),
+        )
+        database = TeamDatabase(config)
+        # Set an empty session_id to initialize without creating dynamic tables
+        token = set_session_id("")
+        try:
+            await database.initialize()
+            # Drop tables for a session that never existed
+            dropped = await database.drop_session_tables_by_id("never_created_session")
+            assert dropped == []
+        finally:
+            await database.close()
+            reset_session_id(token)
+
+
 class TestRuntimeCleanup:
     """Test storage-level runtime cleanup helpers."""
 
