@@ -600,6 +600,23 @@ class _RunnerImpl:
         """Pause the current active TeamAgent runtime owned by Runner."""
         return await self._get_team_runtime_manager().pause(team_name=team_name, session_id=session_id)
 
+    async def stop_agent_team(
+        self,
+        *,
+        team_name: str,
+        session_id: str,
+    ) -> bool:
+        """Stop the active TeamAgent runtime for a given (team, session).
+
+        Tears down the leader and teammate processes; persisted data
+        (checkpoint, dynamic tables, team static row) is preserved so a
+        subsequent ``run_agent_team_streaming`` will cold-recover.
+        """
+        return await self._get_team_runtime_manager().stop_team(
+            team_name=team_name,
+            session_id=session_id,
+        )
+
     async def delete_agent_team(
         self,
         *,
@@ -1216,6 +1233,16 @@ class Runner:
     ) -> bool:
         """Pause the current active TeamAgent runtime owned by Runner."""
         return await GLOBAL_RUNNER.pause_agent_team(team_name=team_name, session_id=session_id)
+
+    @classmethod
+    async def stop_agent_team(
+        cls,
+        *,
+        team_name: str,
+        session_id: str,
+    ) -> bool:
+        """Stop the active TeamAgent runtime for ``(team_name, session_id)``."""
+        return await GLOBAL_RUNNER.stop_agent_team(team_name=team_name, session_id=session_id)
 
     @classmethod
     async def delete_agent_team(

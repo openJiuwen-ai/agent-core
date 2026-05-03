@@ -23,7 +23,14 @@ from openjiuwen.agent_teams.runtime.metadata import (
     read_team_namespace,
     read_teams_bucket,
 )
+from openjiuwen.agent_teams.runtime.pool import (
+    ActiveTeam,
+    RuntimeState,
+    TeamRuntimePool,
+)
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session.agent_team import (
     Session as AgentTeamSession,
@@ -90,6 +97,12 @@ class TeamRuntimeManager:
         self._active_session_id: Optional[str] = None
         self._active_agent: Optional["TeamAgent"] = None
         self._active_paused: bool = False
+        self._pool: TeamRuntimePool = TeamRuntimePool()
+
+    @property
+    def pool(self) -> TeamRuntimePool:
+        """Process-local TeamRuntimePool tracking active team runtimes."""
+        return self._pool
 
     @property
     def active_team_name(self) -> Optional[str]:
@@ -139,7 +152,7 @@ class TeamRuntimeManager:
             session_resolution = await self._resolve_session_checkpoint(team_session, team_name)
             if session_resolution.kind == "recoverable":
                 await recover_for_existing_session(self._active_agent, team_session)
-                self._set_active(team_name, session_id, self._active_agent)
+                await self._set_active(team_name, session_id, self._active_agent)
                 return TeamRuntimeActivation(
                     agent=self._active_agent,
                     session=team_session,
@@ -160,7 +173,7 @@ class TeamRuntimeManager:
 
             await self._pre_run_with_inputs(team_session, inputs)
             await resume_persistent_team(self._active_agent, team_session)
-            self._set_active(team_name, session_id, self._active_agent)
+            await self._set_active(team_name, session_id, self._active_agent)
             return TeamRuntimeActivation(
                 agent=self._active_agent,
                 session=team_session,
@@ -191,7 +204,7 @@ class TeamRuntimeManager:
             agent = spec.build()
             activation_kind = TeamActivationKind.CREATE
 
-        self._set_active(team_name, session_id, agent)
+        await self._set_active(team_name, session_id, agent)
         return TeamRuntimeActivation(agent=agent, session=team_session, activation_kind=activation_kind)
 
     async def pause(
@@ -207,6 +220,9 @@ class TeamRuntimeManager:
             return False
         await self._active_agent.pause_coordination()
         self._active_paused = True
+        entry = await self._pool.get(self._active_team_name)
+        if entry is not None:
+            entry.state = RuntimeState.PAUSED
         return True
 
     async def interact(
@@ -224,15 +240,58 @@ class TeamRuntimeManager:
         await self._active_agent.interact(user_input)
         return True
 
+    async def stop_team(
+        self,
+        *,
+        team_name: str,
+        session_id: str,
+    ) -> bool:
+        """Tear down the active TeamAgent runtime for ``(team_name, session_id)``.
+
+        Stops coordination (closes the event bus, shuts down spawned
+        teammates) and drops the entry from the pool. Persisted data
+        (checkpoint, dynamic tables, team static row) is left intact —
+        the next ``run_agent_team_streaming`` for this team goes through
+        the cold-recover path.
+
+        Returns ``False`` when the requested ``(team_name, session_id)``
+        does not match the currently active runtime; otherwise ``True``.
+        """
+        if not self._matches_active(team_name=team_name, session_id=session_id):
+            return False
+        if self._active_agent is None:
+            return False
+        try:
+            await self._active_agent.stop_coordination()
+        except Exception as exc:
+            team_logger.warning(
+                "Failed to stop team {} on session {}: {}",
+                team_name,
+                session_id,
+                exc,
+            )
+        await self._clear_active()
+        return True
+
     async def delete_team(
         self,
         team_name: str,
         session_ids: list[str],
     ) -> bool:
-        """Delete team runtime state, checkpoints, and persisted team metadata."""
-        if self._active_team_name == team_name:
-            await self._deactivate_active_runtime()
-            self._clear_active()
+        """Delete team runtime state, checkpoints, and persisted team metadata.
+
+        Refuses to run while the team has an active runtime in the pool —
+        callers must stop_team / pause_team and wait for completion first.
+        """
+        if await self._pool.has_active(team_name):
+            entry = await self._pool.get(team_name)
+            active_session = entry.current_session_id if entry else "?"
+            raise_error(
+                StatusCode.AGENT_TEAM_BUSY_INVALID,
+                team_name=team_name,
+                session_id=active_session,
+                reason="team has an active runtime; stop_team before delete_team",
+            )
 
         # Resolve db_config from session state BEFORE releasing checkpoint
         db_config = None
@@ -362,10 +421,16 @@ class TeamRuntimeManager:
         if not session_id:
             return
 
-        # If releasing the currently active session, stop coordination and clear
-        if self._active_session_id == session_id:
-            await self._deactivate_active_runtime()
-            self._clear_active()
+        # Static precondition: any team active on this session blocks release.
+        active_teams = await self._pool.teams_for_session(session_id)
+        if active_teams:
+            blocked_names = ", ".join(t.team_name for t in active_teams)
+            raise_error(
+                StatusCode.AGENT_TEAM_BUSY_INVALID,
+                team_name=blocked_names,
+                session_id=session_id,
+                reason="team(s) active on this session; stop_team or pause_team first",
+            )
 
         # Resolve metadata - raises RuntimeError if team session but db_config missing
         metadata = await self.resolve_team_session_metadata(session_id)
@@ -442,14 +507,25 @@ class TeamRuntimeManager:
             return False
         return True
 
-    def _set_active(self, team_name: str, session_id: str, agent: "TeamAgent") -> None:
+    async def _set_active(self, team_name: str, session_id: str, agent: "TeamAgent") -> None:
         self._active_team_name = team_name
         self._active_session_id = session_id
         self._active_agent = agent
         self._active_paused = False
+        await self._pool.add(
+            ActiveTeam(
+                team_name=team_name,
+                agent=agent,
+                current_session_id=session_id,
+                state=RuntimeState.RUNNING,
+            )
+        )
 
-    def _clear_active(self) -> None:
+    async def _clear_active(self) -> None:
+        team_name = self._active_team_name
         self._active_team_name = None
         self._active_session_id = None
         self._active_agent = None
         self._active_paused = False
+        if team_name is not None:
+            await self._pool.remove(team_name)
