@@ -230,10 +230,26 @@ class TeamAgentSpec(BaseModel):
     Not serializable — only usable with in-process spawn mode.
     """
 
+    def resolve_db_config(self):
+        """Resolve the DatabaseConfig this spec would use at build time.
+
+        Mirrors the materialisation step inside ``build()`` so callers that
+        only need the storage handle (e.g. the runtime manager probing the
+        static team table before deciding the run path) can obtain the same
+        config without constructing a TeamAgent.
+        """
+        from openjiuwen.agent_teams.tools.database import DatabaseConfig as _DatabaseConfig
+
+        db_config = self.storage.build() if self.storage else _DatabaseConfig()
+        if db_config.db_type == "sqlite" and not db_config.connection_string:
+            from openjiuwen.agent_teams.paths import get_agent_teams_home
+
+            db_config.connection_string = str(get_agent_teams_home() / "team.db")
+        return db_config
+
     def build(self) -> "TeamAgent":
         """Materialize a configured TeamAgent from this spec."""
         from openjiuwen.agent_teams.agent.team_agent import TeamAgent as _TeamAgent
-        from openjiuwen.agent_teams.tools.database import DatabaseConfig as _DatabaseConfig
         from openjiuwen.harness.prompts import resolve_language
 
         leader_agent = self.agents.get("leader")
@@ -258,11 +274,7 @@ class TeamAgentSpec(BaseModel):
         )
 
         messager_config = self.transport.build() if self.transport else None
-        db_config = self.storage.build() if self.storage else _DatabaseConfig()
-        if db_config.db_type == "sqlite" and not db_config.connection_string:
-            from openjiuwen.agent_teams.paths import get_agent_teams_home
-
-            db_config.connection_string = str(get_agent_teams_home() / "team.db")
+        db_config = self.resolve_db_config()
 
         leader_card_id = f"{self.team_name}_{self.leader.member_name}"
         leader_card = leader_agent.card or AgentCard(

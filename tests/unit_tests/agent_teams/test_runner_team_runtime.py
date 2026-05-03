@@ -62,6 +62,41 @@ def isolated_checkpointer():
         CheckpointerFactory.set_default_checkpointer(original)
 
 
+@pytest.fixture
+def stateful_team_db():
+    """Stateful fake TeamDatabase shared via the ``get_shared_db`` patch.
+
+    The dispatch path now queries ``db.team.team_exists`` for the
+    authoritative ``team_in_db`` signal. Tests using ``FakeTeamAgent``
+    bypass production's ``BuildTeamTool`` (which is what writes the
+    ``team_info`` row in round 1), so they must mark the team as
+    persisted by hand — call ``await fake.team.create_team(...)`` after
+    round 1 to flip ``team_exists`` for the next round.
+    """
+    created: set[str] = set()
+
+    async def _create_team(team_name, **_kwargs):
+        created.add(team_name)
+        return True
+
+    async def _team_exists(team_name):
+        return team_name in created
+
+    fake = AsyncMock()
+    fake.initialize = AsyncMock()
+    fake.drop_session_tables_by_id = AsyncMock(return_value=[])
+    fake.team = AsyncMock()
+    fake.team.create_team = AsyncMock(side_effect=_create_team)
+    fake.team.team_exists = AsyncMock(side_effect=_team_exists)
+    fake.team.delete_team = AsyncMock(return_value=True)
+
+    with patch(
+        "openjiuwen.agent_teams.spawn.shared_resources.get_shared_db",
+        return_value=fake,
+    ):
+        yield fake
+
+
 class FakeTeamAgent:
     def __init__(self, team_name: str, *, stream_label: str):
         self.team_name = team_name
@@ -168,7 +203,9 @@ async def test_runner_run_agent_team_streaming_accepts_spec_and_emits_runtime_re
 
 
 @pytest.mark.asyncio
-async def test_runner_team_runtime_manager_resumes_new_session_and_recovers_history(isolated_checkpointer):
+async def test_runner_team_runtime_manager_resumes_new_session_and_recovers_history(
+    isolated_checkpointer, stateful_team_db,
+):
     await Runner.start()
     session_one = f"resume_{uuid.uuid4().hex}"
     session_two = f"resume_{uuid.uuid4().hex}"
@@ -202,6 +239,13 @@ async def test_runner_team_runtime_manager_resumes_new_session_and_recovers_hist
                 session=session_one,
             )
         ]
+        # Stand in for BuildTeamTool persisting the team_info row during
+        # round 1; subsequent dispatch reads team_exists from the DB.
+        await stateful_team_db.team.create_team(
+            team_name="persistent_team",
+            display_name="persistent_team",
+            leader_member_name="leader",
+        )
         second_chunks = [
             chunk
             async for chunk in Runner.run_agent_team_streaming(
@@ -270,7 +314,9 @@ async def test_runner_same_session_streaming_short_circuits_and_skips_second_str
 
 
 @pytest.mark.asyncio
-async def test_runner_same_session_after_pause_resumes_paused_runtime(isolated_checkpointer):
+async def test_runner_same_session_after_pause_resumes_paused_runtime(
+    isolated_checkpointer, stateful_team_db,
+):
     session_id = f"paused_{uuid.uuid4().hex}"
     spec = TeamAgentSpec.model_construct(team_name="paused_team", agents={})
     agent = FakeTeamAgent("paused_team", stream_label="team.chunk")
@@ -285,6 +331,11 @@ async def test_runner_same_session_after_pause_resumes_paused_runtime(isolated_c
                 session=session_id,
             )
         ]
+        await stateful_team_db.team.create_team(
+            team_name="paused_team",
+            display_name="paused_team",
+            leader_member_name="leader",
+        )
         assert await Runner.pause_agent_team(team_name="paused_team", session_id=session_id) is True
 
         second_chunks = [
@@ -308,7 +359,9 @@ async def test_runner_same_session_after_pause_resumes_paused_runtime(isolated_c
 
 
 @pytest.mark.asyncio
-async def test_runner_paused_same_session_resume_uses_same_prepared_session(isolated_checkpointer):
+async def test_runner_paused_same_session_resume_uses_same_prepared_session(
+    isolated_checkpointer, stateful_team_db,
+):
     session_id = f"paused_same_{uuid.uuid4().hex}"
     spec = TeamAgentSpec.model_construct(team_name="paused_same_team", agents={})
     agent = FakeTeamAgent("paused_same_team", stream_label="team.chunk")
@@ -324,6 +377,11 @@ async def test_runner_paused_same_session_resume_uses_same_prepared_session(isol
             )
         ]
         assert initial_chunks[0].payload["activation_kind"] == "create"
+        await stateful_team_db.team.create_team(
+            team_name="paused_same_team",
+            display_name="paused_same_team",
+            leader_member_name="leader",
+        )
         assert await Runner.pause_agent_team(team_name="paused_same_team", session_id=session_id) is True
 
         resumed_result = await Runner.run_agent_team(
@@ -357,6 +415,7 @@ async def test_runner_interact_pause_and_delete_agent_team_route_through_team_ru
     fake_db.initialize = AsyncMock()
     fake_db.drop_session_tables_by_id = AsyncMock(return_value=["team_task_xxx"])
     fake_db.team = AsyncMock()
+    fake_db.team.team_exists = AsyncMock(return_value=False)
     fake_db.team.delete_team = AsyncMock(return_value=True)
 
     with (
@@ -391,7 +450,10 @@ async def test_runner_interact_pause_and_delete_agent_team_route_through_team_ru
         assert await Runner.stop_agent_team(team_name="delete_team", session_id=session_id) is True
 
         assert await Runner.delete_agent_team(team_name="delete_team", session_ids=[session_id]) is True
-        fake_db.initialize.assert_awaited_once()
+        # ``initialize`` is also called by the dispatch DB-existence probe
+        # in ``_inspect_session``, so assert it ran at least once instead of
+        # exactly once.
+        fake_db.initialize.assert_awaited()
         fake_db.drop_session_tables_by_id.assert_awaited_once_with(session_id)
         fake_db.team.delete_team.assert_awaited_once_with("delete_team")
 

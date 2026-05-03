@@ -103,7 +103,7 @@ class TeamRuntimeManager:
 
         pool_entry = await self._pool.get(team_name)
         team_in_session, team_in_db = await self._inspect_session(
-            team_session, team_name, pool_entry,
+            spec, team_session, team_name,
         )
         action = decide_run_action(
             team_in_db=team_in_db,
@@ -408,19 +408,21 @@ class TeamRuntimeManager:
 
     async def _inspect_session(
         self,
+        spec: "TeamAgentSpec",
         team_session: AgentTeamSession,
         team_name: str,
-        pool_entry: Optional[ActiveTeam],
     ) -> tuple[bool, bool]:
-        """Inspect the session checkpoint to derive (team_in_session, team_in_db).
+        """Inspect the session checkpoint and team table.
 
-        ``team_in_db`` is approximated as ``team_in_session OR pool_entry``.
-        A clean implementation would query the static team table directly,
-        but that requires a materialised db_config which may not be available
-        before the leader is built. The approximation only loses precision
-        for the "DB has team but no session has tracked it yet" case, which
-        the caller can cover by passing a fresh spec — same effect as CREATE.
+        ``team_in_session`` comes from the checkpoint bucket; ``team_in_db``
+        comes from the static team table queried via the spec's resolved
+        ``DatabaseConfig``. Both reads are required by the dispatch truth
+        table — the team-table query is what distinguishes CREATE from
+        NEW_TEAM_IN_SESSION when the session is fresh and no warm pool
+        entry exists.
         """
+        from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
+
         checkpointer = CheckpointerFactory.get_checkpointer()
         session_exists = await checkpointer.session_exists(team_session.get_session_id())
         await team_session.pre_run()
@@ -428,7 +430,10 @@ class TeamRuntimeManager:
             team_in_session = False
         else:
             team_in_session = read_team_namespace(team_session, team_name) is not None
-        team_in_db = team_in_session or pool_entry is not None
+
+        db = get_shared_db(spec.resolve_db_config())
+        await db.initialize()
+        team_in_db = await db.team.team_exists(team_name)
         return team_in_session, team_in_db
 
     async def _apply_action(
