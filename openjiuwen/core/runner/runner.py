@@ -505,6 +505,10 @@ class _RunnerImpl:
                         return None
                     return await activation.agent.invoke(inputs, session=activation.session)
                 finally:
+                    await self._close_team_interact_gate(
+                        team_name=agent_team.team_name,
+                        session_id=activation.session.get_session_id(),
+                    )
                     await activation.session.post_run()
             agent_team_instance = await self._prepare_agent_team(agent_team)
             agent_team_session = self._create_agent_team_session(agent_team_instance, session)
@@ -566,6 +570,10 @@ class _RunnerImpl:
                     async for chunk in activation.agent.stream(inputs, session=activation.session):
                         yield chunk
                 finally:
+                    await self._close_team_interact_gate(
+                        team_name=agent_team.team_name,
+                        session_id=activation.session.get_session_id(),
+                    )
                     await activation.session.post_run()
                 return
             agent_team_instance = await self._prepare_agent_team(agent_team)
@@ -607,14 +615,32 @@ class _RunnerImpl:
 
     async def interact_agent_team(
         self,
-        user_input: str,
+        payload: Any,
         *,
         team_name: Optional[str] = None,
         session_id: Optional[str] = None,
-    ) -> bool:
-        """Deliver user input to the current active TeamAgent runtime owned by Runner."""
+    ):
+        """Deliver an interact payload to an active TeamAgent runtime.
+
+        ``payload`` is either an :class:`InteractPayload` (one of
+        ``GodViewMessage`` / ``OperatorMessage`` / ``HumanAgentMessage``)
+        or a bare ``str`` — the latter is shorthand for the god-view
+        channel (``GodViewMessage(body=...)``).
+
+        Returns a :class:`DeliverResult`. Missing ``team_name`` or
+        ``session_id`` returns ``DeliverResult.failure("missing_target")``.
+        """
+        from openjiuwen.agent_teams.interaction.payload import (
+            DeliverResult,
+            GodViewMessage,
+        )
+
+        if team_name is None or session_id is None:
+            return DeliverResult.failure("missing_target")
+        if isinstance(payload, str):
+            payload = GodViewMessage(body=payload)
         return await self._get_team_runtime_manager().interact(
-            user_input,
+            payload,
             team_name=team_name,
             session_id=session_id,
         )
@@ -855,6 +881,26 @@ class _RunnerImpl:
         except ImportError:
             return False
         return isinstance(agent_team, TeamAgentSpec)
+
+    async def _close_team_interact_gate(
+        self,
+        *,
+        team_name: str,
+        session_id: str,
+    ) -> None:
+        """Close-and-drain the InteractGate for a finished run cycle.
+
+        Run is over: late ``interact_team`` calls must be rejected, and
+        any payload that was admitted earlier must finish before the
+        stream really ends. Skips silently when the pool entry is gone
+        (e.g. ``stop_team`` already removed it) or bound to a different
+        session (warm path moved on).
+        """
+        manager = self._get_team_runtime_manager()
+        entry = await manager.pool.get(team_name)
+        if entry is None or entry.current_session_id != session_id:
+            return
+        await entry.interact_gate.close_and_drain()
 
     @staticmethod
     def _build_team_runtime_ready_chunk(
@@ -1240,14 +1286,14 @@ class Runner:
     @classmethod
     async def interact_agent_team(
         cls,
-        user_input: str,
+        payload: Any,
         *,
         team_name: Optional[str] = None,
         session_id: Optional[str] = None,
-    ) -> bool:
-        """Deliver user input to the current active TeamAgent runtime owned by Runner."""
+    ):
+        """Deliver an interact payload to an active TeamAgent runtime."""
         return await GLOBAL_RUNNER.interact_agent_team(
-            user_input,
+            payload,
             team_name=team_name,
             session_id=session_id,
         )

@@ -22,6 +22,17 @@ from openjiuwen.agent_teams.factory import (
     recover_for_existing_session,
     resume_persistent_team,
 )
+from openjiuwen.agent_teams.interaction import (
+    DeliverResult,
+    GodViewMessage,
+    HumanAgentInbox,
+    HumanAgentMessage,
+    HumanAgentNotEnabledError,
+    InteractPayload,
+    OperatorMessage,
+    UnknownHumanAgentError,
+    UserInbox,
+)
 from openjiuwen.agent_teams.runtime.dispatch import (
     RunAction,
     RunActionKind,
@@ -130,17 +141,56 @@ class TeamRuntimeManager:
 
     async def interact(
         self,
-        user_input: str,
+        payload: InteractPayload,
         *,
         team_name: str,
         session_id: str,
-    ) -> bool:
-        """Deliver ``user_input`` to the active runtime for ``(team_name, session_id)``."""
+    ) -> DeliverResult:
+        """Route an interact payload through the active team's gate.
+
+        Returns:
+            ``DeliverResult.success(...)`` when the payload was handed off
+            to the team. ``DeliverResult.failure("not_active")`` when no
+            pool entry matches; ``DeliverResult.failure("gate_closed")``
+            when the runtime is shutting down. Other failure reasons
+            propagate from the underlying inbox.
+        """
         entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
         if entry is None:
-            return False
-        await entry.agent.interact(user_input)
-        return True
+            return DeliverResult.failure("not_active")
+        ticket = await entry.interact_gate.admit()
+        if ticket is None:
+            return DeliverResult.failure("gate_closed")
+        try:
+            return await self._dispatch_payload(entry.agent, payload)
+        finally:
+            await entry.interact_gate.consume_done(ticket)
+
+    @staticmethod
+    async def _dispatch_payload(agent: "TeamAgent", payload: InteractPayload) -> DeliverResult:
+        backend = agent.team_backend
+        if backend is None and not isinstance(payload, GodViewMessage):
+            return DeliverResult.failure("no_team_backend")
+
+        if isinstance(payload, GodViewMessage):
+            return await UserInbox.deliver_to_leader(agent.deliver_input, payload.body)
+        if isinstance(payload, OperatorMessage):
+            inbox = UserInbox(backend.message_manager)
+            if payload.target is None:
+                return await inbox.broadcast(payload.body)
+            return await inbox.direct(payload.target, payload.body)
+        if isinstance(payload, HumanAgentMessage):
+            try:
+                return await HumanAgentInbox(backend, backend.message_manager).send(
+                    payload.body,
+                    to=payload.target,
+                    sender=payload.sender,
+                )
+            except HumanAgentNotEnabledError:
+                return DeliverResult.failure("human_agent_not_enabled")
+            except UnknownHumanAgentError:
+                return DeliverResult.failure("unknown_human_agent")
+        return DeliverResult.failure(f"unknown_payload:{type(payload).__name__}")
 
     async def stop_team(
         self,
@@ -375,6 +425,7 @@ class TeamRuntimeManager:
             assert pool_entry is not None
             await self._pre_run_with_inputs(team_session, inputs)
             pool_entry.state = RuntimeState.RUNNING
+            await pool_entry.interact_gate.reset()
             return TeamRuntimeActivation(agent=pool_entry.agent, session=team_session, action=action)
 
         if kind is RunActionKind.WARM_RECOVER:
@@ -382,6 +433,7 @@ class TeamRuntimeManager:
             await recover_for_existing_session(pool_entry.agent, team_session)
             pool_entry.current_session_id = session_id
             pool_entry.state = RuntimeState.RUNNING
+            await pool_entry.interact_gate.reset()
             return TeamRuntimeActivation(agent=pool_entry.agent, session=team_session, action=action)
 
         if kind is RunActionKind.NEW_TEAM_IN_SESSION_WARM:
@@ -390,6 +442,7 @@ class TeamRuntimeManager:
             await resume_persistent_team(pool_entry.agent, team_session)
             pool_entry.current_session_id = session_id
             pool_entry.state = RuntimeState.RUNNING
+            await pool_entry.interact_gate.reset()
             return TeamRuntimeActivation(agent=pool_entry.agent, session=team_session, action=action)
 
         # Cold paths — no pool entry. Make sure the pool stays clean.

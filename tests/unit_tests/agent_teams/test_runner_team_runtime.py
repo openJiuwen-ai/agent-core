@@ -371,15 +371,17 @@ async def test_runner_interact_pause_and_delete_agent_team_route_through_team_ru
         ):
             pass
 
-        assert (
-            await Runner.interact_agent_team(
-                "follow-up",
-                team_name="delete_team",
-                session_id=session_id,
-            )
-            is True
+        # The stream has ended, so the InteractGate is closed: late
+        # interact_team calls must be rejected with gate_closed rather
+        # than reaching the agent.
+        post_stream_result = await Runner.interact_agent_team(
+            "follow-up",
+            team_name="delete_team",
+            session_id=session_id,
         )
-        assert agent.interactions == ["follow-up"]
+        assert post_stream_result.ok is False
+        assert post_stream_result.reason == "gate_closed"
+        assert agent.interactions == []
 
         assert await Runner.pause_agent_team(team_name="delete_team", session_id=session_id) is True
         assert agent.pause_calls == 1
@@ -723,6 +725,113 @@ class TestTeamRuntimeManagerReleaseSession:
             await manager.release_session(session_id)
 
         await isolated_checkpointer.release(session_id)
+
+
+class TestTeamRuntimeManagerInteract:
+    """Test TeamRuntimeManager.interact payload dispatch and gate behaviour."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_interact_god_view_routes_to_deliver_input(self):
+        """GodViewMessage must invoke ``agent.deliver_input`` and report success."""
+        from openjiuwen.agent_teams.interaction.payload import GodViewMessage
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+
+        manager = TeamRuntimeManager()
+        team_name = "god_team"
+        session_id = "s-god"
+
+        delivered: list[str] = []
+
+        class _Agent:
+            team_backend = None
+
+            async def deliver_input(self, content):
+                delivered.append(content)
+
+        await _activate_pool_entry(manager, team_name, session_id, _Agent())
+
+        result = await manager.interact(
+            GodViewMessage(body="hi"),
+            team_name=team_name,
+            session_id=session_id,
+        )
+        assert result.ok is True
+        assert delivered == ["hi"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_interact_returns_not_active_when_no_pool_entry(self):
+        from openjiuwen.agent_teams.interaction.payload import GodViewMessage
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+
+        manager = TeamRuntimeManager()
+        result = await manager.interact(
+            GodViewMessage(body="x"),
+            team_name="missing",
+            session_id="missing",
+        )
+        assert result.ok is False
+        assert result.reason == "not_active"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_interact_returns_gate_closed_after_close_and_drain(self):
+        from openjiuwen.agent_teams.interaction.payload import GodViewMessage
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+
+        manager = TeamRuntimeManager()
+        team_name = "drained"
+        session_id = "s1"
+
+        class _Agent:
+            team_backend = None
+
+            async def deliver_input(self, content):
+                pass
+
+        await _activate_pool_entry(manager, team_name, session_id, _Agent())
+        entry = await manager.pool.get(team_name)
+        assert entry is not None
+        await entry.interact_gate.close_and_drain()
+
+        result = await manager.interact(
+            GodViewMessage(body="x"),
+            team_name=team_name,
+            session_id=session_id,
+        )
+        assert result.ok is False
+        assert result.reason == "gate_closed"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_interact_string_input_via_runner_treated_as_god_view(self):
+        """Runner.interact_agent_team accepts a bare str as god-view sugar."""
+        await Runner.start()
+        try:
+            session_id = f"runner_god_{uuid.uuid4().hex}"
+            spec = TeamAgentSpec.model_construct(team_name="god_runner_team", agents={})
+            agent = FakeTeamAgent("god_runner_team", stream_label="team.chunk")
+
+            with patch.object(TeamAgentSpec, "build", return_value=agent):
+                async for _ in Runner.run_agent_team_streaming(
+                    agent_team=spec,
+                    inputs={"query": "first"},
+                    session=session_id,
+                ):
+                    pass
+
+                # Stream ended -> gate closed; god-view interact should be
+                # rejected via DeliverResult, not raise.
+                result = await Runner.interact_agent_team(
+                    "follow",
+                    team_name="god_runner_team",
+                    session_id=session_id,
+                )
+                assert result.ok is False
+                assert result.reason == "gate_closed"
+        finally:
+            await Runner.stop()
 
 
 class TestTeamRuntimeManagerStopTeam:

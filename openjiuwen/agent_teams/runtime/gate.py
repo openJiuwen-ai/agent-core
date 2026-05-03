@@ -91,5 +91,18 @@ class InteractGate:
                 return
         await self._drained.wait()
 
+    async def reset(self) -> None:
+        """Reopen the gate for a fresh run cycle.
+
+        Clears the ``closed`` flag and resets ``inflight`` to zero so the
+        next ``run_agent_team_streaming`` admits payloads again. Tickets
+        from the previous cycle are no longer trackable; callers must not
+        keep references to them across a ``reset``.
+        """
+        async with self._lock:
+            self._closed.clear()
+            self._inflight = 0
+            self._drained.set()
+
 
 __all__ = ["AdmissionTicket", "InteractGate"]
