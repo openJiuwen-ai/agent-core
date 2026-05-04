@@ -1,8 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-import json
-import logging
-from typing import Any, List, Optional, Tuple
+from typing import List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
@@ -11,6 +9,13 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextProcessor, ContextEvent
 from openjiuwen.core.context_engine.base import ModelContext
+from openjiuwen.core.context_engine.processor.compressor.util import (
+    collect_summary_indices,
+    count_messages_tokens,
+    find_last_completed_api_round_end_idx,
+    is_summary_message,
+    iter_summary_merge_ranges,
+)
 from openjiuwen.core.foundation.llm import (
     BaseMessage, AssistantMessage, UserMessage,
     ModelRequestConfig, ModelClientConfig, Model, ToolMessage
@@ -406,17 +411,27 @@ class CurrentRoundCompressorConfig(BaseModel):
     3. Compress only the selected span after the latest valid user boundary.
     4. Skip first-stage compression when the selected span is smaller than the
        configured minimum worthwhile size.
-    5. Optionally write the generated memory block through the offload system.
+    5. Write the generated memory block back as a plain user memory message.
 
     Historical memory blocks remain part of the context and may later be merged
     again by the second-stage consolidation path.
     """
-    tokens_threshold: int = Field(default=10000, gt=0)
+    tokens_threshold: int = Field(default=100000, gt=0)
     """Maximum accumulated context size before compression is triggered."""
 
-    messages_to_keep: int | None = Field(default=None, gt=0)
+    messages_to_keep: int = Field(default=3, gt=0)
     """Guaranteed number of most-recent messages to retain, regardless of any other threshold."""
 
+    model: ModelRequestConfig | None = Field(default=None)
+    """Model request configuration used during compression and summary merge."""
+
+    model_client: ModelClientConfig | None = Field(default=None)
+    """Client configuration for the LLM used to generate compressed memory blocks."""
+
+
+    # ------------------------------------------------------------------
+    # Advanced compression settings
+    # ------------------------------------------------------------
     min_selected_tokens_for_compression: int = Field(default=20000, gt=0)
     """Minimum token size required for the selected compression span before first-stage compression runs."""
 
@@ -435,17 +450,12 @@ class CurrentRoundCompressorConfig(BaseModel):
     prior_context_window_size: int = Field(default=10, gt=0)
     """Maximum number of recent user/assistant intent messages included in the reference-only user intent context."""
 
-    offload_writeback_enabled: bool = Field(default=True)
-    """
-    When enabled, compressed memory blocks are written back as
-    offload-aware user messages instead of plain UserMessage.
-    """
-
-    model: ModelRequestConfig | None = Field(default=None)
-    """Model request configuration used during compression and summary merge."""
-
-    model_client: ModelClientConfig | None = Field(default=None)
-    """Client configuration for the LLM used to generate compressed memory blocks."""
+    # Prompt customization.
+    custom_compression_prompt: str | None = Field(
+        default=None,
+        description="Custom first-stage compression prompt template. Defaults to the built-in prompt when omitted.",
+    )
+    """User-editable prompt template for current-round compression."""
 
 
 @ContextEngine.register_processor()
@@ -477,7 +487,7 @@ class CurrentRoundCompressor(ContextProcessor):
         summary merge logic.
         """
         super().__init__(config)
-        self._compressed_prompt = DEFAULT_COMPRESSION_PROMPT
+        self._compressed_prompt = config.custom_compression_prompt or DEFAULT_COMPRESSION_PROMPT
         self._token_threshold = config.tokens_threshold
         self._messages_to_keep = config.messages_to_keep
         self._min_selected_tokens_for_compression = config.min_selected_tokens_for_compression
@@ -486,20 +496,7 @@ class CurrentRoundCompressor(ContextProcessor):
         self._accumulated_summary_token_limit = config.accumulated_summary_token_limit
         self._summary_merge_min_blocks = config.summary_merge_min_blocks
         self._prior_context_window_size = config.prior_context_window_size
-        self._offload_writeback_enabled = config.offload_writeback_enabled
         self._model = Model(self.config.model_client, self.config.model)
-
-    def _count_response_tokens(self, token_counter, response) -> int:
-        """Estimate response token usage for stats recording.
-
-        Some model wrappers do not expose structured usage data, so token count
-        is approximated by wrapping the returned content as a synthetic
-        `UserMessage`.
-        """
-        content = getattr(response, "content", "")
-        if not content:
-            return 0
-        return self._count_messages_tokens([UserMessage(content=content)], token_counter)
 
     def _wrap_memory_block(self, summary: str) -> str:
         """
@@ -537,37 +534,9 @@ class CurrentRoundCompressor(ContextProcessor):
             f"{summary}"
         )
 
-    @staticmethod
-    def _build_memory_metadata(**items: Any) -> str:
-        """
-        Build lightweight metadata for memory blocks.
-
-        **This helper was added** to keep block metadata structured and stable
-        across first-stage and second-stage compression.
-
-        The format stays intentionally lightweight so the block remains readable
-        to both humans and downstream prompts.
-        """
-        metadata_lines = ["Metadata:"]
-        for key, value in items.items():
-            metadata_lines.append(f"- {key}: {value}")
-        return "\n".join(metadata_lines)
-
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    def _collect_prior_summary_indices(self, messages: List[BaseMessage]) -> List[int]:
-        """Return indices of all accumulated compressed summary UserMessages."""
-        indices: List[int] = []
-        for i, msg in enumerate(messages):
-            if not isinstance(msg, UserMessage):
-                continue
-            if not isinstance(msg.content, str):
-                continue
-            if msg.content.startswith(_SUMMARY_MARKER):
-                indices.append(i)
-        return indices
 
     def _build_prompt(
             self,
@@ -588,48 +557,6 @@ class CurrentRoundCompressor(ContextProcessor):
             .replace("{prior_context_and_query}", prior_context_and_query if prior_context_and_query else "(none)")
         )
 
-    @staticmethod
-    def _estimate_content_tokens(content: Any) -> int:
-        """Approximate token count when no token counter is available."""
-        if isinstance(content, str):
-            return len(content) // 3
-        try:
-            return len(json.dumps(content, ensure_ascii=False)) // 3
-        except TypeError:
-            return len(str(content)) // 3
-
-    def _count_messages_tokens(self, messages: List[BaseMessage], token_counter) -> int:
-        """Count tokens with tokenizer-first strategy and character fallback."""
-        if not messages:
-            return 0
-        if token_counter is not None:
-            try:
-                return token_counter.count_messages(messages)
-            except Exception as exc:  # pragma: no cover - defensive fallback
-                logger.warning(
-                    f"[{self.processor_type()}] token_counter failed, fallback to char-based estimate: {exc}"
-                )
-        return sum(self._estimate_content_tokens(getattr(message, "content", "")) for message in messages)
-
-    async def _build_writeback_message(
-            self,
-            content: str,
-            source_messages: List[BaseMessage],
-            context: ModelContext,
-    ) -> Optional[BaseMessage]:
-        """Build the final memory-block message using the configured writeback mode."""
-        if not self._offload_writeback_enabled:
-            return UserMessage(content=content)
-        offload_message = await self.offload_messages(
-            role="user",
-            content=content,
-            messages=source_messages,
-            context=context,
-        )
-        if offload_message:
-            return offload_message
-        return UserMessage(content=content)
-
     def _format_recent_context(self, all_context_messages: List[BaseMessage], end_idx: int) -> str:
         """Serialize the raw tail after the compression span as boundary context.
 
@@ -639,9 +566,8 @@ class CurrentRoundCompressor(ContextProcessor):
         """
         recent_messages: List[BaseMessage] = []
         for msg in all_context_messages[end_idx + 1:]:
-            if isinstance(msg, UserMessage):
-                if isinstance(msg.content, str) and msg.content.startswith(_SUMMARY_MARKER):
-                    continue
+            if is_summary_message(msg, _SUMMARY_MARKER):
+                continue
             recent_messages.append(msg)
         if not recent_messages:
             return ""
@@ -657,13 +583,7 @@ class CurrentRoundCompressor(ContextProcessor):
         prior_messages = []
         if current_query_idx > 0:
             for msg in all_context_messages[:current_query_idx]:
-                is_plain_user = (
-                    isinstance(msg, UserMessage)
-                    and not (
-                        isinstance(msg.content, str)
-                        and msg.content.startswith(_SUMMARY_MARKER)
-                    )
-                )
+                is_plain_user = isinstance(msg, UserMessage) and not is_summary_message(msg, _SUMMARY_MARKER)
                 is_plain_assistant = isinstance(msg, AssistantMessage) and not msg.tool_calls
                 if is_plain_user or is_plain_assistant:
                     prior_messages.append(msg)
@@ -694,7 +614,7 @@ class CurrentRoundCompressor(ContextProcessor):
         The processor first finds the latest compressible user boundary, then
         runs span-level compression on the selected range after that boundary.
         Successful compression replaces the original raw messages in place with
-        memory blocks written according to the configured writeback strategy.
+        a plain current-round memory block.
 
         In the successful replacement path, the context is updated in place and
         the returned message list is empty because the new block has already been
@@ -704,20 +624,16 @@ class CurrentRoundCompressor(ContextProcessor):
         last_user_idx = await self.get_compress_idx(context_messages)
         if last_user_idx == -1:
             return None, messages_to_add
-        if self._messages_to_keep:
-            messages = context_messages[:-self._messages_to_keep]
-        else:
-            messages = context_messages
-        end_idx = len(messages) - 1
+        keep_start_idx = max(0, len(context_messages) - self._messages_to_keep)
+        end_idx = keep_start_idx - 1
 
         event = ContextEvent(event_type=self.processor_type())
         try:
-            compressed_context = await self.multi_compress(
+            compressed_context, modified_indices = await self.multi_compress(
                 context_messages, last_user_idx, end_idx, context
             )
             if compressed_context:
-                start_idx = last_user_idx + 1
-                event.messages_to_modify += list(range(start_idx, end_idx + 1))
+                event.messages_to_modify += modified_indices
                 context.set_messages(compressed_context)
                 return event, []
             return None, messages_to_add
@@ -743,14 +659,19 @@ class CurrentRoundCompressor(ContextProcessor):
 
         `messages_to_keep` still acts as a hard guard for the preserved tail.
         This method only decides whether compression work should start; the exact
-        replacement range is determined later by `get_compress_idx`.
+        replacement range is determined later by the preserved tail and the last
+        complete API round.
         """
         config = self.config
         message_size = len(context) + len(messages_to_add)
-        if self._messages_to_keep and message_size < self._messages_to_keep:
+        if message_size < self._messages_to_keep:
             return False
         token_counter = context.token_counter()
-        tokens = self._count_messages_tokens(context.get_messages() + messages_to_add, token_counter)
+        tokens = count_messages_tokens(
+            context.get_messages() + messages_to_add,
+            token_counter,
+            self.processor_type(),
+        )
         if tokens > self._token_threshold:
             logger.info(
                 f"[{self.processor_type()} triggered] context tokens {tokens} "
@@ -779,11 +700,7 @@ class CurrentRoundCompressor(ContextProcessor):
             return -1
         if compressed_idx < 0:
             return -1
-        keep_index = (
-            len(messages)
-            if not self._messages_to_keep
-            else len(messages) - self._messages_to_keep
-        )
+        keep_index = len(messages) - self._messages_to_keep
         if compressed_idx >= keep_index:
             return -1
         return compressed_idx
@@ -794,7 +711,7 @@ class CurrentRoundCompressor(ContextProcessor):
             last_user_idx: int,
             end_idx: int,
             context: ModelContext,
-    ) -> Optional[list[BaseMessage]]:
+    ) -> Tuple[Optional[list[BaseMessage]], List[int]]:
         """
         Compress the whole eligible span into one memory block.
 
@@ -805,81 +722,41 @@ class CurrentRoundCompressor(ContextProcessor):
         old memory blocks once enough compressed history has accumulated.
         """
         updated = False
+        modified_indices: List[int] = []
         start_idx = last_user_idx + 1
-        if end_idx >= start_idx:
-            end_idx = self._protect_tool_call_boundary(context_messages, start_idx, end_idx)
-        if end_idx > start_idx:
-            messages_to_compress = context_messages[start_idx:end_idx + 1]
+        actual_end_idx = end_idx
+        if actual_end_idx >= start_idx:
+            actual_end_idx = find_last_completed_api_round_end_idx(
+                context_messages,
+                start_idx,
+                actual_end_idx,
+            )
+        if actual_end_idx >= start_idx:
+            messages_to_compress = context_messages[start_idx:actual_end_idx + 1]
             compressed_msg = await self.compress(
-                messages_to_compress, context, context_messages, end_idx, current_query_idx=last_user_idx
+                messages_to_compress, context, context_messages, actual_end_idx, current_query_idx=last_user_idx
             )
             if compressed_msg:
                 context_messages = ContextUtils.replace_messages(
-                    context_messages, [compressed_msg], start_idx, end_idx
+                    context_messages, [compressed_msg], start_idx, actual_end_idx
                 )
+                modified_indices.extend(range(start_idx, actual_end_idx + 1))
                 updated = True
-        summary_indices = self._collect_prior_summary_indices(context_messages)
-
-        if len(summary_indices) >= self._summary_merge_min_blocks:
-            start_idx_ = summary_indices[0]
-            end_idx_ = summary_indices[-1]
+        for start_idx_, end_idx_ in iter_summary_merge_ranges(
+                context_messages,
+                _SUMMARY_MARKER,
+                self._summary_merge_min_blocks,
+        ):
             old_compress_messages = context_messages[start_idx_:end_idx_ + 1]
-            compressed_msg = await self.compress_(context, old_compress_messages)
+            compressed_msg = await self._merge_summary_blocks(context, old_compress_messages)
             if compressed_msg:
                 context_messages = ContextUtils.replace_messages(
                     context_messages, [compressed_msg], start_idx_, end_idx_
                 )
+                modified_indices.extend(range(start_idx_, end_idx_ + 1))
                 updated = True
-        return context_messages if updated else None
-
-    @staticmethod
-    def _protect_tool_call_boundary(
-            messages: List[BaseMessage],
-            start_idx: int,
-            end_idx: int,
-    ) -> int:
-        """
-        Avoid splitting assistant tool calls from their tool results.
-
-        Compression replaces the selected span with a memory block. If the span
-        contains an AssistantMessage with tool_calls but any matching ToolMessage
-        is kept outside the span, the next model request would contain orphan
-        tool results. In that case, keep the whole tool-call exchange raw by
-        ending compression before the assistant message.
-        """
-        if end_idx < start_idx:
-            return end_idx
-
-        protected_end_idx = end_idx
-        tail_tool_ids = {
-            getattr(message, "tool_call_id", None)
-            for message in messages[end_idx + 1:]
-            if isinstance(message, ToolMessage) and getattr(message, "tool_call_id", None)
-        }
-        if not tail_tool_ids:
-            if isinstance(messages[end_idx], AssistantMessage) and messages[end_idx].tool_calls:
-                return end_idx - 1
-            return end_idx
-
-        for idx in range(start_idx, end_idx + 1):
-            message = messages[idx]
-            if not isinstance(message, AssistantMessage) or not message.tool_calls:
-                continue
-            tool_call_ids = {
-                getattr(tool_call, "id", None)
-                for tool_call in message.tool_calls
-                if getattr(tool_call, "id", None)
-            }
-            if tool_call_ids & tail_tool_ids:
-                protected_end_idx = min(protected_end_idx, idx - 1)
-
-        if (
-                protected_end_idx == end_idx
-                and isinstance(messages[end_idx], AssistantMessage)
-                and messages[end_idx].tool_calls
-        ):
-            protected_end_idx = end_idx - 1
-        return protected_end_idx
+                break
+        return (context_messages if updated else None), modified_indices
 
     async def compress(
             self,
@@ -911,7 +788,7 @@ class CurrentRoundCompressor(ContextProcessor):
         - the generated summary is smaller than the original span.
         """
         token_counter = context.token_counter()
-        input_tokens = self._count_messages_tokens(messages_to_compress, token_counter)
+        input_tokens = count_messages_tokens(messages_to_compress, token_counter, self.processor_type())
         if input_tokens < self._min_selected_tokens_for_compression:
             logger.info(
                 f"[{self.processor_type()}] Skipping: selected span tokens ({input_tokens}) "
@@ -923,7 +800,7 @@ class CurrentRoundCompressor(ContextProcessor):
         recent_context = ""
         prior_context_and_query = ""
         if all_context_messages is not None:
-            summary_indices = self._collect_prior_summary_indices(all_context_messages)
+            summary_indices = collect_summary_indices(all_context_messages, _SUMMARY_MARKER)
             if summary_indices:
                 prior_summaries = "\n---\n".join(
                     all_context_messages[i].content for i in summary_indices
@@ -943,9 +820,6 @@ class CurrentRoundCompressor(ContextProcessor):
             prior_context_and_query,
         )
 
-        ai_count = sum(1 for m in messages_to_compress if isinstance(m, AssistantMessage))
-        tool_count = sum(1 for m in messages_to_compress if isinstance(m, ToolMessage))
-
         processed_messages = "\n".join([f"role:{msg.role}, content:{msg}"
             for msg in messages_to_compress])
         filled_prompt = filled_prompt.replace("{selected_messages}", str(processed_messages))
@@ -961,7 +835,11 @@ class CurrentRoundCompressor(ContextProcessor):
 
         summary = response.content or ""
         if summary:
-            compressed_tokens = self._count_messages_tokens([UserMessage(content=summary)], token_counter)
+            compressed_tokens = count_messages_tokens(
+                [UserMessage(content=summary)],
+                token_counter,
+                self.processor_type(),
+            )
             if compressed_tokens >= input_tokens:
                 logger.info(
                     f"[{self.processor_type()}] Skipping: compressed tokens ({compressed_tokens}) "
@@ -969,19 +847,9 @@ class CurrentRoundCompressor(ContextProcessor):
                 )
                 return None
 
-        metadata = self._build_memory_metadata(
-            total_messages_compressed=len(messages_to_compress),
-            assistant_messages=ai_count,
-            tool_messages=tool_count,
-        )
-        memory_summary = f"{metadata}\n\n{summary}"
-        return await self._build_writeback_message(
-            content=self._wrap_memory_block(memory_summary),
-            source_messages=messages_to_compress,
-            context=context,
-        )
+        return UserMessage(content=self._wrap_memory_block(summary))
 
-    async def compress_(
+    async def _merge_summary_blocks(
             self,
             context: ModelContext,
             old_compress_messages: Optional[List[BaseMessage]] = None,
@@ -1001,7 +869,7 @@ class CurrentRoundCompressor(ContextProcessor):
         """
         token_counter = context.token_counter()
 
-        total_tokens = self._count_messages_tokens(old_compress_messages or [], token_counter)
+        total_tokens = count_messages_tokens(old_compress_messages or [], token_counter, self.processor_type())
         if total_tokens <= self._accumulated_summary_token_limit:
             return None
         merged_blocks = "\n\n".join(
@@ -1025,30 +893,15 @@ class CurrentRoundCompressor(ContextProcessor):
             return None
         summary_text = response.content or ""
         if summary_text:
-            memory_summary = (
-                f"{self._build_memory_metadata(merged_memory_blocks=len(old_compress_messages or []))}\n\n"
-                f"{summary_text}"
-            )
-            compressed_msg = await self._build_writeback_message(
-                content=self._wrap_memory_block(memory_summary),
-                source_messages=old_compress_messages or [],
-                context=context,
-            )
+            compressed_msg = UserMessage(content=self._wrap_memory_block(summary_text))
             logger.info(
                 f"[{self.processor_type()}] compressed "
                 f"{len(old_compress_messages or [])} old compressed messages into one"
             )
         else:
             logger.info(
-                f"[{self.processor_type()}] failed to compress, removed "
+                f"[{self.processor_type()}] failed to compress "
                 f"{len(old_compress_messages or [])} old compressed messages"
             )
-            compressed_msg = await self._build_writeback_message(
-                content=self._wrap_memory_block(
-                    f"{self._build_memory_metadata(merged_memory_blocks=len(old_compress_messages or []))}\n\n"
-                    f"{response.content or ''}"
-                ),
-                source_messages=old_compress_messages or [],
-                context=context,
-            )
+            return None
         return compressed_msg

@@ -14,7 +14,7 @@ Subclasses verl's `RayPPOTrainer` and implements one PPO/GRPO training step (adv
 
 * `sleep_rollout` / `wake_up_rollout`: work with the async rollout manager to rotate backend vLLM addresses between steps.
 * `setup_logger` / `log_metrics` / `save_checkpoint` / `load_checkpoint`: experiment logging and checkpoints.
-* Uses helpers such as `TrainingDiagnostics` (`monitoring/training_logger.py`) for diagnostics aggregated at sequence granularity.
+* Uses helpers such as `TrainingDiagnostics` (`offline/store/metrics_tracker.py`) for stage-wise diagnostics when `develop_mode` is enabled.
 
 **Note**: Instances are wired inside verl/Ray distributed workers; this class is not exposed to end users as a direct `OfflineRLOptimizer` entry point.
 
@@ -28,7 +28,7 @@ class openjiuwen.agent_evolving.agent_rl.offline.main_trainer.MainTrainer(rl_tra
 
 **Highlights**:
 
-* Creates a [`BackendProxy`](./proxy.md) internally; after the proxy starts, writes **`proxy_url`** into the mutable `agent_factory.proxy_url` (see [`AgentFactory`](./offline/runtime.md)) so `ReActAgent` uses a stable base URL for vLLM.
+* Creates a [`BackendProxy`](./proxy.md) internally; after the proxy starts, writes **`proxy_url`** into the mutable `agent_factory.proxy_url` (see [`AgentFactory`](./offline/runtime.md)) so rollout agents (**`DeepAgent`** instances produced by **`AgentFactory`**) use a stable base URL for vLLM.
 * **`update_backends(servers)`**: supplies the current step's vLLM backend addresses to the proxy.
 * **`validate()`**: runs one forward pass on the validation set; the implementation has preconditions on validation `DataLoader` batching—see the validation logic in the source.
 * **`fit()`**: main training loop (epochs, progress bar, per-step training and optional validation).

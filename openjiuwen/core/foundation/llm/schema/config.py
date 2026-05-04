@@ -6,6 +6,9 @@ from typing import Optional, Union, Any, Self
 
 from pydantic import BaseModel, Field, model_validator
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+
 
 class ProviderType(str, Enum):
     """ModelClientProvider type"""
@@ -41,30 +44,36 @@ class ModelClientConfig(BaseModel):
     @model_validator(mode='after')
     def validate_client_provider(self) -> Self:
         """Validate and normalize client_provider."""
-        def to_provider_type(provider_name: str) -> Union[ProviderType, str]:
-            try:
-                return ProviderType(provider_name)
-            except ValueError:
-                return provider_name
-
+        if isinstance(self.client_provider, ProviderType):
+            return self
         provider = self.client_provider.value if isinstance(self.client_provider, ProviderType) \
             else str(self.client_provider)
         provider = provider.strip()
-
-        from openjiuwen.core.foundation.llm.model import _CLIENT_TYPE_REGISTRY
-
-        if provider in _CLIENT_TYPE_REGISTRY:
-            self.client_provider = to_provider_type(provider)
+        if provider in ProviderType.__members__:
+            self.client_provider = provider
             return self
 
         # Normalize common lowercase/mixed-case provider values to canonical keys.
-        provider_map = {k.lower(): k for k in _CLIENT_TYPE_REGISTRY.keys()}
+        provider_map = {k.lower(): k.value for k in ProviderType}
         normalized_provider = provider_map.get(provider.lower())
         if normalized_provider:
-            self.client_provider = to_provider_type(normalized_provider)
+            self.client_provider = normalized_provider
             return self
 
-        return self
+        from openjiuwen.core.common.clients import get_client_registry
+        supported_types = [name[4:] for name in get_client_registry().list_clients() if name.startswith("llm_")]
+        for builtin in ProviderType:
+            supported_types.append(builtin.value)
+        supported_types = list(set(supported_types))
+        if provider in supported_types:
+            self.client_provider = provider
+            return self
+        else:
+            raise build_error(
+                StatusCode.MODEL_PROVIDER_INVALID,
+                error_msg=f"unavailable model provider: {provider},"
+                          f"and available providers are: {supported_types}"
+            )
 
 
 class ModelRequestConfig(BaseModel):

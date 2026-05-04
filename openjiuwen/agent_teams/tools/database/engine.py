@@ -26,6 +26,7 @@ from openjiuwen.agent_teams.tools.models import (
     _get_message_read_status_model,
     _get_task_dependency_model,
     _get_task_model,
+    _sanitize_session_id_for_table,
 )
 from openjiuwen.core.common.logging import team_logger
 
@@ -256,3 +257,37 @@ async def cleanup_all_runtime_state(
         cleared_tables,
     )
     return deleted_tables, cleared_tables
+
+
+async def drop_session_tables_by_id(engine: AsyncEngine, session_id: str) -> list[str]:
+    """Drop dynamic tables for a specific session_id without context.
+
+    This is used by Runner.release(session_id) to clean up per-session
+    tables when the session context is not active (e.g. after the agent
+    has finished executing).
+
+    Args:
+        engine: Database engine.
+        session_id: Session identifier to clean up.
+
+    Returns:
+        List of dropped table names.
+    """
+    if engine is None or not session_id:
+        return []
+
+    suffix = _sanitize_session_id_for_table(session_id)
+    dropped: list[str] = []
+    async with engine.begin() as conn:
+        table_names = await conn.run_sync(_get_table_names)
+        for prefix in TEAM_DYNAMIC_TABLE_PREFIXES:
+            expected_table = f"{prefix}{suffix}"
+            if expected_table in table_names:
+                await conn.run_sync(_drop_table, expected_table)
+                dropped.append(expected_table)
+
+    _clear_session_model_cache(session_id)
+
+    if dropped:
+        team_logger.info("Dropped session tables for session %s: %s", session_id, dropped)
+    return dropped

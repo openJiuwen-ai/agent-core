@@ -3,8 +3,6 @@
 """
 客服系统示例 - Handoff 模式
 
-参考 AutoGen handoff 模式：https://microsoft.github.io/autogen/stable//user-guide/core-user-guide/design-patterns/handoffs.html
-
 Agent 流程：
     Triage Agent (分流) → Technical Support (技术支持) / Billing Support (账单支持)
 
@@ -14,11 +12,10 @@ Agent 流程：
 """
 import sys
 import os
-# 添加项目根目录到 Python 路径
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
 
 import asyncio
-from typing import Any, AsyncIterator, Optional
 
 from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.multi_agent.teams.handoff import (
@@ -31,14 +28,9 @@ from openjiuwen.core.multi_agent.schema.team_card import TeamCard
 from openjiuwen.core.single_agent import ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
-
-# ============================================================================
-# 配置
-# ============================================================================
-
 model_client_config = ModelClientConfig(
-    client_id="your client id",
-    client_provider="your client provider",
+    client_id="openai",
+    client_provider="openai",
     api_key="your api key",
     api_base="your api base",
     verify_ssl=False
@@ -91,10 +83,6 @@ billing_support_card = AgentCard(
     description="账单支持专员，处理账单查询、付款、退款等问题"
 )
 
-
-# ============================================================================
-# 主函数
-# ============================================================================
 
 async def main():
     print("=" * 80)
@@ -192,10 +180,6 @@ async def main():
         print(f"\n最终结果：")
         print(result)
         print()
-
-    print("=" * 80)
-    print("所有测试完成")
-    print("=" * 80)
 
 
 if __name__ == "__main__":

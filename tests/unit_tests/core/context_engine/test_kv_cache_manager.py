@@ -28,14 +28,14 @@ import pytest
 from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
-    DialogueCompressorConfig,
+    DialogueCompressorConfig as _DialogueCompressorConfig,
 )
 from openjiuwen.core.context_engine.processor.offloader.message_offloader import (
     MessageOffloaderConfig,
 )
 from openjiuwen.core.foundation.llm import UserMessage, ToolMessage, AssistantMessage, ToolCall
 from openjiuwen.core.foundation.llm.inference_affinity_model import InferenceAffinityModel
-from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 
 pytestmark = pytest.mark.asyncio
 
@@ -43,6 +43,19 @@ _DIALOGUE_BENEFIT_PATCH = (
     "openjiuwen.core.context_engine.processor.compressor."
     "dialogue_compressor.DialogueCompressor._has_compression_benefit"
 )
+
+
+def DialogueCompressorConfig(**kwargs):
+    return _DialogueCompressorConfig(
+        model=ModelRequestConfig(model="test-model"),
+        model_client=ModelClientConfig(
+            client_provider="OpenAI",
+            api_key="test-key",
+            api_base="http://test.local",
+            verify_ssl=False,
+        ),
+        **kwargs,
+    )
 
 
 @pytest.fixture(autouse=True)

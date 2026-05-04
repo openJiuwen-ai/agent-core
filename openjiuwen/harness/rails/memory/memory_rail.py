@@ -8,14 +8,16 @@ from typing import Set
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
+from openjiuwen.core.memory.lite.config import create_memory_settings
+from openjiuwen.core.memory.lite.memory_tool_context import MemoryToolContext
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
 from openjiuwen.core.memory.lite.memory_tools import (
-    get_decorated_tools,
     init_memory_manager_async,
 )
 from openjiuwen.harness.prompts.sections.memory import build_memory_section
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.tools.memory import create_memory_tools
 
 
 class MemoryRail(DeepAgentRail):
@@ -58,6 +60,7 @@ class MemoryRail(DeepAgentRail):
         self._embedding_config = embedding_config
         self._is_proactive = is_proactive
         self.system_prompt_builder = None
+        self._tool_ctx: MemoryToolContext | None = None
 
     def init(self, agent) -> None:
         """Initialize the rail.
@@ -91,6 +94,7 @@ class MemoryRail(DeepAgentRail):
         self._owned_tool_names.clear()
         self._initialized = False
         self._manager_initialized = False
+        self._tool_ctx = None
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section("memory")
             self.system_prompt_builder = None
@@ -145,6 +149,8 @@ class MemoryRail(DeepAgentRail):
 
             if manager:
                 self._manager_initialized = True
+                if self._tool_ctx is not None:
+                    self._tool_ctx.manager = manager
                 logger.info(
                     f"[MemoryRail] Memory manager initialized: "
                     f"agent_id={agent_id}"
@@ -166,13 +172,28 @@ class MemoryRail(DeepAgentRail):
             return
 
         try:
-            memory_tools = get_decorated_tools()
+            agent_id = getattr(getattr(agent, "card", None), "id", None) or "default"
+            language = getattr(self.system_prompt_builder, "language", "cn")
+
+            memory_dir = str(self.workspace.get_node_path("memory") or "") if self.workspace else ""
+            settings = create_memory_settings(memory_dir)
+            self._tool_ctx = MemoryToolContext(
+                workspace=self.workspace,
+                settings=settings,
+                agent_id=agent_id,
+                embedding_config=self._embedding_config,
+                sys_operation=self.sys_operation,
+                manager=None,
+                node_name="memory",
+            )
+
+            memory_tools = create_memory_tools(self._tool_ctx, language=language, agent_id=agent_id)
 
             for tool in memory_tools:
                 try:
                     tool_card = getattr(tool, "card", None)
                     if not tool_card:
-                        logger.warning(f"[MemoryRail] Tool {tool.__name__} has no card")
+                        logger.warning("[MemoryRail] Tool has no card")
                         continue
 
                     existing_tool = Runner.resource_mgr.get_tool(tool_card.id)
@@ -187,7 +208,7 @@ class MemoryRail(DeepAgentRail):
 
                 except Exception as exc:
                     logger.warning(
-                        f"[MemoryRail] Failed to register tool {tool.__name__}: {exc}"
+                        f"[MemoryRail] Failed to register tool: {exc}"
                     )
 
         except Exception as e:

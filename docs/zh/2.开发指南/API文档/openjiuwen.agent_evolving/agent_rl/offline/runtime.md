@@ -147,7 +147,7 @@ class openjiuwen.agent_evolving.agent_rl.offline.runtime.parallel_executor.Paral
 class openjiuwen.agent_evolving.agent_rl.offline.runtime.agent_factory.AgentFactory(system_prompt: str, tools: List[Any], tool_names: List[str], temperature: float, max_new_tokens: int, top_p: float, presence_penalty: float, frequency_penalty: float)
 ```
 
-为每个 RL 任务创建 ReActAgent 实例的可调用工厂。
+为每个 RL 任务创建 DeepAgent 实例的可调用工厂。
 
 必须在首次调用前设置 `proxy_url`（由 MainTrainer 设置）。
 
@@ -161,11 +161,11 @@ class openjiuwen.agent_evolving.agent_rl.offline.runtime.agent_factory.AgentFact
 
 ### __call__(self, rl_task: RLTask)
 
-为给定的 RL 任务创建并配置 ReActAgent 实例。
+为给定的 RL 任务创建并配置 DeepAgent 实例。
 
 **返回**：
 
-配置好的 ReActAgent 实例。
+配置好的 DeepAgent 实例。
 
 **异常**：
 

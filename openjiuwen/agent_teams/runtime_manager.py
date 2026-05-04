@@ -9,10 +9,7 @@ from typing import (
     TYPE_CHECKING,
 )
 
-from openjiuwen.agent_teams.tools.database import (
-    DatabaseConfig,
-    TeamDatabase,
-)
+from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session.agent_team import (
     Session as AgentTeamSession,
@@ -40,6 +37,14 @@ class TeamSessionResolution:
 
     kind: str
     reason: Optional[str] = None
+
+
+@dataclass(slots=True)
+class TeamSessionMetadata:
+    """Resolved metadata for an agent team session."""
+
+    team_name: str
+    db_config: DatabaseConfig
 
 
 class TeamRuntimeManager:
@@ -194,29 +199,155 @@ class TeamRuntimeManager:
         self,
         team_name: str,
         session_ids: list[str],
-        *,
-        db_config: Optional[DatabaseConfig] = None,
     ) -> bool:
         """Delete team runtime state, checkpoints, and persisted team metadata."""
         if self._active_team_name == team_name:
             await self._deactivate_active_runtime()
             self._clear_active()
 
+        # Resolve db_config from session state BEFORE releasing checkpoint
+        db_config = None
+        if session_ids:
+            metadata = await self.resolve_team_session_metadata(session_ids[0])
+            if metadata is None:
+                raise RuntimeError(
+                    f"Cannot resolve team session metadata for {session_ids[0]}, "
+                    f"aborting delete_team"
+                )
+            db_config = metadata.db_config
+
+        # Get shared db and drop dynamic tables for each session
+        from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
+
+        db = get_shared_db(db_config)
+        await db.initialize()
+        for session_id in session_ids:
+            await db.drop_session_tables_by_id(session_id)
+
+        # Release checkpoints
         checkpointer = CheckpointerFactory.get_checkpointer()
         for session_id in session_ids:
             await checkpointer.release(session_id)
 
-        database = TeamDatabase(db_config or DatabaseConfig())
-        await database.initialize()
-        try:
-            return await database.delete_team(team_name)
-        finally:
-            await database.close()
+        # Delete team row from static table
+        return await db.team.delete_team(team_name)
 
-    def clear_if_matches(self, *, team_name: str, session_id: str) -> None:
-        """Drop active pointers when the current runtime is no longer valid."""
-        if self._active_team_name == team_name and self._active_session_id == session_id:
+    @staticmethod
+    async def resolve_team_session_metadata(session_id: str) -> Optional[TeamSessionMetadata]:
+        """Resolve metadata for an agent team session.
+
+        Returns None if the session is not an agent team session (missing team_name,
+        context, or spec). Returns TeamSessionMetadata if it is a valid team session.
+
+        Raises RuntimeError if session appears to be team session but db_config
+        cannot be resolved - this prevents cleaning wrong database.
+
+        Args:
+            session_id: Session identifier to resolve.
+
+        Returns:
+            TeamSessionMetadata if valid agent team session, None otherwise.
+
+        Raises:
+            RuntimeError: If session has team_name/context/spec but db_config cannot be obtained.
+        """
+        if not session_id:
+            return None
+
+        session = create_agent_team_session(session_id=session_id)
+        try:
+            await session.pre_run()
+        except Exception as e:
+            team_logger.warning("Failed to restore session state for %s: %s", session_id, e)
+            return None
+
+        state = session.get_state()
+        if not isinstance(state, dict):
+            return None
+
+        # Check if this is an agent team session (must have team_name, context, and spec)
+        # agent_teams always persists these three together in recovery_manager
+        team_name = state.get("team_name")
+        context_data = state.get("context")
+        spec_data = state.get("spec")
+        if team_name is None or context_data is None or spec_data is None:
+            return None
+
+        # Validate spec has a valid team_name to confirm it's a TeamAgentSpec-like structure
+        from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
+        try:
+            spec = TeamAgentSpec.model_validate(spec_data)
+            if spec.team_name != team_name:
+                team_logger.warning(
+                    "Session %s has mismatched team_name in spec vs state: %s vs %s",
+                    session_id,
+                    spec.team_name,
+                    team_name,
+                )
+                raise RuntimeError(
+                    f"Session {session_id} has mismatched team_name: spec={spec.team_name}, state={team_name}"
+                )
+        except Exception as e:
+            team_logger.warning("Failed to parse spec for session %s: %s", session_id, e)
+            raise RuntimeError(
+                f"Session {session_id} appears to be team session (team_name={team_name}) "
+                f"but spec parsing failed: {e}"
+            ) from e
+
+        # Parse context to get db_config
+        from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
+        try:
+            context = TeamRuntimeContext.model_validate(context_data)
+            db_config = context.db_config
+        except Exception as e:
+            team_logger.warning("Failed to parse context for session %s: %s", session_id, e)
+            raise RuntimeError(
+                f"Session {session_id} is team session (team_name={team_name}) "
+                f"but context parsing failed: {e}"
+            ) from e
+
+        if db_config is None:
+            raise RuntimeError(
+                f"Session {session_id} is team session (team_name={team_name}) "
+                f"but db_config is missing"
+            )
+
+        return TeamSessionMetadata(team_name=team_name, db_config=db_config)
+
+    async def release_session(self, session_id: str) -> None:
+        """Release per-session dynamic tables for an agent team session.
+
+        If the session is currently active, stops the coordination loop first.
+        Then restores the session state from checkpointer to obtain the db_config,
+        and drops the dynamic tables (tasks, messages, etc.) for that session.
+
+        Raises on failure to ensure caller does not proceed with checkpoint release.
+
+        Args:
+            session_id: Session identifier to clean up.
+
+        Raises:
+            RuntimeError: If db_config cannot be obtained from session state.
+        """
+        if not session_id:
+            return
+
+        # If releasing the currently active session, stop coordination and clear
+        if self._active_session_id == session_id:
+            await self._deactivate_active_runtime()
             self._clear_active()
+
+        # Resolve metadata - raises RuntimeError if team session but db_config missing
+        metadata = await self.resolve_team_session_metadata(session_id)
+        if metadata is None:
+            raise RuntimeError(f"Cannot resolve team session metadata for {session_id}")
+
+        # Get shared database instance and drop session tables
+        from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
+
+        db = get_shared_db(metadata.db_config)
+        await db.initialize()
+        await db.drop_session_tables_by_id(session_id)
 
     @staticmethod
     def _build_session(
@@ -229,9 +360,9 @@ class TeamRuntimeManager:
             return create_agent_team_session(session_id=session, team_id=spec.team_name)
         return create_agent_team_session(team_id=spec.team_name)
 
+    @staticmethod
     async def _resolve_session_checkpoint(
-        self,
-        session: AgentTeamSession,
+            session: AgentTeamSession,
         team_name: str,
     ) -> TeamSessionResolution:
         checkpointer = CheckpointerFactory.get_checkpointer()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -247,17 +248,20 @@ async def test_judge_scorer_retries_length_and_sanitizes_prompt():
 
 
 @pytest.mark.asyncio
-async def test_gateway_trajectory_runtime_rejects_missing_user_id_on_record(tmp_path: Path):
+async def test_gateway_trajectory_runtime_fills_single_user_default_on_record(tmp_path: Path):
     from openjiuwen.agent_evolving.agent_rl.online.gateway.config import GatewayConfig
     from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory import GatewayTrajectoryRuntime
 
+    redis = _FakeRedis()
     runtime = GatewayTrajectoryRuntime(
         GatewayConfig(port=18080, model_id="dummy-model", record_dir=str(tmp_path)),
-        redis=_FakeRedis(),
+        redis=redis,
     )
 
-    with pytest.raises(ValueError, match="missing user_id"):
-        await runtime.record_sample({"sample_id": "s1"})
+    await runtime.record_sample({"sample_id": "s1"})
+
+    assert redis._hashes["rl:traj:s1"]["user_id"] == "jiuwenclaw-web"
+    assert json.loads((tmp_path / "samples.jsonl").read_text(encoding="utf-8").strip())["user_id"] == "jiuwenclaw-web"
 
 
 def test_online_trajectory_converter_reads_prompt_and_response_token_ids_from_response():

@@ -34,3 +34,4 @@ class GatewayConfig:
     upstream_retry_backoff_sec: float = 0.2
     upstream_retry_max_backoff_sec: float = 2.0
     disable_gateway_trajectory_collection: bool = False
+    single_user_default: bool = True

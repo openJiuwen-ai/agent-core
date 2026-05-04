@@ -64,7 +64,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--config',
         default=None,
-        help=f'Runtime config YAML override (default base: built-in {DEFAULT_CONFIG_FILENAME})',
+        help=(
+            f'YAML overlay on built-in defaults from {DEFAULT_CONFIG_FILENAME} '
+            '(optional)'
+        ),
     )
     parser.add_argument('--model-path', default=None, help='Base model path')
     parser.add_argument('--model-name', default=None, help='Model name registered in vLLM')
@@ -86,7 +89,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--ppo-config',
         default=None,
-        help='PPO training config path (default: built-in ppo_online_trainer.yaml)',
+        help=(
+            'Custom Hydra PPO YAML (default: compose verl ``ppo_trainer`` + '
+            'online_config.ONLINE_PPO_VERL_HYDRA_OVERLAY)'
+        ),
     )
     parser.add_argument(
         '--trajectory-batch-size',

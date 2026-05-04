@@ -135,7 +135,7 @@ async def test_active_compression_streams_started_and_completed_state():
     assert completed.statistic.total_messages == 1
     assert completed.statistic.total_tokens == 0
     assert completed.statistic.user_messages == 1
-    assert completed.summary == "Compressed 2 -> 1 messages, ~40 -> ~2 tokens, modified 2 messages"
+    assert completed.summary == "Compressed 2 -> 1 messages, ~40 -> ~2 tokens, saved ~38 tokens (95.0%), modified 2 messages"
     assert completed.duration_ms is not None
 
 

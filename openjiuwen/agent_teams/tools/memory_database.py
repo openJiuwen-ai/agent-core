@@ -232,6 +232,31 @@ class InMemoryTeamDatabase:
         cleared_tables = ["team_info", "team_member"] if had_static_state else []
         return deleted_tables, cleared_tables
 
+    async def drop_session_tables_by_id(self, session_id: str) -> list[str]:
+        """Drop dynamic data for a specific session.
+
+        For the in-memory backend, all dynamic data (tasks, messages, etc.)
+        is stored in shared collections without per-session isolation.
+        This method clears all dynamic data since memory is ephemeral.
+
+        Args:
+            session_id: Session identifier (used for logging only).
+
+        Returns:
+            List indicating what was cleared.
+        """
+        async with self._lock:
+            had_data = any((self._tasks, self._task_deps, self._messages, self._read_status))
+            self._tasks.clear()
+            self._task_deps.clear()
+            self._messages.clear()
+            self._read_status.clear()
+
+        if had_data:
+            team_logger.info("Cleared all in-memory dynamic data for session %s", session_id)
+            return ["memory_dynamic_state"]
+        return []
+
     async def close(self) -> None:
         self._initialized = False
 

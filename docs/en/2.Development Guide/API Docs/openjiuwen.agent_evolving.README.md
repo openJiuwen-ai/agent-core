@@ -19,7 +19,8 @@
 | [trajectory](openjiuwen.agent_evolving/trajectory.md) | Trajectory types and extraction (Trajectory, TracerTrajectoryExtractor, iter_steps, etc.) |
 | [updater](openjiuwen.agent_evolving/updater.md) | Updaters (Updater, SingleDimUpdater, MultiDimUpdater) |
 | [checkpointing](openjiuwen.agent_evolving/checkpointing.md) | Checkpoint and restore (EvolveCheckpoint, FileCheckpointStore, CheckpointManager) |
-| [optimizer](openjiuwen.agent_evolving/optimizer.md) | Optimizers (BaseOptimizer, TextualParameter, InstructionOptimizer) |
+| [optimizer](openjiuwen.agent_evolving/optimizer/optimizer.md) | Optimizer base classes (BaseOptimizer, TextualParameter, InstructionOptimizer) |
+| [team_skill_optimizer](openjiuwen.agent_evolving/optimizer/team_skill_optimizer.md) | Team skill optimizer (TeamSkillOptimizer, PATCH generation) |
 | [evaluator](openjiuwen.agent_evolving/evaluator.md) | Evaluation interfaces and metrics (BaseEvaluator, DefaultEvaluator, MetricEvaluator, Metric) |
 | [agent_rl](openjiuwen.agent_evolving/agent_rl/agent_rl.README.md) | VERL-based RL training (`RLConfig`, `OfflineRLOptimizer`, rollout coordination, reward registry) |
 

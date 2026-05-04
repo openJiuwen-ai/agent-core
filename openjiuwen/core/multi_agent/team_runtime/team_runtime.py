@@ -29,6 +29,10 @@ class RuntimeConfig(BaseModel):
     Attributes:
         team_id: Team ID for topic isolation. Defaults to ``"default"``.
         message_bus: Message bus configuration
+        p2p_timeout: Default P2P message communication timeout in seconds.
+            Used by HierarchicalTeam and P2PAbilityManager when no explicit
+            timeout is provided. Defaults to 1800.0 (30 minutes), which is
+            sufficient for nested multi-agent LLM chains.
     """
     team_id: str = Field(
         default="default",
@@ -37,6 +41,14 @@ class RuntimeConfig(BaseModel):
     message_bus: Optional[MessageBusConfig] = Field(
         default=None,
         description="Message bus configuration for the runtime"
+    )
+    p2p_timeout: float = Field(
+        default=1800.0,
+        description=(
+            "Default P2P message communication timeout in seconds. "
+            "Used by HierarchicalTeam and P2PAbilityManager when no explicit "
+            "timeout is provided. Defaults to 1800s (30 minutes)."
+        ),
     )
 
 
@@ -67,6 +79,7 @@ class TeamRuntime:
         self._active_team_sessions = {}
         self._running = False
         self._start_lock: asyncio.Lock = asyncio.Lock()
+        self._p2p_timeout: float = self._config.p2p_timeout
 
         logger.info(f"[{self.__class__.__name__}] Initialized with team_id: {self._team_id}")
 
@@ -77,6 +90,26 @@ class TeamRuntime:
             True if the runtime is running, False otherwise
         """
         return self._running
+
+    @property
+    def p2p_timeout(self) -> float:
+        """Default P2P message timeout in seconds.
+
+        Returns:
+            Timeout value from RuntimeConfig, defaulting to 1800.0.
+        """
+        return self._p2p_timeout
+
+    def set_p2p_timeout(self, timeout: float) -> None:
+        """Set the P2P message timeout.
+
+        HierarchicalTeam uses this to propagate the config-level timeout
+        to sub-agent dispatch.
+
+        Args:
+            timeout: Timeout in seconds.
+        """
+        self._p2p_timeout = timeout
 
     # ========== Lifecycle ==========
 

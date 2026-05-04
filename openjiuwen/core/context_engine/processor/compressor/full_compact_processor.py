@@ -162,36 +162,81 @@ following this structure and ensuring precision and thoroughness in your respons
 )
 
 
+FULL_COMPACT_BOUNDARY_MARKER = "[FULL_COMPACT_BOUNDARY]"
+FULL_COMPACT_STATE_MARKER = "[FULL_COMPACT_STATE]"
+SESSION_MEMORY_BOUNDARY_MARKER = "[SESSION_MEMORY_BOUNDARY]"
+FULL_COMPACT_SYNTHETIC_USER_MARKER = "[earlier conversation truncated for compaction retry]"
+FULL_COMPACT_SUMMARY_INTRO = (
+    "This session is being continued from a previous conversation that "
+    "ran out of context. The summary below covers the earlier portion "
+    "of the conversation."
+)
+FULL_COMPACT_RECENT_MESSAGES_NOTICE = "Recent messages are preserved verbatim."
+SESSION_MEMORY_SUMMARY_INTRO = (
+    "Earlier conversation has been replaced with the session memory file. "
+    "Use it as the canonical summary of prior work."
+)
+
+
 class FullCompactProcessorConfig(BaseModel):
-    trigger_total_tokens: int = Field(default=180000, gt=0)
-    compression_call_max_tokens: int = Field(default=200000, gt=0)
-    messages_to_keep: int = Field(default=10, ge=0)
-    keep_tool_message_pairs: bool = Field(default=True)
-    state_snapshot_max_chars: int = Field(default=4000, gt=0)
-    reinject_recent_skills: int = Field(default=3, ge=0)
-    reinject_file_tool_names: List[str] = Field(default=["read_file", "write_file", "edit_file", "glob", "grep"])
-    reinject_tool_result_hint_names: List[str] = Field(default=["read_file", "write_file", "edit_file", "glob", "grep"])
+    trigger_total_tokens: int = Field(
+        default=180000,
+        gt=0,
+        description="Trigger full compaction when the estimated context window exceeds this token count.",
+    )
+    compression_call_max_tokens: int = Field(
+        default=200000,
+        gt=0,
+        description="Maximum token budget for the internal summary-generation prompt.",
+    )
+    messages_to_keep: int = Field(
+        default=10,
+        ge=0,
+        description="Number of most-recent active messages preserved verbatim after full compaction.",
+    )
+    session_memory_enabled: bool = Field(
+        default=True,
+        description="Prefer committed session memory notes before falling back to LLM full compaction.",
+    )
+
     model: ModelRequestConfig | None = Field(default=None)
+    """Model request configuration used by the full-compaction summarizer."""
+
     model_client: ModelClientConfig | None = Field(default=None)
-    marker: str = Field(default="[FULL_COMPACT_BOUNDARY]")
-    state_marker: str = Field(default="[FULL_COMPACT_STATE]")
-    synthetic_user_marker: str = Field(default="[earlier conversation truncated for compaction retry]")
-    summary_intro: str = Field(
-        default=(
-            "This session is being continued from a previous conversation that "
-            "ran out of context. The summary below covers the earlier portion "
-            "of the conversation."
-        )
+    """Client configuration used to create the full-compaction summarizer model."""
+
+    # Advanced retention and state reinjection settings.
+    keep_tool_message_pairs: bool = Field(
+        default=True,
+        description="When preserving recent tool results, also keep their matching assistant tool-call messages.",
     )
-    recent_messages_notice: str = Field(default="Recent messages are preserved verbatim.")
-    session_memory_enabled: bool = Field(default=True)
-    session_memory_marker: str = Field(default="[SESSION_MEMORY_BOUNDARY]")
-    session_memory_intro: str = Field(
-        default=(
-            "Earlier conversation has been replaced with the session memory file. "
-            "Use it as the canonical summary of prior work."
-        )
+    state_snapshot_max_chars: int = Field(
+        default=4000,
+        gt=0,
+        description="Maximum characters retained for each reinjected state snapshot.",
     )
+    reinject_recent_skills: int = Field(
+        default=3,
+        ge=0,
+        description="Maximum number of recent skill-read rounds reinjected after full compaction.",
+    )
+    reinject_file_tool_names: List[str] = Field(
+        default=["read_file", "write_file", "edit_file", "glob", "grep"],
+        description="Tool names eligible for file-related state reinjection.",
+    )
+    reinject_tool_result_hint_names: List[str] = Field(
+        default=["read_file", "write_file", "edit_file", "glob", "grep"],
+        description="Tool names eligible for compact tool-result hints.",
+    )
+
+    # Advanced marker and prompt text settings.
+    marker: str = Field(default=FULL_COMPACT_BOUNDARY_MARKER)
+    state_marker: str = Field(default=FULL_COMPACT_STATE_MARKER)
+    synthetic_user_marker: str = Field(default=FULL_COMPACT_SYNTHETIC_USER_MARKER)
+    summary_intro: str = Field(default=FULL_COMPACT_SUMMARY_INTRO)
+    recent_messages_notice: str = Field(default=FULL_COMPACT_RECENT_MESSAGES_NOTICE)
+    session_memory_marker: str = Field(default=SESSION_MEMORY_BOUNDARY_MARKER)
+    session_memory_intro: str = Field(default=SESSION_MEMORY_SUMMARY_INTRO)
 
 
 @ContextEngine.register_processor()
@@ -236,6 +281,14 @@ class FullCompactProcessor(ContextProcessor):
     @property
     def config(self) -> FullCompactProcessorConfig:
         return self._config
+
+    @property
+    def state_marker(self) -> str:
+        return self._state_marker
+
+    @property
+    def advanced_config(self) -> FullCompactProcessorConfig:
+        return self.config
 
     async def trigger_add_messages(
         self,
@@ -799,7 +852,29 @@ class FullCompactProcessor(ContextProcessor):
 
     @staticmethod
     def _serialize_messages(messages: List[BaseMessage]) -> str:
-        return "\n".join(f"role={msg.role}, content={FullCompactProcessor._message_to_text(msg)}" for msg in messages)
+        return "\n".join(FullCompactProcessor._serialize_message(msg) for msg in messages)
+
+    @staticmethod
+    def _serialize_message(message: BaseMessage) -> str:
+        parts = [f"role={message.role}"]
+        if isinstance(message, AssistantMessage):
+            tool_calls = getattr(message, "tool_calls", None) or []
+            if tool_calls:
+                serialized_tool_calls = []
+                for tool_call in tool_calls:
+                    serialized_tool_calls.append(
+                        {
+                            "id": getattr(tool_call, "id", ""),
+                            "name": getattr(tool_call, "name", ""),
+                            "arguments": getattr(tool_call, "arguments", ""),
+                            "type": getattr(tool_call, "type", ""),
+                        }
+                    )
+                parts.append(f"tool_calls={json.dumps(serialized_tool_calls, ensure_ascii=False)}")
+        if isinstance(message, ToolMessage):
+            parts.append(f"tool_call_id={message.tool_call_id}")
+        parts.append(f"content={FullCompactProcessor._message_to_text(message)}")
+        return " | ".join(parts)
 
     @staticmethod
     def _message_to_text(message: BaseMessage) -> str:

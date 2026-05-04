@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.foundation.llm.model_clients import OpenAIModelClient
+from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
 from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client import SiliconFlowModelClient
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig, ProviderType
 from openjiuwen.core.foundation.llm.schema.message import UserMessage

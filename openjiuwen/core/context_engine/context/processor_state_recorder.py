@@ -328,12 +328,16 @@ class ContextProcessorStateRecorder:
         if after is None or saved is None:
             return f"Context processor skipped: {summary_input.reason}"
         if status == "noop":
-            return f"Context unchanged at ~{self._compact_number(after.tokens)} tokens"
+            return (
+                f"Context unchanged at ~{self._compact_number(after.tokens)} tokens "
+                f"(saved {saved.percent:.1f}%)"
+            )
         messages_to_modify = summary_input.messages_to_modify
         modified = f", modified {len(messages_to_modify)} messages" if messages_to_modify else ""
         return (
             f"Compressed {before.messages} -> {after.messages} messages, "
             f"~{self._compact_number(before.tokens)} -> ~{self._compact_number(after.tokens)} tokens"
+            f", saved ~{self._compact_number(saved.tokens)} tokens ({saved.percent:.1f}%)"
             f"{modified}"
         )
 

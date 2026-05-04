@@ -118,27 +118,75 @@ class _DialogueRound:
 
 
 class DialogueCompressorConfig(BaseModel):
-    messages_threshold: int | None = Field(default=None, gt=0)
-    tokens_threshold: int = Field(default=10000, gt=0)
-    messages_to_keep: int | None = Field(default=None, gt=0)
-    keep_last_round: bool = Field(default=True)
-    compression_target_tokens: int = Field(default=1800, gt=0)
-    offload_writeback_enabled: bool = Field(default=True)
-    model: ModelRequestConfig | None = Field(default=None)
-    model_client: ModelClientConfig | None = Field(default=None)
+    messages_threshold: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Trigger compression when total context messages exceed this value. "
+            "None disables message-count triggering."
+        ),
+    )
+    """Optional message-count trigger. Token threshold remains active when this is None."""
+
+    tokens_threshold: int = Field(
+        default=10000,
+        gt=0,
+        description="Trigger compression when estimated context tokens exceed this value.",
+    )
+    """Primary token-budget trigger for dialogue compression."""
+
+    messages_to_keep: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Number of most-recent messages protected from compression. "
+            "None means no explicit raw-tail protection."
+        ),
+    )
+    """Raw tail size kept untouched before selecting historical dialogue rounds."""
+
+    keep_last_round: bool = Field(
+        default=True,
+        description="Avoid compressing the most recent completed dialogue round.",
+    )
+    """Protects the latest completed user-to-final-assistant dialogue round for short-term continuity."""
+
+    compression_target_tokens: int = Field(
+        default=1800,
+        gt=0,
+        description="Target token budget communicated to the model for each compressed dialogue block.",
+    )
+    """Per-block summary size hint used in the compression prompt."""
+
+    custom_compression_prompt: str | None = Field(
+        default=None,
+        description="Custom first-stage compression prompt template. Defaults to the built-in prompt when omitted.",
+    )
+    """User-editable prompt template for dialogue summary generation."""
+
+    model: ModelRequestConfig | None = Field(
+        default=None,
+        description="Model request configuration used by the dialogue compression model.",
+    )
+    """Controls model request options for dialogue summary generation."""
+
+    model_client: ModelClientConfig | None = Field(
+        default=None,
+        description="Client configuration for the LLM used by the dialogue compressor.",
+    )
+    """Selects/configures the model client used by the internal compressor model."""
 
 
 @ContextEngine.register_processor()
 class DialogueCompressor(ContextProcessor):
     def __init__(self, config: DialogueCompressorConfig):
         super().__init__(config)
-        self._compressed_prompt = DEFAULT_COMPRESSION_PROMPT
+        self._compressed_prompt = config.custom_compression_prompt or DEFAULT_COMPRESSION_PROMPT
         self._token_threshold = config.tokens_threshold
         self._message_num_threshold = config.messages_threshold
         self._messages_to_keep = config.messages_to_keep
         self._keep_last_round = config.keep_last_round
         self._compression_target_tokens = config.compression_target_tokens
-        self._offload_writeback_enabled = config.offload_writeback_enabled
         self._model = Model(self.config.model_client, self.config.model)
 
     async def on_add_messages(
@@ -463,16 +511,6 @@ class DialogueCompressor(ContextProcessor):
         summary: str,
     ) -> Optional[BaseMessage]:
         content = self._wrap_memory_block(summary.strip())
-        if not self._offload_writeback_enabled:
-            return UserMessage(content=content)
-        message = await self.offload_messages(
-            role="user",
-            content=content,
-            messages=source_messages,
-            context=context,
-        )
-        if message is not None:
-            return message
         return UserMessage(content=content)
 
     @staticmethod

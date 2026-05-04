@@ -14,7 +14,6 @@ from openjiuwen.core.foundation.llm import (
     ModelRequestConfig, ModelClientConfig, AssistantMessage, Model, BaseModelClient,
     BaseMessage, BaseOutputParser, AssistantMessageChunk, UserMessage
 )
-from openjiuwen.core.foundation.llm.model import _CLIENT_TYPE_REGISTRY
 from openjiuwen.core.foundation.tool import ToolInfo
 import openjiuwen.dev_tools.prompt_builder.builder.prompt_zh as TEMPLATE_ZH
 
