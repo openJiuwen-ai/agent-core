@@ -640,7 +640,7 @@ class MemoryIndexManager:
         All session files (YYYY-MM-DD.md) are indexed for search.
         Recent session files (today + yesterday) are also loaded for context.
         """
-        files = list_memory_files(self.workspace)
+        files = list_memory_files(self.workspace, node_name=self.node_name)
 
         logger.debug(f"Syncing {len(files)} memory files")
 

@@ -32,13 +32,15 @@ def ensure_dir(path: str) -> None:
 
 def list_memory_files(
     workspace: "Workspace",
-    extra_paths: Optional[List[str]] = None
+    extra_paths: Optional[List[str]] = None,
+    node_name: str = "memory"
 ) -> List[str]:
     """List all memory files in workspace.
     
     Args:
         workspace: Workspace instance.
         extra_paths: Extra paths to include.
+        node_name: Workspace node name (e.g. "memory" or "coding_memory").
     
     Returns:
         List of absolute paths to memory files.
@@ -46,7 +48,7 @@ def list_memory_files(
     files = []
     extra_paths = extra_paths or []
     
-    memory_dir = workspace.get_node_path("memory")
+    memory_dir = workspace.get_node_path(node_name)
     if memory_dir and os.path.isdir(memory_dir):
         for f in os.listdir(memory_dir):
             if f.endswith(".md"):
