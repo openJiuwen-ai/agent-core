@@ -174,7 +174,6 @@ class BuildTeamTool(TeamTool):
                 "leader_desc": {"type": "string", "description": t("build_team", "leader_desc")},
                 "enable_hitt": {
                     "type": "boolean",
-                    "default": False,
                     "description": t("build_team", "enable_hitt"),
                 },
             },
@@ -184,13 +183,16 @@ class BuildTeamTool(TeamTool):
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         display_name = inputs.get("display_name")
         leader_display_name = inputs["leader_display_name"]
-        enable_hitt = bool(inputs.get("enable_hitt", False))
+        # None when LLM omits the field — backend.build_team inherits the
+        # spec ceiling. True/False explicitly set the runtime instance flag
+        # (subject to the spec ceiling check).
+        enable_hitt_arg = inputs.get("enable_hitt")
         await self.team.build_team(
             display_name=display_name,
             desc=inputs.get("team_desc"),
             leader_display_name=leader_display_name,
             leader_desc=inputs["leader_desc"],
-            enable_hitt=enable_hitt,
+            enable_hitt=enable_hitt_arg,
         )
         return ToolOutput(
             success=True,
@@ -199,7 +201,7 @@ class BuildTeamTool(TeamTool):
                 "display_name": display_name,
                 "leader_member_name": self.team.member_name,
                 "leader_display_name": leader_display_name,
-                "enable_hitt": enable_hitt,
+                "enable_hitt": self.team.hitt_enabled(),
             },
         )
 
@@ -207,13 +209,12 @@ class BuildTeamTool(TeamTool):
         if not output.success:
             return output.error or "Failed to build team"
         d = output.data or {}
-        hitt_note = " [human_agent registered]" if d.get("enable_hitt") else ""
         return (
             f"Team created: team_name={d.get('team_name')} "
             f"display_name={d.get('display_name')} "
             f"leader_member_name={d.get('leader_member_name')} "
-            f"leader_display_name={d.get('leader_display_name')}"
-            f"{hitt_note}"
+            f"leader_display_name={d.get('leader_display_name')} "
+            f"hitt_enabled={d.get('enable_hitt')}"
         )
 
 
@@ -285,6 +286,12 @@ class SpawnMemberTool(TeamTool):
                     "description": t("spawn_member", "display_name"),
                 },
                 "desc": {"type": "string", "description": t("spawn_member", "desc")},
+                "role_type": {
+                    "type": "string",
+                    "enum": ["teammate", "human_agent"],
+                    "default": "teammate",
+                    "description": t("spawn_member", "role_type"),
+                },
                 "prompt": {"type": "string", "description": t("spawn_member", "prompt")},
                 "model_name": {
                     "type": "string",
@@ -301,12 +308,53 @@ class SpawnMemberTool(TeamTool):
         member_name = inputs.get("member_name")
         display_name = inputs.get("display_name")
         desc = inputs.get("desc", "")
+        role_type = (inputs.get("role_type") or "teammate").lower()
+
+        if role_type not in {"teammate", "human_agent"}:
+            return ToolOutput(
+                success=False,
+                error=f"Invalid role_type '{role_type}'; expected 'teammate' or 'human_agent'",
+            )
+
+        if role_type == "human_agent":
+            # Capability gate: fail fast to LLM before touching backend.
+            if not self.team.hitt_enabled():
+                return ToolOutput(
+                    success=False,
+                    error=(
+                        "Cannot spawn human agent: HITT capability is disabled "
+                        "(enable_hitt=False on TeamAgentSpec or build_team). "
+                        "Either enable HITT in the team spec or use role_type='teammate'."
+                    ),
+                )
+            if inputs.get("model_name") or inputs.get("prompt"):
+                return ToolOutput(
+                    success=False,
+                    error=(
+                        "role_type='human_agent' does not accept 'model_name' or 'prompt'; "
+                        "human members use the framework template — remove these fields"
+                    ),
+                )
+            result = await self.team.spawn_human_agent(
+                member_name=member_name,
+                display_name=display_name,
+                desc=desc,
+            )
+            return ToolOutput(
+                success=result.ok,
+                data={
+                    "member_name": member_name,
+                    "display_name": display_name,
+                    "role_type": "human_agent",
+                },
+                error=None if result.ok else result.reason,
+            )
+
+        # teammate path (default)
         mode_str = self.team.teammate_mode.value
         mode = MemberMode(mode_str)
-
         model_name = inputs.get("model_name")
         allocation = self._allocate_model_config(model_name) if self._allocate_model_config else None
-
         card_id = f"{self.team.team_name}_{member_name}"
         agent_card = AgentCard(id=card_id, name=display_name, description=desc)
         result = await self.team.spawn_member(
@@ -320,7 +368,11 @@ class SpawnMemberTool(TeamTool):
         )
         return ToolOutput(
             success=result.ok,
-            data={"member_name": member_name, "display_name": display_name},
+            data={
+                "member_name": member_name,
+                "display_name": display_name,
+                "role_type": "teammate",
+            },
             error=None if result.ok else result.reason,
         )
 
@@ -328,7 +380,8 @@ class SpawnMemberTool(TeamTool):
         if not output.success:
             return output.error or "Failed to spawn member"
         d = output.data
-        return f"Member spawned: member_name={d['member_name']} display_name={d['display_name']}"
+        role = d.get("role_type", "teammate")
+        return f"Member spawned: member_name={d['member_name']} display_name={d['display_name']} role={role}"
 
 
 class ShutdownMemberTool(TeamTool):

@@ -163,8 +163,22 @@ async def run_interactive(
     runtime_cfg: dict[str, Any],
     default_session_id: str,
     default_initial_query: str = "hello",
+    *,
+    team_name: str | None = None,
 ) -> None:
-    """Run the standard interactive CLI loop."""
+    """Run the standard interactive CLI loop.
+
+    Args:
+        leader: TeamAgent instance to drive.
+        runtime_cfg: Runtime overrides parsed from the YAML ``runtime`` block.
+        default_session_id: Fallback session id when ``runtime_cfg`` omits one.
+        default_initial_query: Fallback initial query when ``runtime_cfg`` omits one.
+        team_name: When set, route stdin input through
+            ``Runner.interact_agent_team`` so the ``# / $ / @`` prefix grammar
+            (god-view / human-agent / operator) dispatches automatically. When
+            ``None`` (default), input is forwarded to ``leader.interact``,
+            preserving the legacy god-view-only behavior for non-HITT scripts.
+    """
     session_id = runtime_cfg.get("session_id", default_session_id)
     initial_query = runtime_cfg.get("initial_query", default_initial_query)
 
@@ -183,8 +197,19 @@ async def run_interactive(
             if not user_input.strip():
                 continue
 
-            await leader.interact(user_input)
-            print(f"[System] Input sent to leader: {user_input}")
+            if team_name is None:
+                await leader.interact(user_input)
+                print(f"[System] Input sent to leader: {user_input}")
+            else:
+                result = await Runner.interact_agent_team(
+                    user_input,
+                    team_name=team_name,
+                    session_id=session_id,
+                )
+                if result.ok:
+                    print(f"[System] Input dispatched (message_id={result.message_id})")
+                else:
+                    _write(f"{_COLOR_YELLOW}[Deliver failed] {result.reason}{_COLOR_RESET}\n")
 
     except KeyboardInterrupt:
         print("\nInterrupted by user.")

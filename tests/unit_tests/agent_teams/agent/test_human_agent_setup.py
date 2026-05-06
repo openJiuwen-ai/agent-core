@@ -88,18 +88,27 @@ async def team_backend(db, messager):
                 persona="user avatar",
             ),
         ],
+        enable_hitt=True,
     )
     yield backend
 
 
 def _human_agent_team_spec() -> TeamAgentSpec:
-    """Construct a leader team spec with HITT enabled so
-    ``_inject_human_agent_if_enabled`` seeds the default human agent.
+    """Construct a leader team spec that explicitly declares the default
+    ``human_agent`` HUMAN_AGENT predefined member.
     """
     return TeamAgentSpec(
         agents={"leader": DeepAgentSpec()},
         team_name="hitt_team",
         enable_hitt=True,
+        predefined_members=[
+            TeamMemberSpec(
+                member_name=HUMAN_AGENT_MEMBER_NAME,
+                display_name="Human",
+                role_type=TeamRole.HUMAN_AGENT,
+                persona="Default human collaborator",
+            ),
+        ],
     )
 
 
@@ -253,6 +262,14 @@ def test_human_agent_never_attaches_tool_approval_rail() -> None:
         agents={"leader": DeepAgentSpec(approval_required_tools=["write_file"])},
         team_name="hitt_team",
         enable_hitt=True,
+        predefined_members=[
+            TeamMemberSpec(
+                member_name=HUMAN_AGENT_MEMBER_NAME,
+                display_name="Human",
+                role_type=TeamRole.HUMAN_AGENT,
+                persona="Default human collaborator",
+            ),
+        ],
     )
     leader = spec.build()
     member = next(m for m in spec.predefined_members if m.role_type == TeamRole.HUMAN_AGENT)

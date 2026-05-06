@@ -21,7 +21,6 @@ from typing import (
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
 
-from openjiuwen.agent_teams.constants import HUMAN_AGENT_MEMBER_NAME
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.messager import Messager
@@ -78,6 +77,7 @@ class TeamBackend:
         predefined_members: list[TeamMemberSpec] | None = None,
         model_config_allocator: Optional[Callable[[Optional[str]], Optional["Allocation"]]] = None,
         leader_allocation: Optional["Allocation"] = None,
+        enable_hitt: bool = False,
     ):
         """Initialize agent team manager.
 
@@ -101,6 +101,11 @@ class TeamBackend:
                 ``build_team`` as ``{model_name, model_index}`` so the
                 assignment is auditable and survives full-restart
                 recovery via positional lookup against the live pool.
+            enable_hitt: Spec-level HITT capability ceiling. When
+                False, every human-agent spawn path returns failure;
+                when True, the runtime instance flag (mutated by
+                ``build_team``) decides whether the capability is
+                actually engaged.
         """
         self.team_name = team_name
         self.member_name = member_name
@@ -111,6 +116,13 @@ class TeamBackend:
         self.predefined_members = predefined_members or []
         self._allocate_model_config = model_config_allocator
         self.leader_allocation = leader_allocation
+        # HITT capability ceiling (immutable, from spec) and the runtime
+        # effective flag that ``build_team`` may downgrade. All human-agent
+        # creation paths gate on ``_enable_hitt``; the spec ceiling is
+        # consulted only when ``build_team(enable_hitt=True)`` tries to
+        # enable beyond it.
+        self._spec_enable_hitt: bool = enable_hitt
+        self._enable_hitt: bool = enable_hitt
 
         self.task_manager = TeamTaskManager(self.team_name, member_name, self.db, messager)
         # Roster of human-collaborator members. Shared by reference with
@@ -800,7 +812,7 @@ class TeamBackend:
         desc: str,
         leader_display_name: str,
         leader_desc: str,
-        enable_hitt: bool = False,
+        enable_hitt: Optional[bool] = None,
     ):
         """Create a team and register the leader as a member.
 
@@ -812,10 +824,32 @@ class TeamBackend:
             desc: Team goal, scope, and directives.
             leader_display_name: Human-readable display label for the leader member.
             leader_desc: Persona description of the leader member.
-            enable_hitt: When True, also registers the reserved
-                ``human_agent`` member so the human collaborator joins
-                as a first-class teammate.
+            enable_hitt: Runtime instance HITT switch (None inherits the
+                spec ceiling, True enables, False disables). Cannot exceed
+                ``TeamAgentSpec.enable_hitt`` — passing True when the spec
+                ceiling is False is a config error and raises. When the
+                effective flag is False, predefined HUMAN_AGENT members
+                are skipped (with a warning).
         """
+        # Step A: enforce spec ceiling
+        if enable_hitt is True and not self._spec_enable_hitt:
+            from openjiuwen.core.common.exception.codes import StatusCode
+            from openjiuwen.core.common.exception.errors import raise_error
+
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason=(
+                    "build_team(enable_hitt=True) requires TeamAgentSpec.enable_hitt=True "
+                    "(capability ceiling). Spec has enable_hitt=False — cannot enable HITT "
+                    "at build_team time."
+                ),
+            )
+
+        # Step B: compute effective flag and persist on backend so all
+        # downstream spawn paths see a single source of truth.
+        effective_enable_hitt = self._spec_enable_hitt if enable_hitt is None else enable_hitt
+        self._enable_hitt = effective_enable_hitt
+
         # Create team in database
         team_name = self.team_name
         leader_member_name = self.member_name
@@ -872,14 +906,27 @@ class TeamBackend:
                 allocation=allocation,
             )
 
-        # HITT: register every declared human member; when enable_hitt is
-        # True but the caller declared no human specs, seed a single
-        # default ``human_agent`` for backward compatibility.
+        # HITT: register every declared human member when the effective
+        # capability is on. When the leader passed enable_hitt=False at
+        # build_team time, all predefined HUMAN_AGENT specs are skipped
+        # (the ceiling itself stays open per the spec, but this run
+        # declined to engage HITT).
         human_specs = [m for m in self.predefined_members if m.role_type == TeamRole.HUMAN_AGENT]
-        if not human_specs and enable_hitt:
-            human_specs = [None]
-        for human_spec in human_specs:
-            await self._spawn_human_agent(team_name, human_spec)
+        if effective_enable_hitt:
+            for human_spec in human_specs:
+                await self.spawn_human_agent(
+                    member_name=human_spec.member_name,
+                    display_name=human_spec.display_name,
+                    desc=human_spec.persona,
+                    prompt=human_spec.prompt_hint,
+                )
+        elif human_specs:
+            team_logger.warning(
+                "Skipped %d predefined HUMAN_AGENT(s) for team %s because "
+                "build_team(enable_hitt=False) overrode the spec capability",
+                len(human_specs),
+                team_name,
+            )
 
         # Publish team created event
         session_id = get_session_id()
@@ -901,55 +948,78 @@ class TeamBackend:
 
         team_logger.info(f"Team {team_name} created successfully")
 
-    async def _spawn_human_agent(
+    async def spawn_human_agent(
         self,
-        team_name: str,
-        spec: Optional[TeamMemberSpec],
-    ) -> None:
+        *,
+        member_name: str,
+        display_name: Optional[str] = None,
+        desc: Optional[str] = None,
+        prompt: Optional[str] = None,
+    ) -> MemberOpResult:
         """Register a human-agent member as an UNSTARTED team member.
 
-        Human agents share the standard spawn path with teammates so
-        they get a real DeepAgent runtime (LLM + tools) the user can
-        drive through ``HumanAgentInbox``. Status starts at UNSTARTED so
+        Public method called by ``build_team`` (for predefined HUMAN_AGENT
+        specs) and ``SpawnMemberTool`` (when ``role_type='human_agent'``).
+        Human agents share the standard spawn path with teammates so they
+        get a real DeepAgent runtime (LLM + tools) the user can drive
+        through ``HumanAgentInbox``. Status starts at UNSTARTED so
         ``startup()`` picks them up and the leader's
-        ``_on_teammate_created`` callback spawns them just like any
-        other member; role-aware rail filtering inside the configurator
-        then strips the team-coordination rails (FirstIterationGate /
+        ``_on_teammate_created`` callback spawns them just like any other
+        member; role-aware rail filtering inside the configurator then
+        strips the team-coordination rails (FirstIterationGate /
         TeamToolApprovalRail) and replaces ``send_message`` /
         ``claim_task`` with the human agent's dedicated tool surface.
 
-        When ``spec`` is None the default ``human_agent`` identity is
-        used (the single-human backward-compatible path triggered by
-        ``enable_hitt=True``).
-        """
-        member_name = spec.member_name if spec else HUMAN_AGENT_MEMBER_NAME
-        display_name = spec.display_name if spec else t("hitt.human_agent_display_name")
-        persona = spec.persona if spec else t("hitt.human_agent_default_persona")
-        prompt = spec.prompt_hint if spec else None
+        Args:
+            member_name: Unique member identifier for the human.
+            display_name: Optional display label; falls back to the
+                framework-managed default when omitted.
+            desc: Optional persona description; falls back to the
+                framework default.
+            prompt: Optional startup hint forwarded to the avatar.
 
+        Returns:
+            ``MemberOpResult``. Returns failure when HITT is disabled
+            (``MemberOpResult.fail``) or the underlying member create
+            fails. Caller (tool layer) propagates ``reason`` to the LLM.
+        """
+        if not self._enable_hitt:
+            return MemberOpResult.fail(
+                "Cannot spawn human agent: HITT capability is disabled "
+                "(enable_hitt=False on TeamAgentSpec or build_team)"
+            )
+
+        resolved_display_name = display_name or t("hitt.human_agent_display_name")
+        resolved_desc = desc or t("hitt.human_agent_default_persona")
         member_card = AgentCard(
-            id=f"{team_name}_{member_name}",
-            name=display_name,
-            description=persona,
+            id=f"{self.team_name}_{member_name}",
+            name=resolved_display_name,
+            description=resolved_desc,
         )
         result = await self.spawn_member(
             member_name=member_name,
-            display_name=display_name,
+            display_name=resolved_display_name,
             agent_card=member_card,
-            desc=persona,
+            desc=resolved_desc,
             prompt=prompt,
             status=MemberStatus.UNSTARTED,
             execution_status=ExecutionStatus.IDLE,
             mode=MemberMode.BUILD_MODE,
         )
         if not result.ok:
-            team_logger.warning(f"Failed to register human agent '{member_name}' for team {team_name}: {result.reason}")
-            return
+            team_logger.warning(
+                "Failed to register human agent '%s' for team %s: %s",
+                member_name,
+                self.team_name,
+                result.reason,
+            )
+            return result
 
         # Mutate the shared set in place so TeamMessageManager (which
         # holds the same reference) observes the registration without
         # extra wiring.
         self._human_agent_names.add(member_name)
+        return result
 
     def is_human_agent(self, member_name: Optional[str]) -> bool:
         """Whether ``member_name`` is a registered human-agent member."""
@@ -989,10 +1059,13 @@ class TeamBackend:
         return frozenset(self._human_agent_names)
 
     def hitt_enabled(self) -> bool:
-        """Whether the team has at least one registered human-agent member.
+        """Whether the HITT capability is currently engaged for this team.
 
-        Checked by runtime entry points (e.g. ``TeamAgent.human_agent_say``)
-        to fail fast when the caller tries to act as a human_agent on a
-        non-HITT team.
+        Reflects the runtime effective flag (set by ``TeamAgentSpec`` and
+        possibly downgraded by ``build_team(enable_hitt=False)``), not
+        the live roster. Used by tools and rails to decide whether
+        human-agent operations are admissible at all — gating on this
+        flag avoids the chicken-and-egg of "no humans yet, so HITT looks
+        off" while ``spawn_human_agent`` waits to be called.
         """
-        return bool(self._human_agent_names)
+        return self._enable_hitt

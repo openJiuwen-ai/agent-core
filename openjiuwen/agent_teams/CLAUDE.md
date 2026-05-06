@@ -179,18 +179,30 @@ Messager 是点对点 + broadcast 的统一抽象，**任何直接新建 socket 
 
 ### HITT（Human in the Team）
 
-开启方式：
+`enable_hitt` 是**分层开关**：
 
-- **静态**：`TeamAgentSpec.enable_hitt=True`，build() 时自动注册 human_agent 成员。
-- **动态**：leader 通过 `build_team(enable_hitt=true)` 工具在建团时启用。
+- `TeamAgentSpec.enable_hitt`（spec 层）= 能力天花板（capability ceiling）。True 才允许 HITT；False 时所有 human-agent 创建路径全部拒绝。
+- `build_team(enable_hitt=...)`（工具参数，`Optional[bool]`）= 本次实例的运行时开关。`None` 继承 spec；`True` 显式启用（要求 spec=True，否则报错）；`False` 显式禁用（即使 spec=True 也覆盖，跳过预配的 HUMAN_AGENT 并 warning）。
+
+人类成员的来源：
+
+- **静态**：在 `TeamAgentSpec.predefined_members` 显式声明 `role_type=HUMAN_AGENT` 成员（自定 `member_name`，可多人）。框架不再隐式注入默认 `human_agent`。
+- **动态**：leader 在已建团后通过 `spawn_member(role_type='human_agent', member_name=..., display_name=..., desc=...)` 拉新人类成员加入。`role_type='human_agent'` 时禁止传 `model_name` / `prompt`（由框架内置模板托管）。
+
+一致性约束（`TeamAgentSpec.build()` 时 fail-fast）：
+
+- `enable_hitt=False` 且 `predefined_members` 含 HUMAN_AGENT → `AGENT_TEAM_CONFIG_INVALID`（特性禁了但预配了人）。
+- `enable_hitt=True` 且 `predefined_members` 无 HUMAN_AGENT → 允许（动态 spawn 路径）。
+
+`_resolve_team_mode`（`agent_configurator.py:55`）只把**非 HUMAN_AGENT** 的 predefined member 计入 predefined 派生 —— 所以纯 HITT 团队（仅声明人类成员）仍然是 `default` 模式，leader 保留 `spawn_member` 工具。
 
 运行约束（代码层 + Prompt 层双重保证）：
 
-1. `human_agent` 是保留成员名，常量在 `constants.RESERVED_MEMBER_NAMES`。预定义成员不允许撞保留名。
-2. human_agent 直接 READY，不进入 UNSTARTED/BUSY/SHUTDOWN 流程；唯一工具是 `send_message`。
-3. 一旦 `task.assignee == "human_agent"` 且状态 CLAIMED，`UpdateTaskTool` 拒绝 reassign 和 cancel；批量 cancel 链路也跳过。
-4. 发送给 human_agent 的点对点消息 `is_read=True`；广播后 human_agent 的 `read_at` 立即跟进。
-5. TeamPolicyRail 注入 `team_hitt` section（priority=12），按 role 分别给 leader/teammate/human_agent 下达角色特定的行为约束。
+1. `human_agent` 是保留成员名（`constants.RESERVED_MEMBER_NAMES`），用作动态 spawn 的默认人类成员名；自定 HUMAN_AGENT 成员名可避开此保留名。普通 teammate 的 predefined 成员仍然不允许撞保留名（`_validate_reserved_names`）。
+2. human-agent 走标准 UNSTARTED → spawn 流程（与 teammate 一致），但工具集仅保留 `view_task` + `member_complete_task`（`HUMAN_AGENT_TOOLS`）；rail 装配会剥离 `FirstIterationGate` / `TeamToolApprovalRail`。
+3. 一旦 `task.assignee` 指向某个 human-agent 且状态 CLAIMED，`UpdateTaskTool` 拒绝 reassign 和 cancel；批量 cancel 链路也跳过。
+4. 发送给 human-agent 的点对点消息 `is_read=True`；广播后 human-agent 的 `read_at` 立即跟进。
+5. TeamPolicyRail 注入 `team_hitt` section（priority=12），按 role 给 leader/teammate/human_agent 下达角色特定的行为约束。section 注入条件来自 `backend.hitt_enabled()` —— 反映运行时 effective flag，不依赖 roster 是否已 spawn。
 
 ### worktree — Git worktree 隔离
 

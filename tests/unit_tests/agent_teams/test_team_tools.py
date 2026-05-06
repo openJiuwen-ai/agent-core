@@ -8,13 +8,13 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 
-from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.schema.status import (
-    MemberStatus,
-)
 from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
+)
+from openjiuwen.agent_teams.messager import Messager
+from openjiuwen.agent_teams.schema.status import (
+    MemberStatus,
 )
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
@@ -78,11 +78,7 @@ async def message_bus():
 async def agent_team(db, message_bus):
     """Provide initialized AgentTeam instance with pre-created team"""
     team_id = "test_team"
-    await db.team.create_team(
-        team_name=team_id,
-        display_name="Test Team",
-        leader_member_name="leader1"
-    )
+    await db.team.create_team(team_name=team_id, display_name="Test Team", leader_member_name="leader1")
     return TeamBackend(
         team_name=team_id,
         member_name="leader1",
@@ -107,11 +103,7 @@ async def agent_team_without_team(db, message_bus):
 @pytest.fixture
 def sample_agent_card():
     """Provide sample AgentCard for testing"""
-    return AgentCard(
-        name="TestAgent",
-        description="A test agent",
-        version="1.0.0"
-    )
+    return AgentCard(name="TestAgent", description="A test agent", version="1.0.0")
 
 
 # ========== Team Management Tools ==========
@@ -135,12 +127,14 @@ class TestBuildTeamTool:
     async def test_invoke_success(self, agent_team_without_team, t, db):
         """Test invoking build team tool successfully"""
         tool = BuildTeamTool(agent_team_without_team, t)
-        result = await tool.invoke({
-            "display_name": "My Team",
-            "team_desc": "Test team description",
-            "leader_display_name": "Lead",
-            "leader_desc": "Project manager",
-        })
+        result = await tool.invoke(
+            {
+                "display_name": "My Team",
+                "team_desc": "Test team description",
+                "leader_display_name": "Lead",
+                "leader_desc": "Project manager",
+            }
+        )
 
         assert result.success is True
         assert result.error is None
@@ -158,12 +152,14 @@ class TestBuildTeamTool:
     async def test_invoke_with_minimal_args(self, agent_team_without_team, t, db):
         """Test invoking build team tool with minimal arguments"""
         tool = BuildTeamTool(agent_team_without_team, t)
-        result = await tool.invoke({
-            "display_name": "Minimal Team",
-            "team_desc": "A minimal team",
-            "leader_display_name": "Lead",
-            "leader_desc": "PM",
-        })
+        result = await tool.invoke(
+            {
+                "display_name": "Minimal Team",
+                "team_desc": "A minimal team",
+                "leader_display_name": "Lead",
+                "leader_desc": "PM",
+            }
+        )
 
         assert result.success is True
         team_info = await db.team.get_team("test_team")
@@ -186,11 +182,7 @@ class TestCleanTeamTool:
     @pytest.mark.level0
     async def test_invoke_success(self, agent_team, t, sample_agent_card, db):
         """Test invoking clean team tool successfully"""
-        await agent_team.spawn_member(
-            member_name="member1",
-            display_name="Member One",
-            agent_card=sample_agent_card
-        )
+        await agent_team.spawn_member(member_name="member1", display_name="Member One", agent_card=sample_agent_card)
         # Shutdown member
         await db.member.update_member_status("member1", "test_team", MemberStatus.SHUTDOWN_REQUESTED.value)
         await db.member.update_member_status("member1", "test_team", MemberStatus.SHUTDOWN.value)
@@ -205,11 +197,7 @@ class TestCleanTeamTool:
     @pytest.mark.level0
     async def test_invoke_fails_when_members_not_shutdown(self, agent_team, t, sample_agent_card):
         """Test invoking clean team tool fails when members not shutdown"""
-        await agent_team.spawn_member(
-            member_name="member1",
-            display_name="Member One",
-            agent_card=sample_agent_card
-        )
+        await agent_team.spawn_member(member_name="member1", display_name="Member One", agent_card=sample_agent_card)
 
         tool = CleanTeamTool(agent_team, t)
         result = await tool.invoke({})
@@ -231,21 +219,166 @@ class TestSpawnMemberTool:
         assert tool.card.name == "spawn_member"
         assert tool.card.id == "team.spawn_member"
         assert tool.team == agent_team
+        # role_type is exposed to the LLM with a default of teammate.
+        props = tool.card.input_params["properties"]
+        assert "role_type" in props
+        assert props["role_type"]["enum"] == ["teammate", "human_agent"]
+        assert props["role_type"]["default"] == "teammate"
 
     @pytest.mark.asyncio
     @pytest.mark.level0
     async def test_invoke_success(self, agent_team, t):
         """Test invoking spawn member tool successfully"""
         tool = SpawnMemberTool(agent_team, t)
-        result = await tool.invoke({
-            "member_name": "member1",
-            "display_name": "Member One",
-            "desc": "Test member",
-            "prompt": "Member prompt"
-        })
+        result = await tool.invoke(
+            {"member_name": "member1", "display_name": "Member One", "desc": "Test member", "prompt": "Member prompt"}
+        )
 
         assert result.success is True
         assert result.error is None
+        assert result.data["role_type"] == "teammate"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_role_type_teammate_explicit(self, agent_team, t):
+        """Explicit role_type='teammate' is equivalent to omitting it."""
+        tool = SpawnMemberTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "member_explicit_tm",
+                "display_name": "Member",
+                "desc": "Test member",
+                "role_type": "teammate",
+            }
+        )
+        assert result.success is True
+        assert result.data["role_type"] == "teammate"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_role_type_human_agent_blocked_when_hitt_disabled(self, agent_team, t):
+        """HITT-off team rejects role_type='human_agent' at the tool layer."""
+        tool = SpawnMemberTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "alice",
+                "display_name": "Alice",
+                "desc": "Domain expert",
+                "role_type": "human_agent",
+            }
+        )
+        assert result.success is False
+        assert "HITT capability is disabled" in (result.error or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_role_type_human_agent_rejects_model_name(self, db, message_bus, t):
+        """role_type='human_agent' must not accept model_name."""
+        # Build a HITT-capable backend so the gate falls through to the
+        # field validation.
+        team = TeamBackend(
+            team_name="hitt_tools_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            enable_hitt=True,
+        )
+        team._enable_hitt = True
+        await db.team.create_team(
+            team_name="hitt_tools_team",
+            display_name="t",
+            leader_member_name="leader1",
+        )
+        tool = SpawnMemberTool(team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "alice",
+                "display_name": "Alice",
+                "desc": "x",
+                "role_type": "human_agent",
+                "model_name": "gpt-4",
+            }
+        )
+        assert result.success is False
+        assert "does not accept" in (result.error or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_role_type_human_agent_rejects_prompt(self, db, message_bus, t):
+        """role_type='human_agent' must not accept prompt."""
+        team = TeamBackend(
+            team_name="hitt_tools_team_p",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            enable_hitt=True,
+        )
+        team._enable_hitt = True
+        await db.team.create_team(
+            team_name="hitt_tools_team_p",
+            display_name="t",
+            leader_member_name="leader1",
+        )
+        tool = SpawnMemberTool(team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "alice",
+                "display_name": "Alice",
+                "desc": "x",
+                "role_type": "human_agent",
+                "prompt": "be nice",
+            }
+        )
+        assert result.success is False
+        assert "does not accept" in (result.error or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_invalid_role_type_rejected(self, agent_team, t):
+        tool = SpawnMemberTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "x",
+                "display_name": "x",
+                "desc": "x",
+                "role_type": "admin",
+            }
+        )
+        assert result.success is False
+        assert "Invalid role_type" in (result.error or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_role_type_human_agent_success(self, db, message_bus, t):
+        """Happy path: HITT engaged, no forbidden fields → human_agent gets spawned."""
+        team = TeamBackend(
+            team_name="hitt_tools_team_ok",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            enable_hitt=True,
+        )
+        team._enable_hitt = True
+        await db.team.create_team(
+            team_name="hitt_tools_team_ok",
+            display_name="t",
+            leader_member_name="leader1",
+        )
+        tool = SpawnMemberTool(team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "alice",
+                "display_name": "Alice",
+                "desc": "Domain expert",
+                "role_type": "human_agent",
+            }
+        )
+        assert result.success is True, result.error
+        assert result.data["role_type"] == "human_agent"
+        assert team.is_human_agent("alice") is True
 
 
 class TestShutdownMemberTool:
@@ -271,10 +404,7 @@ class TestShutdownMemberTool:
         )
 
         tool = ShutdownMemberTool(agent_team, t)
-        result = await tool.invoke({
-            "member_name": "member1",
-            "force": False
-        })
+        result = await tool.invoke({"member_name": "member1", "force": False})
 
         assert result.success is True
         assert result.error is None
@@ -291,10 +421,7 @@ class TestShutdownMemberTool:
         )
 
         tool = ShutdownMemberTool(agent_team, t)
-        result = await tool.invoke({
-            "member_name": "member1",
-            "force": True
-        })
+        result = await tool.invoke({"member_name": "member1", "force": True})
 
         assert result.success is True
 
@@ -324,18 +451,10 @@ class TestApprovePlanTool:
     @pytest.mark.level0
     async def test_invoke_approve(self, agent_team, t, sample_agent_card):
         """Test invoking approve plan tool to approve"""
-        await agent_team.spawn_member(
-            member_name="member1",
-            display_name="Member One",
-            agent_card=sample_agent_card
-        )
+        await agent_team.spawn_member(member_name="member1", display_name="Member One", agent_card=sample_agent_card)
 
         tool = ApprovePlanTool(agent_team, t)
-        result = await tool.invoke({
-            "member_name": "member1",
-            "approved": True,
-            "feedback": "Great plan!"
-        })
+        result = await tool.invoke({"member_name": "member1", "approved": True, "feedback": "Great plan!"})
 
         assert result.success is True
         assert result.error is None
@@ -344,18 +463,10 @@ class TestApprovePlanTool:
     @pytest.mark.level0
     async def test_invoke_reject(self, agent_team, t, sample_agent_card):
         """Test invoking approve plan tool to reject"""
-        await agent_team.spawn_member(
-            member_name="member1",
-            display_name="Member One",
-            agent_card=sample_agent_card
-        )
+        await agent_team.spawn_member(member_name="member1", display_name="Member One", agent_card=sample_agent_card)
 
         tool = ApprovePlanTool(agent_team, t)
-        result = await tool.invoke({
-            "member_name": "member1",
-            "approved": False,
-            "feedback": "Please revise"
-        })
+        result = await tool.invoke({"member_name": "member1", "approved": False, "feedback": "Please revise"})
 
         assert result.success is True
 
@@ -364,10 +475,7 @@ class TestApprovePlanTool:
     async def test_invoke_member_not_found(self, agent_team, t):
         """Test invoking approve plan tool for non-existent member"""
         tool = ApprovePlanTool(agent_team, t)
-        result = await tool.invoke({
-            "member_name": "nonexistent",
-            "approved": True
-        })
+        result = await tool.invoke({"member_name": "nonexistent", "approved": True})
 
         assert result.success is False
 
@@ -392,13 +500,15 @@ class TestApproveToolCallTool:
         )
 
         tool = ApproveToolCallTool(agent_team, t)
-        result = await tool.invoke({
-            "member_name": "member1",
-            "tool_call_id": "call-1",
-            "approved": True,
-            "feedback": "approved",
-            "auto_confirm": True,
-        })
+        result = await tool.invoke(
+            {
+                "member_name": "member1",
+                "tool_call_id": "call-1",
+                "approved": True,
+                "feedback": "approved",
+                "auto_confirm": True,
+            }
+        )
 
         assert result.success is True
         assert result.error is None
@@ -430,16 +540,8 @@ class TestListMembersTool:
     @pytest.mark.level0
     async def test_invoke_with_members(self, agent_team, t, sample_agent_card):
         """Test invoking list members tool with members"""
-        await agent_team.spawn_member(
-            member_name="member1",
-            display_name="Member One",
-            agent_card=sample_agent_card
-        )
-        await agent_team.spawn_member(
-            member_name="member2",
-            display_name="Member Two",
-            agent_card=sample_agent_card
-        )
+        await agent_team.spawn_member(member_name="member1", display_name="Member One", agent_card=sample_agent_card)
+        await agent_team.spawn_member(member_name="member2", display_name="Member Two", agent_card=sample_agent_card)
 
         tool = ListMembersTool(agent_team, t)
         result = await tool.invoke({})
@@ -469,9 +571,7 @@ class TestTaskCreateTool:
     async def test_create_single_task(self, agent_team, t):
         """Test creating a single task"""
         tool = TaskCreateTool(agent_team, t)
-        result = await tool.invoke({
-            "tasks": [{"title": "Task 1", "content": "Content 1"}]
-        })
+        result = await tool.invoke({"tasks": [{"title": "Task 1", "content": "Content 1"}]})
 
         assert result.success is True
         assert result.data["title"] == "Task 1"
@@ -481,13 +581,15 @@ class TestTaskCreateTool:
     async def test_create_batch_tasks(self, agent_team, t):
         """Test batch task creation"""
         tool = TaskCreateTool(agent_team, t)
-        result = await tool.invoke({
-            "tasks": [
-                {"title": "Task 1", "content": "Content 1"},
-                {"title": "Task 2", "content": "Content 2"},
-                {"title": "Task 3", "content": "Content 3"},
-            ]
-        })
+        result = await tool.invoke(
+            {
+                "tasks": [
+                    {"title": "Task 1", "content": "Content 1"},
+                    {"title": "Task 2", "content": "Content 2"},
+                    {"title": "Task 3", "content": "Content 3"},
+                ]
+            }
+        )
 
         assert result.success is True
         assert result.data["count"] == 3
@@ -512,13 +614,17 @@ class TestTaskCreateTool:
         base = await agent_team.task_manager.add(title="Base Task", content="Base content")
 
         tool = TaskCreateTool(agent_team, t)
-        result = await tool.invoke({
-            "tasks": [{
-                "title": "Priority Task",
-                "content": "Priority content",
-                "depended_by": [base.task_id],
-            }]
-        })
+        result = await tool.invoke(
+            {
+                "tasks": [
+                    {
+                        "title": "Priority Task",
+                        "content": "Priority content",
+                        "depended_by": [base.task_id],
+                    }
+                ]
+            }
+        )
 
         assert result.success is True
         assert result.data["title"] == "Priority Task"
@@ -546,11 +652,13 @@ class TestUpdateTaskTool:
         task = await agent_team.task_manager.add(title="Original", content="Original Content")
 
         tool = UpdateTaskTool(agent_team, t)
-        result = await tool.invoke({
-            "task_id": task.task_id,
-            "title": "Updated Title",
-            "content": "Updated Content",
-        })
+        result = await tool.invoke(
+            {
+                "task_id": task.task_id,
+                "title": "Updated Title",
+                "content": "Updated Content",
+            }
+        )
 
         assert result.success is True
         assert result.data["status"] == "updated"
@@ -564,10 +672,12 @@ class TestUpdateTaskTool:
         task = await agent_team.task_manager.add(title="Task to Cancel", content="Content")
 
         tool = UpdateTaskTool(agent_team, t)
-        result = await tool.invoke({
-            "task_id": task.task_id,
-            "status": "cancelled",
-        })
+        result = await tool.invoke(
+            {
+                "task_id": task.task_id,
+                "status": "cancelled",
+            }
+        )
 
         assert result.success is True
         assert result.data["task_id"] == task.task_id
@@ -600,10 +710,12 @@ class TestUpdateTaskTool:
         task = await agent_team.task_manager.add(title="Task", content="Content")
 
         tool = UpdateTaskTool(agent_team, t)
-        result = await tool.invoke({
-            "task_id": task.task_id,
-            "assignee": "dev-1",
-        })
+        result = await tool.invoke(
+            {
+                "task_id": task.task_id,
+                "assignee": "dev-1",
+            }
+        )
 
         assert result.success is True
         assert "assignee" in result.data["updated_fields"]
@@ -628,10 +740,12 @@ class TestUpdateTaskTool:
         await db.task.claim_task(task.task_id, "dev-1")
 
         tool = UpdateTaskTool(agent_team, t)
-        result = await tool.invoke({
-            "task_id": task.task_id,
-            "assignee": "dev-2",
-        })
+        result = await tool.invoke(
+            {
+                "task_id": task.task_id,
+                "assignee": "dev-2",
+            }
+        )
 
         assert result.success is True
         assert "assignee" in result.data["updated_fields"]
@@ -646,10 +760,12 @@ class TestUpdateTaskTool:
         downstream = await agent_team.task_manager.add(title="Downstream", content="Second")
 
         tool = UpdateTaskTool(agent_team, t)
-        result = await tool.invoke({
-            "task_id": downstream.task_id,
-            "add_blocked_by": [upstream.task_id],
-        })
+        result = await tool.invoke(
+            {
+                "task_id": downstream.task_id,
+                "add_blocked_by": [upstream.task_id],
+            }
+        )
 
         assert result.success is True
         assert "blocked_by" in result.data["updated_fields"]
@@ -683,10 +799,12 @@ class TestUpdateTaskTool:
 
         tool = UpdateTaskTool(agent_team, t)
         # b -> a already; trying to make a -> b would close A -> B -> A.
-        result = await tool.invoke({
-            "task_id": a.task_id,
-            "add_blocked_by": [b.task_id],
-        })
+        result = await tool.invoke(
+            {
+                "task_id": a.task_id,
+                "add_blocked_by": [b.task_id],
+            }
+        )
 
         assert result.success is False
         assert "Circular dependency" in result.error
@@ -698,9 +816,7 @@ class TestUpdateTaskTool:
         depended on it. Mirrors the bug-fix coverage in test_database
         but exercises the full tool boundary."""
         upstream = await agent_team.task_manager.add(title="Up", content="c")
-        downstream = await agent_team.task_manager.add(
-            title="Down", content="c", dependencies=[upstream.task_id]
-        )
+        downstream = await agent_team.task_manager.add(title="Down", content="c", dependencies=[upstream.task_id])
         assert downstream.status == "blocked"
 
         tool = UpdateTaskTool(agent_team, t)
@@ -746,7 +862,8 @@ class TestViewTaskToolV2:
         tm = agent_team.task_manager
         upstream = await tm.add(title="Upstream", content="Do first")
         downstream = await tm.add(
-            title="Downstream", content="Do second",
+            title="Downstream",
+            content="Do second",
             dependencies=[upstream.task_id],
         )
 
@@ -874,6 +991,7 @@ class TestClaimTaskTool:
     async def test_complete_via_status(self, agent_team, t, sample_agent_card, db):
         """Test completing a task by setting status=completed"""
         from openjiuwen.agent_teams.schema.status import MemberMode
+
         await db.member.create_member(
             member_name="leader1",
             team_name="test_team",
@@ -902,7 +1020,6 @@ class TestClaimTaskTool:
 
         assert result.success is False
         assert result.error == "Task not found"
-
 
 
 # ========== Result Mapping ==========
@@ -964,7 +1081,13 @@ class TestMappedToolOutput:
             data={
                 "tasks": [
                     {"task_id": "t1", "title": "Fix bug", "status": "pending", "assignee": None, "blocked_by": []},
-                    {"task_id": "t2", "title": "Add test", "status": "claimed", "assignee": "dev-1", "blocked_by": ["t1"]},
+                    {
+                        "task_id": "t2",
+                        "title": "Add test",
+                        "status": "claimed",
+                        "assignee": "dev-1",
+                        "blocked_by": ["t1"],
+                    },
                 ],
                 "count": 2,
             },
@@ -1071,11 +1194,13 @@ class TestSendMessageTool:
     async def test_invoke_with_summary(self, agent_team, t):
         """Test message with summary field"""
         tool = SendMessageTool(agent_team.message_manager, t)
-        result = await tool.invoke({
-            "to": "member2",
-            "content": "Please claim task-1",
-            "summary": "assign task-1",
-        })
+        result = await tool.invoke(
+            {
+                "to": "member2",
+                "content": "Please claim task-1",
+                "summary": "assign task-1",
+            }
+        )
 
         assert result.success is True
         assert result.data["summary"] == "assign task-1"

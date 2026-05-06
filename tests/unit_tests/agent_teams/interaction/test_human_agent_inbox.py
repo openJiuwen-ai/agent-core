@@ -94,6 +94,7 @@ async def team_backend(db, messager):
                 persona="user avatar",
             ),
         ],
+        enable_hitt=True,
     )
     yield backend
 
@@ -145,9 +146,7 @@ async def test_send_to_member_routes_direct(team_backend, db):
     assert result.ok
     assert result.message_id is not None
     messages = await team_backend.message_manager.get_messages(to_member_name=TEAMMATE)
-    assert any(
-        m.from_member_name == HUMAN and "ping me when done" in m.content for m in messages
-    )
+    assert any(m.from_member_name == HUMAN and "ping me when done" in m.content for m in messages)
 
 
 @pytest.mark.asyncio

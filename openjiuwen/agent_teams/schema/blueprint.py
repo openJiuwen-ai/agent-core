@@ -23,7 +23,6 @@ from pydantic import (
 
 from openjiuwen.agent_teams.constants import (
     DEFAULT_LEADER_MEMBER_NAME,
-    HUMAN_AGENT_MEMBER_NAME,
     RESERVED_MEMBER_NAMES,
 )
 from openjiuwen.agent_teams.i18n import t
@@ -37,9 +36,9 @@ from openjiuwen.agent_teams.schema.team import (
     TeamSpec,
 )
 from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
-from openjiuwen.harness.tools.worktree import WorktreeConfig
 from openjiuwen.core.memory.team import TeamMemoryConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.harness.tools.worktree import WorktreeConfig
 
 if TYPE_CHECKING:
     # Resolved for type-checkers only; the runtime import lives in ``build()``
@@ -194,16 +193,27 @@ class TeamAgentSpec(BaseModel):
     """Optional shared workspace config for team members."""
     metadata: dict[str, Any] = {}
     enable_hitt: bool = False
-    """Enable Human-in-the-Team mode.
+    """Spec-level Human-in-the-Team capability ceiling.
 
-    When True, the runtime auto-registers a reserved ``human_agent``
-    member alongside the declared roster. The human_agent is a first-
-    class team member that the leader can assign tasks to via
-    ``update_task``; it only has access to ``send_message`` and never
-    goes through spawn / startup lifecycle. Setting this to True is
-    also exposed to the leader as a ``build_team(enable_hitt=...)``
-    tool parameter so the leader can turn HITT on dynamically when
-    the user expresses intent to join the team.
+    True opens the capability — the framework will register every
+    HUMAN_AGENT member declared in ``predefined_members`` during
+    ``build_team``, and the leader's ``spawn_member`` tool may
+    additionally bring up new human members at runtime via
+    ``role_type='human_agent'``. False forbids both paths.
+
+    The framework does **not** inject any default ``human_agent``
+    when this flag is True — callers must declare the human roster
+    explicitly via ``predefined_members`` (or rely on dynamic
+    ``spawn_member`` after build).
+
+    Consistency check (``build()`` time):
+    - ``enable_hitt=False`` with any HUMAN_AGENT in predefined → error.
+    - ``enable_hitt=True`` with no HUMAN_AGENT predefined → allowed
+      (dynamic spawn path).
+
+    The ``build_team`` tool exposes its own ``enable_hitt`` parameter
+    that gates the runtime instance: it may downgrade an open ceiling
+    to disabled, but cannot exceed it.
     """
     language: Optional[str] = None
     """Preferred language for prompts and tool descriptions ("cn" or "en").
@@ -257,7 +267,7 @@ class TeamAgentSpec(BaseModel):
             raise ValueError("agents dict must contain a 'leader' key")
 
         self._validate_reserved_names()
-        self._inject_human_agent_if_enabled()
+        self._validate_hitt_consistency()
 
         resolved_language = resolve_language(self.language)
         for role_spec in self.agents.values():
@@ -294,13 +304,9 @@ class TeamAgentSpec(BaseModel):
 
         model_allocator = build_model_allocator(self, team_spec)
         leader_allocation = (
-            model_allocator.allocate(model_name=self.leader.model_name)
-            if team_spec.model_pool
-            else None
+            model_allocator.allocate(model_name=self.leader.model_name) if team_spec.model_pool else None
         )
-        leader_member_model = (
-            leader_allocation.to_team_model_config() if leader_allocation else None
-        )
+        leader_member_model = leader_allocation.to_team_model_config() if leader_allocation else None
         self._validate_leader_model_resolved(leader_agent, leader_member_model, team_spec)
 
         context = TeamRuntimeContext(
@@ -354,15 +360,9 @@ class TeamAgentSpec(BaseModel):
         strategy = team_spec.model_pool_strategy
         leader_name = self.leader.model_name
         if leader_name and leader_name not in available_names:
-            cause = (
-                f"leader.model_name='{leader_name}' is not present in the pool "
-                f"(available names: {available_names})"
-            )
+            cause = f"leader.model_name='{leader_name}' is not present in the pool (available names: {available_names})"
         elif strategy == "by_model_name":
-            cause = (
-                "model_pool_strategy='by_model_name' requires leader.model_name "
-                "to be set to one of the pool names"
-            )
+            cause = "model_pool_strategy='by_model_name' requires leader.model_name to be set to one of the pool names"
         else:
             cause = "the allocator did not produce a model for the leader"
 
@@ -400,27 +400,31 @@ class TeamAgentSpec(BaseModel):
                     f"{sorted(RESERVED_MEMBER_NAMES)})"
                 )
 
-    def _inject_human_agent_if_enabled(self) -> None:
-        """Ensure at least one human-agent member exists when HITT is on.
+    def _validate_hitt_consistency(self) -> None:
+        """Reject configs where predefined HUMAN_AGENT members exist without HITT enabled.
 
-        ``enable_hitt=True`` is a convenience that bootstraps a single
-        default ``human_agent`` member. If the caller already declared
-        one or more members with ``role_type=HUMAN_AGENT`` (including
-        under custom names), nothing is added — the explicit roster
-        wins and multi-human teams work out of the box.
-        Idempotent across repeated ``build()`` calls.
+        ``enable_hitt`` acts as the spec-level capability ceiling. Declaring
+        a HUMAN_AGENT predefined member without opening that ceiling is a
+        misconfiguration. The reverse (``enable_hitt=True`` with no
+        predefined HUMAN_AGENT) is allowed: callers may rely on dynamic
+        ``spawn_member(role_type='human_agent', ...)`` after build.
         """
-        if not self.enable_hitt:
+        if self.enable_hitt:
             return
-        if any(m.role_type == TeamRole.HUMAN_AGENT for m in self.predefined_members):
+        if not any(m.role_type == TeamRole.HUMAN_AGENT for m in self.predefined_members):
             return
-        self.predefined_members.append(
-            TeamMemberSpec(
-                member_name=HUMAN_AGENT_MEMBER_NAME,
-                display_name=t("hitt.human_agent_display_name"),
-                role_type=TeamRole.HUMAN_AGENT,
-                persona=t("hitt.human_agent_default_persona"),
-            )
+
+        from openjiuwen.core.common.exception.codes import StatusCode
+        from openjiuwen.core.common.exception.errors import raise_error
+
+        offenders = [m.member_name for m in self.predefined_members if m.role_type == TeamRole.HUMAN_AGENT]
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason=(
+                f"predefined_members contains HUMAN_AGENT role(s) {offenders} "
+                f"but enable_hitt=False; set enable_hitt=True (capability ceiling) "
+                f"or remove the human member(s)"
+            ),
         )
 
 

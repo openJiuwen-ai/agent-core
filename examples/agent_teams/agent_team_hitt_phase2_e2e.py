@@ -43,18 +43,36 @@ from openjiuwen.agent_teams.schema.blueprint import (
     StorageSpec,
     TeamAgentSpec,
 )
+from openjiuwen.agent_teams.schema.team import (
+    TeamMemberSpec,
+    TeamRole,
+)
 from openjiuwen.core.common.logging import team_logger
 
 TEAM_NAME = "hitt-phase2-demo"
 
 
 def build_spec() -> TeamAgentSpec:
-    """Construct a HITT team spec without a real LLM model."""
+    """Construct a HITT team spec without a real LLM model.
+
+    HITT now requires the human roster to be declared explicitly — the
+    framework no longer injects a default ``human_agent`` for free. This
+    demo declares a single default human member to mirror the legacy
+    convenience while exercising the new explicit contract.
+    """
     return TeamAgentSpec(
         agents={"leader": DeepAgentSpec()},
         team_name=TEAM_NAME,
         spawn_mode="inprocess",
         enable_hitt=True,
+        predefined_members=[
+            TeamMemberSpec(
+                member_name=HUMAN_AGENT_MEMBER_NAME,
+                display_name="Human Operator",
+                role_type=TeamRole.HUMAN_AGENT,
+                persona="External user proxy for the phase-2 inbox demo",
+            ),
+        ],
         storage=StorageSpec(type="memory"),
     )
 

@@ -102,6 +102,33 @@ async def team_backend(db, messager):
     yield backend
 
 
+@pytest_asyncio.fixture
+async def hitt_team_backend(db, messager):
+    """TeamBackend with HITT capability enabled and a default human_agent predefined.
+
+    Mirrors the old "enable_hitt=True auto-injects default human_agent"
+    convenience that legacy fixtures relied on, but expressed via the new
+    explicit-declaration contract.
+    """
+    backend = TeamBackend(
+        team_name="hitt_team",
+        member_name="team_leader",
+        is_leader=True,
+        db=db,
+        messager=messager,
+        predefined_members=[
+            TeamMemberSpec(
+                member_name=HUMAN_AGENT_MEMBER_NAME,
+                display_name="Human",
+                role_type=TeamRole.HUMAN_AGENT,
+                persona="Default human collaborator",
+            ),
+        ],
+        enable_hitt=True,
+    )
+    yield backend
+
+
 # ---------------------------------------------------------------------------
 # Router / reserved names
 # ---------------------------------------------------------------------------
@@ -158,18 +185,8 @@ def _minimal_spec(**overrides) -> TeamAgentSpec:
 
 
 @pytest.mark.level0
-def test_enable_hitt_injects_human_agent_member():
-    spec = _minimal_spec(enable_hitt=True)
-    spec._validate_reserved_names()
-    spec._inject_human_agent_if_enabled()
-    names = [m.member_name for m in spec.predefined_members]
-    roles = [m.role_type for m in spec.predefined_members]
-    assert HUMAN_AGENT_MEMBER_NAME in names
-    assert TeamRole.HUMAN_AGENT in roles
-
-
-@pytest.mark.level0
-def test_enable_hitt_is_idempotent_on_existing_human_agent():
+def test_enable_hitt_with_declared_human_agent_passes_validation():
+    """Spec.enable_hitt=True with at least one HUMAN_AGENT predefined is valid."""
     pre = TeamMemberSpec(
         member_name=HUMAN_AGENT_MEMBER_NAME,
         display_name="Custom Human",
@@ -177,18 +194,37 @@ def test_enable_hitt_is_idempotent_on_existing_human_agent():
         persona="Custom persona",
     )
     spec = _minimal_spec(enable_hitt=True, predefined_members=[pre])
-    spec._inject_human_agent_if_enabled()
-    human_slots = [m for m in spec.predefined_members if m.member_name == HUMAN_AGENT_MEMBER_NAME]
-    assert len(human_slots) == 1
-    # Pre-existing spec wins — no clobber.
-    assert human_slots[0].persona == "Custom persona"
+    spec._validate_hitt_consistency()  # must not raise
 
 
 @pytest.mark.level0
-def test_enable_hitt_false_skips_injection():
+def test_enable_hitt_true_without_human_agent_predefined_passes():
+    """Spec.enable_hitt=True with no predefined HUMAN_AGENT is allowed (dynamic spawn path)."""
+    spec = _minimal_spec(enable_hitt=True)
+    spec._validate_hitt_consistency()  # must not raise
+
+
+@pytest.mark.level0
+def test_enable_hitt_false_with_human_agent_predefined_raises():
+    """Spec.enable_hitt=False with a HUMAN_AGENT predefined is a misconfiguration."""
+    pre = TeamMemberSpec(
+        member_name=HUMAN_AGENT_MEMBER_NAME,
+        display_name="Custom Human",
+        role_type=TeamRole.HUMAN_AGENT,
+        persona="Custom persona",
+    )
+    spec = _minimal_spec(enable_hitt=False, predefined_members=[pre])
+    from openjiuwen.core.common.exception.errors import BaseError
+
+    with pytest.raises(BaseError, match="enable_hitt=False"):
+        spec._validate_hitt_consistency()
+
+
+@pytest.mark.level0
+def test_enable_hitt_false_no_human_agent_predefined_passes():
+    """Spec.enable_hitt=False with no HUMAN_AGENT predefined is the default valid case."""
     spec = _minimal_spec(enable_hitt=False)
-    spec._inject_human_agent_if_enabled()
-    assert all(m.member_name != HUMAN_AGENT_MEMBER_NAME for m in spec.predefined_members)
+    spec._validate_hitt_consistency()  # must not raise
 
 
 @pytest.mark.level0
@@ -217,13 +253,13 @@ def test_predefined_member_cannot_use_reserved_name():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_build_team_enable_hitt_registers_human_agent(team_backend, db):
-    await team_backend.build_team(
+async def test_build_team_with_predefined_human_agent_registers_member(hitt_team_backend, db):
+    """Spec-declared HUMAN_AGENT members are spawned during build_team when HITT is on."""
+    await hitt_team_backend.build_team(
         display_name="HITT Team",
         desc="test",
         leader_display_name="Leader",
         leader_desc="Leader persona",
-        enable_hitt=True,
     )
     member = await db.member.get_member(HUMAN_AGENT_MEMBER_NAME, "hitt_team")
     assert member is not None
@@ -231,14 +267,46 @@ async def test_build_team_enable_hitt_registers_human_agent(team_backend, db):
     # the leader's startup sweep brings up a real DeepAgent for it.
     assert member.status == MemberStatus.UNSTARTED.value
     assert member.execution_status == ExecutionStatus.IDLE.value
-    assert team_backend.hitt_enabled() is True
+    assert hitt_team_backend.hitt_enabled() is True
 
 
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_build_team_without_hitt_skips_human_agent(team_backend, db):
+    """No HUMAN_AGENT predefined and HITT off → no human members get spawned."""
     await team_backend.build_team(
         display_name="Plain Team",
+        desc="test",
+        leader_display_name="Leader",
+        leader_desc="Leader persona",
+    )
+    member = await db.member.get_member(HUMAN_AGENT_MEMBER_NAME, "hitt_team")
+    assert member is None
+    assert team_backend.hitt_enabled() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_team_arg_enable_hitt_true_with_spec_false_raises(team_backend):
+    """build_team(enable_hitt=True) cannot exceed the spec ceiling when spec.enable_hitt=False."""
+    from openjiuwen.core.common.exception.errors import BaseError
+
+    with pytest.raises(BaseError, match="capability ceiling"):
+        await team_backend.build_team(
+            display_name="x",
+            desc="y",
+            leader_display_name="Leader",
+            leader_desc="z",
+            enable_hitt=True,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_team_arg_enable_hitt_false_overrides_spec_true(hitt_team_backend, db):
+    """build_team(enable_hitt=False) downgrades the runtime flag, skips predefined humans."""
+    await hitt_team_backend.build_team(
+        display_name="HITT Team",
         desc="test",
         leader_display_name="Leader",
         leader_desc="Leader persona",
@@ -246,7 +314,29 @@ async def test_build_team_without_hitt_skips_human_agent(team_backend, db):
     )
     member = await db.member.get_member(HUMAN_AGENT_MEMBER_NAME, "hitt_team")
     assert member is None
-    assert team_backend.hitt_enabled() is False
+    assert hitt_team_backend.hitt_enabled() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_team_arg_enable_hitt_none_inherits_spec(hitt_team_backend):
+    """build_team(enable_hitt=None) inherits the spec ceiling — HITT stays engaged."""
+    await hitt_team_backend.build_team(
+        display_name="HITT Team",
+        desc="test",
+        leader_display_name="Leader",
+        leader_desc="Leader persona",
+    )
+    assert hitt_team_backend.hitt_enabled() is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_backend_spawn_human_agent_blocked_when_hitt_disabled(team_backend):
+    """Direct backend.spawn_human_agent gate prevents human spawn when HITT is off."""
+    result = await team_backend.spawn_human_agent(member_name="alice")
+    assert result.ok is False
+    assert "HITT capability is disabled" in (result.reason or "")
 
 
 # ---------------------------------------------------------------------------
@@ -287,15 +377,14 @@ async def test_leader_role_tools_exclude_human_agent_only(team_backend):
 
 
 @pytest_asyncio.fixture
-async def built_team(team_backend, db):
-    await team_backend.build_team(
+async def built_team(hitt_team_backend, db):
+    await hitt_team_backend.build_team(
         display_name="HITT Team",
         desc="t",
         leader_display_name="Leader",
         leader_desc="persona",
-        enable_hitt=True,
     )
-    yield team_backend
+    yield hitt_team_backend
 
 
 async def _create_and_assign(backend, db, task_id: str, assignee: str) -> None:
@@ -532,13 +621,12 @@ def test_multi_human_spec_validates():
 
 
 @pytest.mark.level0
-def test_enable_hitt_does_not_reinject_when_declared():
-    """enable_hitt=True must not add the default human_agent if the caller
-    already supplied one or more role=HUMAN_AGENT members."""
+def test_multi_human_spec_with_enable_hitt_passes_consistency():
+    """Multi-human declaration validates fine; the framework no longer mutates the roster."""
     spec = _multi_human_spec()
     spec.enable_hitt = True
     before = {m.member_name for m in spec.predefined_members}
-    spec._inject_human_agent_if_enabled()
+    spec._validate_hitt_consistency()
     after = {m.member_name for m in spec.predefined_members}
     assert after == before
     # The default "human_agent" must NOT appear alongside the two customs.
@@ -567,6 +655,7 @@ async def multi_human_backend(db, messager):
                 persona="Product",
             ),
         ],
+        enable_hitt=True,
     )
     await backend.build_team(
         display_name="Multi",
@@ -766,3 +855,105 @@ def test_reserved_member_names_set_content():
     assert HUMAN_AGENT_MEMBER_NAME in RESERVED_MEMBER_NAMES
     assert USER_PSEUDO_MEMBER_NAME in RESERVED_MEMBER_NAMES
     assert "team_leader" in RESERVED_MEMBER_NAMES
+
+
+# ---------------------------------------------------------------------------
+# _resolve_team_mode — HUMAN_AGENT must not flip the team into "predefined"
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.level0
+def test_resolve_team_mode_default_when_no_predefined():
+    from openjiuwen.agent_teams.agent.agent_configurator import _resolve_team_mode
+
+    spec = _minimal_spec()
+    assert _resolve_team_mode(spec) == "default"
+
+
+@pytest.mark.level0
+def test_resolve_team_mode_ignores_human_agent_in_predefined():
+    """Predefined HUMAN_AGENT alone must NOT trigger predefined mode."""
+    from openjiuwen.agent_teams.agent.agent_configurator import _resolve_team_mode
+
+    pre = TeamMemberSpec(
+        member_name=HUMAN_AGENT_MEMBER_NAME,
+        display_name="H",
+        role_type=TeamRole.HUMAN_AGENT,
+        persona="x",
+    )
+    spec = _minimal_spec(enable_hitt=True, predefined_members=[pre])
+    assert _resolve_team_mode(spec) == "default"
+
+
+@pytest.mark.level0
+def test_resolve_team_mode_predefined_when_non_human_member():
+    """A regular teammate in predefined_members triggers predefined mode."""
+    from openjiuwen.agent_teams.agent.agent_configurator import _resolve_team_mode
+
+    pre = TeamMemberSpec(
+        member_name="dev_1",
+        display_name="Dev",
+        role_type=TeamRole.TEAMMATE,
+        persona="x",
+    )
+    spec = _minimal_spec(predefined_members=[pre])
+    assert _resolve_team_mode(spec) == "predefined"
+
+
+@pytest.mark.level0
+def test_resolve_team_mode_predefined_with_mixed_roster():
+    """A mixed roster (human + teammate) still resolves to predefined."""
+    from openjiuwen.agent_teams.agent.agent_configurator import _resolve_team_mode
+
+    spec = _minimal_spec(
+        enable_hitt=True,
+        predefined_members=[
+            TeamMemberSpec(
+                member_name=HUMAN_AGENT_MEMBER_NAME,
+                display_name="H",
+                role_type=TeamRole.HUMAN_AGENT,
+                persona="x",
+            ),
+            TeamMemberSpec(
+                member_name="dev_1",
+                display_name="Dev",
+                role_type=TeamRole.TEAMMATE,
+                persona="x",
+            ),
+        ],
+    )
+    assert _resolve_team_mode(spec) == "predefined"
+
+
+# ---------------------------------------------------------------------------
+# hitt_enabled() now reflects the runtime effective flag (not the roster)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_hitt_enabled_reflects_capability_not_roster(db, messager):
+    """A backend with enable_hitt=True reports hitt_enabled=True even before any human is spawned."""
+    backend = TeamBackend(
+        team_name="cap_team",
+        member_name="team_leader",
+        is_leader=True,
+        db=db,
+        messager=messager,
+        enable_hitt=True,
+    )
+    assert backend.hitt_enabled() is True
+    assert backend.human_agent_names() == frozenset()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_hitt_enabled_false_when_capability_disabled(db, messager):
+    backend = TeamBackend(
+        team_name="cap_team_off",
+        member_name="team_leader",
+        is_leader=True,
+        db=db,
+        messager=messager,
+    )
+    assert backend.hitt_enabled() is False

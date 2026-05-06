@@ -55,7 +55,11 @@ if TYPE_CHECKING:
 def _resolve_team_mode(spec: TeamAgentSpec) -> str:
     if spec.team_mode is not None:
         return spec.team_mode
-    return "predefined" if spec.predefined_members else "default"
+    # HUMAN_AGENT predefined members are HITT roster declarations, not a
+    # signal to lock the team into "predefined" mode. Only non-human
+    # predefined teammates should drop the leader's spawn_member tool.
+    non_human_predefined = [m for m in spec.predefined_members if m.role_type != TeamRole.HUMAN_AGENT]
+    return "predefined" if non_human_predefined else "default"
 
 
 class AgentConfigurator:
@@ -492,6 +496,7 @@ class AgentConfigurator:
             predefined_members=spec.predefined_members or None,
             model_config_allocator=self.model_allocator.allocate if self.model_allocator else None,
             leader_allocation=self.leader_allocation if is_leader else None,
+            enable_hitt=spec.enable_hitt,
         )
         self.team_backend = agent_team
         self.task_manager = agent_team.task_manager

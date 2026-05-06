@@ -24,10 +24,13 @@ STRINGS: dict[str, str] = {
         "influences how members trust and communicate with you"
     ),
     "build_team.enable_hitt": (
-        "Enable Human in the Team (HITT). When true, registers the "
-        "reserved human_agent member as a first-class teammate. Set to "
-        "true when the user signals intent to join the team "
-        "(e.g. 'I want to join', 'Count me in'); default false"
+        "Per-instance HITT (Human in the Team) switch; accepts true / false / omitted. "
+        "Omitted: inherit TeamAgentSpec.enable_hitt (the spec-level capability ceiling). "
+        "true: explicitly enable for this build — requires spec.enable_hitt=True or it errors. "
+        "false: explicitly disable — every spawn_human_agent request is rejected and any "
+        "predefined HUMAN_AGENT members in the spec are skipped. "
+        "Use true when the user wants to join the team; false when human collaboration is "
+        "explicitly out of scope"
     ),
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/en/clean_team.md
@@ -47,17 +50,27 @@ STRINGS: dict[str, str] = {
         "core expertise, preferred task types, collaboration style, "
         "and boundaries the member should not own"
     ),
+    "spawn_member.role_type": (
+        "Optional. Member role type. 'teammate' (default) = regular LLM teammate, "
+        "requires model_name/prompt to drive its avatar. 'human_agent' = human "
+        "member driven by the real user via HumanAgentInbox; **rejects** model_name "
+        "and prompt (the framework template manages them) — passing those fields "
+        "raises an error. Choosing 'human_agent' requires spec.enable_hitt=True and "
+        "the current build_team instance must not have disabled HITT"
+    ),
     "spawn_member.prompt": (
         "The first instruction the member receives at startup. "
         "Use it to define initial priorities, task selection guidance, constraints, "
         "or coordination expectations; give clear direction, "
         "avoid generic startup filler, "
-        "and do not repeat the generic workflow"
+        "and do not repeat the generic workflow. "
+        "Forbidden when role_type='human_agent'"
     ),
     "spawn_member.model_name": (
         "Optional. Suggested model name for this member "
         "(e.g. gpt-4, claude-sonnet-4); "
-        "the system picks an appropriate model when omitted"
+        "the system picks an appropriate model when omitted. "
+        "Forbidden when role_type='human_agent'"
     ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/en/shutdown_member.md
@@ -165,8 +178,8 @@ STRINGS: dict[str, str] = {
     "send_message.to": (
         'Recipient: member_name for point-to-point (e.g. "backend-dev-1"); '
         'array of member names (e.g. ["m1","m2"]) for multicast — same content sent '
-        'as separate messages to each member, cost is linear in recipient count and '
-        'MORE expensive than broadcast for the same audience, use only when truly needed '
+        "as separate messages to each member, cost is linear in recipient count and "
+        "MORE expensive than broadcast for the same audience, use only when truly needed "
         'and cannot mix with "*"/"user"; '
         '"user" (teammates only, to reply to the user); '
         '"*" for broadcast'
