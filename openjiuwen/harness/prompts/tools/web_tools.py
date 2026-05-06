@@ -36,14 +36,20 @@ def _schema_paid_search(lang: str) -> Dict[str, Any]:
         "en": "Provider: auto|bocha|perplexity|serper|jina.",
     }[lang]
     md = {"cn": "最大 URL 数（1-20）。", "en": "Maximum number of URLs (1-20)."}[lang]
-    td = {"cn": "请求超时时间（秒，10-120）。", "en": "Request timeout in seconds (10-120)."}[lang]
+    td = {"cn": "请求超时时间（秒，30-300）。", "en": "Request timeout in seconds (30-300)."}[lang]
     return {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": qd},
             "provider": {"type": "string", "description": pd, "default": "auto"},
             "max_results": {"type": "integer", "description": md, "default": 8},
-            "timeout_seconds": {"type": "integer", "description": td, "default": 45},
+            "timeout_seconds": {
+                "type": "integer",
+                "description": td,
+                "default": 180,
+                "minimum": 30,
+                "maximum": 300,
+            },
         },
         "required": ["query"],
     }

@@ -619,8 +619,11 @@ class DeepAgent(BaseAgent):
             await self.init_workspace()
 
         # Unregister stale rails left over from a previous configure() cycle.
+        # Skip rails that are also in pending (same instance): they will be
+        # re-initialized by the pending loop below without needing a full retire.
         for stale_rail in self._stale_rails:
-            await self.unregister_rail(stale_rail)
+            if stale_rail not in self._pending_rails:
+                await self.unregister_rail(stale_rail)
         self._stale_rails.clear()
 
         for rail_inst in self._pending_rails:

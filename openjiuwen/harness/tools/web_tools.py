@@ -88,12 +88,23 @@ _FREE_SEARCH_BING_ENABLED_ENV = "FREE_SEARCH_BING_ENABLED"
 _FREE_SEARCH_PROXY_URL_ENV = "FREE_SEARCH_PROXY_URL"
 _FREE_SEARCH_SSL_VERIFY_ENV = "FREE_SEARCH_SSL_VERIFY"
 _FREE_SEARCH_DDG_URL_ENV = "FREE_SEARCH_DDG_URL"
-_PAID_SEARCH_API_KEY_ENVS = (
-    "BOCHA_API_KEY",
-    "PERPLEXITY_API_KEY",
-    "SERPER_API_KEY",
-    "JINA_API_KEY",
-)
+_PAID_SEARCH_PROVIDER_ENV = "PAID_SEARCH_PROVIDER"
+_PAID_SEARCH_PROVIDER_ALT_ENV = "WEB_PAID_SEARCH_PROVIDER"
+_PAID_SEARCH_PROVIDER_KEY_ENVS = {
+    "perplexity": "PERPLEXITY_API_KEY",
+    "bocha": "BOCHA_API_KEY",
+    "jina": "JINA_API_KEY",
+    "serper": "SERPER_API_KEY",
+}
+_PAID_SEARCH_PROVIDER_ORDER = ("perplexity", "bocha", "jina", "serper")
+_PAID_SEARCH_API_KEY_ENVS = tuple(_PAID_SEARCH_PROVIDER_KEY_ENVS.values())
+_PAID_SEARCH_DEFAULT_TIMEOUT_SECONDS = 180
+_PAID_SEARCH_MIN_TIMEOUT_SECONDS = 30
+_PAID_SEARCH_MAX_TIMEOUT_SECONDS = 300
+_PPLX_ALLOWED_MODELS = {"sonar", "sonar-pro"}
+_PPLX_DEFAULT_MODEL = "sonar-pro"
+_JINA_ALLOWED_MODELS = {"jina-deepsearch-v1"}
+_JINA_DEFAULT_MODEL = "jina-deepsearch-v1"
 _FREE_SEARCH_DEFAULT_NO_PROXY = (
     "127.0.0.1,.huawei.com,localhost,local,.local,10.155.97.247,.myhuaweicloud.com, api.openai.rnd.huawei.com"
 )
@@ -187,6 +198,22 @@ def _http_request(method: str, url: str, **kwargs) -> requests.Response:
         with requests.Session() as session:
             session.trust_env = False
             return session.request(method_up, url, **kwargs)
+
+
+def _raise_for_status_with_body(response: requests.Response) -> None:
+    """Raise an HTTPError that includes the provider's response body."""
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        body = ""
+        try:
+            body = json.dumps(response.json(), ensure_ascii=False)
+        except ValueError:
+            body = (response.text or "").strip()
+        if body:
+            body = body[:1000]
+            raise requests.HTTPError(f"{exc}; response body: {body}", response=response) from exc
+        raise
 
 
 def _strip_tags(value: str) -> str:
@@ -425,6 +452,27 @@ def is_free_search_enabled() -> bool:
 def is_paid_search_enabled() -> bool:
     """Whether at least one paid-search provider API key is configured."""
     return any(str(os.environ.get(key, "") or "").strip() for key in _PAID_SEARCH_API_KEY_ENVS)
+
+
+def _configured_paid_search_providers() -> list[str]:
+    """Return paid-search providers whose API keys are configured, in fallback order."""
+    return [
+        provider
+        for provider in _PAID_SEARCH_PROVIDER_ORDER
+        if str(os.environ.get(_PAID_SEARCH_PROVIDER_KEY_ENVS[provider], "") or "").strip()
+    ]
+
+
+def _safe_env_choice(name: str, default: str, allowed: set[str]) -> str:
+    """Read an env string only when it is in a conservative allowlist."""
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
+        return default
+    normalized = raw.lower()
+    if normalized in allowed:
+        return normalized
+    tool_logger.warning("Ignoring unsupported paid-search model %s=%r; using %s", name, raw, default)
+    return default
 
 
 def _search_request_headers(query: str) -> dict[str, str]:
@@ -1059,7 +1107,7 @@ class WebPaidSearchTool(Tool):
             raise build_error(StatusCode.TOOL_WEB_API_KEY_NOT_SET, key_name="JINA_API_KEY")
 
         payload = {
-            "model": "jina-deepsearch-v1",
+            "model": _safe_env_choice("JINA_MODEL", _JINA_DEFAULT_MODEL, _JINA_ALLOWED_MODELS),
             "messages": [{"role": "user", "content": query}],
             "stream": False,
             "reasoning_effort": "low",
@@ -1071,7 +1119,7 @@ class WebPaidSearchTool(Tool):
             json=payload,
             timeout=timeout_seconds,
         )
-        response.raise_for_status()
+        _raise_for_status_with_body(response)
         data = response.json()
 
         answer = ""
@@ -1149,7 +1197,7 @@ class WebPaidSearchTool(Tool):
             json={"query": query, "summary": True, "count": max_results},
             timeout=timeout_seconds,
         )
-        response.raise_for_status()
+        _raise_for_status_with_body(response)
         data = response.json()
         return {
             "provider": "bocha",
@@ -1164,14 +1212,23 @@ class WebPaidSearchTool(Tool):
         if not serper_key:
             raise build_error(StatusCode.TOOL_WEB_API_KEY_NOT_SET, key_name="SERPER_API_KEY")
 
+        headers = {"X-API-KEY": serper_key, "Content-Type": "application/json"}
         response = _http_request(
             "POST",
             "https://google.serper.dev/search",
-            headers={"X-API-KEY": serper_key, "Content-Type": "application/json"},
+            headers=headers,
             json={"q": query, "num": max_results},
             timeout=timeout_seconds,
         )
-        response.raise_for_status()
+        if response.status_code == 400:
+            response = _http_request(
+                "POST",
+                "https://google.serper.dev/search",
+                headers=headers,
+                json={"q": query},
+                timeout=timeout_seconds,
+            )
+        _raise_for_status_with_body(response)
         data = response.json()
         urls: list[str] = []
         organic = data.get("organic", [])
@@ -1208,7 +1265,7 @@ class WebPaidSearchTool(Tool):
             raise build_error(StatusCode.TOOL_WEB_API_KEY_NOT_SET, key_name="PERPLEXITY_API_KEY")
 
         payload = {
-            "model": os.environ.get("PPLX_MODEL", "sonar-pro"),
+            "model": _safe_env_choice("PPLX_MODEL", _PPLX_DEFAULT_MODEL, _PPLX_ALLOWED_MODELS),
             "messages": [
                 {"role": "system", "content": "Provide concise answer and include citations."},
                 {"role": "user", "content": query},
@@ -1224,7 +1281,7 @@ class WebPaidSearchTool(Tool):
             json=payload,
             timeout=timeout_seconds,
         )
-        response.raise_for_status()
+        _raise_for_status_with_body(response)
         data = response.json()
 
         answer = ""
@@ -1242,8 +1299,18 @@ class WebPaidSearchTool(Tool):
         """Invoke the paid web search tool."""
         query = str(inputs.get("query", "") or "").strip()
         provider = str(inputs.get("provider", "auto") or "auto").strip().lower()
+        env_provider = str(
+            os.environ.get(_PAID_SEARCH_PROVIDER_ENV)
+            or os.environ.get(_PAID_SEARCH_PROVIDER_ALT_ENV)
+            or ""
+        ).strip().lower()
+        if provider == "auto" and env_provider:
+            provider = env_provider
         max_results = int(inputs.get("max_results", 8) or 8)
-        timeout_seconds = int(inputs.get("timeout_seconds", 45) or 45)
+        timeout_seconds = int(
+            inputs.get("timeout_seconds", _PAID_SEARCH_DEFAULT_TIMEOUT_SECONDS)
+            or _PAID_SEARCH_DEFAULT_TIMEOUT_SECONDS
+        )
 
         if not query:
             return "[ERROR]: query cannot be empty."
@@ -1251,7 +1318,10 @@ class WebPaidSearchTool(Tool):
         if provider not in {"auto", "bocha", "jina", "serper", "perplexity"}:
             return "[ERROR]: provider must be one of auto|bocha|jina|serper|perplexity."
 
-        timeout_seconds = max(10, min(timeout_seconds, 120))
+        timeout_seconds = max(
+            _PAID_SEARCH_MIN_TIMEOUT_SECONDS,
+            min(timeout_seconds, _PAID_SEARCH_MAX_TIMEOUT_SECONDS),
+        )
         max_results = max(1, min(max_results, 20))
 
         runners = {
@@ -1266,7 +1336,15 @@ class WebPaidSearchTool(Tool):
                 query=query, max_results=max_results, timeout_seconds=timeout_seconds
             ),
         }
-        order = [provider] if provider != "auto" else ["bocha", "perplexity", "serper", "jina"]
+        if provider == "auto":
+            order = _configured_paid_search_providers()
+            if not order:
+                return (
+                    "[ERROR]: no paid search provider API key configured. "
+                    "Set one of BOCHA_API_KEY, PERPLEXITY_API_KEY, SERPER_API_KEY, JINA_API_KEY."
+                )
+        else:
+            order = [provider]
 
         errors: list[str] = []
         for name in order:
@@ -1291,7 +1369,8 @@ class WebPaidSearchTool(Tool):
                 for idx, url in enumerate(urls, 1):
                     lines.append(f"{idx}. {url}")
             if not answer and not urls:
-                lines.append("No usable result payload.")
+                errors.append(f"{name}: no usable result payload")
+                continue
             return "\n".join(lines)
 
         return "[ERROR]: paid search failed. " + " | ".join(errors)

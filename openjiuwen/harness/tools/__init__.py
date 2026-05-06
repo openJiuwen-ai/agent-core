@@ -44,13 +44,7 @@ from openjiuwen.harness.tools.web_tools import (
     is_free_search_enabled,
     is_paid_search_enabled,
 )
-from openjiuwen.harness.tools.agent_control import (
-    SwitchModeTool,
-    EnterPlanModeTool,
-    ExitPlanModeTool,
-    generate_word_slug,
-    get_or_create_plan_slug,
-    resolve_plan_file_path,
+from openjiuwen.harness.tools.subagent import (
     SESSION_SPAWN_TASK_TYPE,
     SessionTaskRow,
     SessionToolkit,
@@ -60,6 +54,14 @@ from openjiuwen.harness.tools.agent_control import (
     build_session_tools,
     TaskTool,
     create_task_tool,
+)
+from openjiuwen.harness.tools.agent_mode_tools import (
+    SwitchModeTool,
+    EnterPlanModeTool,
+    ExitPlanModeTool,
+    generate_word_slug,
+    get_or_create_plan_slug,
+    resolve_plan_file_path,
 )
 from openjiuwen.harness.tools.lsp_tool import LspTool
 from openjiuwen.harness.tools.ask_user import AskUserTool
