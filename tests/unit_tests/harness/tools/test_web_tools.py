@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
@@ -268,25 +269,31 @@ class TestWebPaidSearchTool:
         assert "https://example.com/page1" in result
 
     @pytest.mark.asyncio
-    async def test_invoke_auto_provider_prefers_bocha(self, tool):
+    async def test_invoke_auto_provider_prefers_perplexity(self, tool):
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {"data": {"summary": "Bocha auto summary.", "webPages": {"value": [{"url": "https://example.com/bocha"}]}}}
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "PPLX auto answer"}}],
+            "citations": ["https://example.com/pplx"],
+        }
         mock_response.raise_for_status = MagicMock()
 
-        with patch.dict("os.environ", {"BOCHA_API_KEY": "test-key"}):
+        with patch.dict("os.environ", {"PERPLEXITY_API_KEY": "test-key"}):
             with patch("openjiuwen.harness.tools.web_tools._http_request", return_value=mock_response):
                 result = await tool.invoke({"query": "test query", "provider": "auto"})
 
-        assert "Paid search provider: bocha" in result
+        assert "Paid search provider: perplexity" in result
 
     @pytest.mark.asyncio
     async def test_invoke_auto_provider_fallback(self, tool):
+        perplexity_response = MagicMock()
+        perplexity_response.raise_for_status = MagicMock(side_effect=Exception("PPLX error"))
+
         bocha_response = MagicMock()
         bocha_response.raise_for_status = MagicMock(side_effect=Exception("Bocha error"))
 
-        perplexity_response = MagicMock()
-        perplexity_response.raise_for_status = MagicMock(side_effect=Exception("PPLX error"))
+        jina_response = MagicMock()
+        jina_response.raise_for_status = MagicMock(side_effect=Exception("Jina error"))
 
         serper_response = MagicMock()
         serper_response.status_code = 200
@@ -294,17 +301,108 @@ class TestWebPaidSearchTool:
         serper_response.raise_for_status = MagicMock()
 
         def mock_http_request(method, url, **kwargs):
-            if "api.bocha.cn" in url:
-                return bocha_response
             if "perplexity.ai" in url:
                 return perplexity_response
+            if "api.bocha.cn" in url:
+                return bocha_response
+            if "deepsearch.jina.ai" in url:
+                return jina_response
             return serper_response
 
-        with patch.dict("os.environ", {"BOCHA_API_KEY": "x", "PERPLEXITY_API_KEY": "x", "SERPER_API_KEY": "x"}):
+        env = {
+            "PERPLEXITY_API_KEY": "x",
+            "BOCHA_API_KEY": "x",
+            "JINA_API_KEY": "x",
+            "SERPER_API_KEY": "x",
+        }
+        with patch.dict("os.environ", env):
             with patch("openjiuwen.harness.tools.web_tools._http_request", side_effect=mock_http_request):
                 result = await tool.invoke({"query": "test query", "provider": "auto"})
 
         assert "Paid search provider: serper" in result
+
+    @pytest.mark.asyncio
+    async def test_invoke_paid_search_clamps_timeout(self, tool):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"organic": [{"link": "https://example.com/serper"}]}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch.dict("os.environ", {"SERPER_API_KEY": "test-key"}):
+            with patch("openjiuwen.harness.tools.web_tools._http_request", return_value=mock_response) as request:
+                result = await tool.invoke(
+                    {"query": "test query", "provider": "serper", "timeout_seconds": 999}
+                )
+
+        assert "Paid search provider: serper" in result
+        assert request.call_args.kwargs["timeout"] == 300
+
+    @pytest.mark.asyncio
+    async def test_serper_retries_minimal_payload_after_bad_request(self, tool):
+        bad_response = MagicMock()
+        bad_response.status_code = 400
+        bad_response.raise_for_status.side_effect = requests.HTTPError("400 bad request")
+
+        good_response = MagicMock()
+        good_response.status_code = 200
+        good_response.json.return_value = {"organic": [{"link": "https://example.com/serper"}]}
+        good_response.raise_for_status = MagicMock()
+
+        with patch.dict("os.environ", {"SERPER_API_KEY": "test-key"}):
+            with patch(
+                "openjiuwen.harness.tools.web_tools._http_request",
+                side_effect=[bad_response, good_response],
+            ) as request:
+                result = await tool.invoke({"query": "test query", "provider": "serper"})
+
+        assert "Paid search provider: serper" in result
+        assert request.call_args_list[0].kwargs["json"] == {"q": "test query", "num": 8}
+        assert request.call_args_list[1].kwargs["json"] == {"q": "test query"}
+
+    @pytest.mark.asyncio
+    async def test_perplexity_uses_safe_model_without_forced_search_context(self, tool):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "PPLX answer"}}],
+            "citations": ["https://example.com/pplx"],
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        env = {"PERPLEXITY_API_KEY": "test-key", "PPLX_MODEL": "sonar-deep-research"}
+        with patch.dict("os.environ", env):
+            with patch("openjiuwen.harness.tools.web_tools._http_request", return_value=mock_response) as request:
+                result = await tool.invoke({"query": "test query", "provider": "perplexity"})
+
+        payload = request.call_args.kwargs["json"]
+        assert "Paid search provider: perplexity" in result
+        assert payload["model"] == "sonar-pro"
+        assert "search_context_size" not in payload
+        assert payload["stream"] is False
+
+    @pytest.mark.asyncio
+    async def test_jina_uses_low_effort_without_budget_tokens(self, tool):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "Jina answer https://example.com/jina"}}],
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        env = {
+            "JINA_API_KEY": "test-key",
+            "JINA_MODEL": "unsupported-slow-model",
+            "JINA_BUDGET_TOKENS": "50000",
+        }
+        with patch.dict("os.environ", env):
+            with patch("openjiuwen.harness.tools.web_tools._http_request", return_value=mock_response) as request:
+                result = await tool.invoke({"query": "test query", "provider": "jina"})
+
+        payload = request.call_args.kwargs["json"]
+        assert "Paid search provider: jina" in result
+        assert payload["model"] == "jina-deepsearch-v1"
+        assert payload["reasoning_effort"] == "low"
+        assert "budget_tokens" not in payload
 
 
 class TestWebFetchWebpageTool:
@@ -318,7 +416,10 @@ class TestWebFetchWebpageTool:
         response.status_code = 200
         response.url = "https://example.com/article"
         response.headers = {"Content-Type": "text/html; charset=utf-8"}
-        response.content = b"<html><title>Title</title><body><nav>menu</nav><main><p>Main content paragraph.</p></main></body></html>"
+        response.content = (
+            b"<html><title>Title</title><body><nav>menu</nav>"
+            b"<main><p>Main content paragraph.</p></main></body></html>"
+        )
         response.encoding = "utf-8"
         response.apparent_encoding = "utf-8"
         response.raise_for_status = MagicMock()
