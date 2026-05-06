@@ -16,7 +16,6 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.i18n import t
-from openjiuwen.agent_teams.interaction import UserInbox, parse_mention
 from openjiuwen.agent_teams.schema.events import MessageEvent, TeamEvent
 from openjiuwen.agent_teams.schema.status import MemberStatus, TaskStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
@@ -49,10 +48,6 @@ class DispatcherHost(Protocol):
     @property
     def infra(self) -> "TeamInfra":
         """Return the per-process team infrastructure container."""
-        ...
-
-    async def has_team_member(self, member_name: str) -> bool:
-        """Check whether a team member exists in the backend."""
         ...
 
     def is_agent_ready(self) -> bool:
@@ -283,14 +278,12 @@ class EventDispatcher:
             return
 
         if event.event_type == InnerEventType.USER_INPUT:
+            # Routing decisions (``@<member> body`` etc.) happen at the
+            # runtime dispatch boundary in
+            # ``TeamRuntimeManager._dispatch_god_view`` — by the time
+            # input reaches the inner event bus it is already aimed at
+            # this agent.
             content = event.payload.get("content", "")
-
-            mention = await self._resolve_mention(content)
-            if mention is not None:
-                target, body = mention
-                await self._send_user_direct_message(target, body)
-                return
-
             team_logger.info("user_input → deliver_input")
             await host.deliver_input(content)
             return
@@ -310,38 +303,6 @@ class EventDispatcher:
             team_logger.debug("poll mailbox: member_name={}", member_name)
             if member_name and host.infra.message_manager:
                 await self._process_unread_messages(member_name)
-
-    # ------------------------------------------------------------------
-    # User @mention helpers
-    # ------------------------------------------------------------------
-
-    async def _resolve_mention(self, content: str) -> tuple[str, str] | None:
-        """Parse ``@member_name message`` and validate the target exists.
-
-        Returns ``(target, body)`` only when the target is a real roster
-        member, otherwise ``None`` so the caller falls through to the
-        default (leader) delivery path.
-        """
-        parsed = parse_mention(content)
-        if parsed is None:
-            return None
-        target, body = parsed
-        if not await self._host.has_team_member(target):
-            team_logger.warning("@mention target '{}' not found in database, falling through", target)
-            return None
-        return target, body
-
-    async def _send_user_direct_message(self, to_member_name: str, content: str) -> None:
-        """Write a user→member direct message via the user inbox."""
-        mm = self._host.infra.message_manager
-        if mm is None:
-            team_logger.warning("message_manager unavailable, cannot send user direct message")
-            return
-        result = await UserInbox(mm).direct(to_member_name, content)
-        if result.ok:
-            team_logger.info("user direct message sent to {}: {}", to_member_name, result.message_id)
-        else:
-            team_logger.warning("user direct message to {} failed: {}", to_member_name, result.reason)
 
     # ------------------------------------------------------------------
     # Member events

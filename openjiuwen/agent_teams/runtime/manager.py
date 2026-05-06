@@ -33,6 +33,7 @@ from openjiuwen.agent_teams.interaction import (
     UnknownHumanAgentError,
     UserInbox,
 )
+from openjiuwen.agent_teams.interaction.router import parse_interact_str
 from openjiuwen.agent_teams.runtime.dispatch import (
     RunAction,
     RunActionKind,
@@ -145,12 +146,33 @@ class TeamRuntimeManager:
 
     async def interact(
         self,
-        payload: InteractPayload,
+        payload: InteractPayload | str,
         *,
         team_name: str,
         session_id: str,
     ) -> DeliverResult:
         """Route an interact payload through the active team's gate.
+
+        ``payload`` accepts either an :class:`InteractPayload` (one of
+        ``GodViewMessage`` / ``OperatorMessage`` / ``HumanAgentMessage``)
+        or a free-form ``str``. String inputs are parsed by
+        :func:`parse_interact_str` exactly once at this layer:
+
+        - ``# body`` → :class:`GodViewMessage` (leader DeepAgent).
+        - ``$<name> body`` → :class:`HumanAgentMessage` driving that
+          avatar.
+        - Either form may be followed by one or more ``@<member>``
+          recipients (e.g. ``# @m1 @m2 hi``); each named recipient
+          becomes its own bus message and ``@all`` / ``@*`` collapses
+          into a single broadcast.
+        - No recognised prefix → :class:`GodViewMessage(body=payload)`.
+
+        Multi-recipient inputs fan out to multiple
+        ``_dispatch_payload`` calls under the same gate ticket. The
+        first failure short-circuits and is returned verbatim; on
+        all-success the result carries the last message id (callers
+        that need per-recipient ids should send recipients
+        individually).
 
         Returns:
             ``DeliverResult.success(...)`` when the payload was handed off
@@ -159,6 +181,12 @@ class TeamRuntimeManager:
             when the runtime is shutting down. Other failure reasons
             propagate from the underlying inbox.
         """
+        if isinstance(payload, str):
+            parsed = parse_interact_str(payload)
+            payloads: list[InteractPayload] = parsed or [GodViewMessage(body=payload)]
+        else:
+            payloads = [payload]
+
         entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
         if entry is None:
             return DeliverResult.failure("not_active")
@@ -166,7 +194,12 @@ class TeamRuntimeManager:
         if ticket is None:
             return DeliverResult.failure("gate_closed")
         try:
-            return await self._dispatch_payload(entry.agent, payload)
+            last_result: DeliverResult = DeliverResult.success(None)
+            for entry_payload in payloads:
+                last_result = await self._dispatch_payload(entry.agent, entry_payload)
+                if not last_result.ok:
+                    return last_result
+            return last_result
         finally:
             await entry.interact_gate.consume_done(ticket)
 
@@ -177,6 +210,11 @@ class TeamRuntimeManager:
             return DeliverResult.failure("no_team_backend")
 
         if isinstance(payload, GodViewMessage):
+            # GodView is the explicit "talk straight to the leader's
+            # DeepAgent" channel — no mention parsing here. Routing
+            # decisions (``@<member>`` / ``# body`` / ``$<avatar>``)
+            # live in ``parse_interact_str`` on the str-input boundary
+            # and surface as concrete payload types of their own.
             return await UserInbox.deliver_to_leader(agent.deliver_input, payload.body)
         if isinstance(payload, OperatorMessage):
             inbox = UserInbox(backend.message_manager)

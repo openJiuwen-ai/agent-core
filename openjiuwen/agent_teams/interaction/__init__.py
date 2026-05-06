@@ -32,6 +32,7 @@ from openjiuwen.agent_teams.interaction.payload import (
 )
 from openjiuwen.agent_teams.interaction.router import (
     is_reserved_name,
+    parse_interact_str,
     parse_mention,
 )
 from openjiuwen.agent_teams.interaction.user_inbox import (
@@ -50,5 +51,6 @@ __all__ = [
     "UnknownHumanAgentError",
     "UserInbox",
     "is_reserved_name",
+    "parse_interact_str",
     "parse_mention",
 ]

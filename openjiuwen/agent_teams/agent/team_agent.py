@@ -243,11 +243,6 @@ class TeamAgent(BaseAgent):
         except ValueError:
             pass
 
-    async def has_team_member(self, member_name: str) -> bool:
-        if self._configurator.team_backend is None:
-            return False
-        return await self._configurator.team_backend.get_member(member_name) is not None
-
     def lookup_human_agent_runtime(self, member_name: str) -> Optional["TeamAgent"]:
         """Resolve an inprocess-spawned human agent's live ``TeamAgent``.
 

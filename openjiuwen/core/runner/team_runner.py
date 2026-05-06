@@ -231,20 +231,16 @@ class _TeamRunnerMixin:
         ``payload`` is either an ``InteractPayload`` (one of
         ``GodViewMessage`` / ``OperatorMessage`` / ``HumanAgentMessage``)
         or a bare ``str`` — the latter is shorthand for the god-view
-        channel (``GodViewMessage(body=...)``).
+        channel (``GodViewMessage(body=...)``); the conversion happens
+        inside ``TeamRuntimeManager.interact``.
 
         Returns a ``DeliverResult``. Missing ``team_name`` or
         ``session_id`` returns ``DeliverResult.failure("missing_target")``.
         """
-        from openjiuwen.agent_teams.interaction.payload import (
-            DeliverResult,
-            GodViewMessage,
-        )
+        from openjiuwen.agent_teams.interaction.payload import DeliverResult
 
         if team_name is None or session_id is None:
             return DeliverResult.failure("missing_target")
-        if isinstance(payload, str):
-            payload = GodViewMessage(body=payload)
         return await self._get_team_runtime_manager().interact(
             payload,
             team_name=team_name,

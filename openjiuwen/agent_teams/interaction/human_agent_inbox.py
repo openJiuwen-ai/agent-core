@@ -1,26 +1,23 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Human-agent-side inbox: route a user's input to the team or to the
-human agent's own DeepAgent.
+"""Human-agent-side inbox: dumb router for typed ``HumanAgentMessage`` payloads.
 
-Phase-2 HITT splits the inbox into two explicit dispatch paths driven
-by the body itself:
+The inbox does **not** parse the body — the top-layer
+``parse_interact_str`` already turned ``@<member>`` / ``@all`` / ``$<name>``
+syntax into structured payloads. ``send`` only routes based on the
+explicit ``to`` argument:
 
-* ``@<member> body`` (or ``@all body`` / ``@* body``) → forward to the
-  team's message bus exactly like Phase 1 did, with the human-agent
-  member as the sender. Mirrors how the user has always addressed the
-  team.
-* anything else → feed the body straight into the corresponding human
-  agent's DeepAgent via ``deliver_input``. The agent uses its tool
-  surface (file ops, ``member_complete_task``, workspace meta, etc.)
-  to act on the user's behalf.
+* ``to is None`` → drive the matching avatar's DeepAgent (no bus).
+* ``to in BROADCAST_TARGETS`` (``"all"`` / ``"*"``) → broadcast as the
+  human-agent ``sender``.
+* ``to=<member>`` → validate the target and post a point-to-point bus
+  message from ``sender``.
 
-Explicit routing keeps one message doing one thing: the user knows
-whether they are talking to the team or instructing their avatar, the
-runtime never speculatively burns LLM tokens on chat traffic, and
-mention typos surface as ``unknown_member`` errors instead of
-silently falling through to the LLM.
+Sender resolution stays here: a team with a single human-agent member
+can omit ``sender``, and we still want unknown senders to raise
+``UnknownHumanAgentError`` rather than silently injecting a rogue
+identity into the message log.
 """
 
 from __future__ import annotations
@@ -37,16 +34,16 @@ from openjiuwen.agent_teams.interaction.payload import (
     DeliverResult,
     HumanAgentInboundEvent,
 )
-from openjiuwen.agent_teams.interaction.router import parse_mention
+from openjiuwen.agent_teams.interaction.router import (
+    BROADCAST_TARGETS,
+    deliver_direct,
+)
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
     from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
     from openjiuwen.agent_teams.tools.team import TeamBackend
-
-
-_BROADCAST_TARGETS: frozenset[str] = frozenset({"all", "*"})
 
 
 AgentLookup = Callable[[str], Optional["TeamAgent"]]
@@ -150,26 +147,29 @@ class HumanAgentInbox:
         *,
         sender: Optional[str] = None,
     ) -> DeliverResult:
-        """Dispatch one human-agent input.
+        """Dispatch one already-parsed human-agent payload.
 
-        Routing rules (in order):
+        Routes purely on ``to``:
 
-        1. ``to`` is provided → forward to the team via point-to-point
-           ``send_message`` (Phase 1 contract preserved for callers
-           that bypass mention parsing).
-        2. body starts with ``@<target> body`` → forward to the team:
-           ``@all`` / ``@*`` broadcast; otherwise single-member
-           direct message. Unknown member names return
-           ``DeliverResult.failure("unknown_member")``.
-        3. otherwise → feed the body to the human agent's DeepAgent
-           via ``deliver_input``. Returns
-           ``DeliverResult.failure("agent_unavailable")`` when no
-           ``agent_lookup`` is wired or the avatar is not running.
+        * ``to is None`` → feed ``body`` to the matching avatar's
+          DeepAgent via ``deliver_input``. Returns
+          ``DeliverResult.failure("agent_unavailable")`` when no
+          ``agent_lookup`` is wired or the avatar is not running.
+        * ``to`` in :data:`BROADCAST_TARGETS` (``"all"`` / ``"*"``) →
+          broadcast as ``sender``.
+        * ``to=<member>`` → validate ``to`` against the live roster
+          and post a direct bus message from ``sender``. Unknown
+          targets surface as
+          ``DeliverResult.failure("unknown_member:<target>")``.
+
+        The body is delivered verbatim — top-level
+        ``parse_interact_str`` already stripped any ``@<member>`` /
+        ``$<name>`` prefixes before this layer sees the call.
 
         Args:
-            body: Message content (may include ``@<target>`` prefix).
-            to: Optional explicit point-to-point target. Bypasses
-                mention parsing when set.
+            body: Already-parsed message content.
+            to: ``None`` to drive the avatar; broadcast token to
+                broadcast; otherwise a member name.
             sender: Member name of the human agent speaking. Optional
                 on single-human teams; required when the team declares
                 multiple human-agent members.
@@ -184,52 +184,35 @@ class HumanAgentInbox:
         team_logger.debug(
             "HumanAgentInbox: sender=%s, to=%s, body_len=%d",
             resolved_sender,
-            to or "<auto>",
+            to or "<avatar>",
             len(body or ""),
         )
 
-        if to is not None:
-            return await self._forward_direct(body, target=to, sender=resolved_sender)
-
-        mention = parse_mention(body)
-        if mention is not None:
-            target, stripped = mention
-            if target in _BROADCAST_TARGETS:
-                return await self._forward_broadcast(stripped, sender=resolved_sender)
-            return await self._forward_direct(stripped, target=target, sender=resolved_sender)
-
-        return await self._drive_agent(body, sender=resolved_sender)
+        if to is None:
+            return await self._drive_agent(body, sender=resolved_sender)
+        if to in BROADCAST_TARGETS:
+            msg_id = await self._mm.broadcast_message(
+                content=body,
+                from_member_name=resolved_sender,
+            )
+            if msg_id is None:
+                return DeliverResult.failure("broadcast_failed")
+            return DeliverResult.success(msg_id)
+        return await deliver_direct(
+            body,
+            sender=resolved_sender,
+            target=to,
+            message_manager=self._mm,
+            member_exists=self._member_exists,
+        )
 
     # ------------------------------------------------------------------
     # Routing primitives
     # ------------------------------------------------------------------
 
-    async def _forward_broadcast(self, body: str, *, sender: str) -> DeliverResult:
-        msg_id = await self._mm.broadcast_message(content=body, from_member_name=sender)
-        if msg_id is None:
-            return DeliverResult.failure("send_failed")
-        return DeliverResult.success(msg_id)
-
-    async def _forward_direct(self, body: str, *, target: str, sender: str) -> DeliverResult:
-        # Validate target against the live roster — typos or stale member
-        # names should fail loudly here rather than producing an orphan
-        # message row that nobody consumes.
-        member = await self._team.get_member(target)
-        if member is None:
-            team_logger.warning(
-                "HumanAgentInbox: unknown mention target '%s' from sender '%s'",
-                target,
-                sender,
-            )
-            return DeliverResult.failure("unknown_member")
-        msg_id = await self._mm.send_message(
-            content=body,
-            to_member_name=target,
-            from_member_name=sender,
-        )
-        if msg_id is None:
-            return DeliverResult.failure("send_failed")
-        return DeliverResult.success(msg_id)
+    async def _member_exists(self, name: str) -> bool:
+        """Async predicate adapter for ``deliver_direct``."""
+        return (await self._team.get_member(name)) is not None
 
     async def _drive_agent(self, body: str, *, sender: str) -> DeliverResult:
         if self._agent_lookup is None:

@@ -131,22 +131,6 @@ async def test_wake_feeds_messages_to_agent():
     agent._start_agent.assert_called_once()
 
 
-# ------------------------------------------------------------------
-# @mention direct message tests
-# ------------------------------------------------------------------
-
-
-def _make_leader_with_teammate() -> TeamAgent:
-    """Create a leader with a mocked get_team_member for @mention tests."""
-    agent = _make_leader()
-
-    async def _has_team_member(mid: str) -> bool:
-        return mid == "dev-1"
-
-    agent.has_team_member = _has_team_member
-    return agent
-
-
 def _make_teammate() -> TeamAgent:
     team_spec = TeamSpec(
         team_name="test-team",
@@ -167,28 +151,6 @@ def _make_teammate() -> TeamAgent:
     agent = TeamAgent(AgentCard(id="dev-1", name="dev", description="test"))
     agent.configure(spec, ctx)
     return agent
-
-
-@pytest.mark.asyncio
-@pytest.mark.level0
-async def test_mention_routes_direct_message():
-    """@member_id pattern sends a direct message from 'user', bypassing leader agent."""
-    agent = _make_leader_with_teammate()
-    agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.send_message = AsyncMock(return_value="msg-123")
-    agent._start_agent = AsyncMock()
-
-    await agent._start_coordination(session=None)
-    await agent.interact("@dev-1 请完成这个任务")
-    await asyncio.sleep(0.1)
-    await agent._stop_coordination()
-
-    agent._configurator.message_manager.send_message.assert_called_once_with(
-        content="请完成这个任务",
-        to_member_name="dev-1",
-        from_member_name="user",
-    )
-    agent._start_agent.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -242,63 +204,6 @@ async def test_human_agent_inbound_callback_fires_on_message_event():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_mention_invalid_member_falls_through():
-    """@nonexistent falls through to normal leader-agent path."""
-    agent = _make_leader_with_teammate()
-    agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.send_message = AsyncMock()
-    agent._is_agent_running = lambda: False
-    agent._start_agent = AsyncMock()
-
-    await agent._start_coordination(session=None)
-    await agent.interact("@nonexistent hello")
-    await asyncio.sleep(0.1)
-    await agent._stop_coordination()
-
-    agent._configurator.message_manager.send_message.assert_not_called()
-    agent._start_agent.assert_called_once()
-
-
-@pytest.mark.asyncio
-@pytest.mark.level0
-async def test_no_mention_normal_flow():
-    """Plain message without @ goes through existing leader flow."""
-    agent = _make_leader_with_teammate()
-    agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.send_message = AsyncMock()
-    agent._is_agent_running = lambda: False
-    agent._start_agent = AsyncMock()
-
-    await agent._start_coordination(session=None)
-    await agent.interact("普通消息")
-    await asyncio.sleep(0.1)
-    await agent._stop_coordination()
-
-    agent._configurator.message_manager.send_message.assert_not_called()
-    agent._start_agent.assert_called_once()
-
-
-@pytest.mark.asyncio
-@pytest.mark.level0
-async def test_mention_no_body_falls_through():
-    """@member_id with no message body falls through (regex requires body)."""
-    agent = _make_leader_with_teammate()
-    agent._configurator.message_manager = MagicMock()
-    agent._configurator.message_manager.send_message = AsyncMock()
-    agent._is_agent_running = lambda: False
-    agent._start_agent = AsyncMock()
-
-    await agent._start_coordination(session=None)
-    await agent.interact("@dev-1")
-    await asyncio.sleep(0.1)
-    await agent._stop_coordination()
-
-    agent._configurator.message_manager.send_message.assert_not_called()
-    agent._start_agent.assert_called_once()
-
-
-@pytest.mark.asyncio
-@pytest.mark.level0
 async def test_tool_approval_event_resumes_interrupt():
     """Tool approval result event should resume teammate HITL with InteractiveInput."""
     team_spec = TeamSpec(
@@ -340,7 +245,7 @@ async def test_tool_approval_event_resumes_interrupt():
 @pytest.mark.level0
 async def test_mailbox_messages_deferred_while_interrupt_pending():
     """Normal mailbox messages should not preempt a pending tool interrupt."""
-    agent = _make_leader_with_teammate()
+    agent = _make_leader()
     agent._configurator.message_manager = MagicMock()
     agent._configurator.message_manager.mark_message_read = AsyncMock(return_value=True)
     agent._start_agent = AsyncMock()

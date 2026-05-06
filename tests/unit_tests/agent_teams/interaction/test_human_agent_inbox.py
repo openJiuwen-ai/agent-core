@@ -1,7 +1,16 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Verify HumanAgentInbox routes input by ``@`` mention vs LLM dispatch."""
+"""Verify HumanAgentInbox dumb-routes typed payloads.
+
+Top-level ``parse_interact_str`` already strips channel and mention
+prefixes, so the inbox itself never inspects the body. Routing
+decisions follow the explicit ``to`` argument:
+
+- ``to is None`` → drive the avatar's DeepAgent.
+- ``to`` ∈ ``BROADCAST_TARGETS`` → broadcast as ``sender``.
+- ``to=<member>`` → validated direct message from ``sender``.
+"""
 
 from __future__ import annotations
 
@@ -91,8 +100,8 @@ async def team_backend(db, messager):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_send_no_mention_drives_human_agent(team_backend):
-    """No mention prefix → body is fed to the avatar's DeepAgent."""
+async def test_send_to_none_drives_avatar(team_backend):
+    """``to=None`` feeds the body verbatim to the avatar's DeepAgent."""
     avatar = AsyncMock()
     inbox = HumanAgentInbox(
         team_backend,
@@ -109,40 +118,48 @@ async def test_send_no_mention_drives_human_agent(team_backend):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_send_mention_at_member_forwards_direct(team_backend, db):
-    """``@<member> body`` forwards to the team via point-to-point send."""
+async def test_send_inbox_does_not_parse_at_in_body(team_backend):
+    """Body starting with ``@`` is delivered literally — parsing lives upstairs."""
     avatar = AsyncMock()
     inbox = HumanAgentInbox(
         team_backend,
         team_backend.message_manager,
-        agent_lookup=lambda name: avatar,
+        agent_lookup=lambda name: avatar if name == HUMAN else None,
     )
 
     result = await inbox.send(f"@{TEAMMATE} ping me when done")
-    assert result.ok
-    assert result.message_id is not None
-    avatar.deliver_input.assert_not_called()
 
-    messages = await team_backend.message_manager.get_messages(to_member_name=TEAMMATE)
-    assert any(m.from_member_name == HUMAN and "ping me when done" in m.content for m in messages)
+    assert result.ok
+    assert result.message_id is None
+    avatar.deliver_input.assert_awaited_once_with(f"@{TEAMMATE} ping me when done")
 
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_send_mention_at_all_broadcasts(team_backend, db):
-    """``@all body`` and ``@* body`` both broadcast as the human member."""
-    avatar = AsyncMock()
-    inbox = HumanAgentInbox(
-        team_backend,
-        team_backend.message_manager,
-        agent_lookup=lambda name: avatar,
+async def test_send_to_member_routes_direct(team_backend, db):
+    """``to=<member>`` posts a validated point-to-point bus message."""
+    inbox = HumanAgentInbox(team_backend, team_backend.message_manager)
+
+    result = await inbox.send("ping me when done", to=TEAMMATE)
+
+    assert result.ok
+    assert result.message_id is not None
+    messages = await team_backend.message_manager.get_messages(to_member_name=TEAMMATE)
+    assert any(
+        m.from_member_name == HUMAN and "ping me when done" in m.content for m in messages
     )
 
-    result = await inbox.send("@all status sync")
-    assert result.ok
-    avatar.deliver_input.assert_not_called()
 
-    star = await inbox.send("@* heads up")
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_send_to_all_broadcasts_as_human_agent(team_backend, db):
+    """``to="all"`` and ``to="*"`` both broadcast as the human member."""
+    inbox = HumanAgentInbox(team_backend, team_backend.message_manager)
+
+    first = await inbox.send("status sync", to="all")
+    assert first.ok
+
+    star = await inbox.send("heads up", to="*")
     assert star.ok
 
     casts = await team_backend.message_manager.get_team_messages("hitt_team")
@@ -153,39 +170,14 @@ async def test_send_mention_at_all_broadcasts(team_backend, db):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_send_mention_unknown_target_returns_unknown_member(team_backend):
-    """Mention typo must surface as a stable failure code, not LLM input."""
-    avatar = AsyncMock()
-    inbox = HumanAgentInbox(
-        team_backend,
-        team_backend.message_manager,
-        agent_lookup=lambda name: avatar,
-    )
+async def test_send_to_unknown_member_returns_unknown_member(team_backend):
+    """Unknown explicit target surfaces a stable failure code."""
+    inbox = HumanAgentInbox(team_backend, team_backend.message_manager)
 
-    result = await inbox.send("@ghost hi")
+    result = await inbox.send("hi", to="ghost")
+
     assert not result.ok
-    assert result.reason == "unknown_member"
-    avatar.deliver_input.assert_not_called()
-
-
-@pytest.mark.asyncio
-@pytest.mark.level0
-async def test_send_explicit_to_param_bypasses_mention_parsing(team_backend, db):
-    """The legacy ``to=...`` Phase-1 surface still routes to the team."""
-    avatar = AsyncMock()
-    inbox = HumanAgentInbox(
-        team_backend,
-        team_backend.message_manager,
-        agent_lookup=lambda name: avatar,
-    )
-
-    result = await inbox.send("just a heads up", to=TEAMMATE)
-
-    assert result.ok
-    assert result.message_id is not None
-    avatar.deliver_input.assert_not_called()
-    messages = await team_backend.message_manager.get_messages(to_member_name=TEAMMATE)
-    assert any("just a heads up" in m.content for m in messages)
+    assert result.reason == "unknown_member:ghost"
 
 
 @pytest.mark.asyncio
