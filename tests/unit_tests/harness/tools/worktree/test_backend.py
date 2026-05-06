@@ -1,23 +1,24 @@
 # coding: utf-8
 
-"""Tests for openjiuwen.agent_teams.worktree.backend."""
+"""Tests for openjiuwen.harness.tools.worktree.backend."""
 
 import pytest
 
-from openjiuwen.agent_teams.worktree.backend import (
+from openjiuwen.harness.tools.worktree.backend import (
     GitBackend,
     WorktreeBackend,
     _BACKEND_REGISTRY,
     create_backend,
     register_worktree_backend,
 )
-from openjiuwen.agent_teams.worktree.models import WorktreeConfig
+from openjiuwen.harness.tools.worktree.models import WorktreeConfig
 from tests.test_logger import logger
 
 
 def _wt_target(tmp_path, slug: str) -> str:
     """Compute a deterministic worktree target path under a tmp workspace."""
     import os
+
     return os.path.join(str(tmp_path), "ws", ".worktrees", slug)
 
 

@@ -12,8 +12,6 @@ import asyncio
 import os
 from dataclasses import dataclass
 
-from openjiuwen.core.common.logging import team_logger
-
 
 class GitError(Exception):
     """Git command execution failed."""
@@ -423,9 +421,7 @@ async def read_worktree_head_sha(worktree_path: str) -> str | None:
     if not content.startswith("gitdir:"):
         return None
 
-    git_dir = os.path.normpath(
-        os.path.join(worktree_path, content[len("gitdir:"):].strip())
-    )
+    git_dir = os.path.normpath(os.path.join(worktree_path, content[len("gitdir:") :].strip()))
     head_file = os.path.join(git_dir, "HEAD")
     try:
         with open(head_file) as f:
@@ -438,7 +434,7 @@ async def read_worktree_head_sha(worktree_path: str) -> str | None:
         return head if len(head) == 40 else None
 
     # Branch ref: resolve to SHA
-    ref_path = head[len("ref:"):].strip()
+    ref_path = head[len("ref:") :].strip()
     # Try worktree-local refs first
     for base in (git_dir,):
         full_ref = os.path.join(base, ref_path)

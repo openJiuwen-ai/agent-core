@@ -3,8 +3,12 @@
 """Worktree data models.
 
 Pydantic models for worktree configuration, session state, creation results,
-and change summaries. Team workspace models live in
-``openjiuwen.agent_teams.team_workspace.models``.
+and change summaries.
+
+Owner identification fields (``member_name`` / ``team_name``) are kept for
+backwards compatibility with existing persistence and tests; semantically
+they are generic ``owner_id`` / ``tag`` markers and may be left ``None`` by
+single-agent callers.
 """
 
 from enum import Enum
@@ -13,31 +17,32 @@ from pydantic import BaseModel
 
 
 class WorktreeLifecyclePolicy(str, Enum):
-    """How worktree lifecycle binds to team lifecycle."""
+    """How worktree lifecycle binds to its owner's lifecycle."""
 
     AUTO = "auto"
-    """Infer from TeamLifecycle (temporary -> ephemeral, persistent -> durable)."""
+    """Infer from owner lifecycle (temporary -> ephemeral, persistent -> durable)."""
 
     EPHEMERAL = "ephemeral"
-    """Always auto-cleanup on member shutdown."""
+    """Always auto-cleanup on owner shutdown."""
 
     DURABLE = "durable"
     """Always preserve across sessions."""
 
 
 class WorktreeConfig(BaseModel):
-    """Worktree configuration declared in TeamAgentSpec.
+    """Worktree configuration for a managed worktree owner.
 
-    Controls how worktrees are created and managed for team members.
-    Mirrors the settings.json worktree section.
+    Controls how worktrees are created and managed. Used by both team
+    members (via ``TeamAgentSpec.worktree``) and single agents (passed
+    directly to ``WorktreeManager``).
     """
 
     enabled: bool = False
-    """Enable worktree isolation for team members."""
+    """Enable worktree isolation."""
 
     base_dir: str | None = None
     """Override worktree root directory.
-    Default: <repo-root>/.agent_teams/worktrees/
+    Default: <workspace-root>/.worktrees/
     """
 
     sparse_paths: list[str] | None = None
@@ -62,12 +67,12 @@ class WorktreeConfig(BaseModel):
     """Auto-cleanup ephemeral worktrees older than this many days."""
 
     auto_cleanup_on_shutdown: bool = True
-    """Automatically remove worktree when member shuts down cleanly."""
+    """Automatically remove worktree when owner shuts down cleanly."""
 
     lifecycle_policy: WorktreeLifecyclePolicy = WorktreeLifecyclePolicy.AUTO
-    """How worktree lifecycle binds to team lifecycle.
-    AUTO: infer from TeamLifecycle (temporary -> ephemeral, persistent -> durable).
-    EPHEMERAL: always auto-cleanup on member shutdown.
+    """How worktree lifecycle binds to its owner's lifecycle.
+    AUTO: infer from owner context (temporary -> ephemeral, persistent -> durable).
+    EPHEMERAL: always auto-cleanup on owner shutdown.
     DURABLE: always preserve across sessions.
     """
 
@@ -99,10 +104,10 @@ class WorktreeSession(BaseModel):
     """Base commit SHA at creation time. Used for change detection."""
 
     member_name: str | None = None
-    """Team member this worktree belongs to."""
+    """Owner identifier (team member name, or any caller-defined owner id)."""
 
     team_name: str | None = None
-    """Team this worktree belongs to."""
+    """Owner tag (team name, or any caller-defined grouping label)."""
 
     hook_based: bool = False
     """True if created via WorktreeBackend hook, not native git."""
@@ -111,7 +116,7 @@ class WorktreeSession(BaseModel):
     """Resolved lifecycle policy for this worktree."""
 
     team_lifecycle: str | None = None
-    """Team lifecycle at creation time (temporary/persistent)."""
+    """Owner lifecycle marker at creation time (temporary/persistent)."""
 
     # === Transient fields (not persisted) ===
     creation_duration_ms: float | None = None
@@ -151,5 +156,3 @@ class WorktreeChangeSummary(BaseModel):
 
     commits: int = 0
     """Number of commits since original_head_commit."""
-
-

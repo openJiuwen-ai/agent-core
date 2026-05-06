@@ -173,22 +173,10 @@ STRINGS: dict[str, str] = {
     ),
     "send_message.content": "Message content with clear action guidance or information",
     "send_message.summary": "5-10 word summary for message preview and logging",
-    # ===== enter_worktree =====================================================
-    # enter_worktree._desc lives in descs/en/enter_worktree.md
-    "enter_worktree.name": (
-        "Optional name for the worktree. "
-        'Each "/"-separated segment may contain only letters, '
-        "digits, dots, underscores, and dashes; max 64 chars total. "
-        "A random name is generated if not provided"
-    ),
-    # ===== exit_worktree ======================================================
-    # exit_worktree._desc lives in descs/en/exit_worktree.md
-    "exit_worktree.action": '"keep" leaves the worktree and branch on disk; "remove" deletes both',
-    "exit_worktree.discard_changes": (
-        'Required true when action is "remove" and '
-        "the worktree has uncommitted files or unmerged commits. "
-        "The tool will refuse and list them otherwise"
-    ),
+    # NOTE: worktree tools (enter_worktree / exit_worktree) live in
+    # ``openjiuwen.harness.tools.worktree`` and resolve their description
+    # / param schema via ``harness.prompts.tools`` providers — no entries
+    # in this dict.
     # ===== workspace_meta =====================================================
     # workspace_meta._desc lives in descs/en/workspace_meta.md
     "workspace_meta.action": (

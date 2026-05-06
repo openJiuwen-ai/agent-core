@@ -96,13 +96,10 @@ STRINGS: dict[str, str] = {
     ),
     "send_message.content": "消息内容，应包含明确的行动指引或信息",
     "send_message.summary": "5-10 词摘要，用于消息预览和日志",
-    # ===== enter_worktree =====================================================
-    # enter_worktree._desc lives in descs/cn/enter_worktree.md
-    "enter_worktree.name": '可选的 worktree 名称。每个 "/" 分隔的段只能包含字母、数字、点、下划线和短横线；总长度最多 64 字符。不提供则自动生成随机名称',
-    # ===== exit_worktree ======================================================
-    # exit_worktree._desc lives in descs/cn/exit_worktree.md
-    "exit_worktree.action": '"keep" 保留 worktree 目录和分支在磁盘上；"remove" 删除目录和分支',
-    "exit_worktree.discard_changes": '仅在 action="remove" 且 worktree 有未提交文件或未合并提交时需设为 true。工具会先拒绝并列出变更，确认后再设此参数重新调用',
+    # NOTE: worktree tools (enter_worktree / exit_worktree) live in
+    # ``openjiuwen.harness.tools.worktree`` and resolve their description
+    # / param schema via ``harness.prompts.tools`` providers — no entries
+    # in this dict.
     # ===== workspace_meta =====================================================
     # workspace_meta._desc lives in descs/cn/workspace_meta.md
     "workspace_meta.action": "操作类型：lock（获取文件锁）、unlock（释放文件锁）、locks（列出所有活跃锁）、history（查看文件版本历史）",

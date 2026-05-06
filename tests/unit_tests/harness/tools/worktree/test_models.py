@@ -1,12 +1,10 @@
 # coding: utf-8
 
-"""Tests for openjiuwen.agent_teams.worktree.models."""
-
-from datetime import datetime, timedelta, timezone
+"""Tests for openjiuwen.harness.tools.worktree.models."""
 
 import pytest
 
-from openjiuwen.agent_teams.worktree.models import (
+from openjiuwen.harness.tools.worktree.models import (
     WorktreeChangeSummary,
     WorktreeConfig,
     WorktreeCreateResult,
@@ -187,5 +185,3 @@ class TestWorktreeChangeSummary:
         summary = WorktreeChangeSummary(changed_files=3, commits=2)
         assert summary.changed_files == 3
         assert summary.commits == 2
-
-

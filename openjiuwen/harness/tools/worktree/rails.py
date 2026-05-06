@@ -2,10 +2,11 @@
 
 """Worktree rail base class with lifecycle hooks.
 
-Extends DeepAgentRail with 8 hook methods for worktree lifecycle events:
-create, exit, file write, commit, and sync phases. WorktreeManager calls
-these hooks directly (not via AgentCallbackEvent routing) because worktree
-events span across tool calls rather than within the agent task-loop.
+Extends ``DeepAgentRail`` with hook methods for worktree lifecycle events:
+create, exit, file write, commit, and sync phases. ``WorktreeManager``
+calls these hooks directly (not via AgentCallbackEvent routing) because
+worktree events span across tool calls rather than within the agent
+task-loop.
 """
 
 from __future__ import annotations
@@ -14,13 +15,13 @@ import asyncio
 import os
 from typing import TYPE_CHECKING
 
-from openjiuwen.agent_teams.worktree.git import _run_git
-from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.common.logging import agent_logger
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.tools.worktree.git import _run_git
 
 if TYPE_CHECKING:
-    from openjiuwen.agent_teams.worktree.models import WorktreeSession
+    from openjiuwen.harness.tools.worktree.models import WorktreeSession
 
 
 class WorktreeRail(DeepAgentRail):
@@ -238,7 +239,7 @@ class AutoSetupRail(WorktreeRail):
             )
             stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
-                team_logger.warning("Setup command '%s' failed: %s", cmd, stderr.decode())
+                agent_logger.warning("Setup command '%s' failed: %s", cmd, stderr.decode())
 
     @staticmethod
     async def _detect_setup(path: str) -> list[str]:
@@ -261,7 +262,7 @@ class DiffSummaryRail(WorktreeRail):
     """Generate diff summary before worktree exit.
 
     Logs a stat-level diff when the exit action is "keep", so the
-    team can see what changed in the worktree at a glance.
+    caller can see what changed in the worktree at a glance.
     """
 
     async def before_worktree_exit(
@@ -287,7 +288,5 @@ class DiffSummaryRail(WorktreeRail):
             cwd=session.worktree_path,
         )
         if diff.ok and diff.stdout:
-            team_logger.info("Worktree '%s' diff summary:\n%s", session.worktree_name, diff.stdout)
+            agent_logger.info("Worktree '%s' diff summary:\n%s", session.worktree_name, diff.stdout)
         return None
-
-

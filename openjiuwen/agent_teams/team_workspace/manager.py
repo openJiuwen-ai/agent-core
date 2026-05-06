@@ -30,7 +30,7 @@ from openjiuwen.agent_teams.team_workspace.models import (
     WorkspaceFileLock,
     WorkspaceMode,
 )
-from openjiuwen.agent_teams.worktree.git import _run_git, rev_parse
+from openjiuwen.harness.tools.worktree.git import _run_git, rev_parse
 from openjiuwen.core.common.logging import team_logger
 
 try:

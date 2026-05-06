@@ -16,15 +16,15 @@ from datetime import (
     timezone,
 )
 
-from openjiuwen.agent_teams.worktree.backend import WorktreeBackend
-from openjiuwen.agent_teams.worktree.git import (
+from openjiuwen.harness.tools.worktree.backend import WorktreeBackend
+from openjiuwen.harness.tools.worktree.git import (
     find_canonical_git_root,
     has_unpushed_commits,
     status_porcelain,
     worktree_prune,
 )
-from openjiuwen.agent_teams.worktree.models import WorktreeConfig
-from openjiuwen.agent_teams.worktree.slug import worktrees_dir
+from openjiuwen.harness.tools.worktree.models import WorktreeConfig
+from openjiuwen.harness.tools.worktree.slug import worktrees_dir
 
 EPHEMERAL_PATTERNS: list[re.Pattern[str]] = [
     # teammate-<member_name first 8 hex chars>
@@ -70,6 +70,7 @@ async def cleanup_stale_worktrees(
         Number of worktrees removed.
     """
     from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
+
     repo_root = await find_canonical_git_root(get_cwd())
     if not repo_root:
         return 0

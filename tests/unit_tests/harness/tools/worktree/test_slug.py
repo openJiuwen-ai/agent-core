@@ -1,10 +1,10 @@
 # coding: utf-8
 
-"""Tests for openjiuwen.agent_teams.worktree.slug."""
+"""Tests for openjiuwen.harness.tools.worktree.slug."""
 
 import pytest
 
-from openjiuwen.agent_teams.worktree.slug import (
+from openjiuwen.harness.tools.worktree.slug import (
     MAX_SLUG_LENGTH,
     validate_slug,
     worktree_branch_name,

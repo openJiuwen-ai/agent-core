@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tools.team import TeamBackend
-    from openjiuwen.agent_teams.worktree.manager import WorktreeManager
+    from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
 class TeamToolRail(DeepAgentRail):
@@ -117,16 +117,14 @@ class TeamToolRail(DeepAgentRail):
             tools.append(WorkspaceMetaTool(self._workspace_manager, ws_t))
 
         if self._worktree_manager is not None:
-            from openjiuwen.agent_teams.tools.locales import make_translator
-            from openjiuwen.agent_teams.worktree.session import init_session_state
-            from openjiuwen.agent_teams.worktree.tools import (
+            from openjiuwen.harness.tools.worktree import (
                 EnterWorktreeTool,
                 ExitWorktreeTool,
+                init_session_state,
             )
 
-            wt_t = make_translator(self._language)
-            tools.append(EnterWorktreeTool(self._worktree_manager, wt_t))
-            tools.append(ExitWorktreeTool(self._worktree_manager, wt_t))
+            tools.append(EnterWorktreeTool(self._worktree_manager, language=self._language))
+            tools.append(ExitWorktreeTool(self._worktree_manager, language=self._language))
             init_session_state()
 
         if self._qualify_ids:

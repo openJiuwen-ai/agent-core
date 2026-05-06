@@ -48,8 +48,8 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
     from openjiuwen.agent_teams.rails import FirstIterationGate
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
-    from openjiuwen.agent_teams.worktree.manager import WorktreeManager
     from openjiuwen.core.memory.team.manager import TeamMemoryManager
+    from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
 def _resolve_team_mode(spec: TeamAgentSpec) -> str:
@@ -240,7 +240,7 @@ class AgentConfigurator:
         )
 
     def create_worktree_manager(self, spec: TeamAgentSpec) -> WorktreeManager:
-        from openjiuwen.agent_teams.worktree.manager import WorktreeManager
+        from openjiuwen.harness.tools.worktree import WorktreeManager
 
         ws_root = self.workspace_manager.workspace_path if self.workspace_manager else None
         return WorktreeManager(

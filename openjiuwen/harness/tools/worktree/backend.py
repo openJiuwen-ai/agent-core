@@ -3,15 +3,19 @@
 """Worktree backend protocol and git implementation.
 
 Pluggable backend for worktree creation and removal. The default
-GitBackend uses native git worktree commands with a four-phase
+``GitBackend`` uses native git worktree commands with a four-phase
 creation flow: fast recovery, base resolution, worktree add, and
 optional sparse checkout.
+
+Custom backends (e.g. distributed cross-machine isolation) are
+registered via :func:`register_worktree_backend` and selected by
+name through :func:`create_backend`.
 """
 
 import os
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import Callable, Protocol, runtime_checkable
 
-from openjiuwen.agent_teams.worktree.git import (
+from openjiuwen.harness.tools.worktree.git import (
     GitError,
     branch_delete,
     fetch_ref,
@@ -23,8 +27,8 @@ from openjiuwen.agent_teams.worktree.git import (
     worktree_add,
     worktree_remove,
 )
-from openjiuwen.agent_teams.worktree.models import WorktreeConfig, WorktreeCreateResult
-from openjiuwen.agent_teams.worktree.slug import worktree_branch_name
+from openjiuwen.harness.tools.worktree.models import WorktreeConfig, WorktreeCreateResult
+from openjiuwen.harness.tools.worktree.slug import worktree_branch_name
 
 
 @runtime_checkable
@@ -222,6 +226,11 @@ class GitBackend:
 
 # -- Backend registry ---------------------------------------------------------
 
+# Built-in backends are populated below. Backends that need extra
+# constructor arguments (e.g. ``RemoteWorktreeBackend`` in
+# ``agent_teams.worktree_remote``, which takes a messager and node id)
+# are not exposed through ``create_backend``; callers instantiate them
+# directly and pass them as ``WorktreeManager(backend=...)``.
 _BACKEND_REGISTRY: dict[str, Callable[..., WorktreeBackend]] = {
     "git": GitBackend,
 }
@@ -244,21 +253,12 @@ def register_worktree_backend(
 def create_backend(
     name: str = "git",
     config: WorktreeConfig | None = None,
-    *,
-    messager: Any = None,
-    node_id: str | None = None,
 ) -> WorktreeBackend:
     """Create a worktree backend by name.
-
-    When *messager* and *node_id* are provided (or *name* is ``"remote"``),
-    a :class:`RemoteWorktreeBackend` is returned instead of looking up the
-    registry.
 
     Args:
         name: Backend identifier (default "git").
         config: Worktree configuration to pass to the backend.
-        messager: Optional Messager instance for remote communication.
-        node_id: Optional target node identifier for the remote backend.
 
     Returns:
         A WorktreeBackend instance.
@@ -266,15 +266,7 @@ def create_backend(
     Raises:
         ValueError: If the backend name is not registered.
     """
-    if name == "remote" or (messager and node_id):
-        from openjiuwen.agent_teams.worktree.remote import RemoteWorktreeBackend
-
-        return RemoteWorktreeBackend(config or WorktreeConfig(), messager, node_id or "")
-
     factory = _BACKEND_REGISTRY.get(name)
     if not factory:
-        raise ValueError(
-            f"Unknown worktree backend '{name}'. "
-            f"Available: {list(_BACKEND_REGISTRY)}"
-        )
+        raise ValueError(f"Unknown worktree backend '{name}'. Available: {list(_BACKEND_REGISTRY)}")
     return factory(config)

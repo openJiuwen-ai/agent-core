@@ -2,8 +2,8 @@
 
 """Worktree context notice generation.
 
-Builds informational text injected into the system prompt of spawned
-members to inform them about their isolated worktree environment.
+Builds informational text injected into the system prompt of agents
+operating inside an isolated worktree.
 """
 
 
@@ -13,11 +13,11 @@ def build_worktree_notice(
 ) -> str:
     """Build context notice for agents running in a worktree.
 
-    Injected into the system prompt of spawned members to inform
-    them about the isolated environment.
+    Injected into the system prompt to inform the agent about the
+    isolated environment.
 
     Args:
-        parent_cwd: Working directory of the parent agent.
+        parent_cwd: Working directory of the parent / outer context.
         worktree_cwd: Working directory of the worktree (isolated copy).
 
     Returns:
@@ -25,7 +25,7 @@ def build_worktree_notice(
     """
     return (
         f"You are operating in an isolated git worktree at {worktree_cwd}. "
-        f"The parent agent works in {parent_cwd} — same repository, "
+        f"The parent context lives in {parent_cwd} — same repository, "
         f"same relative file structure, separate working copy.\n\n"
         f"Important:\n"
         f"- Paths from the parent context refer to {parent_cwd}\n"

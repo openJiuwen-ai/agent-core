@@ -42,7 +42,7 @@ if role == "leader" and teammate_mode != "plan_mode":
     allowed = allowed - {"approve_plan", "approve_tool"}
 ```
 
-Worktree tools (`enter_worktree`, `exit_worktree`) have locale files under `descs/` but are currently commented out in the permission set — keep the Markdown descriptions in sync if they are re-enabled.
+Worktree tools (`enter_worktree`, `exit_worktree`) have moved to `openjiuwen.harness.tools.worktree`. Their description and parameter schema live in `harness/prompts/tools/{enter,exit}_worktree.py`, and they are mounted by `TeamToolRail` whenever `agent_configurator.create_worktree_manager()` returns a `WorktreeManager` for the agent. There is nothing left to maintain in `tools/locales/descs/` for these two tools.
 
 ## Tool Design Principles
 

@@ -1,12 +1,20 @@
 # coding: utf-8
 
-"""Distributed worktree backend for remote nodes.
+"""Distributed worktree backend for remote nodes (team-specific).
 
 Enables worktree isolation across machines: the leader sends worktree
-lifecycle requests via Messager; each remote node maintains its own
+lifecycle requests via ``Messager``; each remote node maintains its own
 shallow clone and creates local worktrees within it.
 
-See design.md Section 23 for the full architecture.
+This module is team-specific because it depends on the team's storage
+layout (``agent_teams.paths.get_agent_teams_home``) for shallow-clone
+caching. The generic worktree manager / backend protocol live in
+``openjiuwen.harness.tools.worktree``.
+
+Importing this module has no side effect on the harness backend
+registry — callers that need a remote backend instantiate
+``RemoteWorktreeBackend(config, messager, node_id)`` directly and pass
+it as the ``backend=`` argument when constructing ``WorktreeManager``.
 """
 
 import asyncio
@@ -17,16 +25,16 @@ from typing import Any
 from pydantic import BaseModel
 
 from openjiuwen.agent_teams.paths import get_agent_teams_home
-from openjiuwen.agent_teams.worktree.git import (
+from openjiuwen.core.common.logging import team_logger
+from openjiuwen.harness.tools.worktree.git import (
     _run_git,
     fetch_ref,
     get_default_branch,
 )
-from openjiuwen.agent_teams.worktree.models import (
+from openjiuwen.harness.tools.worktree.models import (
     WorktreeConfig,
     WorktreeCreateResult,
 )
-from openjiuwen.core.common.logging import team_logger
 
 
 # -- Request / Response models ------------------------------------------------
@@ -150,6 +158,7 @@ class RemoteWorktreeBackend:
         Returns:
             True if the remote reports success.
         """
+        del repo_root
         request = WorktreeRemoteRequest(
             action="remove",
             worktree_path=worktree_path,
@@ -225,10 +234,10 @@ class WorktreeRemoteHandler:
     the local WorktreeManager.
     """
 
-    def __init__(self, manager: "WorktreeManager"):
-        from openjiuwen.agent_teams.worktree.manager import WorktreeManager as _WM
-
-        self._manager: _WM = manager
+    def __init__(self, manager: Any) -> None:
+        # ``manager`` is a ``WorktreeManager``; typed as ``Any`` to keep
+        # this module free of import cycles when WorktreeManager evolves.
+        self._manager = manager
         self._cloned_repos: dict[str, str] = {}
 
     async def handle(self, request: WorktreeRemoteRequest) -> WorktreeRemoteResponse:
@@ -263,7 +272,7 @@ class WorktreeRemoteHandler:
         """
         repo_root = await self._ensure_repo(request.repo_url or "")
         await fetch_ref(repo_root, request.base_branch or "main")
-        result = await self._manager.create_agent_worktree(request.slug or "")
+        result = await self._manager.create_owner_worktree(request.slug or "")
         return WorktreeRemoteResponse(
             worktree_path=result.worktree_path,
             worktree_branch=result.worktree_branch,
@@ -281,8 +290,7 @@ class WorktreeRemoteHandler:
             Response indicating success or failure.
         """
         wt_path = request.worktree_path or ""
-        # Find the repo root that owns this worktree
-        from openjiuwen.agent_teams.worktree.git import find_canonical_git_root
+        from openjiuwen.harness.tools.worktree.git import find_canonical_git_root
 
         repo_root = await find_canonical_git_root(wt_path)
         if not repo_root:
@@ -307,8 +315,8 @@ class WorktreeRemoteHandler:
         """Clone the repo if not already present on this node.
 
         Uses a content-addressable directory under
-        ``{get_agent_teams_home()}/remote_repos/`` so the same URL always maps
-        to the same local path.
+        ``{get_agent_teams_home()}/remote_repos/`` so the same URL always
+        maps to the same local path.
 
         Args:
             repo_url: Git remote URL to clone.
@@ -329,3 +337,11 @@ class WorktreeRemoteHandler:
 
         self._cloned_repos[repo_url] = local_path
         return local_path
+
+
+__all__ = [
+    "WorktreeRemoteRequest",
+    "WorktreeRemoteResponse",
+    "RemoteWorktreeBackend",
+    "WorktreeRemoteHandler",
+]

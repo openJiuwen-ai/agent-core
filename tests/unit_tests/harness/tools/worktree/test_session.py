@@ -1,13 +1,13 @@
 # coding: utf-8
 
-"""Tests for openjiuwen.agent_teams.worktree.session."""
+"""Tests for openjiuwen.harness.tools.worktree.session."""
 
 import asyncio
 
 import pytest
 
-from openjiuwen.agent_teams.worktree.models import WorktreeSession
-from openjiuwen.agent_teams.worktree.session import (
+from openjiuwen.harness.tools.worktree.models import WorktreeSession
+from openjiuwen.harness.tools.worktree.session import (
     get_current_session,
     require_current_session,
     set_current_session,

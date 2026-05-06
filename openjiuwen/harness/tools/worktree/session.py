@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from openjiuwen.agent_teams.worktree.models import WorktreeSession
+    from openjiuwen.harness.tools.worktree.models import WorktreeSession
 
 
 @dataclass
@@ -32,6 +32,7 @@ class WorktreeSessionState:
     the same agent share the same instance and see each other's
     mutations.
     """
+
     session: "WorktreeSession | None" = None
 
 
@@ -72,7 +73,7 @@ def init_session_state() -> None:
 
     Must be called before asyncio.gather copies the context, to ensure
     tool calls within the same agent share the same mutable holder.
-    Typically called during agent setup (e.g. _register_team_tools).
+    Typically called during agent setup (e.g. when registering worktree tools).
     """
     _get_state()
 

@@ -14,7 +14,7 @@ from openjiuwen.agent_teams.schema.blueprint import (
 )
 from openjiuwen.agent_teams.schema.team import TeamMemberSpec
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
-from openjiuwen.agent_teams.worktree.models import WorktreeConfig
+from openjiuwen.harness.tools.worktree import WorktreeConfig
 from openjiuwen.core.session.agent_team import Session as AgentTeamSession
 
 

@@ -37,7 +37,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamSpec,
 )
 from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
-from openjiuwen.agent_teams.worktree.models import WorktreeConfig
+from openjiuwen.harness.tools.worktree import WorktreeConfig
 from openjiuwen.core.memory.team import TeamMemoryConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 

@@ -26,17 +26,11 @@ def validate_slug(slug: str) -> None:
         ValueError: If slug is invalid, with specific reason.
     """
     if len(slug) > MAX_SLUG_LENGTH:
-        raise ValueError(
-            f"Invalid worktree name: must be {MAX_SLUG_LENGTH} "
-            f"characters or fewer (got {len(slug)})"
-        )
+        raise ValueError(f"Invalid worktree name: must be {MAX_SLUG_LENGTH} characters or fewer (got {len(slug)})")
 
     for segment in slug.split("/"):
         if segment in (".", ".."):
-            raise ValueError(
-                f'Invalid worktree name "{slug}": '
-                f'must not contain "." or ".." path segments'
-            )
+            raise ValueError(f'Invalid worktree name "{slug}": must not contain "." or ".." path segments')
         if not VALID_SLUG_SEGMENT.match(segment):
             raise ValueError(
                 f'Invalid worktree name "{slug}": '

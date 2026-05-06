@@ -40,7 +40,7 @@ agent_teams/
 ├── spawn/               # 成员启动（process / inprocess）
 ├── monitor/             # 团队运行态监控
 ├── team_workspace/      # 团队共享工作空间（跨成员的文件/锁/版本）
-└── worktree/            # Git worktree 隔离（成员级代码空间）
+└── worktree_remote.py   # 跨机器 worktree 后端（团队专属，generic 实现见 harness/tools/worktree）
 ```
 
 ### agent/ — 运行时主骨架
@@ -192,12 +192,14 @@ Messager 是点对点 + broadcast 的统一抽象，**任何直接新建 socket 
 4. 发送给 human_agent 的点对点消息 `is_read=True`；广播后 human_agent 的 `read_at` 立即跟进。
 5. TeamPolicyRail 注入 `team_hitt` section（priority=12），按 role 分别给 leader/teammate/human_agent 下达角色特定的行为约束。
 
-### worktree/ — Git worktree 隔离
+### worktree — Git worktree 隔离
 
-可选启用（`TeamAgentSpec.worktree`），为成员挂一个独立 git worktree。
-- `manager.py`：生命周期管理（创建/清理）
-- `backend.py`：`WorktreeBackend` 抽象 + `GitBackend` 默认实现；可用 `register_worktree_backend` 注册自定义后端（如远程）
-- `rails.py`：自动进入 worktree / diff summary 的 Rail
+通用实现已下沉到 `openjiuwen.harness.tools.worktree`，由 deepagent 与 team 共用。team 侧只保留两件事：
+
+- 通过 `TeamAgentSpec.worktree`（`WorktreeConfig`）描述配置，`agent_configurator.create_worktree_manager` 在非 LEADER 角色上构造 `WorktreeManager`。
+- `worktree_remote.py`：`RemoteWorktreeBackend` / `WorktreeRemoteHandler` 跨机器 worktree 后端，依赖 `paths.get_agent_teams_home`。需要时由调用方直接 `WorktreeManager(backend=RemoteWorktreeBackend(...))` 注入，不走 backend registry（构造参数不止 config）。
+
+`harness/tools/worktree` 暴露的 `WorktreeManager` 接受可选 `event_handler: Callable[[WorktreeEvent], Awaitable[None]]`；team 端如需把生命周期事件桥接到 `TeamEvent.WORKTREE_*` 总线，在 `create_worktree_manager` 里传一个适配器即可（当前未启用）。
 
 ## 架构铁律
 

@@ -18,7 +18,7 @@ from typing import (
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import ModelAllocator
     from openjiuwen.agent_teams.rails import FirstIterationGate
-    from openjiuwen.agent_teams.worktree.manager import WorktreeManager
+    from openjiuwen.harness.tools.worktree import WorktreeManager
     from openjiuwen.core.memory.team.manager import TeamMemoryManager
     from openjiuwen.harness.deep_agent import DeepAgent
 
