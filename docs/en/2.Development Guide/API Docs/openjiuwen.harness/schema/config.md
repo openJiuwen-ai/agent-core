@@ -68,7 +68,7 @@ Full configuration dataclass for a [`DeepAgent`](../deep_agent.md#class-openjiuw
 - **card** ([AgentCard](../../openjiuwen.core/single_agent/single_agent.md#class-openjiuwencoresingle_agentagentcard), optional): Agent identity card. Default: `None`.
 - **system_prompt** (str, optional): System prompt override. Default: `None`.
 - **enable_task_loop** (bool): Enable the autonomous task loop. Default: `False`.
-- **enable_async_subagent** (bool): Allow sub-agents to run asynchronously. Default: `False`.
+- **enable_async_subagent** (bool): Allow sub-agents to run asynchronously. Differentiate sync/async modes: register `TaskTool` for synchronous mode, register `session` tools for asynchronous mode. Default: `False`.
 - **add_general_purpose_agent** (bool): Automatically add a general-purpose sub-agent. Default: `False`.
 - **max_iterations** (int): Maximum task-loop iterations. Default: `15`.
 - **subagents** (list[[SubAgentConfig](#class-openjiuwenharnessschemasubagentconfig)], optional): Sub-agent configuration list. Default: `None`.

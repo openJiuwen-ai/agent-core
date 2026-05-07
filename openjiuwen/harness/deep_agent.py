@@ -135,7 +135,7 @@ class DeepAgent(BaseAgent):
         super().__init__(card)
 
     def set_session_toolkit(self, toolkit: SessionToolkit | None) -> None:
-        """Attach or clear the session toolkit (wired by SessionRail)."""
+        """Attach or clear the session toolkit (wired by SubagentRail async)."""
         self._session_toolkit = toolkit
 
     def configure(self, config: DeepAgentConfig) -> "DeepAgent":
