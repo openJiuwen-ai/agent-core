@@ -62,6 +62,7 @@ from _e2e_utils import (  # noqa: E402
     run_interactive,
 )
 
+from openjiuwen.agent_teams.agent.team_agent import TeamAgent  # noqa: E402
 from openjiuwen.agent_teams.constants import HUMAN_AGENT_MEMBER_NAME  # noqa: E402
 from openjiuwen.agent_teams.interaction import HumanAgentInboundEvent  # noqa: E402
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec  # noqa: E402
@@ -128,50 +129,24 @@ def _make_inbound_handler() -> Callable[[HumanAgentInboundEvent], Awaitable[None
     return _handler
 
 
-async def _arm_inbound_when_ready(
-    *,
-    team_name: str,
-    session_id: str,
+def _arm_inbound_callback(
+    leader: TeamAgent,
     member_name: str,
     callback: Callable[[HumanAgentInboundEvent], Awaitable[None]],
-    max_attempts: int = 600,
-    interval: float = 0.5,
 ) -> None:
-    """Poll until the team runtime + human_agent member exist, then register the callback.
+    """Register the SDK-facing inbound callback directly on the team backend.
 
-    The team runtime is registered when ``Runner.run_agent_team_streaming``
-    activates the team (kicked off by ``consume_stream``); the human_agent
-    member only exists after the leader's first ``build_team(enable_hitt=true)``
-    call. We keep retrying for up to ``max_attempts * interval`` seconds and
-    swallow the two expected transient errors:
-      * ``Runner.register_human_agent_inbound`` returns ``False`` while the
-        team entry has not been added to the pool yet.
-      * The backend raises ``KeyError`` while ``human_agent`` has not been
-        spawned yet.
+    ``backend._human_agent_names`` is pre-seeded from ``spec.predefined_members``
+    in ``TeamBackend.__init__``, so the human_agent name is already known the
+    moment ``spec.build()`` returns. We can attach the callback right here
+    without polling for the runtime entry to land in the pool.
     """
-    for _ in range(max_attempts):
-        try:
-            ok = await Runner.register_human_agent_inbound(
-                team_name=team_name,
-                session_id=session_id,
-                member_name=member_name,
-                callback=callback,
-            )
-        except KeyError:
-            ok = False
-        if ok:
-            team_logger.info(
-                "[hitt-e2e] human-agent inbound callback armed for %s in session %s",
-                member_name,
-                session_id,
-            )
-            return
-        await asyncio.sleep(interval)
-    team_logger.warning(
-        "[hitt-e2e] human-agent inbound never armed within %.1fs; "
-        "team runtime or human_agent member did not become ready",
-        max_attempts * interval,
-    )
+    backend = leader.team_backend
+    if backend is None:
+        team_logger.warning("[hitt-e2e] leader has no team_backend; inbound callback not armed")
+        return
+    backend.register_human_agent_inbound(member_name, callback)
+    team_logger.info("[hitt-e2e] human-agent inbound callback armed for %s", member_name)
 
 
 async def main() -> None:
@@ -181,18 +156,15 @@ async def main() -> None:
     spec = TeamAgentSpec.model_validate(cfg)
     leader = spec.build()
 
+    _arm_inbound_callback(
+        leader,
+        member_name=HUMAN_AGENT_MEMBER_NAME,
+        callback=_make_inbound_handler(),
+    )
+
     await Runner.start()
 
     session_id = runtime_cfg.get("session_id", "hitt_blast_furnace_session")
-
-    arm_task = asyncio.create_task(
-        _arm_inbound_when_ready(
-            team_name=spec.team_name,
-            session_id=session_id,
-            member_name=HUMAN_AGENT_MEMBER_NAME,
-            callback=_make_inbound_handler(),
-        )
-    )
 
     print(_BANNER)
 
@@ -204,12 +176,6 @@ async def main() -> None:
             team_name=spec.team_name,
         )
     finally:
-        if not arm_task.done():
-            arm_task.cancel()
-            try:
-                await arm_task
-            except asyncio.CancelledError:
-                pass
         await Runner.stop()
         print("Done.")
 

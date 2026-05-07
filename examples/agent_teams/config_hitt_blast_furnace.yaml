@@ -1,16 +1,18 @@
 # HITT Blast-Furnace Operation Team — config
 #
 # Loads the local `blast-furnace-operation-team` skill via SkillUseRail and
-# enables HITT so the framework auto-injects a reserved `human_agent` member.
-# The leader's persona instructs it to follow the SKILL's 7-step SOP and to
-# normalize SKILL role ids (which use `-`) to framework member names (`_`)
-# when invoking team tools.
+# enables HITT. The human collaborator is declared explicitly as a
+# HUMAN_AGENT predefined member (see `predefined_members` below); the
+# framework wires it up at build_team time. The leader's persona instructs
+# it to follow the SKILL's 7-step SOP and to normalize SKILL worker role
+# ids (which use `-`) to framework member names (`_`) when invoking
+# spawn_member / send_message.
 #
 # Sensitive values should be overridden via environment variables:
 #   API_BASE, LEADER_API_KEY, TEAMMATE_API_KEY, MODEL_NAME
 #
-# Prerequisite: start the furnace MCP server in a separate terminal before
-# launching this e2e — see the e2e file's docstring for the command.
+# The furnace MCP server is launched automatically by the framework as a
+# stdio subprocess; see the `mcps` block on the shared agent spec.
 
 team_name: hitt_blast_furnace_team
 lifecycle: persistent
