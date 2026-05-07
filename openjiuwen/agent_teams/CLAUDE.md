@@ -5,6 +5,9 @@
 本文件是本模块的入口索引。深入细节时跳转到：
 - `tools/CLAUDE.md` — 团队工具设计与描述契约
 - `prompts/CLAUDE.md` — Prompt 模板与语言切换
+- `runtime/CLAUDE.md` — 对象池 / 派发 / 并发门禁，spec vs 实例 pool 行为
+- `interaction/CLAUDE.md` — 三视角交互 inbox + HITT runtime 表面
+- `agent/CLAUDE.md` — TeamAgent 四象限分解 + spawn / coordination / stream 等 manager
 
 ## 公开入口（public API）
 
@@ -45,12 +48,9 @@ agent_teams/
 
 ### agent/ — 运行时主骨架
 
-| 文件 | 职责 |
-|---|---|
-| `team_agent.py` | `TeamAgent`（单一实现同时承担 Leader / Teammate 角色，内部组合一个 `DeepAgent`） |
-| `coordination/` | `CoordinatorLoop` 事件驱动唤醒循环 + dispatcher，**不做决策**，只负责 wake-up 和轮询 |
-| `member.py` | `TeamMember` 成员状态管理 |
-| `agent_configurator.py` | DeepAgent 装配，挂载 prompts/ 与 rails/ 子模块（spawn 时复用 `models/` 暴露的 allocator 回调） |
+`TeamAgent` 单一实现同时承担 Leader / Teammate 角色（按 `TeamRole` 切），内部组合一个 `DeepAgent`。字段按"四象限"拆（`blueprint` 静态 / `state` 跨 operator 可变 / `resources` 每实例 / `infra` 每进程），spawn / recovery / session / stream / coordination 各有独立 manager。
+
+详见 [`agent/CLAUDE.md`](agent/CLAUDE.md)。
 
 ### prompts/ — 系统提示词
 
@@ -146,76 +146,19 @@ Messager 是点对点 + broadcast 的统一抽象，**任何直接新建 socket 
 
 ### runtime/ — TeamAgent 对象池 + 派发 + 并发门禁
 
-| 文件 | 职责 |
-|---|---|
-| `pool.py` | `TeamRuntimePool` / `ActiveTeam` / `RuntimeState`。pool key 是 `team_name`，同一 team 在内存中至多一个 `ActiveTeam` 实例；同 session 多 team 通过 pool 多 entry 自然支持。`RuntimeState.RUNNING / PAUSED` 是运行时状态（与 `schema.team.TeamLifecycle` "temporary/persistent" 不同） |
-| `gate.py` | `InteractGate` / `AdmissionTicket`。run / interact 并发门禁：`admit / consume_done / close_and_drain / reset`。每个 `ActiveTeam` 自带一个 gate |
-| `dispatch.py` | `decide_run_action(...)` 纯函数 + `RunAction` / `RunActionKind`。9 路 truth table：`CREATE / NEW_TEAM_IN_SESSION / NEW_TEAM_IN_SESSION_WARM / COLD_RECOVER / WARM_RECOVER / RESUME_FROM_PAUSE / REJECT_RUNNING / REJECT_ORPHANED / REJECT_INCONSISTENT` |
-| `metadata.py` | session checkpoint 的 per-team namespace 读写：`read_team_namespace / write_team_namespace / merge_team_namespace / read_team_names_in_session`。状态结构 `state["teams"][team_name] = {spec, context, model_allocator_state, lifecycle}`，按 team 分桶 |
-| `manager.py` | `TeamRuntimeManager`：持有 `TeamRuntimePool`；`activate` 用 `decide_run_action` 派发后调用 `_apply_action` 执行副作用；`pause / interact / stop_team / release_session / delete_team` 通过 pool 查 entry。`interact` 接 `InteractPayload`，走 gate 的 `admit / consume_done`，分发到 `UserInbox`（GodView / Operator）或 `HumanAgentInbox`（HumanAgent） |
+`TeamRuntimePool` + `TeamRuntimeManager` + 9 路 dispatch truth table + `InteractGate`，是 `Runner.run_agent_team*` / `interact_agent_team` / `register_human_agent_inbound` / `pause_agent_team` / `stop_team` / `release_session` / `delete_team` 这一组 SDK facade 的实现层。spec 路径走 `activate`，已 build 的 TeamAgent leader 实例走 `register_instance` —— 两条路径在 pool 中殊途同归。
 
-- **派发决策是纯函数**：`decide_run_action` 只看 `(team_in_db, team_in_session, pool_entry, target_session_id, target_team_name)`，无副作用。manager 把 IO 收集进派发输入，然后 `_apply_action` 才动 factory / pool / session。改派发时改 `dispatch.py`，不要把决策逻辑塞回 manager。
-- **同一 team 在内存中只有一个实例**：切 session 走 `recover_for_existing_session`（warm），不要让 pool 出现多个相同 `team_name` 的 entry。
-- **InteractGate 的生命周期与 run cycle 对齐**：`run_agent_team[_streaming]` 退出 `finally` 调 `_close_team_interact_gate`（Runner 内 helper）；warm 路径 activate 时调 `gate.reset()` 让下一个 cycle 重新放行。
-- **静止前置**：`release_session` / `delete_team` 在 pool 仍持有相关 entry 时报 `AGENT_TEAM_BUSY_INVALID`（ValidationError），调用方必须先 `stop_team`。
-- `Runner` 在 `_get_team_runtime_manager()` 里 lazy import 它，避免子进程 bootstrap 时拉链。
-
-#### Stream 生命周期 ≠ OuterLoop 单轮
-
-`Runner.run_agent_team_streaming` 的 stream 不会因为 leader DeepAgent 单轮 OuterLoop "all tasks completed, controller cleaned up" 就结束。stream 的真正终止由 team 层显式动作触发：`pause_agent_team` / `stop_agent_team` / `clean_team`（或 spec 路径下 `_close_team_interact_gate` 的 finally 收尾，但那也得 `agent.stream(...)` 自身先返回）。leader OuterLoop 跑完一轮后会 idle 等下一个唤醒事件（worker 回报、用户 interact 等），dispatcher 仍在调度，pool entry 仍 `RUNNING`。基于"OuterLoop 完成 = stream 结束 = entry 失活"做的判断都是错的——遇到 `interact_agent_team` 返回 `not_active` 时，先查 entry 是否在 pool 里、是否走了 spec 路径，而不是怀疑 stream 已收尾。
-
-#### Spec 路径 vs 实例路径：pool 行为不一致（已知坑）
-
-`Runner.run_agent_team_streaming` 同时接 `TeamAgentSpec` 和 `TeamAgent` 实例：
-
-- **Spec 路径**：`manager.activate(spec, ...)` 创建 pool entry，`Runner.interact_agent_team` / `register_human_agent_inbound` 都通过 `_resolve_entry` 找得到。
-- **实例路径**：`_prepare_agent_team` 直接调 `agent.stream(...)`，**不走 manager.activate，不入 pool**。后续 `Runner.interact_agent_team` 永远 `DeliverResult.failure("not_active")`，`Runner.register_human_agent_inbound` 永远返回 False。
-
-对 SDK 用户，标准用法是传 spec；如果你已经在外面 `spec.build()` 了（典型 e2e 写法），又要用 `Runner.interact_agent_team` 路由 HITT 输入，就会撞这个不一致。绕开的两种方式：(a) 不预先 `spec.build()`，把 spec 直接交给 streaming，回调用 `Runner.register_human_agent_inbound` 通过 pool 注册；(b) 直接调 `leader.team_backend.register_human_agent_inbound(...)` + `HumanAgentInbox.send(...)` 走 backend 层（绕过 pool / Runner facade）。两条路径要让行为对齐需要 framework 层支持"把已有实例注册为 pool entry"，目前没有这个 API。
+详见 [`runtime/CLAUDE.md`](runtime/CLAUDE.md)。
 
 ### team_workspace/ — 共享工作空间
 
 跨成员的文件共享区，支持锁 / 版本 / 冲突策略。独立于 worktree：**worktree 管代码隔离，workspace 管产物协同**。
 
-### interaction/ — 外部交互入口
+### interaction/ — 外部交互入口 + HITT
 
-| 文件 | 作用 |
-|---|---|
-| `payload.py` | `GodViewMessage` / `OperatorMessage` / `HumanAgentMessage` 三种交互视角的 dataclass + `InteractPayload` Union + `DeliverResult(ok, message_id, reason)` 统一返回类型 |
-| `router.py` | `parse_mention(raw) -> (target, body) \| None` 纯函数；`is_reserved_name(name)` 校验保留名 |
-| `user_inbox.py` | `UserInbox`：user 侧显式 API。`broadcast` / `direct` / `deliver_to_leader`，全部返回 `DeliverResult` |
-| `human_agent_inbox.py` | `HumanAgentInbox`：human_agent 对外发声，仅在 HITT 启用时可用。`send` 成功返 `DeliverResult`；HITT 关闭抛 `HumanAgentNotEnabledError`，未知 sender 抛 `UnknownHumanAgentError`（manager 层捕获转 `DeliverResult.failure(reason)`） |
+三种交互视角（`GodViewMessage` / `OperatorMessage` / `HumanAgentMessage`）+ `UserInbox` / `HumanAgentInbox` 的实现层，所有 HITT runtime 表面（`enable_hitt` 分层开关、人类成员来源、一致性约束、运行约束）也落在这里。
 
-- `Runner.interact_agent_team(payload, *, team_name, session_id)` 接收 `InteractPayload`，bare `str` 作为 `GodViewMessage` 的便捷形式。
-- 三视角到 inbox 的 dispatch 统一在 `runtime/manager.py:_dispatch_payload`：GodView → `deliver_to_leader`，Operator(target=None/x) → `UserInbox.broadcast/direct`，HumanAgent → `HumanAgentInbox.send`。
-- 旧的 `@xxx body` 解析从 `agent/dispatcher.py` 移到这里——dispatcher 只保留调用点。`TeamAgent.broadcast()` 和 `TeamAgent.human_agent_say()` 也走这一层。
-
-### HITT（Human in the Team）
-
-`enable_hitt` 是**分层开关**：
-
-- `TeamAgentSpec.enable_hitt`（spec 层）= 能力天花板（capability ceiling）。True 才允许 HITT；False 时所有 human-agent 创建路径全部拒绝。
-- `build_team(enable_hitt=...)`（工具参数，`Optional[bool]`）= 本次实例的运行时开关。`None` 继承 spec；`True` 显式启用（要求 spec=True，否则报错）；`False` 显式禁用（即使 spec=True 也覆盖，跳过预配的 HUMAN_AGENT 并 warning）。
-
-人类成员的来源：
-
-- **静态**：在 `TeamAgentSpec.predefined_members` 显式声明 `role_type=HUMAN_AGENT` 成员（自定 `member_name`，可多人）。框架不再隐式注入默认 `human_agent`。
-- **动态**：leader 在已建团后通过 `spawn_member(role_type='human_agent', member_name=..., display_name=..., desc=...)` 拉新人类成员加入。`role_type='human_agent'` 时禁止传 `model_name` / `prompt`（由框架内置模板托管）。
-
-一致性约束（`TeamAgentSpec.build()` 时 fail-fast）：
-
-- `enable_hitt=False` 且 `predefined_members` 含 HUMAN_AGENT → `AGENT_TEAM_CONFIG_INVALID`（特性禁了但预配了人）。
-- `enable_hitt=True` 且 `predefined_members` 无 HUMAN_AGENT → 允许（动态 spawn 路径）。
-
-`_resolve_team_mode`（`agent_configurator.py:55`）只把**非 HUMAN_AGENT** 的 predefined member 计入 predefined 派生 —— 所以纯 HITT 团队（仅声明人类成员）仍然是 `default` 模式，leader 保留 `spawn_member` 工具。
-
-运行约束（代码层 + Prompt 层双重保证）：
-
-1. `human_agent` 是保留成员名（`constants.RESERVED_MEMBER_NAMES`），用作动态 spawn 的默认人类成员名；自定 HUMAN_AGENT 成员名可避开此保留名。普通 teammate 的 predefined 成员仍然不允许撞保留名（`_validate_reserved_names`）。
-2. human-agent 走标准 UNSTARTED → spawn 流程（与 teammate 一致），但工具集仅保留 `view_task` + `member_complete_task`（`HUMAN_AGENT_TOOLS`）；rail 装配会剥离 `FirstIterationGate` / `TeamToolApprovalRail`。
-3. 一旦 `task.assignee` 指向某个 human-agent 且状态 CLAIMED，`UpdateTaskTool` 拒绝 reassign 和 cancel；批量 cancel 链路也跳过。
-4. 发送给 human-agent 的点对点消息 `is_read=True`；广播后 human-agent 的 `read_at` 立即跟进。
-5. TeamPolicyRail 注入 `team_hitt` section（priority=12），按 role 给 leader/teammate/human_agent 下达角色特定的行为约束。section 注入条件来自 `backend.hitt_enabled()` —— 反映运行时 effective flag，不依赖 roster 是否已 spawn。
+详见 [`interaction/CLAUDE.md`](interaction/CLAUDE.md)。
 
 ### worktree — Git worktree 隔离
 
