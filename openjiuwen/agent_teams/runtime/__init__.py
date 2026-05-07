@@ -8,7 +8,7 @@ from openjiuwen.agent_teams.runtime.dispatch import (
 from openjiuwen.agent_teams.runtime.manager import (
     TeamRuntimeActivation,
     TeamRuntimeManager,
-    TeamSessionMetadata,
+    TeamSessionReleaseInfo,
 )
 from openjiuwen.agent_teams.runtime.pool import (
     ActiveTeam,
@@ -26,5 +26,5 @@ __all__ = [
     "TeamRuntimeActivation",
     "TeamRuntimeManager",
     "TeamRuntimePool",
-    "TeamSessionMetadata",
+    "TeamSessionReleaseInfo",
 ]

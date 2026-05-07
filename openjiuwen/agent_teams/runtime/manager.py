@@ -45,6 +45,7 @@ from openjiuwen.agent_teams.runtime.dispatch import (
 )
 from openjiuwen.agent_teams.runtime.metadata import (
     read_team_namespace,
+    read_team_names_in_session,
     read_teams_bucket,
 )
 from openjiuwen.agent_teams.runtime.pool import (
@@ -80,10 +81,10 @@ class TeamRuntimeActivation:
 
 
 @dataclass(slots=True)
-class TeamSessionMetadata:
-    """Resolved metadata for an agent team session."""
+class TeamSessionReleaseInfo:
+    """Resolved session-scoped release info for one or more persisted teams."""
 
-    team_name: str
+    team_names: list[str]
     db_config: DatabaseConfig
 
 
@@ -350,10 +351,10 @@ class TeamRuntimeManager:
 
         db_config: Optional[DatabaseConfig] = None
         if session_ids:
-            metadata = await self.resolve_team_session_metadata(session_ids[0])
-            if metadata is None:
-                raise RuntimeError(f"Cannot resolve team session metadata for {session_ids[0]}, aborting delete_team")
-            db_config = metadata.db_config
+            release_info = await self.resolve_team_session_release_info(session_ids[0])
+            if release_info is None:
+                raise RuntimeError(f"Cannot resolve team session release info for {session_ids[0]}, aborting delete_team")
+            db_config = release_info.db_config
 
         from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
 
@@ -401,32 +402,32 @@ class TeamRuntimeManager:
                 )
                 await self.stop_team(team_name=team.team_name, session_id=session_id)
 
-        metadata = await self.resolve_team_session_metadata(session_id)
-        if metadata is None:
-            raise RuntimeError(f"Cannot resolve team session metadata for {session_id}")
+        release_info = await self.resolve_team_session_release_info(session_id)
+        if release_info is None:
+            raise RuntimeError(f"Cannot resolve team session release info for {session_id}")
 
         from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
 
-        db = get_shared_db(metadata.db_config)
+        db = get_shared_db(release_info.db_config)
         await db.initialize()
         await db.drop_session_tables_by_id(session_id)
 
     @staticmethod
-    async def resolve_team_session_metadata(session_id: str) -> Optional[TeamSessionMetadata]:
-        """Resolve metadata for an agent team session.
+    async def resolve_team_session_release_info(session_id: str) -> Optional[TeamSessionReleaseInfo]:
+        """Resolve session-scoped release info for persisted teams.
 
-        Returns None if the session has no agent team buckets. When one or
-        more team buckets exist, returns metadata derived from the first
-        parseable bucket — db_config is shared across teams within a
-        session, so any bucket suffices for callers that only need to drop
-        dynamic tables.
+        Returns None when the session has no persisted team buckets. When
+        one or more buckets exist, returns a release info object with all
+        discovered team names and the first parseable db_config.
 
         Raises:
-            RuntimeError: A bucket exists but its spec/context cannot be
-                parsed, or db_config is missing.
+            RuntimeError: Team buckets exist but none can be parsed into a
+                usable db_config.
         """
         if not session_id:
             return None
+
+        from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
 
         session = create_agent_team_session(session_id=session_id)
         try:
@@ -439,40 +440,39 @@ class TeamRuntimeManager:
         if not teams:
             return None
 
-        team_name = sorted(teams.keys())[0]
-        bucket = teams[team_name]
-        spec_data = bucket.get("spec")
-        context_data = bucket.get("context")
-        if spec_data is None or context_data is None:
-            raise RuntimeError(f"Session {session_id} has team bucket '{team_name}' missing spec or context")
+        team_names = read_team_names_in_session(session)
+        parse_errors: list[str] = []
+        db_config: Optional[DatabaseConfig] = None
 
-        from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
-        from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
+        for team_name, bucket in sorted(teams.items()):
+            context_data = bucket.get("context")
+            if context_data is None:
+                parse_errors.append(f"team bucket '{team_name}' missing context")
+                continue
 
-        try:
-            spec = TeamAgentSpec.model_validate(spec_data)
-            if spec.team_name != team_name:
-                team_logger.warning(
-                    "Session %s bucket key '%s' mismatches spec.team_name '%s'",
-                    session_id,
-                    team_name,
-                    spec.team_name,
-                )
-        except Exception as e:
-            team_logger.warning("Failed to parse spec for session %s: %s", session_id, e)
-            raise RuntimeError(f"Session {session_id} team bucket '{team_name}' spec parsing failed: {e}") from e
+            try:
+                context = TeamRuntimeContext.model_validate(context_data)
+            except Exception as e:
+                parse_errors.append(f"team bucket '{team_name}' context parsing failed: {e}")
+                continue
 
-        try:
-            context = TeamRuntimeContext.model_validate(context_data)
+            if context.db_config is None:
+                parse_errors.append(f"team bucket '{team_name}' db_config is missing")
+                continue
+
             db_config = context.db_config
-        except Exception as e:
-            team_logger.warning("Failed to parse context for session %s: %s", session_id, e)
-            raise RuntimeError(f"Session {session_id} team bucket '{team_name}' context parsing failed: {e}") from e
+            break
 
         if db_config is None:
-            raise RuntimeError(f"Session {session_id} team bucket '{team_name}' db_config is missing")
+            details = "; ".join(parse_errors) if parse_errors else "no parseable team bucket found"
+            raise RuntimeError(
+                f"Cannot resolve team session release info for {session_id}: {details}"
+            )
 
-        return TeamSessionMetadata(team_name=team_name, db_config=db_config)
+        return TeamSessionReleaseInfo(
+            team_names=sorted(team_names),
+            db_config=db_config,
+        )
 
     # ------------------------------------------------------------------
     # internals
@@ -602,8 +602,8 @@ class TeamRuntimeManager:
         if isinstance(session, AgentTeamSession):
             return session
         if isinstance(session, str):
-            return create_agent_team_session(session_id=session, team_id=spec.team_name)
-        return create_agent_team_session(team_id=spec.team_name)
+            return create_agent_team_session(session_id=session)
+        return create_agent_team_session()
 
     @staticmethod
     async def _pre_run_with_inputs(session: AgentTeamSession, inputs: object) -> None:

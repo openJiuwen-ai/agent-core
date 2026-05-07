@@ -496,8 +496,8 @@ class _TeamRunnerMixin:
         """
         from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 
-        metadata = await TeamRuntimeManager.resolve_team_session_metadata(session_id)
-        if metadata is None:
+        release_info = await TeamRuntimeManager.resolve_team_session_release_info(session_id)
+        if release_info is None:
             return False
         await self._get_team_runtime_manager().release_session(session_id, force=force)
         await CheckpointerFactory.get_checkpointer().release(session_id)
@@ -571,16 +571,14 @@ class _TeamRunnerMixin:
     ):
         if isinstance(session, AgentTeamSession):
             return session
-        team_id = getattr(agent_team.card, "id", None) or getattr(agent_team.card, "name", "agent_team")
         if isinstance(session, AgentSession):
             return create_agent_team_session(
                 session_id=session.get_session_id(),
                 envs=session.get_envs(),
-                team_id=team_id,
             )
         if isinstance(session, str):
-            return create_agent_team_session(session_id=session, team_id=team_id)
-        return create_agent_team_session(team_id=team_id)
+            return create_agent_team_session(session_id=session)
+        return create_agent_team_session()
 
     async def _close_team_interact_gate(
         self,
