@@ -11,11 +11,9 @@ from typing import (
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.core.session.agent_team import Session as AgentTeamSession
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.agent_configurator import AgentConfigurator
-    from openjiuwen.agent_teams.agent.session_manager import SessionManager
     from openjiuwen.agent_teams.agent.spawn_manager import SpawnManager
 
 
@@ -63,20 +61,22 @@ class RecoveryManager:
         return restarted
 
     def persist_leader_config(self, session) -> None:
+        from openjiuwen.agent_teams.runtime.metadata import write_team_namespace
+
         spec = self._configurator.spec
         ctx = self._configurator.ctx
-        if spec is None or ctx is None:
+        team_name = self._configurator.team_name
+        if spec is None or ctx is None or team_name is None:
             return
 
         payload: dict[str, Any] = {
             "spec": spec.model_dump(mode="json"),
             "context": ctx.model_dump(mode="json"),
-            "team_name": self._configurator.team_name,
         }
         allocator = self._configurator.model_allocator
         if allocator is not None:
             payload["model_allocator_state"] = allocator.state_dict()
-        session.update_state(payload)
+        write_team_namespace(session, team_name, payload)
 
     async def _mark_teammate_restarting_for_session_switch(
         self,
@@ -185,11 +185,16 @@ class RecoveryManager:
             await self._spawn_manager.restart_teammate(member_name)
 
     def persist_allocator_state(self, team_session) -> None:
+        from openjiuwen.agent_teams.runtime.metadata import merge_team_namespace
+
         allocator = self._configurator.model_allocator
-        if team_session is None or allocator is None:
+        team_name = self._configurator.team_name
+        if team_session is None or allocator is None or team_name is None:
             return
         try:
-            team_session.update_state(
+            merge_team_namespace(
+                team_session,
+                team_name,
                 {"model_allocator_state": allocator.state_dict()},
             )
         except Exception as e:

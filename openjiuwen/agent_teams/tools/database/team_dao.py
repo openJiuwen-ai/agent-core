@@ -57,6 +57,18 @@ class TeamDao:
             result = await session.execute(select(Team).where(Team.team_name == team_name))
             return result.scalar_one_or_none()
 
+    async def team_exists(self, team_name: str) -> bool:
+        """Check whether a team row exists in the static table.
+
+        Lighter than ``get_team`` when only existence is needed: selects the
+        team name column instead of hydrating a full ORM object.
+        """
+        async with self._session_local() as session:
+            result = await session.execute(
+                select(Team.team_name).where(Team.team_name == team_name)
+            )
+            return result.scalar_one_or_none() is not None
+
     async def delete_team(self, team_name: str) -> bool:
         """Delete a team (cascade delete will remove related records).
 

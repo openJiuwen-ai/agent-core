@@ -12,7 +12,7 @@ from typing import Optional
 
 import pytest
 
-from openjiuwen.agent_teams.agent.team_section_cache import MtimeSectionCache
+from openjiuwen.agent_teams.prompts import MtimeSectionCache
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from tests.test_logger import logger
 

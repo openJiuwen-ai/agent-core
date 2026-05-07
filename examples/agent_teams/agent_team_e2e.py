@@ -56,7 +56,6 @@ async def main() -> None:
     runtime_cfg = cfg.pop("runtime", {})
 
     spec = TeamAgentSpec.model_validate(cfg)
-    leader = spec.build()
 
     await Runner.start()
 
@@ -66,7 +65,7 @@ async def main() -> None:
     print("Type 'exit' or 'quit' to stop.")
     print("=" * 60)
 
-    await run_interactive(leader, runtime_cfg, default_session_id="agent_team_session")
+    await run_interactive(spec, runtime_cfg, default_session_id="agent_team_session")
 
     await Runner.stop()
     print("Done.")

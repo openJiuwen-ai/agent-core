@@ -33,8 +33,14 @@ from openjiuwen.agent_teams.schema.blueprint import (
     TransportSpec,
 )
 from openjiuwen.agent_teams.schema.events import TeamEvent
+from openjiuwen.agent_teams.models import ModelPoolEntry
+from openjiuwen.agent_teams.runtime import (
+    RunAction,
+    RunActionKind,
+    TeamRuntimeActivation,
+    TeamRuntimeManager,
+)
 from openjiuwen.agent_teams.schema.team import (
-    ModelPoolEntry,
     TeamLifecycle,
     TeamMemberSpec,
     TeamRole,
@@ -64,12 +70,16 @@ __all__ = [
     "Messager",
     "MessagerPeerConfig",
     "MessagerTransportConfig",
+    "RunAction",
+    "RunActionKind",
     "TeamAgent",
     "TeamEvent",
     "TeamLifecycle",
     "TeamMemberSpec",
     "TeamRole",
+    "TeamRuntimeActivation",
     "TeamRuntimeContext",
+    "TeamRuntimeManager",
     "TeamSpec",
     "TeamRuntimeMessager",
     "PyZmqMessager",

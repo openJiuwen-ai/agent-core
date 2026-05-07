@@ -23,6 +23,7 @@ from openjiuwen.core.runner.spawn.process_manager import SpawnConfig
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.agent_configurator import AgentConfigurator
+    from openjiuwen.agent_teams.agent.state import TeamAgentState
     from openjiuwen.core.runner.spawn.process_manager import SpawnedProcessHandle
 
 
@@ -38,12 +39,13 @@ class SpawnManager:
 
     def __init__(
         self,
+        *,
+        state: "TeamAgentState",
         configurator: AgentConfigurator,
-        session_id_getter: Callable[[], Optional[str]],
         team_agent_getter: Callable[[], Any],
     ):
+        self._state = state
         self._configurator = configurator
-        self._get_session_id = session_id_getter
         self._get_team_agent = team_agent_getter
 
         self.spawned_handles: dict[str, SpawnedProcessHandle] = {}
@@ -68,7 +70,7 @@ class SpawnManager:
                 team_agent=self._get_team_agent(),
                 ctx=ctx,
                 initial_message=initial_message,
-                session_id=self._get_session_id() or session,
+                session_id=self._state.session_id or session,
             )
         else:
             handle = await Runner.spawn_agent(
@@ -91,6 +93,18 @@ class SpawnManager:
 
         handle.on_unhealthy = _trigger_unhealthy_recovery
         return handle
+
+    def lookup_inprocess_agent(self, member_name: str) -> Optional[Any]:
+        """Return the live ``TeamAgent`` for an inprocess-spawned member.
+
+        Returns ``None`` for subprocess-spawned members (they live in a
+        different process and cannot be addressed by direct method call)
+        or when no handle is registered for ``member_name``.
+        """
+        handle = self.spawned_handles.get(member_name)
+        if handle is None:
+            return None
+        return getattr(handle, "agent_ref", None)
 
     async def cleanup_teammate(self, member_name: str) -> None:
         handle = self.spawned_handles.pop(member_name, None)
@@ -125,7 +139,7 @@ class SpawnManager:
                 await self.spawn_teammate(
                     ctx,
                     initial_message=initial_message,
-                    session=self._get_session_id(),
+                    session=self._state.session_id,
                     spawn_config=spawn_config,
                 )
                 await self.publish_restart_event(member_name, attempt)
@@ -158,7 +172,7 @@ class SpawnManager:
     async def build_context_from_db(self, member_name: str) -> Optional[TeamRuntimeContext]:
         import json
 
-        from openjiuwen.agent_teams.agent.model_allocator import resolve_member_model
+        from openjiuwen.agent_teams.models.allocator import resolve_member_model
 
         team_backend = self._configurator.team_backend
         if team_backend is None:
@@ -192,8 +206,13 @@ class SpawnManager:
                     )
 
         ctx = self._configurator.ctx
+        # Role isn't stored on the member row; infer it from the live
+        # human-agent roster the leader holds. Without this the standard
+        # spawn path would label every UNSTARTED member as TEAMMATE and
+        # the human agent would inherit the wrong tool / rail set.
+        role = TeamRole.HUMAN_AGENT if team_backend.is_human_agent(teammate.member_name) else TeamRole.TEAMMATE
         return TeamRuntimeContext(
-            role=TeamRole.TEAMMATE,
+            role=role,
             member_name=teammate.member_name,
             persona=teammate.desc or "",
             team_spec=ctx.team_spec if ctx else None,
@@ -207,12 +226,12 @@ class SpawnManager:
         team_backend = self._configurator.team_backend
         if not messager or not team_backend:
             return
+        from openjiuwen.agent_teams.context import get_session_id
         from openjiuwen.agent_teams.schema.events import (
             EventMessage,
             MemberRestartedEvent,
             TeamTopic,
         )
-        from openjiuwen.agent_teams.spawn.context import get_session_id
 
         try:
             await messager.publish(

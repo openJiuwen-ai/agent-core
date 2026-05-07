@@ -7,12 +7,13 @@ import os
 from typing import (
     TYPE_CHECKING,
     Any,
-    Dict,
-    List,
     Optional,
 )
 
-from openjiuwen.agent_teams.agent.policy import role_policy
+from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
+from openjiuwen.agent_teams.agent.infra import TeamInfra
+from openjiuwen.agent_teams.agent.payload import SpawnPayloadBuilder
+from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
 from openjiuwen.agent_teams.messager import (
     Messager,
     create_messager,
@@ -20,8 +21,11 @@ from openjiuwen.agent_teams.messager import (
 from openjiuwen.agent_teams.paths import (
     independent_member_workspace,
     team_home,
+)
+from openjiuwen.agent_teams.paths import (
     team_memory_dir as default_team_memory_dir,
 )
+from openjiuwen.agent_teams.prompts import role_policy
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import SysOperationSpec
 from openjiuwen.agent_teams.schema.team import (
@@ -32,13 +36,8 @@ from openjiuwen.agent_teams.schema.team import (
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.core.foundation.tool import ToolCard
-from openjiuwen.core.foundation.tool.base import Tool
-from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.runner.spawn.agent_config import (
     SpawnAgentConfig,
-    SpawnAgentKind,
-    serialize_runner_config,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode
@@ -46,17 +45,21 @@ from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.prompts import resolve_language as _resolve_language
 
 if TYPE_CHECKING:
-    from openjiuwen.agent_teams.agent.model_allocator import Allocation, ModelAllocator
-    from openjiuwen.agent_teams.agent.rails import FirstIterationGate
+    from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
+    from openjiuwen.agent_teams.rails import FirstIterationGate
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
-    from openjiuwen.agent_teams.worktree.manager import WorktreeManager
     from openjiuwen.core.memory.team.manager import TeamMemoryManager
+    from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
 def _resolve_team_mode(spec: TeamAgentSpec) -> str:
     if spec.team_mode is not None:
         return spec.team_mode
-    return "predefined" if spec.predefined_members else "default"
+    # HUMAN_AGENT predefined members are HITT roster declarations, not a
+    # signal to lock the team into "predefined" mode. Only non-human
+    # predefined teammates should drop the leader's spawn_member tool.
+    non_human_predefined = [m for m in spec.predefined_members if m.role_type != TeamRole.HUMAN_AGENT]
+    return "predefined" if non_human_predefined else "default"
 
 
 class AgentConfigurator:
@@ -72,24 +75,114 @@ class AgentConfigurator:
 
     def __init__(self, card: AgentCard):
         self._card = card
-        self.spec: Optional[TeamAgentSpec] = None
-        self.ctx: Optional[TeamRuntimeContext] = None
-        self.role_policy: str = ""
-        self.workspace_manager: Optional[TeamWorkspaceManager] = None
-        self.workspace_initialized: bool = False
-        self.worktree_manager: Optional[WorktreeManager] = None
-        self.model_allocator: Optional[ModelAllocator] = None
+        self._blueprint: Optional[TeamAgentBlueprint] = None
+        self._spawn_payload_builder: Optional[SpawnPayloadBuilder] = None
+        self._infra = TeamInfra()
+        self._resources = PrivateAgentResources()
         self.leader_allocation: Optional[Allocation] = None
-        self.tool_cards: List[ToolCard] = []
-        self.deep_agent: Optional[DeepAgent] = None
-        self.team_backend: Optional[TeamBackend] = None
-        self.task_manager: Any = None
-        self.message_manager: Any = None
-        self.messager: Optional[Messager] = None
-        self.member_port_map: dict[str, int] = {}
-        self.teammate_port_counter: int = 0
-        self.memory_manager: Optional[TeamMemoryManager] = None
-        self.first_iter_gate: Optional[FirstIterationGate] = None
+        self._on_teammate_created: Optional[Any] = None
+
+    # ------------------------------------------------------------------
+    # Field forwarding to TeamInfra / PrivateAgentResources
+    # ------------------------------------------------------------------
+
+    @property
+    def infra(self) -> TeamInfra:
+        """Return the per-process infrastructure container."""
+        return self._infra
+
+    @property
+    def resources(self) -> PrivateAgentResources:
+        """Return the per-instance runtime resources container."""
+        return self._resources
+
+    @property
+    def messager(self) -> Optional[Messager]:
+        return self._infra.messager
+
+    @messager.setter
+    def messager(self, value: Optional[Messager]) -> None:
+        self._infra.messager = value
+
+    @property
+    def team_backend(self) -> Optional[TeamBackend]:
+        return self._infra.team_backend
+
+    @team_backend.setter
+    def team_backend(self, value: Optional[TeamBackend]) -> None:
+        self._infra.team_backend = value
+
+    @property
+    def workspace_manager(self) -> Optional["TeamWorkspaceManager"]:
+        return self._infra.workspace_manager
+
+    @workspace_manager.setter
+    def workspace_manager(self, value: Optional["TeamWorkspaceManager"]) -> None:
+        self._infra.workspace_manager = value
+
+    @property
+    def workspace_initialized(self) -> bool:
+        return self._infra.workspace_initialized
+
+    @workspace_initialized.setter
+    def workspace_initialized(self, value: bool) -> None:
+        self._infra.workspace_initialized = value
+
+    @property
+    def task_manager(self) -> Any:
+        return self._infra.task_manager
+
+    @task_manager.setter
+    def task_manager(self, value: Any) -> None:
+        self._infra.task_manager = value
+
+    @property
+    def message_manager(self) -> Any:
+        return self._infra.message_manager
+
+    @message_manager.setter
+    def message_manager(self, value: Any) -> None:
+        self._infra.message_manager = value
+
+    @property
+    def deep_agent(self) -> Optional[DeepAgent]:
+        return self._resources.deep_agent
+
+    @deep_agent.setter
+    def deep_agent(self, value: Optional[DeepAgent]) -> None:
+        self._resources.deep_agent = value
+
+    @property
+    def worktree_manager(self) -> Optional["WorktreeManager"]:
+        return self._resources.worktree_manager
+
+    @worktree_manager.setter
+    def worktree_manager(self, value: Optional["WorktreeManager"]) -> None:
+        self._resources.worktree_manager = value
+
+    @property
+    def memory_manager(self) -> Optional["TeamMemoryManager"]:
+        return self._resources.memory_manager
+
+    @memory_manager.setter
+    def memory_manager(self, value: Optional["TeamMemoryManager"]) -> None:
+        self._resources.memory_manager = value
+
+    @property
+    def first_iter_gate(self) -> Optional["FirstIterationGate"]:
+        return self._resources.first_iter_gate
+
+    @first_iter_gate.setter
+    def first_iter_gate(self, value: Optional["FirstIterationGate"]) -> None:
+        self._resources.first_iter_gate = value
+
+    @property
+    def model_allocator(self) -> Optional["ModelAllocator"]:
+        return self._resources.model_allocator
+
+    @model_allocator.setter
+    def model_allocator(self, value: Optional["ModelAllocator"]) -> None:
+        self._resources.model_allocator = value
 
     def configure(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> DeepAgent:
         """Main entry point: configure infrastructure and build DeepAgent."""
@@ -97,9 +190,18 @@ class AgentConfigurator:
         return self.setup_agent(spec, ctx)
 
     def setup_infra(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext, *, on_teammate_created=None) -> None:
-        """Phase 1: set spec/context, create messager, workspace manager, register team tools."""
-        self.spec = spec
-        self.ctx = ctx
+        """Phase 1: set spec/context, create messager, workspace manager, prepare team backend."""
+        agent_spec = self.resolve_agent_spec(spec, ctx.role, ctx.member_name)
+        resolved_language = _resolve_language(agent_spec.language)
+        self._blueprint = TeamAgentBlueprint(
+            card=self._card,
+            spec=spec,
+            ctx=ctx,
+            role_policy=role_policy(ctx.role, language=resolved_language),
+            language=resolved_language,
+        )
+        self._spawn_payload_builder = SpawnPayloadBuilder(spec, ctx)
+        self._on_teammate_created = on_teammate_created
 
         messager_config = ctx.messager_config
         member_name = ctx.member_name
@@ -112,13 +214,16 @@ class AgentConfigurator:
             self.workspace_manager = self.create_workspace_manager(spec, ctx)
 
         if ctx.role == TeamRole.LEADER and self.model_allocator is None:
-            from openjiuwen.agent_teams.agent.model_allocator import (
+            from openjiuwen.agent_teams.models.allocator import (
                 build_model_allocator,
             )
 
             self.model_allocator = build_model_allocator(spec, ctx.team_spec)
 
-        self.tool_cards = self.register_team_tools(spec, ctx, self.messager, on_teammate_created=on_teammate_created)
+        self.setup_team_backend(spec, ctx, self.messager)
+
+        if ctx.role != TeamRole.LEADER and spec.worktree and spec.worktree.enabled:
+            self.worktree_manager = self.create_worktree_manager(spec)
 
     @staticmethod
     def create_workspace_manager(
@@ -139,7 +244,7 @@ class AgentConfigurator:
         )
 
     def create_worktree_manager(self, spec: TeamAgentSpec) -> WorktreeManager:
-        from openjiuwen.agent_teams.worktree.manager import WorktreeManager
+        from openjiuwen.harness.tools.worktree import WorktreeManager
 
         ws_root = self.workspace_manager.workspace_path if self.workspace_manager else None
         return WorktreeManager(
@@ -154,8 +259,7 @@ class AgentConfigurator:
     ) -> DeepAgent:
         """Phase 2: build prompt, create DeepAgent, set up coordination."""
         agent_spec = self.resolve_agent_spec(spec, ctx.role, ctx.member_name)
-        resolved_language = _resolve_language(agent_spec.language)
-        self.role_policy = role_policy(ctx.role, language=resolved_language)
+        resolved_language = self._blueprint.language if self._blueprint else _resolve_language(agent_spec.language)
         member_name = ctx.member_name
 
         ws_spec = agent_spec.workspace or spec.agents.get("leader", agent_spec).workspace
@@ -177,10 +281,6 @@ class AgentConfigurator:
 
         model_config = ctx.member_model or agent_spec.model
 
-        merged_tools = list(self.tool_cards)
-        if agent_spec.tools:
-            merged_tools.extend(agent_spec.tools)
-
         sys_operation_spec = agent_spec.sys_operation or SysOperationSpec(
             id=f"{self._card.id}.sys_operation",
             mode=OperationMode.LOCAL,
@@ -192,24 +292,50 @@ class AgentConfigurator:
                 "model": model_config,
                 "workspace": ws_spec,
                 "sys_operation": sys_operation_spec,
-                "tools": merged_tools,
+                "tools": list(agent_spec.tools or []),
                 "enable_skill_discovery": True,
                 "enable_task_loop": True,
             }
         )
         self.deep_agent = build_spec.build()
 
+        resolved_team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
+
         team_workspace_mount: str | None = None
         team_workspace_path: str | None = None
         if self.workspace_manager:
-            resolved_team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
             team_workspace_mount = f".team/{resolved_team_name}/"
             team_workspace_path = self.workspace_manager.workspace_path
 
-        from openjiuwen.agent_teams.agent.team_rail import TeamRail
+        from openjiuwen.agent_teams.rails import TeamPolicyRail, TeamToolRail
+
+        exclude = {"spawn_member"} if _resolve_team_mode(spec) == "predefined" else None
+        team_tool_rail = TeamToolRail(
+            team_backend=self.team_backend,
+            role=ctx.role.value,
+            teammate_mode=spec.teammate_mode,
+            language=resolved_language,
+            on_teammate_created=self._on_teammate_created,
+            model_config_allocator=self.model_allocator.allocate if self.model_allocator else None,
+            exclude_tools=exclude,
+            workspace_manager=self.workspace_manager,
+            worktree_manager=self.worktree_manager,
+            qualify_ids=spec.spawn_mode == "inprocess",
+            team_name=resolved_team_name,
+            member_name=member_name or "",
+        )
+        self.deep_agent.add_rail(team_tool_rail)
+        # Register team tools eagerly so callers that inspect the
+        # ability manager between ``configure()`` and the first
+        # ``invoke()`` (tests, tool snapshots) see the same surface
+        # the LLM will see.  The rail's ``init`` is idempotent so the
+        # DeepAgent's lazy rail-init pass becomes a no-op.
+        team_tool_rail.set_sys_operation(self.deep_agent.deep_config.sys_operation)
+        team_tool_rail.set_workspace(self.deep_agent.deep_config.workspace)
+        team_tool_rail.init(self.deep_agent)
 
         self.deep_agent.add_rail(
-            TeamRail(
+            TeamPolicyRail(
                 role=ctx.role,
                 persona=ctx.persona,
                 member_name=member_name,
@@ -224,10 +350,16 @@ class AgentConfigurator:
             )
         )
 
-        from openjiuwen.agent_teams.agent.rails import FirstIterationGate
+        # Human agents have no autonomous task loop and no mailbox poll
+        # cycle — their input arrives through HumanAgentInbox, and team
+        # messages addressed to them are passed through to the external
+        # user. Skipping FirstIterationGate keeps
+        # ``enqueue_mailbox_after_first_iteration`` a no-op for them.
+        if ctx.role != TeamRole.HUMAN_AGENT:
+            from openjiuwen.agent_teams.rails import FirstIterationGate
 
-        self.first_iter_gate = FirstIterationGate()
-        self.deep_agent.add_rail(self.first_iter_gate)
+            self.first_iter_gate = FirstIterationGate()
+            self.deep_agent.add_rail(self.first_iter_gate)
 
         if self.workspace_manager:
             from openjiuwen.agent_teams.team_workspace.rails import TeamWorkspaceRail
@@ -238,7 +370,7 @@ class AgentConfigurator:
 
         is_coordinated_teammate = ctx.role == TeamRole.TEAMMATE and ctx.team_spec
         if is_coordinated_teammate and self.team_backend and self.messager:
-            from openjiuwen.agent_teams.agent.rails import TeamToolApprovalRail
+            from openjiuwen.agent_teams.rails import TeamToolApprovalRail
 
             approval_tools = agent_spec.approval_required_tools or []
             if approval_tools:
@@ -333,16 +465,20 @@ class AgentConfigurator:
             return spec.agents[member_name]
         return spec.agents.get(role.value) or spec.agents.get("teammate") or spec.agents["leader"]
 
-    def register_team_tools(
+    def setup_team_backend(
         self,
         spec: TeamAgentSpec,
         ctx: TeamRuntimeContext,
         messager: Messager,
-        on_teammate_created=None,
-    ) -> List[ToolCard]:
+    ) -> TeamBackend:
+        """Construct the TeamBackend and register cleanup paths.
+
+        Tool wiring is done by ``TeamToolRail`` during the agent's lazy
+        rail init, so this stage only owns the backend itself plus the
+        team / workspace cleanup-path registry.
+        """
         from openjiuwen.agent_teams.schema.status import MemberMode
         from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
-        from openjiuwen.agent_teams.tools.team_tools import create_team_tools
 
         team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or "default"
         db = get_shared_db(ctx.db_config)
@@ -360,6 +496,7 @@ class AgentConfigurator:
             predefined_members=spec.predefined_members or None,
             model_config_allocator=self.model_allocator.allocate if self.model_allocator else None,
             leader_allocation=self.leader_allocation if is_leader else None,
+            enable_hitt=spec.enable_hitt,
         )
         self.team_backend = agent_team
         self.task_manager = agent_team.task_manager
@@ -370,51 +507,12 @@ class AgentConfigurator:
 
         agent_team.register_cleanup_path(str(team_home(team_name)))
 
-        exclude = {"spawn_member"} if _resolve_team_mode(spec) == "predefined" else None
-        lang = _resolve_language(ctx.team_spec.language if ctx.team_spec else None)
-        team_tools = create_team_tools(
-            role=ctx.role.value,
-            agent_team=agent_team,
-            teammate_mode=spec.teammate_mode,
-            on_teammate_created=on_teammate_created,
-            model_config_allocator=self.model_allocator.allocate if self.model_allocator else None,
-            exclude_tools=exclude,
-            lang=lang,
-        )
-        if self.workspace_manager:
-            from openjiuwen.agent_teams.team_workspace.tools import WorkspaceMetaTool
-            from openjiuwen.agent_teams.tools.locales import make_translator
-
-            ws_t = make_translator(lang)
-            team_tools.append(WorkspaceMetaTool(self.workspace_manager, ws_t))
-
-        if not is_leader and spec.worktree and spec.worktree.enabled:
-            from openjiuwen.agent_teams.tools.locales import make_translator
-            from openjiuwen.agent_teams.worktree.tools import EnterWorktreeTool, ExitWorktreeTool
-
-            self.worktree_manager = self.create_worktree_manager(spec)
-            wt_t = make_translator(lang)
-            team_tools.append(EnterWorktreeTool(self.worktree_manager, wt_t))
-            team_tools.append(ExitWorktreeTool(self.worktree_manager, wt_t))
-            from openjiuwen.agent_teams.worktree.session import init_session_state
-
-            init_session_state()
-
-        if spec.spawn_mode == "inprocess":
-            _qualify_team_tool_ids(team_tools, team_name=team_name, member_name=current_member_name)
-
-        try:
-            Runner.resource_mgr.add_tool(team_tools)
-        except Exception:
-            team_logger.debug("Runner.resource_mgr not available, skipping tool registration")
-
-        return [t.card for t in team_tools]
+        return agent_team
 
     def update_model_pool(self, new_pool: list) -> None:
         if self.ctx is None or self.ctx.team_spec is None:
             return
-        from openjiuwen.agent_teams.agent.model_allocator import build_model_allocator
-        from openjiuwen.agent_teams.schema.team import inherit_pool_ids
+        from openjiuwen.agent_teams.models import build_model_allocator, inherit_pool_ids
 
         merged = inherit_pool_ids(self.ctx.team_spec.model_pool, list(new_pool))
         self.ctx.team_spec.model_pool = merged
@@ -439,70 +537,33 @@ class AgentConfigurator:
         *,
         initial_message: Optional[str] = None,
     ) -> dict[str, Any]:
-        team_spec = self.team_spec
-        member_transport = self.build_member_messager_config(ctx.member_name)
-        return {
-            "coordination": {
-                "team_name": team_spec.team_name if team_spec else "",
-                "display_name": team_spec.display_name if team_spec else "",
-                "leader_member_name": team_spec.leader_member_name if team_spec else None,
-                "member_name": ctx.member_name,
-                "role": ctx.role.value,
-                "persona": ctx.persona,
-                "transport": (member_transport.model_dump(mode="json") if member_transport is not None else None),
-            },
-            "query": initial_message or "Join the team and wait for your first assignment.",
-        }
+        return self._spawn_payload_builder.build_spawn_payload(ctx, initial_message=initial_message)
 
     def build_member_context(self, member_spec: TeamMemberSpec) -> TeamRuntimeContext:
-        return TeamRuntimeContext(
-            role=member_spec.role_type,
-            member_name=member_spec.member_name,
-            persona=member_spec.persona,
-            team_spec=self.ctx.team_spec,
-            messager_config=self.build_member_messager_config(member_spec.member_name),
-            db_config=self.ctx.db_config,
-        )
+        return self._spawn_payload_builder.build_member_context(member_spec)
 
     def build_member_messager_config(self, member_name: str):
-        if self.ctx is None or self.ctx.messager_config is None:
-            return None
-        leader_cfg = self.ctx.messager_config
-        meta = self.spec.metadata if self.spec else {}
-        base_port = meta.get("teammate_base_port", 16000)
-        port_offset = meta.get("teammate_port_offset", 10)
-
-        mid = member_name
-        if mid in self.member_port_map:
-            port_base = self.member_port_map[mid]
-        else:
-            port_base = base_port + self.teammate_port_counter * port_offset
-            self.teammate_port_counter += 1
-            self.member_port_map[mid] = port_base
-
-        updates: Dict[str, Any] = {
-            "node_id": member_name,
-            "direct_addr": f"tcp://127.0.0.1:{port_base}",
-            "pubsub_publish_addr": leader_cfg.pubsub_publish_addr,
-            "pubsub_subscribe_addr": leader_cfg.pubsub_subscribe_addr,
-        }
-        metadata = dict(leader_cfg.metadata)
-        metadata.pop("pubsub_bind", None)
-        updates["metadata"] = metadata
-        return leader_cfg.model_copy(update=updates)
+        return self._spawn_payload_builder.build_member_messager_config(member_name)
 
     def build_spawn_config(self, ctx: TeamRuntimeContext) -> SpawnAgentConfig:
-        logging_config = _build_member_logging_config(ctx.member_name or "", ctx.member_name or "")
-        return SpawnAgentConfig(
-            agent_kind=SpawnAgentKind.TEAM_AGENT,
-            runner_config=serialize_runner_config(Runner.get_config()),
-            logging_config=logging_config,
-            session_id=None,
-            payload={
-                "spec": self.spec.model_dump(mode="json"),
-                "context": ctx.model_dump(mode="json"),
-            },
-        )
+        return self._spawn_payload_builder.build_spawn_config(ctx)
+
+    @property
+    def blueprint(self) -> Optional[TeamAgentBlueprint]:
+        """Return the static assembly blueprint, or None before configure()."""
+        return self._blueprint
+
+    @property
+    def spec(self) -> Optional[TeamAgentSpec]:
+        return self._blueprint.spec if self._blueprint else None
+
+    @property
+    def ctx(self) -> Optional[TeamRuntimeContext]:
+        return self._blueprint.ctx if self._blueprint else None
+
+    @property
+    def role_policy(self) -> str:
+        return self._blueprint.role_policy if self._blueprint else ""
 
     @property
     def team_spec(self) -> Optional[TeamSpec]:
@@ -531,32 +592,3 @@ class AgentConfigurator:
         if self.ctx and self.ctx.team_spec:
             return self.ctx.team_spec.team_name
         return None
-
-
-def _qualify_team_tool_ids(team_tools: list[Tool], *, team_name: str, member_name: str) -> None:
-    team_key = team_name or "default"
-    member_key = member_name or "unknown"
-    for tool in team_tools:
-        if tool.card is None or not tool.card.id:
-            continue
-        qualified_id = f"{tool.card.id}.{team_key}.{member_key}"
-        if tool.card.id != qualified_id:
-            tool.card.id = qualified_id
-
-
-def _build_member_logging_config(member_name: str, name: str) -> dict[str, Any]:
-    from openjiuwen.core.common.logging.log_config import get_log_config_snapshot
-
-    config = get_log_config_snapshot()
-    member_tag = member_name or name
-    sinks = config.get("sinks", {})
-    for sink in sinks.values():
-        target = sink.get("target")
-        if not isinstance(target, str) or target in ("stdout", "stderr"):
-            continue
-        parts = target.rsplit("/", 1)
-        if len(parts) == 2:
-            sink["target"] = f"{parts[0]}/teammates/{member_tag}/{parts[1]}"
-        else:
-            sink["target"] = f"teammates/{member_tag}/{target}"
-    return config

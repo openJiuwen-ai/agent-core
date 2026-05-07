@@ -246,3 +246,10 @@ memories/ace/demo_user_hotpot_ace.json
 .traecli/
 .claude/
 CLAUDE.local.md
+.crossnote/
+
+auto_harness/
+images/
+*.txt
+*.bin
+*.sqlite3

@@ -8,7 +8,8 @@ import pytest
 
 from openjiuwen.agent_teams import create_agent_team
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
-from openjiuwen.agent_teams.agent.team_rail import TeamRail, TeamSectionName
+from openjiuwen.agent_teams.prompts import TeamSectionName
+from openjiuwen.agent_teams.rails import TeamPolicyRail
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
     TransportSpec,
@@ -36,13 +37,14 @@ def test_team_agent_leader_policy() -> None:
     )
 
     assert leader.role == TeamRole.LEADER
-    # TeamLeader policy is injected by TeamRail as a PromptSection before each
-    # model call, not stored in deep_config.system_prompt (which stays None).
-    team_rail = next(
-        r for r in leader.deep_agent._pending_rails if isinstance(r, TeamRail)
+    # TeamLeader policy is injected by TeamPolicyRail as a PromptSection
+    # before each model call, not stored in deep_config.system_prompt
+    # (which stays None).
+    policy_rail = next(
+        r for r in leader.deep_agent._pending_rails if isinstance(r, TeamPolicyRail)
     )
     role_section = next(
-        s for s in team_rail._static_sections if s.name == TeamSectionName.ROLE
+        s for s in policy_rail._static_sections if s.name == TeamSectionName.ROLE
     )
     assert "TeamLeader" in role_section.render("cn")
 

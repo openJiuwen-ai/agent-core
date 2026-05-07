@@ -16,7 +16,7 @@ from sqlalchemy import BigInteger
 from sqlmodel import SQLModel, Field
 from sqlmodel.main import SQLModelMetaclass
 
-from openjiuwen.agent_teams.spawn.context import get_session_id
+from openjiuwen.agent_teams.context import get_session_id
 
 TEAM_DYNAMIC_TABLE_PREFIXES = (
     "team_task_dependency_",
@@ -42,8 +42,9 @@ class Team(SQLModel, table=True):
     desc: Optional[str] = Field(default=None, nullable=True)
     prompt: Optional[str] = Field(default=None, nullable=True)
     created: int = Field(sa_type=BigInteger, nullable=False)
-    # Bumped on every roster-affecting write so consumers (e.g. TeamRail
-    # prompt cache) can probe a single column for change detection.
+    # Bumped on every roster-affecting write so consumers (e.g.
+    # TeamPolicyRail prompt cache) can probe a single column for change
+    # detection.
     updated_at: Optional[int] = Field(default=None, sa_type=BigInteger, nullable=True)
 
 

@@ -16,12 +16,11 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import AsyncAdaptedQueuePool, StaticPool
 from sqlmodel import SQLModel
 
-from openjiuwen.agent_teams.spawn.context import get_session_id
+from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.tools.database.config import DatabaseConfig, DatabaseType
 from openjiuwen.agent_teams.tools.models import (
     TEAM_DYNAMIC_TABLE_PREFIXES,
     TEAM_STATIC_TABLES_TO_CLEAR,
-    _clear_session_model_cache,
     _get_message_model,
     _get_message_read_status_model,
     _get_task_dependency_model,
@@ -215,11 +214,6 @@ async def drop_cur_session_tables(engine: AsyncEngine) -> None:
         for model in (task_model, dep_model, message_model, read_status_model):
             await conn.run_sync(model.__table__.drop, checkfirst=True)
 
-    for model in (task_model, dep_model, message_model, read_status_model):
-        SQLModel.metadata.remove(model.__table__)
-
-    _clear_session_model_cache(session_id)
-
     team_logger.info("Dropped dynamic tables for session %s", session_id)
 
 
@@ -285,8 +279,6 @@ async def drop_session_tables_by_id(engine: AsyncEngine, session_id: str) -> lis
             if expected_table in table_names:
                 await conn.run_sync(_drop_table, expected_table)
                 dropped.append(expected_table)
-
-    _clear_session_model_cache(session_id)
 
     if dropped:
         team_logger.info("Dropped session tables for session %s: %s", session_id, dropped)

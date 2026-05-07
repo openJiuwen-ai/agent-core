@@ -16,12 +16,19 @@ class InProcessSpawnHandle:
 
     Implements the same surface used by TeamAgent (_spawned_handles):
     is_alive, is_healthy, shutdown, force_kill, start/stop_health_check.
+
+    ``agent_ref`` exposes the spawned ``TeamAgent`` instance — only set
+    for inprocess spawn (subprocess agents live in a different process
+    and are addressed via the messager). ``HumanAgentInbox`` uses it
+    to feed user input straight into the human agent's DeepAgent
+    without going through the message bus.
     """
 
     process_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     _task: Optional[asyncio.Task] = field(default=None, repr=False)
     on_unhealthy: Optional[Callable[[], Any]] = field(default=None, repr=False)
     _shutdown_requested: bool = field(default=False, repr=False)
+    agent_ref: Any = field(default=None, repr=False)
 
     # ------------------------------------------------------------------
     # Properties compatible with SpawnedProcessHandle

@@ -1,0 +1,175 @@
+# HITT Blast-Furnace Operation Team — config
+#
+# Loads the local `blast-furnace-operation-team` skill via SkillUseRail and
+# enables HITT. The human collaborator is declared explicitly as a
+# HUMAN_AGENT predefined member (see `predefined_members` below); the
+# framework wires it up at build_team time. The leader's persona instructs
+# it to follow the SKILL's 7-step SOP and to normalize SKILL worker role
+# ids (which use `-`) to framework member names (`_`) when invoking
+# spawn_member / send_message.
+#
+# Sensitive values should be overridden via environment variables:
+#   API_BASE, LEADER_API_KEY, TEAMMATE_API_KEY, MODEL_NAME
+#
+# The furnace MCP server is launched automatically by the framework as a
+# stdio subprocess; see the `mcps` block on the shared agent spec.
+
+team_name: hitt_blast_furnace_team
+lifecycle: persistent
+teammate_mode: build_mode
+spawn_mode: inprocess
+enable_hitt: true
+language: cn
+
+# Pre-declare the human collaborator so build_team materialises it as a
+# first-class team member from the start. Worker handoffs target this
+# member by name (`human_agent`).
+predefined_members:
+  - member_name: human_agent
+    display_name: 用户代理
+    role_type: human_agent
+    persona: 高炉操作团队的真人用户代理；负责接收 worker 的执行确认请求并按用户回复回传决策
+
+leader:
+  member_name: team_leader
+  display_name: 高炉工长
+  persona: |
+    你是高炉工长（furnace-manager）。本会话已加载 blast-furnace-operation-team SKILL，
+    请严格按 SKILL.md 的 7 步 SOP 调度团队：
+      1) 先调用 build_team(enable_hitt=true) 物化团队（human_agent 已在 spec 预配，
+         build_team 时会自动注册，无需再手动 spawn）；
+      2) 串行采样 get_furnace_current_status / get_furnace_control_params /
+         get_furnace_operation_suggestions；
+      3) 按"风温→风量→煤粉→上料"关键词路由，用 spawn_member + send_message
+         一次只派一个 worker；
+      4) worker 完成 apply_*_operation 后会 send_message 给 human_agent，
+         human_agent 与真人用户在 team chat 自然对话后回传 decision；
+      5) 最后输出 Markdown 高炉操作报告，结尾单独一行 TERMINATE。
+
+    重要命名规则：SKILL.md 中的 worker 角色 id 使用连字符（如
+    hot-air-furnace-worker、blower-worker、coal-spraying-worker、
+    material-loading-worker），但 framework 成员名必须使用下划线。调用
+    spawn_member / send_message 时把所有连字符替换为下划线，例如：
+      - hot-air-furnace-worker → hot_air_furnace_worker
+      - blower-worker          → blower_worker
+      - coal-spraying-worker   → coal_spraying_worker
+      - material-loading-worker → material_loading_worker
+    Worker 给人类成员发消息时，send_message 的 to 字段固定写 "human_agent"
+    （这是 spec 预配的成员名）。
+
+# ---------------------------------------------------------------------------
+# Shared capability anchors
+# ---------------------------------------------------------------------------
+
+x-model-template: &model_template
+  model_client_config:
+    client_provider: OpenAI
+    api_base: "${API_BASE}"
+    api_key: "${LEADER_API_KEY}"
+    timeout: 120
+    rate_limit: 1.0
+    verify_ssl: false
+  model_request_config:
+    model: "${MODEL_NAME}"
+    temperature: 0.2
+    top_p: 0.9
+
+x-shared-rails: &shared_rails
+  - type: filesystem
+  - type: skill_use
+    params:
+      skill_mode: all
+      skills_dir: examples/agent_teams
+      enabled_skills:
+        - blast-furnace-operation-team
+
+x-shared-tools: &shared_tools
+  - type: web_search
+    params: { language: cn }
+  - type: web_fetch
+    params: { language: cn }
+
+x-shared-agent-spec: &shared_agent_spec
+  workspace:
+    stable_base: true
+  max_iterations: 200
+  completion_timeout: 600.0
+  language: cn
+  enable_task_planning: false
+  enable_async_subagent: true
+  restrict_to_sandbox: false
+  rails: *shared_rails
+  tools: *shared_tools
+  # furnace-mcp-server is launched by the framework as a stdio subprocess
+  # whenever a member with this spec starts. PYTHON_BIN must point at the
+  # interpreter that has the `mcp` package installed; the e2e entrypoint
+  # defaults it to sys.executable.
+  mcps:
+    - server_name: furnace-mcp-server
+      server_path: ""
+      client_type: stdio
+      params:
+        command: "${PYTHON_BIN}"
+        args:
+          - examples/agent_teams/blast-furnace-operation-team/mcp_server/server.py
+        encoding_error_handler: strict
+        # mcp.client.stdio.get_default_environment() only inherits a small
+        # whitelist (HOME / PATH / USER / ...). Anything we need to push
+        # to the child must be listed here. FASTMCP_LOG_LEVEL silences
+        # fastmcp's RichHandler INFO logs ("Processing request of type ..."
+        # on every tool call) that would otherwise leak onto the cli's
+        # stderr because stdio MCP clients do not capture child stderr.
+        env:
+          FASTMCP_LOG_LEVEL: WARNING
+
+# ---------------------------------------------------------------------------
+# Agent specifications
+# ---------------------------------------------------------------------------
+
+agents:
+  leader:
+    <<: *shared_agent_spec
+    model:
+      <<: *model_template
+      model_client_config:
+        client_provider: OpenAI
+        api_base: "${API_BASE}"
+        api_key: "${LEADER_API_KEY}"
+        timeout: 120
+        rate_limit: 1.0
+        verify_ssl: false
+
+  teammate:
+    <<: *shared_agent_spec
+    model:
+      <<: *model_template
+      model_client_config:
+        client_provider: OpenAI
+        api_base: "${API_BASE}"
+        api_key: "${TEAMMATE_API_KEY}"
+        timeout: 120
+        rate_limit: 1.0
+        verify_ssl: false
+
+# ---------------------------------------------------------------------------
+# Infrastructure — in-process + in-memory for a self-contained demo
+# ---------------------------------------------------------------------------
+
+transport:
+  type: inprocess
+
+storage:
+  type: sqlite
+
+# ---------------------------------------------------------------------------
+# Runtime (not part of TeamAgentSpec, consumed by the e2e script)
+# ---------------------------------------------------------------------------
+
+runtime:
+  session_id: hitt_blast_furnace_session
+  initial_query: |
+    按 blast-furnace-operation-team SKILL 启动一次"调炉温"工作流。
+    请先 build_team(enable_hitt=true)，再按 SOP 派遣 hot_air_furnace_worker；
+    worker 完成 apply_hot_air_furnace_operation 后通过 send_message 把 handoff
+    转发给 human_agent，等用户从命令行确认后回传 decision；最后输出 Markdown
+    高炉操作报告（结尾单独一行 TERMINATE）。

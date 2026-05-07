@@ -401,6 +401,9 @@ class StatusCode(Enum):
     AGENT_TEAM_EXECUTION_ERROR = (132002, "agent team execution error, reason: {error_msg}")
     AGENT_TEAM_AGENT_NOT_FOUND = (132003, "agent team agent not found error, reason: {error_msg}")
     AGENT_TEAM_CONFIG_INVALID = (132004, "agent team config invalid, reason: {reason}")
+    AGENT_TEAM_BUSY_INVALID = (132005,
+                               "agent team is busy, team='{team_name}', session='{session_id}', reason: {reason}")
+    AGENT_TEAM_STATE_INVALID = (132006, "agent team state inconsistent, reason: {reason}")
 
     # =========================
     # DevTools / AgentBuilder 140000 - 140099

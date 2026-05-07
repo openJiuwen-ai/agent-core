@@ -37,8 +37,8 @@ from typing import Any
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 
+from openjiuwen.agent_teams.models import ModelPoolEntry
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
-from openjiuwen.agent_teams.schema.team import ModelPoolEntry
 from openjiuwen.core.common.logging.log_config import (
     configure_log,
     configure_log_config,
@@ -130,8 +130,6 @@ async def main() -> None:
     print("Model pool:")
     _print_pool_summary(spec)
 
-    leader = spec.build()
-
     await Runner.start()
 
     print("=" * 70)
@@ -139,7 +137,7 @@ async def main() -> None:
     print("Type 'exit' or 'quit' to stop.")
     print("=" * 70)
 
-    await run_interactive(leader, runtime_cfg, default_session_id="model_pool_session")
+    await run_interactive(spec, runtime_cfg, default_session_id="model_pool_session")
 
     await Runner.stop()
     print("Done.")
