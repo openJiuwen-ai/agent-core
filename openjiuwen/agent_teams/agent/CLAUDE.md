@@ -31,23 +31,16 @@
 
 ## coordination/ — 唤醒循环
 
-| 文件 | 类 | 职责 |
-|---|---|---|
-| `event_bus.py` | `EventBus` / `InnerEventType` / `InnerEventMessage` | 事件入队 + 周期 poll timer + lifecycle（start / stop） |
-| `dispatcher.py` | `EventDispatcher` / `DispatcherHost` | 把每个 event 派给具体处理器（MESSAGE / TASK_CLAIMED / MEMBER_* / inbound notification 等） |
-| `kernel.py` | `CoordinationKernel` | 整体协调 facade：把 event_bus + dispatcher 挂在 host 上，pause / resume / drain |
-
-**铁律：coordination 不做决策**。loop 只管 wake-up，所有业务行为由内部 DeepAgent + team tools 驱动。新功能想塞进 dispatcher.py 之前先问：是不是应该用一个新工具实现，让 LLM 自己决定调？
+事件驱动的 wake-up 层：`EventBus` 收事件 → `EventDispatcher` 粗筛 → `AsyncCallbackFramework` 分发到 5 个场景 handler（lifecycle / member / message / task_board / stale_task）。**自身不做决策**，业务行为由 handler 触发的 `DispatcherHost` 回调驱动 DeepAgent。详见 [`coordination/CLAUDE.md`](coordination/CLAUDE.md)。
 
 ## 跨文件协作的几个关键点
 
 - **同一 team 的 leader 和 teammate 不在同一进程**：`infra.py` 的 "per-process" 语义就来自这里。要让两边都看到的状态走 db / messager，不要走对象引用。
 - **`payload.py` 的 wire 格式是公共契约**：`build_spawn_payload(...)` 的所有输出键 = `TeamAgent.from_spawn_payload` 的所有读取键，改一边必须改另一边。
 - **stream_controller 不直接驱动 DeepAgent**：它管理 stream queue 和 round 状态；驱动 DeepAgent 的入口是 `team_agent.py` 的 `start_agent / steer / follow_up / deliver_input`。
-- **coordination.kernel 的 `pause` 会等 in-flight round drain**：相关 `contextlib.suppress(asyncio.CancelledError, Exception)` 在 `stream_controller.drain_agent_task` —— 改清理路径时检查 `import contextlib` 是否还在（之前漏过一次）。
 
 ## 跟其他子目录的边界
 
 - 真正干活的 LLM 在 `harness/deep_agent.py`，本目录只组装 + 调度。
 - 跨 team 的对象池 / 派发 / 并发门禁在 `runtime/`（leader 进 pool 的唯一公共路径是 spec → `manager.activate`）。
-- 三视角交互（GodView / Operator / HumanAgent）通过 `interaction/` 进 dispatcher，不要让 dispatcher 自己解析 mention 字符串——那段已经搬到 `interaction/router.py`。
+- 三视角交互（GodView / Operator / HumanAgent）通过 `interaction/` 进 coordination；mention 解析在 `interaction/router.py` 不在 dispatcher。

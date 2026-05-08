@@ -1,9 +1,24 @@
 # coding: utf-8
-"""Event dispatcher for TeamAgent coordination events."""
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+"""Event dispatcher for TeamAgent coordination events.
+
+Trigger rules (coarse filters: agent_ready, inner-vs-transport, role
+gating) live here; behavior lives in scenario-scoped handlers under
+:mod:`coordination.handlers`. Each handler exposes ``get_callbacks()``
+yielding the ``event_key -> bound method`` mapping that we feed to a
+private :class:`AsyncCallbackFramework` instance. Multiple handlers
+may register the same ``event_key`` — the framework fans out callbacks
+in registration order (sorted stably by ``priority=0``).
+
+Note on exception semantics: ``AsyncCallbackFramework.trigger()``
+swallows callback exceptions (logs + continues), unlike the previous
+fail-fast dispatch. Handlers must log their own errors via
+``team_logger.error(..., exc_info=True)`` rather than relying on
+framework swallowing as silent error handling.
+"""
 
 from __future__ import annotations
 
-import time
 from typing import (
     TYPE_CHECKING,
     Protocol,
@@ -15,11 +30,17 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventMessage,
     InnerEventType,
 )
-from openjiuwen.agent_teams.i18n import t
-from openjiuwen.agent_teams.schema.events import MessageEvent, TeamEvent
-from openjiuwen.agent_teams.schema.status import MemberStatus, TaskStatus
+from openjiuwen.agent_teams.agent.coordination.handlers import (
+    AgentLifecycleHandler,
+    MemberHandler,
+    MessageHandler,
+    StaleTaskHandler,
+    TaskBoardHandler,
+)
+from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.runner.callback import AsyncCallbackFramework
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
@@ -31,8 +52,9 @@ class DispatcherHost(Protocol):
     """Contract between EventDispatcher and its owning agent.
 
     Splits into:
-    - data access: ``blueprint`` (static config) and ``infra`` (per-process
-      infrastructure including message_manager / task_manager).
+    - data access: ``blueprint`` (static config) and ``infra``
+      (per-process infrastructure including message_manager /
+      task_manager).
     - behavior callbacks: round control, polling, message delivery.
 
     The dispatcher reads role / lifecycle / member_name / team_spec /
@@ -104,60 +126,72 @@ class DispatcherHost(Protocol):
 
 
 class EventDispatcher:
-    """Dispatches coordination events to the appropriate handler.
+    """Routes coordination events to scenario-scoped handler methods.
 
-    Works through the DispatcherHost protocol — never reaches
-    into the concrete agent's private members.
+    Owns trigger rules plus a private :class:`AsyncCallbackFramework`
+    instance. Per-team registry isolation: framework is local to this
+    dispatcher so coordination events never enter the global
+    ``Runner.callback_framework``.
+
+    The five scenario handlers are exposed as public attributes
+    (``lifecycle`` / ``member`` / ``message`` / ``task_board`` /
+    ``stale_task``) for direct access in tests.
     """
-
-    _TASK_EVENTS = frozenset(
-        {
-            TeamEvent.TASK_CREATED,
-            TeamEvent.TASK_UPDATED,
-            TeamEvent.TASK_CLAIMED,
-            TeamEvent.TASK_COMPLETED,
-            TeamEvent.TASK_CANCELLED,
-            TeamEvent.TASK_UNBLOCKED,
-        }
-    )
-
-    _MEMBER_EVENTS = frozenset(
-        {
-            TeamEvent.MEMBER_SPAWNED,
-            TeamEvent.MEMBER_RESTARTED,
-            TeamEvent.MEMBER_STATUS_CHANGED,
-            TeamEvent.MEMBER_EXECUTION_CHANGED,
-            TeamEvent.MEMBER_SHUTDOWN,
-            TeamEvent.MEMBER_CANCELED,
-        }
-    )
-
-    _STALE_CLAIM_SECONDS = 10 * 60.0
-    _STALE_PENDING_SECONDS = 10 * 60.0
 
     def __init__(self, host: DispatcherHost) -> None:
         self._host = host
-        # task_id -> wall-clock seconds when we last fired a stale-claim
-        # nudge. Used only to throttle follow-up nudges; the ``is this
-        # task stale?`` decision itself reads ``task.updated_at`` from the
-        # database so we never lose state across process restarts.
-        self._last_stale_nudge: dict[str, float] = {}
-        # Same idea, but for stale PENDING tasks the leader observes —
-        # throttles the leader's self-prompt about long-unclaimed work.
-        self._last_pending_nudge: dict[str, float] = {}
+        # Throttle dict shared by reference between MemberHandler
+        # (status-change path) and StaleTaskHandler (poll path) so the
+        # same task cannot be nudged twice within one stale window
+        # regardless of trigger source.
+        stale_claim_throttle: dict[str, float] = {}
+
+        self.lifecycle = AgentLifecycleHandler(host)
+        self.member = MemberHandler(host, stale_claim_throttle)
+        self.message = MessageHandler(host)
+        self.task_board = TaskBoardHandler(host)
+        self.stale_task = StaleTaskHandler(host, stale_claim_throttle)
+
+        self._framework = AsyncCallbackFramework(
+            enable_metrics=False,
+            enable_logging=False,
+        )
+        # Register order matters for fan-out on shared event_keys.
+        # MEMBER_SHUTDOWN is the example: MemberHandler.on_member_event
+        # processes the lifecycle state, then
+        # MessageHandler.on_member_shutdown_drain flushes the mailbox.
+        # Same priority (default 0) → Python's stable sort keeps this
+        # registration order.
+        for handler in (
+            self.lifecycle,
+            self.member,
+            self.message,
+            self.task_board,
+            self.stale_task,
+        ):
+            for event_key, callback in handler.get_callbacks().items():
+                self._framework.register_sync(event_key, callback)
 
     async def dispatch(self, event: CoordinationEvent) -> None:
-        """Entry point called by CoordinatorLoop on every wake-up.
-
-        Dispatches to inner-event or transport-event handling.
-        """
+        """Wake-up entry. Applies coarse rules, then triggers framework."""
         host = self._host
         if not host.is_agent_ready():
             team_logger.debug("agent not ready, skipping coordination wake")
             return
 
         if isinstance(event, InnerEventMessage):
-            await self._handle_inner_event(event)
+            # Human agents must never autonomously poll. USER_INPUT
+            # through this path comes from coordination bootstrap (the
+            # leader's god-view input); a human agent never reaches
+            # that path because the leader is the one whose invoke()
+            # carries it. Defensively short-circuit polling branches.
+            if host.blueprint.role == TeamRole.HUMAN_AGENT and event.event_type in (
+                InnerEventType.POLL_TASK,
+                InnerEventType.POLL_MAILBOX,
+            ):
+                return
+            team_logger.debug("inner event received: type={}, payload={}", event.event_type, event.payload)
+            await self._framework.trigger(event.event_type.value, event)
             return
 
         # --- Transport events (cross-process EventMessage) ---
@@ -166,650 +200,21 @@ class EventDispatcher:
             team_logger.debug("no member_name, skipping transport event")
             return
 
-        event_type = event.event_type
-        # team_logger.debug("transport event: type={}, member_name={}", event_type, member_name)
-
-        if event_type == TeamEvent.STANDBY:
-            team_logger.info("[{}] received TEAM_STANDBY, pausing polls", member_name)
-            await host.pause_polls()
-            return
-
-        if event_type == TeamEvent.CLEANED:
-            # Teammates must abandon their loop when the team row (and their
-            # own member row) has been wiped — otherwise they spin forever
-            # waiting for events on a dead team. The leader must NEVER
-            # shutdown_self from its own CLEANED event: persistent leaders
-            # have to survive clean_team to accept the next interaction, and
-            # the teardown for temporary leaders is handled by the natural
-            # _finalize_round path instead. Skip the leader branch as
-            # defense in depth on top of the sender_id self-filter.
-            if host.blueprint.role == TeamRole.LEADER:
-                team_logger.debug(
-                    "[{}] ignoring TEAM_CLEANED on leader path",
-                    member_name,
-                )
-                return
-            team_logger.info(
-                "[{}] received TEAM_CLEANED, shutting down coordination",
-                member_name,
-            )
-            await host.shutdown_self()
-            return
-
         # Human agents are user avatars: only their corresponding user
         # (via HumanAgentInbox) drives their LLM. All other team-side
         # events (incoming messages, task assignments, stale-claim
-        # nudges) must NOT autonomously poke the LLM. CLEANED above
-        # still applies because the agent process must tear down with
-        # the team. MEMBER_CANCELED is handled by ``handle_team_event``
-        # at a lower level (cancel_agent), not by autonomous nudging,
-        # so muting the rest is safe.
+        # nudges) must NOT autonomously poke the LLM. The whitelist:
+        # CLEANED tears the agent down with the team; MEMBER_CANCELED
+        # routes to cancel_agent (no autonomous nudge); STANDBY pauses
+        # the periodic poll timers so a paused leader does not leave
+        # human-agent avatars polling forever. Everything else stays
+        # muted.
         if host.blueprint.role == TeamRole.HUMAN_AGENT:
-            if event_type == TeamEvent.MEMBER_CANCELED:
-                await self._handle_member_event(event)
-            return
-
-        if event_type == TeamEvent.TOOL_APPROVAL_RESULT:
-            await self._handle_tool_approval_result(event)
-            return
-
-        if event_type in self._MEMBER_EVENTS:
-            await self._handle_member_event(event)
-            return
-
-        if event_type in (TeamEvent.MESSAGE, TeamEvent.BROADCAST) and host.infra.message_manager:
-            # Leader auto-acks teammate→user replies. The "user" pseudo-member
-            # has no agent process polling its mailbox, so without this the
-            # message would stay unread forever and re-fire dispatcher wakes.
-            if host.blueprint.role == TeamRole.LEADER and event_type == TeamEvent.MESSAGE:
-                await self._ack_user_bound_message(event)
-            # Leader-side hook: notify SDK callbacks for messages reaching
-            # human-agent members. The avatar's own DeepAgent stays out of
-            # this loop (its dispatcher mutes MESSAGE events for HUMAN_AGENT)
-            # so the user is the sole consumer of these notifications.
-            if host.blueprint.role == TeamRole.LEADER:
-                await self._notify_human_agent_inbound(event)
-            await host.resume_polls()
-            await self._process_unread_messages(member_name)
-            return
-
-        if event_type == TeamEvent.TASK_CLAIMED and host.infra.task_manager:
-            # Directed assignment from another node (self-claims are
-            # filtered upstream via sender_id). Must reach the agent
-            # regardless of execution state, so we go through
-            # ``deliver_input`` — it picks steer / queue / start based on
-            # what the round is doing — and skip the generic task-board
-            # nudge below since the targeted message already tells the
-            # agent which task to look at.
-            payload = event.get_payload()
-            if payload.member_name == member_name:
-                await host.resume_polls()
-                content = t("dispatcher.task_assigned_to_self", task_id=payload.task_id)
-                team_logger.info(
-                    "[{}] received TASK_CLAIMED for self, task_id={}",
-                    member_name,
-                    payload.task_id,
-                )
-                await host.deliver_input(content)
+            if event.event_type not in (
+                TeamEvent.CLEANED,
+                TeamEvent.MEMBER_CANCELED,
+                TeamEvent.STANDBY,
+            ):
                 return
 
-        if event_type in self._TASK_EVENTS and not host.has_in_flight_round() and host.infra.task_manager:
-            # Gate on the task-level check, not ``is_agent_running``: nudging
-            # during the pre-stream or finalize window would call
-            # ``_start_agent`` and overwrite the still-live ``_agent_task``.
-            await host.resume_polls()
-            team_logger.debug("task trigger detected, nudging idle agent: member_name={}", member_name)
-            await self._nudge_idle_agent(member_name)
-
-    async def _handle_inner_event(self, event: InnerEventMessage) -> None:
-        """Handle local inner events (user input, polling)."""
-        host = self._host
-        team_logger.debug("inner event received: type={}, payload={}", event.event_type, event.payload)
-
-        # Human agents must never autonomously poll task / mailbox state.
-        # USER_INPUT through this path comes from coordination bootstrap
-        # (the leader's god-view input); a human agent never reaches that
-        # path because the leader is the one whose invoke() carries it.
-        # Even so, defensively short-circuit the polling-driven branches.
-        if host.blueprint.role == TeamRole.HUMAN_AGENT and event.event_type in (
-            InnerEventType.POLL_TASK,
-            InnerEventType.POLL_MAILBOX,
-        ):
-            return
-
-        if event.event_type == InnerEventType.USER_INPUT:
-            # Routing decisions (``@<member> body`` etc.) happen at the
-            # runtime dispatch boundary in
-            # ``TeamRuntimeManager._dispatch_god_view`` — by the time
-            # input reaches the inner event bus it is already aimed at
-            # this agent.
-            content = event.payload.get("content", "")
-            team_logger.info("user_input → deliver_input")
-            await host.deliver_input(content)
-            return
-
-        if event.event_type == InnerEventType.POLL_TASK:
-            member_name = host.blueprint.member_name
-            team_logger.debug("poll task: member_name={}, agent_running={}", member_name, host.is_agent_running())
-            if member_name and host.infra.task_manager:
-                await self._check_stale_claimed_tasks()
-                await self._check_stale_pending_tasks()
-                # if not host.is_agent_running():
-                #     await self._nudge_idle_agent(member_name, from_poll=True)
-            return
-
-        if event.event_type == InnerEventType.POLL_MAILBOX:
-            member_name = host.blueprint.member_name
-            team_logger.debug("poll mailbox: member_name={}", member_name)
-            if member_name and host.infra.message_manager:
-                await self._process_unread_messages(member_name)
-
-    # ------------------------------------------------------------------
-    # Member events
-    # ------------------------------------------------------------------
-
-    async def _handle_member_event(self, event: CoordinationEvent) -> None:
-        """Handle member lifecycle events.
-
-        Teammate: handle cancel events targeting self.
-        Leader: observe all other members' lifecycle events.
-        """
-        if self._host.blueprint.role == TeamRole.LEADER:
-            await self._handle_leader_member_event(event)
-        else:
-            await self._handle_teammate_member_event(event)
-
-    async def _handle_teammate_member_event(self, event: CoordinationEvent) -> None:
-        """Handle member events as a teammate — only react to events targeting self."""
-        member_name = self._host.blueprint.member_name
-        target_id = event.get_payload().member_name
-        if target_id is None or target_id != member_name:
-            return
-        if event.event_type == TeamEvent.MEMBER_CANCELED:
-            await self._host.cancel_agent()
-        elif event.event_type == TeamEvent.MEMBER_SHUTDOWN:
-            await self._process_unread_messages(member_name, use_steer=True)
-
-    async def _handle_leader_member_event(self, event: CoordinationEvent) -> None:
-        """Handle member events as the leader — observe other members' lifecycle."""
-        payload = event.payload
-        target_id = payload.get("member_name", "")
-        event_type = event.event_type
-        if event_type == TeamEvent.MEMBER_SPAWNED:
-            text = t("dispatcher.member_online", target_id=target_id)
-        elif event_type == TeamEvent.MEMBER_RESTARTED:
-            restart_count = payload.get("restart_count", 1)
-            text = t("dispatcher.member_restarted", target_id=target_id, restart_count=restart_count)
-        elif event_type == TeamEvent.MEMBER_STATUS_CHANGED:
-            old_status = payload.get("old_status")
-            new_status = payload.get("new_status")
-            text = t(
-                "dispatcher.member_status_changed",
-                target_id=target_id,
-                old_status=old_status,
-                new_status=new_status,
-            )
-            await self._nudge_idle_member_with_stale_claims(
-                target_id,
-                old_status,
-                new_status,
-            )
-        elif event_type == TeamEvent.MEMBER_EXECUTION_CHANGED:
-            text = t(
-                "dispatcher.member_execution_changed",
-                target_id=target_id,
-                old_status=payload.get("old_status"),
-                new_status=payload.get("new_status"),
-            )
-        elif event_type == TeamEvent.MEMBER_SHUTDOWN:
-            text = t("dispatcher.member_shutdown", target_id=target_id)
-        elif event_type == TeamEvent.MEMBER_CANCELED:
-            text = t("dispatcher.member_canceled", target_id=target_id)
-        else:
-            return
-
-        team_logger.debug(text)
-
-    _IDLE_NUDGE_STATUSES = frozenset({MemberStatus.READY.value, MemberStatus.ERROR.value})
-
-    async def _nudge_idle_member_with_stale_claims(
-        self,
-        target_id: str,
-        old_status: str | None,
-        new_status: str | None,
-    ) -> None:
-        """Remind a member about long-claimed work on transition to READY/ERROR.
-
-        Only tasks whose claim has aged past ``_STALE_CLAIM_SECONDS`` are
-        included, and each task is throttled via ``_last_stale_nudge`` —
-        shared with the POLL_TASK path — so successive status flips or a
-        concurrent poll tick cannot re-nudge within one stale window.
-        """
-        if not target_id:
-            return
-        if new_status not in self._IDLE_NUDGE_STATUSES:
-            return
-        if new_status == old_status:
-            return
-        task_manager = self._host.infra.task_manager
-        message_manager = self._host.infra.message_manager
-        if task_manager is None or message_manager is None:
-            return
-
-        claimed = await task_manager.get_tasks_by_assignee(
-            target_id,
-            status=TaskStatus.CLAIMED.value,
-        )
-        if not claimed:
-            return
-
-        now = time.time()
-        threshold_ms = self._STALE_CLAIM_SECONDS * 1000
-        stale = []
-        for task in claimed:
-            if task.updated_at is None:
-                continue
-            if now * 1000 - task.updated_at < threshold_ms:
-                continue
-            last_nudge = self._last_stale_nudge.get(task.task_id, 0.0)
-            if now - last_nudge < self._STALE_CLAIM_SECONDS:
-                continue
-            stale.append(task)
-
-        if not stale:
-            return
-
-        for task in stale:
-            self._last_stale_nudge[task.task_id] = now
-
-        lines = [t("dispatcher.stale_claim_header", count=len(stale))]
-        for task in stale:
-            lines.append(f"- [{task.task_id}] {task.title}: {task.content}")
-        await message_manager.send_message("\n".join(lines), target_id)
-        team_logger.info(
-            "[leader] nudged {} about {} stale claimed task(s) after status → {}",
-            target_id,
-            len(stale),
-            new_status,
-        )
-
-    # ------------------------------------------------------------------
-    # Message handling
-    # ------------------------------------------------------------------
-
-    async def _handle_tool_approval_result(self, event: CoordinationEvent) -> None:
-        """Resume a teammate HITL interrupt from a structured approval event."""
-        host = self._host
-        member_name = host.blueprint.member_name
-        payload = event.get_payload()
-        target_id = payload.member_name
-
-        if target_id is None or target_id != member_name:
-            return
-
-        from openjiuwen.core.session import InteractiveInput
-
-        interactive_input = InteractiveInput()
-        interactive_input.update(
-            payload.tool_call_id,
-            {
-                "approved": payload.approved,
-                "feedback": payload.feedback,
-                "auto_confirm": payload.auto_confirm,
-            },
-        )
-        team_logger.debug(
-            "[{}] received tool approval result for tool_call_id={}, approved={}",
-            member_name,
-            payload.tool_call_id,
-            payload.approved,
-        )
-        await host.resume_interrupt(interactive_input)
-
-    async def _process_unread_messages(self, member_name: str, *, use_steer: bool = True) -> None:
-        """Read unread messages, feed to agent one by one, loop until no new messages.
-
-        Args:
-            member_name: Current member ID.
-            use_steer: When True, use steer instead of follow_up for running agent.
-        """
-        host = self._host
-        seen_ids: set[str] = set()
-
-        while True:
-            all_unread = await self._read_all_unread(member_name)
-            new_messages = [m for m in all_unread if m.message_id not in seen_ids]
-
-            if not new_messages:
-                break
-
-            team_logger.info("[{}] processing {} unread messages (steer={})", member_name, len(new_messages), use_steer)
-            for msg in new_messages:
-                seen_ids.add(msg.message_id)
-                if host.has_pending_interrupt():
-                    team_logger.info(
-                        "[{}] deferring mailbox message {} until pending interrupt is resolved",
-                        member_name,
-                        msg.message_id,
-                    )
-                    return
-                text = self._format_message(msg)
-                team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
-
-                await host.deliver_input(text, use_steer=use_steer)
-                await host.infra.message_manager.mark_message_read(msg.message_id, member_name)
-
-    async def _notify_human_agent_inbound(self, event: CoordinationEvent) -> None:
-        """Forward a team-side message to the SDK's human-agent callbacks.
-
-        The leader observes every MESSAGE / BROADCAST event on the team
-        topic. For point-to-point messages addressed to a human agent
-        we fire the recipient's callback; for broadcasts we fire every
-        registered callback whose owner is not the broadcast sender (so
-        a human agent doesn't get its own broadcast echoed back).
-
-        The lookup goes through ``TeamBackend.get_human_agent_inbound``
-        — the registry the SDK populates via
-        ``TeamRuntimeManager.register_human_agent_inbound``. Missing
-        message metadata (e.g. body lookup failure) is logged and
-        swallowed so a notification glitch never breaks the dispatch
-        loop.
-        """
-        host = self._host
-        backend = host.infra.team_backend
-        mm = host.infra.message_manager
-        if backend is None or mm is None:
-            return
-
-        from openjiuwen.agent_teams.interaction.payload import HumanAgentInboundEvent
-
-        payload: MessageEvent = event.get_payload()
-        message_id = payload.message_id
-        sender = payload.from_member_name
-        is_broadcast = event.event_type == TeamEvent.BROADCAST
-
-        try:
-            row = await mm.db.message.get_message(message_id)
-        except Exception as exc:
-            team_logger.warning(
-                "human_agent on_inbound: failed to load message %s: %s",
-                message_id,
-                exc,
-            )
-            return
-        if row is None:
-            return
-
-        body = row.content
-        ts = row.timestamp
-
-        if is_broadcast:
-            recipients = [name for name in backend.human_agent_names() if name != sender]
-        else:
-            target = payload.to_member_name
-            if not backend.is_human_agent(target):
-                return
-            recipients = [target]
-
-        for recipient in recipients:
-            callback = backend.get_human_agent_inbound(recipient)
-            if callback is None:
-                continue
-            evt = HumanAgentInboundEvent(
-                member_name=recipient,
-                sender=sender,
-                body=body,
-                broadcast=is_broadcast,
-                message_id=message_id,
-                timestamp=ts or 0,
-            )
-            try:
-                result = callback(evt)
-                if hasattr(result, "__await__"):
-                    await result
-            except Exception as exc:
-                team_logger.warning(
-                    "human_agent on_inbound callback for %s raised: %s",
-                    recipient,
-                    exc,
-                )
-
-    async def _ack_user_bound_message(self, event: CoordinationEvent) -> None:
-        """Mark a teammate→user direct message as read on the user's behalf.
-
-        The leader observes every direct-message event on the team topic;
-        when the recipient is the ``user`` pseudo-member (no real polling
-        process), the leader flips ``is_read`` so the message does not
-        accumulate as unread and keep waking the dispatcher.
-        """
-        payload: MessageEvent = event.get_payload()
-        if payload.to_member_name != "user":
-            return
-        mm = self._host.infra.message_manager
-        if mm is None:
-            return
-        await mm.mark_message_read(payload.message_id, "user")
-        team_logger.debug(
-            "leader auto-acked user-bound message {} from {}",
-            payload.message_id,
-            payload.from_member_name,
-        )
-
-    async def _read_all_unread(self, member_name: str) -> list:
-        """Read all unread messages (direct + broadcast).
-
-        Returns merged list sorted by timestamp descending (newest first).
-        """
-        mm = self._host.infra.message_manager
-        direct = await mm.get_messages(to_member_name=member_name, unread_only=True)
-        broadcasts = await mm.get_broadcast_messages(member_name=member_name, unread_only=True)
-        merged = list(direct) + list(broadcasts)
-        merged.sort(key=lambda m: m.timestamp, reverse=True)
-        return merged
-
-    @staticmethod
-    def _format_message(msg) -> str:
-        """Format one TeamMessage for agent input.
-
-        Includes message_id so the agent can call mark_message_read,
-        and distinguishes direct vs broadcast messages.
-        """
-        msg_type = t("dispatcher.msg_type_broadcast") if msg.broadcast else t("dispatcher.msg_type_direct")
-        return t(
-            "dispatcher.msg_received",
-            msg_type=msg_type,
-            message_id=msg.message_id,
-            sender=msg.from_member_name,
-            content=msg.content,
-        )
-
-    # ------------------------------------------------------------------
-    # Task nudging
-    # ------------------------------------------------------------------
-
-    async def _nudge_idle_agent(self, member_name: str, from_poll: bool = False) -> None:
-        """Feed task context to an idle agent.
-
-        Leader: reviews full task board to decide whether to re-plan or conclude.
-        Teammate: reviews claimable tasks to pick one, plus all tasks for coordination context.
-
-        Args:
-            member_name: The calling member's own name.
-            from_poll: True when the nudge originates from a routine
-                POLL_TASK tick. In that case an idle leader with no
-                incomplete tasks (covers all-done / no-tasks / empty-team)
-                returns silently — real task-completion prompts arrive
-                via the TASK_EVENTS path so polling should not
-                re-trigger them.
-        """
-        host = self._host
-        all_tasks = await host.infra.task_manager.list_tasks()
-        _terminal = {"completed", "cancelled"}
-        incomplete = [t for t in all_tasks if t.status not in _terminal]
-
-        if from_poll and host.blueprint.role == TeamRole.LEADER and not incomplete:
-            return
-
-        team_logger.debug("[{}] nudge_idle_agent: {} incomplete tasks", member_name, len(incomplete))
-        if host.blueprint.role == TeamRole.LEADER:
-            if not incomplete:
-                lifecycle = host.blueprint.lifecycle
-                if lifecycle == "persistent":
-                    prompt = t("dispatcher.all_done_persistent")
-                else:
-                    prompt = t("dispatcher.all_done_temporary")
-                await host.deliver_input(prompt)
-                return
-            lines = [t("dispatcher.leader_task_board")]
-        else:
-            claimable = [task for task in incomplete if task.status == "pending" and not task.assignee]
-            if not claimable and not incomplete:
-                return
-            lines = [t("dispatcher.teammate_task_list")]
-
-        for task in incomplete:
-            assignee = f" → {task.assignee}" if task.assignee else t("dispatcher.task_unassigned_marker")
-            lines.append(f"- [{task.task_id}] [{task.status}] {task.title}: {task.content}{assignee}")
-
-        await host.deliver_input("\n".join(lines))
-
-    async def _check_stale_claimed_tasks(self) -> None:
-        """Find claimed tasks that have been running past the stale threshold.
-
-        Measures how long a task has been in CLAIMED state by reading the
-        database ``updated_at`` column (bumped on every status transition,
-        so for a claimed task it is the claim timestamp). When the
-        elapsed time exceeds ``_STALE_CLAIM_SECONDS`` the assignee is
-        nudged via the local agent loop (self) or a direct message
-        (leader → other member). A per-task throttle prevents follow-up
-        polls from re-nudging inside the same stale window.
-        """
-        host = self._host
-        task_manager = host.infra.task_manager
-        if task_manager is None:
-            return
-
-        claimed = await task_manager.list_tasks(status=TaskStatus.CLAIMED.value)
-        own_name = host.blueprint.member_name
-        is_leader = host.blueprint.role == TeamRole.LEADER
-        relevant = [t for t in claimed if t.assignee and (t.assignee == own_name or is_leader)]
-
-        current_ids = {t.task_id for t in relevant}
-        for tid in [k for k in self._last_stale_nudge if k not in current_ids]:
-            self._last_stale_nudge.pop(tid, None)
-
-        if not relevant:
-            return
-
-        now = time.time()
-        threshold_ms = self._STALE_CLAIM_SECONDS * 1000
-        for task in relevant:
-            if task.updated_at is None:
-                continue
-            elapsed_ms = now * 1000 - task.updated_at
-            if elapsed_ms < threshold_ms:
-                continue
-            last_nudge = self._last_stale_nudge.get(task.task_id, 0.0)
-            if now - last_nudge < self._STALE_CLAIM_SECONDS:
-                continue
-            self._last_stale_nudge[task.task_id] = now
-            await self._nudge_stale_claim(task)
-
-    async def _nudge_stale_claim(self, task) -> None:
-        """Dispatch a stale-claim nudge to self or to the assigned member."""
-        host = self._host
-        assignee = task.assignee
-        if assignee and assignee == host.blueprint.member_name:
-            await self._self_nudge_stale_claim(task)
-        elif host.blueprint.role == TeamRole.LEADER and assignee:
-            await self._leader_nudge_stale_claim(task)
-
-    @staticmethod
-    def _format_stale_claim_nudge(task) -> str:
-        return t(
-            "dispatcher.stale_claim_self",
-            task_id=task.task_id,
-            title=task.title,
-            content=task.content,
-        )
-
-    async def _self_nudge_stale_claim(self, task) -> None:
-        """Feed a nudge input into the local agent loop."""
-        host = self._host
-        content = self._format_stale_claim_nudge(task)
-        await host.deliver_input(content)
-        team_logger.info(
-            "[{}] self-nudged stale claimed task {}",
-            host.blueprint.member_name,
-            task.task_id,
-        )
-
-    async def _leader_nudge_stale_claim(self, task) -> None:
-        """Send a direct reminder to the member holding a stale claim."""
-        host = self._host
-        if host.infra.message_manager is None:
-            return
-        content = self._format_stale_claim_nudge(task)
-        await host.infra.message_manager.send_message(content, task.assignee)
-        team_logger.info(
-            "[leader] nudged {} about stale claimed task {}",
-            task.assignee,
-            task.task_id,
-        )
-
-    async def _check_stale_pending_tasks(self) -> None:
-        """Leader-only: self-prompt about pending tasks that nobody claimed.
-
-        Scans pending tasks via ``task.updated_at`` (bumped on every status
-        transition). When a task has been pending past
-        ``_STALE_PENDING_SECONDS``, the leader feeds itself an input
-        listing those tasks plus a hint to pick the right teammate and
-        ping them via ``send_message``. The model decides who to notify
-        based on each task's content and the team roster — the dispatcher
-        does not try to do the matching itself. A per-task throttle
-        prevents follow-up polls from re-prompting inside the same
-        stale window.
-        """
-        host = self._host
-        if host.blueprint.role != TeamRole.LEADER:
-            return
-        task_manager = host.infra.task_manager
-        if task_manager is None:
-            return
-
-        pending = await task_manager.list_tasks(status=TaskStatus.PENDING.value)
-        now = time.time()
-        threshold_ms = self._STALE_PENDING_SECONDS * 1000
-        stale_ids = {
-            t.task_id for t in pending if t.updated_at is not None and (now * 1000 - t.updated_at) >= threshold_ms
-        }
-
-        # GC throttle entries for tasks no longer pending/stale.
-        for tid in [k for k in self._last_pending_nudge if k not in stale_ids]:
-            self._last_pending_nudge.pop(tid, None)
-
-        fresh: list = []
-        for task in pending:
-            if task.task_id not in stale_ids:
-                continue
-            last = self._last_pending_nudge.get(task.task_id, 0.0)
-            if now - last < self._STALE_PENDING_SECONDS:
-                continue
-            fresh.append(task)
-
-        if not fresh:
-            return
-
-        for task in fresh:
-            self._last_pending_nudge[task.task_id] = now
-
-        lines = [t("dispatcher.stale_pending_header")]
-        for task in fresh:
-            lines.append(f"- [{task.task_id}] {task.title}: {task.content}")
-        content = "\n".join(lines)
-
-        await host.deliver_input(content)
-        team_logger.info(
-            "[leader] self-prompted about {} stale pending task(s)",
-            len(fresh),
-        )
+        await self._framework.trigger(event.event_type, event)
