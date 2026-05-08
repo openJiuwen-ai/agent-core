@@ -22,14 +22,12 @@ from openjiuwen.agent_teams.schema.status import (
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.core.runner.runner import Runner
-from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
     from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
     from openjiuwen.agent_teams.agent.state import TeamAgentState
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 
 _MAX_RETRY_ATTEMPTS = 10
 _RETRYABLE_ERROR_CODES = {181001}
@@ -105,15 +103,14 @@ class StreamController:
         return self.agent_task is not None and not self.agent_task.done()
 
     def has_pending_interrupt(self) -> bool:
-        deep_agent = self._resources.deep_agent
-        session = deep_agent.loop_session if deep_agent else None
-        if session is None:
+        harness = self._resources.harness
+        if harness is None:
             return False
-        return session.get_state(INTERRUPTION_KEY) is not None
+        return harness.has_pending_interrupt()
 
     async def start_round(self, content: Any) -> None:
-        deep_agent = self._resources.deep_agent
-        if deep_agent is None or self.stream_queue is None:
+        harness = self._resources.harness
+        if harness is None or self.stream_queue is None:
             return
         preview = content if isinstance(content, str) else type(content).__name__
         team_logger.info("[{}] start_agent: {:.120}", self._member_name() or "?", str(preview))
@@ -123,16 +120,14 @@ class StreamController:
         self.agent_task.add_done_callback(self._log_agent_task_exception)
 
     async def steer(self, content: str) -> None:
-        deep_agent = self._resources.deep_agent
-        if deep_agent is not None:
-            team_logger.debug("[{}] steer: {:.120}", self._member_name() or "?", content)
-            await deep_agent.steer(content)
+        harness = self._resources.harness
+        if harness is not None:
+            await harness.steer(content)
 
     async def follow_up(self, content: str) -> None:
-        deep_agent = self._resources.deep_agent
-        if deep_agent is not None:
-            team_logger.debug("[{}] follow_up: {:.120}", self._member_name() or "?", content)
-            await deep_agent.follow_up(content)
+        harness = self._resources.harness
+        if harness is not None:
+            await harness.follow_up(content)
 
     async def cancel_agent(self) -> None:
         await self._update_execution(ExecutionStatus.CANCEL_REQUESTED)
@@ -167,12 +162,9 @@ class StreamController:
         )
 
     async def _run_one_round(self, message: Any) -> None:
-        deep_agent = self._resources.deep_agent
-        if deep_agent and deep_agent.deep_config and deep_agent.deep_config.workspace:
-            from openjiuwen.core.sys_operation.cwd import init_cwd
-
-            init_root = deep_agent.deep_config.workspace.root_path
-            init_cwd(init_root, workspace=init_root)
+        harness = self._resources.harness
+        if harness is not None:
+            harness.init_cwd_for_round()
 
         await self._update_status(MemberStatus.READY)
         await self._update_status(MemberStatus.BUSY)
@@ -203,9 +195,7 @@ class StreamController:
                     if len(drained) == 1:
                         combined = drained[0]
                     else:
-                        combined = "\n\n---\n\n".join(
-                            item if isinstance(item, str) else str(item) for item in drained
-                        )
+                        combined = "\n\n---\n\n".join(item if isinstance(item, str) else str(item) for item in drained)
                     await self.start_round(combined)
                 else:
                     await self._wake_mailbox_if_interrupt_cleared()
@@ -214,17 +204,16 @@ class StreamController:
                         self.close_stream()
 
     async def _stream_one_round(self, query: Any) -> Optional[Tuple[Optional[int], str]]:
-        deep_agent = self._resources.deep_agent
+        harness = self._resources.harness
         inputs = {"query": query}
         error_seen = False
         error_code: Optional[int] = None
         error_text: str = ""
         self.streaming_active = True
         try:
-            async for chunk in Runner.run_agent_streaming(
-                deep_agent,
+            async for chunk in harness.run_streaming(
                 inputs,
-                session=self._state.session_id,
+                session_id=self._state.session_id,
             ):
                 if error_seen:
                     continue
@@ -297,24 +286,10 @@ class StreamController:
             await self._update_execution(ExecutionStatus.IDLE)
 
     def is_valid_interrupt_resume(self, user_input: Any) -> bool:
-        if not isinstance(user_input, InteractiveInput):
+        harness = self._resources.harness
+        if harness is None:
             return False
-        deep_agent = self._resources.deep_agent
-        session = deep_agent.loop_session if deep_agent else None
-        if session is None:
-            return False
-        state = session.get_state(INTERRUPTION_KEY)
-        if state is None:
-            return False
-        interrupted = getattr(state, "interrupted_tools", {}) or {}
-        pending_ids = set()
-        for entry in interrupted.values():
-            requests = getattr(entry, "interrupt_requests", {}) or {}
-            pending_ids.update(requests.keys())
-        if not pending_ids:
-            return False
-        resume_ids = set(user_input.user_inputs.keys())
-        return bool(resume_ids) and resume_ids.issubset(pending_ids)
+        return harness.is_pending_interrupt_resume_valid(user_input)
 
     def _dequeue_valid_interrupt_resume(self) -> Optional[InteractiveInput]:
         while self.pending_interrupt_resumes:

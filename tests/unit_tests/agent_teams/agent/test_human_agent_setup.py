@@ -236,7 +236,7 @@ def test_human_agent_skips_first_iteration_gate() -> None:
     """Human agents must not hold a FirstIterationGate — they have no
     task loop the gate would open."""
     avatar = _build_human_agent_runtime()
-    rails = list(avatar.deep_agent._pending_rails)
+    rails = list(avatar.harness.inner_agent._pending_rails)
 
     assert not any(isinstance(r, FirstIterationGate) for r in rails)
     assert avatar.resources.first_iter_gate is None
@@ -247,7 +247,7 @@ def test_human_agent_attaches_team_tool_and_policy_rails() -> None:
     """TeamToolRail (filtered by role) and TeamPolicyRail must still be
     on the avatar so it gets its tool surface and prompt sections."""
     avatar = _build_human_agent_runtime()
-    rails = list(avatar.deep_agent._pending_rails)
+    rails = list(avatar.harness.inner_agent._pending_rails)
 
     assert any(isinstance(r, TeamToolRail) for r in rails)
     assert any(isinstance(r, TeamPolicyRail) for r in rails)
@@ -285,5 +285,5 @@ def test_human_agent_never_attaches_tool_approval_rail() -> None:
     avatar = TeamAgent(card)
     avatar.configure(spec, ctx)
 
-    rails = list(avatar.deep_agent._pending_rails)
+    rails = list(avatar.harness.inner_agent._pending_rails)
     assert not any(isinstance(r, TeamToolApprovalRail) for r in rails)

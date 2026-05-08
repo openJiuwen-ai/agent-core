@@ -16,6 +16,7 @@ from typing import Any, List
 
 import pytest
 
+from openjiuwen.agent_teams import harness as harness_module
 from openjiuwen.agent_teams.agent import stream_controller as stream_controller_module
 from openjiuwen.agent_teams.agent.stream_controller import StreamController
 from openjiuwen.agent_teams.schema.status import ExecutionStatus
@@ -64,6 +65,9 @@ def _make_stream_controller_stub() -> StreamController:
     """
     from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
     from openjiuwen.agent_teams.agent.state import TeamAgentState
+    from openjiuwen.agent_teams.harness import TeamHarness, _MountedRails
+    from openjiuwen.agent_teams.schema.team import TeamRole
+    from unittest.mock import MagicMock
 
     execution_log: list[ExecutionStatus] = []
 
@@ -74,7 +78,14 @@ def _make_stream_controller_stub() -> StreamController:
         return None
 
     state = TeamAgentState(session_id="sess-1")
-    resources = PrivateAgentResources(deep_agent=object())  # type: ignore[arg-type]
+    fake_rails = _MountedRails(team_tool=MagicMock(), team_policy=MagicMock())
+    fake_harness = TeamHarness(
+        SimpleNamespace(deep_config=None),
+        fake_rails,
+        role=TeamRole.LEADER,
+        member_name="stub",
+    )
+    resources = PrivateAgentResources(harness=fake_harness)
     fake_blueprint = SimpleNamespace(member_name="stub")
 
     sc = StreamController(
@@ -107,7 +118,7 @@ def _install_fake_runner(
             yield chunk
 
     monkeypatch.setattr(
-        stream_controller_module.Runner,
+        harness_module.Runner,
         "run_agent_streaming",
         fake_run_agent_streaming,
     )

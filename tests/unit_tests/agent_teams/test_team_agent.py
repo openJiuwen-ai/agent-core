@@ -41,7 +41,7 @@ def test_team_agent_leader_policy() -> None:
     # before each model call, not stored in deep_config.system_prompt
     # (which stays None).
     policy_rail = next(
-        r for r in leader.deep_agent._pending_rails if isinstance(r, TeamPolicyRail)
+        r for r in leader.harness.inner_agent._pending_rails if isinstance(r, TeamPolicyRail)
     )
     role_section = next(
         s for s in policy_rail._static_sections if s.name == TeamSectionName.ROLE

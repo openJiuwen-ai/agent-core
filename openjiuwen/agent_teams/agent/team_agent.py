@@ -40,15 +40,14 @@ from openjiuwen.core.runner.spawn.agent_config import SpawnAgentConfig
 from openjiuwen.core.runner.spawn.process_manager import SpawnConfig
 from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.rail.base import AgentRail
-from openjiuwen.harness.deep_agent import DeepAgent
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.harness import TeamHarness
     from openjiuwen.agent_teams.interaction.payload import DeliverResult
     from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
     from openjiuwen.agent_teams.models.pool import ModelPoolEntry
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.harness.tools.worktree import WorktreeManager
-    from openjiuwen.harness.schema.config import DeepAgentConfig
 
 
 # pylint: disable=too-many-public-methods
@@ -114,14 +113,14 @@ class TeamAgent(BaseAgent):
         return self._configurator.resources
 
     @property
-    def deep_agent(self) -> Optional[DeepAgent]:
-        return self._configurator.deep_agent
+    def harness(self) -> Optional["TeamHarness"]:
+        """Return the harness owning the underlying DeepAgent runtime.
 
-    @property
-    def deep_config(self) -> Optional["DeepAgentConfig"]:
-        if self._configurator.deep_agent is None:
-            return None
-        return self._configurator.deep_agent.deep_config
+        All access to the DeepAgent runtime — config, model, workspace,
+        rails, streaming — must go through this object. New code should
+        not seek out the DeepAgent instance directly.
+        """
+        return self._configurator.harness
 
     @property
     def spec(self) -> Optional[TeamAgentSpec]:
@@ -258,7 +257,7 @@ class TeamAgent(BaseAgent):
         return self._spawn_manager.lookup_inprocess_agent(member_name)
 
     def is_agent_ready(self) -> bool:
-        return self._configurator.deep_agent is not None
+        return self._configurator.harness is not None
 
     def is_agent_running(self) -> bool:
         return self._is_agent_running()
@@ -559,13 +558,15 @@ class TeamAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     async def register_rail(self, rail: AgentRail) -> "TeamAgent":
-        if self._configurator.deep_agent is not None:
-            await self._configurator.deep_agent.register_rail(rail)
+        harness = self._configurator.harness
+        if harness is not None:
+            await harness.register_rail(rail)
         return self
 
     async def unregister_rail(self, rail: AgentRail) -> "TeamAgent":
-        if self._configurator.deep_agent is not None:
-            await self._configurator.deep_agent.unregister_rail(rail)
+        harness = self._configurator.harness
+        if harness is not None:
+            await harness.unregister_rail(rail)
         return self
 
     # ------------------------------------------------------------------

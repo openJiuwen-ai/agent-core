@@ -149,18 +149,19 @@ class CoordinationKernel:
             await infra.workspace_manager.initialize(remote_url=remote_url)
             infra.workspace_initialized = True
 
-        # Wire up the team memory toolkit once the DeepAgent and workspace
+        # Wire up the team memory toolkit once the harness and workspace
         # are ready. init_toolkit is idempotent; calling it on every start
         # is safe.
         memory_manager = resources.memory_manager
-        if memory_manager and resources.deep_agent:
+        harness = resources.harness
+        if memory_manager and harness:
             success = await memory_manager.init_toolkit()
             if success:
-                memory_manager.register_tools(resources.deep_agent)
-                if memory_manager.extraction_model is None and resources.deep_agent.deep_config:
-                    memory_manager.set_extraction_model(resources.deep_agent.deep_config.model)
-                await memory_manager.load_and_inject(
-                    resources.deep_agent,
+                harness.register_member_tools(memory_manager)
+                if memory_manager.extraction_model is None:
+                    memory_manager.set_extraction_model(harness.model)
+                await harness.inject_member_memory(
+                    memory_manager,
                     query=host.state.pending_user_query or "",
                 )
 
@@ -256,6 +257,7 @@ class CoordinationKernel:
         if session is None or team_name is None:
             return
         from openjiuwen.agent_teams.runtime.metadata import merge_team_namespace
+
         try:
             merge_team_namespace(session, team_name, {"lifecycle": lifecycle})
         except Exception as e:

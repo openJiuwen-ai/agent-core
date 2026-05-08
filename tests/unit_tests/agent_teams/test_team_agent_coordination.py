@@ -99,7 +99,7 @@ async def test_wake_feeds_messages_to_agent():
     """When loop wakes, unread messages are fed
     to the DeepAgent via follow_up or Runner."""
     agent = _make_leader()
-    agent._configurator.deep_agent.follow_up = AsyncMock()
+    agent._configurator.harness.inner_agent.follow_up = AsyncMock()
     fake_msg = MagicMock()
     fake_msg.message_id = "msg-1"
     fake_msg.from_member_name = "dev-1"
@@ -278,8 +278,8 @@ async def test_resume_interrupt_queues_while_agent_running():
     fake_entry.interrupt_requests = {"call-1": MagicMock()}
     fake_state = MagicMock()
     fake_state.interrupted_tools = {"call-1": fake_entry}
-    agent._configurator.deep_agent._loop_session = MagicMock()
-    agent._configurator.deep_agent._loop_session.get_state = MagicMock(return_value=fake_state)
+    agent._configurator.harness.inner_agent._loop_session = MagicMock()
+    agent._configurator.harness.inner_agent._loop_session.get_state = MagicMock(return_value=fake_state)
     agent._stream_controller.agent_task = MagicMock()
     agent._stream_controller.agent_task.done.return_value = False
     agent._start_agent = AsyncMock()
@@ -740,15 +740,16 @@ async def test_teammate_round_completion_wakes_mailbox_after_interrupt_clears():
 @pytest.mark.level0
 def test_first_iter_gate_single_instance_registered_on_deep_agent():
     """Regression: gate awaited by coordination must be the same instance
-    registered as a deep_agent rail. A previous refactor created two gates
-    -- registered one, awaited the other -- causing teammates to hang on
-    the initial mailbox poll forever.
+    registered as a rail on the underlying agent. A previous refactor
+    created two gates -- registered one, awaited the other -- causing
+    teammates to hang on the initial mailbox poll forever.
     """
     agent = _make_leader()
     gate = agent._configurator.first_iter_gate
     assert gate is not None
-    assert agent.deep_agent is not None
-    all_rails = list(agent.deep_agent._pending_rails) + list(agent.deep_agent._registered_rails)
+    assert agent.harness is not None
+    inner = agent.harness.inner_agent
+    all_rails = list(inner._pending_rails) + list(inner._registered_rails)
     assert gate in all_rails
 
 

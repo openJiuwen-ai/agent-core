@@ -14,6 +14,7 @@ from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
 from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.agent.payload import SpawnPayloadBuilder
 from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
+from openjiuwen.agent_teams.harness import TeamHarness
 from openjiuwen.agent_teams.messager import (
     Messager,
     create_messager,
@@ -41,7 +42,6 @@ from openjiuwen.core.runner.spawn.agent_config import (
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode
-from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.prompts import resolve_language as _resolve_language
 
 if TYPE_CHECKING:
@@ -145,12 +145,12 @@ class AgentConfigurator:
         self._infra.message_manager = value
 
     @property
-    def deep_agent(self) -> Optional[DeepAgent]:
-        return self._resources.deep_agent
+    def harness(self) -> Optional[TeamHarness]:
+        return self._resources.harness
 
-    @deep_agent.setter
-    def deep_agent(self, value: Optional[DeepAgent]) -> None:
-        self._resources.deep_agent = value
+    @harness.setter
+    def harness(self, value: Optional[TeamHarness]) -> None:
+        self._resources.harness = value
 
     @property
     def worktree_manager(self) -> Optional["WorktreeManager"]:
@@ -184,8 +184,8 @@ class AgentConfigurator:
     def model_allocator(self, value: Optional["ModelAllocator"]) -> None:
         self._resources.model_allocator = value
 
-    def configure(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> DeepAgent:
-        """Main entry point: configure infrastructure and build DeepAgent."""
+    def configure(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> TeamHarness:
+        """Main entry point: configure infrastructure and build the harness."""
         self.setup_infra(spec, ctx)
         return self.setup_agent(spec, ctx)
 
@@ -256,8 +256,8 @@ class AgentConfigurator:
         self,
         spec: TeamAgentSpec,
         ctx: TeamRuntimeContext,
-    ) -> DeepAgent:
-        """Phase 2: build prompt, create DeepAgent, set up coordination."""
+    ) -> TeamHarness:
+        """Phase 2: build prompt, create DeepAgent through TeamHarness, set up coordination."""
         agent_spec = self.resolve_agent_spec(spec, ctx.role, ctx.member_name)
         resolved_language = self._blueprint.language if self._blueprint else _resolve_language(agent_spec.language)
         member_name = ctx.member_name
@@ -297,7 +297,6 @@ class AgentConfigurator:
                 "enable_task_loop": True,
             }
         )
-        self.deep_agent = build_spec.build()
 
         resolved_team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
 
@@ -324,30 +323,19 @@ class AgentConfigurator:
             team_name=resolved_team_name,
             member_name=member_name or "",
         )
-        self.deep_agent.add_rail(team_tool_rail)
-        # Register team tools eagerly so callers that inspect the
-        # ability manager between ``configure()`` and the first
-        # ``invoke()`` (tests, tool snapshots) see the same surface
-        # the LLM will see.  The rail's ``init`` is idempotent so the
-        # DeepAgent's lazy rail-init pass becomes a no-op.
-        team_tool_rail.set_sys_operation(self.deep_agent.deep_config.sys_operation)
-        team_tool_rail.set_workspace(self.deep_agent.deep_config.workspace)
-        team_tool_rail.init(self.deep_agent)
 
-        self.deep_agent.add_rail(
-            TeamPolicyRail(
-                role=ctx.role,
-                persona=ctx.persona,
-                member_name=member_name,
-                lifecycle=spec.lifecycle,
-                teammate_mode=spec.teammate_mode,
-                language=resolved_language,
-                team_mode=_resolve_team_mode(spec),
-                base_prompt=agent_spec.system_prompt,
-                team_workspace_mount=team_workspace_mount,
-                team_workspace_path=team_workspace_path,
-                team_backend=self.team_backend,
-            )
+        team_policy_rail = TeamPolicyRail(
+            role=ctx.role,
+            persona=ctx.persona,
+            member_name=member_name,
+            lifecycle=spec.lifecycle,
+            teammate_mode=spec.teammate_mode,
+            language=resolved_language,
+            team_mode=_resolve_team_mode(spec),
+            base_prompt=agent_spec.system_prompt,
+            team_workspace_mount=team_workspace_mount,
+            team_workspace_path=team_workspace_path,
+            team_backend=self.team_backend,
         )
 
         # Human agents have no autonomous task loop and no mailbox poll
@@ -355,52 +343,55 @@ class AgentConfigurator:
         # messages addressed to them are passed through to the external
         # user. Skipping FirstIterationGate keeps
         # ``enqueue_mailbox_after_first_iteration`` a no-op for them.
+        first_iter_gate = None
         if ctx.role != TeamRole.HUMAN_AGENT:
             from openjiuwen.agent_teams.rails import FirstIterationGate
 
-            self.first_iter_gate = FirstIterationGate()
-            self.deep_agent.add_rail(self.first_iter_gate)
+            first_iter_gate = FirstIterationGate()
+            self.first_iter_gate = first_iter_gate
 
+        team_workspace_rail = None
         if self.workspace_manager:
             from openjiuwen.agent_teams.team_workspace.rails import TeamWorkspaceRail
 
-            self.deep_agent.add_rail(
-                TeamWorkspaceRail(self.workspace_manager, member_name or ""),
-            )
+            team_workspace_rail = TeamWorkspaceRail(self.workspace_manager, member_name or "")
 
+        tool_approval_rail = None
         is_coordinated_teammate = ctx.role == TeamRole.TEAMMATE and ctx.team_spec
         if is_coordinated_teammate and self.team_backend and self.messager:
             from openjiuwen.agent_teams.rails import TeamToolApprovalRail
 
             approval_tools = agent_spec.approval_required_tools or []
             if approval_tools:
-                self.deep_agent.add_rail(
-                    TeamToolApprovalRail(
-                        team_name=ctx.team_spec.team_name,
-                        member_name=member_name or "",
-                        db=self.team_backend.db,
-                        messager=self.messager,
-                        leader_member_name=ctx.team_spec.leader_member_name or "",
-                        tool_names=approval_tools,
-                    )
+                tool_approval_rail = TeamToolApprovalRail(
+                    team_name=ctx.team_spec.team_name,
+                    member_name=member_name or "",
+                    db=self.team_backend.db,
+                    messager=self.messager,
+                    leader_member_name=ctx.team_spec.leader_member_name or "",
+                    tool_names=approval_tools,
                 )
+
+        self.harness = TeamHarness.build(
+            agent_spec=build_spec,
+            role=ctx.role,
+            member_name=member_name,
+            team_tool_rail=team_tool_rail,
+            team_policy_rail=team_policy_rail,
+            first_iter_gate=first_iter_gate,
+            team_workspace_rail=team_workspace_rail,
+            tool_approval_rail=tool_approval_rail,
+        )
 
         # Team memory manager (only when explicitly enabled in the spec).
         # Construction must happen before agent_customizer so platform
         # adapters that touch memory tools can see them.
         self.memory_manager = self._build_memory_manager(spec, ctx, agent_spec, resolved_language, member_name)
 
-        if spec.agent_customizer and self.deep_agent:
-            try:
-                spec.agent_customizer(self.deep_agent, member_name, ctx.role.value)
-            except Exception as exc:
-                team_logger.warning(
-                    "[{}] agent_customizer failed: {}",
-                    member_name or "?",
-                    exc,
-                )
+        if spec.agent_customizer:
+            self.harness.run_agent_customizer(spec.agent_customizer)
 
-        return self.deep_agent
+        return self.harness
 
     def _build_memory_manager(
         self,
@@ -431,8 +422,8 @@ class AgentConfigurator:
         if spec.memory.shared_memory and spec.lifecycle == "persistent":
             team_memory_dir = spec.memory.team_memory_dir or str(default_team_memory_dir(resolved_team_name))
 
-        agent_workspace = self.deep_agent.deep_config.workspace if self.deep_agent else None
-        sys_operation = self.deep_agent.deep_config.sys_operation if self.deep_agent else None
+        agent_workspace = self.harness.workspace if self.harness else None
+        sys_operation = self.harness.sys_operation if self.harness else None
 
         params = TeamMemoryManagerParams(
             member_name=member_name or "",

@@ -508,13 +508,23 @@ async def test_team_agent_cancelled_round_does_not_restart_follow_up():
 
     from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
     from openjiuwen.agent_teams.agent.state import TeamAgentState
+    from openjiuwen.agent_teams.harness import TeamHarness, _MountedRails
+    from openjiuwen.agent_teams.schema.team import TeamRole
+    from unittest.mock import MagicMock
 
     fake_deep_agent = SimpleNamespace(deep_config=None)
+    fake_rails = _MountedRails(team_tool=MagicMock(), team_policy=MagicMock())
+    fake_harness = TeamHarness(
+        fake_deep_agent,
+        fake_rails,
+        role=TeamRole.LEADER,
+        member_name="leader",
+    )
     fake_blueprint = SimpleNamespace(member_name="leader")
     sc = StreamController(
         blueprint_getter=lambda: fake_blueprint,
         state=TeamAgentState(),
-        resources=PrivateAgentResources(deep_agent=fake_deep_agent),
+        resources=PrivateAgentResources(harness=fake_harness),
         status_updater=_noop,
         execution_updater=_noop,
     )
