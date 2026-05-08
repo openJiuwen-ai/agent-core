@@ -1162,6 +1162,59 @@ class TestTeamRuntimeManagerDeleteTeam:
 
     @pytest.mark.asyncio
     @pytest.mark.level0
+    async def test_delete_team_uses_first_parseable_release_info(self):
+        """delete_team should skip bad sessions and use the first parseable release info."""
+        from openjiuwen.agent_teams.runtime.manager import (
+            TeamRuntimeManager,
+            TeamSessionReleaseInfo,
+        )
+        from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
+
+        manager = TeamRuntimeManager()
+        team_name = "delete_parseable_team"
+        bad_session_id = f"bad_{uuid.uuid4().hex}"
+        good_session_id = f"good_{uuid.uuid4().hex}"
+
+        db_config = DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:")
+        release_info = TeamSessionReleaseInfo(team_names=[team_name], db_config=db_config)
+        fake_db = AsyncMock()
+        fake_db.initialize = AsyncMock()
+        fake_db.drop_session_tables_by_id = AsyncMock(return_value=[])
+        fake_db.team = AsyncMock()
+        fake_db.team.delete_team = AsyncMock(return_value=True)
+        fake_checkpointer = AsyncMock()
+        fake_checkpointer.release = AsyncMock()
+
+        async def _fake_resolve(session_id: str):
+            if session_id == bad_session_id:
+                raise RuntimeError(f"Cannot resolve team session release info for {session_id}")
+            if session_id == good_session_id:
+                return release_info
+            return None
+
+        with patch(
+            "openjiuwen.agent_teams.runtime.manager.TeamRuntimeManager.resolve_team_session_release_info",
+            side_effect=_fake_resolve,
+        ), patch(
+            "openjiuwen.agent_teams.spawn.shared_resources.get_shared_db",
+            return_value=fake_db,
+        ), patch(
+            "openjiuwen.agent_teams.runtime.manager.CheckpointerFactory.get_checkpointer",
+            return_value=fake_checkpointer,
+        ):
+            result = await manager.delete_team(team_name, [bad_session_id, good_session_id])
+
+        assert result is True
+        fake_db.drop_session_tables_by_id.assert_any_await(bad_session_id)
+        fake_db.drop_session_tables_by_id.assert_any_await(good_session_id)
+        assert fake_db.drop_session_tables_by_id.await_count == 2
+        fake_checkpointer.release.assert_any_await(bad_session_id)
+        fake_checkpointer.release.assert_any_await(good_session_id)
+        assert fake_checkpointer.release.await_count == 2
+        fake_db.team.delete_team.assert_awaited_once_with(team_name)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_delete_team_rejects_when_team_active(self):
         """delete_team must refuse while the target team is active in the pool."""
         from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager

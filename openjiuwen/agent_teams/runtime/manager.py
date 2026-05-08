@@ -351,10 +351,12 @@ class TeamRuntimeManager:
 
         db_config: Optional[DatabaseConfig] = None
         if session_ids:
-            release_info = await self.resolve_team_session_release_info(session_ids[0])
+            release_info = await self._resolve_any_team_session_release_info(session_ids)
             if release_info is None:
-                raise RuntimeError(f"Cannot resolve team session release info for {session_ids[0]}, "
-                                   f"aborting delete_team")
+                raise RuntimeError(
+                    f"Cannot resolve team session release info for any supplied sessions: {session_ids}, "
+                    f"aborting delete_team"
+                )
             db_config = release_info.db_config
 
         from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
@@ -412,6 +414,33 @@ class TeamRuntimeManager:
         db = get_shared_db(release_info.db_config)
         await db.initialize()
         await db.drop_session_tables_by_id(session_id)
+
+    @staticmethod
+    async def _resolve_any_team_session_release_info(
+        session_ids: list[str],
+    ) -> Optional[TeamSessionReleaseInfo]:
+        """Return the first parseable release info from the supplied sessions."""
+        if not session_ids:
+            return None
+
+        parse_errors: list[str] = []
+        for session_id in session_ids:
+            try:
+                release_info = await TeamRuntimeManager.resolve_team_session_release_info(session_id)
+            except Exception as exc:
+                parse_errors.append(f"{session_id}: {exc}")
+                continue
+            if release_info is None:
+                continue
+            return release_info
+
+        if parse_errors:
+            details = "; ".join(parse_errors)
+            raise RuntimeError(
+                "Cannot resolve team session release info from supplied sessions: "
+                f"{details}"
+            )
+        return None
 
     @staticmethod
     async def resolve_team_session_release_info(session_id: str) -> Optional[TeamSessionReleaseInfo]:
