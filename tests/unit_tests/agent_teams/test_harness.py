@@ -207,6 +207,18 @@ async def test_follow_up_forwards_to_inner_agent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_abort_forwards_to_inner_agent() -> None:
+    """``abort`` is the cooperative shutdown seam — must reach the agent."""
+    deep_agent = _stub_deep_agent()
+    deep_agent.abort = AsyncMock()
+    harness = _make_harness(deep_agent)
+
+    await harness.abort()
+
+    deep_agent.abort.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_register_and_unregister_rail_forward() -> None:
     deep_agent = _stub_deep_agent()
     harness = _make_harness(deep_agent)

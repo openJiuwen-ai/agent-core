@@ -34,6 +34,11 @@ _RETRYABLE_ERROR_CODES = {181001}
 _RETRY_QUERY = "刚才有异常状况，继续执行"
 _TASK_FAILED_PAYLOAD_TYPE = "task_failed"
 _ERROR_CODE_PATTERN = re.compile(r"^\[(\d+)\]")
+# Soft deadline for cooperative cancel before falling back to Task.cancel.
+# Picked low enough that a stuck task loop doesn't block teardown for long,
+# but high enough that a normally-responsive abort handler can drain its
+# work (model output flush, state persistence) without being interrupted.
+_COOPERATIVE_ABORT_TIMEOUT_SECONDS = 2.0
 
 
 def _detect_task_failed(chunk: Any) -> Optional[Tuple[Optional[int], str]]:
@@ -91,6 +96,13 @@ class StreamController:
         self.streaming_active: bool = False
         self.pending_interrupt_resumes: list[InteractiveInput] = []
         self.pending_inputs: list[Any] = []
+        # Tracks whether the in-flight round was cancelled by the team
+        # (cancel_agent / drain / shutdown) rather than completing on its
+        # own. Cooperative aborts let the round exit without raising
+        # CancelledError, so this flag is needed to keep the
+        # ExecutionStatus state machine honest and to gate the post-round
+        # restart paths in ``_run_one_round``.
+        self._cancel_requested: bool = False
 
     def _member_name(self) -> Optional[str]:
         bp = self._get_blueprint()
@@ -133,7 +145,7 @@ class StreamController:
         await self._update_execution(ExecutionStatus.CANCEL_REQUESTED)
         if self.agent_task and not self.agent_task.done():
             await self._update_execution(ExecutionStatus.CANCELLING)
-            self.agent_task.cancel()
+            await self.cooperative_cancel()
 
     def close_stream(self) -> None:
         if self.stream_queue is not None:
@@ -145,9 +157,47 @@ class StreamController:
             return
         self.pending_inputs.clear()
         self.pending_interrupt_resumes.clear()
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
+        await self.cooperative_cancel()
+
+    async def cooperative_cancel(self) -> None:
+        """Ask the underlying task loop to abort, then hard-cancel if needed.
+
+        Two-phase shutdown:
+
+        1. Set ``_cancel_requested`` and call ``harness.abort()`` so the
+           DeepAgent task loop exits at its next safe checkpoint. This
+           lets in-flight model output flush and state persistence run.
+        2. Wait up to ``_COOPERATIVE_ABORT_TIMEOUT_SECONDS`` for the
+           round task to complete naturally. If the deadline passes,
+           fall back to ``task.cancel`` so an unresponsive loop cannot
+           block teardown indefinitely.
+
+        Suppresses every exception the task surfaces — the caller has
+        already declared intent to cancel.
+        """
+        task = self.agent_task
+        if task is None or task.done():
+            return
+        self._cancel_requested = True
+        harness = self._resources.harness
+        if harness is not None:
+            try:
+                await harness.abort()
+            except Exception as exc:
+                team_logger.debug(
+                    "[{}] harness.abort failed: {}",
+                    self._member_name() or "?",
+                    exc,
+                )
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=_COOPERATIVE_ABORT_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            if not task.done():
+                task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        except (asyncio.CancelledError, Exception):
+            pass
 
     def _log_agent_task_exception(self, task: asyncio.Task) -> None:
         if task.cancelled():
@@ -162,6 +212,10 @@ class StreamController:
         )
 
     async def _run_one_round(self, message: Any) -> None:
+        # Reset cancel state for the new round. cooperative_cancel sets
+        # this flag for the *current* round only; otherwise a stale True
+        # from a prior aborted round would suppress restarts here.
+        self._cancel_requested = False
         harness = self._resources.harness
         if harness is not None:
             harness.init_cwd_for_round()
@@ -185,7 +239,9 @@ class StreamController:
             await self._update_status(MemberStatus.ERROR)
         finally:
             self.agent_task = None
-            if not cancelled:
+            # Cooperative abort exits without CancelledError, so check
+            # _cancel_requested as well to suppress the restart paths.
+            if not cancelled and not self._cancel_requested:
                 next_resume = self._dequeue_valid_interrupt_resume()
                 if next_resume is not None and self.stream_queue is not None:
                     await self.start_round(next_resume)
@@ -270,8 +326,15 @@ class StreamController:
         await self._update_execution(ExecutionStatus.RUNNING)
         try:
             await self._run_retrying_stream(message)
-            await self._update_execution(ExecutionStatus.COMPLETING)
-            await self._update_execution(ExecutionStatus.COMPLETED)
+            # Cooperative abort path: the stream finished without
+            # raising, but cancel was requested. Surface CANCELLED
+            # rather than COMPLETED so the state machine matches user
+            # intent.
+            if self._cancel_requested:
+                await self._update_execution(ExecutionStatus.CANCELLED)
+            else:
+                await self._update_execution(ExecutionStatus.COMPLETING)
+                await self._update_execution(ExecutionStatus.COMPLETED)
         except asyncio.CancelledError:
             await self._update_execution(ExecutionStatus.CANCELLED)
             raise

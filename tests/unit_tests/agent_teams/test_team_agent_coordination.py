@@ -700,18 +700,41 @@ async def test_team_cleaned_event_ignored_by_leader():
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_shutdown_self_cancels_running_round_and_closes_stream():
-    """shutdown_self cancels the in-flight agent task and unblocks stream()."""
+    """shutdown_self drives the cooperative cancel path and unblocks stream().
+
+    The task loop should receive an abort signal first; if the round is
+    stuck (here, an indefinite ``asyncio.sleep``), the fallback hard
+    cancel must still terminate it so stream() can drain its sentinel.
+    """
     agent = _make_teammate()
     agent._team_member = None
     agent._stream_controller.stream_queue = asyncio.Queue()
 
-    fake_task = MagicMock()
-    fake_task.done.return_value = False
-    agent._stream_controller.agent_task = fake_task
+    abort_calls: list[None] = []
 
-    await agent.shutdown_self()
+    async def _fake_abort() -> None:
+        abort_calls.append(None)
 
-    fake_task.cancel.assert_called_once()
+    agent.harness._deep_agent.abort = _fake_abort
+
+    async def _stuck_round() -> None:
+        await asyncio.sleep(60)
+
+    real_task = asyncio.create_task(_stuck_round())
+    agent._stream_controller.agent_task = real_task
+
+    # Patch the timeout so the test does not block for the production value.
+    import openjiuwen.agent_teams.agent.stream_controller as stream_controller_module
+
+    original_timeout = stream_controller_module._COOPERATIVE_ABORT_TIMEOUT_SECONDS
+    stream_controller_module._COOPERATIVE_ABORT_TIMEOUT_SECONDS = 0.05
+    try:
+        await agent.shutdown_self()
+    finally:
+        stream_controller_module._COOPERATIVE_ABORT_TIMEOUT_SECONDS = original_timeout
+
+    assert len(abort_calls) == 1, "harness.abort must be called exactly once"
+    assert real_task.done(), "stuck task must be terminated by the fallback cancel"
     sentinel = await agent._stream_controller.stream_queue.get()
     assert sentinel is None
 

@@ -231,6 +231,18 @@ class TeamHarness:
         team_logger.debug("[{}] follow_up: {:.120}", self._member_name or "?", content)
         await self._deep_agent.follow_up(content)
 
+    async def abort(self) -> None:
+        """Request the underlying task loop to abort cooperatively.
+
+        The agent's coordinator sets an abort flag and runs ``on_abort``
+        so the in-flight iteration exits at the next safe point. The
+        outer streaming iterator then terminates naturally — no
+        ``CancelledError`` is raised. Callers that need a hard deadline
+        should pair this with ``asyncio.wait_for`` plus ``Task.cancel``
+        as a fallback.
+        """
+        await self._deep_agent.abort()
+
     def run_streaming(
         self,
         inputs: dict[str, Any],

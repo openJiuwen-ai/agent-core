@@ -519,9 +519,7 @@ class TeamAgent(BaseAgent):
     async def shutdown_self(self) -> None:
         member_name = self._member_name() or "?"
         team_logger.info("[{}] shutdown_self requested", member_name)
-        sc_task = self._stream_controller.agent_task
-        if sc_task is not None and not sc_task.done():
-            sc_task.cancel()
+        await self._stream_controller.cooperative_cancel()
         if self._state.team_member is not None:
             try:
                 await self._state.team_member.update_status(MemberStatus.SHUTDOWN)
