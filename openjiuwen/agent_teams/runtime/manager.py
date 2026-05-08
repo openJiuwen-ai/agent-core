@@ -574,7 +574,11 @@ class TeamRuntimeManager:
 
         # Cold paths — no pool entry. Make sure the pool stays clean.
         if kind is RunActionKind.COLD_RECOVER:
-            agent = await recover_agent_team(team_session, team_name=team_name)
+            agent = await recover_agent_team(
+                team_session,
+                team_name=team_name,
+                runtime_spec=spec,
+            )
         elif kind is RunActionKind.NEW_TEAM_IN_SESSION:
             await self._pre_run_with_inputs(team_session, inputs)
             agent = spec.build()

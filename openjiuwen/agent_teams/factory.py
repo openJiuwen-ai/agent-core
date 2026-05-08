@@ -76,6 +76,7 @@ async def recover_agent_team(
     session: Union[str, AgentTeamSession],
     *,
     team_name: str,
+    runtime_spec: Optional[TeamAgentSpec] = None,
     db_config: Optional[DatabaseConfig] = None,
 ) -> TeamAgent:
     """Recover a leader TeamAgent after full team restart.
@@ -99,7 +100,7 @@ async def recover_agent_team(
         session = create_agent_team_session(session_id=session)
         await session.pre_run()  # triggers checkpointer.recover()
 
-    agent = TeamAgent.recover_from_session(session, team_name)
+    agent = TeamAgent.recover_from_session(session, team_name, runtime_spec=runtime_spec)
     await agent.recover_team()
     return agent
 

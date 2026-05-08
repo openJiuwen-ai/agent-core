@@ -207,6 +207,36 @@ async def test_runner_run_agent_team_streaming_accepts_spec_and_emits_runtime_re
 
 
 @pytest.mark.asyncio
+async def test_team_runtime_manager_cold_recover_reinjects_runtime_spec():
+    from openjiuwen.agent_teams.runtime.dispatch import RunActionKind
+    from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+
+    session_id = f"cold_recover_{uuid.uuid4().hex}"
+    spec = TeamAgentSpec.model_construct(team_name="cold_recover_team", agents={})
+    spec.agent_customizer = lambda *_args, **_kwargs: None
+    agent = FakeTeamAgent("cold_recover_team", stream_label="team.chunk")
+
+    manager = TeamRuntimeManager()
+    manager._pool.add = AsyncMock()
+
+    with patch.object(
+        TeamRuntimeManager,
+        "_inspect_session",
+        AsyncMock(return_value=(True, True)),
+    ), patch(
+        "openjiuwen.agent_teams.runtime.manager.recover_agent_team",
+        AsyncMock(return_value=agent),
+    ) as recover_mock:
+        activation = await manager.activate(spec, session_id, {"query": "recover"})
+
+    assert activation.action.kind is RunActionKind.COLD_RECOVER
+    recover_mock.assert_awaited_once()
+    _, kwargs = recover_mock.await_args
+    assert kwargs["team_name"] == "cold_recover_team"
+    assert kwargs["runtime_spec"] is spec
+
+
+@pytest.mark.asyncio
 async def test_runner_team_runtime_manager_resumes_new_session_and_recovers_history(
     isolated_checkpointer,
     stateful_team_db,

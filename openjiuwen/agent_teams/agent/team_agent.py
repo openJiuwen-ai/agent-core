@@ -676,7 +676,12 @@ class TeamAgent(BaseAgent):
         self._recovery_manager.persist_allocator_state(self._session_manager.team_session)
 
     @classmethod
-    def recover_from_session(cls, session, team_name: str) -> "TeamAgent":
+    def recover_from_session(
+        cls,
+        session,
+        team_name: str,
+        runtime_spec: TeamAgentSpec | None = None,
+    ) -> "TeamAgent":
         """Reconstruct a leader TeamAgent from a session checkpoint.
 
         Args:
@@ -699,6 +704,8 @@ class TeamAgent(BaseAgent):
         if spec_data is None:
             raise ValueError(f"No leader spec found for team '{team_name}'")
         spec = TeamAgentSpec.model_validate(spec_data)
+        if runtime_spec is not None and runtime_spec.agent_customizer is not None:
+            spec.agent_customizer = runtime_spec.agent_customizer
         context = TeamRuntimeContext.model_validate(bucket["context"])
 
         agent_spec = spec.agents.get(context.role.value) or spec.agents["leader"]
