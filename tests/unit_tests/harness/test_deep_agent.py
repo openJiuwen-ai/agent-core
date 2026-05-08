@@ -559,6 +559,7 @@ async def test_create_deep_agent_registers_mcps_on_first_invoke() -> None:
             "required": ["query"],
         },
     )
+    mcp_tool_raw_name = mcp_tool.name
 
     with patch.object(
         Runner.resource_mgr,
@@ -590,8 +591,9 @@ async def test_create_deep_agent_registers_mcps_on_first_invoke() -> None:
         assert agent.ability_manager.get(mcp_config.server_name) is mcp_config
 
         tool_infos = await agent.ability_manager.list_tool_info()
-        assert any(tool_info.name == "mcp_lookup" for tool_info in tool_infos)
-        mcp_tool_card = agent.ability_manager.get("mcp_lookup")
+        expected_mcp_tool_name = f"mcp_{mcp_config.server_name}_{mcp_tool_raw_name}"
+        assert any(tool_info.name == expected_mcp_tool_name for tool_info in tool_infos)
+        mcp_tool_card = agent.ability_manager.get(expected_mcp_tool_name)
         assert isinstance(mcp_tool_card, ToolCard)
         assert mcp_tool_card.input_params == mcp_tool.parameters
         mock_get_mcp_tool_infos.assert_awaited()
