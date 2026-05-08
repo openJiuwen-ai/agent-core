@@ -19,6 +19,7 @@ from typing import (
 from pydantic import (
     BaseModel,
     Field,
+    model_validator,
 )
 
 from openjiuwen.agent_teams.constants import (
@@ -186,6 +187,15 @@ class TeamAgentSpec(BaseModel):
     allowing ``spawn_member`` calls during execution.
     """
     transport: Optional[TransportSpec] = None
+    """Pluggable transport layer specification.
+
+    When unset, the framework picks a sensible default based on
+    ``spawn_mode``: ``"inprocess"`` spawn implies an in-process messager,
+    so ``transport`` is materialized as ``TransportSpec(type="inprocess")``
+    during validation; ``"process"`` spawn keeps ``None`` and forces the
+    caller to configure a cross-process backend (e.g. ``"pyzmq"``) when
+    teammates are involved.
+    """
     storage: Optional[StorageSpec] = None
     worktree: Optional[WorktreeConfig] = None
     """Optional worktree isolation config for team members."""
@@ -239,6 +249,27 @@ class TeamAgentSpec(BaseModel):
     Used by platform adapters to inject additional rails / tools.
     Not serializable — only usable with in-process spawn mode.
     """
+
+    @model_validator(mode="after")
+    def _default_transport_for_spawn_mode(self) -> "TeamAgentSpec":
+        """Fill an in-process transport default when spawn_mode='inprocess'.
+
+        ``spawn_mode='inprocess'`` co-locates teammates in the leader's
+        event loop, so the only transport that makes sense is the
+        in-process messager. Materializing the default here (rather than
+        inside ``build()``) keeps the spec self-describing: a dumped spec
+        always carries the transport that will actually be used, which
+        matters for cross-process spawn payloads and for callers that
+        introspect the spec without building it.
+
+        Cross-process spawn (``"process"``) intentionally keeps
+        ``transport=None`` so the caller is forced to configure a real
+        cross-process backend (e.g. ``"pyzmq"``) when teammates are
+        involved.
+        """
+        if self.transport is None and self.spawn_mode == "inprocess":
+            self.transport = TransportSpec(type="inprocess")
+        return self
 
     def resolve_db_config(self):
         """Resolve the DatabaseConfig this spec would use at build time.
