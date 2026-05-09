@@ -132,61 +132,17 @@ Leader 身份配置。
 * **type**(str): 存储类型 — `sqlite`、`postgresql` 或 `memory`。
 * **params**(dict, 可选): 存储参数。默认值：`{}`。
 
-## function create_agent_team
+## 创建与恢复入口
+
+构造 leader 的唯一公共路径是 `TeamAgentSpec(...).build()`：
 
 ```python
-create_agent_team(
-    agents: dict[str, DeepAgentSpec],
-    *,
-    team_name: str = "agent_team",
-    lifecycle: str = "temporary",
-    teammate_mode: str = "build_mode",
-    spawn_mode: str = "process",
-    leader: Optional[LeaderSpec] = None,
-    predefined_members: list[TeamMemberSpec] | None = None,
-    transport: Optional[TransportSpec] = None,
-    storage: Optional[StorageSpec] = None,
-    worktree: Optional[WorktreeConfig] = None,
-    metadata: Optional[dict] = None,
-) -> TeamAgent
+from openjiuwen.agent_teams import TeamAgentSpec, DeepAgentSpec
+
+leader = TeamAgentSpec(
+    agents={"leader": DeepAgentSpec()},
+    team_name="demo_team",
+).build()
 ```
 
-便捷函数，构造 `TeamAgentSpec` 并调用 `build()`。等效于 `TeamAgentSpec(...).build()`。
-
-**参数：**
-
-* **agents**(dict[str, [DeepAgentSpec](./agent_teams.md#class-deepagentspec)]): 按角色的 DeepAgentSpec 配置。必须包含 `"leader"` 键。
-* **team_name**(str, 可选): 团队名称。默认值：`agent_team`。
-* **lifecycle**(str, 可选): `temporary` 或 `persistent`。默认值：`temporary`。
-* **teammate_mode**(str, 可选): `build_mode` 或 `plan_mode`。默认值：`build_mode`。
-* **spawn_mode**(str, 可选): `process` 或 `inprocess`。默认值：`process`。
-* **leader**([LeaderSpec](./agent_teams.md#class-leaderspec), 可选): Leader 身份。默认值：`None`。
-* **predefined_members**(list[[TeamMemberSpec](./agent_teams.md#class-teammemberspec)], 可选): 预配置成员。默认值：`None`。
-* **transport**([TransportSpec](./agent_teams.md#class-transportspec), 可选): 传输配置。默认值：`None`。
-* **storage**([StorageSpec](./agent_teams.md#class-storagespec), 可选): 存储配置。默认值：`None`。
-* **worktree**(WorktreeConfig, 可选): Worktree 隔离。默认值：`None`。
-* **metadata**(dict, 可选): 元数据。默认值：`None`。
-
-**返回：**
-
-**TeamAgent**: 配置好的 leader 实例。
-
-## function resume_persistent_team
-
-```python
-async resume_persistent_team(
-    agent: TeamAgent,
-    new_session_id: str,
-) -> TeamAgent
-```
-
-在新会话中恢复持久团队。
-
-**参数：**
-
-* **agent**(TeamAgent): 已完成至少一轮的持久团队 leader。
-* **new_session_id**(str): 新一轮的会话 ID。
-
-**返回：**
-
-**TeamAgent**: 同一 leader 实例，已就绪进入下一轮。
+恢复 / 续接持久团队不再有独立的 helper 函数——通过 `Runner.run_agent_team_streaming(agent_team=spec, session=...)` 触发即可，runtime 会基于内存池与 session checkpoint 自动选 cold/warm 路径。`TeamAgent.recover_from_session(session, team_name, runtime_spec=spec)` 仍可作为低层入口直接构造 leader 实例（运维脚本场景），后接 `await agent.recover_team()` 即可。

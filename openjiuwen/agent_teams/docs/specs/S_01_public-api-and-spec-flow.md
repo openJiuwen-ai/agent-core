@@ -5,7 +5,7 @@
 | 项 | 值 |
 |---|---|
 | 类型 | spec |
-| 关联模块 | `openjiuwen/agent_teams/__init__.py`、`openjiuwen/agent_teams/factory.py`、`openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/core/runner/team_runner.py`、`openjiuwen/core/runner/runner.py` |
+| 关联模块 | `openjiuwen/agent_teams/__init__.py`、`openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/runtime/manager.py`、`openjiuwen/core/runner/team_runner.py`、`openjiuwen/core/runner/runner.py` |
 | 最近一次修订 commit | 18823271 |
 | 关联 feature | N/A |
 
@@ -27,9 +27,9 @@
 公开表面：
 
 1. `openjiuwen/agent_teams/__init__.py` 的 `__all__` 是公开 API 的**完整集合**；任何不在 `__all__` 里的导入路径都是内部实现，不承担兼容性保证。
-2. `factory.create_agent_team` 是 `TeamAgentSpec.build()` 的**便利封装**，调用语义必须等价于显式构造 `TeamAgentSpec` 后调用 `.build()`。
-3. 所有新增装配配置必须落到 `TeamAgentSpec` 字段；不允许在 `create_agent_team` 上新增 `**kwargs` 或新增平铺参数。
-4. `__init__.py` 不导出 `recover_agent_team` / `recover_for_existing_session`——这两个是内部恢复路径，未进入公开 API。
+2. 装配 leader 的唯一公共路径是 `TeamAgentSpec(...).build()`；不存在与之并行的 factory wrapper（曾经的 `create_agent_team` / `resume_persistent_team` / `recover_agent_team` 已删除）。
+3. 所有新增装配配置必须落到 `TeamAgentSpec` 字段；任何 wrapper / 顶层入口都不得通过 `**kwargs` 或平铺参数承接装配选项——形态上根除"扩参数列表"路径。
+4. lifecycle 操作（cold recover / warm recover / 切 session / 续接持久团队）一律经 `Runner.run_agent_team[_streaming](agent_team=spec, session=...)` 触发，由 `runtime` 子系统的 dispatch 表自动选择分支；`agent_teams` 包未导出独立的恢复函数。
 
 Spec 形态：
 
@@ -56,42 +56,35 @@ Runner 入口：
 
 ### 顶层装配
 
+唯一公共入口：`TeamAgentSpec(...).build()`。
+
 ```python
-def create_agent_team(
-    agents: dict[str, DeepAgentSpec],
-    *,
-    team_name: str = "agent_team",
-    lifecycle: str = "temporary",
-    teammate_mode: str = "build_mode",
-    spawn_mode: str = "process",
-    leader: Optional[LeaderSpec] = None,
-    predefined_members: list[TeamMemberSpec] | None = None,
-    transport: Optional[TransportSpec] = None,
-    storage: Optional[StorageSpec] = None,
-    worktree: Optional[WorktreeConfig] = None,
-    metadata: Optional[dict] = None,
-) -> TeamAgent
+spec = TeamAgentSpec(
+    agents={"leader": DeepAgentSpec(...)},
+    team_name="...",
+    lifecycle="...",          # "temporary" 或 "persistent"
+    teammate_mode="...",      # "build_mode" 或 "plan_mode"
+    spawn_mode="...",         # "process" 或 "inprocess"
+    leader=LeaderSpec(...),
+    predefined_members=[...],
+    transport=TransportSpec(...),
+    storage=StorageSpec(...),
+    worktree=WorktreeConfig(...),
+    metadata={...},
+    # 其他字段见 schema.blueprint.TeamAgentSpec
+)
+leader = spec.build()
 ```
 
-- 构造 `TeamAgentSpec` 后立即调用 `spec.build()` 返回 leader 角色的 `TeamAgent`。
 - `agents["leader"]` 必填，缺失时 `build()` 抛 `ValueError("agents dict must contain a 'leader' key")`。
 - `agents["teammate"]` 可选，缺失时 teammate 派生自 leader 的模型与默认 persona。
-- `lifecycle` 取 `"temporary"` / `"persistent"`；前者一轮完成后解散，后者跨 session 保留。
-- `teammate_mode` 取 `"build_mode"` / `"plan_mode"`；后者需 leader 审批方可执行。
-- `spawn_mode` 取 `"process"` / `"inprocess"`；`"inprocess"` 时 `transport=None` 会被 spec 验证器自动填为 `TransportSpec(type="inprocess")`，`"process"` 不做隐式默认（强制用户显式选 `pyzmq` 等跨进程后端）。
-- 不接受 `**kwargs`。新增参数请改 `TeamAgentSpec` 字段。
+- `spawn_mode="inprocess"` 时 `transport=None` 会被 spec 验证器自动填为 `TransportSpec(type="inprocess")`；`"process"` 不做隐式默认（强制用户显式选 `pyzmq` 等跨进程后端）。
+- 新增装配维度直接在 `TeamAgentSpec` 上加字段——package 不暴露任何"参数列表型"工厂函数承接配置。
 
-```python
-async def resume_persistent_team(
-    agent: TeamAgent,
-    session: Union[str, AgentTeamSession],
-) -> TeamAgent
-```
+恢复 / 续接：
 
-- 输入 `agent` 必须是已完成至少一轮的 `lifecycle="persistent"` 团队 leader。
-- `session` 为字符串时，内部 `create_agent_team_session(session_id=...)` 后 `pre_run()`（触发 checkpointer.recover）。
-- 复用同一个 `TeamAgent` 对象，初始化新 session 的动态任务表 / 消息表，返回的 agent 即可再次 `invoke()` / `stream()`。
-- 不接受 `lifecycle="temporary"` 的 agent；调用方违约时由 `TeamAgent.resume_for_new_session` 抛错。
+- 不存在独立的恢复 API。把同一个 `spec` 与目标 `session_id` 交给 `Runner.run_agent_team[_streaming]`，由 runtime 自动识别 cold/warm/switch（详见 S_06 与 S_04）。
+- 低层入口 `TeamAgent.recover_from_session(session, team_name, runtime_spec=spec)` + `await agent.recover_team()` 仅供运维脚本绕开 Runner 直接拿 leader 实例时使用，不是公共 API。
 
 ### TeamAgentSpec 核心契约
 

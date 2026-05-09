@@ -12,16 +12,17 @@
 
 ## 公开入口（public API）
 
-只有两类东西是公开的：`__init__.py` 导出的符号 + `factory.py` 的两个便利函数。
+公开符号仅限 `__init__.py` 导出。**没有 factory wrapper**——`create_agent_team` / `resume_persistent_team` / `recover_agent_team` 这套已删除，所有 lifecycle 都走 `TeamAgentSpec.build()` + `Runner` facade。
 
 | 入口 | 用途 |
 |---|---|
-| `create_agent_team(agents={...}, ...)` | 从零组装 TeamAgent。`agents["leader"]` 必填，`agents["teammate"]` 可选 |
-| `resume_persistent_team(agent, new_session_id)` | 在新 session 中恢复已完成一轮的持久化团队 |
-| `TeamAgentSpec.build()` | 任何希望走 pydantic 模型路径的调用者的统一入口；`create_agent_team` 是它的便利封装 |
+| `TeamAgentSpec(...).build()` | 从零组装 TeamAgent 的唯一公共路径。`agents["leader"]` 必填，`agents["teammate"]` 可选 |
+| `Runner.run_agent_team[_streaming](agent_team=spec, session=..., ...)` | 运行入口；冷启动 / 热恢复 / 切 session 由 `runtime` 子系统的 dispatch 表自动选 |
 | `cli.run_team_cli(*, specs=None, yaml_paths=None)` | 交互式 TUI 公共入口。`/team` `/session` `/spec` 子命令覆盖 lifecycle 全 facade，普通文本透传 `Runner.interact_agent_team`。详见 `cli/CLAUDE.md` |
 
-**新增配置项走 `TeamAgentSpec`，不要在 `create_agent_team` 上堆 `**kwargs` 或平铺参数。** 扩参数列表是 hack，扩 Spec 才是设计。
+**新增配置项一律走 `TeamAgentSpec`**——曾经的"在 factory 函数上堆参数"路径已物理消失。扩参数列表永远是 hack，扩 Spec 才是设计。
+
+**Cold-recover 的低层入口**：`TeamAgent.recover_from_session(session, team_name, runtime_spec=spec)` + `await agent.recover_team()`。仅供运维脚本绕过 Runner 直接拿 leader 实例时使用，常规应用走 `Runner.run_agent_team_streaming(agent_team=spec, session=...)` 即可。
 
 **Runner 入口签名收紧**：`Runner.run_agent_team` / `run_agent_team_streaming` 默认接 `str | TeamAgentSpec`——str 是 `team_name`，要求该 team 已被 spec 路径激活过、pool 里有 entry。已 build 的 `TeamAgent` 实例不再是合法入参。要跑 multi_agent 体系的 `BaseTeam`（`str | BaseTeam`），传同一个方法、加 `base=True` 切到 multi_agent 路径——`Runner` 公共表面只有这一对方法，由 `base` 参数分流。
 
@@ -32,7 +33,6 @@ agent_teams/
 ├── __init__.py          # 公开 API 聚合导出
 ├── constants.py         # 保留名（user/team_leader/human_agent）集中定义
 ├── context.py           # session_id 跨成员/跨模式共享 contextvars
-├── factory.py           # create_agent_team / resume_persistent_team 便利函数
 ├── i18n.py              # 运行时中/英文字符串（仅装运行时 hard-coded 串）
 ├── paths.py             # 文件系统布局单一真相源
 ├── schema/              # 全部数据模型（Spec / Context / Event / Status / Task）

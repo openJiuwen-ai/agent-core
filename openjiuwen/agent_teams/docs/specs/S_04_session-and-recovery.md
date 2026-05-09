@@ -135,8 +135,9 @@ state["teams"][team_name] = {
 
 session 切换有两条入口，差异**只在是否先清理旧 handle**：
 
-- `resume_for_new_session`：来自 SDK facade（`factory.resume_persistent_team`
-  / `manager.activate(NEW_TEAM_IN_SESSION_*)` / `manager.activate(RESUME_FROM_PAUSE)`），
+- `resume_for_new_session`：来自 `manager.activate` 的
+  `NEW_TEAM_IN_SESSION` / `NEW_TEAM_IN_SESSION_WARM` / `RESUME_FROM_PAUSE` 分支
+  （`_apply_action` 直接调 `agent.resume_for_new_session`，不再有 factory wrapper），
   上层未做 spawn handle 清理，由本路径以 `cleanup_first=True` 自清。
 - `recover_for_existing_session`：来自 checkpoint 恢复（`COLD_RECOVER`
   / `WARM_RECOVER`），coordination 已在重建前清过一次，本路径以

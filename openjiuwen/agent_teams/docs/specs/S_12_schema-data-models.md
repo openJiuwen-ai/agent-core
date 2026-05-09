@@ -388,7 +388,7 @@ tool / rail / sys_operation 与 `DeepAgentSpec.build()` 同模式。
 | `stable_base` | `bool` | `False` | 为 True 时由调用方将 `root_path` 重写到 `{repo_root}/.agent_teams/workspaces/`，避免 worktree 清理一同抹掉 |
 
 `build() -> Workspace`。`stable_base` 的路径重写**不在 `build()` 内部完成**，由
-`factory.create_agent_team` / `agent_configurator` 在调用前完成。
+`agent_configurator` 在装配过程中完成。
 
 #### 其余叶子 Spec
 
@@ -714,7 +714,7 @@ in-memory，不写 spec。
 ## 与其它 spec 的关系
 
 - **`S_01_public-api-and-spec-flow.md`**：本规约钉死 schema 形状，S_01 描述
-  这些 Spec 如何流经 `factory.create_agent_team` / `Runner.run_agent_team*`。
+  这些 Spec 如何流经 `TeamAgentSpec.build()` 与 `Runner.run_agent_team*`。
   schema 是数据，S_01 是控制流。
 - **`S_02_team-agent-architecture.md`**：`TeamRuntimeContext` 是
   `TeamAgent.configure(spec, context)` 的入参之一，S_02 钉死 TeamAgent 内部

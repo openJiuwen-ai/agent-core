@@ -132,61 +132,17 @@ Storage layer configuration.
 * **type**(str): Storage type — `sqlite`, `postgresql`, or `memory`.
 * **params**(dict, optional): Storage-specific parameters. Default: `{}`.
 
-## function create_agent_team
+## Building and recovering a team
+
+The single public path to construct a leader is `TeamAgentSpec(...).build()`:
 
 ```python
-create_agent_team(
-    agents: dict[str, DeepAgentSpec],
-    *,
-    team_name: str = "agent_team",
-    lifecycle: str = "temporary",
-    teammate_mode: str = "build_mode",
-    spawn_mode: str = "process",
-    leader: Optional[LeaderSpec] = None,
-    predefined_members: list[TeamMemberSpec] | None = None,
-    transport: Optional[TransportSpec] = None,
-    storage: Optional[StorageSpec] = None,
-    worktree: Optional[WorktreeConfig] = None,
-    metadata: Optional[dict] = None,
-) -> TeamAgent
+from openjiuwen.agent_teams import TeamAgentSpec, DeepAgentSpec
+
+leader = TeamAgentSpec(
+    agents={"leader": DeepAgentSpec()},
+    team_name="demo_team",
+).build()
 ```
 
-Convenience function that constructs a `TeamAgentSpec` and calls `build()`. Equivalent to `TeamAgentSpec(...).build()`.
-
-**Parameters:**
-
-* **agents**(dict[str, [DeepAgentSpec](./agent_teams.md#class-deepagentspec)]): Per-role DeepAgentSpec configs. Must contain `"leader"` key.
-* **team_name**(str, optional): Team name. Default: `agent_team`.
-* **lifecycle**(str, optional): `temporary` or `persistent`. Default: `temporary`.
-* **teammate_mode**(str, optional): `build_mode` or `plan_mode`. Default: `build_mode`.
-* **spawn_mode**(str, optional): `process` or `inprocess`. Default: `process`.
-* **leader**([LeaderSpec](./agent_teams.md#class-leaderspec), optional): Leader identity. Default: `None`.
-* **predefined_members**(list[[TeamMemberSpec](./agent_teams.md#class-teammemberspec)], optional): Pre-configured members. Default: `None`.
-* **transport**([TransportSpec](./agent_teams.md#class-transportspec), optional): Transport config. Default: `None`.
-* **storage**([StorageSpec](./agent_teams.md#class-storagespec), optional): Storage config. Default: `None`.
-* **worktree**(WorktreeConfig, optional): Worktree isolation. Default: `None`.
-* **metadata**(dict, optional): Metadata. Default: `None`.
-
-**Returns:**
-
-**TeamAgent**: A configured leader instance.
-
-## function resume_persistent_team
-
-```python
-async resume_persistent_team(
-    agent: TeamAgent,
-    new_session_id: str,
-) -> TeamAgent
-```
-
-Resume a persistent team in a new session.
-
-**Parameters:**
-
-* **agent**(TeamAgent): A persistent-team leader that has completed at least one round.
-* **new_session_id**(str): Session ID for the new round.
-
-**Returns:**
-
-**TeamAgent**: The same leader instance, ready for the next round.
+There is no dedicated helper for resuming or recovering a persistent team. Pass the same spec to `Runner.run_agent_team_streaming(agent_team=spec, session=...)` and the runtime decides cold vs warm vs session-switch automatically based on the in-memory pool and the session checkpoint. `TeamAgent.recover_from_session(session, team_name, runtime_spec=spec)` followed by `await agent.recover_team()` is the low-level path for operations scripts that need the leader instance directly.

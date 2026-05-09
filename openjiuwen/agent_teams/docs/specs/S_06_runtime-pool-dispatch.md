@@ -156,11 +156,11 @@ def decide_run_action(
 | 2 | F | F | present | — | — | `REJECT_INCONSISTENT` | 不动 pool；返回 `reason` |
 | 3 | F | T | * | — | — | `REJECT_ORPHANED` | 不动 pool；返回 `reason` |
 | 4 | T | F | None | — | — | `NEW_TEAM_IN_SESSION` | `pre_run(inputs)` → `spec.build()` → `agent.resume_for_new_session(session)` → 入 pool |
-| 5 | T | T | None | — | — | `COLD_RECOVER` | `recover_agent_team(session, team_name=...)` → 入 pool |
+| 5 | T | T | None | — | — | `COLD_RECOVER` | `TeamAgent.recover_from_session(session, team_name, runtime_spec=spec)` → `agent.recover_team()` → 入 pool |
 | 6 | T | T | present | yes | RUNNING | `REJECT_RUNNING` | 不动 pool；引导 caller 改用 `interact` |
 | 7 | T | T | present | yes | PAUSED | `RESUME_FROM_PAUSE` | `pre_run(inputs)` → `entry.state = RUNNING` → `gate.reset()` |
-| 8 | T | T | present | no  | * | `WARM_RECOVER` | `recover_for_existing_session(entry.agent, session)` → 改写 `current_session_id` → `state = RUNNING` → `gate.reset()` |
-| 9 | T | F | present | * | * | `NEW_TEAM_IN_SESSION_WARM` | `pre_run(inputs)` → `resume_persistent_team(entry.agent, session)` → 改写 `current_session_id` → `state = RUNNING` → `gate.reset()` |
+| 8 | T | T | present | no  | * | `WARM_RECOVER` | `entry.agent.recover_for_existing_session(session)` → 改写 `current_session_id` → `state = RUNNING` → `gate.reset()` |
+| 9 | T | F | present | * | * | `NEW_TEAM_IN_SESSION_WARM` | `pre_run(inputs)` → `entry.agent.resume_for_new_session(session)` → 改写 `current_session_id` → `state = RUNNING` → `gate.reset()` |
 
 注：
 
