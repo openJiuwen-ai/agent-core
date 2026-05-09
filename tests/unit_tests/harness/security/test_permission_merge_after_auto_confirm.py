@@ -103,3 +103,27 @@ def test_legacy_bash_star_ask_merge_adds_command_override() -> None:
     )
 
     assert evaluate_tiered_policy(merged, "bash", tool_args)[0] == PermissionLevel.ALLOW
+
+
+def test_plain_tool_auto_confirm_sets_whole_tool_allow() -> None:
+    """非 shell / path 工具在 ASK 下选择总是允许后，应持久化为整工具 allow。"""
+    cfg = {
+        **_base_tiered(),
+        "tools": {"cron_create_job": "ask"},
+    }
+    tool_args = {"cron": "0 * * * *", "name": "sync"}
+
+    before, _rule = evaluate_tiered_policy(cfg, "cron_create_job", tool_args)
+    assert before == PermissionLevel.ASK
+
+    merged, applied = merge_permission_allow_rule_into_permissions(
+        deepcopy(cfg), "cron_create_job", tool_args
+    )
+
+    assert applied is True
+    assert merged["tools"]["cron_create_job"] == "allow"
+    assert merged.get("approval_overrides") == []
+
+    after, matched = evaluate_tiered_policy(merged, "cron_create_job", tool_args)
+    assert after == PermissionLevel.ALLOW
+    assert "tools.cron_create_job" in matched
