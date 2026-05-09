@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Serializable DeepAgent specifications for network distribution.
 
 All types in this module are Pydantic BaseModels that support full JSON

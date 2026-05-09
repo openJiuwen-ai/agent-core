@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """AgentTeam public interfaces."""
 
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent

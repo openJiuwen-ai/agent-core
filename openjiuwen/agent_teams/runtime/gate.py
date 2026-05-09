@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Interaction gate for the Run/Interact concurrency contract.
 
 Each :class:`ActiveTeam` in the runtime pool owns one ``InteractGate``.

@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """FirstIterationGate — signals when the agent enters its first iteration."""
 
 from __future__ import annotations

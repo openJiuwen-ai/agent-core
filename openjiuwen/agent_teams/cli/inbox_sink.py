@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Render HumanAgentInboundEvent notifications into the CLI console.
 
 ``Runner.register_human_agent_inbound`` accepts an async callback that

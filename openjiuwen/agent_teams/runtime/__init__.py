@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Runner-scoped runtime management for TeamAgent."""
 
 from openjiuwen.agent_teams.runtime.dispatch import (

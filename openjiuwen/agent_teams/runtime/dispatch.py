@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Pure dispatch decision for ``run_agent_team_streaming``.
 
 Resolves the (team, session, pool, checkpoint) state into one of the

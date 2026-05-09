@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """TeamAgent infrastructure layer.
 
 The third quadrant of the four-quadrant TeamAgent decomposition: per-process

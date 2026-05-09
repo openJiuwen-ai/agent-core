@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Runner-scoped owner of the active TeamAgent runtime pool.
 
 Holds the in-process ``TeamRuntimePool`` and dispatches each

@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """TeamToolApprovalRail — leader-side approval for teammate tool calls."""
 
 from __future__ import annotations

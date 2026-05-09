@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """In-process messager — pure handler-based pub-sub and P2P.
 
 All ``InProcessMessager`` instances share a process-global ``_Bus``.

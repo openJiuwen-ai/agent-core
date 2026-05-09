@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Coordination loop driven by events.
 
 The loop is a thin wake-up layer — NOT a decision engine.

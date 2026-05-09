@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """TeamAgent static blueprint.
 
 Frozen dataclass holding configuration that is determined at construction

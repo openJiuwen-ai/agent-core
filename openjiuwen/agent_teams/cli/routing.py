@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Top-level dispatcher that routes a raw input line to the right handler.
 
 A user line falls into exactly one of three buckets:

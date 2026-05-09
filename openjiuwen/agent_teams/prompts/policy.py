@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Role-aware prompt and policy helpers.
 
 The system prompt is the primary driver of team behavior — the

@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Model pool entries and pool-refresh helpers.
 
 A team's ``model_pool`` is the canonical multi-endpoint deployment

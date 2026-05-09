@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Teammate process lifecycle management for TeamAgent."""
 
 from __future__ import annotations
