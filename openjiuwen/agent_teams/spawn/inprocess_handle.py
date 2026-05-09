@@ -33,7 +33,7 @@ class InProcessSpawnHandle:
     # this teammate's stream chunks into the leader's stream_queue. Held
     # here so cleanup_teammate can detach it deterministically. Subprocess
     # handles leave this None.
-    _chunk_forward: Any = field(default=None, repr=False)
+    chunk_forward: Any = field(default=None, repr=False)
 
     # ------------------------------------------------------------------
     # Properties compatible with SpawnedProcessHandle

@@ -342,11 +342,14 @@ class RouterAllocator:
     def load_state_dict(self, state: dict) -> None:
         """No-op restore (router allocation has no rotating counter).
 
-        Defined for ``ModelAllocator`` protocol compatibility. Layout
-        changes between save and load are still observable via the
-        ``pool_digest`` snapshot if a caller wants to inspect drift.
+        Defined for ``ModelAllocator`` protocol compatibility. Even when
+        the pool digest changes between save and load there is nothing to
+        reset — RouterAllocator has no rotation counter.
         """
-        del state  # router allocation is deterministic; nothing to restore
+        if state.get("pool_digest") == self._pool_digest:
+            return
+        # Pool composition changed; nothing to reset for router allocation
+        # since there is no rotation counter.
 
 
 def resolve_member_model(

@@ -113,8 +113,8 @@ class SpawnManager:
         leader = self._get_team_agent()
         if leader is None or handle.agent_ref is None:
             return
-        leader_sc = leader._stream_controller
-        teammate_sc = handle.agent_ref._stream_controller
+        leader_sc = leader.stream_controller
+        teammate_sc = handle.agent_ref.stream_controller
 
         async def _forward(chunk: "OutputSchema") -> None:
             # Drop silently if the leader's queue is not set up yet or
@@ -126,7 +126,7 @@ class SpawnManager:
             await queue.put(chunk)
 
         teammate_sc.add_chunk_observer(_forward)
-        handle._chunk_forward = _forward
+        handle.chunk_forward = _forward
 
     def lookup_inprocess_agent(self, member_name: str) -> Optional[Any]:
         """Return the live ``TeamAgent`` for an inprocess-spawned member.
@@ -147,12 +147,12 @@ class SpawnManager:
         # Detach chunk forwarder before tearing the task down so a
         # late-arriving chunk cannot land in the leader queue after we
         # have considered the teammate gone.
-        forward = getattr(handle, "_chunk_forward", None)
+        forward = getattr(handle, "chunk_forward", None)
         agent_ref = getattr(handle, "agent_ref", None)
         if forward is not None and agent_ref is not None:
             with contextlib.suppress(Exception):
-                agent_ref._stream_controller.remove_chunk_observer(forward)
-            handle._chunk_forward = None
+                agent_ref.stream_controller.remove_chunk_observer(forward)
+            handle.chunk_forward = None
         try:
             await handle.stop_health_check()
             if handle.is_alive:
