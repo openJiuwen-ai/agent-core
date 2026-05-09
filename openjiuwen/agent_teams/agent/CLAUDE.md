@@ -27,7 +27,7 @@
 | `spawn_manager.py` | `SpawnManager` | teammate 进程生命周期：拉起 / 心跳 / 重启 / 取消 |
 | `recovery_manager.py` | `RecoveryManager` | 团队级容错：成员崩溃恢复、状态对齐 |
 | `session_manager.py` | `SessionManager` | session checkpoint 读写、生命周期 |
-| `stream_controller.py` | `StreamController` | DeepAgent 的 stream 队列、round 状态、pending input、interrupt 收纳 |
+| `stream_controller.py` | `StreamController` | DeepAgent 的 stream 队列、round 状态、pending input、interrupt 收纳；自动给 chunk 升级为 `TeamOutputSchema` 并通过 `add_chunk_observer` 对外 fan-out |
 
 ## coordination/ — 唤醒循环
 
@@ -38,6 +38,7 @@
 - **同一 team 的 leader 和 teammate 不在同一进程**：`infra.py` 的 "per-process" 语义就来自这里。要让两边都看到的状态走 db / messager，不要走对象引用。
 - **`payload.py` 的 wire 格式是公共契约**：`build_spawn_payload(...)` 的所有输出键 = `TeamAgent.from_spawn_payload` 的所有读取键，改一边必须改另一边。
 - **stream_controller 不直接驱动 DeepAgent**：它管理 stream queue 和 round 状态；驱动 DeepAgent 的入口是 `team_agent.py` 的 `start_agent / steer / follow_up / deliver_input`。
+- **stream chunk 跨成员 fan-out**：每个 `StreamController` 在 chunk 进 queue 之前用 `_tag_chunk` 把 chunk 升级为 `TeamOutputSchema`（带 `source_member`），再 fan-out 给注册在 `_chunk_observers` 上的回调。inprocess 模式下，`SpawnManager._wire_inprocess_chunk_forward` 会把每个 spawn 出来的 teammate `StreamController` 上挂一个 forward observer——把 chunk 转投到 leader 的 `stream_queue`，让 `Runner.run_agent_team_streaming` 对外流出全成员 chunk。observer 抛错自动 detach 不阻塞主流；teardown 时由 `cleanup_teammate` 反注册。subprocess 模式不挂 observer（不同进程不共享对象），扩展点已留好（messager-driven observer）。
 
 ## 跟其他子目录的边界
 

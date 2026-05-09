@@ -10,6 +10,7 @@ import traceback
 from typing import (
     TYPE_CHECKING,
     Any,
+    Awaitable,
     Callable,
     Optional,
     Tuple,
@@ -19,15 +20,23 @@ from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberStatus,
 )
+from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.session.stream.base import OutputSchema
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
     from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
     from openjiuwen.agent_teams.agent.state import TeamAgentState
     from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+
+# Async callback fired for each chunk produced by this StreamController,
+# after the chunk has been tagged with the producing member name. Used by
+# SpawnManager to forward in-process teammate chunks into the leader's
+# stream_queue.
+ChunkObserver = Callable[[OutputSchema], Awaitable[None]]
 
 _MAX_RETRY_ATTEMPTS = 10
 _RETRYABLE_ERROR_CODES = {181001}
@@ -96,6 +105,10 @@ class StreamController:
         self.streaming_active: bool = False
         self.pending_interrupt_resumes: list[InteractiveInput] = []
         self.pending_inputs: list[Any] = []
+        # Observers fan-out chunks to external consumers (e.g. leader's
+        # stream_queue receiving a teammate's chunks). Empty by default;
+        # SpawnManager wires entries when a teammate is spawned in-process.
+        self._chunk_observers: list[ChunkObserver] = []
         # Tracks whether the in-flight round was cancelled by the team
         # (cancel_agent / drain / shutdown) rather than completing on its
         # own. Cooperative aborts let the round exit without raising
@@ -107,6 +120,40 @@ class StreamController:
     def _member_name(self) -> Optional[str]:
         bp = self._get_blueprint()
         return bp.member_name if bp else None
+
+    def add_chunk_observer(self, cb: ChunkObserver) -> None:
+        """Register a chunk observer fired after each chunk is tagged.
+
+        Observers run after the producing member name has been stamped
+        onto the chunk and after the chunk has been put into this
+        controller's own ``stream_queue``. An observer raising an
+        exception is automatically detached so it cannot stall the
+        producer's main stream.
+        """
+        self._chunk_observers.append(cb)
+
+    def remove_chunk_observer(self, cb: ChunkObserver) -> None:
+        """Detach a previously-registered observer; idempotent."""
+        with contextlib.suppress(ValueError):
+            self._chunk_observers.remove(cb)
+
+    def _tag_chunk(self, chunk: Any) -> Any:
+        """Stamp the producing member name onto the chunk.
+
+        Plain ``OutputSchema`` instances are upgraded to
+        ``TeamOutputSchema`` via :meth:`TeamOutputSchema.from_output`;
+        already-tagged chunks whose ``source_member`` matches stay
+        untouched. Non-OutputSchema chunks pass through unchanged so
+        custom stream payloads are preserved.
+        """
+        member_name = self._member_name()
+        if not member_name or not isinstance(chunk, OutputSchema):
+            return chunk
+        if isinstance(chunk, TeamOutputSchema):
+            if chunk.source_member == member_name:
+                return chunk
+            return chunk.model_copy(update={"source_member": member_name})
+        return TeamOutputSchema.from_output(chunk, source_member=member_name)
 
     def is_agent_running(self) -> bool:
         return self.streaming_active
@@ -278,8 +325,21 @@ class StreamController:
                     error_seen = True
                     error_code, error_text = detected
                     continue
+                tagged = self._tag_chunk(chunk)
                 if self.stream_queue is not None:
-                    await self.stream_queue.put(chunk)
+                    await self.stream_queue.put(tagged)
+                # Fan out to observers; an observer raising must NOT
+                # block our own stream — auto-detach so a misbehaving
+                # consumer cannot stall the producer.
+                for ob in list(self._chunk_observers):
+                    try:
+                        await ob(tagged)
+                    except Exception:
+                        team_logger.exception(
+                            "[{}] chunk observer raised; detaching",
+                            self._member_name() or "?",
+                        )
+                        self.remove_chunk_observer(ob)
         finally:
             self.streaming_active = False
 

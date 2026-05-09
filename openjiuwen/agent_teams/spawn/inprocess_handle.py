@@ -29,6 +29,11 @@ class InProcessSpawnHandle:
     on_unhealthy: Optional[Callable[[], Any]] = field(default=None, repr=False)
     _shutdown_requested: bool = field(default=False, repr=False)
     agent_ref: Any = field(default=None, repr=False)
+    # Reference to the chunk observer wired by SpawnManager that forwards
+    # this teammate's stream chunks into the leader's stream_queue. Held
+    # here so cleanup_teammate can detach it deterministically. Subprocess
+    # handles leave this None.
+    _chunk_forward: Any = field(default=None, repr=False)
 
     # ------------------------------------------------------------------
     # Properties compatible with SpawnedProcessHandle

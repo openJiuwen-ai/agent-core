@@ -86,6 +86,7 @@ deep_agent_spec.py # DeepAgentSpec / SubAgentSpec / RailSpec 等 —— DeepAgen
 team.py            # TeamSpec / TeamRole / TeamLifecycle / TeamRuntimeContext / TeamMemberSpec
 events.py          # EventMessage / TeamTopic —— 跨进程事件
 status.py          # MemberStatus / ExecutionStatus —— 状态机枚举
+stream.py          # TeamOutputSchema —— OutputSchema 子类，带 source_member 成员归属字段
 task.py            # TaskSummary / TaskDetail —— 任务返回模型
 ```
 
@@ -94,6 +95,7 @@ task.py            # TaskSummary / TaskDetail —— 任务返回模型
 - 新增 spec 字段要想清楚：**属于装配数据**（放 Spec）还是**运行时资源**（放 Config/Manager/Runtime）。不要让 Spec 持有 `Runner`、`Session`、文件句柄。
 - **Session checkpoint 状态结构按 team 分桶**：`session.update_state` 的全局状态根上有一个 `teams` namespace —— `state["teams"][team_name] = {spec, context, model_allocator_state, lifecycle}`。同一 session 可以承载多个 team 的状态；读写一律走 `runtime/metadata.py` 的 `read_team_namespace / merge_team_namespace`，不要直接在 root 上 `update_state({"spec": ...})`。
 - `MemberStatus.PAUSED`：teammate 协程退出但状态保留，可经 `RESTARTING` 重新拉起；与 `SHUTDOWN`（永久退出）区分。`schema.team.TeamLifecycle`（temporary / persistent）描述静态团队类型，`runtime.pool.RuntimeState`（running / paused）描述对象池中 team 的运行时状态——两个枚举各管各的。
+- `TeamOutputSchema` 是 `core.session.stream.OutputSchema` 的子类（不污染 core 层），扩出 `source_member: str | None`。`Runner.run_agent_team_streaming` 的所有输出 chunk 在 team 路径下都会被 `StreamController` 自动升级为 `TeamOutputSchema` 并打上来源成员名。**inprocess 模式**下，`SpawnManager` 在 spawn teammate 时通过 `StreamController.add_chunk_observer` 把 teammate chunk fan-out 到 leader 的 `stream_queue`，让 leader 的 streaming 流出全成员 chunk；subprocess 模式不做转发（chunk 留在 teammate 进程内），扩展点已留好（messager-driven observer）。详见 `agent/CLAUDE.md` 的 StreamController 段。
 
 ### models/ — 多模型部署原语
 
@@ -210,6 +212,23 @@ prompt_toolkit + rich 驱动的交互式 CLI。`run_team_cli(*, specs, yaml_path
 - 内存后端：`MemoryDatabaseConfig` + `InProcessMessager` 适合单测，不依赖 sqlite / zmq。
 - 多成员场景优先用 `spawn_mode="inprocess"`，避免子进程拉起开销。
 - `pytest` 纯函数风格；禁止 `print`，改用 `team_logger` 或 test_logger。
+
+## 设计文档归档
+
+本模块的设计文档**全部**落在 `docs/` 下，命名与结构规约见 [`docs/CLAUDE.md`](docs/CLAUDE.md)。
+
+两条强制约束，提交时必查：
+
+1. **每次特性更新提交代码前必须归档 feature 文档**：在 `docs/features/` 下新增一份
+   `F_NN_<slug>.md`，记录决策、拒绝的方案、验证基线、已知遗留。commit message 只写 what，
+   feature 文档负责写 why / why-not。归档与代码改动应在同一次 commit（或紧邻的两次 commit）落地，
+   避免设计上下文随时间漂移。
+2. **所有模块设计规约变动必须更新 specs 文档**：模块契约、跨子模块的公共协议、不变量、
+   公共 API 形态发生变化时，同步修订对应 `docs/specs/S_NN_<slug>.md`；新规约 = 新 spec 文件。
+   规约变了但 specs 没改，下次读 spec 的人就被误导——这是设计债，不是文档懒。
+
+子模块自身的本地约定继续放各 `<subdir>/CLAUDE.md`；跨子模块的设计规约一律落到 `docs/specs/`，
+不要塞进单一子目录的 CLAUDE.md。
 
 ## 提交约定
 
