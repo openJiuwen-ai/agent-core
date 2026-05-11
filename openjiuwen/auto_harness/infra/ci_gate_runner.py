@@ -20,6 +20,23 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+
+def _decode_stdout(stdout: bytes) -> str:
+    """Decode subprocess stdout with cross-platform encoding handling.
+
+    Windows consoles often use GBK (cp936) while Unix uses UTF-8.
+    This function tries multiple encodings to handle both cases.
+    """
+    # Try common encodings in order of likelihood
+    encodings = ["utf-8", sys.stdout.encoding or "utf-8", "gbk", "cp936", "latin-1"]
+    for encoding in encodings:
+        try:
+            return stdout.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    # Fallback: decode with replacement chars
+    return stdout.decode("utf-8", errors="replace")
+
 _DEFAULT_YAML = str(
     Path(__file__).resolve().parent.parent
     / "resources" / "ci_gate.yaml"
@@ -185,7 +202,7 @@ class CIGateRunner:
             env=self._command_env(),
         )
         stdout, _ = await proc.communicate()
-        output = stdout.decode("utf-8", errors="replace")
+        output = _decode_stdout(stdout)
         if proc.returncode != 0:
             raise RuntimeError(
                 "CI gate install command failed: "
@@ -250,9 +267,7 @@ class CIGateRunner:
                 env=self._command_env(),
             )
             stdout, _ = await proc.communicate()
-            output = stdout.decode(
-                "utf-8", errors="replace"
-            )
+            output = _decode_stdout(stdout)
             output = self._sanitize_failure_output(output)
             passed = proc.returncode == 0
         except Exception as exc:

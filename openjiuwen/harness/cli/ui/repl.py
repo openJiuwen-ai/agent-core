@@ -203,7 +203,8 @@ def _auto_harness_help(console: Console) -> None:
     tbl.add_row(
         "/auto-harness run [--task TOPIC] "
         "[--goal TEXT] "
-        "[--competitor NAME] [--dry-run] "
+        "[--pipeline meta|extended|auto] "
+        "[--dry-run] "
         "[--no-push] [--budget N]",
         "执行优化周期",
     )
@@ -221,8 +222,7 @@ def _auto_harness_help(console: Console) -> None:
         "列出经验库记录",
     )
     tbl.add_row(
-        "/auto-harness gap-analyze "
-        "--competitor NAME",
+        "/auto-harness gap-analyze",
         "差距分析",
     )
     tbl.add_row(
@@ -236,6 +236,7 @@ async def _cmd_auto_harness(
     console: Console,
     text: str = "",
     cfg: Optional[CLIConfig] = None,
+    backend: Any = None,
     **_: Any,
 ) -> None:
     """Dispatch /auto-harness subcommands."""
@@ -264,7 +265,10 @@ async def _cmd_auto_harness(
         workspace = os.getcwd()
 
     if subcmd == "run":
-        await _subcmd_run(console, rest, workspace, cfg)
+        await _subcmd_run(
+            console, rest, workspace, cfg,
+            backend=backend,
+        )
     elif subcmd == "experience":
         await _subcmd_memory(console, rest, workspace)
     elif subcmd == "gap-analyze":
@@ -277,6 +281,7 @@ async def _cmd_auto_harness(
             ["--goal", args_str],
             workspace,
             cfg,
+            backend=backend,
         )
 
 
@@ -285,14 +290,20 @@ async def _subcmd_run(
     args: list[str],
     workspace: str,
     cfg: Optional[CLIConfig] = None,
+    *,
+    backend: Any = None,
 ) -> None:
     """Handle /auto-harness run."""
     import time as _time
 
     from openjiuwen.auto_harness.schema import (
         OptimizationTask,
+        normalize_pipeline_preference,
         is_placeholder_local_repo,
         load_auto_harness_config,
+    )
+    from openjiuwen.auto_harness.pipelines import (
+        META_EVOLVE_PIPELINE,
     )
     from openjiuwen.auto_harness.orchestrator import (
         create_auto_harness_orchestrator,
@@ -307,7 +318,7 @@ async def _subcmd_run(
     no_push = False
     budget: Optional[float] = None
     goal: Optional[str] = None
-    competitor: Optional[str] = None
+    pipeline: Optional[str] = None
 
     i = 0
     while i < len(args):
@@ -333,11 +344,14 @@ async def _subcmd_run(
         elif a == "--goal" and i + 1 < len(args):
             goal = args[i + 1]
             i += 2
-        elif (
-            a == "--competitor"
-            and i + 1 < len(args)
-        ):
-            competitor = args[i + 1]
+        elif a == "--pipeline" and i + 1 < len(args):
+            raw_pipeline = args[i + 1]
+            if raw_pipeline not in ("meta", "extended", "auto"):
+                console.print(
+                    "[red]--pipeline 只支持 meta、extended 或 auto[/red]"
+                )
+                return
+            pipeline = raw_pipeline
             i += 2
         else:
             console.print(
@@ -426,8 +440,9 @@ async def _subcmd_run(
         config.git_remote = ""
     if goal:
         config.optimization_goal = goal
-    if competitor:
-        config.competitor = competitor
+    config.pipeline_preference = normalize_pipeline_preference(
+        pipeline or META_EVOLVE_PIPELINE
+    )
 
     ensure_github_cli_ready(
         lambda msg: console.print(
@@ -463,10 +478,86 @@ async def _subcmd_run(
         )
         return
 
+    from openjiuwen.harness.cli.rails.tool_tracker import (
+        ToolTrackingRail,
+    )
+
     t0 = _time.monotonic()
-    orch = create_auto_harness_orchestrator(config)
+    agent = (
+        getattr(backend, "agent", None)
+        if backend
+        else None
+    )
+    orch = create_auto_harness_orchestrator(
+        config,
+        agent=agent,
+        stream_rails=[ToolTrackingRail()],
+    )
+
+    async def _on_activate_interaction(
+        iid: str, value: Any,
+    ) -> str:
+        """Handle activate_confirm interaction in CLI."""
+        if (
+            isinstance(value, dict)
+            and value.get("interaction_type")
+            == "activate_confirm"
+        ):
+            ext_name = value.get(
+                "extension_name", "unknown"
+            )
+            summary = value.get("components_summary", {})
+            console.print()
+            console.print(
+                f"[bold]扩展 {ext_name} 已就绪[/bold]"
+            )
+            if value.get("runtime_path"):
+                console.print(
+                    f"  路径: {value['runtime_path']}"
+                )
+            if summary:
+                console.print(
+                    f"  组件: "
+                    f"{summary.get('rails', 0)} rails, "
+                    f"{summary.get('tools', 0)} tools, "
+                    f"{summary.get('skills', 0)} skills"
+                )
+            console.print()
+            console.print(
+                "  [green][A][/green] 接受并热加载"
+            )
+            console.print(
+                "  [red][R][/red] 拒绝并清理"
+            )
+            console.print()
+            while True:
+                choice = console.input(
+                    "[bold]选择 (A/R): [/bold]"
+                ).strip().lower()
+                if choice in ("a", "accept", ""):
+                    action = "accept"
+                    break
+                if choice in ("r", "reject"):
+                    action = "reject"
+                    break
+                console.print(
+                    "[dim]请输入 A 或 R[/dim]"
+                )
+            orch.run_session_stream(
+                message={
+                    "interaction_id": iid,
+                    "action": action,
+                },
+            )
+            return action
+        return ""
+
     stream = orch.run_session_stream(tasks=tasks)
-    await render_stream(stream, console)
+    await render_stream(
+        stream,
+        console,
+        on_interaction=_on_activate_interaction,
+    )
     results = orch.results
     elapsed = _time.monotonic() - t0
     ok = sum(1 for r in results if r.success)
@@ -590,28 +681,15 @@ async def _subcmd_gap_analyze(
         run_gap_analysis,
     )
 
-    competitor: Optional[str] = None
-    i = 0
-    while i < len(args):
-        if args[i] == "--competitor" and i + 1 < len(args):
-            competitor = args[i + 1]
-            i += 2
-        else:
-            console.print(
-                f"[red]未知参数: {args[i]}[/red]"
-            )
-            return
-
-    if not competitor:
+    if args:
         console.print(
-            "[red]用法: /auto-harness gap-analyze "
-            "--competitor NAME[/red]"
+            f"[red]未知参数: {args[0]}[/red]"
         )
         return
 
     config = AutoHarnessConfig(workspace=workspace)
     gaps = await run_gap_analysis(
-        config, competitor=competitor, harness_state="",
+        config, harness_state="",
     )
     if not gaps:
         console.print(

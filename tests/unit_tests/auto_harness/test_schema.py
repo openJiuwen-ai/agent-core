@@ -85,6 +85,10 @@ class TestExperience:
         m = Experience()
         assert m.type == ExperienceType.OPTIMIZATION
         assert m.files_changed == []
+        assert m.signal == ""
+        assert m.strategy == ""
+        assert m.causal_chain == ""
+        assert m.signal_frequency == 0
 
 
 class TestResearchContext:
@@ -113,9 +117,10 @@ class TestAutoHarnessConfig:
         cfg = AutoHarnessConfig()
         assert cfg.data_dir == ""
         assert cfg.local_repo == ""
-        assert cfg.session_budget_secs == 3600.0
-        assert cfg.model_timeout_secs == 300.0
-        assert cfg.max_tasks_per_session == 3
+        assert cfg.session_budget_secs == 900000.0
+        assert cfg.task_timeout_secs == 300000.0
+        assert cfg.model_timeout_secs == 300000.0
+        assert cfg.max_tasks_per_session == 10
         assert cfg.git_remote == ""
         assert cfg.fork_owner == ""
         assert cfg.git_user_name == ""
@@ -160,10 +165,25 @@ class TestAutoHarnessConfig:
         cfg = AutoHarnessConfig(data_dir="/tmp/ah")
         assert cfg.runs_dir == "/tmp/ah/runs"
 
+    def test_runtime_extensions_dir_from_data_dir(self):
+        cfg = AutoHarnessConfig(data_dir="/tmp/ah")
+        assert cfg.runtime_extensions_dir == (
+            "/tmp/ah/runtime_extensions"
+        )
+
     def test_cache_repo_dir_from_data_dir(self):
         cfg = AutoHarnessConfig(data_dir="/tmp/ah")
         assert cfg.cache_repo_dir == (
             "/tmp/ah/repo/agent-core"
+        )
+
+    def test_build_paths_includes_runtime_extensions_dir(
+        self,
+    ):
+        cfg = AutoHarnessConfig(data_dir="/tmp/ah")
+        paths = cfg.build_paths()
+        assert paths.runtime_extensions_dir == (
+            "/tmp/ah/runtime_extensions"
         )
 
     def test_cache_repo_dir_uses_upstream_repo(self):
@@ -368,7 +388,7 @@ class TestLoadFromDict:
     def test_empty_dict(self):
         cfg = AutoHarnessConfig.load_from_dict({})
         assert cfg.git_remote == ""
-        assert cfg.session_budget_secs == 3600.0
+        assert cfg.session_budget_secs == 900000.0
 
 
 class TestLoadAutoHarnessConfig:
@@ -394,7 +414,7 @@ class TestLoadAutoHarnessConfig:
             str(tmp_path / "nonexistent.yaml")
         )
         assert cfg.git_remote == ""
-        assert cfg.session_budget_secs == 3600.0
+        assert cfg.session_budget_secs == 900000.0
         assert cfg.config_bootstrapped is True
         assert (tmp_path / "nonexistent.yaml").is_file()
 
@@ -431,7 +451,7 @@ class TestLoadAutoHarnessConfig:
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text("", encoding="utf-8")
         cfg = load_auto_harness_config(str(cfg_file))
-        assert cfg.session_budget_secs == 3600.0
+        assert cfg.session_budget_secs == 900000.0
 
 
 class TestLocalRepoHelpers:

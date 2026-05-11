@@ -15,6 +15,10 @@ import pytest
 from openjiuwen.core.session.stream.base import (
     OutputSchema,
 )
+from openjiuwen.auto_harness.pipelines import (
+    EXTENDED_EVOLVE_PIPELINE,
+    META_EVOLVE_PIPELINE,
+)
 from openjiuwen.harness.cli.cli import (
     AutoHarnessRunRequest,
     _run_auto_harness,
@@ -72,7 +76,7 @@ class TestAutoHarnessCli:
         captured_config = None
         received_tasks = "NOT_SET"
 
-        def _capture_create(config):
+        def _capture_create(config, **_kwargs):
             nonlocal captured_config
             captured_config = config
 
@@ -90,7 +94,7 @@ class TestAutoHarnessCli:
             mock_orch.results = []
             return mock_orch
 
-        async def _fake_render(stream, _console):
+        async def _fake_render(stream, _console, **_kwargs):
             async for _ in stream:
                 pass
             return SimpleNamespace(text="")
@@ -140,23 +144,23 @@ class TestAutoHarnessCli:
         assert captured_config.data_dir == str(
             (tmp_path / "auto_harness").resolve()
         )
+        assert (
+            captured_config.pipeline_preference
+            == META_EVOLVE_PIPELINE
+        )
         assert received_tasks is None
 
     @pytest.mark.asyncio
-    async def test_run_with_detected_local_repo_sets_workspace(
+    async def test_run_pipeline_option_overrides_default(
         self, tmp_path, monkeypatch,
     ) -> None:
-        """探测到 local_repo 时，workspace 也应切到仓库根。"""
+        """--pipeline extended should override the CLI meta default."""
+        fake_cwd_repo = _make_fake_repo(tmp_path, "cwd_repo")
+        monkeypatch.chdir(fake_cwd_repo)
+
         captured_config = None
 
-        repo = _make_fake_repo(tmp_path, "agent-core")
-        # chdir to a non-repo directory so detection is driven by
-        # workspace_hint (tmp_path/agent-core), not the ambient cwd.
-        neutral_cwd = tmp_path / "cwd"
-        neutral_cwd.mkdir()
-        monkeypatch.chdir(neutral_cwd)
-
-        def _capture_create(config):
+        def _capture_create(config, **_kwargs):
             nonlocal captured_config
             captured_config = config
 
@@ -172,7 +176,80 @@ class TestAutoHarnessCli:
             mock_orch.results = []
             return mock_orch
 
-        async def _fake_render(stream, _console):
+        async def _fake_render(stream, _console, **_kwargs):
+            async for _ in stream:
+                pass
+            return SimpleNamespace(text="")
+
+        opts = SimpleNamespace(
+            workspace=str(tmp_path),
+            provider="OpenAI",
+            model="gpt-4o",
+            api_key="mock-api-key",
+            api_base="https://api.openai.com/v1",
+            verbose=False,
+        )
+        (tmp_path / "auto_harness").mkdir(
+            parents=True, exist_ok=True,
+        )
+
+        with patch(
+            "openjiuwen.auto_harness.orchestrator"
+            ".create_auto_harness_orchestrator",
+            side_effect=_capture_create,
+        ), patch(
+            "openjiuwen.core.foundation.llm.model.Model",
+            return_value=MagicMock(name="mock_model"),
+        ), patch.dict(
+            sys.modules,
+            _install_renderer_stubs(_fake_render),
+        ):
+            exit_code = await _run_auto_harness(
+                opts=opts,
+                request=AutoHarnessRunRequest(
+                    goal="分析差距 claude-code",
+                    pipeline="extended",
+                ),
+            )
+
+        assert exit_code == 0
+        assert captured_config is not None
+        assert (
+            captured_config.pipeline_preference
+            == EXTENDED_EVOLVE_PIPELINE
+        )
+
+    @pytest.mark.asyncio
+    async def test_run_with_detected_local_repo_sets_workspace(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """探测到 local_repo 时，workspace 也应切到仓库根。"""
+        captured_config = None
+
+        repo = _make_fake_repo(tmp_path, "agent-core")
+        # chdir to a non-repo directory so detection is driven by
+        # workspace_hint (tmp_path/agent-core), not the ambient cwd.
+        neutral_cwd = tmp_path / "cwd"
+        neutral_cwd.mkdir()
+        monkeypatch.chdir(neutral_cwd)
+
+        def _capture_create(config, **_kwargs):
+            nonlocal captured_config
+            captured_config = config
+
+            async def _fake_stream(tasks=None):
+                yield OutputSchema(
+                    type="message",
+                    index=0,
+                    payload={"content": "ok"},
+                )
+
+            mock_orch = MagicMock()
+            mock_orch.run_session_stream = _fake_stream
+            mock_orch.results = []
+            return mock_orch
+
+        async def _fake_render(stream, _console, **_kwargs):
             async for _ in stream:
                 pass
             return SimpleNamespace(text="")
@@ -229,7 +306,7 @@ class TestAutoHarnessCli:
 
         preflight_called = False
 
-        async def _fake_render(stream, _console):
+        async def _fake_render(stream, _console, **_kwargs):
             async for _ in stream:
                 pass
             return SimpleNamespace(
@@ -277,7 +354,6 @@ class TestAutoHarnessCli:
                 opts=opts,
                 request=AutoHarnessRunRequest(
                     stage="assess",
-                    competitor="claude-code",
                 ),
             )
 

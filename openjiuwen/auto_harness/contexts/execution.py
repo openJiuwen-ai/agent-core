@@ -85,11 +85,41 @@ class BaseExecutionContext:
         )
 
     @staticmethod
-    def message(text: str) -> OutputSchema:
+    def message(
+        text: str,
+        *,
+        stage: str = "",
+    ) -> OutputSchema:
+        """Build a progress message OutputSchema."""
+        payload: dict[str, Any] = {"content": text}
+        if stage:
+            payload["stage"] = stage
         return OutputSchema(
             type="message",
             index=0,
-            payload={"content": text},
+            payload=payload,
+        )
+
+    @staticmethod
+    def stage_result_output(
+        *,
+        stage: str,
+        status: str,
+        error: str = "",
+        messages: list[str] | None = None,
+        metrics: dict[str, Any] | None = None,
+    ) -> OutputSchema:
+        """Build a stage_result OutputSchema."""
+        return OutputSchema(
+            type="stage_result",
+            index=0,
+            payload={
+                "stage": stage,
+                "status": status,
+                "error": error,
+                "messages": messages or [],
+                "metrics": metrics or {},
+            },
         )
 
 

@@ -25,15 +25,17 @@ class TestSelectPipelineStage(
 ):
     async def test_explicit_task_pipeline_wins(self):
         result = await run_select_pipeline(
-            AutoHarnessConfig(model=MagicMock()),
+            AutoHarnessConfig(
+                model=MagicMock(),
+                pipeline_preference=EXTENDED_EVOLVE_PIPELINE,
+            ),
             OptimizationTask(
                 topic="t1",
-                pipeline_name=EXTENDED_EVOLVE_PIPELINE,
             ),
         )
         assert result.pipeline_name == EXTENDED_EVOLVE_PIPELINE
 
-    async def test_no_model_falls_back_to_pr(self):
+    async def test_no_model_defaults_to_meta_pipeline(self):
         result = await run_select_pipeline(
             AutoHarnessConfig(model=None),
             OptimizationTask(topic="t1"),

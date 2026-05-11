@@ -60,6 +60,7 @@ def create_auto_harness_agent(
     *,
     workspace_override: Optional[str] = None,
     edit_safety_rail: Optional["AgentRail"] = None,
+    enable_edit_safety: bool = True,
     skill_names: Optional[List[str]] = None,
     enable_task_loop: bool = True,
     enable_task_planning: bool = True,
@@ -71,6 +72,7 @@ def create_auto_harness_agent(
     rails = _build_rails(
         config,
         edit_safety_rail=edit_safety_rail,
+        enable_edit_safety=enable_edit_safety,
     )
     rails.append(
         _build_skill_rail(
@@ -128,6 +130,7 @@ def create_auto_harness_agent(
         max_iterations=config.resolve_agent_iterations(
             "implement", 30
         ),
+        completion_timeout=config.model_timeout_secs,
         auto_create_workspace=False,
         sys_operation=_build_trusted_local_sys_operation(
             "auto-harness"
@@ -139,6 +142,7 @@ def create_commit_agent(
     config: "AutoHarnessConfig",
     *,
     workspace_override: Optional[str] = None,
+    extra_rails: Optional[List["AgentRail"]] = None,
 ) -> "DeepAgent":
     """Create the dedicated commit-stage agent."""
     return create_auto_harness_agent(
@@ -148,6 +152,7 @@ def create_commit_agent(
         enable_task_loop=False,
         enable_task_planning=False,
         enable_progress_repeat=False,
+        extra_rails=extra_rails,
     )
 
 
@@ -155,8 +160,15 @@ def _build_rails(
     config: "AutoHarnessConfig",
     *,
     edit_safety_rail: Optional["AgentRail"] = None,
+    enable_edit_safety: bool = True,
 ) -> list["AgentRail"]:
-    """Build the standard rails for writable task stages."""
+    """Build the standard rails for writable task stages.
+
+    Stream-event rails (e.g. ToolTrackingRail) are no longer
+    included here — they should be injected by the caller via
+    ``extra_rails`` so that auto-harness stays decoupled from
+    any specific UI/product layer.
+    """
     from openjiuwen.auto_harness.rails.context_rail import (
         AutoHarnessContextRail,
     )
@@ -169,9 +181,6 @@ def _build_rails(
     from openjiuwen.auto_harness.rails.security_rail import (
         SecurityRail,
     )
-    from openjiuwen.harness.cli.rails.tool_tracker import (
-        ToolTrackingRail,
-    )
     from openjiuwen.harness.rails.filesystem_rail import (
         FileSystemRail,
     )
@@ -179,8 +188,7 @@ def _build_rails(
         LspRail,
     )
 
-    return [
-        ToolTrackingRail(),
+    rails = [
         FileSystemRail(),
         AutoHarnessContextRail(preset=True),
         LspRail(),
@@ -192,8 +200,10 @@ def _build_rails(
             immutable_files=config.immutable_files,
             high_impact_prefixes=config.high_impact_prefixes,
         ),
-        edit_safety_rail or EditSafetyRail(),
     ]
+    if enable_edit_safety:
+        rails.append(edit_safety_rail or EditSafetyRail())
+    return rails
 
 
 def _build_subagents(
@@ -285,15 +295,15 @@ def _render_prompt(
 def _build_readonly_rails(
     config: "AutoHarnessConfig",
 ) -> list["AgentRail"]:
-    """Build readonly rails for assess/plan/eval style stages."""
+    """Build readonly rails for assess/plan/eval style stages.
+
+    Stream-event rails should be injected via ``extra_rails``.
+    """
     from openjiuwen.auto_harness.rails.context_rail import (
         AutoHarnessContextRail,
     )
     from openjiuwen.auto_harness.rails.experience_rail import (
         AutoHarnessExperienceRail,
-    )
-    from openjiuwen.harness.cli.rails.tool_tracker import (
-        ToolTrackingRail,
     )
     from openjiuwen.harness.rails.filesystem_rail import (
         FileSystemRail,
@@ -303,7 +313,6 @@ def _build_readonly_rails(
     )
 
     return [
-        ToolTrackingRail(),
         FileSystemRail(),
         AutoHarnessContextRail(preset=True),
         LspRail(),
@@ -366,11 +375,15 @@ def _build_research_tools(
 
 def create_assess_agent(
     config: "AutoHarnessConfig",
+    *,
+    extra_rails: Optional[List["AgentRail"]] = None,
 ) -> "DeepAgent":
     """Create the assessment-stage agent."""
     prompt = _load_prompt("assess.md")
     rails = _build_readonly_rails(config)
     rails.append(_build_skill_rail(config, ["assess"]))
+    if extra_rails:
+        rails.extend(extra_rails)
     return create_deep_agent(
         model=config.model,
         card=AgentCard(
@@ -390,6 +403,7 @@ def create_assess_agent(
         max_iterations=config.resolve_agent_iterations(
             "assess", 30
         ),
+        completion_timeout=config.model_timeout_secs,
         auto_create_workspace=False,
         sys_operation=_build_trusted_local_sys_operation(
             "auto-harness-assess"
@@ -399,11 +413,15 @@ def create_assess_agent(
 
 def create_plan_agent(
     config: "AutoHarnessConfig",
+    *,
+    extra_rails: Optional[List["AgentRail"]] = None,
 ) -> "DeepAgent":
     """Create the planning-stage agent."""
     prompt = _load_prompt("plan.md")
     rails = _build_readonly_rails(config)
     rails.append(_build_skill_rail(config, ["plan"]))
+    if extra_rails:
+        rails.extend(extra_rails)
     return create_deep_agent(
         model=config.model,
         card=AgentCard(
@@ -423,6 +441,7 @@ def create_plan_agent(
         max_iterations=config.resolve_agent_iterations(
             "plan", 15
         ),
+        completion_timeout=config.model_timeout_secs,
         auto_create_workspace=False,
         sys_operation=_build_trusted_local_sys_operation(
             "auto-harness-plan"
@@ -432,11 +451,15 @@ def create_plan_agent(
 
 def create_eval_agent(
     config: "AutoHarnessConfig",
+    *,
+    extra_rails: Optional[List["AgentRail"]] = None,
 ) -> "DeepAgent":
     """Create the evaluator agent used by the verify fix loop."""
     prompt = _load_prompt("evaluate.md")
     rails = _build_readonly_rails(config)
-    rails.append(_build_skill_rail(config, ["verify"]))
+    rails.append(_build_skill_rail(config, ["verify", "verify_ext"]))
+    if extra_rails:
+        rails.extend(extra_rails)
     return create_deep_agent(
         model=config.model,
         card=AgentCard(
@@ -455,6 +478,7 @@ def create_eval_agent(
         max_iterations=config.resolve_agent_iterations(
             "eval", 10
         ),
+        completion_timeout=config.model_timeout_secs,
         auto_create_workspace=False,
         sys_operation=_build_trusted_local_sys_operation(
             "auto-harness-eval"
@@ -464,6 +488,8 @@ def create_eval_agent(
 
 def create_select_pipeline_agent(
     config: "AutoHarnessConfig",
+    *,
+    extra_rails: Optional[List["AgentRail"]] = None,
 ) -> "DeepAgent":
     """Create the pipeline-selection agent."""
     prompt = _load_prompt("select_pipeline.md")
@@ -471,6 +497,8 @@ def create_select_pipeline_agent(
     rails.append(
         _build_skill_rail(config, ["select_pipeline"])
     )
+    if extra_rails:
+        rails.extend(extra_rails)
     return create_deep_agent(
         model=config.model,
         card=AgentCard(
@@ -490,9 +518,51 @@ def create_select_pipeline_agent(
         max_iterations=config.resolve_agent_iterations(
             "select_pipeline", 10
         ),
+        completion_timeout=config.model_timeout_secs,
         auto_create_workspace=False,
         sys_operation=_build_trusted_local_sys_operation(
             "auto-harness-select-pipeline"
+        ),
+    )
+
+
+def create_design_ext_agent(
+    config: "AutoHarnessConfig",
+    *,
+    extra_rails: Optional[List["AgentRail"]] = None,
+) -> "DeepAgent":
+    """Create the extension-design agent for Phase 2."""
+    prompt = _load_prompt("design_ext.md")
+    rails = _build_readonly_rails(config)
+    rails.append(
+        _build_skill_rail(config, ["design_ext"])
+    )
+    if extra_rails:
+        rails.extend(extra_rails)
+    return create_deep_agent(
+        model=config.model,
+        card=AgentCard(
+            name="auto-harness-design-ext",
+            description="设计运行时扩展方案",
+        ),
+        system_prompt=prompt,
+        tools=_build_research_tools(config) or None,
+        subagents=_build_subagents(
+            config,
+            workspace=config.workspace,
+        )
+        or None,
+        rails=rails or None,
+        workspace=config.workspace,
+        language=config.language,
+        enable_async_subagent=True,
+        max_iterations=config.resolve_agent_iterations(
+            "design_ext", 15
+        ),
+        completion_timeout=config.model_timeout_secs,
+        auto_create_workspace=False,
+        sys_operation=_build_trusted_local_sys_operation(
+            "auto-harness-design-ext"
         ),
     )
 
@@ -501,11 +571,14 @@ def create_pr_draft_agent(
     config: "AutoHarnessConfig",
     *,
     workspace_override: Optional[str] = None,
+    extra_rails: Optional[List["AgentRail"]] = None,
 ) -> "DeepAgent":
     """Create the communicate-only agent used for PR drafts."""
     prompt = _load_prompt("pr_draft.md")
     rails = _build_readonly_rails(config)
     rails.append(_build_skill_rail(config, ["communicate"]))
+    if extra_rails:
+        rails.extend(extra_rails)
     workspace = workspace_override or config.workspace
     return create_deep_agent(
         model=config.model,
@@ -520,6 +593,7 @@ def create_pr_draft_agent(
         max_iterations=config.resolve_agent_iterations(
             "pr_draft", 5
         ),
+        completion_timeout=config.model_timeout_secs,
         auto_create_workspace=False,
         sys_operation=_build_trusted_local_sys_operation(
             "auto-harness-pr-draft"
@@ -532,6 +606,7 @@ def create_learnings_agent(
     *,
     session_results: str = "",
     existing_memories: str = "",
+    extra_rails: Optional[List["AgentRail"]] = None,
 ) -> "DeepAgent":
     """Create the session learnings agent."""
     prompt = _render_prompt(
@@ -541,6 +616,8 @@ def create_learnings_agent(
     )
     rails = _build_readonly_rails(config)
     rails.append(_build_skill_rail(config, ["communicate"]))
+    if extra_rails:
+        rails.extend(extra_rails)
     return create_deep_agent(
         model=config.model,
         card=AgentCard(
@@ -554,8 +631,43 @@ def create_learnings_agent(
         max_iterations=config.resolve_agent_iterations(
             "learnings", 5
         ),
+        completion_timeout=config.model_timeout_secs,
         auto_create_workspace=False,
         sys_operation=_build_trusted_local_sys_operation(
             "auto-harness-learnings"
+        ),
+    )
+
+
+def create_activate_guide_agent(
+    config: "AutoHarnessConfig",
+    *,
+    extra_rails: Optional[List["AgentRail"]] = None,
+) -> "DeepAgent":
+    """Create the activate testing guide agent.
+
+    This is a pure text-generation agent with no tools
+    or file-reading rails so it produces the guide
+    directly in a single iteration.
+    """
+    prompt = _load_prompt("activate_guide.md")
+    rails: list["AgentRail"] = []
+    if extra_rails:
+        rails.extend(extra_rails)
+    return create_deep_agent(
+        model=config.plan_model or config.model,
+        card=AgentCard(
+            name="activate-guide",
+            description="生成扩展测试引导",
+        ),
+        system_prompt=prompt,
+        rails=rails or None,
+        workspace=config.workspace,
+        language=config.language,
+        max_iterations=1,
+        completion_timeout=config.model_timeout_secs,
+        auto_create_workspace=False,
+        sys_operation=_build_trusted_local_sys_operation(
+            "activate-guide"
         ),
     )

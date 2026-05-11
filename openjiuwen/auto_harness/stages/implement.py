@@ -1,12 +1,14 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Implement stage for task-scoped code changes."""
+"""Implement stage hierarchy for task-scoped code changes."""
 
 from __future__ import annotations
 
 import logging
+import shutil
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from openjiuwen.auto_harness.contexts import (
@@ -21,12 +23,16 @@ from openjiuwen.auto_harness.schema import (
     CodeChangeArtifact,
     CycleResult,
     Experience,
+    ExtensionBuildArtifact,
+    ExtensionDesign,
     OptimizationTask,
+    RuntimeExtensionArtifact,
     StageResult,
     TaskStatus,
 )
 from openjiuwen.auto_harness.stages.base import (
     TaskStage,
+    scope_output_event_stage,
 )
 
 if TYPE_CHECKING:
@@ -80,6 +86,44 @@ def _build_prompt_debug_stats(
         "lines": prompt.count("\n") + 1,
         "bytes": len(prompt.encode("utf-8")),
     }
+
+
+def _artifact_contract_hint(name: str) -> str:
+    """Return artifact validation guidance for generated extensions."""
+    lowered = name.lower()
+    common = (
+        "文件/产物生成类 Tool 必须在返回 success=true 前完成自校验："
+        "输出路径存在、size_bytes > 0、format 与文件后缀一致，并返回 "
+        "success/path 或 absolute_path/format/exists/size_bytes 等结构化字段。"
+        "如果依赖缺失、写入失败或格式校验失败，必须返回 success=false "
+        "和明确错误；不得用成功文本掩盖失败。"
+    )
+    if any(token in lowered for token in ("ppt", "pptx", "powerpoint")):
+        return (
+            common +
+            " PPT/PPTX 生成必须产出真实 .pptx 文件；不得用 JSON、Markdown、"
+            "纯文本或“待下游转换”的中间结构冒充 PPTX。"
+            "成功前必须用 zipfile 校验文件是合法 zip 包，并包含 "
+            "`[Content_Types].xml`、`ppt/presentation.xml` 和至少一个 "
+            "`ppt/slides/slide*.xml`。可用 python-pptx 时应优先生成真实 PPTX。"
+        )
+    if any(token in lowered for token in ("docx", "word")):
+        return (
+            common +
+            " DOCX 生成必须产出真实 .docx 文件，并用 zipfile 校验 "
+            "`[Content_Types].xml` 和 `word/document.xml`。"
+        )
+    if "pdf" in lowered:
+        return (
+            common +
+            " PDF 生成必须产出真实 .pdf 文件，并校验文件头以 `%PDF` 开始。"
+        )
+    if "json" in lowered:
+        return (
+            common +
+            " JSON 生成必须写出可被 json parser 解析的文件，并校验关键字段存在。"
+        )
+    return common
 
 
 def _extract_repo_edit_candidates(
@@ -254,11 +298,24 @@ async def run_implement_stream(
 
 
 class ImplementStage(TaskStage):
-    """Execute code changes for the current task."""
+    """Abstract base for all implement-slot stages."""
 
     name = "implement"
-    description = "Run the implement stage for PR pipeline."
+    slot = "implement"
+    display_name = "执行代码修改"
+    description = "Implement code changes."
     produces = ["code_change"]
+
+    async def stream(
+        self,
+        ctx: TaskContext,
+    ) -> AsyncIterator[Any]:
+        """Subclasses must override this method."""
+        raise NotImplementedError
+
+
+class MetaImplementStage(ImplementStage):
+    """Execute code changes for the current task."""
 
     async def stream(
         self,
@@ -300,7 +357,6 @@ class ImplementStage(TaskStage):
         yield ctx.message(
             f"任务准备就绪: {ctx.task.topic}"
         )
-        yield ctx.message("[1/5] 执行代码修改")
         async for chunk in run_implement_stream(
             ctx.runtime.task_agent,
             ctx.task,
@@ -397,3 +453,350 @@ class ImplementStage(TaskStage):
                 )
             }
         )
+
+
+# ------------------------------------------------------------------
+# ExtendImplementStage — extension implementation (from implement_ext)
+# ------------------------------------------------------------------
+
+
+def _build_implement_ext_prompt(
+    design: ExtensionDesign,
+    *,
+    extension_root: Path,
+    config_path: Path,
+) -> str:
+    """Build the prompt for the implement_ext agent."""
+    components = list(design.components or ["tool", "skill"])
+    components_text = ", ".join(components)
+    file_plan_lines: list[str] = []
+    for key, value in design.file_plan.items():
+        file_plan_lines.append(f"  - {key}: {value}")
+    file_plan_text = (
+        "\n".join(file_plan_lines)
+        if file_plan_lines
+        else "  (无)"
+    )
+
+    # Build component-specific requirements
+    requirements: list[str] = [
+        "1. 在扩展根目录下创建完整的 Python 包结构",
+        "2. 严格按 ExtensionDesign.components 实现组件；"
+        "不要为了完整性自动补充未声明的 Rail、Tool 或 Skill。",
+        "3. 实现必须贴合 extension_name 和 gap 语义，"
+        "保留用户目标中的关键实体与产物类型；不要把 PPT/"
+        "文档/办公生成类需求泛化成需求收集或结构化需求报告。",
+        f"4. 真实产物契约：{_artifact_contract_hint(design.extension_name)}",
+    ]
+    step = 5
+    if "rail" in components:
+        requirements.append(
+            f"{step}. 实现 rail 组件 "
+            "(继承 DeepAgentRail)。Rail 只负责设计中要求的"
+            "生命周期拦截、后台监听、周期触发、审计或上下文增强；"
+            "不得替代 Tool 执行文件生成等主动动作。"
+        )
+        step += 1
+    if "tool" in components:
+        requirements.append(
+            f"{step}. 实现 tool 组件 "
+            "(继承 Tool，包含 ToolCard)。ToolCard.id 和 "
+            "ToolCard.name 必须稳定、snake_case、语义明确，"
+            "优先与 extension_name 或核心动作一致。"
+        )
+        step += 1
+    if "skill" in components:
+        requirements.append(
+            f"{step}. 创建 skills/<skill_name>/SKILL.md，"
+            "包含 frontmatter (name, description) 和正文；"
+            "必须参考 skill-creator 规范：name/description 要准确描述"
+            "触发场景，正文保持精简且可操作，只写 agent 真正需要的"
+            "领域规范、品牌风格、模板原则、生成流程、示例和验收标准；"
+            "如需 PPT 模板、品牌素材或详细参考资料，可放在 skill "
+            "目录下的 assets/ 或 references/，并在 SKILL.md 中说明何时使用"
+        )
+        step += 1
+    if "rail" in components and "tool" in components:
+        requirements.append(
+            f"{step}. 如果 Rail 与 Tool 需要共享状态，"
+            "必须使用按 session_id 隔离的显式文件状态；"
+            "不得通过 Tool 构造函数注入 Rail 实例、agent、"
+            "session 或其他运行时对象"
+        )
+        step += 1
+    requirements.append(
+        f"{step}. 生成 harness_config.yaml manifest"
+        "（只声明实际包含的组件类型）"
+    )
+    step += 1
+    requirements.append(
+        f"{step}. 确保所有模块可正常 import；自测 import 和类实例化"
+        "必须从 `harness_config.yaml` 中读取实际声明的 `module` 和 "
+        "`class`，不要手写或猜测 module path；所有 rail/tool module "
+        "必须以 `openjiuwen.extensions.harness.<extension_name>.` 开头，"
+        "并指向扩展目录内真实存在的 Python 文件"
+    )
+    requirements_text = "\n".join(requirements)
+
+    return (
+        f"实现运行时扩展: {design.extension_name}\n\n"
+        f"Gap ID: {design.gap_id}\n"
+        f"组件: {components_text}\n"
+        f"文件规划:\n{file_plan_text}\n\n"
+        f"扩展根目录: {extension_root}\n"
+        f"Manifest 路径: {config_path}\n\n"
+        f"要求:\n{requirements_text}\n\n"
+        "直接开始实现，不要等待确认。\n"
+        "严禁执行 git add、git commit 或其他提交动作。"
+    )
+
+
+def _extract_task_failed_error(
+    chunk: Any,
+) -> str:
+    """Return task-loop failure text from a chunk."""
+    if getattr(chunk, "type", "") != "controller_output":
+        return ""
+    payload = getattr(chunk, "payload", None)
+    if payload is None:
+        return ""
+    if isinstance(payload, dict):
+        payload_type = payload.get("type", "")
+        payload_data = payload.get("data", [])
+    else:
+        payload_type = getattr(payload, "type", "")
+        payload_data = getattr(payload, "data", [])
+    if str(payload_type).lower() != "task_failed":
+        return ""
+    texts: list[str] = []
+    if isinstance(payload_data, list):
+        for item in payload_data:
+            if isinstance(item, dict):
+                text = item.get("text", "")
+            else:
+                text = getattr(item, "text", "")
+            text = str(text).strip()
+            if text:
+                texts.append(text)
+    if texts:
+        return "\n".join(texts)
+    return str(payload).strip()
+
+
+def _resolve_extension_root(
+    wt_path: str,
+    design: ExtensionDesign,
+) -> Path:
+    """Resolve the extension root directory in the worktree."""
+    root = design.file_plan.get(
+        "root",
+        (
+            "openjiuwen/extensions/harness/"
+            f"{design.extension_name}"
+        ),
+    )
+    return Path(wt_path) / root
+
+
+def _resolve_config_path(
+    wt_path: str,
+    design: ExtensionDesign,
+) -> Path:
+    """Resolve the manifest config path in the worktree."""
+    manifest = design.file_plan.get(
+        "manifest",
+        (
+            "openjiuwen/extensions/harness/"
+            f"{design.extension_name}/harness_config.yaml"
+        ),
+    )
+    return Path(wt_path) / manifest
+
+
+class ExtendImplementStage(ImplementStage):
+    """Materialize one extension design into the task worktree."""
+
+    name = "implement_ext"
+    display_name = "实现扩展"
+    produces = ["extension_build"]
+    consumes = ["extension_target"]
+
+    async def stream(
+        self,
+        ctx: TaskContext,
+    ) -> AsyncIterator[Any]:
+        design = ctx.require_artifact("extension_target")
+        if not isinstance(design, ExtensionDesign):
+            raise TypeError(
+                "extension_target artifact must be "
+                "ExtensionDesign"
+            )
+
+        agent = ctx.runtime.task_agent
+        if agent is None:
+            error = (
+                "No task_agent available for "
+                "implement_ext stage"
+            )
+            logger.error(error)
+            ctx.task.status = TaskStatus.FAILED
+            yield StageResult(
+                status="failed",
+                artifacts={
+                    "task_result": CycleResult(
+                        success=False,
+                        error=error,
+                    ),
+                },
+                messages=[error],
+                error=error,
+            )
+            return
+
+        extension_root = _resolve_extension_root(
+            ctx.runtime.wt_path,
+            design,
+        )
+        config_path = _resolve_config_path(
+            ctx.runtime.wt_path,
+            design,
+        )
+
+        prompt = _build_implement_ext_prompt(
+            design,
+            extension_root=extension_root,
+            config_path=config_path,
+        )
+
+        yield ctx.message(
+            f"开始实现扩展: {design.extension_name}"
+        )
+
+        session = ctx.runtime.task_session
+        if session is not None:
+            await session.pre_run(
+                inputs={"query": prompt}
+            )
+
+        implement_error = ""
+        async for chunk in agent.stream(
+            {"query": prompt},
+            **(
+                {"session": session}
+                if session is not None
+                else {}
+            ),
+        ):
+            yield scope_output_event_stage(
+                chunk,
+                self.name,
+            )
+            implement_error = (
+                _extract_task_failed_error(chunk)
+            )
+            if implement_error:
+                break
+
+        if implement_error:
+            ctx.task.status = TaskStatus.FAILED
+            yield StageResult(
+                status="failed",
+                artifacts={
+                    "task_result": CycleResult(
+                        success=False,
+                        error=implement_error,
+                    ),
+                },
+                messages=[implement_error],
+                error=implement_error,
+            )
+            return
+
+        # Verify agent produced actual files
+        if not extension_root.exists():
+            error = (
+                "Agent did not create extension root: "
+                f"{extension_root}"
+            )
+            ctx.task.status = TaskStatus.FAILED
+            yield StageResult(
+                status="failed",
+                artifacts={
+                    "task_result": CycleResult(
+                        success=False,
+                        error=error,
+                    ),
+                },
+                messages=[error],
+                error=error,
+            )
+            return
+
+        artifact = ExtensionBuildArtifact(
+            extension_name=design.extension_name,
+            extension_root=str(
+                extension_root.resolve()
+            ),
+            config_path=str(config_path.resolve()),
+        )
+        yield StageResult(
+            artifacts={"extension_build": artifact},
+            messages=[
+                "Implemented extension: "
+                f"{design.extension_name}"
+            ],
+        )
+
+
+# ------------------------------------------------------------------
+# promote_runtime — plain async function (from promote_runtime.py)
+# ------------------------------------------------------------------
+
+
+async def promote_runtime(
+    ctx: "TaskContext",
+) -> "RuntimeExtensionArtifact":
+    """Promote a verified extension build into the session runtime dir.
+
+    Converts the former ``PromoteRuntimeStage.stream()`` logic into a
+    plain async helper that returns the artifact directly.
+    """
+    build = ctx.require_artifact("extension_build")
+    if not isinstance(build, ExtensionBuildArtifact):
+        raise TypeError(
+            "extension_build artifact must be "
+            "ExtensionBuildArtifact"
+        )
+
+    session_root = (
+        ctx.orchestrator.ensure_session_runtime_dir()
+    )
+    destination = session_root / build.extension_name
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(
+        build.extension_root,
+        destination,
+    )
+    config_path = (
+        destination / "harness_config.yaml"
+    ).resolve()
+    return RuntimeExtensionArtifact(
+        extension_name=build.extension_name,
+        runtime_path=str(destination.resolve()),
+        config_path=str(config_path),
+    )
+
+
+# Backwards-compatible alias
+ImplementExtStage = ExtendImplementStage
+
+
+__all__ = [
+    "ImplementStage",
+    "MetaImplementStage",
+    "ExtendImplementStage",
+    "ImplementExtStage",
+    "promote_runtime",
+    "run_implement_stream",
+]

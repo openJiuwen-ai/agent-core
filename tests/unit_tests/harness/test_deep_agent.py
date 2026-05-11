@@ -997,4 +997,5 @@ async def test_create_deep_agent_with_restrict_to_work_dir_enabled(tmp_path) -> 
     sys_op = Runner.resource_mgr.get_sys_operation(f"{agent.card.name}_{agent.card.id}")
     assert sys_op is not None
     assert sys_op._run_config.sandbox_root is None
+    assert sys_op._run_config.shell_allowlist is None
     assert sys_op._run_config.restrict_to_sandbox is False

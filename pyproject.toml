@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "openjiuwen"
 version = "0.1.11"
@@ -153,6 +157,7 @@ openjiuwen = [
     "**/prompts/**/*.md",
     "**/locales/**/*.md",
     "**/online/yaml/*.yaml",
+    "**/auto_harness/resources/*.yaml",
 ]
 
 [tool.coverage.run]
