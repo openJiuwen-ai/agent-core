@@ -55,10 +55,6 @@ from openjiuwen.core.sys_operation.sandbox.providers.base_provider import (
 from openjiuwen.core.sys_operation.sandbox.sandbox_registry import SandboxRegistry
 
 
-STDERR_MARKER = "__OJW_STDERR__:"
-DEFAULT_SANDBOX_COMMAND = ["/usr/bin/python3", "-c", "import time; time.sleep(36000)"]
-
-
 def _build_fs_error_result(execution: str, error_msg: str, result_cls: Any, data: Any = None):
     return build_operation_error_result(
         error_type=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR,
@@ -90,24 +86,11 @@ def _quote_shell_value(value: str) -> str:
     return shlex.quote(value)
 
 
-def _split_marked_shell_output(output: str) -> Tuple[str, str]:
-    stdout_parts: List[str] = []
-    stderr_parts: List[str] = []
-    cursor = 0
-    while cursor < len(output):
-        marker_index = output.find(STDERR_MARKER, cursor)
-        if marker_index < 0:
-            stdout_parts.append(output[cursor:])
-            break
-        stdout_parts.append(output[cursor:marker_index])
-        stderr_start = marker_index + len(STDERR_MARKER)
-        stderr_end = output.find("\n", stderr_start)
-        if stderr_end < 0:
-            stderr_parts.append(output[stderr_start:])
-            break
-        stderr_parts.append(output[stderr_start:stderr_end + 1])
-        cursor = stderr_end + 1
-    return "".join(stdout_parts), "".join(stderr_parts)
+def _normalize_exec_timeout(timeout: Optional[int]) -> Optional[int]:
+    if timeout is None:
+        return None
+    normalized = int(timeout)
+    return normalized if normalized > 0 else None
 
 
 def _normalize_read_params(
@@ -232,7 +215,7 @@ class _JiuwenBoxClient:
         policy: dict[str, Any] | None = None,
         policy_mode: str | None = None,
     ) -> str:
-        body: dict[str, Any] = {"command": DEFAULT_SANDBOX_COMMAND}
+        body: dict[str, Any] = {}
         if policy is not None:
             body["policy"] = policy
         if policy_mode is not None:
@@ -252,18 +235,19 @@ class _JiuwenBoxClient:
         environment: Dict[str, str] | None = None,
         stdin: str | None = None,
     ) -> dict[str, Any]:
+        timeout_seconds = _normalize_exec_timeout(timeout)
         body: dict[str, Any] = {
             "command": command,
             "workdir": cwd,
             "env": environment,
             "stdin": stdin,
-            "timeout_seconds": timeout,
+            "timeout_seconds": timeout_seconds,
         }
         body = {key: value for key, value in body.items() if value is not None}
         response = self._client.post(
             f"/api/v1/sandboxes/{sandbox_id}/exec",
             json=body,
-            timeout=max(timeout or 30, 30),
+            timeout=max(timeout_seconds or 30, 30),
         )
         _raise_for_status(response)
         return dict(response.json())
@@ -281,14 +265,14 @@ class _JiuwenBoxClient:
         result = self.exec(
             sandbox_id,
             [
-                "/usr/bin/bash",
+                "bash",
                 "-lc",
                 (
                     "set -euo pipefail; "
                     'target="$1"; '
-                    'parent=$(/usr/bin/dirname -- "$target"); '
-                    '/usr/bin/mkdir -p -- "$parent"; '
-                    '/usr/bin/base64 -d >> "$target"'
+                    'parent=$(dirname -- "$target"); '
+                    'mkdir -p -- "$parent"; '
+                    'base64 -d >> "$target"'
                 ),
                 "jiuwenbox-append",
                 sandbox_path,
@@ -855,50 +839,37 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
         super().__init__(endpoint, config)
         self._init_jiuwenbox(endpoint, config)
 
-    @staticmethod
-    def _build_wrapped_command(
-        command: str,
-        *,
-        cwd: Optional[str] = None,
-        timeout: Optional[int] = None,
-        environment: Optional[Dict[str, str]] = None,
-    ) -> str:
-        inner_parts: List[str] = []
-        if cwd:
-            inner_parts.append(f"cd {_quote_shell_value(cwd)}")
-        if environment:
-            env_prefix = " ".join(f"{key}={_quote_shell_value(value)}" for key, value in environment.items())
-            inner_parts.append(f"export {env_prefix}")
-        inner_parts.append(f"{{ {command}; }} 2> >(sed 's/^/{STDERR_MARKER}/')")
-        bash_path = os.path.join(os.sep, "usr", "bin", "bash")
-        shell_command = " ".join([bash_path, "-lc", _quote_shell_value(" && ".join(inner_parts))])
-        if timeout is not None and timeout > 0:
-            timeout_path = os.path.join(os.sep, "usr", "bin", "timeout")
-            shell_command = " ".join([timeout_path, f"{int(timeout)}s", shell_command])
-        return shell_command
-
     async def execute_cmd(
         self,
         command: str,
-        cwd: str = ".",
+        cwd: Optional[str] = None,
         timeout: Optional[int] = 300,
         environment: Optional[Dict[str, str]] = None,
         **kwargs,
     ) -> ExecuteCmdResult:
         if not command or not command.strip():
             return _build_shell_error_result("execute_cmd", "command can not be empty", ExecuteCmdResult)
-        wrapped = self._build_wrapped_command(command, cwd=cwd or ".", timeout=timeout, environment=environment)
-        exec_timeout = timeout + 1 if timeout is not None and timeout > 0 else timeout
+        exec_timeout = _normalize_exec_timeout(timeout)
+        workdir = None if not cwd or cwd == "." else cwd
         try:
             result = await asyncio.to_thread(
                 self._get_client().exec,
                 self._get_sandbox_id(),
-                ["/usr/bin/bash", "-lc", wrapped],
+                ["bash", "-lc", command],
+                cwd=workdir,
                 timeout=exec_timeout,
+                environment=environment,
             )
-            stdout, stderr = _split_marked_shell_output(result.get("stdout") or "")
+            stdout = result.get("stdout") or ""
+            stderr = result.get("stderr") or ""
             exit_code = int(result.get("exit_code") or 0)
-            data = ExecuteCmdData(command=command, cwd=cwd or ".", stdout=stdout, stderr=stderr, exit_code=exit_code)
+            data = ExecuteCmdData(
+                command=command,
+                cwd=cwd or ".",
+                stdout=stdout,
+                stderr=stderr,
+                exit_code=exit_code,
+            )
             if exit_code == 124:
                 return _build_shell_error_result(
                     "execute_cmd",
@@ -919,7 +890,7 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
         environment: Optional[Dict[str, str]] = None,
         **kwargs,
     ) -> AsyncIterator[ExecuteCmdStreamResult]:
-        result = await self.execute_cmd(command, cwd=cwd or ".", timeout=timeout, environment=environment)
+        result = await self.execute_cmd(command, cwd=cwd, timeout=timeout, environment=environment)
         if result.code != StatusCode.SUCCESS.code:
             yield _build_shell_error_result(
                 "execute_cmd_stream",
@@ -957,20 +928,20 @@ class JiuwenBoxCodeProvider(_JiuwenBoxProviderMixin, BaseCodeProvider):
         encoded = base64.b64encode(code.encode("utf-8")).decode("ascii")
         if language == "python":
             if force_file:
-                return ["/usr/bin/bash", "-lc", (
-                    "tmp=$(/usr/bin/mktemp /tmp/ojw_code_XXXXXX.py) && "
-                    f"printf %s {_quote_shell_value(encoded)} | /usr/bin/base64 -d > \"$tmp\" && "
-                    "/usr/bin/python3 \"$tmp\"; status=$?; rm -f \"$tmp\"; exit $status"
+                return ["bash", "-lc", (
+                    "tmp=$(mktemp /tmp/ojw_code_XXXXXX.py) && "
+                    f"printf %s {_quote_shell_value(encoded)} | base64 -d > \"$tmp\" && "
+                    "python3 \"$tmp\"; status=$?; rm -f \"$tmp\"; exit $status"
                 )]
-            return ["/usr/bin/python3", "-c", code]
+            return ["python3", "-c", code]
         if language == "javascript":
             if force_file:
-                return ["/usr/bin/bash", "-lc", (
-                    "tmp=$(/usr/bin/mktemp /tmp/ojw_code_XXXXXX.js) && "
-                    f"printf %s {_quote_shell_value(encoded)} | /usr/bin/base64 -d > \"$tmp\" && "
-                    "/usr/bin/node \"$tmp\"; status=$?; rm -f \"$tmp\"; exit $status"
+                return ["bash", "-lc", (
+                    "tmp=$(mktemp /tmp/ojw_code_XXXXXX.js) && "
+                    f"printf %s {_quote_shell_value(encoded)} | base64 -d > \"$tmp\" && "
+                    "node \"$tmp\"; status=$?; rm -f \"$tmp\"; exit $status"
                 )]
-            return ["/usr/bin/node", "-e", code]
+            return ["node", "-e", code]
         return None
 
     @staticmethod
@@ -1006,13 +977,14 @@ class JiuwenBoxCodeProvider(_JiuwenBoxProviderMixin, BaseCodeProvider):
         if command is None:
             return _build_code_error_result("execute_code", "subprocess cmd can not be none",
                                             ExecuteCodeResult, data=data)
+        exec_timeout = _normalize_exec_timeout(timeout)
         try:
             result = await asyncio.to_thread(
                 self._get_client().exec,
                 self._get_sandbox_id(),
                 command,
                 cwd="/tmp",
-                timeout=timeout,
+                timeout=exec_timeout,
                 environment=self._prepare_code_environment(language, environment),
             )
             result_data = ExecuteCodeData(
