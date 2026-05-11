@@ -5,6 +5,8 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import ValidationError
 from openjiuwen.harness.tools.worktree.manager import WorktreeManager
 from openjiuwen.harness.tools.worktree.models import (
     WorktreeConfig,
@@ -183,9 +185,44 @@ class TestExit:
         mgr = _make_manager(mock_backend)
         await mgr.enter("dirty-slug")
 
-        with pytest.raises(ValueError, match="uncommitted files"):
+        with pytest.raises(ValidationError) as exc_info:
             await mgr.exit("remove")
-        logger.info("exit(remove) raises when changes exist and discard_changes=False")
+        assert exc_info.value.status is StatusCode.TOOL_WORKTREE_EXIT_INVALID
+        assert "uncommitted files" in exc_info.value.message
+        assert "discard_changes=True" in exc_info.value.message
+        logger.info("exit(remove) raises ValidationError when changes exist and discard_changes=False")
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.harness.tools.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.get_current_branch", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.status_porcelain", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.count_commits_since", new_callable=AsyncMock)
+    @pytest.mark.level1
+    async def test_exit_remove_fail_closed_on_unknown_state(
+        self, mock_commits, mock_status, mock_branch, mock_git_root, mock_backend
+    ):
+        """Fail-closed: when count_changes cannot determine state, refuse removal.
+
+        Mirrors Claude Code's errorCode 3 behavior — if git status / rev-list
+        cannot prove the worktree is clean, removing without discard_changes
+        would silently destroy work.
+        """
+        mock_git_root.return_value = "/repo"
+        mock_branch.return_value = "main"
+        mock_status.return_value = []
+        # rev-list failure: count_commits_since returns None → summary is None.
+        mock_commits.return_value = None
+
+        mgr = _make_manager(mock_backend)
+        await mgr.enter("unknown-state-slug")
+
+        with pytest.raises(ValidationError) as exc_info:
+            await mgr.exit("remove")
+        assert exc_info.value.status is StatusCode.TOOL_WORKTREE_EXIT_INVALID
+        assert "Could not verify worktree state" in exc_info.value.message
+        assert "discard_changes=True" in exc_info.value.message
+        mock_backend.remove.assert_not_awaited()
+        logger.info("exit(remove) fails closed when worktree state cannot be verified")
 
     @pytest.mark.asyncio
     @patch("openjiuwen.harness.tools.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)

@@ -36,7 +36,7 @@ from openjiuwen.agent_teams.observability.config import ObservabilityConfig
 from openjiuwen.agent_teams.observability.monitor_handler import OtelTeamMonitorHandler
 from openjiuwen.agent_teams.observability.span_context import reset_all
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import raise_error
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.runner.callback.events import (
     AgentEvents,
@@ -184,7 +184,7 @@ def _build_exporter(config: ObservabilityConfig) -> SpanExporter:
         )
 
         return HttpExporter(endpoint=config.endpoint)
-    raise_error(
+    raise build_error(
         StatusCode.PARAM_INVALID_ERROR,
         reason=f"unsupported observability exporter: {config.exporter}",
     )

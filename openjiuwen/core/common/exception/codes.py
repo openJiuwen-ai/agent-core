@@ -850,6 +850,9 @@ class StatusCode(Enum):
     TOOL_WEB_API_KEY_NOT_SET = (182508, "web tool api key is not set, key_name='{key_name}'")
     TOOL_SESSION_TOOL_INVOKED = (182509, "session tool invoked failed, error='{reason}'")
 
+    # worktree tool 182510 - 182519
+    TOOL_WORKTREE_EXIT_INVALID = (182510, "worktree exit is invalid, reason='{reason}'")
+
     # Foundation - Logger 183000 - 183999
     COMMON_LOG_PATH_INVALID = (183000, "common log_path is invalid, reason: {error_msg}")
     COMMON_LOG_PATH_INIT_FAILED = (183001, "common log_path initialization failed, reason: {error_msg}")

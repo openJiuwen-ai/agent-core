@@ -246,12 +246,35 @@ class AgentConfigurator:
         )
 
     def create_worktree_manager(self, spec: TeamAgentSpec) -> WorktreeManager:
-        from openjiuwen.harness.tools.worktree import WorktreeManager
+        from openjiuwen.harness.tools.worktree import (
+            WorktreeCreatedEvent,
+            WorktreeManager,
+            WorktreeRemovedEvent,
+        )
 
-        ws_root = self.workspace_manager.workspace_path if self.workspace_manager else None
+        ws_mgr = self.workspace_manager
+
+        event_handler = None
+        if ws_mgr is not None:
+
+            async def _mirror_worktree_into_workspace(event: Any) -> None:
+                """Keep ``.worktree/{slug}`` in lockstep with manager events.
+
+                Translates the generic worktree lifecycle stream into team
+                workspace mount/unmount calls. Single-agent callers never
+                install this handler, so the symlink view is team-only by
+                construction.
+                """
+                if isinstance(event, WorktreeCreatedEvent):
+                    ws_mgr.mount_worktree(event.worktree_name, event.worktree_path)
+                elif isinstance(event, WorktreeRemovedEvent):
+                    ws_mgr.unmount_worktree(event.worktree_name)
+
+            event_handler = _mirror_worktree_into_workspace
+
         return WorktreeManager(
             config=spec.worktree,
-            workspace_root=ws_root,
+            event_handler=event_handler,
         )
 
     def setup_agent(

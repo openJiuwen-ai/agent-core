@@ -358,8 +358,6 @@ class OtelCallbackHandler:
         )
 
         if reasoning_text:
-            from opentelemetry.trace import set_span_in_context
-
             with self._tracer().start_as_current_span(
                 name="llm.reasoning",
                 context=set_span_in_context(state.span),
@@ -376,7 +374,8 @@ class OtelCallbackHandler:
         if state.context_token is not None:
             otel_context.detach(state.context_token)
 
-    def _maybe_record_response_attrs(self, state: LlmSpanState, response: Any) -> None:
+    @staticmethod
+    def _maybe_record_response_attrs(state: LlmSpanState, response: Any) -> None:
         """Write usage / finish_reason / model attributes if present on the response."""
         if response is None:
             return

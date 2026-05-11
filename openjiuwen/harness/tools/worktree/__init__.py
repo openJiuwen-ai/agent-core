@@ -33,6 +33,7 @@ from openjiuwen.harness.tools.worktree.notice import build_worktree_notice
 from openjiuwen.harness.tools.worktree.rails import (
     AutoSetupRail,
     DiffSummaryRail,
+    WorktreeLifecycleRail,
     WorktreeRail,
 )
 from openjiuwen.harness.tools.worktree.session import (
@@ -85,6 +86,7 @@ __all__ = [
     "ExitWorktreeTool",
     # Rails
     "WorktreeRail",
+    "WorktreeLifecycleRail",
     "AutoSetupRail",
     "DiffSummaryRail",
     # Events

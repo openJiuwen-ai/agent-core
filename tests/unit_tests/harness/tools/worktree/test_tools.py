@@ -154,6 +154,42 @@ async def test_exit_validates_action_value():
 
 
 @pytest.mark.asyncio
+async def test_exit_remove_translates_validation_error_to_tool_output(monkeypatch):
+    """ValidationError from manager.exit must surface as ToolOutput.error.
+
+    The tool contract is to return ToolOutput, never to raise BaseError up
+    to the caller. Verify the rendered ValidationError message reaches
+    ToolOutput.error verbatim so the model sees the two-phase confirmation
+    instructions.
+    """
+    from openjiuwen.core.common.exception.codes import StatusCode
+    from openjiuwen.core.common.exception.errors import raise_error
+
+    set_current_session(
+        WorktreeSession(
+            original_cwd="/tmp",
+            worktree_path="/tmp/wt",
+            worktree_name="wt",
+        )
+    )
+    mgr = WorktreeManager(WorktreeConfig(enabled=True))
+
+    async def fake_exit(action, *, discard_changes=False):
+        raise_error(
+            StatusCode.TOOL_WORKTREE_EXIT_INVALID,
+            reason="Worktree has 2 uncommitted files. Set discard_changes=True to proceed.",
+        )
+
+    monkeypatch.setattr(mgr, "exit", fake_exit)
+    tool = ExitWorktreeTool(mgr)
+
+    result = await tool.invoke({"action": "remove"})
+    assert result.success is False
+    assert "Worktree has 2 uncommitted files" in (result.error or "")
+    assert "discard_changes=True" in (result.error or "")
+
+
+@pytest.mark.asyncio
 async def test_event_handler_receives_generic_events(tmp_path, monkeypatch):
     """Sanity check that manager dispatches generic events to the handler.
 
@@ -176,7 +212,6 @@ async def test_event_handler_receives_generic_events(tmp_path, monkeypatch):
 
     mgr = WorktreeManager(
         WorktreeConfig(enabled=True),
-        workspace_root=workspace,
         event_handler=handler,
     )
     enter_tool = EnterWorktreeTool(mgr)

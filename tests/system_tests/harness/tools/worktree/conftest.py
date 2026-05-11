@@ -101,7 +101,6 @@ def worktree_bed(tmp_path: Path) -> WorktreeBed:
 
     manager = WorktreeManager(
         WorktreeConfig(enabled=True),
-        workspace_root=str(workspace_root),
         event_handler=event_handler,
     )
     return WorktreeBed(
