@@ -130,7 +130,7 @@ DeepAgent 运行时配置。
 | `system_prompt` | `Optional[str]` | `None` | 注入内部 ReActAgent 提示模板的系统提示词 |
 | `context_engine_config` | `Optional[Any]` | `None` | 上下文工程配置，设置后应用为内部 ReActAgent 的 `ContextEngineConfig` |
 | `enable_task_loop` | `bool` | `False` | 是否启用外层任务循环 |
-| `enable_async_subagent` | `bool` | `False` | 启用通过 SessionRail 的异步子智能体 |
+| `enable_async_subagent` | `bool` | `False` | 区分同步/异步模式执行子智能体；同步模式注册 `TaskTool`，异步模式注册 `session` 工具 |
 | `add_general_purpose_agent` | `bool` | `False` | 为 True 时自动添加通用子智能体 |
 | `max_iterations` | `int` | `15` | 每次 invoke 的最大 ReAct 迭代次数 |
 | `subagents` | `Optional[List[SubAgentConfig \| DeepAgent]]` | `None` | 子智能体规格或实例列表 |

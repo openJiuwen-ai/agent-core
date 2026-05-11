@@ -168,6 +168,16 @@ addopts = ["-v", "--html=report/index.html", "--self-contained-html"]
 line-length = 120
 target-version = "py311"
 
+[tool.ruff.lint]
+# E203 (whitespace before ':') intentionally allowed everywhere: ``ruff
+# format`` (Black style) inserts a space before ``:`` in slices that contain
+# non-trivial expressions (e.g. ``s[len(prefix) :]``), and Black's official
+# guidance is to disable E203 in any companion linter so the formatter and
+# the linter agree. Ruff itself does not raise E203 in the stable rule set,
+# but this entry makes the project intent explicit for downstream tools that
+# read ``pyproject.toml``.
+extend-ignore = ["E203"]
+
 [tool.ruff.format]
 # Respect magic trailing commas: when a call/signature/collection ends with `,`,
 # keep it multi-line even if it fits within line-length. This is the team's

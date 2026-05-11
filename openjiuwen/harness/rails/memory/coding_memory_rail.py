@@ -14,6 +14,8 @@ import asyncio
 from typing import Optional, Set
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.memory.lite.coding_memory_tool_context import CodingMemoryToolContext
+from openjiuwen.core.memory.lite.config import create_memory_settings
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -25,11 +27,11 @@ from openjiuwen.harness.prompts.sections.coding_memory import (
     build_coding_memory_section,
 )
 from openjiuwen.core.memory.lite.coding_memory_tools import (
-    get_decorated_tools,
     init_memory_manager_async,
 )
 from openjiuwen.core.memory.lite.frontmatter import parse_frontmatter, _extract_body
 from openjiuwen.core.memory.lite.manager import MemoryIndexManager
+from openjiuwen.harness.tools.coding_memory import create_coding_memory_tools
 
 
 class CodingMemoryRail(DeepAgentRail):
@@ -80,6 +82,7 @@ class CodingMemoryRail(DeepAgentRail):
         
         # SystemPromptBuilder 引用
         self.system_prompt_builder = None
+        self._tool_ctx: CodingMemoryToolContext | None = None
     
     def init(self, agent) -> None:
         """初始化 Rail，注册工具.
@@ -128,6 +131,7 @@ class CodingMemoryRail(DeepAgentRail):
         self._owned_tool_ids.clear()
         self._owned_tool_names.clear()
         self._manager_initialized = False
+        self._tool_ctx = None
         
         # 从 system_prompt_builder 移除 memory section
         if self.system_prompt_builder is not None:
@@ -147,9 +151,25 @@ class CodingMemoryRail(DeepAgentRail):
             return
         
         try:
-            tools = get_decorated_tools()
+            agent_id = getattr(getattr(agent, "card", None), "id", None) or "default"
+            language = getattr(self.system_prompt_builder, "language", "cn")
+
+            memory_dir = str(self.workspace.get_node_path("memory") or "") if self.workspace else ""
+            settings = create_memory_settings(memory_dir)
+            self._tool_ctx = CodingMemoryToolContext(
+                workspace=self.workspace,
+                settings=settings,
+                agent_id=agent_id,
+                embedding_config=self._embedding_config,
+                sys_operation=self.sys_operation,
+                coding_memory_dir="coding_memory",
+                manager=None,
+                node_name="coding_memory",
+            )
+
+            memory_tools = create_coding_memory_tools(self._tool_ctx, language=language, agent_id=agent_id)
             
-            for tool in tools:
+            for tool in memory_tools:
                 try:
                     tool_card = getattr(tool, "card", None)
                     if not tool_card:
@@ -241,6 +261,8 @@ class CodingMemoryRail(DeepAgentRail):
             if manager:
                 self._manager = manager
                 self._manager_initialized = True
+                if self._tool_ctx is not None:
+                    self._tool_ctx.manager = manager
                 logger.info(
                     f"[CodingMemoryRail] Coding memory manager initialized: "
                     f"agent_id={agent_id}, dir={self._coding_memory_dir}"

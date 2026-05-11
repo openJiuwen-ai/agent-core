@@ -25,8 +25,7 @@ class DeepAgentRail(AgentRail): ...
 | `TaskCompletionRail` | 任务完成护栏，构建 `StopConditionEvaluator` 链，决定外层任务循环何时停止 |
 | `ContextEvolutionRail` | 任务记忆护栏，在迭代后总结轨迹并写入长期记忆 |
 | `MemoryRail` | 记忆护栏，管理工作区内的记忆读写和日常记忆归档 |
-| `SubagentRail` | 子智能体护栏（同步模式），注册 `TaskTool` 并管理子智能体的同步调用 |
-| `SessionRail` | 会话护栏（异步模式），注册 `SessionSpawnTool` 实现子智能体的异步并发执行 |
+| `SubagentRail` | 子智能体护栏，通过 `enable_async_subagent` 参数区分同步/异步模式；同步模式注册 `TaskTool`，异步模式注册 `session` 工具|
 | `SkillUseRail` | 技能使用护栏，在模型调用前注入可用技能列表到提示词 |
 | `SkillEvolutionRail` | 技能进化护栏，在任务完成后从对话轨迹中提取可复用技能 |
 | `AskUserRail` | 用户交互护栏，拦截 `ask_user` 工具调用并生成 HITL 中断 |

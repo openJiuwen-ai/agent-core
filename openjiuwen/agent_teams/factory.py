@@ -14,7 +14,7 @@ from openjiuwen.agent_teams.schema.blueprint import (
 )
 from openjiuwen.agent_teams.schema.team import TeamMemberSpec
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
-from openjiuwen.agent_teams.worktree.models import WorktreeConfig
+from openjiuwen.harness.tools.worktree import WorktreeConfig
 from openjiuwen.core.session.agent_team import Session as AgentTeamSession
 
 
@@ -74,12 +74,15 @@ def create_agent_team(
 
 async def recover_agent_team(
     session: Union[str, AgentTeamSession],
+    *,
+    team_name: str,
+    runtime_spec: Optional[TeamAgentSpec] = None,
     db_config: Optional[DatabaseConfig] = None,
 ) -> TeamAgent:
     """Recover a leader TeamAgent after full team restart.
 
-    Restores the leader from persisted session state, then re-launches
-    all non-shutdown teammates from the database.
+    Restores the leader from persisted session state for ``team_name``,
+    then re-launches all non-shutdown teammates from the database.
 
     Requires PersistenceCheckpointer to be configured so that session
     state survives across process restarts.
@@ -87,6 +90,12 @@ async def recover_agent_team(
     Args:
         session: The original session ID from the previous run or an
             existing prepared team session.
+        team_name: Which team's persisted bucket to recover. A session
+            may carry state for multiple teams; the caller must specify.
+        runtime_spec: Optional live spec from the current runtime. Forwarded
+            to ``TeamAgent.recover_from_session`` to reinject
+            non-serializable fields (e.g. ``agent_customizer``) that are
+            dropped from the persisted spec.
         db_config: Database config (used only if session state is unavailable).
     """
     if isinstance(session, str):
@@ -95,7 +104,7 @@ async def recover_agent_team(
         session = create_agent_team_session(session_id=session)
         await session.pre_run()  # triggers checkpointer.recover()
 
-    agent = TeamAgent.recover_from_session(session)
+    agent = TeamAgent.recover_from_session(session, team_name, runtime_spec=runtime_spec)
     await agent.recover_team()
     return agent
 

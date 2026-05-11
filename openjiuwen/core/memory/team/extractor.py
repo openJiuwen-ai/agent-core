@@ -93,7 +93,7 @@ def _build_extraction_context(
         parts.append("## 团队对话\n")
         sorted_msgs = sorted(messages, key=lambda m: m.timestamp)
         for m in sorted_msgs:
-            ts = datetime.fromtimestamp(m.timestamp, tz=tz).strftime("%m-%d %H:%M")
+            ts = datetime.fromtimestamp(m.timestamp / 1000, tz=tz).strftime("%m-%d %H:%M")
             direction = "-> 全体" if m.broadcast else f"-> {m.to_member_name or '?'}"
             parts.append(
                 f"[{ts}] {m.from_member_name} {direction}: "
@@ -211,7 +211,7 @@ async def extract_team_memories(
 
     try:
         tasks = await task_manager.list_tasks()
-        messages = await db.get_team_messages(team_name)
+        messages = await db.message.get_team_messages(team_name)
 
         if not tasks and not messages:
             return

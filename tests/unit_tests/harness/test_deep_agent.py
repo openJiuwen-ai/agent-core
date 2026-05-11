@@ -10,7 +10,15 @@ from unittest.mock import AsyncMock, call, patch
 
 import pytest
 
-from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.context_engine import ContextEngineConfig
+from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
+    Model,
+    ModelClientConfig,
+    ModelRequestConfig,
+    UsageMetadata,
+    UserMessage,
+)
 from openjiuwen.core.foundation.tool import Tool, ToolCard, McpServerConfig
 from openjiuwen.core.foundation.tool.schema import ToolInfo
 from openjiuwen.core.runner.resources_manager.base import Ok
@@ -366,6 +374,123 @@ async def test_follow_up_steer_noop_without_queue() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_context_usage_prefers_model_usage_metadata() -> None:
+    agent = DeepAgent(
+        AgentCard(name="deep", description="test")
+    ).configure(
+        DeepAgentConfig(
+            enable_task_loop=False,
+            context_engine_config=ContextEngineConfig(
+                context_window_tokens=1000,
+            ),
+        )
+    )
+
+    session = Session(session_id="ctx_usage")
+    context = await agent.react_agent.context_engine.create_context(
+        session=session
+    )
+    await context.add_messages([
+        UserMessage(content="hello"),
+        AssistantMessage(
+            content="world",
+            usage_metadata=UsageMetadata(total_tokens=250),
+        ),
+    ])
+
+    usage = agent.get_context_usage(session_id="ctx_usage")
+
+    assert usage["session_id"] == "ctx_usage"
+    assert usage["total_tokens"] == 250
+    assert usage["context_window_tokens"] == 1000
+    assert usage["usage_ratio"] == 0.25
+    assert usage["usage_percent"] == 25.0
+    assert usage["stats"]["total_tokens"] == 250
+
+
+@pytest.mark.asyncio
+async def test_get_current_context_returns_messages() -> None:
+    agent = DeepAgent(
+        AgentCard(name="deep", description="test")
+    ).configure(
+        DeepAgentConfig(enable_task_loop=False)
+    )
+
+    session = Session(session_id="ctx_messages")
+    context = await agent.react_agent.context_engine.create_context(
+        session=session
+    )
+    await context.add_messages(UserMessage(content="current"))
+
+    messages = agent.get_current_context(session_id="ctx_messages")
+
+    assert len(messages) == 1
+    assert messages[0].content == "current"
+
+
+@pytest.mark.asyncio
+async def test_create_new_context_engine_returns_session_id_and_keeps_existing_context() -> None:
+    agent = DeepAgent(
+        AgentCard(name="deep", description="test")
+    ).configure(
+        DeepAgentConfig(enable_task_loop=False)
+    )
+
+    old_engine = agent.react_agent.context_engine
+    session = Session(session_id="old_ctx")
+    await old_engine.create_context(session=session)
+
+    new_session_id = await agent.create_new_context_engine("new_ctx")
+
+    assert new_session_id == "new_ctx"
+    assert agent.react_agent.context_engine is old_engine
+    assert old_engine.get_context(session_id="old_ctx") is not None
+    assert agent.react_agent.context_engine.get_context(session_id="new_ctx") is not None
+
+
+@pytest.mark.asyncio
+async def test_create_new_context_engine_seeds_messages() -> None:
+    agent = DeepAgent(
+        AgentCard(name="deep", description="test")
+    ).configure(
+        DeepAgentConfig(enable_task_loop=False)
+    )
+
+    await agent.create_new_context_engine(
+        "seeded_ctx",
+        messages=["seed prompt"],
+    )
+    context = agent.react_agent.context_engine.get_context(
+        session_id="seeded_ctx"
+    )
+
+    messages = context.get_messages()
+    assert len(messages) == 1
+    assert messages[0].role == "system"
+    assert messages[0].content == "seed prompt"
+
+
+@pytest.mark.asyncio
+async def test_new_context_engine_accepts_messages() -> None:
+    agent = DeepAgent(
+        AgentCard(name="deep", description="test")
+    ).configure(
+        DeepAgentConfig(enable_task_loop=False)
+    )
+
+    session_id = await agent.new_context_engine(
+        session_id="alias_ctx",
+        messages=["alias prompt"],
+    )
+
+    context = agent.react_agent.context_engine.get_context(
+        session_id="alias_ctx"
+    )
+    assert session_id == "alias_ctx"
+    assert context.get_messages()[0].content == "alias prompt"
+
+
+@pytest.mark.asyncio
 async def test_abort_sets_coordinator_flag() -> None:
     agent = DeepAgent(
         AgentCard(name="deep", description="test")
@@ -559,6 +684,7 @@ async def test_create_deep_agent_registers_mcps_on_first_invoke() -> None:
             "required": ["query"],
         },
     )
+    mcp_tool_raw_name = mcp_tool.name
 
     with patch.object(
         Runner.resource_mgr,
@@ -590,8 +716,9 @@ async def test_create_deep_agent_registers_mcps_on_first_invoke() -> None:
         assert agent.ability_manager.get(mcp_config.server_name) is mcp_config
 
         tool_infos = await agent.ability_manager.list_tool_info()
-        assert any(tool_info.name == "mcp_lookup" for tool_info in tool_infos)
-        mcp_tool_card = agent.ability_manager.get("mcp_lookup")
+        expected_mcp_tool_name = f"mcp_{mcp_config.server_name}_{mcp_tool_raw_name}"
+        assert any(tool_info.name == expected_mcp_tool_name for tool_info in tool_infos)
+        mcp_tool_card = agent.ability_manager.get(expected_mcp_tool_name)
         assert isinstance(mcp_tool_card, ToolCard)
         assert mcp_tool_card.input_params == mcp_tool.parameters
         mock_get_mcp_tool_infos.assert_awaited()

@@ -59,7 +59,7 @@ The `crypto_key` parameter has a `field_validator`:
 ## class openjiuwen.core.memory.config.config.MemoryScopeConfig
 
 ```
-class openjiuwen.core.memory.config.config.MemoryScopeConfig(model_cfg: ModelRequestConfig | None = None, model_client_cfg: ModelClientConfig | None = None, embedding_cfg: EmbeddingConfig | None = None)
+class openjiuwen.core.memory.config.config.MemoryScopeConfig(model_cfg: ModelRequestConfig | None = None, model_client_cfg: ModelClientConfig | None = None, embedding_cfg: EmbeddingConfig | None = None, user_profile_definition: str = "用户本人的肯定或否定表述（包含不限于基本身份、兴趣偏好、人际关系、资产状况）", semantic_memory_definition: str = "用户对话中涉及的和时间无明确关系的事实性内容或概念", episodic_memory_definition: str = "用户对话中涉及的和时间有明确关系的事实性内容或概念")
 ```
 
 Scope-level memory configuration, used to define independent model and vector parameters for different `scope_id`.
@@ -69,6 +69,9 @@ Scope-level memory configuration, used to define independent model and vector pa
 * **model_cfg** (ModelRequestConfig | None, optional): LLM request configuration used in this scope (model name, temperature, etc.); if `None`, uses the global `MemoryEngineConfig.default_model_cfg`. Default: `None`.
 * **model_client_cfg** (ModelClientConfig | None, optional): LLM client configuration used in this scope (`client_id / api_base / api_key`, etc.); if `None`, uses the global `MemoryEngineConfig.default_model_client_cfg`. Default: `None`.
 * **embedding_cfg** (EmbeddingConfig | None, optional): Embedding model configuration used in this scope (`model_name / base_url / api_key`, etc.); if `None`, semantic retrieval may be unavailable (depending on whether a global embedding model is provided). Default: `None`.
+* **user_profile_definition** (str, optional): Definition rule for user profile memory extraction, used to customize the scope of user profile information extracted from conversations. Default: `"用户本人的肯定或否定表述（包含不限于基本身份、兴趣偏好、人际关系、资产状况）"`.
+* **semantic_memory_definition** (str, optional): Definition rule for semantic memory extraction, used to customize the scope of semantic memory information extracted from conversations. Default: `"用户对话中涉及的和时间无明确关系的事实性内容或概念"`.
+* **episodic_memory_definition** (str, optional): Definition rule for episodic memory extraction, used to customize the scope of episodic memory information extracted from conversations. Default: `"用户对话中涉及的和时间有明确关系的事实性内容或概念"`.
 
 > **Note**: The `api_key` parameter in `MemoryScopeConfig` will be automatically encrypted when saved to `kv_store` (using `MemoryEngineConfig.crypto_key`) and automatically decrypted when read.
 

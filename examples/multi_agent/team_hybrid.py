@@ -308,13 +308,17 @@ class TaskExecutionTeam(BaseTeam):
 
     async def invoke(self, message: Any, session: Optional[Session] = None) -> Any:
         if session is None:
-            raise ValueError("TaskExecutionTeam.invoke requires a team session. Use Runner.run_agent_team(...).")
+            raise ValueError(
+                "TaskExecutionTeam.invoke requires a team session. "
+                "Use Runner.run_agent_team(..., base=True)."
+            )
         return await self._run_workflow(message, session)
 
     async def stream(self, message: Any, session: Optional[Session] = None) -> AsyncIterator[Any]:
         if session is None:
             raise ValueError(
-                "TaskExecutionTeam.stream requires a team session. Use Runner.run_agent_team_streaming(...)."
+                "TaskExecutionTeam.stream requires a team session. "
+                "Use Runner.run_agent_team_streaming(..., base=True)."
             )
 
         async def run_workflow() -> None:
@@ -350,6 +354,7 @@ async def main():
         result = await Runner.run_agent_team(
             agent_team=team.card.id,
             inputs={"task": "开发新功能模块"},
+            base=True,
         )
 
         multi_agent_logger.info("\n--- 任务完成 ---")

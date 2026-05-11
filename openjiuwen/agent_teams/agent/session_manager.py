@@ -14,6 +14,7 @@ from openjiuwen.core.session.agent_team import Session as AgentTeamSession
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.agent_configurator import AgentConfigurator
     from openjiuwen.agent_teams.agent.recovery_manager import RecoveryManager
+    from openjiuwen.agent_teams.agent.state import TeamAgentState
 
 
 class SessionManager:
@@ -27,38 +28,45 @@ class SessionManager:
 
     def __init__(
         self,
+        *,
+        state: "TeamAgentState",
         configurator: AgentConfigurator,
         recovery_manager: RecoveryManager,
     ):
+        self._state = state
         self._configurator = configurator
         self._recovery_manager = recovery_manager
 
-        self._session_id: Optional[str] = None
-        self._team_session: Optional[AgentTeamSession] = None
-
     @property
     def session_id(self) -> Optional[str]:
-        return self._session_id
+        return self._state.session_id
 
     @session_id.setter
     def session_id(self, value: Optional[str]) -> None:
-        self._session_id = value
+        self._state.session_id = value
 
     @property
     def team_session(self) -> Optional[AgentTeamSession]:
-        return self._team_session
+        return self._state.team_session
 
     @team_session.setter
     def team_session(self, value: Optional[AgentTeamSession]) -> None:
-        self._team_session = value
+        self._state.team_session = value
 
-    async def _switch_session(self, session) -> None:
-        """Apply the new session id, contextvar, and per-session DB tables."""
-        from openjiuwen.agent_teams.spawn.context import set_session_id
+    async def bind_session(self, session: AgentTeamSession) -> None:
+        """Full attach to ``session``.
 
-        self._session_id = session.get_session_id()
-        set_session_id(self._session_id)
-        self._team_session = session if isinstance(session, AgentTeamSession) else None
+        Wires session_id into the state and the global contextvar,
+        creates per-session DB tables, and persists leader config when
+        the team is leader-side. The session must be non-None — for
+        the "no session at all" path use :meth:`unbind_session`; for
+        the pause / stop tear-down path use :meth:`release_session`.
+        """
+        from openjiuwen.agent_teams.context import set_session_id
+
+        self._state.session_id = session.get_session_id()
+        set_session_id(self._state.session_id)
+        self._state.team_session = session if isinstance(session, AgentTeamSession) else None
 
         team_backend = self._configurator.team_backend
         if team_backend:
@@ -68,7 +76,30 @@ class SessionManager:
         if spec and self._configurator.role == TeamRole.LEADER:
             self._recovery_manager.persist_leader_config(session)
 
-    async def resume_for_new_session(self, session) -> None:
+    def release_session(self) -> None:
+        """Release the live session object, keep ``session_id`` intact.
+
+        Used by coordination pause / stop tear-down: the runtime
+        ``AgentTeamSession`` is dropped so it cannot be mutated after
+        the round ends, while ``session_id`` (and the contextvar)
+        survive for log correlation, post-round persistence, and the
+        resume path that re-binds a fresh session object under the
+        same id. Use :meth:`unbind_session` instead when the agent
+        should be fully detached.
+        """
+        self._state.team_session = None
+
+    def unbind_session(self) -> None:
+        """Fully detach from any session.
+
+        Clears both ``session_id`` and the live ``team_session``. Used
+        by entry points that explicitly start the agent without a
+        session, so prior identity does not bleed into the new round.
+        """
+        self._state.session_id = None
+        self._state.team_session = None
+
+    async def resume_for_new_session(self, session: AgentTeamSession) -> None:
         """Switch to a new session and rebind live teammate runtimes.
 
         Persistent teams keep team rows and old session data intact across
@@ -76,7 +107,7 @@ class SessionManager:
         new session_id.
         """
         recoverable_members = await self._recovery_manager.collect_live_teammates_for_session_switch()
-        await self._switch_session(session)
+        await self.bind_session(session)
 
         team_backend = self._configurator.team_backend
         if self._configurator.role != TeamRole.LEADER or not team_backend:
@@ -87,14 +118,14 @@ class SessionManager:
             cleanup_first=True,
         )
 
-    async def recover_for_existing_session(self, session) -> None:
+    async def recover_for_existing_session(self, session: AgentTeamSession) -> None:
         """Rebind to a checkpoint-restored session without cleanup.
 
         Caller must have already torn down coordination (which already
         cleared the live handles) and validated the checkpoint.
         """
         recoverable_members = await self._recovery_manager.collect_live_teammates_for_session_switch()
-        await self._switch_session(session)
+        await self.bind_session(session)
 
         team_backend = self._configurator.team_backend
         if self._configurator.role != TeamRole.LEADER or not team_backend:

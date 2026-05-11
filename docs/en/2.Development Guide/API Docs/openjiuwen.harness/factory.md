@@ -44,7 +44,7 @@ Constructs a `DeepAgentConfig` from the provided arguments, instantiates a `Deep
 - **subagents** (list[[SubAgentConfig](./schema/config.md#class-openjiuwenharnessschemasubagentconfig)], optional): Sub-agent configurations. Default: `None`.
 - **rails** (list[Rail], optional): Guardrails to register. Default: `None`.
 - **enable_task_loop** (bool, optional): Enable the autonomous task loop. Default: `False`.
-- **enable_async_subagent** (bool, optional): Allow sub-agents to run asynchronously. Default: `False`.
+- **enable_async_subagent** (bool, optional): Allow sub-agents to run asynchronously. Differentiate sync/async modes: register `TaskTool` for synchronous mode, register `session` tools for asynchronous mode. Default: `False`.
 - **add_general_purpose_agent** (bool, optional): Automatically add a general-purpose sub-agent. Default: `False`.
 - **max_iterations** (int, optional): Maximum task-loop iterations. Default: `15`.
 - **workspace** ([Workspace](./workspace/workspace.md#class-openjiuwenharnessworkspaceworkspace) | str, optional): Workspace instance or root path string. Default: `None`.

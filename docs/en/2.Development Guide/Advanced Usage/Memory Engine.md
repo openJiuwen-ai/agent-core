@@ -26,6 +26,9 @@ The core types of the memory engine are defined in the `openjiuwen.core.memory` 
   - `model_cfg: ModelRequestConfig`: LLM request configuration used in this scope.
   - `model_client_cfg: ModelClientConfig`: LLM client configuration used in this scope.
   - `embedding_cfg: EmbeddingConfig`: Embedding model configuration used in this scope (`model_name/base_url/api_key`).
+  - `user_profile_definition: str`: Definition rule for user profile memory extraction, used to customize the scope of user profile information extracted from conversations. Default: `"用户本人的肯定或否定表述（包含不限于基本身份、兴趣偏好、人际关系、资产状况）"`.
+  - `semantic_memory_definition: str`: Definition rule for semantic memory extraction, used to customize the scope of semantic memory information extracted from conversations. Default: `"用户对话中涉及的和时间无明确关系的事实性内容或概念"`.
+  - `episodic_memory_definition: str`: Definition rule for episodic memory extraction, used to customize the scope of episodic memory information extracted from conversations. Default: `"用户对话中涉及的和时间有明确关系的事实性内容或概念"`.
 
 - **`AgentMemoryConfig`** (Agent-level Memory Strategy Configuration)
   Describes which "variable memories", "long-term memories", "user profile memories", and "user summary memories" an agent wants to extract and manage:
@@ -144,7 +147,10 @@ MemoryEngineConfig (Global Engine Configuration)
 MemoryScopeConfig (Scope Configuration)
 ├── model_cfg: ModelRequestConfig              # Scope model request configuration
 ├── model_client_cfg: ModelClientConfig        # Scope model client configuration
-└── embedding_cfg: EmbeddingConfig             # Scope embedding model configuration
+├── embedding_cfg: EmbeddingConfig             # Scope embedding model configuration
+├── user_profile_definition: str               # User profile memory extraction definition rule
+├── semantic_memory_definition: str            # Semantic memory extraction definition rule
+└── episodic_memory_definition: str            # Episodic memory extraction definition rule
 ```
 
 > **Configuration Priority**: When both global configuration and scope configuration are set, scope configuration takes precedence. That is, configuration in `MemoryScopeConfig` overrides default configuration in `MemoryEngineConfig`.

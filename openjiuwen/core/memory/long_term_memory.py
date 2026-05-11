@@ -364,7 +364,7 @@ class LongTermMemory(metaclass=Singleton):
                 scope_id=scope_id
             )
             return False
-        scope_user_data = await self.scope_user_mapping_manager.get_by_scope_id(scope_id=scope_id)
+        scope_user_data = await self.scope_user_mapping_manager.get_by_scope_id(scope_id=scope_id) or []
         user_ids = [scope_user["user_id"] for scope_user in scope_user_data]
         # Use write_manager to delete all memories associated with the scope
         semantic_store = await self._create_semantic_store_with_embedding(scope_id)
@@ -410,6 +410,7 @@ class LongTermMemory(metaclass=Singleton):
         msg_id = "-1"
         llm = await self._get_scope_llm(scope_id)
         semantic_store = await self._create_semantic_store_with_embedding(scope_id)
+        scope_config = await self._get_scope_config(scope_id)
         # user level distributed lock
         lock = DistributedLock(self.kv_store, f"user/{user_id}")
         async with lock:
@@ -471,7 +472,8 @@ class LongTermMemory(metaclass=Singleton):
                 message_mem_id=msg_id,
                 timestamp=timestamp_str,
                 forbidden_variables=self._sys_mem_config.forbidden_variables,
-                summary_max_token=self._sys_mem_config.single_turn_history_summary_max_token
+                summary_max_token=self._sys_mem_config.single_turn_history_summary_max_token,
+                scope_config=scope_config
             )
             try:
                 await self.write_manager.add_memories(

@@ -44,7 +44,7 @@ def create_deep_agent(
 | `subagents` | `Optional[List[SubAgentConfig \| DeepAgent]]` | `None` | 子智能体规格或子智能体实例，支持不同的模型、工具和提示词 |
 | `rails` | `Optional[List[AgentRail]]` | `None` | 要注册的 AgentRail 实例 |
 | `enable_task_loop` | `bool` | `False` | 是否启用外层任务循环 |
-| `enable_async_subagent` | `bool` | `False` | 启用通过 SessionRail 的异步子智能体。为 True 且配置了子智能体时，使用 SessionRail 代替 SubagentRail |
+| `enable_async_subagent` | `bool` | `False` | 区分同步/异步模式执行子智能体；同步模式注册 `TaskTool`，异步模式注册 `session` 工具 |
 | `add_general_purpose_agent` | `bool` | `False` | 为 True 时自动添加通用子智能体 |
 | `max_iterations` | `int` | `15` | 每次 invoke 的最大 ReAct 迭代次数 |
 | `workspace` | `Optional[str \| Workspace]` | `None` | 文件操作的工作区路径或 Workspace 对象 |
@@ -70,5 +70,4 @@ def create_deep_agent(
 | `SecurityRail` | 始终注入 |
 | `TaskPlanningRail` | `enable_task_planning=True` |
 | `SkillUseRail` | `skills` 非空 |
-| `SessionRail` | `subagents` 非空且 `enable_async_subagent=True` |
-| `SubagentRail` | `subagents` 非空且 `enable_async_subagent=False` |
+| `SubagentRail` | `subagents` 非空 |

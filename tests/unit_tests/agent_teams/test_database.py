@@ -4,12 +4,14 @@
 """Unit tests for TeamDatabase module"""
 
 import asyncio
+import warnings
 
 import pytest
 import pytest_asyncio
+from sqlalchemy.exc import SAWarning
 from sqlalchemy import inspect
 
-from openjiuwen.agent_teams.spawn.context import (
+from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
 )
@@ -18,7 +20,13 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
-from openjiuwen.agent_teams.tools.models import _sanitize_session_id_for_table
+from openjiuwen.agent_teams.tools.models import (
+    _get_message_model,
+    _get_message_read_status_model,
+    _get_task_dependency_model,
+    _get_task_model,
+    _sanitize_session_id_for_table,
+)
 from openjiuwen.core.single_agent import AgentCard
 
 
@@ -2260,6 +2268,66 @@ class TestSessionTables:
             reset_session_id(token)
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_drop_cur_session_tables_allows_same_session_recreate(self, tmp_path):
+        """Dropping current session tables should reuse dynamic models on recreate."""
+        db_path = tmp_path / "drop_cur_recreate.db"
+        config = DatabaseConfig(
+            db_type=DatabaseType.SQLITE,
+            connection_string=str(db_path),
+        )
+        database = TeamDatabase(config)
+        session_id = "cur_session_recreate"
+        suffix = _sanitize_session_id_for_table(session_id)
+        dynamic_table_names = {
+            f"team_task_{suffix}",
+            f"team_task_dependency_{suffix}",
+            f"team_message_{suffix}",
+            f"message_read_status_{suffix}",
+        }
+
+        token = set_session_id(session_id)
+        try:
+            await database.initialize()
+            await database.create_cur_session_tables()
+            first_models = (
+                _get_task_model(),
+                _get_task_dependency_model(),
+                _get_message_model(),
+                _get_message_read_status_model(),
+            )
+
+            await database.drop_cur_session_tables()
+
+            async with database.engine.begin() as conn:
+                table_names = set(await conn.run_sync(lambda sync_conn: inspect(sync_conn).get_table_names()))
+            assert dynamic_table_names.isdisjoint(table_names)
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                await database.create_cur_session_tables()
+            duplicate_class_warnings = [
+                warning
+                for warning in caught
+                if issubclass(warning.category, SAWarning)
+                and "already contains a class with the same class name" in str(warning.message)
+            ]
+            assert duplicate_class_warnings == []
+            assert first_models == (
+                _get_task_model(),
+                _get_task_dependency_model(),
+                _get_message_model(),
+                _get_message_read_status_model(),
+            )
+
+            async with database.engine.begin() as conn:
+                table_names = set(await conn.run_sync(lambda sync_conn: inspect(sync_conn).get_table_names()))
+            assert dynamic_table_names.issubset(table_names)
+        finally:
+            await database.close()
+            reset_session_id(token)
+
+    @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_create_and_drop_symmetry(self, db_config):
         """Test that create and drop are symmetric operations"""
@@ -2523,6 +2591,69 @@ class TestDropSessionTablesById:
                 )
             assert f"team_task_{suffix}" not in table_names
 
+        finally:
+            await database.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_drop_session_tables_by_id_allows_same_session_recreate(self, tmp_path):
+        """Dropping by id must reuse dynamic models so the same session can be recreated."""
+        db_path = tmp_path / "drop_recreate.db"
+        config = DatabaseConfig(
+            db_type=DatabaseType.SQLITE,
+            connection_string=str(db_path),
+        )
+        database = TeamDatabase(config)
+        session_id = "same_session_recreate"
+        suffix = _sanitize_session_id_for_table(session_id)
+        dynamic_table_names = {
+            f"team_task_{suffix}",
+            f"team_task_dependency_{suffix}",
+            f"team_message_{suffix}",
+            f"message_read_status_{suffix}",
+        }
+
+        token = set_session_id(session_id)
+        try:
+            await database.initialize()
+            await database.create_cur_session_tables()
+            first_models = (
+                _get_task_model(),
+                _get_task_dependency_model(),
+                _get_message_model(),
+                _get_message_read_status_model(),
+            )
+        finally:
+            reset_session_id(token)
+
+        try:
+            dropped = await database.drop_session_tables_by_id(session_id)
+            assert dynamic_table_names.issubset(set(dropped))
+
+            token = set_session_id(session_id)
+            try:
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    await database.create_cur_session_tables()
+                duplicate_class_warnings = [
+                    warning
+                    for warning in caught
+                    if issubclass(warning.category, SAWarning)
+                    and "already contains a class with the same class name" in str(warning.message)
+                ]
+                assert duplicate_class_warnings == []
+                assert first_models == (
+                    _get_task_model(),
+                    _get_task_dependency_model(),
+                    _get_message_model(),
+                    _get_message_read_status_model(),
+                )
+            finally:
+                reset_session_id(token)
+
+            async with database.engine.begin() as conn:
+                table_names = set(await conn.run_sync(lambda sync_conn: inspect(sync_conn).get_table_names()))
+            assert dynamic_table_names.issubset(table_names)
         finally:
             await database.close()
 

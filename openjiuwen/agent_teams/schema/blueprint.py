@@ -19,17 +19,17 @@ from typing import (
 from pydantic import (
     BaseModel,
     Field,
+    model_validator,
 )
 
 from openjiuwen.agent_teams.constants import (
     DEFAULT_LEADER_MEMBER_NAME,
-    HUMAN_AGENT_MEMBER_NAME,
     RESERVED_MEMBER_NAMES,
 )
 from openjiuwen.agent_teams.i18n import t
+from openjiuwen.agent_teams.models.pool import ModelPoolEntry, ModelRouterConfig
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import (
-    ModelPoolEntry,
     TeamLifecycle,
     TeamMemberSpec,
     TeamRole,
@@ -37,9 +37,9 @@ from openjiuwen.agent_teams.schema.team import (
     TeamSpec,
 )
 from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
-from openjiuwen.agent_teams.worktree.models import WorktreeConfig
 from openjiuwen.core.memory.team import TeamMemoryConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.harness.tools.worktree import WorktreeConfig
 
 if TYPE_CHECKING:
     # Resolved for type-checkers only; the runtime import lives in ``build()``
@@ -135,12 +135,15 @@ class LeaderSpec(BaseModel):
     persona: str = Field(default_factory=lambda: t("blueprint.default_persona"))
     model_name: Optional[str] = None
     """Optional pool model_name to allocate from when ``TeamSpec.model_pool``
-    is configured with ``by_model_name`` strategy.
+    is configured with ``by_model_name`` or ``router`` strategy.
 
     Forwarded to ``ModelAllocator.allocate`` at ``build()`` time so the
-    leader draws an endpoint from the named group. Ignored by the
-    ``round_robin`` strategy (which always allocates regardless of name).
-    ``None`` (default) means the leader uses its per-agent model.
+    leader draws an endpoint from the named group (``by_model_name``) or
+    the named router entry (``router``). Ignored by the ``round_robin``
+    strategy (which always allocates regardless of name). ``None``
+    (default) means the leader uses its per-agent model — except under
+    ``router``, where it falls back to the router's first declared
+    model_name.
     """
 
 
@@ -170,13 +173,33 @@ class TeamAgentSpec(BaseModel):
     in ``agents`` and behavior is unchanged. Propagated to ``TeamSpec``
     at ``build()`` time so allocators reachable from runtime context
     see the same pool.
+
+    Mutually exclusive with ``model_router``: configure one or the other,
+    never both.
     """
-    model_pool_strategy: Literal["round_robin", "by_model_name"] = "round_robin"
+    model_router: Optional[ModelRouterConfig] = None
+    """Optional single-endpoint router configuration.
+
+    Convenience input for backends that serve many model names through
+    one ``(api_key, api_base_url, api_provider)`` triple (OpenRouter,
+    LiteLLM proxy, ...). At ``build()`` time the router is expanded into
+    ``TeamSpec.model_pool`` (one entry per declared name) and
+    ``model_pool_strategy`` is set to ``"router"``, so all downstream
+    machinery (``resolve_member_model``, ``inherit_pool_ids``,
+    ``update_model_pool``) keeps working against the flat pool view.
+
+    Mutually exclusive with ``model_pool``. The first declared model
+    name acts as the team's default — ``RouterAllocator.allocate()``
+    with no hint returns it, so the leader can run without an explicit
+    ``leader.model_name``.
+    """
+    model_pool_strategy: Literal["round_robin", "by_model_name", "router"] = "round_robin"
     """Allocation strategy applied to ``model_pool``.
 
     Mirrors ``TeamSpec.model_pool_strategy`` and propagates to it at
     ``build()`` time. See ``TeamSpec.model_pool_strategy`` for the
-    semantics of each option.
+    semantics of each option. When ``model_router`` is set, ``build()``
+    forces this to ``"router"`` regardless of the configured value.
     """
     team_mode: Literal["default", "predefined", "hybrid"] | None = None
     """Team operating mode.
@@ -187,6 +210,15 @@ class TeamAgentSpec(BaseModel):
     allowing ``spawn_member`` calls during execution.
     """
     transport: Optional[TransportSpec] = None
+    """Pluggable transport layer specification.
+
+    When unset, the framework picks a sensible default based on
+    ``spawn_mode``: ``"inprocess"`` spawn implies an in-process messager,
+    so ``transport`` is materialized as ``TransportSpec(type="inprocess")``
+    during validation; ``"process"`` spawn keeps ``None`` and forces the
+    caller to configure a cross-process backend (e.g. ``"pyzmq"``) when
+    teammates are involved.
+    """
     storage: Optional[StorageSpec] = None
     worktree: Optional[WorktreeConfig] = None
     """Optional worktree isolation config for team members."""
@@ -194,16 +226,27 @@ class TeamAgentSpec(BaseModel):
     """Optional shared workspace config for team members."""
     metadata: dict[str, Any] = {}
     enable_hitt: bool = False
-    """Enable Human-in-the-Team mode.
+    """Spec-level Human-in-the-Team capability ceiling.
 
-    When True, the runtime auto-registers a reserved ``human_agent``
-    member alongside the declared roster. The human_agent is a first-
-    class team member that the leader can assign tasks to via
-    ``update_task``; it only has access to ``send_message`` and never
-    goes through spawn / startup lifecycle. Setting this to True is
-    also exposed to the leader as a ``build_team(enable_hitt=...)``
-    tool parameter so the leader can turn HITT on dynamically when
-    the user expresses intent to join the team.
+    True opens the capability — the framework will register every
+    HUMAN_AGENT member declared in ``predefined_members`` during
+    ``build_team``, and the leader's ``spawn_member`` tool may
+    additionally bring up new human members at runtime via
+    ``role_type='human_agent'``. False forbids both paths.
+
+    The framework does **not** inject any default ``human_agent``
+    when this flag is True — callers must declare the human roster
+    explicitly via ``predefined_members`` (or rely on dynamic
+    ``spawn_member`` after build).
+
+    Consistency check (``build()`` time):
+    - ``enable_hitt=False`` with any HUMAN_AGENT in predefined → error.
+    - ``enable_hitt=True`` with no HUMAN_AGENT predefined → allowed
+      (dynamic spawn path).
+
+    The ``build_team`` tool exposes its own ``enable_hitt`` parameter
+    that gates the runtime instance: it may downgrade an open ceiling
+    to disabled, but cannot exceed it.
     """
     language: Optional[str] = None
     """Preferred language for prompts and tool descriptions ("cn" or "en").
@@ -230,10 +273,63 @@ class TeamAgentSpec(BaseModel):
     Not serializable — only usable with in-process spawn mode.
     """
 
+    @model_validator(mode="after")
+    def _validate_pool_router_exclusive(self) -> "TeamAgentSpec":
+        """Reject configs that set both ``model_pool`` and ``model_router``.
+
+        The two fields describe overlapping concerns — a flat list of
+        endpoints versus a router-shaped declaration that expands into
+        the same kind of list. Allowing both leaves the strategy and
+        the materialized pool ambiguous, so we surface the conflict
+        early instead of silently picking one.
+        """
+        if self.model_router is not None and self.model_pool:
+            raise ValueError(
+                "model_pool and model_router are mutually exclusive; configure one or the other",
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _default_transport_for_spawn_mode(self) -> "TeamAgentSpec":
+        """Fill an in-process transport default when spawn_mode='inprocess'.
+
+        ``spawn_mode='inprocess'`` co-locates teammates in the leader's
+        event loop, so the only transport that makes sense is the
+        in-process messager. Materializing the default here (rather than
+        inside ``build()``) keeps the spec self-describing: a dumped spec
+        always carries the transport that will actually be used, which
+        matters for cross-process spawn payloads and for callers that
+        introspect the spec without building it.
+
+        Cross-process spawn (``"process"``) intentionally keeps
+        ``transport=None`` so the caller is forced to configure a real
+        cross-process backend (e.g. ``"pyzmq"``) when teammates are
+        involved.
+        """
+        if self.transport is None and self.spawn_mode == "inprocess":
+            self.transport = TransportSpec(type="inprocess")
+        return self
+
+    def resolve_db_config(self):
+        """Resolve the DatabaseConfig this spec would use at build time.
+
+        Mirrors the materialisation step inside ``build()`` so callers that
+        only need the storage handle (e.g. the runtime manager probing the
+        static team table before deciding the run path) can obtain the same
+        config without constructing a TeamAgent.
+        """
+        from openjiuwen.agent_teams.tools.database import DatabaseConfig as _DatabaseConfig
+
+        db_config = self.storage.build() if self.storage else _DatabaseConfig()
+        if db_config.db_type == "sqlite" and not db_config.connection_string:
+            from openjiuwen.agent_teams.paths import get_agent_teams_home
+
+            db_config.connection_string = str(get_agent_teams_home() / "team.db")
+        return db_config
+
     def build(self) -> "TeamAgent":
         """Materialize a configured TeamAgent from this spec."""
         from openjiuwen.agent_teams.agent.team_agent import TeamAgent as _TeamAgent
-        from openjiuwen.agent_teams.tools.database import DatabaseConfig as _DatabaseConfig
         from openjiuwen.harness.prompts import resolve_language
 
         leader_agent = self.agents.get("leader")
@@ -241,28 +337,35 @@ class TeamAgentSpec(BaseModel):
             raise ValueError("agents dict must contain a 'leader' key")
 
         self._validate_reserved_names()
-        self._inject_human_agent_if_enabled()
+        self._validate_hitt_consistency()
 
         resolved_language = resolve_language(self.language)
         for role_spec in self.agents.values():
             if role_spec.language is None:
                 role_spec.language = resolved_language
 
+        # ``model_router`` is a convenience input that expands into the
+        # flat ``model_pool`` view at build time. Doing the expansion here
+        # keeps every downstream component (resolver, pool refresh, DB
+        # ref lookup) on a single code path — they only ever see entries.
+        if self.model_router is not None:
+            team_pool = self.model_router.to_pool_entries()
+            team_strategy: Literal["round_robin", "by_model_name", "router"] = "router"
+        else:
+            team_pool = list(self.model_pool)
+            team_strategy = self.model_pool_strategy
+
         team_spec = TeamSpec(
             team_name=self.team_name,
             display_name=self.team_name,
             leader_member_name=self.leader.member_name,
             language=resolved_language,
-            model_pool=list(self.model_pool),
-            model_pool_strategy=self.model_pool_strategy,
+            model_pool=team_pool,
+            model_pool_strategy=team_strategy,
         )
 
         messager_config = self.transport.build() if self.transport else None
-        db_config = self.storage.build() if self.storage else _DatabaseConfig()
-        if db_config.db_type == "sqlite" and not db_config.connection_string:
-            from openjiuwen.agent_teams.paths import get_agent_teams_home
-
-            db_config.connection_string = str(get_agent_teams_home() / "team.db")
+        db_config = self.resolve_db_config()
 
         leader_card_id = f"{self.team_name}_{self.leader.member_name}"
         leader_card = leader_agent.card or AgentCard(
@@ -278,17 +381,13 @@ class TeamAgentSpec(BaseModel):
         # PerAgentModelAllocator returns ``None`` for the leader and the
         # downstream ``ctx.member_model or agent_spec.model`` fallback in
         # ``TeamAgent._setup_agent`` keeps behavior unchanged.
-        from openjiuwen.agent_teams.agent.model_allocator import build_model_allocator
+        from openjiuwen.agent_teams.models.allocator import build_model_allocator
 
         model_allocator = build_model_allocator(self, team_spec)
         leader_allocation = (
-            model_allocator.allocate(model_name=self.leader.model_name)
-            if team_spec.model_pool
-            else None
+            model_allocator.allocate(model_name=self.leader.model_name) if model_allocator is not None else None
         )
-        leader_member_model = (
-            leader_allocation.to_team_model_config() if leader_allocation else None
-        )
+        leader_member_model = leader_allocation.to_team_model_config() if leader_allocation else None
         self._validate_leader_model_resolved(leader_agent, leader_member_model, team_spec)
 
         context = TeamRuntimeContext(
@@ -326,6 +425,11 @@ class TeamAgentSpec(BaseModel):
         and the failure surfaces only at the first LLM invocation as
         a confusing "model_client_config is required" error.
 
+        ``RouterAllocator`` always falls back to the first declared
+        ``model_name`` when no hint is given, so this path only trips
+        when ``leader.model_name`` is set to a name that isn't in the
+        router's list (or, under ``by_model_name``, in any pool group).
+
         Surface it at ``build()`` time with a clear remediation list
         so the inconsistency is caught while the user is still looking
         at the spec.
@@ -342,24 +446,28 @@ class TeamAgentSpec(BaseModel):
         strategy = team_spec.model_pool_strategy
         leader_name = self.leader.model_name
         if leader_name and leader_name not in available_names:
+            scope = "router" if strategy == "router" else "pool"
             cause = (
-                f"leader.model_name='{leader_name}' is not present in the pool "
-                f"(available names: {available_names})"
+                f"leader.model_name='{leader_name}' is not present in the {scope} (available names: {available_names})"
             )
         elif strategy == "by_model_name":
-            cause = (
-                "model_pool_strategy='by_model_name' requires leader.model_name "
-                "to be set to one of the pool names"
-            )
+            cause = "model_pool_strategy='by_model_name' requires leader.model_name to be set to one of the pool names"
         else:
             cause = "the allocator did not produce a model for the leader"
 
-        reason = (
-            f"{cause}; resolve by either: "
-            f"(1) set leader.model_name to one of {available_names}, "
-            f"(2) provide an explicit agents['leader'].model in the spec, "
-            f"(3) switch model_pool_strategy to 'round_robin' (always allocates)"
-        )
+        if strategy == "router":
+            tail = (
+                f"(1) leave leader.model_name unset to fall back on the router's first declared name, "
+                f"(2) set leader.model_name to one of {available_names}, "
+                f"(3) provide an explicit agents['leader'].model in the spec"
+            )
+        else:
+            tail = (
+                f"(1) set leader.model_name to one of {available_names}, "
+                f"(2) provide an explicit agents['leader'].model in the spec, "
+                f"(3) switch model_pool_strategy to 'round_robin' (always allocates)"
+            )
+        reason = f"{cause}; resolve by either: {tail}"
         raise_error(StatusCode.AGENT_TEAM_CONFIG_INVALID, reason=reason)
 
     def _validate_reserved_names(self) -> None:
@@ -388,27 +496,31 @@ class TeamAgentSpec(BaseModel):
                     f"{sorted(RESERVED_MEMBER_NAMES)})"
                 )
 
-    def _inject_human_agent_if_enabled(self) -> None:
-        """Ensure at least one human-agent member exists when HITT is on.
+    def _validate_hitt_consistency(self) -> None:
+        """Reject configs where predefined HUMAN_AGENT members exist without HITT enabled.
 
-        ``enable_hitt=True`` is a convenience that bootstraps a single
-        default ``human_agent`` member. If the caller already declared
-        one or more members with ``role_type=HUMAN_AGENT`` (including
-        under custom names), nothing is added — the explicit roster
-        wins and multi-human teams work out of the box.
-        Idempotent across repeated ``build()`` calls.
+        ``enable_hitt`` acts as the spec-level capability ceiling. Declaring
+        a HUMAN_AGENT predefined member without opening that ceiling is a
+        misconfiguration. The reverse (``enable_hitt=True`` with no
+        predefined HUMAN_AGENT) is allowed: callers may rely on dynamic
+        ``spawn_member(role_type='human_agent', ...)`` after build.
         """
-        if not self.enable_hitt:
+        if self.enable_hitt:
             return
-        if any(m.role_type == TeamRole.HUMAN_AGENT for m in self.predefined_members):
+        if not any(m.role_type == TeamRole.HUMAN_AGENT for m in self.predefined_members):
             return
-        self.predefined_members.append(
-            TeamMemberSpec(
-                member_name=HUMAN_AGENT_MEMBER_NAME,
-                display_name=t("hitt.human_agent_display_name"),
-                role_type=TeamRole.HUMAN_AGENT,
-                persona=t("hitt.human_agent_default_persona"),
-            )
+
+        from openjiuwen.core.common.exception.codes import StatusCode
+        from openjiuwen.core.common.exception.errors import raise_error
+
+        offenders = [m.member_name for m in self.predefined_members if m.role_type == TeamRole.HUMAN_AGENT]
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason=(
+                f"predefined_members contains HUMAN_AGENT role(s) {offenders} "
+                f"but enable_hitt=False; set enable_hitt=True (capability ceiling) "
+                f"or remove the human member(s)"
+            ),
         )
 
 

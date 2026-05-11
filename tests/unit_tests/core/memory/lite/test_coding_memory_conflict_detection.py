@@ -188,32 +188,28 @@ class TestOptimisticConcurrency:
 
     def test_max_conflict_retries_value(self):
         """Validate max conflict retries constant."""
-        from openjiuwen.core.memory.lite.coding_memory_tools import _MAX_CONFLICT_RETRIES
+        from openjiuwen.core.memory.lite.coding_memory_tool_ops import _MAX_CONFLICT_RETRIES
+
         assert _MAX_CONFLICT_RETRIES >= 1
         assert _MAX_CONFLICT_RETRIES <= 5  # Should not be too large to avoid infinite loops
 
     @pytest.mark.asyncio
     async def test_concurrent_snapshot_reads(self):
         """Multiple coroutines reading snapshots concurrently should not block each other (no lock)."""
-        from openjiuwen.core.memory.lite import coding_memory_tools
+        from openjiuwen.core.memory.lite.coding_memory_tool_context import CodingMemoryToolContext
+        from openjiuwen.core.memory.lite.coding_memory_tool_ops import _snapshot_memory_files
 
-        # Without sys_operation, snapshot should return empty set
-        original_sys_op = coding_memory_tools.coding_memory_sys_operation
-        try:
-            coding_memory_tools.coding_memory_sys_operation = None
-
-            results = await asyncio.gather(
-                coding_memory_tools._snapshot_memory_files("coding_memory"),
-                coding_memory_tools._snapshot_memory_files("coding_memory"),
-                coding_memory_tools._snapshot_memory_files("coding_memory"),
-            )
-            assert all(r == frozenset() for r in results)
-        finally:
-            coding_memory_tools.coding_memory_sys_operation = original_sys_op
+        ctx = CodingMemoryToolContext(workspace=None, sys_operation=None, coding_memory_dir="")
+        results = await asyncio.gather(
+            _snapshot_memory_files(ctx, "coding_memory"),
+            _snapshot_memory_files(ctx, "coding_memory"),
+            _snapshot_memory_files(ctx, "coding_memory"),
+        )
+        assert all(r == frozenset() for r in results)
 
 
 class TestLockMechanismBasic:
-    """Test lock mechanism basic logic (without importing coding_memory_tools)."""
+    """Test lock mechanism basic logic (stdlib asyncio patterns only)."""
 
     def test_asyncio_lock_basic(self):
         """Test asyncio.Lock basic behavior."""
@@ -251,30 +247,30 @@ class TestMemoryIndexLockMechanism:
     @pytest.mark.asyncio
     async def test_memory_index_lock_exists(self):
         """Verify _memory_index_lock exists as an independent asyncio.Lock."""
-        from openjiuwen.core.memory.lite import coding_memory_tools
+        from openjiuwen.core.memory.lite import coding_memory_tool_ops
 
-        assert hasattr(coding_memory_tools, "_memory_index_lock")
-        assert isinstance(coding_memory_tools._memory_index_lock, asyncio.Lock)
+        assert hasattr(coding_memory_tool_ops, "_memory_index_lock")
+        assert isinstance(coding_memory_tool_ops._memory_index_lock, asyncio.Lock)
 
     @pytest.mark.asyncio
     async def test_memory_index_lock_separate_from_file_locks(self):
         """Verify index lock is separate from file locks dictionary."""
-        from openjiuwen.core.memory.lite import coding_memory_tools
+        from openjiuwen.core.memory.lite import coding_memory_tool_ops
 
         # Index lock should not appear in file locks dictionary
-        assert "_memory_index_lock" not in coding_memory_tools._file_locks
+        assert "_memory_index_lock" not in coding_memory_tool_ops._file_locks
         # Index lock is a different object from file locks init lock
-        assert coding_memory_tools._memory_index_lock is not coding_memory_tools._file_locks_init_lock
+        assert coding_memory_tool_ops._memory_index_lock is not coding_memory_tool_ops._file_locks_init_lock
 
     @pytest.mark.asyncio
     async def test_memory_index_lock_concurrent_protection(self):
         """Simulate concurrent writes to MEMORY.md: index lock should serialize operations."""
-        from openjiuwen.core.memory.lite import coding_memory_tools
+        from openjiuwen.core.memory.lite import coding_memory_tool_ops
 
         order = []
 
         async def simulate_index_update(tag: str):
-            async with coding_memory_tools._memory_index_lock:
+            async with coding_memory_tool_ops._memory_index_lock:
                 order.append(f"{tag}_start")
                 await asyncio.sleep(0.01)
                 order.append(f"{tag}_end")
@@ -302,11 +298,11 @@ class TestEditLockProtection:
     @pytest.mark.asyncio
     async def test_edit_uses_same_file_lock_as_write(self):
         """Verify edit and write use the same file-level lock for the same file."""
-        from openjiuwen.core.memory.lite import coding_memory_tools
+        from openjiuwen.core.memory.lite import coding_memory_tool_ops
 
         path = "/coding_memory/test_file.md"
-        lock1 = await coding_memory_tools._get_file_lock(path)
-        lock2 = await coding_memory_tools._get_file_lock(path)
+        lock1 = await coding_memory_tool_ops._get_file_lock(path)
+        lock2 = await coding_memory_tool_ops._get_file_lock(path)
 
         # Same path should return the same lock object
         assert lock1 is lock2
@@ -314,20 +310,20 @@ class TestEditLockProtection:
     @pytest.mark.asyncio
     async def test_different_files_use_different_locks(self):
         """Verify different files use different lock objects."""
-        from openjiuwen.core.memory.lite import coding_memory_tools
+        from openjiuwen.core.memory.lite import coding_memory_tool_ops
 
-        lock_a = await coding_memory_tools._get_file_lock("/coding_memory/a.md")
-        lock_b = await coding_memory_tools._get_file_lock("/coding_memory/b.md")
+        lock_a = await coding_memory_tool_ops._get_file_lock("/coding_memory/a.md")
+        lock_b = await coding_memory_tool_ops._get_file_lock("/coding_memory/b.md")
 
         assert lock_a is not lock_b
 
     @pytest.mark.asyncio
     async def test_concurrent_edit_and_write_same_file_serialized(self):
         """Simulate concurrent edit and write on the same file: file lock should serialize operations."""
-        from openjiuwen.core.memory.lite import coding_memory_tools
+        from openjiuwen.core.memory.lite import coding_memory_tool_ops
 
         path = "/coding_memory/same_file.md"
-        lock = await coding_memory_tools._get_file_lock(path)
+        lock = await coding_memory_tool_ops._get_file_lock(path)
         order = []
 
         async def simulate_write(tag: str):
@@ -383,23 +379,23 @@ class TestFileLockRegistry:
     @pytest.mark.asyncio
     async def test_same_path_returns_same_lock_instance(self):
         """Repeated _get_file_lock for one path returns the same Lock object."""
-        from openjiuwen.core.memory.lite import coding_memory_tools
+        from openjiuwen.core.memory.lite import coding_memory_tool_ops
 
         path = f"/coding_memory/same_{uuid.uuid4().hex}.md"
-        a = await coding_memory_tools._get_file_lock(path)
-        b = await coding_memory_tools._get_file_lock(path)
+        a = await coding_memory_tool_ops._get_file_lock(path)
+        b = await coding_memory_tool_ops._get_file_lock(path)
         assert a is b
-        assert path in coding_memory_tools._file_locks
+        assert path in coding_memory_tool_ops._file_locks
 
     @pytest.mark.asyncio
     async def test_concurrent_get_file_lock_same_instance(self):
         """Concurrent getters for one path all receive the same Lock."""
-        from openjiuwen.core.memory.lite import coding_memory_tools
+        from openjiuwen.core.memory.lite import coding_memory_tool_ops
 
         path = f"/coding_memory/gather_{uuid.uuid4().hex}.md"
 
         async def get_lock():
-            return await coding_memory_tools._get_file_lock(path)
+            return await coding_memory_tool_ops._get_file_lock(path)
 
         locks = await asyncio.gather(*[get_lock() for _ in range(32)])
         assert all(l is locks[0] for l in locks)
@@ -407,14 +403,14 @@ class TestFileLockRegistry:
     @pytest.mark.asyncio
     async def test_lock_entry_retained_after_async_with(self):
         """Registry does not remove locks after the critical section (by design)."""
-        from openjiuwen.core.memory.lite import coding_memory_tools
+        from openjiuwen.core.memory.lite import coding_memory_tool_ops
 
         path = f"/coding_memory/retain_{uuid.uuid4().hex}.md"
-        lock = await coding_memory_tools._get_file_lock(path)
+        lock = await coding_memory_tool_ops._get_file_lock(path)
         async with lock:
             pass
-        assert path in coding_memory_tools._file_locks
-        assert coding_memory_tools._file_locks[path] is lock
+        assert path in coding_memory_tool_ops._file_locks
+        assert coding_memory_tool_ops._file_locks[path] is lock
 
 
 if __name__ == "__main__":

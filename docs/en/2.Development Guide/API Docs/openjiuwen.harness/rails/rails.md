@@ -13,10 +13,9 @@ Built-in guardrails that hook into the `DeepAgent` lifecycle. Rails are register
 | `MemoryRail` | Integrates long-term memory read/write into the agent loop. |
 | `ProgressiveToolRail` | Dynamically loads and unloads tools based on relevance to the current task. |
 | `SecurityRail` | Applies security policies such as command allowlists and path validation. |
-| `SessionRail` | Manages session lifecycle events (create, resume, persist). |
 | `SkillEvolutionRail` | Tracks and evolves agent skills based on usage patterns. |
 | `SkillUseRail` | Enables the agent to discover and invoke learned skills. |
-| `SubagentRail` | Manages sub-agent spawning, delegation, and result collection. |
+| `SubagentRail` | Manages sub-agent spawning via `enable_async_subagent` flag — sync mode registers `TaskTool`, async mode registers `session` tools. |
 | `TaskCompletionRail` | Evaluates whether the current task is complete and triggers the stop condition. |
 | `ContextEvolutionRail` | Persists and retrieves task-specific memory across iterations. |
 | `TaskPlanningRail` | Generates and maintains a structured task plan during the loop. |

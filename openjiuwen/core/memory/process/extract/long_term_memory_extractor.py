@@ -7,6 +7,7 @@ from openjiuwen.core.memory.process.extract.common import ExtractMemoryParams
 from openjiuwen.core.memory.prompts.prompt_applier import PromptApplier
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
+from openjiuwen.core.memory.config.config import MemoryScopeConfig
 
 
 class LongTermMemoryExtractor:
@@ -17,7 +18,7 @@ class LongTermMemoryExtractor:
     async def extract_long_term_memory(
         extract_memory_paras: ExtractMemoryParams,
         timestamp: str,
-        user_define: dict[str, str] = None,
+        scope_config: MemoryScopeConfig,
         retries: int = 3,
     ) -> Dict[str, Any]:
         reference_str = ""
@@ -35,6 +36,9 @@ class LongTermMemoryExtractor:
                 "conversation_time": timestamp,
                 "input_messages": input_msg_str,
                 "reference_messages": reference_str,
+                "user_profile_definition": scope_config.user_profile_definition or "",
+                "semantic_memory_definition": scope_config.semantic_memory_definition or "",
+                "episodic_memory_definition": scope_config.episodic_memory_definition or "",
             },
         )
         model_input = [{"role": "user", "content": prompt_content}]

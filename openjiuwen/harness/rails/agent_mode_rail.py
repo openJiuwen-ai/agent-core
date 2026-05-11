@@ -70,7 +70,7 @@ class AgentModeRail(DeepAgentRail):
     ``DeepAgentState.plan_mode.mode == "plan"``.
 
     Priority 85 ensures this rail runs *after*
-    TaskPlanningRail(90) / SessionRail(95) so it can remove sections
+    TaskPlanningRail(90) / SubagentRail(95) so it can remove sections
     those rails added.
 
     Args:

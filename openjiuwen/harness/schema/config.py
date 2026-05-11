@@ -158,8 +158,9 @@ class DeepAgentConfig:
             when the embedded agent is created.
         enable_task_loop: Whether to enable the outer
             task loop (P1).
-        enable_async_subagent: Enable async subagent via SessionRail (default False).
-            When True and subagents are configured, SessionRail is mounted instead of SubagentRail.
+        enable_async_subagent: Enable async subagent mode (default False).
+            When True, SubagentRail registers session tools for async subagent spawning;
+            when False, it registers synchronous task tools.
         add_general_purpose_agent: Add general-purpose agent.
             When True, a general-purpose agent is added as sub-agents.
         max_iterations: Maximum ReAct iterations per

@@ -24,10 +24,13 @@ STRINGS: dict[str, str] = {
         "influences how members trust and communicate with you"
     ),
     "build_team.enable_hitt": (
-        "Enable Human in the Team (HITT). When true, registers the "
-        "reserved human_agent member as a first-class teammate. Set to "
-        "true when the user signals intent to join the team "
-        "(e.g. 'I want to join', 'Count me in'); default false"
+        "Per-instance HITT (Human in the Team) switch; accepts true / false / omitted. "
+        "Omitted: inherit TeamAgentSpec.enable_hitt (the spec-level capability ceiling). "
+        "true: explicitly enable for this build — requires spec.enable_hitt=True or it errors. "
+        "false: explicitly disable — every spawn_human_agent request is rejected and any "
+        "predefined HUMAN_AGENT members in the spec are skipped. "
+        "Use true when the user wants to join the team; false when human collaboration is "
+        "explicitly out of scope"
     ),
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/en/clean_team.md
@@ -47,17 +50,27 @@ STRINGS: dict[str, str] = {
         "core expertise, preferred task types, collaboration style, "
         "and boundaries the member should not own"
     ),
+    "spawn_member.role_type": (
+        "Optional. Member role type. 'teammate' (default) = regular LLM teammate, "
+        "requires model_name/prompt to drive its avatar. 'human_agent' = human "
+        "member driven by the real user via HumanAgentInbox; **rejects** model_name "
+        "and prompt (the framework template manages them) — passing those fields "
+        "raises an error. Choosing 'human_agent' requires spec.enable_hitt=True and "
+        "the current build_team instance must not have disabled HITT"
+    ),
     "spawn_member.prompt": (
         "The first instruction the member receives at startup. "
         "Use it to define initial priorities, task selection guidance, constraints, "
         "or coordination expectations; give clear direction, "
         "avoid generic startup filler, "
-        "and do not repeat the generic workflow"
+        "and do not repeat the generic workflow. "
+        "Forbidden when role_type='human_agent'"
     ),
     "spawn_member.model_name": (
         "Optional. Suggested model name for this member "
         "(e.g. gpt-4, claude-sonnet-4); "
-        "the system picks an appropriate model when omitted"
+        "the system picks an appropriate model when omitted. "
+        "Forbidden when role_type='human_agent'"
     ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/en/shutdown_member.md
@@ -152,31 +165,31 @@ STRINGS: dict[str, str] = {
     # claim_task._desc lives in descs/en/claim_task.md
     "claim_task.task_id": "The ID of the task to claim or complete",
     "claim_task.status": "New status: 'claimed' (start work) or 'completed' (mark done)",
+    # ===== member_complete_task ===============================================
+    # member_complete_task._desc lives in descs/en/member_complete_task.md
+    "member_complete_task.task_id": (
+        "ID of the task to mark completed (must be a task the leader has assigned to you)"
+    ),
+    "member_complete_task.note": (
+        "Optional completion note describing your result or any follow-up the team should know about"
+    ),
     # ===== send_message ========================================================
     # send_message._desc lives in descs/en/send_message.md
     "send_message.to": (
         'Recipient: member_name for point-to-point (e.g. "backend-dev-1"); '
+        'array of member names (e.g. ["m1","m2"]) for multicast — same content sent '
+        "as separate messages to each member, cost is linear in recipient count and "
+        "MORE expensive than broadcast for the same audience, use only when truly needed "
+        'and cannot mix with "*"/"user"; '
         '"user" (teammates only, to reply to the user); '
         '"*" for broadcast'
     ),
     "send_message.content": "Message content with clear action guidance or information",
     "send_message.summary": "5-10 word summary for message preview and logging",
-    # ===== enter_worktree =====================================================
-    # enter_worktree._desc lives in descs/en/enter_worktree.md
-    "enter_worktree.name": (
-        "Optional name for the worktree. "
-        'Each "/"-separated segment may contain only letters, '
-        "digits, dots, underscores, and dashes; max 64 chars total. "
-        "A random name is generated if not provided"
-    ),
-    # ===== exit_worktree ======================================================
-    # exit_worktree._desc lives in descs/en/exit_worktree.md
-    "exit_worktree.action": '"keep" leaves the worktree and branch on disk; "remove" deletes both',
-    "exit_worktree.discard_changes": (
-        'Required true when action is "remove" and '
-        "the worktree has uncommitted files or unmerged commits. "
-        "The tool will refuse and list them otherwise"
-    ),
+    # NOTE: worktree tools (enter_worktree / exit_worktree) live in
+    # ``openjiuwen.harness.tools.worktree`` and resolve their description
+    # / param schema via ``harness.prompts.tools`` providers — no entries
+    # in this dict.
     # ===== workspace_meta =====================================================
     # workspace_meta._desc lives in descs/en/workspace_meta.md
     "workspace_meta.action": (

@@ -24,14 +24,13 @@ from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, Local
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.harness.rails.memory.coding_memory_rail import CodingMemoryRail
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
-from openjiuwen.core.memory.lite import coding_memory_tools
-from openjiuwen.core.memory.lite.coding_memory_tools import (
-    bind_coding_memory_runtime,
-    coding_memory_read,
-    coding_memory_write,
-    coding_memory_edit,
-    _upsert_memory_index,
+from openjiuwen.core.memory.lite.coding_memory_tool_context import CodingMemoryToolContext
+from openjiuwen.core.memory.lite.coding_memory_tool_ops import (
     _read_file_safe,
+    _upsert_memory_index,
+    coding_memory_edit_with_context,
+    coding_memory_read_with_context,
+    coding_memory_write_with_context,
 )
 
 
@@ -40,7 +39,7 @@ async def coding_memory_system_env():
     """创建 Coding Memory 系统测试环境."""
     await Runner.start()
     tmp_dir = tempfile.mkdtemp(prefix="coding_memory_st_")
-    work_dir = Workspace().root_path
+    work_dir = tmp_dir
     
     sys_operation_id = f"coding_memory_st_sysop_{os.urandom(4).hex()}"
     card = SysOperationCard(
@@ -61,20 +60,22 @@ async def coding_memory_system_env():
         root_path=work_dir,
         directories=[{"name": "coding_memory", "path": "coding_memory"}]
     )
-    bind_coding_memory_runtime(workspace, sys_op, coding_memory_dir)
-    
+    ctx = CodingMemoryToolContext(
+        workspace=workspace,
+        sys_operation=sys_op,
+        coding_memory_dir=coding_memory_dir,
+        node_name="coding_memory",
+    )
+
     yield {
         "tmp_dir": tmp_dir,
         "work_dir": work_dir,
         "coding_memory_dir": coding_memory_dir,
         "sys_operation_id": sys_operation_id,
         "sys_op": sys_op,
+        "ctx": ctx,
+        "workspace": workspace,
     }
-    
-    # 清理
-    coding_memory_tools.coding_memory_workspace = None
-    coding_memory_tools.coding_memory_sys_operation = None
-    coding_memory_tools.coding_memory_dir = "coding_memory"
 
     try:
         Runner.resource_mgr.remove_sys_operation(sys_operation_id=sys_operation_id)
@@ -214,13 +215,13 @@ type: user
 
 用户喜欢使用 Python 开发后端服务."""
         
-        result = await coding_memory_write.invoke({"path": "user_pref.md", "content": content})
+        result = await coding_memory_write_with_context(env["ctx"], "user_pref.md", content)
         
         assert result["success"] is True
         assert result["type"] == "user"
         
         # 验证文件创建 - 使用 sys_operation 读取
-        read_result = await coding_memory_read.invoke({"path": "user_pref.md"})
+        read_result = await coding_memory_read_with_context(env["ctx"], "user_pref.md")
         assert read_result["success"] is True
         assert "User Preference" in read_result["content"]
     
@@ -231,14 +232,15 @@ type: user
         
         # 直接使用异步版本更新索引
         await _upsert_memory_index(
-            env["coding_memory_dir"], 
-            "code_style.md", 
-            {"name": "Code Style Guide", "description": "Prefer integration tests over mocks"}
+            env["ctx"],
+            env["coding_memory_dir"],
+            "code_style.md",
+            {"name": "Code Style Guide", "description": "Prefer integration tests over mocks"},
         )
         
         # 验证 MEMORY.md 更新
         index_path = os.path.join(env["coding_memory_dir"], "MEMORY.md")
-        index_content = await _read_file_safe(index_path)
+        index_content = await _read_file_safe(env["ctx"], index_path)
         
         assert "Code Style Guide" in index_content
         assert "code_style.md" in index_content
@@ -256,9 +258,9 @@ type: project
 
 移动端发布冻结日期：2026-04-15."""
         
-        await coding_memory_write.invoke({"path": "deadline.md", "content": content})
+        await coding_memory_write_with_context(env["ctx"], "deadline.md", content)
         
-        result = await coding_memory_read.invoke({"path": "deadline.md"})
+        result = await coding_memory_read_with_context(env["ctx"], "deadline.md")
         
         assert result["success"] is True
         assert "Project Deadline" in result["content"]
@@ -282,11 +284,11 @@ Line 3
 Line 4
 Line 5"""
         
-        write_result = await coding_memory_write.invoke({"path": "lines.md", "content": content})
+        write_result = await coding_memory_write_with_context(env["ctx"], "lines.md", content)
         assert write_result["success"] is True
         
         # 读取部分内容
-        result = await coding_memory_read.invoke({"path": "lines.md", "offset": 1, "limit": 3})
+        result = await coding_memory_read_with_context(env["ctx"], "lines.md", offset=1, limit=3)
         assert result["success"] is True
         # totalLines 应该是正数
         assert result["totalLines"] > 0
@@ -304,18 +306,19 @@ type: reference
 
 API 文档地址: https://old-api-docs.com"""
         
-        await coding_memory_write.invoke({"path": "api_ref.md", "content": content})
+        await coding_memory_write_with_context(env["ctx"], "api_ref.md", content)
         
-        result = await coding_memory_edit.invoke({
-            "path": "api_ref.md",
-            "old_text": "https://old-api-docs.com",
-            "new_text": "https://new-api-docs.com"
-        })
+        result = await coding_memory_edit_with_context(
+            env["ctx"],
+            "api_ref.md",
+            "https://old-api-docs.com",
+            "https://new-api-docs.com",
+        )
         
         assert result["success"] is True
         
         # 验证更新
-        read_result = await coding_memory_read.invoke({"path": "api_ref.md"})
+        read_result = await coding_memory_read_with_context(env["ctx"], "api_ref.md")
         assert "https://new-api-docs.com" in read_result["content"]
     
     @pytest.mark.asyncio
@@ -331,27 +334,29 @@ type: user
 
 内容."""
         
-        await coding_memory_write.invoke({"path": "test.md", "content": content})
+        await coding_memory_write_with_context(env["ctx"], "test.md", content)
         
         # 修改 frontmatter
-        result = await coding_memory_edit.invoke({
-            "path": "test.md",
-            "old_text": "name: Old Name",
-            "new_text": "name: New Name"
-        })
+        result = await coding_memory_edit_with_context(
+            env["ctx"],
+            "test.md",
+            "name: Old Name",
+            "name: New Name",
+        )
         
         assert result["success"] is True
         
         # 手动更新索引验证
         await _upsert_memory_index(
-            env["coding_memory_dir"], 
-            "test.md", 
-            {"name": "New Name", "description": "Old description"}
+            env["ctx"],
+            env["coding_memory_dir"],
+            "test.md",
+            {"name": "New Name", "description": "Old description"},
         )
         
         # 验证索引更新
         index_path = os.path.join(env["coding_memory_dir"], "MEMORY.md")
-        index_content = await _read_file_safe(index_path)
+        index_content = await _read_file_safe(env["ctx"], index_path)
         
         assert "New Name" in index_content
     
@@ -362,7 +367,7 @@ type: user
         
         content = "纯文本，没有 frontmatter"
         
-        result = await coding_memory_write.invoke({"path": "invalid.md", "content": content})
+        result = await coding_memory_write_with_context(env["ctx"], "invalid.md", content)
         
         assert result["success"] is False
         assert "frontmatter" in result["error"].lower()
@@ -380,7 +385,7 @@ type: invalid_type
 
 内容."""
         
-        result = await coding_memory_write.invoke({"path": "invalid_type.md", "content": content})
+        result = await coding_memory_write_with_context(env["ctx"], "invalid_type.md", content)
         
         assert result["success"] is False
         assert "type" in result["error"].lower()
@@ -398,7 +403,7 @@ type: user
 
 内容."""
         
-        result = await coding_memory_write.invoke({"path": "../etc/passwd.md", "content": content})
+        result = await coding_memory_write_with_context(env["ctx"], "../etc/passwd.md", content)
         
         assert result["success"] is False
     
@@ -415,13 +420,14 @@ type: user
 
 原始内容."""
         
-        await coding_memory_write.invoke({"path": "test.md", "content": content})
+        await coding_memory_write_with_context(env["ctx"], "test.md", content)
         
-        result = await coding_memory_edit.invoke({
-            "path": "test.md",
-            "old_text": "不存在的文本",
-            "new_text": "新文本"
-        })
+        result = await coding_memory_edit_with_context(
+            env["ctx"],
+            "test.md",
+            "不存在的文本",
+            "新文本",
+        )
         
         assert result["success"] is False
         assert "not found" in result["error"].lower()
@@ -440,13 +446,14 @@ type: user
 重复文本
 重复文本"""
         
-        await coding_memory_write.invoke({"path": "multi.md", "content": content})
+        await coding_memory_write_with_context(env["ctx"], "multi.md", content)
         
-        result = await coding_memory_edit.invoke({
-            "path": "multi.md",
-            "old_text": "重复文本",
-            "new_text": "替换文本"
-        })
+        result = await coding_memory_edit_with_context(
+            env["ctx"],
+            "multi.md",
+            "重复文本",
+            "替换文本",
+        )
         
         assert result["success"] is False
         assert "appears" in result["error"].lower()
@@ -469,7 +476,7 @@ type: user
 
 用户是高级 Python 开发者，熟悉 Django 和 Flask."""
         
-        await coding_memory_write.invoke({"path": "python_dev.md", "content": content})
+        await coding_memory_write_with_context(env["ctx"], "python_dev.md", content)
         
         rail = CodingMemoryRail(
             coding_memory_dir=env["coding_memory_dir"],
@@ -519,7 +526,7 @@ type: user
 ---
 
 其他内容."""
-        await coding_memory_write.invoke({"path": "other.md", "content": content})
+        await coding_memory_write_with_context(env["ctx"], "other.md", content)
         
         # Mock manager 返回 MEMORY.md
         mock_manager = AsyncMock()
@@ -630,9 +637,10 @@ class TestCodingMemoryPromptInjection:
         
         # 创建索引文件
         await _upsert_memory_index(
-            env["coding_memory_dir"], 
-            "test.md", 
-            {"name": "Test Memory", "description": "Test description"}
+            env["ctx"],
+            env["coding_memory_dir"],
+            "test.md",
+            {"name": "Test Memory", "description": "Test description"},
         )
         
         rail = CodingMemoryRail(
@@ -676,9 +684,10 @@ class TestCodingMemoryPromptInjection:
         
         # 创建索引文件
         await _upsert_memory_index(
-            env["coding_memory_dir"], 
-            "test.md", 
-            {"name": "Test", "description": "Test"}
+            env["ctx"],
+            env["coding_memory_dir"],
+            "test.md",
+            {"name": "Test", "description": "Test"},
         )
         
         rail = CodingMemoryRail(
@@ -738,24 +747,25 @@ type: feedback
 **原因：** PostgreSQL 支持更丰富的数据类型和更好的扩展性.
 **如何应用：** 新项目默认使用 PostgreSQL."""
         
-        write_result = await coding_memory_write.invoke({"path": "db_pref.md", "content": content})
+        write_result = await coding_memory_write_with_context(env["ctx"], "db_pref.md", content)
         assert write_result["success"] is True
         
         # 2. 验证文件创建
-        read_result = await coding_memory_read.invoke({"path": "db_pref.md"})
+        read_result = await coding_memory_read_with_context(env["ctx"], "db_pref.md")
         assert read_result["success"] is True
         assert "PostgreSQL" in read_result["content"]
         
         # 3. 手动更新索引验证
         await _upsert_memory_index(
-            env["coding_memory_dir"], 
-            "db_pref.md", 
-            {"name": "Database Preference", "description": "Prefer PostgreSQL over MySQL"}
+            env["ctx"],
+            env["coding_memory_dir"],
+            "db_pref.md",
+            {"name": "Database Preference", "description": "Prefer PostgreSQL over MySQL"},
         )
         
         # 4. 验证索引更新
         index_path = os.path.join(env["coding_memory_dir"], "MEMORY.md")
-        index_content = await _read_file_safe(index_path)
+        index_content = await _read_file_safe(env["ctx"], index_path)
         assert "Database Preference" in index_content
     
     @pytest.mark.asyncio
@@ -779,25 +789,26 @@ type: {mem_type}
 
 这是 {mem_type} 类型的记忆内容."""
             
-            result = await coding_memory_write.invoke({"path": filename, "content": content})
+            result = await coding_memory_write_with_context(env["ctx"], filename, content)
             assert result["success"] is True, f"Failed to write {mem_type} memory"
             assert result["type"] == mem_type
             
             # 手动更新索引
             await _upsert_memory_index(
-                env["coding_memory_dir"], 
-                filename, 
-                {"name": name, "description": desc}
+                env["ctx"],
+                env["coding_memory_dir"],
+                filename,
+                {"name": name, "description": desc},
             )
         
         # 验证所有文件创建
         for filename, _, _, _ in memories:
-            read_result = await coding_memory_read.invoke({"path": filename})
+            read_result = await coding_memory_read_with_context(env["ctx"], filename)
             assert read_result["success"] is True, f"File {filename} should exist"
         
         # 验证索引包含所有条目
         index_path = os.path.join(env["coding_memory_dir"], "MEMORY.md")
-        index_content = await _read_file_safe(index_path)
+        index_content = await _read_file_safe(env["ctx"], index_path)
         
         for filename, _, name, _ in memories:
             assert name in index_content, f"Index should contain {name}"
@@ -821,32 +832,34 @@ type: project
 
 团队成员：张三，负责后端开发."""
         
-        write_result = await coding_memory_write.invoke({"path": filename, "content": content})
+        write_result = await coding_memory_write_with_context(env["ctx"], filename, content)
         assert write_result["success"] is True, f"Write failed: {write_result.get('error', 'unknown')}"
         
         # 2. 更新内容
-        edit_result = await coding_memory_edit.invoke({
-            "path": filename,
-            "old_text": "张三，负责后端开发",
-            "new_text": "张三，负责后端开发和架构设计"
-        })
+        edit_result = await coding_memory_edit_with_context(
+            env["ctx"],
+            filename,
+            "张三，负责后端开发",
+            "张三，负责后端开发和架构设计",
+        )
         assert edit_result["success"] is True, f"Edit failed: {edit_result.get('error', 'unknown')}"
         
         # 3. 验证更新
-        read_result = await coding_memory_read.invoke({"path": filename})
+        read_result = await coding_memory_read_with_context(env["ctx"], filename)
         assert read_result["success"] is True
         assert "架构设计" in read_result["content"]
         
         # 4. 手动更新索引验证
         await _upsert_memory_index(
-            env["coding_memory_dir"], 
-            filename, 
-            {"name": f"Team Member {unique_id}", "description": "Updated team member info"}
+            env["ctx"],
+            env["coding_memory_dir"],
+            filename,
+            {"name": f"Team Member {unique_id}", "description": "Updated team member info"},
         )
         
         # 5. 验证索引更新
         index_path = os.path.join(env["coding_memory_dir"], "MEMORY.md")
-        index_content = await _read_file_safe(index_path)
+        index_content = await _read_file_safe(env["ctx"], index_path)
         assert f"Team Member {unique_id}" in index_content
 
 
@@ -856,18 +869,21 @@ class TestCodingMemoryEdgeCases:
     @pytest.mark.asyncio
     async def test_read_nonexistent_file(self, coding_memory_system_env):
         """测试读取不存在的文件."""
-        result = await coding_memory_read.invoke({"path": "nonexistent.md"})
+        env = coding_memory_system_env
+        result = await coding_memory_read_with_context(env["ctx"], "nonexistent.md")
         assert result["success"] is False
     
     @pytest.mark.asyncio
     async def test_write_empty_content(self, coding_memory_system_env):
         """测试写入空内容."""
-        result = await coding_memory_write.invoke({"path": "empty.md", "content": ""})
+        env = coding_memory_system_env
+        result = await coding_memory_write_with_context(env["ctx"], "empty.md", "")
         assert result["success"] is False
     
     @pytest.mark.asyncio
     async def test_write_non_md_file(self, coding_memory_system_env):
         """测试写入非 .md 文件."""
+        env = coding_memory_system_env
         content = """---
 name: Test
 description: Test
@@ -876,7 +892,7 @@ type: user
 
 内容."""
         
-        result = await coding_memory_write.invoke({"path": "test.txt", "content": content})
+        result = await coding_memory_write_with_context(env["ctx"], "test.txt", content)
         assert result["success"] is False
     
     @pytest.mark.asyncio
@@ -892,13 +908,9 @@ type: user
 
 内容."""
         
-        await coding_memory_write.invoke({"path": "test.md", "content": content})
+        await coding_memory_write_with_context(env["ctx"], "test.md", content)
         
-        result = await coding_memory_edit.invoke({
-            "path": "test.md",
-            "old_text": "",
-            "new_text": "新内容"
-        })
+        result = await coding_memory_edit_with_context(env["ctx"], "test.md", "", "新内容")
         
         assert result["success"] is False
     
@@ -916,18 +928,19 @@ type: user
 ---
 
 内容 {i}."""
-            await coding_memory_write.invoke({"path": f"mem_{i}.md", "content": content})
+            await coding_memory_write_with_context(env["ctx"], f"mem_{i}.md", content)
             
             # 手动更新索引
             await _upsert_memory_index(
-                env["coding_memory_dir"], 
-                f"mem_{i}.md", 
-                {"name": f"Memory {i}", "description": f"Test memory {i}"}
+                env["ctx"],
+                env["coding_memory_dir"],
+                f"mem_{i}.md",
+                {"name": f"Memory {i}", "description": f"Test memory {i}"},
             )
         
         # 验证索引文件存在
         index_path = os.path.join(env["coding_memory_dir"], "MEMORY.md")
-        index_content = await _read_file_safe(index_path)
+        index_content = await _read_file_safe(env["ctx"], index_path)
         
         # 验证所有条目都在索引中
         for i in range(10):

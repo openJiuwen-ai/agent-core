@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from openjiuwen.core.foundation.llm import Model, JsonOutputParser
 from openjiuwen.core.foundation.llm.schema.message import BaseMessage
-from openjiuwen.core.memory.config.config import AgentMemoryConfig
+from openjiuwen.core.memory.config.config import AgentMemoryConfig, MemoryScopeConfig
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
 from openjiuwen.core.memory.prompts.prompt_applier import PromptApplier
@@ -35,6 +35,7 @@ class MemoryAnalyzer:
             memory_config: AgentMemoryConfig,
             summary_max_token: int,
             *,
+            scope_config: MemoryScopeConfig = None,
             forbidden_variables: str = "",
             retries: int = 3
     ) -> MemoryAnalyzerResult | None:
@@ -79,6 +80,9 @@ class MemoryAnalyzer:
                 "variables_output_template": variables_output_format_json,
                 "forbidden_variables": forbidden_variables,
                 "max_message_token": summary_max_token,
+                "user_profile_definition": scope_config.user_profile_definition or "" if scope_config else "",
+                "semantic_memory_definition": scope_config.semantic_memory_definition or "" if scope_config else "",
+                "episodic_memory_definition": scope_config.episodic_memory_definition or "" if scope_config else "",
             },
         )
         model_input = [{"role": "user", "content": prompt_content}]

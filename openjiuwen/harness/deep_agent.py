@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
 from typing import (
     Any, AsyncIterator, Dict, List, Optional,
     TYPE_CHECKING, Tuple, cast,
@@ -36,9 +37,11 @@ from openjiuwen.harness.rails.task_completion_rail import (
     TaskCompletionRail,
 )
 from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
 from openjiuwen.harness.schema.config import DeepAgentConfig
 from openjiuwen.core.controller.config import ControllerConfig
 from openjiuwen.core.context_engine import ContextEngine
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.controller.schema.event import (
     TaskInteractionEvent,
     FollowUpEvent,
@@ -135,7 +138,7 @@ class DeepAgent(BaseAgent):
         super().__init__(card)
 
     def set_session_toolkit(self, toolkit: SessionToolkit | None) -> None:
-        """Attach or clear the session toolkit (wired by SessionRail)."""
+        """Attach or clear the session toolkit (wired by SubagentRail async)."""
         self._session_toolkit = toolkit
 
     def configure(self, config: DeepAgentConfig) -> "DeepAgent":
@@ -459,6 +462,199 @@ class DeepAgent(BaseAgent):
         """The internal ReActAgent instance."""
         return self._react_agent
 
+    def _resolve_context_session_id(self, session_id: Optional[str] = None) -> str:
+        """Resolve the session id used by context inspection APIs."""
+        resolved = (
+            session_id
+            or self._bound_session_id
+            or (
+                self._loop_session.get_session_id()
+                if self._loop_session is not None
+                else None
+            )
+        )
+        if not resolved:
+            raise build_error(
+                StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                error_msg="session_id is required when no context is bound.",
+            )
+        return resolved
+
+    def _get_context_or_error(
+        self,
+        session_id: Optional[str] = None,
+        context_id: str = "default_context_id",
+    ):
+        """Return the inner ReAct context for a session, or raise."""
+        if self._react_agent is None:
+            raise build_error(
+                StatusCode.DEEPAGENT_RUNTIME_ERROR,
+                error_msg="DeepAgent not configured. Call configure() first.",
+            )
+
+        resolved_session_id = self._resolve_context_session_id(session_id)
+        context = self._react_agent.context_engine.get_context(
+            context_id=context_id,
+            session_id=resolved_session_id,
+        )
+        if context is None:
+            raise build_error(
+                StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                error_msg=(
+                    f"cannot find context '{context_id}' "
+                    f"in session '{resolved_session_id}'"
+                ),
+        )
+        return context
+
+    def _get_react_config(self) -> ReActAgentConfig:
+        """Return inner ReActAgent config for real and test agents."""
+        if self._react_agent is None:
+            raise build_error(
+                StatusCode.DEEPAGENT_RUNTIME_ERROR,
+                error_msg="DeepAgent not configured. Call configure() first.",
+            )
+        config = getattr(
+            self._react_agent,
+            "config",
+            getattr(self._react_agent, "_config", None),
+        )
+        if config is None:
+            raise build_error(
+                StatusCode.DEEPAGENT_RUNTIME_ERROR,
+                error_msg="Inner ReActAgent config is not available.",
+            )
+        return config
+
+    def _resolve_context_window_tokens(self) -> int:
+        """Resolve the configured model context window size."""
+        config = self._get_react_config().context_engine_config
+        model_name = None
+        if self._react_agent is not None:
+            model_name = getattr(self._get_react_config(), "model_name", None)
+        if config is not None and getattr(config, "model_name", None):
+            model_name = config.model_name
+
+        return ContextUtils.resolve_context_max(
+            model_name=model_name,
+            fallback_context_window_tokens=(
+                config.context_window_tokens if config is not None else None
+            ),
+            model_context_window_tokens=(
+                config.model_context_window_tokens if config is not None else None
+            ),
+        )
+
+    def get_context_usage(
+        self,
+        session_id: Optional[str] = None,
+        context_id: str = "default_context_id",
+    ) -> Dict[str, Any]:
+        """Get current context occupancy statistics.
+
+        The underlying ``ContextStats`` already prefers the latest
+        ``AssistantMessage.usage_metadata`` returned by the real model when
+        present; otherwise it falls back to local token counting.
+        """
+        context = self._get_context_or_error(session_id, context_id)
+        resolved_session_id = self._resolve_context_session_id(session_id)
+        stats = context.statistic()
+        context_window_tokens = self._resolve_context_window_tokens()
+        usage_ratio = (
+            stats.total_tokens / context_window_tokens
+            if context_window_tokens > 0
+            else 0.0
+        )
+        return {
+            "session_id": resolved_session_id,
+            "context_id": context.context_id(),
+            "total_tokens": stats.total_tokens,
+            "context_window_tokens": context_window_tokens,
+            "usage_ratio": usage_ratio,
+            "usage_percent": round(usage_ratio * 100, 2),
+            "stats": stats.model_dump(),
+        }
+
+    def get_context_occupancy(
+        self,
+        session_id: Optional[str] = None,
+        context_id: str = "default_context_id",
+    ) -> Dict[str, Any]:
+        """Alias for ``get_context_usage``."""
+        return self.get_context_usage(session_id, context_id)
+
+    def get_current_context(
+        self,
+        session_id: Optional[str] = None,
+        context_id: str = "default_context_id",
+    ) -> List[Any]:
+        """Return current context messages for the given session/context."""
+        context = self._get_context_or_error(session_id, context_id)
+        return context.get_messages()
+
+    @staticmethod
+    def _normalize_context_messages(
+        messages: Optional[List[Any] | Any] = None,
+    ) -> List[BaseMessage]:
+        """Normalize initial message inputs for a fresh context."""
+        if messages is None:
+            return []
+        raw_messages = (
+            messages
+            if isinstance(messages, list)
+            else [messages]
+        )
+        normalized: List[BaseMessage] = []
+        for message in raw_messages:
+            if isinstance(message, BaseMessage):
+                normalized.append(message)
+            elif isinstance(message, str):
+                normalized.append(SystemMessage(content=message))
+            elif isinstance(message, dict):
+                normalized.append(SystemMessage(**message))
+            else:
+                raise build_error(
+                    StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                    error_msg=(
+                        "messages must be a string, dict, "
+                        "BaseMessage, or a list of those values."
+                    ),
+                )
+        return normalized
+
+    async def create_new_context_engine(
+        self,
+        session_id: Optional[str] = None,
+        messages: Optional[List[Any] | Any] = None,
+    ) -> str:
+        """Create a fresh context in the inner ContextEngine and return its session id."""
+        if self._react_agent is None:
+            raise build_error(
+                StatusCode.DEEPAGENT_RUNTIME_ERROR,
+                error_msg="DeepAgent not configured. Call configure() first.",
+            )
+
+        new_session_id = session_id or str(uuid.uuid4())
+        normalized_messages = self._normalize_context_messages(
+            messages
+        )
+        await self._react_agent.context_engine.create_context(
+            session=Session(session_id=new_session_id, card=self.card),
+            history_messages=normalized_messages,
+        )
+        return new_session_id
+
+    async def new_context_engine(
+        self,
+        session_id: Optional[str] = None,
+        messages: Optional[List[Any] | Any] = None,
+    ) -> str:
+        """Alias for ``create_new_context_engine``."""
+        return await self.create_new_context_engine(
+            session_id,
+            messages,
+        )
+
     @property
     def loop_coordinator(self) -> Optional[LoopCoordinator]:
         """LoopCoordinator for the outer task loop."""
@@ -619,8 +815,11 @@ class DeepAgent(BaseAgent):
             await self.init_workspace()
 
         # Unregister stale rails left over from a previous configure() cycle.
+        # Skip rails that are also in pending (same instance): they will be
+        # re-initialized by the pending loop below without needing a full retire.
         for stale_rail in self._stale_rails:
-            await self.unregister_rail(stale_rail)
+            if stale_rail not in self._pending_rails:
+                await self.unregister_rail(stale_rail)
         self._stale_rails.clear()
 
         for rail_inst in self._pending_rails:

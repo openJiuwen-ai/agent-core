@@ -125,6 +125,10 @@ class WorkflowEvents(EventBase):
     WORKFLOW_INVOKE_OUTPUT = EventBase.get_event("workflow_invoke_output")
     WORKFLOW_STREAM_INPUT = EventBase.get_event("workflow_stream_input")
     WORKFLOW_STREAM_OUTPUT = EventBase.get_event("workflow_stream_output")
+    COMPONENT_BATCH_INPUT = EventBase.get_event("workflow_component_batch_input")
+    COMPONENT_BATCH_OUTPUT = EventBase.get_event("workflow_component_batch_output")
+    COMPONENT_STREAM_INPUT = EventBase.get_event("workflow_component_stream_input")
+    COMPONENT_STREAM_OUTPUT = EventBase.get_event("workflow_component_stream_output")
 
 
 class LLMCallEvents(EventBase):

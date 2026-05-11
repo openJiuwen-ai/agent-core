@@ -5,7 +5,14 @@ Create a new team member with domain expertise. Members are long-lived entities 
 | **member_name** | Unique semantic slug (e.g. `backend-dev-1`); must not collide with any existing member |
 | **display_name** | Human-readable role label (e.g. "Backend Developer Expert") |
 | **desc** | Long-term role definition: professional background, core expertise, the domains this member owns, and the boundaries it does not own. **Do not put current-batch tasks here** |
-| **prompt** | Long-term working conventions: stable working style, technical preferences, or collaboration constraints this member follows. **Do not put current-batch task assignments here** |
+| **role_type** | Optional. `teammate` (default) = regular LLM teammate; `human_agent` = human collaborator driven via HumanAgentInbox |
+| **prompt** | Long-term working conventions for `teammate`. **Forbidden when role_type=`human_agent`** |
+| **model_name** | Optional model suggestion for `teammate`. **Forbidden when role_type=`human_agent`** |
+
+## role_type usage
+
+- **`teammate` (default)**: regular LLM member; supply `desc` and `prompt`, optionally `model_name`. The framework starts a DeepAgent according to the model config.
+- **`human_agent`**: human member driven by the real user via HumanAgentInbox. **Rejects** `model_name` and `prompt` (managed by the framework template) — passing them raises an error immediately. Requires `TeamAgentSpec.enable_hitt=True` and the current `build_team` instance to leave HITT engaged. `desc` / `display_name` are still honoured for presentation and persisted persona.
 
 You must call build_team before calling spawn_member. Call order: build_team → create_task → spawn_member → send_message. spawn_member only creates the member record (status: UNSTARTED); on the first send_message call the system automatically starts every unstarted member. Call shutdown_member when the member is done. If member_name already exists, creation fails — pick a non-conflicting name.
 

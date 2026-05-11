@@ -8,6 +8,7 @@ from openjiuwen.core.memory.manage.mem_model.data_id_manager import DataIdManage
 from openjiuwen.core.memory.process.extract.memory_analyzer import MemoryAnalyzer, VariableResult
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
+from openjiuwen.core.memory.config.config import MemoryScopeConfig
 
 category_to_class = {
     "user_profile": MemoryType.USER_PROFILE,
@@ -32,6 +33,7 @@ class Generator:
         message_mem_id = kwargs.get("message_mem_id")
         timestamp = kwargs.get("timestamp")
         summary_max_token = kwargs.get("summary_max_token")
+        scope_config = kwargs.get("scope_config")
         if not all([messages, config, user_id, scope_id, model]):
             memory_logger.error(
                 "Messages, config, user_id, scope_id, model are required parameters",
@@ -56,6 +58,7 @@ class Generator:
             base_chat_model=model,
             memory_config=config,
             summary_max_token=summary_max_token,
+            scope_config=scope_config,
             forbidden_variables=forbidden_variables
         )
         variable_units = self._process_extracted_data(
@@ -100,7 +103,8 @@ class Generator:
             merged_units = await self._categories_to_memory_unit(
                 extract_memory_paras=extract_memory_params,
                 message_mem_id=message_mem_id,
-                timestamp=timestamp
+                timestamp=timestamp,
+                scope_config=scope_config
             )
         except AttributeError as e:
             memory_logger.debug(
@@ -148,12 +152,14 @@ class Generator:
         self,
         extract_memory_paras: ExtractMemoryParams,
         message_mem_id: str,
-        timestamp: str
+        timestamp: str,
+        scope_config: MemoryScopeConfig
     ) -> list[BaseMemoryUnit]:
         memory_units = []
         memory_dict = await LongTermMemoryExtractor.extract_long_term_memory(
             extract_memory_paras=extract_memory_paras,
             timestamp=timestamp,
+            scope_config=scope_config
         )
         memory_units.extend(await self._get_fragment_memory_unit(
             user_id=extract_memory_paras.user_id,

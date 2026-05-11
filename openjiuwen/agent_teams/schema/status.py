@@ -17,6 +17,9 @@ class MemberStatus(str, Enum):
         UNSTARTED: Member has been created but not yet started
         READY: Member is ready to receive tasks
         BUSY: Member is currently processing a task
+        PAUSED: Member coroutine has exited gracefully but state is preserved;
+            recoverable via resume (returns to READY). Distinct from SHUTDOWN
+            in that the member is expected to be re-spawned later.
         RESTARTING: Member process is being restarted after failure
         SHUTDOWN_REQUESTED: Member has received shutdown request
         SHUTDOWN: Member has been shut down
@@ -25,6 +28,7 @@ class MemberStatus(str, Enum):
     UNSTARTED = "unstarted"
     READY = "ready"
     BUSY = "busy"
+    PAUSED = "paused"
     RESTARTING = "restarting"
     SHUTDOWN_REQUESTED = "shutdown_requested"
     SHUTDOWN = "shut_down"
@@ -41,13 +45,22 @@ MEMBER_TRANSITIONS: Dict[MemberStatus, List[MemberStatus]] = {
     MemberStatus.READY: [
         MemberStatus.READY,
         MemberStatus.BUSY,
+        MemberStatus.PAUSED,
         MemberStatus.SHUTDOWN_REQUESTED,
         MemberStatus.SHUTDOWN,
         MemberStatus.ERROR,
     ],
     MemberStatus.BUSY: [
         MemberStatus.READY,
+        MemberStatus.PAUSED,
         MemberStatus.SHUTDOWN_REQUESTED,
+        MemberStatus.ERROR,
+    ],
+    MemberStatus.PAUSED: [
+        MemberStatus.READY,
+        MemberStatus.RESTARTING,
+        MemberStatus.SHUTDOWN_REQUESTED,
+        MemberStatus.SHUTDOWN,
         MemberStatus.ERROR,
     ],
     MemberStatus.RESTARTING: [

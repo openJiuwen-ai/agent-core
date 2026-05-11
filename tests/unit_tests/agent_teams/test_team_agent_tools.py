@@ -20,7 +20,7 @@ from openjiuwen.agent_teams.schema.team import (
 def _tool_names(agent) -> set[str]:
     """Extract registered tool names from the agent's
     ability manager."""
-    return set(agent.deep_agent.ability_manager._tools.keys())
+    return set(agent.harness.inner_agent.ability_manager._tools.keys())
 
 
 def _dummy_agents() -> dict[str, DeepAgentSpec]:
@@ -147,5 +147,5 @@ def test_teammate_registers_tool_approval_rail_from_deep_agent_spec():
     teammate = TeamAgent(card)
     teammate.configure(leader._configurator.spec, ctx)
 
-    rail_names = {type(r).__name__ for r in teammate.deep_agent._pending_rails}
+    rail_names = {type(r).__name__ for r in teammate.harness.inner_agent._pending_rails}
     assert "TeamToolApprovalRail" in rail_names
