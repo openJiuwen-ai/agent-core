@@ -30,6 +30,9 @@ class LongTermMemoryExtractor:
             if msg.role == "user":
                 input_msg_str += f"{msg.name or msg.role}: {msg.content}\n"
 
+        if not scope_config:
+            scope_config = MemoryScopeConfig()
+
         prompt_content = PromptApplier().apply(
             "fragment_memory_prompt",
             {

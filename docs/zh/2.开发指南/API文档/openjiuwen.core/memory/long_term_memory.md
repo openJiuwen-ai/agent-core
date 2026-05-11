@@ -333,10 +333,10 @@ async def add_messages(
     timestamp: datetime | None = None,
     gen_mem: bool = True,
     gen_mem_with_history_msg_num: int = 5,
-) -> None
+) -> AddMemResult
 ```
 
-添加对话消息到记忆引擎，并根据 `agent_config` 生成记忆（用户画像、变量等）。
+添加对话消息到记忆引擎，并根据 `agent_config` 生成记忆（用户画像、变量等）。同时支持**指令性记忆**功能：当用户在对话中包含显式记忆指令（如"把...改为..."、"删除..."）时，引擎会自动识别并执行对应的增删改操作。
 
 **参数**：
 
@@ -354,6 +354,17 @@ async def add_messages(
 * **timestamp**(datetime | None, 可选)：消息时间戳，若为 `None` 则使用当前 UTC 时间。默认值：`None`。
 * **gen_mem**(bool, 可选)：是否生成记忆；为 `False` 时仅保存消息，不触发记忆提取。默认值：`True`。
 * **gen_mem_with_history_msg_num**(int, 可选)：生成记忆时参考的历史消息数量。默认值：5。
+
+**返回**：
+
+* **AddMemResult**：本次记忆提取的结果，包含以下字段：
+  * `variables: list[VariableUnit]`：提取的变量记忆列表；
+  * `user_profile: list[FragmentMemoryUnit]`：提取的用户画像记忆列表；
+  * `semantic_memory: list[FragmentMemoryUnit]`：提取的语义记忆列表；
+  * `episodic_memory: list[FragmentMemoryUnit]`：提取的情景记忆列表；
+  * `summary: list[SummaryUnit]`：提取的摘要记忆列表。
+
+当 `gen_mem=False`、`scope_id` 格式无效、LLM 未初始化或消息中不包含用户消息时，返回空 `AddMemResult()`（所有字段为空列表）。
 
 **异常**：
 
@@ -406,6 +417,58 @@ async def add_messages(
 >>>     session_id="session456"
 >>> )
 ```
+**指令性记忆样例**：
+
+```python
+>>> # 用户通过显式指令修改已有记忆
+>>> update_messages = [
+>>>     UserMessage(content="把我的年龄改为30岁"),
+>>>     AssistantMessage(content="好的，已更新您的年龄信息。")
+>>> ]
+>>> result = await memory.add_messages(
+>>>     messages=update_messages,
+>>>     agent_config=agent_config,
+>>>     user_id="user123",
+>>>     scope_id="my_scope",
+>>> )
+>>> 
+>>> # 用户通过显式指令删除已有记忆
+>>> delete_messages = [
+>>>     UserMessage(content="删除我的年龄信息"),
+>>>     AssistantMessage(content="好的，已删除您的年龄信息。")
+>>> ]
+>>> result = await memory.add_messages(
+>>>     messages=delete_messages,
+>>>     agent_config=agent_config,
+>>>     user_id="user123",
+>>>     scope_id="my_scope",
+>>> )
+```
+
+
+## class openjiuwen.core.memory.long_term_memory.AddMemResult
+
+```
+class openjiuwen.core.memory.long_term_memory.AddMemResult(BaseModel)
+```
+
+`add_messages` 方法的返回值模型，封装了本次记忆提取的所有结果。
+
+**字段**：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `variables` | `list[VariableUnit]` | `[]` | 提取的变量记忆列表 |
+| `user_profile` | `list[FragmentMemoryUnit]` | `[]` | 提取的用户画像记忆列表 |
+| `semantic_memory` | `list[FragmentMemoryUnit]` | `[]` | 提取的语义记忆列表 |
+| `episodic_memory` | `list[FragmentMemoryUnit]` | `[]` | 提取的情景记忆列表 |
+| `summary` | `list[SummaryUnit]` | `[]` | 提取的摘要记忆列表 |
+
+**说明**：
+
+- 每个 `FragmentMemoryUnit` 包含 `operation_type` 字段（`ADD` / `UPDATE` / `DELETE`），用于区分本次操作类型。
+- 指令性记忆的 UPDATE 和 DELETE 操作在返回结果中体现为对应 `operation_type` 的 `FragmentMemoryUnit`。
+- 当 `add_messages` 因各种原因（`gen_mem=False`、`scope_id` 无效、LLM 未初始化等）未执行记忆提取时，返回空 `AddMemResult()`。
 
 
 ### async get_recent_messages

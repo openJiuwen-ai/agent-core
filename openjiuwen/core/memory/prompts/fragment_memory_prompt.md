@@ -33,6 +33,17 @@
     1. 用户本人画像信息(user_profile)：Step 2中主体锁定为用户本人，且是关于**用户本人**的{{user_profile_definition}}
     2. 情景记忆信息(episodic_memory)：Step 2中主体锁定为用户本人，且是关于**用户本人**的{{episodic_memory_definition}}
     3. 语义记忆信息(semantic_memory)：{{semantic_memory_definition}}
+    4. 变更记忆指令(instruct_memories)：用户明确要求**修改**或**删除**已有记忆，【目标消息】中必须包含以下关键字：`改为`、`修改`、`更新`、`换成`,`删除`、`去掉`、`清除`、`移除`等明确表示修改和删除含义的词。
+       - 变更记忆指令的提取规则：
+         - 禁止将【目标消息】中不包含上述关键字的信息提取为变更记忆指令
+         - `mem_content`：第三人称陈述，完整描述修改后的新状态（DELETE指令时为空字符串）
+         - `old_mem`：必须提取旧值,描述被变更的记忆内容，格式为第三人称陈述句，用于在记忆库中定位匹配
+           - 用户明确说旧值：直接提取（“把北京改为上海” -> `old_mem`=“北京”）
+           - 用户未明确说旧值：从上下文推理并提取**被变更的属性**，格式为"用户的[属性]"（简洁的属性名称，不要猜测旧值内容）                                                                                                                                                                                               
+             - "家长会时间改为明天上午" -> `old_mem`="用户的家长会时间"     
+             - `old_mem`绝对禁止为空字符串。切绝对禁止出现`未提交`、`未明确`、`未提及`等文字，应该根据上下文推理并明确给出用户要修改的值。
+         - `mem_type`：根据目标记忆的内容属性，归类为`user_profile`、`episodic_memory`或`semantic_memory`
+         - `mem_instruct`：`UPDATE`(修改)或`DELETE`（删除）
 
 ## Step 5: 内容整理
 - 动作：隐私内容过滤，并按规则对每条内容整理
@@ -40,14 +51,35 @@
   - 对于【用户本人画像信息】分类：主语全部改为“用户”，每条信息必须是单值陈述句：用户的[属性][系动词][值], 用户[动词][内容]（例："用户的职业是xx"、"用户不喜欢xx"）
   - 对于【情景记忆信息】分类：主语全部改为“用户”，将内容中的相对时间表述（上午、昨天、上周），根据【对话发生时间】换算为绝对日期表述（2026年1月2日上午、2026年1月3日、2026年1月2日-2026年1月9日）
   - 对于【语义记忆信息】分类：将内容中的相对时间表述（上午、昨天、上周），根据【对话发生时间】换算为绝对日期表述（2026年1月2日上午、2026年1月3日、2026年1月2日-2026年1月9日）
+  - 对于【变更记忆指令】：
+    - `mem_content`和`old_mem`均使用第三人称陈述
+    - `old_mem`绝对禁止为空字符串。切绝对禁止出现`未提交`、`未明确`、`未提及`等文字，应该根据上下文推理并明确给出用户要修改的值。
+    - `DELETE`指令的`mem_content`为空字符串
 
 ## Step 6: 输出
 - 动作：输出所有关键信息
 - 规则：
   - 格式：纯净的 JSON 对象，包裹在 ```json 代码块中。
-  - 结构：`{"user_profile": [...],"semantic_memory": [...], "episodic_memory": [...]}`
+  - 结构：
+  ```json
+  {
+    "has_explict_instruct": true | false,
+    "instruct_memories": [
+        {
+            "mem_content": "标准的记忆内容陈述",
+            "mem_type": "user_profile" | "episodic_memory" | "semantic_memory",
+            "mem_instruct": "UPDATE" | "DELETE",
+            "old_mem": "被修改或删除的旧记忆"
+        }
+    ],
+    "user_profile": [...],
+    "semantic_memory": [...],
+    "episodic_memory": [...]
+  }
+  ```
   - 规范：
-    - 若无符合条件的信息，返回 `{"user_profile": [],"semantic_memory": [], "episodic_memory": []}`。
+    - 若无符合条件的信息，返回 `{"has_explict_instruct": false,"instruct_memories": [],"user_profile": [],"semantic_memory": [], "episodic_memory": []}`。
+    - `has_explict_instruct`:当`instruct_memories`不为空时为`true`，否则为`false`。
     - **禁止**输出任何解释、注释或非JSON文本。
 
 # Core Rules (必须严格遵守)

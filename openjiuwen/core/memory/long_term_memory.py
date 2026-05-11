@@ -15,7 +15,8 @@ from openjiuwen.core.memory.manage.index.fragment_memory_manager import Fragment
 from openjiuwen.core.memory.manage.index.variable_manager import VariableManager
 from openjiuwen.core.memory.manage.index.write_manager import WriteManager
 from openjiuwen.core.memory.manage.index.summary_manager import SummaryManager
-from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType
+from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType, VariableUnit, FragmentMemoryUnit, \
+    SummaryUnit
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.manage.search.search_manager import SearchManager, SearchParams
 from openjiuwen.core.foundation.store.base_db_store import BaseDbStore
@@ -48,6 +49,14 @@ class MemInfo(BaseModel):
 class MemResult(BaseModel):
     mem_info: MemInfo = Field(default=None, description="memory information")
     score: float = Field(default=0.0, description="memory score of relevance")
+
+
+class AddMemResult(BaseModel):
+    variables: list[VariableUnit] = Field(default=list, description="variables result")
+    user_profile: list[FragmentMemoryUnit] = Field(default=list, description="user_profile memory result")
+    semantic_memory: list[FragmentMemoryUnit] = Field(default=list, description="semantic memory result")
+    episodic_memory: list[FragmentMemoryUnit] = Field(default=list, description="episodic memory result")
+    summary: list[SummaryUnit] = Field(default=list, description="summary result")
 
 
 class LongTermMemory(metaclass=Singleton):
@@ -210,7 +219,7 @@ class LongTermMemory(metaclass=Singleton):
             user_mem_store,
             config.crypto_key
         )
-        self.generator = Generator(data_id_generator=data_id_generator)
+        self.generator = Generator(data_id_generator=data_id_generator, search_manager=self.search_manager)
         # set init llm
         if config.default_model_cfg and config.default_model_client_cfg:
             llm = LongTermMemory._get_llm_from_config(model_config=config.default_model_cfg,
@@ -396,8 +405,8 @@ class LongTermMemory(metaclass=Singleton):
             session_id: str = DEFAULT_VALUE,
             timestamp: datetime | None = None,
             gen_mem: bool = True,
-            gen_mem_with_history_msg_num: int = 2
-    ):
+            gen_mem_with_history_msg_num: int = 2,
+    ) -> AddMemResult:
         if not self._validate_id(event_type=LogEventType.MEMORY_STORE, scope_id=scope_id):
             memory_logger.error(
                 "Invalid scope_id format.",
@@ -405,8 +414,7 @@ class LongTermMemory(metaclass=Singleton):
                 scope_id=scope_id,
                 user_id=user_id
             )
-            return
-
+            return AddMemResult()
         msg_id = "-1"
         llm = await self._get_scope_llm(scope_id)
         semantic_store = await self._create_semantic_store_with_embedding(scope_id)
@@ -421,7 +429,7 @@ class LongTermMemory(metaclass=Singleton):
                     user_id=user_id,
                     scope_id=scope_id
                 )
-                return
+                return AddMemResult()
             history_messages = await self._get_history_messages(
                 user_id=user_id,
                 scope_id=scope_id,
@@ -447,7 +455,7 @@ class LongTermMemory(metaclass=Singleton):
                 msg_id = await self.message_manager.add(add_req)
 
             if not gen_mem:
-                return
+                return AddMemResult()
 
             check_res, messages = self._check_messages(messages=messages)
             if not check_res:
@@ -459,7 +467,7 @@ class LongTermMemory(metaclass=Singleton):
                     user_id=user_id,
                     scope_id=scope_id
                 )
-                return
+                return AddMemResult()
 
             all_memory = await self.generator.gen_all_memory(
                 scope_id=scope_id,
@@ -473,7 +481,8 @@ class LongTermMemory(metaclass=Singleton):
                 timestamp=timestamp_str,
                 forbidden_variables=self._sys_mem_config.forbidden_variables,
                 summary_max_token=self._sys_mem_config.single_turn_history_summary_max_token,
-                scope_config=scope_config
+                scope_config=scope_config,
+                semantic_store=semantic_store,
             )
             try:
                 await self.write_manager.add_memories(
@@ -506,7 +515,13 @@ class LongTermMemory(metaclass=Singleton):
                     error_msg=f"{str(e)}",
                     cause=e
                 ) from e
-        return
+        return AddMemResult(
+            variables=all_memory.get(MemoryType.VARIABLE.value, []),
+            user_profile=all_memory.get(MemoryType.USER_PROFILE.value, []),
+            semantic_memory=all_memory.get(MemoryType.SEMANTIC_MEMORY.value, []),
+            episodic_memory=all_memory.get(MemoryType.EPISODIC_MEMORY.value, []),
+            summary=all_memory.get(MemoryType.SUMMARY.value, [])
+        )
 
     async def get_recent_messages(
             self,

@@ -333,10 +333,10 @@ async def add_messages(
     timestamp: datetime | None = None,
     gen_mem: bool = True,
     gen_mem_with_history_msg_num: int = 5,
-) -> None
+) -> AddMemResult
 ```
 
-Add conversation messages to the memory engine and generate memories (user profiles, variables, etc.) according to `agent_config`.
+Add conversation messages to the memory engine and generate memories (user profiles, variables, etc.) according to `agent_config`. Also supports **instructive memory** functionality: when users include explicit memory instructions in the conversation (e.g., "remember...", "change... to...", "delete..."), the engine automatically recognizes and performs the corresponding add, update, or delete operations.
 
 **Parameters**:
 
@@ -354,6 +354,17 @@ Add conversation messages to the memory engine and generate memories (user profi
 * **timestamp** (datetime | None, optional): Message timestamp, if `None` uses current UTC time. Default value: `None`.
 * **gen_mem** (bool, optional): Whether to generate memories; when `False`, only saves messages without triggering memory extraction. Default value: `True`.
 * **gen_mem_with_history_msg_num** (int, optional): Number of historical messages to reference when generating memories. Default value: 5.
+
+**Returns**:
+
+* **AddMemResult**: The memory extraction result for this call, containing the following fields:
+  * `variables: list[VariableUnit]`: List of extracted variable memories;
+  * `user_profile: list[FragmentMemoryUnit]`: List of extracted user profile memories;
+  * `semantic_memory: list[FragmentMemoryUnit]`: List of extracted semantic memories;
+  * `episodic_memory: list[FragmentMemoryUnit]`: List of extracted episodic memories;
+  * `summary: list[SummaryUnit]`: List of extracted summary memories.
+
+When `gen_mem=False`, `scope_id` format is invalid, LLM is not initialized, or no user messages are present, returns an empty `AddMemResult()` (all fields are empty lists).
 
 **Exceptions**:
 
@@ -406,6 +417,61 @@ Add conversation messages to the memory engine and generate memories (user profi
 >>>     session_id="session456"
 >>> )
 ```
+
+**Instructive Memory Example**:
+
+```python
+>>> # User modifies existing memory through explicit instruction
+>>> update_messages = [
+>>>     UserMessage(content="Change my age to 30"),
+>>>     AssistantMessage(content="Okay, I've updated your age information.")
+>>> ]
+>>> result = await memory.add_messages(
+>>>     messages=update_messages,
+>>>     agent_config=agent_config,
+>>>     user_id="user123",
+>>>     scope_id="my_scope",
+>>> )
+>>> # result.user_profile will contain FragmentMemoryUnit with operation_type=UPDATE
+>>> 
+>>> # User deletes existing memory through explicit instruction
+>>> delete_messages = [
+>>>     UserMessage(content="Delete my age information"),
+>>>     AssistantMessage(content="Okay, I've deleted your age information.")
+>>> ]
+>>> result = await memory.add_messages(
+>>>     messages=delete_messages,
+>>>     agent_config=agent_config,
+>>>     user_id="user123",
+>>>     scope_id="my_scope",
+>>> )
+>>> # result.user_profile will contain FragmentMemoryUnit with operation_type=DELETE
+```
+
+
+## class openjiuwen.core.memory.long_term_memory.AddMemResult
+
+```
+class openjiuwen.core.memory.long_term_memory.AddMemResult(BaseModel)
+```
+
+Return value model for the `add_messages` method, encapsulating all memory extraction results for this call.
+
+**Fields**:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `variables` | `list[VariableUnit]` | `[]` | List of extracted variable memories |
+| `user_profile` | `list[FragmentMemoryUnit]` | `[]` | List of extracted user profile memories |
+| `semantic_memory` | `list[FragmentMemoryUnit]` | `[]` | List of extracted semantic memories |
+| `episodic_memory` | `list[FragmentMemoryUnit]` | `[]` | List of extracted episodic memories |
+| `summary` | `list[SummaryUnit]` | `[]` | List of extracted summary memories |
+
+**Notes**:
+
+- Each `FragmentMemoryUnit` contains an `operation_type` field (`ADD` / `UPDATE` / `DELETE`) to distinguish the operation type.
+- Instructive memory UPDATE and DELETE operations are represented as `FragmentMemoryUnit` with the corresponding `operation_type` in the return result.
+- When `add_messages` does not perform memory extraction for any reason (`gen_mem=False`, invalid `scope_id`, LLM not initialized, etc.), returns an empty `AddMemResult()`.
 
 
 ### async get_recent_messages

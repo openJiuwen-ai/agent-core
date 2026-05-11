@@ -10,7 +10,8 @@ from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.memory.common.base import generate_idx_name, parse_memory_hit_infos
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.manage.mem_model.data_id_manager import DataIdManager
-from openjiuwen.core.memory.manage.mem_model.memory_unit import BaseMemoryUnit, FragmentMemoryUnit, MemoryType
+from openjiuwen.core.memory.manage.mem_model.memory_unit import BaseMemoryUnit, FragmentMemoryUnit, MemoryType, \
+    OperationType
 from openjiuwen.core.memory.manage.mem_model.semantic_store import SemanticStore
 from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
 from openjiuwen.core.memory.manage.update.mem_update_checker import (
@@ -111,6 +112,18 @@ class FragmentMemoryManager(BaseMemoryManager):
                         scope_id=scope_id
                     )
                     continue
+
+                # Handle DELETE and UPDATE operation
+                if mem_unit.operation_type == OperationType.DELETE or mem_unit.operation_type == OperationType.UPDATE:
+                    await self._handle_update_delete_operation_type(
+                        mem_unit=mem_unit,
+                        user_id=user_id,
+                        scope_id=scope_id,
+                        semantic_store=semantic_store
+                    )
+                    continue
+
+                # For ADD or None operation_type, continue with original logic
                 mem_content = mem_unit.content
                 mem_id = mem_unit.mem_id
                 if mem_content:
@@ -327,6 +340,49 @@ class FragmentMemoryManager(BaseMemoryManager):
         datas.sort(key=lambda x: (x['mem'], x['timestamp']), reverse=True)
         return datas
 
+    async def _handle_update_delete_operation_type(
+            self,
+            mem_unit: FragmentMemoryUnit,
+            user_id: str,
+            scope_id: str,
+            semantic_store: SemanticStore
+    ) -> Optional[str]:
+        """
+        Handle different operation types for memory units.
+        
+        Args:
+            mem_unit: The memory unit to process
+            user_id: User identifier
+            scope_id: Scope identifier
+            semantic_store: Semantic store for vector operations
+            
+        Returns:
+            The memory content if operation type is ADD or None, None otherwise
+        """
+        # Handle DELETE operation
+        if mem_unit.operation_type == OperationType.DELETE:
+            await self.delete(
+                user_id=user_id,
+                scope_id=scope_id,
+                mem_id=mem_unit.mem_id,
+                semantic_store=semantic_store
+            )
+
+        # Handle UPDATE operation
+        if mem_unit.operation_type == OperationType.UPDATE:
+            await self.delete(
+                user_id=user_id,
+                scope_id=scope_id,
+                mem_id=mem_unit.mem_id,
+                semantic_store=semantic_store
+            )
+            await self._add_memory_to_store(
+                user_id=user_id,
+                scope_id=scope_id,
+                memory=mem_unit,
+                semantic_store=semantic_store
+            )
+
     async def _add_memory_to_store(
         self,
         user_id: str,
@@ -367,19 +423,19 @@ class FragmentMemoryManager(BaseMemoryManager):
             content=memory.content,
             source_id=memory.message_mem_id
         )
-        mem_id = await self._add_user_profile_memory(user_profile_search_param)
+        await self._add_user_profile_memory(user_profile_search_param, memory.mem_id)
         vector_success = await self._add_vector_user_profile_memory(
             AddVectorParams(
                 user_id=user_id,
                 scope_id=scope_id,
-                memory_id=mem_id,
+                memory_id=memory.mem_id,
                 mem=memory.content,
                 semantic_store=semantic_store,
                 mem_type=memory.mem_type.value
             )
         )
         if not vector_success:
-            await self.delete(user_id=user_id, scope_id=scope_id, mem_id=mem_id, semantic_store=semantic_store)
+            await self.delete(user_id=user_id, scope_id=scope_id, mem_id=memory.mem_id, semantic_store=semantic_store)
             raise build_error(
                 StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
                 memory_type=memory.mem_type,
@@ -398,8 +454,7 @@ class FragmentMemoryManager(BaseMemoryManager):
         )
         return parse_memory_hit_infos(memory_hit_info)
 
-    async def _add_user_profile_memory(self, req: FragmentMemoryStoreParams) -> str:
-        mem_id = str(await self.date_user_profile_id.generate_next_id(user_id=req.user_id))
+    async def _add_user_profile_memory(self, req: FragmentMemoryStoreParams, mem_id: str) -> str:
 
         time = datetime.now(timezone.utc).astimezone()
         content = BaseMemoryManager.encrypt_memory_if_needed(
