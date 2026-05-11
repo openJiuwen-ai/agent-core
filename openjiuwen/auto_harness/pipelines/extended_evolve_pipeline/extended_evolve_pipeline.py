@@ -163,12 +163,16 @@ class ExtendedEvolvePipeline(BasePipeline):
                 "activate",
                 "running",
             )
+        activated_names: set[str] = set()
         for design in designs_to_run:
+            if design.extension_name in activated_names:
+                continue
             verified = verified_by_name.get(
                 design.extension_name
             )
             if verified is None:
                 continue
+            activated_names.add(design.extension_name)
             logger.info(
                 "[AutoHarnessExtendedPipeline] extension activate dispatch: extension=%s kind=%s",
                 design.extension_name,
