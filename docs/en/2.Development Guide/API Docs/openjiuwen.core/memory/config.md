@@ -10,7 +10,7 @@
 ## class openjiuwen.core.memory.config.config.MemoryEngineConfig
 
 ```
-class openjiuwen.core.memory.config.config.MemoryEngineConfig(default_model_cfg: ModelRequestConfig | None = None, default_model_client_cfg: ModelClientConfig | None = None, forbidden_variables: str = "", input_msg_max_len: int = 8192, crypto_key: bytes = b'')
+class openjiuwen.core.memory.config.config.MemoryEngineConfig(default_model_cfg: ModelRequestConfig | None = None, default_model_client_cfg: ModelClientConfig | None = None, forbidden_variables: str = "", input_msg_max_len: int = 8192, crypto_key: bytes = b'', enable_memory_expiration: bool = False, memory_expiration_seconds: int = 604800)
 ```
 
 Global memory engine configuration, used to set engine-level common parameters.
@@ -22,6 +22,8 @@ Global memory engine configuration, used to set engine-level common parameters.
 * **forbidden_variables** (str, optional): Forbidden variables (e.g., "user_phone") that cannot be stored. Default: `""` (no forbidden variables).
 * **input_msg_max_len** (int, optional): Maximum length of input messages (character count); when generating memory, message content exceeding this length will be truncated. Default: 8192.
 * **crypto_key** (bytes, optional): AES encryption key for encrypting sensitive parameters in storage (such as API key); must be 32 bytes in length; if empty bytes `b''`, encryption is disabled. Default: `b''` (no encryption).
+* **enable_memory_expiration** (bool, optional): Whether to enable expired memory cleanup; when `True`, the engine will automatically clean up memories that exceed the retention period when calling `add_messages`. Default: `False`.
+* **memory_expiration_seconds** (int, optional): Memory retention duration in seconds; memories older than this duration will be cleaned up when expired memory cleanup is enabled; must be greater than 0. Default: `604800` (7 days).
 
 **Parameter Validation**:
 
@@ -52,6 +54,8 @@ The `crypto_key` parameter has a `field_validator`:
 >>>     forbidden_variables="user_id, phone_number, email",
 >>>     input_msg_max_len=8192,
 >>>     crypto_key=b"your-32-byte-aes-key-here!!",  # 32 bytes
+>>>     enable_memory_expiration=True,
+>>>     memory_expiration_seconds=7 * 24 * 60 * 60,  # 7 days
 >>> )
 ```
 
@@ -183,8 +187,10 @@ Agent-level memory strategy configuration, describing what types of memories an 
 >>>     forbidden_variables="user_id, phone_number, email",
 >>>     input_msg_max_len=8192,
 >>>     crypto_key=b"your-32-byte-aes-key-here!!",  # 32 bytes
+>>>     enable_memory_expiration=True,
+>>>     memory_expiration_seconds=7 * 24 * 60 * 60,  # 7 days
 >>> )
->>> 
+>>>
 >>> # 2. Create scope configuration (optional)
 >>> scope_config = MemoryScopeConfig(
 >>>     model_cfg=ModelRequestConfig(

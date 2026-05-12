@@ -159,3 +159,9 @@ class SearchManager:
                 error_msg=f"{MemoryType.VARIABLE.value} manager class is not VariableManager",
             )
         return await self.managers[MemoryType.VARIABLE.value].query_variable(user_id=user_id, scope_id=scope_id)
+
+    async def get_all(self, user_id: str, scope_id: str, mem_type: str) -> list[dict[str, Any]] | None:
+        return await self.mem_store.get_all(user_id, scope_id, mem_type)
+
+    async def get_mem_by_id(self, user_id: str, scope_id: str, mem_id: str) -> dict[str, Any] | None:
+        return await self.mem_store.get(user_id=user_id, scope_id=scope_id, mem_id=mem_id)

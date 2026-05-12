@@ -39,3 +39,11 @@ class ScopeUserMappingManager:
             columns=None
         )
         return results if results else None
+
+    async def get_all_mappings(self) -> list[dict[str, str]] | None:
+        results = await self.sql_db.condition_get(
+            table=self.meta_table,
+            conditions={},
+            columns=["user_id", "scope_id"]
+        )
+        return results if results else None

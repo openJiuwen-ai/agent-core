@@ -20,6 +20,8 @@ The core types of the memory engine are defined in the `openjiuwen.core.memory` 
   - `forbidden_variables: str`: Forbidden variables (e.g., "user_phone") that cannot be stored. Default: `""` (no forbidden variables).
   - `input_msg_max_len: int`: Maximum length of input messages (default: 8192).
   - `crypto_key: bytes`: AES key for encrypting sensitive fields in storage (must be 32 bytes in length; empty means no encryption).
+  - `enable_memory_expiration: bool`: Whether to enable expired memory cleanup; when `True`, the engine will automatically clean up memories that exceed the retention period when calling `add_messages`. Default: `False`.
+  - `memory_expiration_seconds: int`: Memory retention duration in seconds; memories older than this duration will be cleaned up when expired memory cleanup is enabled; must be greater than 0. Default: `604800` (7 days).
 
 - **`MemoryScopeConfig`** (Scope-level Configuration)
   Used to define independent model/vector configurations for different `scope_id`:

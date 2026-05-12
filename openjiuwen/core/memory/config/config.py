@@ -17,6 +17,8 @@ class MemoryEngineConfig(BaseModel):
     input_msg_max_len: int = Field(default=8192)  # max length of input message
     crypto_key: bytes = Field(default=b'')  # aes key, length must be 32, not enable encrypt memory if empty
     single_turn_history_summary_max_token: int = Field(default=128, gt=0)
+    enable_memory_expiration: bool = Field(default=False)
+    memory_expiration_seconds: int = Field(default=7 * 24 * 60 * 60, gt=0)  # default 7 days
 
     @field_validator('crypto_key')
     @classmethod

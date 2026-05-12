@@ -1,5 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import asyncio
 import copy
 from datetime import datetime, timedelta, timezone
 from typing import Tuple
@@ -100,6 +101,8 @@ class LongTermMemory(metaclass=Singleton):
         self._base_embed: Embedding | None = None
         # embedding model cache
         self._scope_embedding: dict[str, Embedding] = {}
+        # expiration service
+        self._expiration_service: "MemoryExpirationService" = None
 
     async def register_store(self, kv_store: BaseKVStore,
                              vector_store: BaseVectorStore | None = None,
@@ -225,6 +228,35 @@ class LongTermMemory(metaclass=Singleton):
             llm = LongTermMemory._get_llm_from_config(model_config=config.default_model_cfg,
                                                     model_client_config=config.default_model_client_cfg)
             self._base_llm = llm
+        self._init_expiration_service(config)
+
+    def _init_expiration_service(self, config: MemoryEngineConfig) -> None:
+        if self._expiration_service is not None:
+            old_service = self._expiration_service
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(old_service.stop())
+            except RuntimeError:
+                memory_logger.error(
+                    "Failed to stop previous memory expiration service: no running event loop. "
+                    "The background task may continue running."
+                )
+        self._expiration_service = None
+        if config.enable_memory_expiration:
+            from openjiuwen.core.memory.manage.expiration.memory_expiration_service import MemoryExpirationService
+            self._expiration_service = MemoryExpirationService(
+                kv_store=self.kv_store,
+                config=config,
+                scope_user_mapping_manager=self.scope_user_mapping_manager,
+                write_manager=self.write_manager,
+                search_manager=self.search_manager,
+                semantic_store_factory=self._create_semantic_store_with_embedding,
+            )
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._expiration_service.start())
+            except RuntimeError:
+                memory_logger.error("Failed to start memory expiration service: no running event loop")
 
     async def set_scope_config(self, scope_id: str, memory_scope_config: MemoryScopeConfig) -> bool:
         """
