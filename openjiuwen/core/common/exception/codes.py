@@ -884,6 +884,8 @@ class StatusCode(Enum):
     COMMON_JSON_EXECUTION_PROCESS_ERROR = (188003, "common json_execution process error, reason: {error_msg}")
     COMMON_URL_INPUT_INVALID = (188004, "common url_input is invalid, reason: {error_msg}")
     COMMON_SSL_CERT_INVALID = (188005, "common ssl_cert is invalid, reason: {error_msg}")
+    COMMON_ENCRYPTION_ERROR = (188006, "encryption failed, reason: {error_msg}")
+    COMMON_DECRYPTION_ERROR = (188007, "decryption failed, reason: {error_msg}")
 
     # Foundation - Schema 189000 - 189999
     SCHEMA_VALIDATE_INVALID = (189001, "validate data with schema failed, error='{reason}', data={data}")
