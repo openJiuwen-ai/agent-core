@@ -168,6 +168,14 @@ class CodingMemoryRail(DeepAgentRail):
             )
 
             memory_tools = create_coding_memory_tools(self._tool_ctx, language=language, agent_id=agent_id)
+
+            # create_coding_memory_tools overwrites ctx.coding_memory_dir with
+            # workspace.get_node_path(), which may point to the project directory
+            # instead of the agent's designated data workspace.  Restore the
+            # absolute path that was passed at construction time so tools write
+            # to the correct directory.
+            if self._tool_ctx and self._coding_memory_dir:
+                self._tool_ctx.coding_memory_dir = self._coding_memory_dir
             
             for tool in memory_tools:
                 try:

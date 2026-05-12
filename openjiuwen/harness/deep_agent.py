@@ -1000,7 +1000,7 @@ class DeepAgent(BaseAgent):
 
         from openjiuwen.harness.factory import create_deep_agent
 
-        return create_deep_agent(**create_kwargs)
+        return create_deep_agent(**create_kwargs, **dict(spec.factory_kwargs or {}))
 
     def _find_subagent_spec(self, subagent_type: str) -> Optional["SubAgentConfig | DeepAgent"]:
         """Find SubAgentConfig matching subagent_type.
