@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Agent-team prompt assembly: template loaders, policy text, section builders.
 
 This package owns everything that produces system-prompt content for a

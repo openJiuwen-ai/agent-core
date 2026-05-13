@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from openjiuwen.core.common.logging import multi_agent_logger as logger
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.runner.callback.events import AgentTeamEvents
 
 if TYPE_CHECKING:
     from openjiuwen.core.multi_agent.team_runtime.envelope import MessageEnvelope
@@ -44,6 +45,15 @@ class MessageRouter:
         )
 
         from openjiuwen.core.runner import Runner
+        from openjiuwen.core.runner.callback import get_callback_framework
+
+        await get_callback_framework().trigger(
+            AgentTeamEvents.AGENT_P2P_RECEIVED,
+            sender=envelope.sender,
+            recipient=envelope.recipient,
+            message_id=envelope.message_id,
+            session_id=envelope.session_id,
+        )
 
         try:
             session = self._build_agent_session(envelope.session_id, envelope.recipient)
@@ -124,6 +134,17 @@ class MessageRouter:
         """
         try:
             from openjiuwen.core.runner import Runner
+            from openjiuwen.core.runner.callback import get_callback_framework
+
+            await get_callback_framework().trigger(
+                AgentTeamEvents.AGENT_PUBSUB_RECEIVED,
+                sender=envelope.sender,
+                subscriber=subscriber,
+                topic_id=envelope.topic_id,
+                message_id=envelope.message_id,
+                session_id=envelope.session_id,
+            )
+
             session = self._build_agent_session(envelope.session_id, subscriber)
             await Runner.run_agent(
                 agent=subscriber,

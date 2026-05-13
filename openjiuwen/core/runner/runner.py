@@ -218,6 +218,35 @@ class _RunnerImpl(_TeamRunnerMixin):
         finally:
             reset_task_group(token)
 
+    def _enter_root_task_group_context(self):
+        """Bind :attr:`_root_task_group` into ContextVar; return token for :meth:`_exit_root_task_group_context`.
+
+        Async generators must use this with ``try``/``finally`` instead of :meth:`_root_task_group_scope`:
+        ``contextlib``'s sync ``yield`` + ``GeneratorExit`` can call ``ContextVar.reset`` in an invalid
+        context (e.g. A2A streaming on a uvicorn worker thread).
+        """
+        if self._root_task_group is None:
+            return None
+        from openjiuwen.core.common.task_manager.context import get_task_group, set_task_group
+
+        if get_task_group() is not None:
+            return None
+        return set_task_group(self._root_task_group)
+
+    def _exit_root_task_group_context(self, token) -> None:
+        if token is None:
+            return
+        from openjiuwen.core.common.task_manager.context import reset_task_group
+
+        try:
+            reset_task_group(token)
+        except ValueError:
+            logger.debug(
+                "ContextVar reset skipped for root task group (invalid token context); "
+                "runner_id=%s",
+                self._runner_id,
+            )
+
     def set_config(self, config: RunnerConfig):
         """Set the runner configuration with provided config object.
 
@@ -358,11 +387,14 @@ class _RunnerImpl(_TeamRunnerMixin):
             stream_modes: Types of streaming data to output
             envs: Environment variables or configuration overrides
         """
-        with self._root_task_group_scope():
+        token = self._enter_root_task_group_context()
+        try:
             workflow_instance, workflow_session = await self._prepare_workflow(workflow, session)
             async for chunk in workflow_instance.stream(inputs, session=workflow_session,
                                                         stream_modes=stream_modes, context=context):
                 yield chunk
+        finally:
+            self._exit_root_task_group_context(token)
 
     async def run_agent(self,
                         agent: str | BaseAgent | LegacyBaseAgent,
@@ -413,7 +445,8 @@ class _RunnerImpl(_TeamRunnerMixin):
                stream_modes: Types of streaming data to output
                envs: Environment variables or configuration override
         """
-        with self._root_task_group_scope():
+        token = self._enter_root_task_group_context()
+        try:
             agent_instance, agent_session = await self._prepare_agent(agent, inputs, session)
             if self._is_remote_agent(agent_instance):
                 async for chunk in agent_instance.stream(inputs):
@@ -426,6 +459,8 @@ class _RunnerImpl(_TeamRunnerMixin):
                 async for chunk in agent_instance.stream(inputs, session=agent_session):
                     yield chunk
                 await agent_session.post_run()
+        finally:
+            self._exit_root_task_group_context(token)
 
     async def release(self, session_id: str, *, force: bool = False):
         """

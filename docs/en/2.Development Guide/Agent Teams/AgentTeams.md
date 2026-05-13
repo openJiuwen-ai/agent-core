@@ -167,35 +167,26 @@ The `@member_name message` syntax routes the message directly to the target team
 
 ## Recovery and Persistence
 
-### Resume a Persistent Team
+Persistent teams (`lifecycle: persistent`) keep their state in the session checkpoint and the team storage. **All recovery paths share a single entry point — pass the spec and the target session to `Runner.run_agent_team_streaming`**. The `runtime` subsystem inspects the in-memory pool and the persisted session to pick the right branch automatically:
 
-For persistent teams that are still in standby (same process), use `resume_persistent_team()` to start a new round:
+| Scenario | Auto-selected branch |
+|---|---|
+| Same process, switch to a new session | `new_team_in_session_warm` (reuse the in-memory Leader) |
+| Return to a previously persisted session | `warm_recover` (rebind the Leader to the session checkpoint) |
+| Cold start after a process restart | `cold_recover` (rebuild Leader from the session bucket, respawn teammates) |
+| Resume after pause | `resume_from_pause` (same Leader, same session) |
 
 ```python
-from openjiuwen.agent_teams import resume_persistent_team
-
-# Resume in a new session (team processes are still alive)
-leader = await resume_persistent_team(leader, new_session_id="round_2")
-
-# Run the next round
-async for chunk in leader.stream(inputs={"query": "Next task"}):
+# Single entry point: spec + target session_id, runtime decides cold vs warm.
+async for chunk in Runner.run_agent_team_streaming(
+    agent_team=spec,
+    inputs={"query": "Next task"},
+    session="round_2",
+):
     print(chunk)
 ```
 
-### Recover from a Session
-
-For crash recovery or cross-process restore, use `recover_agent_team()`:
-
-```python
-from openjiuwen.agent_teams.factory import recover_agent_team
-
-# Recover the team (includes Leader and all teammates)
-leader = await recover_agent_team(session_id="previous_session_id")
-
-# Continue execution
-async for chunk in leader.stream(inputs={"query": "Continue the task"}):
-    print(chunk)
-```
+If you need to bypass `Runner` and obtain a leader instance directly (e.g. operations scripting), the low-level path is `TeamAgent.recover_from_session(session, team_name, runtime_spec=spec)` followed by `await agent.recover_team()`. Application code should stay on the `Runner` path.
 
 ## Health Check and Auto Recovery
 

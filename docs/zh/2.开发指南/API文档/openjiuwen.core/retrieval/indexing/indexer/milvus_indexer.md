@@ -53,7 +53,12 @@ build_index(chunks: List[TextChunk], config: IndexConfig, embed_model: Optional[
 
 **返回**：
 
-**bool**，如果构建成功则返回True，否则返回False。
+**bool**，构建成功时返回 True。
+
+**异常**：
+
+* **BaseError**（码 155105，`RETRIEVAL_INDEXING_EMBED_MODEL_NOT_FOUND`）：当 `config.index_type` 为 `"vector"` 或 `"hybrid"` 且未提供 `embed_model` 时抛出。
+* **BaseError**（码 155108，`RETRIEVAL_INDEXING_ADD_DOC_RUNTIME_ERROR`）：当集合中已存在相同 `doc_id` 的文档，或构建过程中发生其他运行时错误时抛出。
 
 ### async update_index
 

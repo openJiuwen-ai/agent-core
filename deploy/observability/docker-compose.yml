@@ -1,0 +1,73 @@
+# Minimal but production-shaped observability stack:
+#   application -> otel-collector(:4317) -> langfuse-server(:4317)
+#                                        \-> debug stdout
+#
+# Bring up:    docker-compose up -d
+# UI:          http://localhost:3000   (Langfuse)
+# OTLP gRPC:   localhost:4317           (point OTEL_EXPORTER_OTLP_ENDPOINT here)
+#
+# Replace the NEXTAUTH_SECRET / SALT / database password before exposing
+# this stack outside localhost.
+
+version: "3.9"
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.108.0
+    container_name: otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    depends_on:
+      - langfuse-server
+
+  langfuse-db:
+    image: postgres:16-alpine
+    container_name: langfuse-db
+    environment:
+      POSTGRES_DB: langfuse
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+    volumes:
+      - langfuse-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 5s
+      retries: 10
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: langfuse-clickhouse
+    volumes:
+      - langfuse-ch:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      retries: 10
+
+  langfuse-server:
+    image: langfuse/langfuse:latest
+    container_name: langfuse-server
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      NEXTAUTH_SECRET: please-change-this-secret
+      NEXTAUTH_URL: http://localhost:3000
+      SALT: please-change-this-salt
+      TELEMETRY_ENABLED: "false"
+      OTEL_EXPORTER_OTLP_ENDPOINT_GRPC_ENABLED: "true"
+    ports:
+      - "3000:3000"
+      - "4327:4317"
+
+volumes:
+  langfuse-pg:
+  langfuse-ch:

@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """prompt_toolkit + rich main loop for the Team CLI.
 
 :class:`TeamCli` owns the prompt session, the rich ``Console``, the

@@ -15,6 +15,12 @@ class MemoryType(Enum):
     UNKNOWN = "unknown"
 
 
+class OperationType(Enum):
+    ADD = "add"
+    UPDATE = "update"
+    DELETE = "delete"
+
+
 class SupportMemoryType(Enum):
     USER_PROFILE = "user_profile"
     SUMMARY = "summary"
@@ -32,6 +38,7 @@ class FragmentMemoryUnit(BaseMemoryUnit):
     content: str
     message_mem_id: Optional[str] = None  # Corresponding Message ID
     timestamp: str = ""
+    operation_type: Optional[OperationType] = None
 
 
 @dataclass

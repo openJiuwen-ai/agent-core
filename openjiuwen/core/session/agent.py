@@ -1,6 +1,5 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-
 import uuid
 from typing import (
     Any,
@@ -101,6 +100,12 @@ class Session:
     async def pre_run(self, **kwargs):
         if self._pre_run_done:
             return self
+        from openjiuwen.core.runner.callback import trigger
+        from openjiuwen.core.runner.callback.events import SessionEvents
+        await trigger(SessionEvents.AGENT_SESSION_CREATED,
+                                    session_id=self.get_session_id(),
+                                    card=self._card,
+                                    session=self)
         inputs = kwargs.get("inputs")
         await CheckpointerFactory.get_checkpointer().pre_agent_execute(self._inner, inputs)
         self._pre_run_done = True
@@ -168,7 +173,7 @@ def create_agent_session(session_id: str = None,
                          source_metadata: dict[str, Any] | None = None,
                          **kwargs) -> Session:
     close_stream_on_post_run = kwargs.get("close_stream_on_post_run", True)
-    return Session(
+    session = Session(
         session_id=session_id,
         envs=envs,
         card=card,
@@ -176,3 +181,4 @@ def create_agent_session(session_id: str = None,
         close_stream_on_post_run=close_stream_on_post_run,
         source_metadata=source_metadata,
     )
+    return session

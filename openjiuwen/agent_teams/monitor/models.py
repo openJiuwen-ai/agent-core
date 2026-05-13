@@ -19,9 +19,9 @@ from pydantic import BaseModel, Field
 class TeamInfo(BaseModel):
     """Team basic information."""
 
-    team_id: str
-    name: str
-    leader_id: str
+    team_name: str
+    display_name: str
+    leader_member_name: str
     desc: str | None = None
     created: int = Field(description="Creation timestamp in milliseconds")
 
@@ -33,9 +33,9 @@ class TeamInfo(BaseModel):
             team: A ``Team`` database row object.
         """
         return cls(
-            team_id=team.team_name,
-            name=team.display_name,
-            leader_id=team.leader_member_name,
+            team_name=team.team_name,
+            display_name=team.display_name,
+            leader_member_name=team.leader_member_name,
             desc=team.desc,
             created=team.created,
         )
@@ -44,9 +44,9 @@ class TeamInfo(BaseModel):
 class MemberInfo(BaseModel):
     """Team member information."""
 
-    member_id: str
-    team_id: str
-    name: str
+    member_name: str
+    team_name: str
+    display_name: str
     desc: str | None = None
     status: str = Field(description="MemberStatus value")
     execution_status: str | None = Field(default=None, description="ExecutionStatus value")
@@ -60,9 +60,9 @@ class MemberInfo(BaseModel):
             member: A ``TeamMember`` database row object.
         """
         return cls(
-            member_id=member.member_name,
-            team_id=member.team_name,
-            name=member.display_name,
+            member_name=member.member_name,
+            team_name=member.team_name,
+            display_name=member.display_name,
             desc=member.desc,
             status=member.status,
             execution_status=member.execution_status,
@@ -79,7 +79,7 @@ class TaskInfo(BaseModel):
     """
 
     task_id: str
-    team_id: str
+    team_name: str
     title: str
     content: str
     status: str = Field(description="TaskStatus value")
@@ -95,7 +95,7 @@ class TaskInfo(BaseModel):
         """
         return cls(
             task_id=task.task_id,
-            team_id=task.team_name,
+            team_name=task.team_name,
             title=task.title,
             content=task.content,
             status=task.status,
@@ -108,12 +108,12 @@ class MessageInfo(BaseModel):
     """Mailbox message information."""
 
     message_id: str
-    team_id: str
-    from_member: str
-    to_member: str | None = None
+    team_name: str
+    from_member_name: str
+    to_member_name: str | None = None
     content: str
     timestamp: int
-    is_broadcast: bool
+    broadcast: bool
     is_read: bool = False
 
     @classmethod
@@ -125,12 +125,12 @@ class MessageInfo(BaseModel):
         """
         return cls(
             message_id=msg.message_id,
-            team_id=msg.team_name,
-            from_member=msg.from_member_name,
-            to_member=msg.to_member_name,
+            team_name=msg.team_name,
+            from_member_name=msg.from_member_name,
+            to_member_name=msg.to_member_name,
             content=msg.content,
             timestamp=msg.timestamp,
-            is_broadcast=msg.broadcast,
+            broadcast=msg.broadcast,
             is_read=msg.is_read,
         )
 
@@ -177,13 +177,15 @@ class MonitorEvent(BaseModel):
 
     All payload fields from the four event categories (team, member,
     task, message) are flattened into explicit optional fields.
-    Each event type only populates the relevant subset.
+    Each event type only populates the relevant subset. Field names
+    mirror the internal ``BaseEventMessage`` payload schema, so the
+    conversion is a direct pass-through.
 
     Common fields (always present):
-        event_type, team_id, timestamp
+        event_type, team_name, timestamp
 
     Team event fields:
-        TEAM_CREATED: name, leader_id, created
+        TEAM_CREATED: display_name, leader_member_name, created
 
     Member event fields:
         MEMBER_RESTARTED: reason, restart_count
@@ -195,18 +197,18 @@ class MonitorEvent(BaseModel):
         TASK_CREATED: task_id, status
 
     Message event fields:
-        MESSAGE: message_id, from_member, to_member
-        BROADCAST: message_id, from_member
+        MESSAGE: message_id, from_member_name, to_member_name
+        BROADCAST: message_id, from_member_name
     """
 
     event_type: MonitorEventType
-    team_id: str
-    member_id: str | None = None
+    team_name: str
+    member_name: str | None = None
     timestamp: int = Field(description="Monitor receive time in milliseconds")
 
     # -- Team fields --
-    name: str | None = None
-    leader_id: str | None = None
+    display_name: str | None = None
+    leader_member_name: str | None = None
     created: int | None = None
 
     # -- Member fields --
@@ -222,8 +224,8 @@ class MonitorEvent(BaseModel):
 
     # -- Message fields --
     message_id: str | None = None
-    from_member: str | None = None
-    to_member: str | None = None
+    from_member_name: str | None = None
+    to_member_name: str | None = None
 
     @classmethod
     def from_event_message(cls, event_message) -> MonitorEvent | None:
@@ -239,27 +241,10 @@ class MonitorEvent(BaseModel):
         if raw_type not in _MONITOR_EVENT_VALUES:
             return None
 
-        payload = event_message.payload
-        return cls(
-            event_type=MonitorEventType(raw_type),
-            team_id=payload.get("team_name", ""),
-            member_id=payload.get("member_name"),
-            timestamp=int(round(time.time() * 1000)),
-            # Team
-            name=payload.get("display_name"),
-            leader_id=payload.get("leader_member_name"),
-            created=payload.get("created"),
-            # Member
-            old_status=payload.get("old_status"),
-            new_status=payload.get("new_status"),
-            reason=payload.get("reason"),
-            restart_count=payload.get("restart_count"),
-            force=payload.get("force"),
-            # Task
-            task_id=payload.get("task_id"),
-            status=payload.get("status"),
-            # Message
-            message_id=payload.get("message_id"),
-            from_member=payload.get("from_member_name"),
-            to_member=payload.get("to_member_name"),
+        return cls.model_validate(
+            {
+                **event_message.payload,
+                "event_type": raw_type,
+                "timestamp": int(round(time.time() * 1000)),
+            },
         )

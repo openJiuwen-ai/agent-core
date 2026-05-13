@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Coordination lifecycle and transport wiring for TeamAgent."""
 
 from __future__ import annotations

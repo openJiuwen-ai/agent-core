@@ -152,7 +152,8 @@ class ResourceMgr:
                   card: AgentCard,
                   agent: AgentProvider | "RemoteAgent",
                   *,
-                  tag: Optional[Tag | list[Tag]] = None
+                  tag: Optional[Tag | list[Tag]] = None,
+                  interface_url: str | None = None,
                   ) -> Result[AgentCard, Exception]:
         """
         Add a single agent to the resource manager.
@@ -175,7 +176,8 @@ class ResourceMgr:
                                         resource=agent,
                                         resource_card=card,
                                         tag=tag,
-                                        resource_type="agent")
+                                        resource_type="agent",
+                                        interface_url=interface_url)
 
     def add_agents(self,
                    agents: list[Tuple[AgentCard, AgentProvider]],
@@ -1309,7 +1311,8 @@ class ResourceMgr:
         self._id_to_card = {}
 
     def _inner_add_resource(self, *, resource_id: str, resource_type: str, resource: Any,
-                            resource_card: Optional[BaseCard] = None, tag: Optional[Tag | list[Tag]] = None):
+                            resource_card: Optional[BaseCard] = None, tag: Optional[Tag | list[Tag]] = None,
+                            interface_url: str | None = None):
         """
         Internal method to add a resource.
 
@@ -1331,7 +1334,12 @@ class ResourceMgr:
             if resource_type == "workflow":
                 self._resource_registry.workflow().add_workflow(resource_id, resource)
             elif resource_type == "agent":
-                self._resource_registry.agent().add_agent(resource_id, resource)
+                self._resource_registry.agent().add_agent(
+                    resource_id,
+                    resource,
+                    card=resource_card,
+                    interface_url=interface_url,
+                )
             elif resource_type == "team":
                 self._resource_registry.agent_team().add_agent_team(resource_id, resource)
             elif resource_type == "tool":

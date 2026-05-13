@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """In-process pool of active TeamAgent runtimes.
 
 Replaces the single-active model with a multi-team object pool. Each

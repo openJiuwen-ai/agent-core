@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Per-team state namespace stored in agent team session checkpoints.
 
 Session state organises per-team data under a dedicated ``teams`` bucket

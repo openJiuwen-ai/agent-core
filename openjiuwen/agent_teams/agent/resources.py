@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """TeamAgent private runtime resources.
 
 The third quadrant of the four-quadrant TeamAgent decomposition: per-instance

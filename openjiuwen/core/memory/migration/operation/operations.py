@@ -138,3 +138,18 @@ class UpdateKVOperation(BaseOperation):
         update_func (UpdateKVCallable): Callable that performs the key-value update.
     """
     update_func: UpdateKVCallable
+
+
+# ==================== Message Operations ====================
+MessageUpdateCallable = Callable[[Any], Awaitable[None]]
+
+
+@dataclass
+class UpdateMessageOperation(BaseOperation):
+    """
+    Update message store data via a provided callable.
+
+    Attributes:
+        update_func (MessageUpdateCallable): Callable that performs the message store update.
+    """
+    update_func: MessageUpdateCallable

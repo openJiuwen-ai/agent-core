@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """AgentTeam public interfaces."""
 
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
@@ -8,7 +10,6 @@ from openjiuwen.agent_teams.constants import (
     RESERVED_MEMBER_NAMES,
     USER_PSEUDO_MEMBER_NAME,
 )
-from openjiuwen.agent_teams.factory import create_agent_team, resume_persistent_team
 from openjiuwen.agent_teams.interaction import (
     HumanAgentInbox,
     HumanAgentNotEnabledError,
@@ -88,6 +89,4 @@ __all__ = [
     "create_messager",
     "InProcessSpawnHandle",
     "MemoryDatabaseConfig",
-    "create_agent_team",
-    "resume_persistent_team",
 ]

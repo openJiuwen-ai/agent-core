@@ -15,11 +15,25 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from openjiuwen.auto_harness.pipelines import (
+    EXTENDED_EVOLVE_PIPELINE,
     META_EVOLVE_PIPELINE,
+    normalize_pipeline_name,
 )
 from openjiuwen.core.foundation.llm.model import Model
 
 logger = logging.getLogger(__name__)
+
+PIPELINE_PREFERENCE_AUTO = "auto"
+_PIPELINE_PREFERENCE_ALIASES = {
+    "": PIPELINE_PREFERENCE_AUTO,
+    PIPELINE_PREFERENCE_AUTO: PIPELINE_PREFERENCE_AUTO,
+    "meta": META_EVOLVE_PIPELINE,
+    META_EVOLVE_PIPELINE: META_EVOLVE_PIPELINE,
+    "extended": EXTENDED_EVOLVE_PIPELINE,
+    EXTENDED_EVOLVE_PIPELINE: EXTENDED_EVOLVE_PIPELINE,
+    "extended_harness_pipeline": EXTENDED_EVOLVE_PIPELINE,
+    "pr_pipeline": META_EVOLVE_PIPELINE,
+}
 
 _DEFAULT_REPO_URL = (
     "https://gitcode.com/openJiuwen/agent-core.git"
@@ -27,6 +41,25 @@ _DEFAULT_REPO_URL = (
 _CONFIG_TEMPLATE = (
     Path(__file__).parent / "resources" / "config.yaml"
 )
+
+
+def normalize_pipeline_preference(value: Any) -> str:
+    """Normalize user-facing pipeline preference values."""
+    raw = str(value or "").strip().lower()
+    normalized = _PIPELINE_PREFERENCE_ALIASES.get(raw)
+    if normalized is not None:
+        return normalized
+    pipeline_name = normalize_pipeline_name(raw)
+    if pipeline_name in (
+        META_EVOLVE_PIPELINE,
+        EXTENDED_EVOLVE_PIPELINE,
+    ):
+        return pipeline_name
+    logger.warning(
+        "Invalid auto-harness pipeline preference %r, using auto",
+        value,
+    )
+    return PIPELINE_PREFERENCE_AUTO
 
 
 def _default_immutable_files() -> list[str]:
@@ -55,6 +88,19 @@ class ExperienceType(str, Enum):
     OPTIMIZATION = "optimization"
     FAILURE = "failure"
     INSIGHT = "insight"
+
+
+class StageSlot(str, Enum):
+    """Canonical stage phase names shared across pipelines."""
+
+    ASSESS = "assess"
+    PLAN = "plan"
+    IMPLEMENT = "implement"
+    VERIFY = "verify"
+    ACTIVATE = "activate"
+    COMMIT = "commit"
+    PUBLISH = "publish"
+    LEARNINGS = "learnings"
 
 
 @dataclass
@@ -105,6 +151,10 @@ class Experience:
     files_changed: List[str] = field(
         default_factory=list
     )
+    signal: str = ""
+    strategy: str = ""
+    causal_chain: str = ""
+    signal_frequency: int = 0
     id: str = field(
         default_factory=lambda: uuid.uuid4().hex[:12]
     )
@@ -168,6 +218,68 @@ class PipelineSelectionArtifact:
         default_factory=list
     )
     fallback_pipeline: str = ""
+
+
+@dataclass
+class GapAnalysisArtifact:
+    """Gap analysis output for the extended evolve pipeline."""
+
+    gaps: List["Gap"] = field(
+        default_factory=list
+    )
+    competitor_summary: str = ""
+    raw_analysis: str = ""
+
+
+@dataclass
+class ExtensionDesign:
+    """One extension design candidate."""
+
+    gap_id: str = ""
+    extension_name: str = ""
+    kind: str = "capability"
+    depends_on: List[str] = field(
+        default_factory=list
+    )
+    applies_to: List[str] = field(
+        default_factory=list
+    )
+    components: List[str] = field(
+        default_factory=list
+    )
+    file_plan: Dict[str, str] = field(
+        default_factory=dict
+    )
+    harness_config_patch: Dict[str, Any] = field(
+        default_factory=dict
+    )
+
+
+@dataclass
+class ExtensionDesignArtifact:
+    """Design output for runtime extension generation."""
+
+    designs: List["ExtensionDesign"] = field(
+        default_factory=list
+    )
+
+
+@dataclass
+class ExtensionBuildArtifact:
+    """Verified extension build output inside a task worktree."""
+
+    extension_name: str = ""
+    extension_root: str = ""
+    config_path: str = ""
+
+
+@dataclass
+class RuntimeExtensionArtifact:
+    """Session-local promoted runtime extension."""
+
+    extension_name: str = ""
+    runtime_path: str = ""
+    config_path: str = ""
 
 
 @dataclass
@@ -303,6 +415,7 @@ class AutoHarnessPaths:
     worktrees_dir: str = ""
     runs_dir: str = ""
     cache_repo_dir: str = ""
+    runtime_extensions_dir: str = ""
 
 
 @dataclass
@@ -313,6 +426,9 @@ class AutoHarnessRuntimeState:
     selected_pipeline: str = ""
     config_bootstrapped: bool = False
     suggested_local_repo: str = ""
+    session_id: str = field(
+        default_factory=lambda: uuid.uuid4().hex[:12]
+    )
 
 
 @dataclass
@@ -346,6 +462,7 @@ class StageSpec:
         default_factory=list
     )
     description: str = ""
+    slot: str = ""
 
 
 @dataclass
@@ -373,6 +490,7 @@ class AutoHarnessConfig:
     """
 
     model: Optional[Model] = None
+    plan_model: Optional[Model] = None
 
     # ---- 路径 ----
     data_dir: str = ""
@@ -391,15 +509,16 @@ class AutoHarnessConfig:
     # ---- 语言 ----
     language: str = "cn"
     optimization_goal: str = ""
-    competitor: str = ""
+    pipeline_preference: str = PIPELINE_PREFERENCE_AUTO
 
     # ---- 预算 ----
-    session_budget_secs: float = 3600.0
+    session_budget_secs: float = 900000.0
     cost_limit_usd: float = 10.0
-    task_timeout_secs: float = 1200.0
-    model_timeout_secs: float = 300.0
-    max_tasks_per_session: int = 3
+    task_timeout_secs: float = 300000.0
+    model_timeout_secs: float = 300000.0
+    max_tasks_per_session: int = 10
     self_driven_slots: int = 1
+    extension_verify_concurrency: int = 4
 
     # ---- Git ----
     git_remote: str = ""
@@ -487,6 +606,16 @@ class AutoHarnessConfig:
                 Path(self.data_dir) / "repo" / repo_name
             )
         return f".auto_harness/repo/{repo_name}"
+
+    @property
+    def runtime_extensions_dir(self) -> str:
+        """Session-local runtime extensions root."""
+        if self.data_dir:
+            return str(
+                Path(self.data_dir)
+                / "runtime_extensions"
+            )
+        return ".auto_harness/runtime_extensions/"
 
     def resolve_repo_name(self) -> str:
         """Resolve the repository directory name used for local cache paths."""
@@ -582,6 +711,9 @@ class AutoHarnessConfig:
             worktrees_dir=self.worktrees_dir,
             runs_dir=self.runs_dir,
             cache_repo_dir=self.cache_repo_dir,
+            runtime_extensions_dir=(
+                self.runtime_extensions_dir
+            ),
         )
 
     @staticmethod
@@ -631,6 +763,16 @@ class AutoHarnessConfig:
             ]
         if "language" in data:
             cfg.language = str(data["language"])
+        if "pipeline" in data:
+            cfg.pipeline_preference = (
+                normalize_pipeline_preference(data["pipeline"])
+            )
+        if "pipeline_preference" in data:
+            cfg.pipeline_preference = (
+                normalize_pipeline_preference(
+                    data["pipeline_preference"]
+                )
+            )
         # 兼容旧字段
         if "workspace" in data:
             cfg.workspace = str(data["workspace"])
@@ -898,3 +1040,11 @@ def is_placeholder_local_repo(path: str) -> bool:
         "/home/user/code/agent-core",
         "/home/user/repo",
     }
+
+
+@dataclass
+class ActivateDecision:
+    """activate stage 的用户决策结果。"""
+
+    action: str = "accept"
+    feedback: str = ""

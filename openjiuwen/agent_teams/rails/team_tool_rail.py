@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """TeamToolRail — register team coordination tools onto the DeepAgent.
 
 Mirrors the pattern of :class:`SysOperationRail` / :class:`McpRail` /

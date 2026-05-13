@@ -209,6 +209,10 @@ class SqlDbStore:
             )
             return False
 
+    def invalidate_table_cache(self, table_name: str) -> None:
+        """Remove a table from the reflection cache so the next get_table call re-reflects."""
+        self._async_table_cache.pop(table_name, None)
+
     async def get_table(self, table_name: str) -> Table:
         if table_name in self._async_table_cache:
             return self._async_table_cache[table_name]

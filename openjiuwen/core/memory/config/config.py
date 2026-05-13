@@ -3,7 +3,7 @@
 
 from pydantic import BaseModel, Field, field_validator
 from openjiuwen.core.common.schema.param import Param
-from openjiuwen.core.memory.common.crypto import AES_KEY_LENGTH
+from openjiuwen.core.common.security.crypt_utils import AES_KEY_LENGTH
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.retrieval.common.config import EmbeddingConfig
 from openjiuwen.core.common.exception.codes import StatusCode

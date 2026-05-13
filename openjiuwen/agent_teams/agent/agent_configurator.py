@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Agent configuration, setup, and initialization for TeamAgent."""
 
 from __future__ import annotations
@@ -48,8 +50,8 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
     from openjiuwen.agent_teams.rails import FirstIterationGate
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
-    from openjiuwen.core.memory.team.manager import TeamMemoryManager
     from openjiuwen.harness.tools.worktree import WorktreeManager
+    from openjiuwen.agent_teams.memory.manager import TeamMemoryManager
 
 
 def _resolve_team_mode(spec: TeamAgentSpec) -> str:
@@ -244,12 +246,35 @@ class AgentConfigurator:
         )
 
     def create_worktree_manager(self, spec: TeamAgentSpec) -> WorktreeManager:
-        from openjiuwen.harness.tools.worktree import WorktreeManager
+        from openjiuwen.harness.tools.worktree import (
+            WorktreeCreatedEvent,
+            WorktreeManager,
+            WorktreeRemovedEvent,
+        )
 
-        ws_root = self.workspace_manager.workspace_path if self.workspace_manager else None
+        ws_mgr = self.workspace_manager
+
+        event_handler = None
+        if ws_mgr is not None:
+
+            async def _mirror_worktree_into_workspace(event: Any) -> None:
+                """Keep ``.worktree/{slug}`` in lockstep with manager events.
+
+                Translates the generic worktree lifecycle stream into team
+                workspace mount/unmount calls. Single-agent callers never
+                install this handler, so the symlink view is team-only by
+                construction.
+                """
+                if isinstance(event, WorktreeCreatedEvent):
+                    ws_mgr.mount_worktree(event.worktree_name, event.worktree_path)
+                elif isinstance(event, WorktreeRemovedEvent):
+                    ws_mgr.unmount_worktree(event.worktree_name)
+
+            event_handler = _mirror_worktree_into_workspace
+
         return WorktreeManager(
             config=spec.worktree,
-            workspace_root=ws_root,
+            event_handler=event_handler,
         )
 
     def setup_agent(
@@ -404,9 +429,9 @@ class AgentConfigurator:
         if not (spec.memory and spec.memory.enabled):
             return None
 
-        from openjiuwen.core.memory.team.config import resolve_embedding_config
-        from openjiuwen.core.memory.team.manager import TeamMemoryManager
-        from openjiuwen.core.memory.team.manager_params import TeamMemoryManagerParams
+        from openjiuwen.agent_teams.memory.config import resolve_embedding_config
+        from openjiuwen.agent_teams.memory.manager import TeamMemoryManager
+        from openjiuwen.agent_teams.memory.manager_params import TeamMemoryManagerParams
 
         resolved_team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
         resolved_embedding = resolve_embedding_config(spec.memory)

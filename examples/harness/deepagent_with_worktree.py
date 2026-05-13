@@ -84,7 +84,6 @@ async def main() -> None:
 
         manager = WorktreeManager(
             WorktreeConfig(enabled=True),
-            workspace_root=workspace,
             event_handler=on_event,
         )
 

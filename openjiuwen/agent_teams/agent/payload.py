@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Spawn payload construction.
 
 Centralizes the cross-process wire format for spawning teammates.

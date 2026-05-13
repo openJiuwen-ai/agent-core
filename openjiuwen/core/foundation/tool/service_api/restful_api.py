@@ -11,7 +11,7 @@ from pydantic import Field, field_validator
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import tool_logger, LogEventType
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
@@ -103,7 +103,7 @@ class RestfulApiCard(ToolCard):
         # Warn if schema has path parameters not in URL (not an error, just informational)
         extra_in_schema = schema_path_params - url_path_params
         if extra_in_schema:
-            logger.warn(
+            tool_logger.warning(
                 f"Schema defines path parameters {extra_in_schema} that are not used in URL {self.url}",
                 UserWarning
             )
@@ -245,6 +245,10 @@ class RestfulApi(Tool):
         if query_params:
             url = f'{url}?{urlencode(query_params)}'
         proxy = UrlUtils.get_global_proxy_url(url)
+        tool_logger.info(
+            f"Proxy enabled for {url}: {proxy is not None}",
+            event_type=LogEventType.TOOL_CALL_START
+        )
         async with aiohttp.ClientSession(proxy=proxy, connector=connector) as session:
             async with session.request(
                     self._method,
@@ -282,15 +286,35 @@ class RestfulApi(Tool):
                                              kwargs.get("raise_for_status", True),
                                              kwargs.get("request_args", {}))
         except (aiohttp.ConnectionTimeoutError, asyncio.TimeoutError) as e:
+            tool_logger.error(
+                f"RestfulApi request timeout for {self.card.name}: {str(e)}",
+                event_type=LogEventType.TOOL_CALL_ERROR,
+                exception=str(e)
+            )
             raise build_error(StatusCode.TOOL_RESTFUL_API_EXECUTION_TIMEOUT, cause=e,
                               method="invoke", timeout=final_timeout, card=self.card)
         except aiohttp.ClientResponseError as e:
+            tool_logger.error(
+                f"RestfulApi response error for {self.card.name}: status={e.status}, message={e.message}",
+                event_type=LogEventType.TOOL_CALL_ERROR,
+                exception=str(e)
+            )
             raise build_error(StatusCode.TOOL_RESTFUL_API_RESPONSE_ERROR, cause=e,
                               method="invoke", code=e.status, reason=e.message,
                               card=self.card)
         except BaseError as e:
+            tool_logger.error(
+                f"RestfulApi execution error for {self.card.name}: {str(e)}",
+                event_type=LogEventType.TOOL_CALL_ERROR,
+                exception=str(e)
+            )
             raise e
         except Exception as e:
+            tool_logger.error(
+                f"RestfulApi execution unknown error for {self.card.name}: {str(e)}",
+                event_type=LogEventType.TOOL_CALL_ERROR,
+                exception=str(e)
+            )
             raise build_error(StatusCode.TOOL_RESTFUL_API_EXECUTION_ERROR, cause=e,
                               method="invoke", reason=str(e),
                               card=self.card)
@@ -394,7 +418,7 @@ class RestfulApi(Tool):
             if key.lower() != "content-type":
                 processed_headers[key] = value
             else:
-                logger.debug(
+                tool_logger.debug(
                     f"Content-Type header '{value}' removed for multipart/form-data request. "
                     f"aiohttp will set the correct Content-Type automatically."
                 )

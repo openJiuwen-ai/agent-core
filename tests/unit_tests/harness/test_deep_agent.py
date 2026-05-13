@@ -4,6 +4,8 @@
 # pylint: disable=protected-access
 from __future__ import annotations
 
+import asyncio
+
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 from unittest.mock import AsyncMock, call, patch
@@ -1124,4 +1126,40 @@ async def test_create_deep_agent_with_restrict_to_work_dir_enabled(tmp_path) -> 
     sys_op = Runner.resource_mgr.get_sys_operation(f"{agent.card.name}_{agent.card.id}")
     assert sys_op is not None
     assert sys_op._run_config.sandbox_root is None
+    assert sys_op._run_config.shell_allowlist is None
     assert sys_op._run_config.restrict_to_sandbox is False
+
+
+@pytest.mark.asyncio
+async def test_stream_cancel_waits_for_cleanup() -> None:
+    """Cancelled stream should wait for cleanup before returning."""
+    await Runner.start()
+    try:
+        agent = DeepAgent(
+            AgentCard(name="deep", description="test")
+        ).configure(DeepAgentConfig(enable_task_loop=True))
+        fake_react = FakeReactAgent()
+        agent.set_react_agent(fake_react, initialized=True)
+
+        # Start streaming task
+        async def _collect():
+            chunks = []
+            async for chunk in Runner.run_agent_streaming(agent, {"query": "test"}):
+                chunks.append(chunk)
+            return chunks
+
+        stream_task = asyncio.create_task(_collect())
+        await asyncio.sleep(0.2)  # Let stream start
+
+        # Cancel and wait
+        stream_task.cancel()
+        try:
+            await stream_task
+        except asyncio.CancelledError:
+            pass
+
+        # Cleanup should be complete
+        assert agent._bound_session_id is None
+        assert agent._loop_controller is None
+    finally:
+        await Runner.stop()

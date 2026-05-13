@@ -35,7 +35,9 @@ class TodoItem(BaseModel):
     """Unified task data structure for DeepAgent task planning.
 
     Attributes:
-        id: Unique task identifier (UUID).
+        id: Unique task identifier — a short semantic string chosen by the model
+            (e.g. "translate_doc", "analyze_code"). UUID is used only as a
+            fallback when no id is provided (e.g. when loading legacy data).
         content: Task summary description.
         activeForm: Present-tense form of content (e.g., "Translating document" for content "Translate document").
         description: Detailed task content.
@@ -48,7 +50,7 @@ class TodoItem(BaseModel):
 
     id: str = Field(
         default_factory=lambda: str(uuid.uuid4()),
-        description="Unique task ID",
+        description="Unique task identifier (short semantic string preferred, e.g. 'translate_doc')",
     )
     content: str = Field(default="", description="task summary description")
     activeForm: str = Field(default="", description="present-tense form of content")
@@ -89,24 +91,6 @@ class TodoItem(BaseModel):
             result_summary=data.get("result_summary"),
             meta_data=data.get("meta_data"),
             selected_model_id=data.get("selected_model_id"),
-        )
-
-    @classmethod
-    def create(
-        cls,
-        content: str,
-        active_form: str = "",
-        description: str = "",
-        status: TodoStatus = TodoStatus.PENDING,
-        selected_model_id: Optional[str] = None,
-    ) -> "TodoItem":
-        """Create a new TodoItem."""
-        return cls(
-            content=content,
-            activeForm=active_form or f"Executing {content}",
-            description=description,
-            status=status,
-            selected_model_id=selected_model_id,
         )
 
 

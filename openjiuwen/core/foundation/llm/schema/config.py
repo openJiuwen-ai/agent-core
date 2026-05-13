@@ -18,6 +18,7 @@ class ProviderType(str, Enum):
     DashScope = "DashScope"
     DeepSeek = "DeepSeek"
     InferenceAffinity = "InferenceAffinity"
+    IntelliRouter = "intelli_router"
 
 
 class ModelClientConfig(BaseModel):

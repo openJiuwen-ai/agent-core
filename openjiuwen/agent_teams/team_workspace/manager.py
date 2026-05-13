@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 
 """Team shared workspace manager.
 
@@ -210,6 +212,46 @@ class TeamWorkspaceManager:
                 self.team_name,
                 link_path,
             )
+
+    def mount_worktree(self, slug: str, worktree_path: str) -> None:
+        """Expose a worktree in the team workspace at ``.worktree/{slug}``.
+
+        Creates a stable navigation entry so leader / teammate agents
+        sharing this workspace can see the per-member worktrees at a
+        glance via ``.worktree/<slug>``. Stale symlinks (e.g. pointing
+        at a removed worktree) are replaced; non-symlink collisions are
+        skipped with a warning so this never clobbers user data.
+
+        Args:
+            slug: Worktree slug used both as the symlink basename and
+                the identifier referenced by ``unmount_worktree``.
+            worktree_path: Absolute path the symlink should resolve to.
+        """
+        wt_dir = os.path.join(self.workspace_path, ".worktree")
+        os.makedirs(wt_dir, exist_ok=True)
+        link_path = os.path.join(wt_dir, slug)
+        if os.path.lexists(link_path):
+            if os.path.islink(link_path):
+                os.unlink(link_path)
+            else:
+                team_logger.warning(
+                    "Worktree mount path '%s' exists and is not a symlink -- skipping",
+                    link_path,
+                )
+                return
+        self._mount_directory(worktree_path, link_path)
+        team_logger.debug("Mounted worktree '%s' at %s", slug, link_path)
+
+    def unmount_worktree(self, slug: str) -> None:
+        """Remove the ``.worktree/{slug}`` entry if it exists.
+
+        Args:
+            slug: Worktree slug previously passed to ``mount_worktree``.
+        """
+        link_path = os.path.join(self.workspace_path, ".worktree", slug)
+        if os.path.islink(link_path):
+            os.unlink(link_path)
+            team_logger.debug("Unmounted worktree '%s' from %s", slug, link_path)
 
     def mount_into_worktree(self, worktree_path: str) -> None:
         """Create .team symlink inside a worktree pointing to this workspace.

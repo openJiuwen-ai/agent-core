@@ -444,7 +444,7 @@ def create_agent(
     Also integrates:
     - ``ToolTrackingRail`` — emits tool call/result chunks
     - ``AskUserRail`` — interrupt flow for asking the user
-    - ``ConfirmInterruptRail`` — human-approval for bash/write/edit
+    - ``ConfirmInterruptRail`` — human-approval for write/edit
     - ``ContextEngineeringRail`` — context window management
       (includes ``DialogueCompressor`` for ``/compact`` support)
     - ``MemoryRail`` — vector-memory tools (when embedding
@@ -489,10 +489,10 @@ def create_agent(
     rails.append(AskUserRail())
 
     # ConfirmInterruptRail: human-approval gate for
-    # potentially dangerous tool calls (bash, write, edit).
+    # potentially dangerous file mutation tools.
     rails.append(
         ConfirmInterruptRail(
-            tool_names=["bash", "write_file", "edit_file"]
+            tool_names=["write_file", "edit_file"]
         )
     )
 
@@ -602,6 +602,7 @@ class LocalBackend:
         self.agent: Any = None
         self.tracker: Optional[TokenTrackingRail] = None
         self._session_id: str = f"cli-{uuid4().hex[:8]}"
+        self._loaded_extensions: set[str] = set()
 
     async def start(self) -> None:
         """Create the agent and start the Runner."""
@@ -622,6 +623,7 @@ class LocalBackend:
         *query* may be a plain string (normal user turn) or
         an ``InteractiveInput`` (interrupt resume).
         """
+        await self._load_runtime_extensions()
         sid = session_id or self._session_id
         stream = Runner.run_agent_streaming(
             self.agent,
@@ -638,6 +640,44 @@ class LocalBackend:
                 await self.agent.abort()
             except Exception:  # noqa: BLE001
                 pass
+
+    async def _load_runtime_extensions(self) -> None:
+        """Scan runtime_extensions/ and hot-load new configs."""
+        if self.agent is None:
+            return
+
+        ext_root = (
+            Path(self.cfg.workspace)
+            / "auto_harness"
+            / "runtime_extensions"
+        )
+        if not ext_root.is_dir():
+            return
+        for child in sorted(ext_root.iterdir()):
+            if not child.is_dir():
+                continue
+            config_path = child / "harness_config.yaml"
+            if not config_path.is_file():
+                continue
+            ext_key = str(config_path)
+            if ext_key in self._loaded_extensions:
+                continue
+            try:
+                loaded = await self.agent.load_harness_config(
+                    ext_key,
+                )
+                self._loaded_extensions.add(ext_key)
+                if loaded:
+                    logger.info(
+                        "Hot-loaded runtime extension: %s",
+                        ", ".join(loaded),
+                    )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Failed to load runtime extension: %s",
+                    config_path,
+                    exc_info=True,
+                )
 
 
 # ---------------------------------------------------------------------------

@@ -4,8 +4,10 @@ from typing import Callable, Optional, Union, TYPE_CHECKING
 
 from openjiuwen.core.runner.resources_manager.base import AgentProvider
 from openjiuwen.core.runner.drunner.server_adapter.agent_adapter import AgentAdapter
+from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
 from openjiuwen.core.runner.runner_config import get_runner_config
 from openjiuwen.core.runner.resources_manager.abstract_manager import AbstractManager
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 if TYPE_CHECKING:
     from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
@@ -29,11 +31,18 @@ class AgentMgr(AbstractManager['BaseAgent']):
         super().__init__()
         self._remote_agents: dict[str, "AgentAdapter" | "RemoteAgent"] = {}
 
-    def add_agent(self, agent_id: str, agent: Union[AgentProvider, "RemoteAgent"]) -> None:
+    def add_agent(self, agent_id: str, agent: Union[AgentProvider, RemoteAgent], *,
+        card: AgentCard | None = None, interface_url: str | None = None) -> None:
         if get_runner_config().distributed_mode:
             if not _is_remote_agent(agent):
                 from openjiuwen.core.runner.drunner.server_adapter.agent_adapter import AgentAdapter
-                mq_agent_adapter = AgentAdapter(agent_id)
+                effective_card = card
+                if card is not None and interface_url is not None:
+                    effective_card = card.model_copy(update={"interface_url": interface_url})
+                mq_agent_adapter = AgentAdapter(
+                    agent_id,
+                    agent_card=effective_card,
+                )
                 mq_agent_adapter.start()
                 self._remote_agents[self._AGENT_ADAPTER + agent_id] = mq_agent_adapter
         if self._remote_agents.get(agent_id) is not None:
@@ -42,7 +51,6 @@ class AgentMgr(AbstractManager['BaseAgent']):
             self._register_resource_provider(agent_id, agent)
         else:
             self._remote_agents[agent_id] = agent
-
 
     def remove_agent(self, agent_id: str):
         if get_runner_config().distributed_mode:

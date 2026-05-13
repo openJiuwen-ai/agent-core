@@ -116,6 +116,31 @@ class TestResourceMgrAddMethodsValidation:
             "agent provider is invalid, reason='invalid provider type, expected callable, got str'")
 
     @pytest.mark.asyncio
+    async def test_add_agent_should_forward_interface_url_to_agent_mgr(self, resource_mgr, mock_agent_card, mock_agent_provider, monkeypatch):
+        created = {}
+
+        class FakeAgentMgr:
+            def add_agent(self, resource_id, resource, card=None, interface_url=None):
+                created["resource_id"] = resource_id
+                created["resource"] = resource
+                created["card"] = card
+                created["interface_url"] = interface_url
+
+        monkeypatch.setattr(resource_mgr._resource_registry, "agent", lambda: FakeAgentMgr())
+
+        result = resource_mgr.add_agent(
+            mock_agent_card,
+            mock_agent_provider,
+            interface_url="http://127.0.0.1:8000/a2a/jsonrpc",
+        )
+
+        assert result.is_ok()
+        assert created["resource_id"] == mock_agent_card.id
+        assert created["resource"] == mock_agent_provider
+        assert created["card"] == mock_agent_card
+        assert created["interface_url"] == "http://127.0.0.1:8000/a2a/jsonrpc"
+
+    @pytest.mark.asyncio
     async def test_add_agents_with_invalid_cards_and_providers(self, resource_mgr):
         with pytest.raises(ValidationError) as err:
             agents = [(None, Mock())]

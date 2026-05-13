@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """In-process spawn handle that mirrors SpawnedProcessHandle interface."""
 
 from __future__ import annotations

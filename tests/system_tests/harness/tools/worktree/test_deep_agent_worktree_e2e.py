@@ -243,10 +243,10 @@ async def test_enter_write_keep(worktree_bed: WorktreeBed, runner_lifecycle) -> 
     assert (worktree_path / "notes.md").read_text(encoding="utf-8") == "first draft\n"
     # Main repo must not see the file written into the worktree.
     assert not (bed.repo_root / "notes.md").exists()
-    # Workspace symlink should still point at the kept worktree.
-    link = bed.workspace_root / ".worktree" / "wt-happy"
-    assert link.is_symlink()
-    assert Path(link).resolve() == worktree_path.resolve()
+    # Single-agent flows do not maintain a workspace-side .worktree
+    # symlink view; that mirror lives in TeamWorkspaceManager and is
+    # exercised by team-side tests.
+    assert not (bed.workspace_root / ".worktree").exists()
     # Session is cleared but the cwd was restored to original.
     assert get_current_session() is None
     assert get_cwd() == str(bed.workspace_root.resolve())
@@ -290,8 +290,8 @@ async def test_enter_write_remove_discard(worktree_bed: WorktreeBed, runner_life
 
     worktree_path = Path(enter_out.data["worktree_path"])
     assert not worktree_path.exists(), "removed worktree must be gone from disk"
-    link = bed.workspace_root / ".worktree" / "wt-discard"
-    assert not link.exists() and not link.is_symlink()
+    # Single-agent flows never install the workspace-side mirror.
+    assert not (bed.workspace_root / ".worktree").exists()
     # Both Created and Removed events should fire in order.
     event_types = [type(e).__name__ for e in bed.events]
     assert event_types == [WorktreeCreatedEvent.__name__, WorktreeRemovedEvent.__name__]

@@ -219,21 +219,27 @@ async def test_team_runtime_manager_cold_recover_reinjects_runtime_spec():
     manager = TeamRuntimeManager()
     manager._pool.add = AsyncMock()
 
-    with patch.object(
-        TeamRuntimeManager,
-        "_inspect_session",
-        AsyncMock(return_value=(True, True)),
-    ), patch(
-        "openjiuwen.agent_teams.runtime.manager.recover_agent_team",
-        AsyncMock(return_value=agent),
-    ) as recover_mock:
+    with (
+        patch.object(
+            TeamRuntimeManager,
+            "_inspect_session",
+            AsyncMock(return_value=(True, True)),
+        ),
+        patch.object(
+            TeamAgent,
+            "recover_from_session",
+            return_value=agent,
+        ) as recover_mock,
+    ):
         activation = await manager.activate(spec, session_id, {"query": "recover"})
 
     assert activation.action.kind is RunActionKind.COLD_RECOVER
-    recover_mock.assert_awaited_once()
-    _, kwargs = recover_mock.await_args
-    assert kwargs["team_name"] == "cold_recover_team"
+    recover_mock.assert_called_once()
+    args, kwargs = recover_mock.call_args
+    # Call site: TeamAgent.recover_from_session(team_session, team_name, runtime_spec=spec)
+    assert args[1] == "cold_recover_team"
     assert kwargs["runtime_spec"] is spec
+    assert agent.recover_calls == 1
 
 
 @pytest.mark.asyncio
@@ -247,25 +253,7 @@ async def test_runner_team_runtime_manager_resumes_new_session_and_recovers_hist
     spec = TeamAgentSpec.model_construct(team_name="persistent_team", agents={})
     active_agent = FakeTeamAgent("persistent_team", stream_label="active.chunk")
 
-    async def _resume(agent, session):
-        await agent.resume_for_new_session(session)
-        return agent
-
-    async def _recover_existing(agent, session):
-        await agent.recover_for_existing_session(session)
-        return agent
-
-    with (
-        patch.object(TeamAgentSpec, "build", return_value=active_agent),
-        patch(
-            "openjiuwen.agent_teams.runtime.manager.resume_persistent_team",
-            side_effect=_resume,
-        ),
-        patch(
-            "openjiuwen.agent_teams.runtime.manager.recover_for_existing_session",
-            side_effect=_recover_existing,
-        ),
-    ):
+    with patch.object(TeamAgentSpec, "build", return_value=active_agent):
         first_chunks = [
             chunk
             async for chunk in Runner.run_agent_team_streaming(
@@ -437,14 +425,10 @@ async def test_runner_paused_same_session_resume_uses_same_prepared_session(
 
 @pytest.mark.asyncio
 async def test_runner_interact_pause_and_delete_agent_team_route_through_team_runtime_manager(isolated_checkpointer):
-    from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
-
     await Runner.start()
     session_id = f"delete_{uuid.uuid4().hex}"
     spec = TeamAgentSpec.model_construct(team_name="delete_team", agents={})
     agent = FakeTeamAgent("delete_team", stream_label="team.chunk")
-
-    db_config = DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:")
 
     fake_db = AsyncMock()
     fake_db.initialize = AsyncMock()

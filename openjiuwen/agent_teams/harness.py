@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """TeamHarness: sole adapter between TeamAgent and the underlying DeepAgent.
 
 All construction, rail mounting, runtime calls and state queries that touch

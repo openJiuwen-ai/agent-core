@@ -5,10 +5,12 @@ from typing import Callable, Any
 from openjiuwen.core.foundation.store.base_vector_store import BaseVectorStore
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 from openjiuwen.core.memory.manage.mem_model.sql_db_store import SqlDbStore
-from openjiuwen.core.memory.migration.migration_plan import vector_registry, kv_registry, sql_registry
+from openjiuwen.core.memory.migration.migration_plan import vector_registry, kv_registry,\
+                                            sql_registry, message_registry
 from openjiuwen.core.memory.migration.migrator.sql_migrator import SQLMigrator
 from openjiuwen.core.memory.migration.migrator.vector_migrator import VectorMigrator
 from openjiuwen.core.memory.migration.migrator.kv_migrator import KVMigrator
+from openjiuwen.core.memory.migration.migrator.message_migrator import MessageMigrator
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -101,4 +103,21 @@ async def run_sql_migrations(sql_db_store: SqlDbStore) -> None:
         registry=sql_registry,
         migrator_factory=lambda: SQLMigrator(sql_db_store),
         store_name="db store"
+    )
+
+
+async def run_message_migrations(message_store) -> None:
+    """
+    Apply all registered message migrations.
+
+    For every (key, operations) pair in message_registry:
+        1. key is treated as the entity identifier (e.g., 'message_global')
+        2. MessageMigrator.try_migrate() applies all pending operations via the message store API
+        3. Schema versions are tracked in the message store itself
+        4. Operations are executed in schema_version order
+    """
+    await _run_migrations_with_registry(
+        registry=message_registry,
+        migrator_factory=lambda: MessageMigrator(message_store),
+        store_name="message"
     )

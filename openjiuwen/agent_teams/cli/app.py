@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Public entry point for the Team CLI.
 
 :func:`run_team_cli` is the single async entry the SDK exposes for

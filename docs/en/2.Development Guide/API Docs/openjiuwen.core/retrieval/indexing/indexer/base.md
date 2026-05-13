@@ -21,7 +21,11 @@ Build index.
 
 **Returns**:
 
-**bool**, returns True if building is successful, otherwise returns False.
+**bool**, returns True if building is successful.
+
+**Raises**:
+
+Implementations may raise **BaseError** instead of returning False for validation failures (e.g. missing `embed_model` when `index_type` is `"vector"` or `"hybrid"`, or duplicate document IDs). See concrete indexer docs (e.g. ChromaIndexer, MilvusIndexer) for specific error codes.
 
 ### abstractmethod async update_index
 

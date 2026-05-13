@@ -102,19 +102,34 @@ class SubagentRail(DeepAgentRail):
         logger.info(f"[SubagentRail] Unregistered {mode} tools")
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Inject session tools prompt section before model call (async path only).
+        """Inject tool system prompt section before model call.
 
-        In sync mode (enable_async_subagent=False), this is a no-op.
+        In sync mode (enable_async_subagent=False), injects the task_tool
+        prompt section so the model sees delegation guidance.
         In async mode, injects the session tools section so the model can
         see available session tools.
 
         Args:
             ctx: Agent callback context.
         """
-        if not self.enable_async_subagent:
+        if not self.tools or self.system_prompt_builder is None:
             return
 
-        if not self.tools or self.system_prompt_builder is None:
+        if not self.enable_async_subagent:
+            try:
+                from openjiuwen.harness.prompts.sections.task_tool import (
+                    build_task_section,
+                )
+
+                section = build_task_section(language=self.system_prompt_builder.language)
+                if section is not None:
+                    self.system_prompt_builder.add_section(section)
+                else:
+                    self.system_prompt_builder.remove_section(SectionName.TASK_TOOL)
+            except ImportError:
+                logger.warning(
+                    "[SubagentRail] task_tool prompt section not available, skipping"
+                )
             return
 
         try:

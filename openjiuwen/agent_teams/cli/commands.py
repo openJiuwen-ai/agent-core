@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Slash-command registry and handlers for the Team CLI.
 
 The CLI keeps a flat top-level ``SLASH_COMMANDS`` mapping for first

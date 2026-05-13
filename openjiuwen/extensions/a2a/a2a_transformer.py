@@ -4,6 +4,7 @@
 import uuid
 from typing import Any, Dict
 
+from a2a.server.agent_execution.context import RequestContext
 from a2a.types.a2a_pb2 import Message, Part as A2APart, Role, SendMessageRequest, Task
 from a2a.types.a2a_pb2 import TaskArtifactUpdateEvent, TaskState as A2ATaskStatus, TaskStatusUpdateEvent
 from a2a.types import StreamResponse
@@ -37,22 +38,42 @@ class A2ATransformer:
             role=Role.ROLE_USER,
         )
 
-        session_id = request.get("sessionId")
+        session_id = request.get("conversation_id") or request.get("sessionId")
         if session_id:
             message.context_id = str(session_id)
-            message.task_id = str(session_id)
 
         text = request.get("query")
         if text is not None:
             message.parts.append(A2APart(text=str(text)))
 
-        metadata = {key: value for key, value in request.items()
-                    if key not in {"query", "sessionId"} and value is not None}
-        send_request = SendMessageRequest(message=message)
+        metadata = {
+            key: value
+            for key, value in request.items()
+            if key not in {"query", "sessionId", "conversation_id"} and value is not None
+        }
         if metadata:
-            send_request.metadata.CopyFrom(cls._to_struct(metadata))
-
+            message.metadata.CopyFrom(cls._to_struct(metadata))
+        send_request = SendMessageRequest(message=message)
         return send_request
+
+    @classmethod
+    def from_a2a_request(
+        cls,
+        request: RequestContext | SendMessageRequest | Message | Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if isinstance(request, dict):
+            return cls._dict_request_to_payload(request)
+
+        if isinstance(request, RequestContext):
+            return cls._request_context_to_payload(request)
+
+        if isinstance(request, SendMessageRequest):
+            return cls._send_message_request_to_payload(request)
+
+        if isinstance(request, Message):
+            return cls._message_to_payload(request)
+
+        return {}
 
     @classmethod
     def from_a2a_response(cls, response: StreamResponse | Any) -> AgentResult:
@@ -137,6 +158,28 @@ class A2ATransformer:
             metadata=cls._from_struct(event.metadata),
         )
 
+    @classmethod
+    def to_a2a_part(cls, part: Part) -> A2APart:
+        a2a_part = A2APart()
+        if part.text is not None:
+            a2a_part.text = part.text
+        if part.raw is not None:
+            a2a_part.raw = part.raw
+        if part.url is not None:
+            a2a_part.url = part.url
+        if part.data is not None:
+            if isinstance(part.data, dict):
+                a2a_part.data.struct_value.CopyFrom(cls._to_struct(part.data))
+            else:
+                a2a_part.data.string_value = str(part.data)
+        if part.filename is not None:
+            a2a_part.filename = part.filename
+        if part.media_type is not None:
+            a2a_part.media_type = part.media_type
+        if part.metadata:
+            a2a_part.metadata.CopyFrom(cls._to_struct(part.metadata))
+        return a2a_part
+
     @staticmethod
     def _a2a_artifact_to_artifact(artifact: Any) -> Artifact:
         return Artifact(
@@ -158,6 +201,56 @@ class A2ATransformer:
             media_type=part.media_type or None,
             metadata=A2ATransformer._from_struct(getattr(part, "metadata", None)),
         )
+
+    @classmethod
+    def _dict_request_to_payload(cls, request: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(request)
+        metadata = payload.pop("metadata", None)
+        return cls._merge_metadata(payload, metadata if isinstance(metadata, dict) else None)
+
+    @classmethod
+    def _request_context_to_payload(cls, request: RequestContext) -> Dict[str, Any]:
+        if request.message is not None:
+            payload = cls._message_to_payload(request.message)
+        elif request.task is not None:
+            payload = cls.from_a2a_response(request.task).model_dump(exclude_none=True)
+        else:
+            payload = {}
+
+        if request.task_id and "task_id" not in payload:
+            payload["task_id"] = request.task_id
+        if request.context_id and "sessionId" not in payload:
+            payload["sessionId"] = request.context_id
+        return payload
+
+    @classmethod
+    def _send_message_request_to_payload(cls, request: SendMessageRequest) -> Dict[str, Any]:
+        payload = cls._message_to_payload(request.message)
+        return cls._merge_metadata(payload, cls._from_struct(getattr(request, "metadata", None)))
+
+    @classmethod
+    def _message_to_payload(cls, message: Message) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        for part in message.parts or []:
+            text = getattr(part, "text", None)
+            if text is not None:
+                payload["query"] = str(text)
+                break
+        if message.task_id:
+            payload["task_id"] = message.task_id
+        if message.context_id:
+            payload["sessionId"] = message.context_id
+        return cls._merge_metadata(payload, cls._from_struct(getattr(message, "metadata", None)))
+
+    @staticmethod
+    def _merge_metadata(payload: Dict[str, Any], metadata: Dict[str, Any] | None) -> Dict[str, Any]:
+        if not metadata:
+            return payload
+
+        for key, value in metadata.items():
+            if value is not None and key not in payload:
+                payload[key] = value
+        return payload
 
     @staticmethod
     def _to_ojw_status(status: Any) -> TaskStatus:

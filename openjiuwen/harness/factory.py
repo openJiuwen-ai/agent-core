@@ -245,6 +245,7 @@ def create_deep_agent(
                 id=f"{card.name}_{card.id}",
                 mode=OperationMode.LOCAL,
                 work_config=LocalWorkConfig(
+                    shell_allowlist=None,
                     restrict_to_sandbox=restrict_to_work_dir,
                 ),
             )

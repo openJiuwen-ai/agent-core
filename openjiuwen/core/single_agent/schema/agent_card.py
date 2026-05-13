@@ -16,8 +16,16 @@ from openjiuwen.core.foundation.tool import ToolInfo
 class AgentCard(BaseCard):
     """Agent Card Data Class
     """
+
     input_params: Optional[dict[str, Any] | Type[BaseModel]] = Field(default=None)
     output_params: Optional[dict[str, Any] | Type[BaseModel]] = Field(default=None)
+    interface_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "When set, used as the A2A JSON-RPC base URL for distributed AgentAdapter "
+            "(listen address + published card URL) unless ``add_agent(..., interface_url=...)`` overrides."
+        ),
+    )
 
     def tool_info(self):
         return ToolInfo(

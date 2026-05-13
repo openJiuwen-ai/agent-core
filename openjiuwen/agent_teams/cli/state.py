@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Mutable state for the interactive Team CLI.
 
 :class:`TeamCliState` is the single owner of CLI-side runtime state —

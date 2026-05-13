@@ -82,8 +82,11 @@ def _make_agent(workspace_path: str) -> DeepAgent:
 
 
 def _make_todo(title: str, status: TodoStatus,
-               selected_model_id: str = None) -> TodoItem:
-    return TodoItem.create(
+               selected_model_id: str = None,
+               id: str = None) -> TodoItem:
+    task_id = id or title.lower().replace(" ", "_")
+    return TodoItem(
+        id=task_id,
         content=title,
         status=status,
         selected_model_id=selected_model_id,

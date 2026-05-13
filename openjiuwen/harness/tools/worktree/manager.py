@@ -9,7 +9,11 @@ logic entry point — tools and spawn code delegate here.
 The manager is owner-agnostic: callers (team framework, single agent,
 custom orchestrators) provide an optional ``event_handler`` that receives
 generic ``WorktreeCreatedEvent`` / ``WorktreeRemovedEvent`` payloads and
-translates them into whatever transport their system uses.
+translates them into whatever transport their system uses. The team
+framework, for instance, subscribes to these events to maintain a
+``{team_workspace}/.worktree/{slug}`` symlink view of active worktrees.
+Single-agent callers have no such view requirement and simply ignore the
+events.
 """
 
 import fnmatch
@@ -18,6 +22,8 @@ import shutil
 import time
 from typing import Any
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import agent_logger
 from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
 from openjiuwen.harness.tools.worktree.backend import (
@@ -62,10 +68,18 @@ class WorktreeManager:
     Responsibilities:
     - Create/remove worktrees via backend
     - Manage session state (ContextVar)
-    - Post-creation setup (symlinks, config copy)
+    - Post-creation setup (symlinks for ``symlink_directories`` and
+      gitignored include files inside the worktree itself)
     - Dispatch lifecycle events to caller-provided handler
     - Change detection before removal
     - Rail dispatch for lifecycle hooks
+
+    The manager intentionally does NOT manage any
+    ``{workspace}/.worktree/{slug}`` view symlink — that is a team
+    workspace concern handled by ``TeamWorkspaceManager`` via the
+    ``event_handler`` callback. Keeping that responsibility out of here
+    preserves single-agent semantics (no extra symlink layer) and avoids
+    teaching this generic component about caller-specific layouts.
     """
 
     def __init__(
@@ -74,13 +88,11 @@ class WorktreeManager:
         backend: WorktreeBackend | None = None,
         event_handler: WorktreeEventHandler | None = None,
         rails: list[Any] | None = None,
-        workspace_root: str | None = None,
     ):
         self._config = config
         self._backend = backend or create_backend("git", config)
         self._event_handler = event_handler
         self._rails = rails or []
-        self._workspace_root = workspace_root
 
     @property
     def backend(self) -> WorktreeBackend:
@@ -146,7 +158,6 @@ class WorktreeManager:
         )
 
         set_current_session(session)
-        self._link_worktree_to_workspace(slug, result.worktree_path)
 
         agent_logger.info(
             "Entered worktree '%s' at %s (%s, %.0fms)",
@@ -187,20 +198,44 @@ class WorktreeManager:
 
         Raises:
             RuntimeError: If no worktree session is active.
-            ValueError: If action is "remove" and there are unsaved
-                changes without discard_changes=True.
+            ValidationError: If action is "remove" and either the
+                worktree has unsaved changes, or worktree state cannot
+                be verified, without discard_changes=True. Carries
+                ``StatusCode.TOOL_WORKTREE_EXIT_INVALID``.
         """
         session = require_current_session()
 
         if action == "remove" and not discard_changes:
             summary = await self.count_changes(session)
-            if summary and (summary.changed_files > 0 or summary.commits > 0):
+            # Fail-closed: count_changes returns None when state cannot
+            # be determined (hook-based worktree with no baseline, or
+            # git status / rev-list failed). Refuse to remove without
+            # explicit confirmation rather than silently destroy work.
+            if summary is None:
+                raise_error(
+                    StatusCode.TOOL_WORKTREE_EXIT_INVALID,
+                    reason=(
+                        f"Could not verify worktree state at {session.worktree_path}. "
+                        "Refusing to remove without explicit confirmation. "
+                        "Set discard_changes=True to proceed, or use action='keep' "
+                        "to preserve the worktree."
+                    ),
+                )
+            if summary.changed_files > 0 or summary.commits > 0:
                 parts = []
                 if summary.changed_files > 0:
                     parts.append(f"{summary.changed_files} uncommitted files")
                 if summary.commits > 0:
                     parts.append(f"{summary.commits} commits on {session.worktree_branch}")
-                raise ValueError(f"Worktree has {' and '.join(parts)}. Set discard_changes=True to proceed.")
+                raise_error(
+                    StatusCode.TOOL_WORKTREE_EXIT_INVALID,
+                    reason=(
+                        f"Worktree has {' and '.join(parts)}. "
+                        "Removing will discard this work permanently. "
+                        "Confirm with the user, then set discard_changes=True to proceed, "
+                        "or use action='keep' to preserve the worktree."
+                    ),
+                )
 
         repo_root = await find_canonical_git_root(session.original_cwd)
 
@@ -220,15 +255,10 @@ class WorktreeManager:
 
         # action == "remove"
         if repo_root:
-            await self._remove_worktree_and_unlink(
+            await self._remove_worktree(
                 session.worktree_path,
                 repo_root,
-                slug=session.worktree_name,
             )
-        else:
-            # No git root -- still drop the workspace symlink so it
-            # doesn't dangle against the already-gone worktree path.
-            self._unlink_worktree_from_workspace(session.worktree_name)
 
         set_current_session(None)
 
@@ -291,76 +321,26 @@ class WorktreeManager:
             now = time.time()
             os.utime(result.worktree_path, (now, now))
 
-        self._link_worktree_to_workspace(slug, result.worktree_path)
         return result
 
     # Backwards-compatible alias for the original team-flavoured name.
     # Removed in a follow-up once external callers have migrated.
     create_agent_worktree = create_owner_worktree
 
-    # -- Workspace link management ---------------------------------------------
+    async def _remove_worktree(self, wt_path: str, repo_root: str) -> bool:
+        """Remove a worktree via backend.
 
-    def _link_worktree_to_workspace(self, slug: str, worktree_path: str) -> None:
-        """Create .worktree/{slug} symlink in workspace if workspace_root is set.
-
-        Replaces any pre-existing symlink at the target path -- stale
-        links from previous sessions (e.g. broken links pointing at a
-        removed worktree) would otherwise block ``os.symlink`` with
-        ``FileExistsError``.
-        """
-        if not self._workspace_root:
-            return
-        wt_dir = os.path.join(self._workspace_root, ".worktree")
-        os.makedirs(wt_dir, exist_ok=True)
-        link = os.path.join(wt_dir, slug)
-        if os.path.lexists(link):
-            if os.path.islink(link):
-                os.unlink(link)
-            else:
-                agent_logger.warning(
-                    "Workspace worktree link path '%s' exists and is not a symlink -- skipping",
-                    link,
-                )
-                return
-        os.symlink(worktree_path, link, target_is_directory=True)
-        agent_logger.debug("Linked worktree '%s' into workspace at %s", slug, link)
-
-    def _unlink_worktree_from_workspace(self, slug: str) -> None:
-        """Remove .worktree/{slug} symlink from workspace if it exists."""
-        if not self._workspace_root:
-            return
-        link = os.path.join(self._workspace_root, ".worktree", slug)
-        if os.path.islink(link):
-            os.unlink(link)
-            agent_logger.debug("Unlinked worktree '%s' from workspace", slug)
-
-    async def _remove_worktree_and_unlink(
-        self,
-        wt_path: str,
-        repo_root: str,
-        *,
-        slug: str | None = None,
-    ) -> bool:
-        """Remove a worktree via backend and clean up its workspace symlink.
-
-        Single choke point for worktree teardown: callers must use this
-        method instead of calling ``backend.remove`` directly so that
-        the ``{workspace}/.worktree/{slug}`` symlink stays in lockstep
-        with the worktree directory.
+        Single choke point so future teardown side-effects (event
+        plumbing, telemetry) have one place to land.
 
         Args:
             wt_path: Absolute path to the worktree directory.
             repo_root: Git root that owns the worktree.
-            slug: Worktree slug; defaults to ``basename(wt_path)``.
 
         Returns:
             True if the backend successfully removed the worktree.
         """
-        ok = await self._backend.remove(wt_path, repo_root)
-        resolved_slug = slug or os.path.basename(wt_path.rstrip("/"))
-        if resolved_slug:
-            self._unlink_worktree_from_workspace(resolved_slug)
-        return ok
+        return await self._backend.remove(wt_path, repo_root)
 
     # -- Change detection -----------------------------------------------------
 
@@ -619,8 +599,15 @@ class WorktreeManager:
                     agent_logger.warning("Skipping worktree '%s': has uncommitted changes", slug)
                     continue
 
-            if await self._remove_worktree_and_unlink(wt_path, repo_root, slug=slug):
+            if await self._remove_worktree(wt_path, repo_root):
                 removed.append(wt_path)
+                if self._event_handler:
+                    await self._event_handler(
+                        WorktreeRemovedEvent(
+                            worktree_name=slug,
+                            worktree_path=wt_path,
+                        ),
+                    )
 
         if removed:
             await worktree_prune(repo_root)
@@ -650,7 +637,7 @@ class WorktreeManager:
         Returns:
             True if the worktree was successfully removed.
         """
-        return await self._remove_worktree_and_unlink(worktree_path, repo_root)
+        return await self._remove_worktree(worktree_path, repo_root)
 
     # -- Internal helpers -----------------------------------------------------
 

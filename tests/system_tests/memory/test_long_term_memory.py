@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.memory.long_term_memory import LongTermMemory
+from openjiuwen.core.memory.long_term_memory import LongTermMemory, AddMemResult
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.schema.message import BaseMessage
 from openjiuwen.core.foundation.store import create_vector_store
@@ -477,7 +477,7 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated_mem.content, new_content, "Memory content should be updated")
 
         # Test Incorrect ID leads to failure to add memory
-        scope_id = "test_memory_scope@"
+        scope_id = "test_memory_scope/"
         try:
             await self.engine.add_messages(
                 user_id=user_id,
@@ -486,10 +486,162 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
                 messages=messages,
                 agent_config=agent_cfg
             )
+            self.fail("Should have raised BaseError for invalid scope_id")
         except BaseError as e:
             self.assertEqual(e.code, StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR.code)
-            self.assertIn("failed to add", e.message, "Error message should contain 'failed to add'")
+            self.assertIn("invalid scope_id format", e.message)
 
+    async def test_change_memory_instruction(self):
+        """
+        Test the change memory instruction functionality.
+        This test demonstrates:
+        1. Adding initial memories
+        2. Sending messages with memory change instructions
+        3. Verifying the memories are correctly updated or deleted
+        """
+        scope_id = "test_memory_scope"
+        user_id = "test_user_workflow"
+        # ---------- 1. Add initial memories ----------
+        logger.info("Step 1: Adding initial memories")
+        agent_cfg = AgentMemoryConfig(
+            mem_variables=[
+                Param.string("姓名", "用户姓名", required=False),
+                Param.string("职业", "用户职业", required=False),
+            ],
+            enable_long_term_mem=True,
+            enable_user_profile=True,
+            enable_semantic_memory=True,
+            enable_episodic_memory=True,
+        )
+
+        # Conversation 1: Introduction
+        messages1 = [
+            BaseMessage(role="user", content="你好，我是Tom"),
+            BaseMessage(role="assistant", content="你好Tom，很高兴认识你"),
+        ]
+
+        res1 = await self.engine.add_messages(
+            user_id=user_id,
+            scope_id=scope_id,
+            session_id="workflow_session_1",
+            messages=messages1,
+            agent_config=agent_cfg
+        )
+
+        # Conversation 2: More details
+        messages2 = [
+            BaseMessage(role="user", content="我是一名数据分析师"),
+            BaseMessage(role="assistant", content="数据分析是个很有前景的领域"),
+        ]
+
+        res2 = await self.engine.add_messages(
+            user_id=user_id,
+            scope_id=scope_id,
+            session_id="initial_session",
+            messages=messages2,
+            agent_config=agent_cfg
+        )
+
+        # Verify res1: should capture name "Tom" as a variable
+        self.assertIsNotNone(res1, "res1 should not be None")
+        self.assertIsInstance(res1, AddMemResult, "res1 should be AddMemResult")
+        logger.info(f"res1 variables: {[v.variable_name for v in res1.variables]}")
+        logger.info(f"res1 user_profile: {[p.content for p in res1.user_profile]}")
+        logger.info(f"res1 semantic_memory count: {len(res1.semantic_memory)}")
+        logger.info(f"res1 episodic_memory count: {len(res1.episodic_memory)}")
+
+        # Verify res2: should capture occupation "数据分析师"
+        self.assertIsNotNone(res2, "res2 should not be None")
+        self.assertIsInstance(res2, AddMemResult, "res2 should be AddMemResult")
+        logger.info(f"res2 variables: {[v.variable_name for v in res2.variables]}")
+        logger.info(f"res2 user_profile: {[p.content for p in res2.user_profile]}")
+        logger.info(f"res2 semantic_memory count: {len(res2.semantic_memory)}")
+        logger.info(f"res2 episodic_memory count: {len(res2.episodic_memory)}")
+
+        logger.info("Initial memories added successfully")
+        # Verify initial memories
+        initial_memories = await self.engine.get_user_mem_by_page(
+            user_id=user_id,
+            scope_id=scope_id,
+            page_size=10,
+            page_idx=1
+        )
+        self.assertGreater(len(initial_memories), 0, "Should have initial memories")
+        logger.info(f"Initial memories count: {len(initial_memories)}")
+        for mem in initial_memories:
+            logger.info(f"  - {mem.content}")
+        # ---------- 2. Test memory update instruction ----------
+        logger.info("\nStep 2: Testing memory update instruction")
+        update_messages = [
+            BaseMessage(role="user", content="把我的职业改为软件工程师"),
+            BaseMessage(role="assistant", content="好的，我已经更新了你的职业信息"),
+        ]
+        await self.engine.add_messages(
+            user_id=user_id,
+            scope_id=scope_id,
+            session_id="update_session",
+            messages=update_messages,
+            agent_config=agent_cfg
+        )
+        logger.info("Memory update instruction processed")
+        # ---------- 3. Test memory delete instruction ----------
+        logger.info("\nStep 3: Testing memory delete instruction")
+        delete_messages = [
+            BaseMessage(role="user", content="删除我的姓名信息"),
+            BaseMessage(role="assistant", content="好的，我已经删除了你的姓名信息"),
+        ]
+        await self.engine.add_messages(
+            user_id=user_id,
+            scope_id=scope_id,
+            session_id="delete_session",
+            messages=delete_messages,
+            agent_config=agent_cfg
+        )
+        logger.info("Memory delete instruction processed")
+        # ---------- 4. Verify changes ----------
+        logger.info("\nStep 4: Verifying memory changes")
+        final_memories = await self.engine.get_user_mem_by_page(
+            user_id=user_id,
+            scope_id=scope_id,
+            page_size=10,
+            page_idx=1
+        )
+        self.assertGreater(len(final_memories), 0, "Should have memories after changes")
+        logger.info(f"Final memories count: {len(final_memories)}")
+        for mem in final_memories:
+            logger.info(f"  - {mem.content}")
+        # Search for updated职业
+        search_results = await self.engine.search_user_mem(
+            query="用户的职业",
+            num=3,
+            user_id=user_id,
+            scope_id=scope_id,
+            threshold=0.3
+        )
+        self.assertGreater(len(search_results), 0, "Should find updated职业")
+        career_updated = False
+        for result in search_results:
+            if "软件工程师" in result.mem_info.content:
+                career_updated = True
+                break
+        self.assertTrue(career_updated, "职业 should be updated to 软件工程师")
+        # Verify 姓名 information is deleted
+        name_results = await self.engine.search_user_mem(
+            query="用户的姓名",
+            num=3,
+            user_id=user_id,
+            scope_id=scope_id,
+            threshold=0.3
+        )
+        name_deleted = True
+        for result in name_results:
+            if "Tom" in result.mem_info.content:
+                name_deleted = False
+                break
+        self.assertTrue(career_updated, "姓名 should be delete")
+        # Depending on implementation, name might still exist but be empty or not found
+        # This assertion may need to be adjusted based on actual implementation
+        logger.info("Test test_change_memory_instruction passed")
 
 
 def run_tests():

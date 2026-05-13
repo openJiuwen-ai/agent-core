@@ -12,8 +12,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.memory.team.manager import TeamMemoryManager
-from openjiuwen.core.memory.team.manager_params import (
+from openjiuwen.agent_teams.memory.manager import TeamMemoryManager
+from openjiuwen.agent_teams.memory.manager_params import (
     TeamLifecycle,
     TeamMemoryManagerParams,
     TeamRole,
@@ -253,7 +253,7 @@ async def test_extract_after_round_non_persistent(temp_dir):
     await manager.init_toolkit()
 
     with patch(
-        "openjiuwen.core.memory.team.extractor.extract_team_memories",
+        "openjiuwen.agent_teams.memory.extractor.extract_team_memories",
         new_callable=AsyncMock,
     ) as mock_extract:
         await manager.extract_after_round()
@@ -272,7 +272,7 @@ async def test_extract_after_round_teammate(temp_dir):
     await manager.init_toolkit()
 
     with patch(
-        "openjiuwen.core.memory.team.extractor.extract_team_memories",
+        "openjiuwen.agent_teams.memory.extractor.extract_team_memories",
         new_callable=AsyncMock,
     ) as mock_extract:
         await manager.extract_after_round()
@@ -292,7 +292,7 @@ async def test_extract_after_round_no_auto_extract(temp_dir):
     await manager.init_toolkit()
 
     with patch(
-        "openjiuwen.core.memory.team.extractor.extract_team_memories",
+        "openjiuwen.agent_teams.memory.extractor.extract_team_memories",
         new_callable=AsyncMock,
     ) as mock_extract:
         await manager.extract_after_round()
@@ -327,7 +327,7 @@ async def test_extract_after_round_leader_persistent_calls_extract_team_memories
     await manager.init_toolkit()
 
     with patch(
-        "openjiuwen.core.memory.team.extractor.extract_team_memories",
+        "openjiuwen.agent_teams.memory.extractor.extract_team_memories",
         new_callable=AsyncMock,
     ) as mock_extract:
         await manager.extract_after_round()

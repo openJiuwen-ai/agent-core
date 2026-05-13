@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Markdown template loader for agent-team prompts.
 
 Kept in its own module so ``policy`` / ``sections`` can depend on the

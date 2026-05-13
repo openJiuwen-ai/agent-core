@@ -19,7 +19,7 @@ from openjiuwen.auto_harness.schema import (
     StageResult,
 )
 from openjiuwen.auto_harness.stages.implement import (
-    ImplementStage,
+    MetaImplementStage,
     _build_prompt_debug_stats,
     _extract_repo_edit_candidates,
     run_implement_stream,
@@ -327,7 +327,7 @@ class TestImplementStageHelpers(
     async def test_stage_emits_ready_message_before_agent_summary(
         self,
     ):
-        stage = ImplementStage()
+        stage = MetaImplementStage()
         agent = _StreamingAgent()
         ctx = TaskContext(
             orchestrator=SimpleNamespace(
@@ -359,24 +359,19 @@ class TestImplementStageHelpers(
             items[0].payload["content"]
             == "任务准备就绪: 补全 auto-harness 文档"
         )
-        assert items[1].type == "message"
-        assert (
-            items[1].payload["content"]
-            == "[1/5] 执行代码修改"
-        )
-        assert items[2].type == "llm_output"
+        assert items[1].type == "llm_output"
         assert (
             "任务完成总结"
-            in items[2].payload["content"]
+            in items[1].payload["content"]
         )
         assert agent.session is None
-        assert isinstance(items[3], StageResult)
-        assert items[3].messages == []
+        assert isinstance(items[2], StageResult)
+        assert items[2].messages == []
 
     async def test_stage_passes_runtime_task_session_to_agent(
         self,
     ):
-        stage = ImplementStage()
+        stage = MetaImplementStage()
         agent = _StreamingAgent()
         session = _FakeSession()
         ctx = TaskContext(
@@ -414,7 +409,7 @@ class TestImplementStageHelpers(
     async def test_stage_uses_git_changes_even_if_rail_is_empty(
         self,
     ):
-        stage = ImplementStage()
+        stage = MetaImplementStage()
         ctx = TaskContext(
             orchestrator=SimpleNamespace(
                 artifacts=SimpleNamespace(),
@@ -454,7 +449,7 @@ class TestImplementStageHelpers(
     async def test_stage_fails_with_task_failed_error_before_git_check(
         self,
     ):
-        stage = ImplementStage()
+        stage = MetaImplementStage()
         ctx = TaskContext(
             orchestrator=SimpleNamespace(
                 artifacts=SimpleNamespace(),
@@ -493,7 +488,7 @@ class TestImplementStageHelpers(
         assert "ReadTimeout" in items[-1].error
         assert "Implement model call failed after" in items[-1].error
         assert "prompt_chars=" in items[-1].error
-        assert "model_timeout_secs=300.0" in items[-1].error
+        assert "model_timeout_secs=300000.0" in items[-1].error
         assert (
             "No allowed repo file was changed"
             not in items[-1].error
@@ -503,7 +498,7 @@ class TestImplementStageHelpers(
     async def test_stage_fails_when_git_reports_no_repo_edits(
         self,
     ):
-        stage = ImplementStage()
+        stage = MetaImplementStage()
         ctx = TaskContext(
             orchestrator=SimpleNamespace(
                 artifacts=SimpleNamespace(),
@@ -550,7 +545,7 @@ class TestImplementStageHelpers(
     async def test_stage_ignores_preexisting_dirty_files(
         self,
     ):
-        stage = ImplementStage()
+        stage = MetaImplementStage()
         ctx = TaskContext(
             orchestrator=SimpleNamespace(
                 artifacts=SimpleNamespace(),

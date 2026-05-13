@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Runner-scoped owner of the active TeamAgent runtime pool.
 
 Holds the in-process ``TeamRuntimePool`` and dispatches each
@@ -19,11 +21,6 @@ from typing import (
     Optional,
 )
 
-from openjiuwen.agent_teams.factory import (
-    recover_agent_team,
-    recover_for_existing_session,
-    resume_persistent_team,
-)
 from openjiuwen.agent_teams.interaction import (
     DeliverResult,
     GodViewMessage,
@@ -615,7 +612,7 @@ class TeamRuntimeManager:
         if kind is RunActionKind.WARM_RECOVER:
             if pool_entry is None:
                 raise RuntimeError(f"{kind.value} requires an active pool entry")
-            await recover_for_existing_session(pool_entry.agent, team_session)
+            await pool_entry.agent.recover_for_existing_session(team_session)
             pool_entry.current_session_id = session_id
             pool_entry.state = RuntimeState.RUNNING
             await pool_entry.interact_gate.reset()
@@ -625,7 +622,7 @@ class TeamRuntimeManager:
             if pool_entry is None:
                 raise RuntimeError(f"{kind.value} requires an active pool entry")
             await self._pre_run_with_inputs(team_session, inputs)
-            await resume_persistent_team(pool_entry.agent, team_session)
+            await pool_entry.agent.resume_for_new_session(team_session)
             pool_entry.current_session_id = session_id
             pool_entry.state = RuntimeState.RUNNING
             await pool_entry.interact_gate.reset()
@@ -633,11 +630,12 @@ class TeamRuntimeManager:
 
         # Cold paths — no pool entry. Make sure the pool stays clean.
         if kind is RunActionKind.COLD_RECOVER:
-            agent = await recover_agent_team(
-                team_session,
-                team_name=team_name,
-                runtime_spec=spec,
-            )
+            # Lazy import: TeamAgent's module pulls in heavy deps (rails,
+            # prompts) that the rest of manager.py doesn't need at import time.
+            from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+
+            agent = TeamAgent.recover_from_session(team_session, team_name, runtime_spec=spec)
+            await agent.recover_team()
         elif kind is RunActionKind.NEW_TEAM_IN_SESSION:
             await self._pre_run_with_inputs(team_session, inputs)
             agent = spec.build()

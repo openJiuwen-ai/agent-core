@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Callable
 
 from openjiuwen.core.common.logging import store_logger
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
+from openjiuwen.core.foundation.store.base_message_store import BaseMessageStore, MessageMetadata
 
 # Vector store exports (the ones that don't depend on SQLAlchemy)
 from openjiuwen.core.foundation.store.base_vector_store import (
@@ -136,6 +137,8 @@ def create_vector_store(store_type: str, **kwargs) -> "BaseVectorStore | None":
 
 __all__ = [
     "BaseKVStore",
+    "BaseMessageStore",
+    "MessageMetadata",
     "BaseVectorStore",
     "InMemoryKVStore",
     "VectorSearchResult",

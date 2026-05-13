@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator, Dict, TYPE_CHECKING
 
+from openjiuwen.core.common.exception.errors import ValidationError
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -219,9 +220,10 @@ class ExitWorktreeTool(_WorktreeToolBase):
                 success=False,
                 error=f"Failed to exit worktree: {e}",
             )
-        except ValueError as e:
-            # Two-phase confirmation: worktree has changes, discard_changes not set.
-            return ToolOutput(success=False, error=str(e))
+        except ValidationError as e:
+            # Two-phase confirmation: worktree has changes or state
+            # cannot be verified, and discard_changes was not set.
+            return ToolOutput(success=False, error=e.message)
 
         from openjiuwen.core.sys_operation.cwd import set_cwd, set_original_cwd
 

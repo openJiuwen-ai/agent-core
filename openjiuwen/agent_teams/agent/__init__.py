@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Agent implementations for agent teams."""
 
 from openjiuwen.agent_teams.agent.agent_configurator import AgentConfigurator

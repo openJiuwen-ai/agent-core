@@ -14,8 +14,9 @@
 
 ## 行为铁律
 
-- **派发决策是纯函数**：`decide_run_action` 只看 `(team_in_db, team_in_session, pool_entry, target_session_id, target_team_name)`，无副作用。manager 把 IO 收集进派发输入，然后 `_apply_action` 才动 factory / pool / session。改派发时改 `dispatch.py`，不要把决策逻辑塞回 manager。
-- **同一 team 在内存中只有一个实例**：切 session 走 `recover_for_existing_session`（warm），不要让 pool 出现多个相同 `team_name` 的 entry。
+- **派发决策是纯函数**：`decide_run_action` 只看 `(team_in_db, team_in_session, pool_entry, target_session_id, target_team_name)`，无副作用。manager 把 IO 收集进派发输入，然后 `_apply_action` 才动 TeamAgent / pool / session 这三类副作用源。改派发时改 `dispatch.py`，不要把决策逻辑塞回 manager。
+- **lifecycle 直达 TeamAgent**：`_apply_action` 直接调 `TeamAgent.recover_from_session` / `agent.recover_team` / `agent.resume_for_new_session` / `agent.recover_for_existing_session`，没有任何 `factory.*` 中间层（已删除）——避免 wrapper 上沉淀 runtime 透传参数。
+- **同一 team 在内存中只有一个实例**：切 session 走 `agent.recover_for_existing_session`（warm），不要让 pool 出现多个相同 `team_name` 的 entry。
 - **InteractGate 的生命周期与 run cycle 对齐**：`run_agent_team[_streaming]` 退出 `finally` 调 `_close_team_interact_gate`（Runner 内 helper）；warm 路径 activate 时调 `gate.reset()` 让下一个 cycle 重新放行。
 - **静止前置**：`release_session` / `delete_team` 在 pool 仍持有相关 entry 时报 `AGENT_TEAM_BUSY_INVALID`（ValidationError），调用方必须先 `stop_team`。
 - `Runner` 在 `_get_team_runtime_manager()` 里 lazy import 它，避免子进程 bootstrap 时拉链。

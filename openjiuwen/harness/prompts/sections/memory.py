@@ -73,6 +73,7 @@ MEMORY_PROMPT_CN = """# 持久化存储体系
 
 1. **用户画像信息（user_profile）**：记录用户的身份信息、偏好、习惯等稳定属性，比如用户的职业、兴趣、工作模式、喜好、不满等。
    - **存储**：写入 `USER.md`。
+   - **注意**：USER.md中只允许写入用户相关的记忆内容。当用户提出对Agent的身份、偏好、回答习惯等属性的定义时，记忆工具不做记录
 
 2. **情景记忆信息（episodic_memory）**：记录用户经历的具体事件或重要决策，比如用户要求完成的任务、描述的项目进展、某次事件等。
    - **存储**：写入 `YYYY-MM-DD.md`。
@@ -121,6 +122,7 @@ When valuable information appears during the conversation, classify it and store
 
 1. **User Profile Information (`user_profile`)**: Stable user attributes such as identity, preferences, habits, work style, likes/dislikes.
    - **Storage**: Write to `USER.md`.
+   - **Notice**: Only user-related memory content is allowed to be written into USER.md. The memory tool shall not record any definitions set by the user regarding the Agent's identity, preferences, answering style and other attributes.
 
 2. **Episodic Memory (`episodic_memory`)**: Specific events or important decisions, such as assigned tasks, project progress, or notable incidents.
    - **Storage**: Write to `YYYY-MM-DD.md`.
@@ -196,6 +198,7 @@ MEMORY_INACTIVE_PROMPT_CN = """## 持久化存储体系（被动模式）
   - 用户身份/偏好 → `USER.md`
   - 长期知识/配置 → `MEMORY.md`
   - 事件/日常记录 → `YYYY-MM-DD.md`
+  - 注意：USER.md中只允许写入用户相关的记忆内容。当用户提出对Agent的身份、偏好、回答习惯等属性的定义时，记忆工具不做记录
 
 """
 
@@ -223,6 +226,7 @@ MEMORY_INACTIVE_PROMPT_EN = """## Persistent Storage System (Passive Mode)
   - User identity/preferences → `USER.md`
   - Long-term knowledge/config → `MEMORY.md`
   - Events/daily records → `YYYY-MM-DD.md`
+  - Notice: Only user-related memory content is allowed to be written into USER.md. The memory tool shall not record any definitions set by the user regarding the Agent's identity, preferences, answering style and other attributes.
 
 """
 

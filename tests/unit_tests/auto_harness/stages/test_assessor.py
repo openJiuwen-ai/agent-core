@@ -12,7 +12,10 @@ from openjiuwen.auto_harness.schema import (
     AutoHarnessConfig,
     Experience,
     ExperienceType,
+    OptimizationTask,
+    StageResult,
 )
+from openjiuwen.core.session.stream.base import OutputSchema
 
 _ASSESS_MOD = "openjiuwen.auto_harness.stages.assess"
 
@@ -256,6 +259,156 @@ class TestAssessStream(IsolatedAsyncioTestCase):
                 collected[0].payload["content"]
                 == "part1"
             )
+
+    async def test_meta_assess_uses_input_tasks_as_agent_focus(self):
+        from openjiuwen.auto_harness.contexts import (
+            SessionContext,
+        )
+        from openjiuwen.auto_harness.orchestrator import (
+            AutoHarnessOrchestrator,
+        )
+        from openjiuwen.auto_harness.stages.assess import (
+            MetaAssessStage,
+        )
+
+        with tempfile.TemporaryDirectory() as d:
+            orch = AutoHarnessOrchestrator(
+                AutoHarnessConfig(data_dir=d),
+                agent=None,
+            )
+            orch.artifacts.put(
+                "input_tasks",
+                [
+                    OptimizationTask(
+                        topic="生成预算报告扩展"
+                    )
+                ],
+            )
+            ctx = SessionContext(orchestrator=orch)
+
+            seen_tasks = None
+
+            async def _fake_assess_stream(
+                _config,
+                _experience_store,
+                *,
+                input_tasks=None,
+                extra_rails=None,
+            ):
+                nonlocal seen_tasks
+                del extra_rails
+                seen_tasks = input_tasks
+                yield OutputSchema(
+                    type="message",
+                    index=0,
+                    payload={"content": "# assessment"},
+                )
+
+            with patch(
+                f"{_ASSESS_MOD}.run_assess_stream",
+                new=_fake_assess_stream,
+            ):
+                results = [
+                    item
+                    async for item in MetaAssessStage().stream(ctx)
+                ]
+
+            result = next(
+                item
+                for item in results
+                if isinstance(item, StageResult)
+            )
+            assert "assessment" in result.artifacts
+            assert seen_tasks is not None
+            assert seen_tasks[0].topic == "生成预算报告扩展"
+
+    async def test_extend_assess_uses_input_tasks_as_agent_focus(self):
+        from openjiuwen.auto_harness.contexts import (
+            SessionContext,
+        )
+        from openjiuwen.auto_harness.orchestrator import (
+            AutoHarnessOrchestrator,
+        )
+        from openjiuwen.auto_harness.stages.assess import (
+            ExtendAssessStage,
+        )
+
+        with tempfile.TemporaryDirectory() as d:
+            orch = AutoHarnessOrchestrator(
+                AutoHarnessConfig(data_dir=d),
+                agent=None,
+            )
+            orch.artifacts.put(
+                "input_tasks",
+                [
+                    OptimizationTask(
+                        topic="conversation_budget_report"
+                    )
+                ],
+            )
+            ctx = SessionContext(orchestrator=orch)
+
+            seen_query = ""
+
+            class _FakeAgent:
+                async def stream(self, payload):
+                    nonlocal seen_query
+                    seen_query = payload["query"]
+                    yield OutputSchema(
+                        type="message",
+                        index=0,
+                        payload={
+                            "content": (
+                                "| 竞品 | 功能 | 当前状态 | 差距描述 | 影响(0-1) | 可行性(0-1) | 建议方案 | 目标文件 |\n"
+                                "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                                "| cursor | conversation_budget_report | missing | no report | 0.9 | 0.8 | add report | openjiuwen/extensions/harness/report |\n"
+                            )
+                        },
+                    )
+
+            with patch(
+                "openjiuwen.auto_harness.agents."
+                "create_assess_agent",
+                return_value=_FakeAgent(),
+            ):
+                results = [
+                    item
+                    async for item in ExtendAssessStage().stream(ctx)
+                ]
+
+            result = next(
+                item
+                for item in results
+                if isinstance(item, StageResult)
+            )
+            gap_analysis = result.artifacts["gap_analysis"]
+            assert gap_analysis.gaps[0].feature == (
+                "conversation_budget_report"
+            )
+            assert "conversation_budget_report" in seen_query
+
+    def test_extend_assess_query_marks_runtime_extension_mode(self):
+        from openjiuwen.auto_harness.stages.assess import (
+            _build_gap_query,
+        )
+
+        query = _build_gap_query(
+            [
+                OptimizationTask(
+                    topic="huawei_ppt_generator",
+                    description=(
+                        "帮我优化创建一个能生成华为风格ppt的办公拓展"
+                    ),
+                )
+            ],
+            "",
+        )
+
+        assert "评估模式: runtime_extension_gap_assessment" in query
+        assert "当前 pipeline: extended_evolve_pipeline" in query
+        assert "华为风格ppt" in query
+        assert "主流编码 agent 的能力差距" not in query
+        assert "只有用户明确要求" in query
 
 
 class TestAssessCheckStrategy(IsolatedAsyncioTestCase):

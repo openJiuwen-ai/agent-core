@@ -169,35 +169,26 @@ await leader.interact("@teammate_member_name 请专注处理数据分析部分")
 
 ## 恢复与持久化
 
-### 恢复持久团队
+持久团队（`lifecycle: persistent`）的状态由 session checkpoint 与团队存储共同承载。**所有恢复路径都通过同一个入口触发——把 spec 与目标 session 交给 `Runner.run_agent_team_streaming` 即可**。`runtime` 子系统会根据内存池是否已有该 team 实例、目标 session 是否带持久化数据，自动选择对应分支：
 
-对于仍处于待命状态的持久团队（同一进程），使用 `resume_persistent_team()` 开始新一轮：
+| 场景 | runtime 自动选择 |
+|---|---|
+| 同进程切到新 session | `new_team_in_session_warm`（复用内存中的 Leader） |
+| 切回已持久化过的同名 session | `warm_recover`（复用 Leader，重绑 session checkpoint） |
+| 进程重启后冷启动 | `cold_recover`（从 session bucket 重建 Leader，再拉起 Teammates） |
+| 暂停后续运行 | `resume_from_pause`（同一 Leader、同一 session） |
 
 ```python
-from openjiuwen.agent_teams import resume_persistent_team
-
-# 在新会话中恢复（团队进程仍然存活）
-leader = await resume_persistent_team(leader, new_session_id="round_2")
-
-# 运行下一轮
-async for chunk in leader.stream(inputs={"query": "下一个任务"}):
+# 任意场景统一入口：spec + 目标 session_id，runtime 自己识别冷/热路径
+async for chunk in Runner.run_agent_team_streaming(
+    agent_team=spec,
+    inputs={"query": "下一个任务"},
+    session="round_2",
+):
     print(chunk)
 ```
 
-### 从会话恢复
-
-用于崩溃恢复或跨进程还原，使用 `recover_agent_team()`：
-
-```python
-from openjiuwen.agent_teams.factory import recover_agent_team
-
-# 恢复团队（包含 Leader 和所有队友）
-leader = await recover_agent_team(session_id="previous_session_id")
-
-# 继续执行
-async for chunk in leader.stream(inputs={"query": "继续任务"}):
-    print(chunk)
-```
+需要绕过 Runner 直接拿 leader 实例（脚本化运维场景）时，可使用 `TeamAgent.recover_from_session(session, team_name, runtime_spec=spec)` + `await agent.recover_team()` 这条低层路径——常规应用走 Runner 即可。
 
 ## 健康检查与自动恢复
 

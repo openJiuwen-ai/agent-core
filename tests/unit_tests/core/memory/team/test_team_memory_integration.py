@@ -12,8 +12,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.memory.team.manager import TeamMemoryManager
-from openjiuwen.core.memory.team.manager_params import (
+from openjiuwen.agent_teams.memory.manager import TeamMemoryManager
+from openjiuwen.agent_teams.memory.manager_params import (
     TeamLifecycle,
     TeamMemoryManagerParams,
     TeamRole,
@@ -193,7 +193,7 @@ async def test_lifecycle_with_persistent_leader_auto_extract(temp_dir, temp_team
     await manager.init_toolkit()
 
     with patch(
-        "openjiuwen.core.memory.team.extractor.extract_team_memories",
+        "openjiuwen.agent_teams.memory.extractor.extract_team_memories",
         new_callable=AsyncMock,
     ) as mock_extract:
         await manager.extract_after_round()
@@ -251,7 +251,7 @@ async def test_lifecycle_extract_does_not_run_twice_in_same_round(temp_dir, temp
     await manager.init_toolkit()
 
     with patch(
-        "openjiuwen.core.memory.team.extractor.extract_team_memories",
+        "openjiuwen.agent_teams.memory.extractor.extract_team_memories",
         new_callable=AsyncMock,
     ) as mock_extract:
         await manager.extract_after_round()

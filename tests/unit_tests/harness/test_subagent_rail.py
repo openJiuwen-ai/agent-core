@@ -302,8 +302,7 @@ class TestSubagentRail:
         ctx = Mock()
         await rail.before_model_call(ctx)
 
-        system_prompt_builder.add_section.assert_not_called()
-        system_prompt_builder.remove_section.assert_not_called()
+        system_prompt_builder.add_section.assert_called_once()
 
     @staticmethod
     @pytest.mark.asyncio

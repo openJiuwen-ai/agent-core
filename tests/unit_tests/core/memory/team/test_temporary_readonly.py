@@ -11,8 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.memory.team.manager import TeamMemoryManager
-from openjiuwen.core.memory.team.manager_params import TeamMemoryManagerParams
+from openjiuwen.agent_teams.memory.manager import TeamMemoryManager
+from openjiuwen.agent_teams.memory.manager_params import TeamMemoryManagerParams
 
 
 @pytest.fixture(autouse=True)

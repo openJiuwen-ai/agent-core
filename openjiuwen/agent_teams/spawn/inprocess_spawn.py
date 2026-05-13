@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Spawn a teammate as an in-process coroutine (asyncio.Task)."""
 
 from __future__ import annotations

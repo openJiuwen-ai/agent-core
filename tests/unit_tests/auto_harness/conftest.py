@@ -24,6 +24,8 @@ _A2A_SUBMODULES = [
     "a2a.server.agent_execution",
 ]
 
-if "a2a" not in sys.modules:
+try:
+    import a2a  # noqa: F401
+except ImportError:
     for _name in _A2A_SUBMODULES:
         sys.modules[_name] = MagicMock()

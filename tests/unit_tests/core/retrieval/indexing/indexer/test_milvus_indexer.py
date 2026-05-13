@@ -3,6 +3,8 @@
 Milvus index manager test cases
 """
 
+import os
+import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -143,6 +145,106 @@ class TestMilvusIndexer:
     @pytest.mark.asyncio
     @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
     @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore")
+    async def test_build_index_vector_type_with_image_path_uses_embed_multimodal(
+        self, mock_store_class, mock_client_class
+    ):
+        """When embed_model has embed_multimodal and chunk has image_path, use multimodal embedding for that chunk."""
+        mock_client = MagicMock()
+        mock_client.query.return_value = []
+        mock_client_class.return_value = mock_client
+
+        mock_store = AsyncMock()
+        mock_store.add = AsyncMock()
+        mock_store_class.return_value = mock_store
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(b"\x89PNG\r\n\x1a\n")
+            image_path = f.name
+        try:
+            mock_embed = AsyncMock()
+            mock_embed.embed_documents = AsyncMock(return_value=[[0.2] * 384])
+            mock_embed.embed_multimodal = AsyncMock(return_value=[0.5] * 384)
+
+            config = VectorStoreConfig(store_provider="milvus", collection_name="test_collection")
+            indexer = MilvusIndexer(config=config, milvus_uri="http://localhost:19530")
+            chunks = [
+                TextChunk(id_="1", text="caption one", doc_id="doc_1", metadata={"image_path": image_path}),
+                TextChunk(id_="2", text="text only chunk", doc_id="doc_1"),
+            ]
+            index_config = IndexConfig(index_name="test_index", index_type="vector")
+
+            with patch.object(indexer, "_ensure_collection", new_callable=AsyncMock) as mock_ensure:
+                mock_ensure.return_value = None
+                result = await indexer.build_index(chunks, index_config, mock_embed)
+                assert result is True
+            mock_embed.embed_multimodal.assert_called_once()
+            mock_embed.embed_documents.assert_called_once_with(
+                ["text only chunk"],
+                callback_cls=indexer.doc_index_callback,
+            )
+            assert chunks[0].embedding == [0.5] * 384
+            assert chunks[1].embedding == [0.2] * 384
+            mock_store.add.assert_called_once()
+        finally:
+            if os.path.exists(image_path):
+                os.unlink(image_path)
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore")
+    async def test_build_index_vector_type_with_image_path_use_caption_for_images(
+        self, mock_store_class, mock_client_class
+    ):
+        """When use_caption_for_images=True, image chunks use embed_documents (caption only), not embed_multimodal."""
+        mock_client = MagicMock()
+        mock_client.query.return_value = []
+        mock_client_class.return_value = mock_client
+
+        mock_store = AsyncMock()
+        mock_store.add = AsyncMock()
+        mock_store_class.return_value = mock_store
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            f.write(b"\x89PNG\r\n\x1a\n")
+            image_path = f.name
+        try:
+            mock_embed = AsyncMock()
+            mock_embed.embed_documents = AsyncMock(
+                return_value=[[0.1] * 384, [0.2] * 384]
+            )
+            mock_embed.embed_multimodal = AsyncMock(return_value=[0.5] * 384)
+
+            config = VectorStoreConfig(store_provider="milvus", collection_name="test_collection")
+            indexer = MilvusIndexer(config=config, milvus_uri="http://localhost:19530")
+            chunks = [
+                TextChunk(id_="1", text="caption one", doc_id="doc_1", metadata={"image_path": image_path}),
+                TextChunk(id_="2", text="text only chunk", doc_id="doc_1"),
+            ]
+            index_config = IndexConfig(
+                index_name="test_index",
+                index_type="vector",
+                use_caption_for_images=True,
+            )
+
+            with patch.object(indexer, "_ensure_collection", new_callable=AsyncMock) as mock_ensure:
+                mock_ensure.return_value = None
+                result = await indexer.build_index(chunks, index_config, mock_embed)
+                assert result is True
+            mock_embed.embed_multimodal.assert_not_called()
+            mock_embed.embed_documents.assert_called_once_with(
+                ["caption one", "text only chunk"],
+                callback_cls=indexer.doc_index_callback,
+            )
+            assert chunks[0].embedding == [0.1] * 384
+            assert chunks[1].embedding == [0.2] * 384
+            mock_store.add.assert_called_once()
+        finally:
+            if os.path.exists(image_path):
+                os.unlink(image_path)
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore")
     async def test_build_index_bm25_type(self, mock_store_class, mock_client_class):
         """Test building BM25 index"""
         mock_client = MagicMock()
@@ -166,19 +268,20 @@ class TestMilvusIndexer:
     @pytest.mark.asyncio
     @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
     async def test_build_index_vector_type_without_embed_model(self, mock_client_class):
-        """Test vector index but without embedding model"""
+        """Test vector index without embedding model raises BaseError."""
         mock_client = MagicMock()
+        mock_client.query.return_value = []
         mock_client_class.return_value = mock_client
 
         config = VectorStoreConfig(store_provider="milvus", collection_name="test_collection")
         indexer = MilvusIndexer(config=config, milvus_uri="http://localhost:19530")
         chunks = [TextChunk(id_="1", text="chunk 1", doc_id="doc_1")]
-        config = IndexConfig(index_name="test_index", index_type="vector")
+        index_config = IndexConfig(index_name="test_index", index_type="vector")
 
         with patch.object(indexer, "_ensure_collection", new_callable=AsyncMock) as mock_ensure:
             mock_ensure.return_value = None
             with pytest.raises(BaseError) as exc_info:
-                await indexer.build_index(chunks, config)
+                await indexer.build_index(chunks, index_config)
             assert exc_info.value.code == StatusCode.RETRIEVAL_INDEXING_EMBED_MODEL_NOT_FOUND.code
 
     @pytest.mark.asyncio

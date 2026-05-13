@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Team-level specifications for constructing and configuring AgentTeams.
 
 DeepAgent-scoped specs live in ``deep_agent_spec``.  This module
@@ -37,7 +39,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamSpec,
 )
 from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
-from openjiuwen.core.memory.team import TeamMemoryConfig
+from openjiuwen.agent_teams.memory import TeamMemoryConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.tools.worktree import WorktreeConfig
 

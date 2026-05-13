@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Background stream consumer that renders ``run_agent_team_streaming`` chunks.
 
 Each ``/team start`` (or ``/team switch`` / ``/team resume``) spawns

@@ -19,8 +19,9 @@ class openjiuwen.core.memory.long_term_memory.LongTermMemory(metaclass=Singleton
 
 > **Note**: Unlike the legacy `MemoryEngine(config: SysMemConfig, ...)`, `LongTermMemory` uses a **parameterless constructor + step-by-step initialization** approach:
 > 1. First call `await register_store(...)` to register underlying storage;
-> 2. Then call `set_config(MemoryEngineConfig(...))` to set global configuration;
-> 3. Optionally configure independent model/vector parameters for different business scenarios through `set_scope_config(scope_id, MemoryScopeConfig(...))`.
+> 2. Optionally call `register_message_store(...)` to register a custom message store (if not called, a default `SqlMessageStore` will be created from the registered `db_store`);
+> 3. Then call `set_config(MemoryEngineConfig(...))` to set global configuration;
+> 4. Optionally configure independent model/vector parameters for different business scenarios through `set_scope_config(scope_id, MemoryScopeConfig(...))`.
 
 ```
 LongTermMemory()
@@ -31,9 +32,9 @@ Initialize `LongTermMemory` instance (singleton pattern, multiple calls return t
 **Internal State Initialization**:
 
 - Configuration related: `_sys_mem_config: MemoryEngineConfig | None = None`, `_scope_config: dict[str, MemoryScopeConfig] = {}`;
-- Storage related: `kv_store / semantic_store / db_store` are all `None`, need to register through `register_store`;
-- Manager related: `scope_user_mapping_manager / message_manager / user_profile_manager / variable_manager / write_manager / search_manager / generator` are all `None`, initialized during `set_config`;
-- LLM related: `_base_llm: Tuple[str, Model] | None = None` (set during `set_config`);
+- Storage related: `kv_store / vector_store / db_store / message_store` are all `None`, need to register through `register_store` (and optionally `register_message_store`);
+- Manager related: `scope_user_mapping_manager / message_manager / fragment_memory_manager / variable_manager / write_manager / search_manager / generator` are all `None`, initialized during `set_config`;
+- LLM related: `_base_llm: Model | None = None` (set during `set_config`);
 - Embedding model cache: `_scope_embedding: dict[str, Embedding] = {}`.
 
 
@@ -117,6 +118,46 @@ Register underlying storage instances, must be completed before calling `set_con
 ```
 
 
+### register_message_store
+
+```
+def register_message_store(self, message_store: BaseMessageStore) -> None
+```
+
+Register a custom `BaseMessageStore` implementation. This allows external code to provide a custom message store (e.g., using a different database backend) instead of the default `SqlMessageStore`.
+
+Must be called before `set_config()`. If not called, `LongTermMemory` will create a default `SqlMessageStore` from the registered `db_store`.
+
+**Parameters**:
+
+* **message_store** (BaseMessageStore): A `BaseMessageStore` implementation instance.
+
+**Exceptions**:
+
+* **build_error**: Raised when `message_store` is not a `BaseMessageStore` instance (`MEMORY_REGISTER_STORE_EXECUTION_ERROR`).
+
+**Example**:
+
+```python
+>>> from openjiuwen.core.memory.long_term_memory import LongTermMemory
+>>> from openjiuwen.core.foundation.store.base_message_store import BaseMessageStore
+>>> from openjiuwen.core.memory.manage.mem_model.sql_message_store import SqlMessageStore
+>>> from openjiuwen.core.memory.manage.mem_model.sql_db_store import SqlDbStore
+>>>
+>>> # Create a custom message store
+>>> sql_db_store = SqlDbStore(db_store)
+>>> custom_message_store = SqlMessageStore(
+>>>     crypto_key=b"your-32-byte-aes-key-here!!",
+>>>     sql_db_store=sql_db_store,
+>>>     table_name="custom_messages"
+>>> )
+>>>
+>>> # Register the custom message store
+>>> memory = LongTermMemory()
+>>> memory.register_message_store(custom_message_store)
+```
+
+
 ### set_config
 
 ```
@@ -136,11 +177,27 @@ Set global memory engine configuration and initialize internal managers.
 
 **Prerequisites**:
 
-- Must have called `register_store` to register `kv_store`, `semantic_store`, `db_store`, otherwise will raise `build_error` (`MEMORY_SET_CONFIG_EXECUTION_ERROR`).
+- Must have called `register_store` to register `kv_store`, `vector_store`, `db_store`, otherwise will raise `build_error` (`MEMORY_SET_CONFIG_EXECUTION_ERROR`).
 
 **Exceptions**:
 
 * **build_error**: Raised when `register_store` has not been called or configuration is invalid.
+
+**Internal Managers Initialized**:
+
+This method initializes the following internal managers:
+
+* `scope_user_mapping_manager`: Manages the mapping between scopes and users;
+* `message_manager`: Handles message storage and retrieval operations. Initialized in two ways:
+  - If a custom `message_store` was registered via `register_message_store()` before calling `set_config()`, it uses the registered `message_store`;
+  - Otherwise, creates a default `SqlMessageStore` using the registered `db_store`, with `crypto_key` from config and table name `"user_message"`;
+* `fragment_memory_manager`: Manages user profile, episodic memory, and semantic memory;
+* `variable_manager`: Manages user variable storage and retrieval;
+* `summary_manager`: Manages user summary memory;
+* `write_manager`: Coordinates write operations across all memory types;
+* `search_manager`: Handles search queries across all memory types;
+* `generator`: Generates memory content from messages using LLM;
+* `_base_llm`: Base large language model instance (initialized if `default_model_cfg` and `default_model_client_cfg` are provided).
 
 **Example**:
 
@@ -333,10 +390,10 @@ async def add_messages(
     timestamp: datetime | None = None,
     gen_mem: bool = True,
     gen_mem_with_history_msg_num: int = 5,
-) -> None
+) -> AddMemResult
 ```
 
-Add conversation messages to the memory engine and generate memories (user profiles, variables, etc.) according to `agent_config`.
+Add conversation messages to the memory engine and generate memories (user profiles, variables, etc.) according to `agent_config`. Also supports **instructive memory** functionality: when users include explicit memory instructions in the conversation (e.g., "remember...", "change... to...", "delete..."), the engine automatically recognizes and performs the corresponding add, update, or delete operations.
 
 **Parameters**:
 
@@ -354,6 +411,17 @@ Add conversation messages to the memory engine and generate memories (user profi
 * **timestamp** (datetime | None, optional): Message timestamp, if `None` uses current UTC time. Default value: `None`.
 * **gen_mem** (bool, optional): Whether to generate memories; when `False`, only saves messages without triggering memory extraction. Default value: `True`.
 * **gen_mem_with_history_msg_num** (int, optional): Number of historical messages to reference when generating memories. Default value: 5.
+
+**Returns**:
+
+* **AddMemResult**: The memory extraction result for this call, containing the following fields:
+  * `variables: list[VariableUnit]`: List of extracted variable memories;
+  * `user_profile: list[FragmentMemoryUnit]`: List of extracted user profile memories;
+  * `semantic_memory: list[FragmentMemoryUnit]`: List of extracted semantic memories;
+  * `episodic_memory: list[FragmentMemoryUnit]`: List of extracted episodic memories;
+  * `summary: list[SummaryUnit]`: List of extracted summary memories.
+
+When `gen_mem=False`, `scope_id` format is invalid, LLM is not initialized, or no user messages are present, returns an empty `AddMemResult()` (all fields are empty lists).
 
 **Exceptions**:
 
@@ -406,6 +474,61 @@ Add conversation messages to the memory engine and generate memories (user profi
 >>>     session_id="session456"
 >>> )
 ```
+
+**Instructive Memory Example**:
+
+```python
+>>> # User modifies existing memory through explicit instruction
+>>> update_messages = [
+>>>     UserMessage(content="Change my age to 30"),
+>>>     AssistantMessage(content="Okay, I've updated your age information.")
+>>> ]
+>>> result = await memory.add_messages(
+>>>     messages=update_messages,
+>>>     agent_config=agent_config,
+>>>     user_id="user123",
+>>>     scope_id="my_scope",
+>>> )
+>>> # result.user_profile will contain FragmentMemoryUnit with operation_type=UPDATE
+>>> 
+>>> # User deletes existing memory through explicit instruction
+>>> delete_messages = [
+>>>     UserMessage(content="Delete my age information"),
+>>>     AssistantMessage(content="Okay, I've deleted your age information.")
+>>> ]
+>>> result = await memory.add_messages(
+>>>     messages=delete_messages,
+>>>     agent_config=agent_config,
+>>>     user_id="user123",
+>>>     scope_id="my_scope",
+>>> )
+>>> # result.user_profile will contain FragmentMemoryUnit with operation_type=DELETE
+```
+
+
+## class openjiuwen.core.memory.long_term_memory.AddMemResult
+
+```
+class openjiuwen.core.memory.long_term_memory.AddMemResult(BaseModel)
+```
+
+Return value model for the `add_messages` method, encapsulating all memory extraction results for this call.
+
+**Fields**:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `variables` | `list[VariableUnit]` | `[]` | List of extracted variable memories |
+| `user_profile` | `list[FragmentMemoryUnit]` | `[]` | List of extracted user profile memories |
+| `semantic_memory` | `list[FragmentMemoryUnit]` | `[]` | List of extracted semantic memories |
+| `episodic_memory` | `list[FragmentMemoryUnit]` | `[]` | List of extracted episodic memories |
+| `summary` | `list[SummaryUnit]` | `[]` | List of extracted summary memories |
+
+**Notes**:
+
+- Each `FragmentMemoryUnit` contains an `operation_type` field (`ADD` / `UPDATE` / `DELETE`) to distinguish the operation type.
+- Instructive memory UPDATE and DELETE operations are represented as `FragmentMemoryUnit` with the corresponding `operation_type` in the return result.
+- When `add_messages` does not perform memory extraction for any reason (`gen_mem=False`, invalid `scope_id`, LLM not initialized, etc.), returns an empty `AddMemResult()`.
 
 
 ### async get_recent_messages

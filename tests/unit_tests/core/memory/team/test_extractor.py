@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.memory.team.extractor import extract_team_memories
+from openjiuwen.agent_teams.memory.extractor import extract_team_memories
 
 
 @pytest.fixture

@@ -9,9 +9,11 @@ from openjiuwen.auto_harness.schema import (
     Experience,
     Gap,
     OptimizationTask,
+    PIPELINE_PREFERENCE_AUTO,
     PipelineSpec,
     ResearchContext,
     StageSpec,
+    normalize_pipeline_preference,
 )
 from openjiuwen.auto_harness.orchestrator import (
     AutoHarnessOrchestrator,
@@ -30,10 +32,12 @@ __all__ = [
     "Experience",
     "Gap",
     "OptimizationTask",
+    "PIPELINE_PREFERENCE_AUTO",
     "PipelineRegistry",
     "PipelineSpec",
     "ResearchContext",
     "StageRegistry",
     "StageSpec",
     "create_auto_harness_orchestrator",
+    "normalize_pipeline_preference",
 ]

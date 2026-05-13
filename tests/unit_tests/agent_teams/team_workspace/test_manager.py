@@ -103,6 +103,79 @@ def test_mount_into_workspace_reraises_non_1314_symlink_error(monkeypatch, tmp_p
         manager.mount_into_workspace(str(workspace_root))
 
 
+@pytest.mark.level0
+def test_mount_worktree_creates_symlink(tmp_path):
+    """``mount_worktree`` should expose the target at ``.worktree/{slug}``."""
+    manager = _make_manager(tmp_path)
+    target = tmp_path / "worktrees" / "wt-alpha"
+    target.mkdir(parents=True)
+
+    manager.mount_worktree("wt-alpha", str(target))
+
+    link_path = os.path.join(manager.workspace_path, ".worktree", "wt-alpha")
+    assert os.path.islink(link_path)
+    assert os.path.realpath(link_path) == os.path.realpath(str(target))
+
+
+@pytest.mark.level1
+def test_mount_worktree_replaces_stale_symlink(tmp_path):
+    """A stale symlink from a previous session must be replaced, not error out."""
+    manager = _make_manager(tmp_path)
+    old_target = tmp_path / "worktrees" / "wt-stale"
+    new_target = tmp_path / "worktrees" / "wt-fresh"
+    old_target.mkdir(parents=True)
+    new_target.mkdir(parents=True)
+
+    manager.mount_worktree("wt-shared", str(old_target))
+    # Simulate the old target being removed underneath us.
+    os.rmdir(str(old_target))
+
+    manager.mount_worktree("wt-shared", str(new_target))
+
+    link_path = os.path.join(manager.workspace_path, ".worktree", "wt-shared")
+    assert os.path.realpath(link_path) == os.path.realpath(str(new_target))
+
+
+@pytest.mark.level1
+def test_mount_worktree_skips_when_collision_is_not_symlink(tmp_path):
+    """A real directory at the mount path must not be clobbered."""
+    manager = _make_manager(tmp_path)
+    target = tmp_path / "worktrees" / "wt-collide"
+    target.mkdir(parents=True)
+    wt_dir = os.path.join(manager.workspace_path, ".worktree")
+    os.makedirs(wt_dir, exist_ok=True)
+    real_dir = os.path.join(wt_dir, "wt-collide")
+    os.makedirs(real_dir)
+
+    manager.mount_worktree("wt-collide", str(target))
+
+    assert not os.path.islink(real_dir)
+
+
+@pytest.mark.level0
+def test_unmount_worktree_removes_symlink(tmp_path):
+    """``unmount_worktree`` should drop the link without touching the worktree."""
+    manager = _make_manager(tmp_path)
+    target = tmp_path / "worktrees" / "wt-bye"
+    target.mkdir(parents=True)
+    manager.mount_worktree("wt-bye", str(target))
+
+    manager.unmount_worktree("wt-bye")
+
+    link_path = os.path.join(manager.workspace_path, ".worktree", "wt-bye")
+    assert not os.path.lexists(link_path)
+    # Worktree directory itself is left alone.
+    assert target.is_dir()
+
+
+@pytest.mark.level1
+def test_unmount_worktree_noop_when_link_missing(tmp_path):
+    """Unmounting a slug that was never mounted is a no-op."""
+    manager = _make_manager(tmp_path)
+    # Should not raise.
+    manager.unmount_worktree("never-mounted")
+
+
 class _GitCallRecorder:
     """Records calls to _run_git and returns a default OK result."""
 

@@ -6,6 +6,7 @@ from openjiuwen.core.memory.migration.operation.operation_registry import Operat
 sql_registry = OperationRegistry()
 vector_registry = OperationRegistry()
 kv_registry = OperationRegistry()
+message_registry = OperationRegistry()
 
 """
 # SQL Example
@@ -52,4 +53,32 @@ kv_registry.register(
         update_func=update_user_settings_kv
     )
 )
+
+# Message Example
+from openjiuwen.core.memory.migration.operation.operations import UpdateMessageOperation
+
+async def add_role_prefix(message_store):
+    # Example: Update all messages by prefixing role with 'user:' if role is 'user'
+    # Uses only BaseMessageStore public API, works with any store implementation
+    messages = await message_store.get_messages(
+        message_filter={},
+        limit=10000,
+        order_by="timestamp",
+        order_direction="asc",
+    )
+    for base_msg, metadata in messages:
+        if metadata.message_type == "user" and not base_msg.role.startswith("user:"):
+            await message_store.update_message(
+                metadata.message_id,
+                base_msg.content,
+            )
+
+message_registry.register(
+    "message_global",
+    UpdateMessageOperation(
+        metadata=OperationMetadata(schema_version=1, description="Add role prefix to user messages"),
+        update_func=add_role_prefix
+    )
+)
+
 """
