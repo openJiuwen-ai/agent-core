@@ -1,6 +1,7 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -616,6 +617,72 @@ class TestGlobalSessionControllerConvenienceMethods:
         assert result is False
 
     @pytest.mark.asyncio
+    async def test_create_group_session(
+            self, global_controller, base_path, mock_container
+    ):
+        # create_group_session creates a session with GroupSubject scope
+        with patch.object(DataContainerFactory, "create", return_value=mock_container):
+            is_new, session = await GlobalSessionController.create_group_session(
+                agent_id="agent1", group_id="grp1", session_id="session-1"
+            )
+        assert is_new is True
+        assert session.session_id == "session-1"
+        assert "group:grp1" in str(session.session_scope)
+
+    @pytest.mark.asyncio
+    async def test_add_direct_session_downstream_caller_not_exist(
+            self, global_controller, base_path, mock_container
+    ):
+        # add_direct_session_downstream returns False when caller agent does not exist
+        with patch.object(DataContainerFactory, "create", return_value=mock_container):
+            await GlobalSessionController.create_direct_session(
+                agent_id="agent2", user_id="user2", session_id="session-2"
+            )
+        result = await GlobalSessionController.add_direct_session_downstream(
+            caller_agent_id="nonexistent",
+            caller_user_id="user1",
+            target_agent_id="agent2",
+            target_user_id="user2",
+        )
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_add_direct_session_downstream_caller_no_active_session(
+            self, global_controller, base_path, mock_container
+    ):
+        # add_direct_session_downstream returns False when caller has no active session
+        with patch.object(DataContainerFactory, "create", return_value=mock_container):
+            await GlobalSessionController.create_direct_session(
+                agent_id="agent2", user_id="user2", session_id="session-2"
+            )
+        await global_controller.create_if_not_exist_agent("agent1")
+        result = await GlobalSessionController.add_direct_session_downstream(
+            caller_agent_id="agent1",
+            caller_user_id="user1",
+            target_agent_id="agent2",
+            target_user_id="user2",
+        )
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_add_direct_session_downstream_target_no_active_session(
+            self, global_controller, base_path, mock_container
+    ):
+        # add_direct_session_downstream returns False when target has no active session
+        with patch.object(DataContainerFactory, "create", return_value=mock_container):
+            await GlobalSessionController.create_direct_session(
+                agent_id="agent1", user_id="user1", session_id="session-1"
+            )
+        await global_controller.create_if_not_exist_agent("agent2")
+        result = await GlobalSessionController.add_direct_session_downstream(
+            caller_agent_id="agent1",
+            caller_user_id="user1",
+            target_agent_id="agent2",
+            target_user_id="user2",
+        )
+        assert result is False
+
+    @pytest.mark.asyncio
     async def test_cleanup_user_sessions(
             self, global_controller, base_path, mock_container
     ):
@@ -984,3 +1051,219 @@ class TestGlobalSessionControllerVisualizeCallChain:
             agent_id="agent1", session_id="session-1"
         )
         assert "agent:agent1:main:group:group1" in result
+
+
+class TestGlobalSessionControllerAdvanced:
+    @pytest.mark.asyncio
+    async def test_flush_agent_not_found(self, global_controller):
+        # flush_agent gracefully handles nonexistent agent
+        await global_controller.flush_agent("nonexistent")
+
+    @pytest.mark.asyncio
+    async def test_load_all_no_directory(self, global_controller, tmp_path):
+        # load_all with nonexistent base_path does not crash
+        global_controller.base_path = tmp_path / "nonexistent"
+        await global_controller.load_all()
+        assert len(global_controller.controllers) == 0
+
+    @pytest.mark.asyncio
+    async def test_cleanup_orphan_files_agent_dir_exists_no_controller(
+            self, global_controller, base_path
+    ):
+        # cleanup_orphan_files scans agent directory even without a controller
+        agent_sessions_dir = base_path / "orphan_agent" / "sessions"
+        orphan_dir = agent_sessions_dir / "orphan-s1"
+        orphan_dir.mkdir(parents=True, exist_ok=True)
+        (orphan_dir / "state.data").write_text("{}", encoding="utf-8")
+
+        meta_file = base_path / "orphan_agent" / "sessions" / "sessions.json"
+        meta_file.parent.mkdir(parents=True, exist_ok=True)
+        meta_file.write_text("{}", encoding="utf-8")
+
+        result = await global_controller.cleanup_orphan_files(
+            agent_id="orphan_agent", dry_run=True
+        )
+        assert "orphan_agent" in result
+
+    @pytest.mark.asyncio
+    async def test_cleanup_orphan_files_corrupted_meta(
+            self, global_controller, base_path
+    ):
+        # cleanup_orphan_files handles corrupted sessions.json
+        _, ctrl = await global_controller.create_if_not_exist_agent("agent1")
+        main_scope = SessionScope(scope=MainScope())
+        await ctrl.create_if_not_exists(main_scope, "session-1")
+        await global_controller.flush_all()
+
+        meta_file = base_path / "agent1" / "sessions" / "sessions.json"
+        meta_file.write_text("NOT VALID JSON{{{{", encoding="utf-8")
+
+        orphan_dir = base_path / "agent1" / "sessions" / "orphan-s1"
+        orphan_dir.mkdir(parents=True, exist_ok=True)
+        (orphan_dir / "state.data").write_text("{}", encoding="utf-8")
+
+        result = await global_controller.cleanup_orphan_files(dry_run=True)
+        assert "agent1" in result
+        assert "orphan-s1" in result["agent1"]
+
+    @pytest.mark.asyncio
+    async def test_remove_all_clears_base_directory(
+            self, global_controller, base_path
+    ):
+        # remove_all deletes the base directory from disk
+        _, ctrl = await global_controller.create_if_not_exist_agent("agent1")
+        main_scope = SessionScope(scope=MainScope())
+        await ctrl.create_if_not_exists(main_scope, "session-1")
+        await global_controller.flush_all()
+        assert base_path.exists()
+
+        await global_controller.remove_all()
+        assert not base_path.exists()
+
+
+class TestGlobalSessionControllerCallbackRegistration:
+    def test_init_without_runner(self):
+        # GlobalSessionController init does not crash when Runner is unavailable
+        GlobalSessionController._instances = {}
+        ctrl = GlobalSessionController()
+        assert ctrl is not None
+
+
+class TestGlobalSessionControllerSecurity:
+    @pytest.mark.asyncio
+    async def test_different_direct_subjects_isolated(
+            self, global_controller, base_path
+    ):
+        # Sessions for different users are isolated
+        mock_session = MagicMock()
+        mock_session.get_state = MagicMock(return_value={"key": "value"})
+        mock_session.update_state = MagicMock()
+        mock_container = AgentSessionContainer(mock_session)
+
+        with patch.object(DataContainerFactory, "create", return_value=mock_container):
+            _, s1 = await GlobalSessionController.create_direct_session(
+                agent_id="agent1", user_id="user1", session_id="session-u1"
+            )
+            _, s2 = await GlobalSessionController.create_direct_session(
+                agent_id="agent1", user_id="user2", session_id="session-u2"
+            )
+
+        assert s1.session_scope != s2.session_scope
+        assert s1.can_see("agent1", "session-u2") is False
+        assert s2.can_see("agent1", "session-u1") is False
+
+    @pytest.mark.asyncio
+    async def test_downstream_unidirectional(
+            self, global_controller, base_path
+    ):
+        # Downstream visibility is one-directional
+        _, ctrl1 = await global_controller.create_if_not_exist_agent("agent1")
+        _, ctrl2 = await global_controller.create_if_not_exist_agent("agent2")
+        main_scope = SessionScope(scope=MainScope())
+
+        _, s1 = await ctrl1.create_if_not_exists(main_scope, "session-1")
+        _, s2 = await ctrl2.create_if_not_exists(main_scope, "session-2")
+
+        s1.add_downstream("agent2", "session-2", SharingPolicy(permission=Permission.READ))
+
+        assert s1.can_see("agent2", "session-2") is True
+        assert s2.can_see("agent1", "session-1") is False
+
+    @pytest.mark.asyncio
+    async def test_remove_session_complete_cleanup(
+            self, global_controller, base_path
+    ):
+        # remove_agent deletes all session data from disk
+        _, ctrl = await global_controller.create_if_not_exist_agent("agent1")
+        main_scope = SessionScope(scope=MainScope())
+        await ctrl.create_if_not_exists(main_scope, "session-1")
+        await global_controller.flush_all()
+
+        agent_dir = base_path / "agent1"
+        assert agent_dir.exists()
+
+        await global_controller.remove_agent("agent1")
+        assert not agent_dir.exists()
+
+
+class TestGlobalSessionControllerCompatibility:
+    @pytest.mark.asyncio
+    async def test_load_old_meta_without_container_type(
+            self, global_controller, base_path
+    ):
+        # Loading sessions.json without data_container_type uses default
+        _, ctrl = await global_controller.create_if_not_exist_agent("agent1")
+        main_scope = SessionScope(scope=MainScope())
+        await ctrl.create_if_not_exists(main_scope, "session-1")
+        await global_controller.flush_all()
+
+        meta_file = base_path / "agent1" / "sessions" / "sessions.json"
+        with open(meta_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        for scope_data in data.values():
+            for session_data in scope_data.get("sessions", []):
+                if "data_container_type" in session_data:
+                    del session_data["data_container_type"]
+        with open(meta_file, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+
+        mock_session = MagicMock()
+        mock_session.get_state = MagicMock(return_value={})
+        mock_session.update_state = MagicMock()
+
+        async def _mock_load(agent_id, session_id, serialized):
+            return AgentSessionContainer(mock_session)
+
+        global_controller.controllers.clear()
+        with patch.object(AgentSessionContainer, "load", _mock_load):
+            await global_controller.load_agent("agent1")
+        ctrl = global_controller.get_agent("agent1")
+        assert ctrl is not None
+
+
+class TestGlobalSessionControllerResilience:
+    @pytest.mark.asyncio
+    async def test_flush_all_partial_failure(
+            self, global_controller, base_path
+    ):
+        # flush_all does not crash when one agent fails
+        _, ctrl1 = await global_controller.create_if_not_exist_agent("agent1")
+        _, ctrl2 = await global_controller.create_if_not_exist_agent("agent2")
+        main_scope = SessionScope(scope=MainScope())
+        await ctrl1.create_if_not_exists(main_scope, "session-1")
+        await ctrl2.create_if_not_exists(main_scope, "session-2")
+
+        with patch.object(ctrl2, "flush", return_value=False):
+            await global_controller.flush_all()
+
+        meta1 = base_path / "agent1" / "sessions" / "sessions.json"
+        assert meta1.exists()
+
+    @pytest.mark.asyncio
+    async def test_repeated_remove_same_agent(
+            self, global_controller, base_path
+    ):
+        # Removing the same agent twice returns False the second time
+        await global_controller.create_if_not_exist_agent("agent1")
+        result1 = await global_controller.remove_agent("agent1")
+        result2 = await global_controller.remove_agent("agent1")
+        assert result1 is True
+        assert result2 is False
+
+    @pytest.mark.asyncio
+    async def test_sessions_json_deleted_externally(
+            self, global_controller, base_path
+    ):
+        # load_agent handles missing sessions.json gracefully
+        _, ctrl = await global_controller.create_if_not_exist_agent("agent1")
+        main_scope = SessionScope(scope=MainScope())
+        await ctrl.create_if_not_exists(main_scope, "session-1")
+        await global_controller.flush_all()
+
+        meta_file = base_path / "agent1" / "sessions" / "sessions.json"
+        meta_file.unlink()
+
+        global_controller.controllers.clear()
+        await global_controller.load_agent("agent1")
+        ctrl = global_controller.get_agent("agent1")
+        assert ctrl is not None

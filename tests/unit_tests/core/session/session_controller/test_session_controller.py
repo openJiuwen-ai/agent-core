@@ -1,6 +1,8 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+import asyncio
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -318,3 +320,455 @@ class TestSessionControllerMeta:
         await controller.create_if_not_exists(main_scope, "session-1")
         metas = controller.list_metas()
         assert main_scope in metas
+        del metas[main_scope]
+        assert main_scope in controller.meta_map
+
+
+class TestSessionControllerCreateAdvanced:
+    @pytest.mark.asyncio
+    async def test_create_new_scope_auto_created(self, controller, direct_scope):
+        # create_if_not_exists auto-creates ScopeSessionsMeta for a new scope
+        assert direct_scope not in controller.meta_map
+        await controller.create_if_not_exists(direct_scope, "session-1")
+        assert direct_scope in controller.meta_map
+        assert controller.meta_map[direct_scope].active_session == "session-1"
+
+    @pytest.mark.asyncio
+    async def test_multi_scope_isolation(self, controller, main_scope, direct_scope):
+        # Sessions in different scopes are fully isolated
+        _, s1 = await controller.create_if_not_exists(main_scope, "session-1")
+        _, s2 = await controller.create_if_not_exists(direct_scope, "session-2")
+
+        assert main_scope in controller.meta_map
+        assert direct_scope in controller.meta_map
+        assert controller.meta_map[main_scope].active_session == "session-1"
+        assert controller.meta_map[direct_scope].active_session == "session-2"
+
+        active_main = await controller.get_scope_active_session(main_scope)
+        active_direct = await controller.get_scope_active_session(direct_scope)
+        assert active_main.session_id == "session-1"
+        assert active_direct.session_id == "session-2"
+        assert active_main is not active_direct
+
+
+class TestSessionControllerFlushAdvanced:
+    @pytest.mark.asyncio
+    async def test_flush_empty_cache(self, controller):
+        # flush returns True when session_cache is empty
+        result = await controller.flush()
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_flush_session_failure(self, controller, main_scope):
+        # flush_session returns False when ChainSession.flush fails
+        await controller.create_if_not_exists(main_scope, "session-1")
+        with patch.object(
+                controller.session_cache["session-1"], "flush",
+                return_value=False
+        ):
+            result = await controller.flush_session("session-1")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_flush_scope_nonexistent(self, controller, direct_scope):
+        # flush_scope returns True for a scope not in meta_map
+        result = await controller.flush_scope(direct_scope)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_flush_scope_session_failure(self, controller, main_scope):
+        # flush_scope returns False when a session in the scope fails to flush
+        await controller.create_if_not_exists(main_scope, "session-1")
+        with patch.object(
+                controller.session_cache["session-1"], "flush",
+                return_value=False
+        ):
+            result = await controller.flush_scope(main_scope)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_flush_partial_failure(self, controller, main_scope, direct_scope):
+        # flush returns False when one session flush fails
+        await controller.create_if_not_exists(main_scope, "session-1")
+        await controller.create_if_not_exists(direct_scope, "session-2")
+        with patch.object(
+                controller.session_cache["session-1"], "flush",
+                return_value=False
+        ):
+            result = await controller.flush()
+        assert result is False
+
+
+class TestSessionControllerLoadAdvanced:
+    @pytest.mark.asyncio
+    async def test_load_active_only(self, controller, main_scope, base_path):
+        # load with load_active_only=True only loads active sessions into cache
+        await controller.create_if_not_exists(main_scope, "session-1")
+        s1 = controller.session_cache["session-1"]
+        s1.is_active = False
+        controller.meta_map[main_scope].deactivate_all_sessions()
+        await controller.create_if_not_exists(main_scope, "session-2")
+        await controller.flush()
+
+        mock_session = MagicMock()
+        mock_session.get_state = MagicMock(return_value={})
+        mock_session.update_state = MagicMock()
+
+        async def _mock_load(agent_id, session_id, serialized):
+            return AgentSessionContainer(mock_session)
+
+        ctrl2 = SessionController(agent_id="agent1", base_path=base_path)
+        with patch.object(AgentSessionContainer, "load", _mock_load):
+            await ctrl2.load(load_active_only=True)
+        assert "session-2" in ctrl2.session_cache
+        assert "session-1" not in ctrl2.session_cache
+
+    @pytest.mark.asyncio
+    async def test_load_all_sessions(self, controller, main_scope, base_path):
+        # load with load_active_only=False loads all sessions into cache
+        await controller.create_if_not_exists(main_scope, "session-1")
+        s1 = controller.session_cache["session-1"]
+        s1.is_active = False
+        controller.meta_map[main_scope].deactivate_all_sessions()
+        await controller.create_if_not_exists(main_scope, "session-2")
+        await controller.flush()
+
+        mock_session = MagicMock()
+        mock_session.get_state = MagicMock(return_value={})
+        mock_session.update_state = MagicMock()
+
+        async def _mock_load(agent_id, session_id, serialized):
+            return AgentSessionContainer(mock_session)
+
+        ctrl2 = SessionController(agent_id="agent1", base_path=base_path)
+        with patch.object(AgentSessionContainer, "load", _mock_load):
+            await ctrl2.load(load_active_only=False)
+        assert "session-1" in ctrl2.session_cache
+        assert "session-2" in ctrl2.session_cache
+
+    @pytest.mark.asyncio
+    async def test_load_corrupted_meta_file(self, base_path):
+        # load returns False when sessions.json contains invalid JSON
+        ctrl = SessionController(agent_id="agent1", base_path=base_path)
+        meta_file = base_path / "agent1" / "sessions" / "sessions.json"
+        meta_file.parent.mkdir(parents=True, exist_ok=True)
+        meta_file.write_text("NOT VALID JSON{{{", encoding="utf-8")
+        result = await ctrl.load()
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_load_partial_corrupted_scope(self, controller, main_scope, base_path):
+        # load skips corrupted scope entries and loads the rest
+        await controller.create_if_not_exists(main_scope, "session-1")
+        await controller.flush()
+
+        meta_file = base_path / "agent1" / "sessions" / "sessions.json"
+        with open(meta_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data["invalid_scope_key_no_agent_prefix"] = {"sessions": []}
+        with open(meta_file, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+
+        mock_session = MagicMock()
+        mock_session.get_state = MagicMock(return_value={})
+        mock_session.update_state = MagicMock()
+
+        async def _mock_load(agent_id, session_id, serialized):
+            return AgentSessionContainer(mock_session)
+
+        ctrl2 = SessionController(agent_id="agent1", base_path=base_path)
+        with patch.object(AgentSessionContainer, "load", _mock_load):
+            result = await ctrl2.load()
+        assert result is True
+        assert main_scope in ctrl2.meta_map
+
+    @pytest.mark.asyncio
+    async def test_load_scope_nonexistent(self, controller, direct_scope, base_path):
+        # load_scope returns True when the scope is not in sessions.json
+        result = await controller.load_scope(direct_scope)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_load_session_idempotent(self, controller, main_scope, base_path):
+        # Repeated load does not duplicate sessions in cache
+        await controller.create_if_not_exists(main_scope, "session-1")
+        await controller.flush()
+
+        mock_session = MagicMock()
+        mock_session.get_state = MagicMock(return_value={})
+        mock_session.update_state = MagicMock()
+
+        async def _mock_load(agent_id, session_id, serialized):
+            return AgentSessionContainer(mock_session)
+
+        ctrl2 = SessionController(agent_id="agent1", base_path=base_path)
+        with patch.object(AgentSessionContainer, "load", _mock_load):
+            await ctrl2.load()
+            cache_size_after_first = len(ctrl2.session_cache)
+            await ctrl2.load()
+        assert len(ctrl2.session_cache) == cache_size_after_first
+
+
+class TestSessionControllerGetAdvanced:
+    @pytest.mark.asyncio
+    async def test_get_scope_active_session_auto_loads(
+            self, controller, main_scope, base_path
+    ):
+        # get_scope_active_session auto-loads session not in cache
+        await controller.create_if_not_exists(main_scope, "session-1")
+        await controller.flush()
+
+        mock_session = MagicMock()
+        mock_session.get_state = MagicMock(return_value={})
+        mock_session.update_state = MagicMock()
+
+        async def _mock_load(agent_id, session_id, serialized):
+            return AgentSessionContainer(mock_session)
+
+        ctrl2 = SessionController(agent_id="agent1", base_path=base_path)
+        with patch.object(AgentSessionContainer, "load", _mock_load):
+            await ctrl2.load()
+        ctrl2.session_cache.clear()
+
+        with patch.object(AgentSessionContainer, "load", _mock_load):
+            session = await ctrl2.get_scope_active_session(main_scope)
+        assert session is not None
+        assert session.session_id == "session-1"
+
+    @pytest.mark.asyncio
+    async def test_get_scope_sessions_unknown_scope(self, controller, direct_scope):
+        # get_scope_sessions returns empty list for unknown scope
+        sessions = await controller.get_scope_sessions(direct_scope)
+        assert sessions == []
+
+    @pytest.mark.asyncio
+    async def test_get_scope_sessions_unloaded_not_in_result(
+            self, controller, main_scope, base_path
+    ):
+        # get_scope_sessions only returns sessions already in cache
+        await controller.create_if_not_exists(main_scope, "session-1")
+        s1 = controller.session_cache["session-1"]
+        s1.is_active = False
+        controller.meta_map[main_scope].deactivate_all_sessions()
+        await controller.create_if_not_exists(main_scope, "session-2")
+        await controller.flush()
+
+        mock_session = MagicMock()
+        mock_session.get_state = MagicMock(return_value={})
+        mock_session.update_state = MagicMock()
+
+        async def _mock_load(agent_id, session_id, serialized):
+            return AgentSessionContainer(mock_session)
+
+        ctrl2 = SessionController(agent_id="agent1", base_path=base_path)
+        with patch.object(AgentSessionContainer, "load", _mock_load):
+            await ctrl2.load(load_active_only=True)
+        sessions = await ctrl2.get_scope_sessions(main_scope)
+        session_ids = [s.session_id for s in sessions]
+        assert "session-2" in session_ids
+        assert "session-1" not in session_ids
+
+
+class TestSessionControllerActivateAdvanced:
+    @pytest.mark.asyncio
+    async def test_activate_from_meta_map(self, controller, main_scope, base_path):
+        # activate_session finds and loads session from meta_map when not in cache
+        await controller.create_if_not_exists(main_scope, "session-1")
+        s1 = controller.session_cache["session-1"]
+        s1.is_active = False
+        controller.meta_map[main_scope].deactivate_all_sessions()
+        await controller.create_if_not_exists(main_scope, "session-2")
+        await controller.flush()
+
+        mock_session = MagicMock()
+        mock_session.get_state = MagicMock(return_value={})
+        mock_session.update_state = MagicMock()
+
+        async def _mock_load(agent_id, session_id, serialized):
+            return AgentSessionContainer(mock_session)
+
+        ctrl2 = SessionController(agent_id="agent1", base_path=base_path)
+        with patch.object(AgentSessionContainer, "load", _mock_load):
+            await ctrl2.load(load_active_only=True)
+        assert "session-1" not in ctrl2.session_cache
+
+        with patch.object(AgentSessionContainer, "load", _mock_load):
+            await ctrl2.activate_session("session-1")
+        assert ctrl2.session_cache["session-1"].is_active is True
+
+    @pytest.mark.asyncio
+    async def test_activate_persists(self, controller, main_scope, base_path):
+        # activate_session flushes the session and writes meta file
+        await controller.create_if_not_exists(main_scope, "session-1")
+        s1 = controller.session_cache["session-1"]
+        s1.is_active = False
+        controller.meta_map[main_scope].deactivate_all_sessions()
+        await controller.create_if_not_exists(main_scope, "session-2")
+        await controller.activate_session("session-1")
+
+        meta_file = base_path / "agent1" / "sessions" / "sessions.json"
+        assert meta_file.exists()
+
+
+class TestSessionControllerRemoveAdvanced:
+    @pytest.mark.asyncio
+    async def test_remove_session_without_scope(
+            self, controller, main_scope, direct_scope
+    ):
+        # remove_session without scope searches all scopes
+        await controller.create_if_not_exists(main_scope, "session-1")
+        removed = await controller.remove_session("session-1")
+        assert len(removed) == 1
+        assert "session-1" not in controller.session_cache
+
+    @pytest.mark.asyncio
+    async def test_remove_nonexistent_session(self, controller):
+        # remove_session returns empty list for nonexistent ID
+        removed = await controller.remove_session("nonexistent")
+        assert removed == []
+
+    @pytest.mark.asyncio
+    async def test_remove_active_session_clears_active(
+            self, controller, main_scope
+    ):
+        # Removing the active session clears active_session in scope meta
+        await controller.create_if_not_exists(main_scope, "session-1")
+        assert controller.meta_map[main_scope].active_session == "session-1"
+        await controller.remove_session("session-1")
+        assert controller.meta_map[main_scope].active_session is None
+
+    @pytest.mark.asyncio
+    async def test_remove_scope_sessions_nonexistent(
+            self, controller, direct_scope
+    ):
+        # remove_scope_sessions returns empty list for unknown scope
+        removed = await controller.remove_scope_sessions(direct_scope)
+        assert removed == []
+
+    @pytest.mark.asyncio
+    async def test_remove_session_updates_meta_file(
+            self, controller, main_scope, base_path
+    ):
+        # remove_session updates sessions.json on disk
+        await controller.create_if_not_exists(main_scope, "session-1")
+        await controller.remove_session("session-1")
+
+        meta_file = base_path / "agent1" / "sessions" / "sessions.json"
+        assert meta_file.exists()
+        with open(meta_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        for scope_data in data.values():
+            session_ids = [s["session_id"] for s in scope_data.get("sessions", [])]
+            assert "session-1" not in session_ids
+
+
+class TestSessionControllerCleanupAdvanced:
+    @pytest.mark.asyncio
+    async def test_cleanup_all_active(self, controller, main_scope):
+        # cleanup with all sessions active removes nothing
+        await controller.create_if_not_exists(main_scope, "session-1")
+        cleaned = await controller.cleanup_scope_inactive_sessions(main_scope)
+        assert len(cleaned) == 1
+        assert len(cleaned[0][1]) == 0
+
+    @pytest.mark.asyncio
+    async def test_cleanup_all_inactive(self, controller, main_scope):
+        # cleanup with all sessions inactive removes all
+        await controller.create_if_not_exists(main_scope, "session-1")
+        controller.session_cache["session-1"].is_active = False
+        controller.meta_map[main_scope].deactivate_all_sessions()
+        cleaned = await controller.cleanup_scope_inactive_sessions(main_scope)
+        assert len(cleaned[0][1]) == 1
+        assert len(controller.session_cache) == 0
+
+
+class TestSessionControllerConcurrency:
+    @pytest.mark.asyncio
+    async def test_concurrent_create_same_scope(self, controller, main_scope):
+        # Concurrent create_if_not_exists on same scope is serialized by lock
+        results = await asyncio.gather(
+            controller.create_if_not_exists(main_scope, "session-1"),
+            controller.create_if_not_exists(main_scope, "session-2"),
+        )
+        new_counts = [r[0] for r in results]
+        assert new_counts.count(True) == 1
+        assert new_counts.count(False) == 1
+
+    @pytest.mark.asyncio
+    async def test_concurrent_flush_and_load(
+            self, controller, main_scope, base_path
+    ):
+        # Concurrent flush and load do not corrupt data
+        await controller.create_if_not_exists(main_scope, "session-1")
+        await asyncio.gather(
+            controller.flush(),
+            controller.load(),
+        )
+        assert "session-1" in controller.session_cache
+
+    @pytest.mark.asyncio
+    async def test_concurrent_remove_and_get_sessions(
+            self, controller, main_scope
+    ):
+        # Concurrent remove and query are serialized by lock
+        await controller.create_if_not_exists(main_scope, "session-1")
+        controller.session_cache["session-1"].is_active = False
+        controller.meta_map[main_scope].deactivate_all_sessions()
+        await controller.create_if_not_exists(main_scope, "session-2")
+
+        results = await asyncio.gather(
+            controller.cleanup_scope_inactive_sessions(main_scope),
+            controller.get_scope_sessions(main_scope),
+        )
+        cleaned = results[0]
+        sessions = results[1]
+        assert len(cleaned) > 0
+        assert all(s.is_active for s in sessions)
+
+
+class TestSessionControllerSecurity:
+    @pytest.mark.asyncio
+    async def test_sessions_json_no_sensitive_data(
+            self, controller, main_scope, base_path
+    ):
+        # sessions.json does not contain business data; data is in state.data
+        await controller.create_if_not_exists(main_scope, "session-1")
+        session = controller.session_cache["session-1"]
+        await session.update_data({"secret": "sensitive_value"})
+        await controller.flush()
+
+        meta_file = base_path / "agent1" / "sessions" / "sessions.json"
+        with open(meta_file, "r", encoding="utf-8") as f:
+            meta_content = f.read()
+        assert "sensitive_value" not in meta_content
+
+    @pytest.mark.asyncio
+    async def test_path_traversal_session_id(
+            self, controller, main_scope, base_path
+    ):
+        # pathlib.Path normalizes ../ so the session directory stays
+        # within the agent base directory, but escapes the sessions/ subdir
+        _, session = await controller.create_if_not_exists(
+            main_scope, "../escape_session"
+        )
+        resolved_base = (base_path / "agent1").resolve()
+        resolved_session = (
+            base_path / "agent1" / "sessions" / session.session_id
+        ).resolve()
+        assert str(resolved_session).startswith(str(resolved_base))
+
+
+class TestSessionControllerResilience:
+    @pytest.mark.asyncio
+    async def test_session_dir_deleted_externally(
+            self, controller, main_scope, base_path
+    ):
+        # flush auto-creates directory when deleted externally
+        await controller.create_if_not_exists(main_scope, "session-1")
+        session = controller.session_cache["session-1"]
+        import shutil
+        session_dir = base_path / "agent1" / "sessions" / "session-1"
+        shutil.rmtree(session_dir, ignore_errors=True)
+        result = await session.flush()
+        assert result is True
+        assert session_dir.exists()
