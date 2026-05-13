@@ -463,7 +463,7 @@ for item in search_results:
 
 The return value is a list of `MemResult`, each containing:
 
-- `mem_info: MemInfo`: Includes `mem_id/content/type`;
+- `mem_info: MemInfo`: Includes `mem_id/content/type/timestamp`;
 - `score: float`: Similarity score.
 
 ## Semantic Retrieval of User History Summary Memory (search_user_history_summary)
@@ -486,7 +486,7 @@ for item in search_results:
 
 The return value is a list of `MemResult`, each containing:
 
-- `mem_info: MemInfo`: Includes `mem_id/content/type`;
+- `mem_info: MemInfo`: Includes `mem_id/content/type/timestamp`;
 - `score: float`: Similarity score.
 
 

@@ -808,7 +808,7 @@ async def search_user_mem(
 **返回**：
 
 * **list[MemResult]**：记忆结果列表，每个 `MemResult` 包含：
-  * `mem_info: MemInfo`（`mem_id / content / type`）；
+  * `mem_info: MemInfo`（`mem_id / content / type / timestamp`）；
   * `score: float`（相似度分数）。
 
 **异常**：
@@ -899,7 +899,7 @@ async def search_user_history_summary(
 **返回**：
 
 * **list[MemResult]**：记忆结果列表，每个 `MemResult` 包含：
-  * `mem_info: MemInfo`（`mem_id / content / type`）；
+  * `mem_info: MemInfo`（`mem_id / content / type / timestamp`）；
   * `score: float`（相似度分数）。
 
 **异常**：

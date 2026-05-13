@@ -42,11 +42,25 @@ from openjiuwen.core.memory.migration.run_migrations import run_kv_migrations, r
 from openjiuwen.core.runner.callback import trigger, lazy_callback_framework as _fw
 from openjiuwen.core.runner.callback.events import MemoryEvents
 
+_TIMESTAMP_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S.%f")
+
+
+def _parse_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    for fmt in _TIMESTAMP_FORMATS:
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
+
 
 class MemInfo(BaseModel):
     mem_id: str = Field(default="", description="memory id")
     content: str = Field(default="", description="memory content")
     type: MemoryType = Field(default=MemoryType.USER_PROFILE, description="memory type")
+    timestamp: datetime | None = Field(default=None, description="memory timestamp")
 
 
 class MemResult(BaseModel):
@@ -890,7 +904,8 @@ class LongTermMemory(metaclass=Singleton):
                     mem_info=MemInfo(
                         mem_id=item["id"],
                         content=item["mem"],
-                        type=item.get("mem_type", None)
+                        type=item.get("mem_type", None),
+                        timestamp=_parse_timestamp(item.get("timestamp"))
                     ),
                     score=item.get("score", 0.0)
                 )
@@ -1004,7 +1019,8 @@ class LongTermMemory(metaclass=Singleton):
                     mem_info=MemInfo(
                         mem_id=item["id"],
                         content=item["mem"],
-                        type=item.get("mem_type", MemoryType.SUMMARY)
+                        type=item.get("mem_type", MemoryType.SUMMARY),
+                        timestamp=_parse_timestamp(item.get("timestamp"))
                     ),
                     score=item.get("score", 0.0)
                 )
@@ -1146,7 +1162,8 @@ class LongTermMemory(metaclass=Singleton):
                 MemInfo(
                     mem_id=item["id"],
                     content=item["mem"],
-                    type=mem_type
+                    type=mem_type,
+                    timestamp=_parse_timestamp(item.get("timestamp"))
                 )
             )
         return mem_results

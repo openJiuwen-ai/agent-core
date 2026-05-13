@@ -18,6 +18,7 @@ Environment variables can be set via tests/system_tests/memory/memory_env file.
 import base64
 import os
 import unittest
+from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -642,6 +643,111 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
         # Depending on implementation, name might still exist but be empty or not found
         # This assertion may need to be adjusted based on actual implementation
         logger.info("Test test_change_memory_instruction passed")
+
+    async def test_timestamp_in_query_results(self):
+        """
+        Test that timestamp field is populated in all query interfaces:
+        search_user_mem, search_user_history_summary, get_user_mem_by_page.
+
+        Verifies timestamp data flows from storage through to MemInfo/MemResult.
+        """
+        scope_id = "test_memory_scope"
+        user_id = "test_user_ts"
+
+        # Set scope config
+        scope_config = MemoryScopeConfig(
+            model_cfg=ModelRequestConfig(
+                model=os.getenv("LLM_MODEL_NAME", ""),
+                temperature=0.2,
+                top_p=0.7
+            ),
+            model_client_cfg=ModelClientConfig(
+                client_id="ts_test_client",
+                client_provider=os.getenv("LLM_PROVIDER", "xx"),
+                api_key=os.getenv("LLM_API_KEY", "xx"),
+                api_base=os.getenv("LLM_API_BASE", "xx"),
+                verify_ssl=False
+            ),
+            embedding_cfg=EmbeddingConfig(
+                model_name=os.getenv("EMBED_MODEL_NAME", "xx"),
+                api_key=os.getenv("EMBED_API_KEY", "xx"),
+                base_url=os.getenv("EMBED_API_BASE", "xx"),
+            )
+        )
+        await self.engine.set_scope_config(scope_id, scope_config)
+
+        # Add messages to generate memories
+        agent_cfg = AgentMemoryConfig(
+            mem_variables=[
+                Param.string("姓名", "用户姓名", required=False),
+                Param.string("爱好", "用户爱好", required=False),
+            ],
+            enable_long_term_mem=True,
+            enable_user_profile=True,
+            enable_episodic_memory=True,
+            enable_summary_memory=True,
+        )
+        messages = [
+            BaseMessage(role="user", content="你好，我是Jack，我喜欢打篮球"),
+            BaseMessage(role="assistant", content="你好Jack，篮球是很好的运动"),
+        ]
+        await self.engine.add_messages(
+            user_id=user_id,
+            scope_id=scope_id,
+            session_id="ts_test_session",
+            messages=messages,
+            agent_config=agent_cfg
+        )
+
+        # --- 1. get_user_mem_by_page: verify timestamp ---
+        page_results = await self.engine.get_user_mem_by_page(
+            user_id=user_id, scope_id=scope_id,
+            page_size=10, page_idx=1
+        )
+        logger.info("=== get_user_mem_by_page ===")
+        self.assertGreater(len(page_results), 0, "Should have memories")
+        for mem in page_results:
+            logger.info(f"  mem_id={mem.mem_id}, "
+                        f"content={mem.content}, "
+                        f"type={mem.type}, "
+                        f"timestamp={mem.timestamp}")
+        has_ts = any(isinstance(mem.timestamp, datetime) for mem in page_results)
+        self.assertTrue(has_ts, "At least one memory should have datetime timestamp in get_user_mem_by_page")
+
+        # --- 2. search_user_mem: verify timestamp ---
+        search_results = await self.engine.search_user_mem(
+            query="用户信息", num=5,
+            user_id=user_id, scope_id=scope_id, threshold=0.3
+        )
+        logger.info("=== search_user_mem ===")
+        self.assertGreater(len(search_results), 0, "Should find search results")
+        for r in search_results:
+            logger.info(f"  mem_id={r.mem_info.mem_id}, "
+                        f"content={r.mem_info.content}, "
+                        f"type={r.mem_info.type}, "
+                        f"timestamp={r.mem_info.timestamp}, "
+                        f"score={r.score}")
+        search_has_ts = any(isinstance(r.mem_info.timestamp, datetime) for r in search_results)
+        self.assertTrue(search_has_ts, "At least one result should have datetime timestamp in search_user_mem")
+
+        # --- 3. search_user_history_summary: verify timestamp ---
+        summary_results = await self.engine.search_user_history_summary(
+            query="用户信息", num=5,
+            user_id=user_id, scope_id=scope_id, threshold=0.3
+        )
+        logger.info("=== search_user_history_summary ===")
+        for r in summary_results:
+            logger.info(f"  mem_id={r.mem_info.mem_id}, "
+                        f"content={r.mem_info.content}, "
+                        f"type={r.mem_info.type}, "
+                        f"timestamp={r.mem_info.timestamp}, "
+                        f"score={r.score}")
+
+        # Clean up
+        await self.engine.delete_mem_by_user_id(user_id=user_id, scope_id=scope_id)
+        await self.engine.delete_scope_config(scope_id)
+
+        logger.info("Test test_timestamp_in_query_results passed")
 
 
 def run_tests():

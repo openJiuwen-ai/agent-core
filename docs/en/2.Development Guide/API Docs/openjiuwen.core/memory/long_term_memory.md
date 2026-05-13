@@ -811,7 +811,7 @@ Search user memories (user profiles, variables, etc.) based on semantic similari
 **Returns**:
 
 * **list[MemResult]**: Memory result list, each `MemResult` contains:
-  * `mem_info: MemInfo` (`mem_id / content / type`);
+  * `mem_info: MemInfo` (`mem_id / content / type / timestamp`);
   * `score: float` (similarity score).
 
 **Exceptions**:
@@ -902,7 +902,7 @@ Search user summary memories based on semantic similarity, returning the N most 
 **Returns**:
 
 * **list[MemResult]**: List of memory results, each `MemResult` contains:
-  * `mem_info: MemInfo` (`mem_id / content / type`);
+  * `mem_info: MemInfo` (`mem_id / content / type / timestamp`);
   * `score: float` (similarity score).
 
 **Exceptions**:
