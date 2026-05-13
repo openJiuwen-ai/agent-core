@@ -18,6 +18,7 @@ from typing import (
     Tuple,
 )
 
+from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberStatus,
@@ -320,7 +321,7 @@ class StreamController:
         try:
             async for chunk in harness.run_streaming(
                 inputs,
-                session_id=self._state.session_id,
+                session_id=get_session_id() or None,
             ):
                 if error_seen:
                     continue

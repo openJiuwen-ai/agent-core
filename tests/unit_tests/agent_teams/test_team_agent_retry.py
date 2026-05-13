@@ -63,11 +63,12 @@ def _make_stream_controller_stub() -> StreamController:
     the retry loop end to end without requiring a fully bootstrapped
     TeamAgent.
     """
+    from unittest.mock import MagicMock
+
     from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
     from openjiuwen.agent_teams.agent.state import TeamAgentState
     from openjiuwen.agent_teams.harness import TeamHarness, _MountedRails
     from openjiuwen.agent_teams.schema.team import TeamRole
-    from unittest.mock import MagicMock
 
     execution_log: list[ExecutionStatus] = []
 
@@ -77,7 +78,7 @@ def _make_stream_controller_stub() -> StreamController:
     async def _noop_status(_: Any) -> None:
         return None
 
-    state = TeamAgentState(session_id="sess-1")
+    state = TeamAgentState()
     fake_rails = _MountedRails(team_tool=MagicMock(), team_policy=MagicMock())
     fake_harness = TeamHarness(
         SimpleNamespace(deep_config=None),

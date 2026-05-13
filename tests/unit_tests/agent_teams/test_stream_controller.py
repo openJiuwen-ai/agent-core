@@ -29,7 +29,7 @@ from openjiuwen.core.session.stream.base import OutputSchema
 
 def _make_controller(harness: TeamHarness) -> StreamController:
     """Wire a StreamController against a fake harness, no team_member needed."""
-    state = TeamAgentState(session_id="sess")
+    state = TeamAgentState()
     blueprint = SimpleNamespace(member_name="m", role=TeamRole.LEADER)
 
     async def _noop(_: Any) -> None:
@@ -130,7 +130,7 @@ async def test_cancel_agent_records_execution_transitions(
     abort_calls: list[None] = []
     harness = _make_harness_with_abort(abort_calls)
 
-    state = TeamAgentState(session_id="sess")
+    state = TeamAgentState()
     blueprint = SimpleNamespace(member_name="m", role=TeamRole.LEADER)
     transitions: list[ExecutionStatus] = []
 
@@ -193,7 +193,7 @@ async def test_execute_round_emits_cancelled_on_cooperative_abort_success() -> N
     abort_calls: list[None] = []
     harness = _make_harness_with_abort(abort_calls)
 
-    state = TeamAgentState(session_id="sess")
+    state = TeamAgentState()
     blueprint = SimpleNamespace(member_name="m", role=TeamRole.LEADER)
     transitions: list[ExecutionStatus] = []
 
@@ -226,7 +226,7 @@ async def test_execute_round_emits_completed_on_normal_finish() -> None:
     abort_calls: list[None] = []
     harness = _make_harness_with_abort(abort_calls)
 
-    state = TeamAgentState(session_id="sess")
+    state = TeamAgentState()
     blueprint = SimpleNamespace(member_name="m", role=TeamRole.LEADER)
     transitions: list[ExecutionStatus] = []
 
@@ -417,7 +417,7 @@ def _make_controller_with(
     *, member_name: str, harness: TeamHarness, role: TeamRole = TeamRole.TEAMMATE
 ) -> StreamController:
     """Variant of _make_controller that lets the test fix member identity."""
-    state = TeamAgentState(session_id="sess")
+    state = TeamAgentState()
     blueprint = SimpleNamespace(member_name=member_name, role=role)
 
     async def _noop(_: Any) -> None:

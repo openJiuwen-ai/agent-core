@@ -119,8 +119,7 @@ class CoordinationKernel:
         set_member_id(member_name)
         if session is not None and not isinstance(session, AgentTeamSession):
             team_logger.warning(
-                "[{}] TeamAgent expects AgentTeamSession; got {}. "
-                "Please invoke via Runner.run_agent_team_streaming.",
+                "[{}] TeamAgent expects AgentTeamSession; got {}. Please invoke via Runner.run_agent_team_streaming.",
                 member_name,
                 type(session).__name__,
             )
@@ -129,7 +128,7 @@ class CoordinationKernel:
         if session is not None:
             await sess_mgr.bind_session(session)
         else:
-            sess_mgr.unbind_session()
+            sess_mgr.release_session()
 
         if host.role == TeamRole.LEADER and infra.team_backend:
             existing = await infra.team_backend.db.team.get_team(infra.team_backend.team_name)
@@ -196,12 +195,12 @@ class CoordinationKernel:
             self._persist_team_lifecycle("paused")
         messager = host.infra.messager
         if messager and host.role == TeamRole.LEADER:
+            from openjiuwen.agent_teams.context import get_session_id
             from openjiuwen.agent_teams.schema.events import (
                 EventMessage,
                 TeamStandbyEvent,
                 TeamTopic,
             )
-            from openjiuwen.agent_teams.context import get_session_id
 
             team_name = host.team_name
             if team_name:
@@ -328,8 +327,8 @@ class CoordinationKernel:
         messager = host.infra.messager
         if not messager or not self._event_bus:
             return
-        from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
         from openjiuwen.agent_teams.context import get_session_id
+        from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
 
         local_member_name = host.member_name or ""
 

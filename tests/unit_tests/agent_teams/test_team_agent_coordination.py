@@ -847,13 +847,30 @@ def test_first_iter_gate_single_instance_registered_on_deep_agent():
 
 
 @pytest.mark.level0
-def test_streaming_session_id_reads_from_session_manager():
-    """Regression: StreamController must read session_id from shared state,
-    not a stale local field. Previously StreamController.session_id was
-    initialized None and never assigned, so every streaming round ran
-    with session=None and persistent teams lost cross-round state.
+def test_streaming_session_id_reads_from_contextvar():
+    """Regression: StreamController must read session_id from the
+    agent_teams contextvar (the single source of truth), not a stale local
+    field. Previously a separate cached field on the state was the read
+    source, which silently fell out of sync with the contextvar that tools
+    were already consuming.
     """
+    from openjiuwen.agent_teams.context import (
+        reset_session_id,
+        set_session_id,
+    )
+
     agent = _make_leader()
-    assert agent._stream_controller._state.session_id is None
-    agent._session_manager.session_id = "sess-xyz"
-    assert agent._stream_controller._state.session_id == "sess-xyz"
+    # Force a known-clean baseline. Sibling tests can leave the contextvar
+    # populated (e.g. ``TeamAgent.recover_from_session`` writes the
+    # contextvar without taking a Token), so we cannot assume "" here.
+    baseline = set_session_id("")
+    try:
+        assert agent.session_id is None
+
+        token = set_session_id("sess-xyz")
+        try:
+            assert agent.session_id == "sess-xyz"
+        finally:
+            reset_session_id(token)
+    finally:
+        reset_session_id(baseline)
