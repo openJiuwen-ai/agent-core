@@ -79,8 +79,8 @@ async def test_runneder_run_agent_team_recovers_team_and_child_state(isolated_ch
     team = CountingTeam(f"team_{uuid.uuid4().hex}")
     session_id = f"session_{uuid.uuid4().hex}"
 
-    result1 = await Runner.run_agent_team(team, {"payload": "first"}, session=session_id)
-    result2 = await Runner.run_agent_team(team, {"payload": "second"}, session=session_id)
+    result1 = await Runner.run_agent_team(team, {"payload": "first"}, base=True, session=session_id)
+    result2 = await Runner.run_agent_team(team, {"payload": "second"}, base=True, session=session_id)
 
     assert result1["team_count"] == 1
     assert result1["worker_count"] == 1

@@ -125,6 +125,7 @@ async def _generate_pr_draft_attempt(
     agent = create_pr_draft_agent(
         ctx.orchestrator.config,
         workspace_override=ctx.runtime.wt_path,
+        extra_rails=ctx.orchestrator.stream_rails or None,
     )
     output = ""
     async for chunk in agent.stream(
@@ -160,6 +161,8 @@ class PublishPRStage(TaskStage):
     """Push the branch, open a PR, and finalize the task result."""
 
     name = "publish_pr"
+    slot = "publish"
+    display_name = "发布 PR"
     description = "Push branch and create PR when configured."
     consumes = ["verify_report", "commit_result"]
     produces = ["pull_request", "task_result"]
@@ -204,10 +207,10 @@ class PublishPRStage(TaskStage):
             previous_output = ""
             for attempt in range(1, _PR_DRAFT_MAX_ATTEMPTS + 1):
                 if attempt == 1:
-                    yield ctx.message("[后置] 生成 PR draft")
+                    yield ctx.message("生成 PR draft")
                 else:
                     yield ctx.message(
-                        f"[后置] 修正 PR draft ({attempt}/{_PR_DRAFT_MAX_ATTEMPTS})"
+                        f"修正 PR draft ({attempt}/{_PR_DRAFT_MAX_ATTEMPTS})"
                     )
                 async for event in _generate_pr_draft_attempt(
                     ctx,
@@ -246,12 +249,12 @@ class PublishPRStage(TaskStage):
                 return
             messages.append(f"PR draft 已生成: {pr_draft.title}")
         if ctx.orchestrator.config.git_remote:
-            yield ctx.message("[后置] 推送分支")
+            yield ctx.message("推送分支")
             await ctx.orchestrator.git.push(
                 branch_name=branch_name
             )
             if _should_create_pr(ctx):
-                yield ctx.message("[后置] 创建 PR")
+                yield ctx.message("创建 PR")
                 pr_result = await ctx.orchestrator.git.create_pr(
                     title=pr_draft.title,
                     body=pr_draft.body,

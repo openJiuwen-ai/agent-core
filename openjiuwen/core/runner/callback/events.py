@@ -94,6 +94,20 @@ class AgentEvents(EventBase):
     AGENT_STREAM_OUTPUT = EventBase.get_event("agent_stream_output")
 
 
+class AgentTeamEvents(EventBase):
+    """Standard event names for multi-agent team and Agent-to-Agent communication.
+
+    Covers P2P messaging, Pub-Sub fan-out, handoff delegation, and team
+    lifecycle events within an agent team.
+
+    Attributes:
+        AGENT_P2P_RECEIVED: An agent received a call from another agent via P2P
+        AGENT_PUBSUB_RECEIVED: An agent received a call from another agent via pubsub
+    """
+    AGENT_P2P_RECEIVED = EventBase.get_event("agent_p2p_received")
+    AGENT_PUBSUB_RECEIVED = EventBase.get_event("agent_pubsub_received")
+
+
 class WorkflowEvents(EventBase):
     """Standard event names for workflow execution.
 
@@ -125,6 +139,10 @@ class WorkflowEvents(EventBase):
     WORKFLOW_INVOKE_OUTPUT = EventBase.get_event("workflow_invoke_output")
     WORKFLOW_STREAM_INPUT = EventBase.get_event("workflow_stream_input")
     WORKFLOW_STREAM_OUTPUT = EventBase.get_event("workflow_stream_output")
+    COMPONENT_BATCH_INPUT = EventBase.get_event("workflow_component_batch_input")
+    COMPONENT_BATCH_OUTPUT = EventBase.get_event("workflow_component_batch_output")
+    COMPONENT_STREAM_INPUT = EventBase.get_event("workflow_component_stream_input")
+    COMPONENT_STREAM_OUTPUT = EventBase.get_event("workflow_component_stream_output")
 
 
 class LLMCallEvents(EventBase):
@@ -202,8 +220,10 @@ class SessionEvents(EventBase):
 
     Attributes:
         SESSION_CREATED: Session was created
+        AGENT_SESSION_CREATED: Agent session creation triggered
     """
     SESSION_CREATED = EventBase.get_event("session_created")
+    AGENT_SESSION_CREATED = EventBase.get_event("agent_session_created")
 
 
 class RetrievalEvents(EventBase):

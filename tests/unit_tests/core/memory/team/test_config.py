@@ -7,7 +7,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
-from openjiuwen.core.memory.team.config import TeamMemoryConfig, resolve_embedding_config
+from openjiuwen.agent_teams.memory.config import TeamMemoryConfig, resolve_embedding_config
 
 
 def test_team_memory_config_excluded_fields_absent_from_model_dump():
@@ -35,7 +35,7 @@ def test_resolve_embedding_config_prefers_config_over_env():
     cfg = TeamMemoryConfig(embedding_config=explicit)
 
     with patch(
-        "openjiuwen.core.memory.team.config.resolve_embedding_config_from_env",
+        "openjiuwen.agent_teams.memory.config.resolve_embedding_config_from_env",
         return_value=mock_env,
     ) as mock_env_fn:
         out = resolve_embedding_config(cfg)
@@ -47,7 +47,7 @@ def test_resolve_embedding_config_falls_back_to_env_when_no_embedding_in_config(
     mock_env = EmbeddingConfig(model_name="env", base_url="http://env")
 
     with patch(
-        "openjiuwen.core.memory.team.config.resolve_embedding_config_from_env",
+        "openjiuwen.agent_teams.memory.config.resolve_embedding_config_from_env",
         return_value=mock_env,
     ) as mock_env_fn:
         assert resolve_embedding_config(None) is mock_env

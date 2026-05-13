@@ -31,7 +31,7 @@
 - 至少保留 {self_driven_slots} 个槽位给自驱动工作
 - 如果多个候选改动存在直接依赖关系（后一个任务必须基于前一个任务产生的代码修改才能实施、验证或提交），不要拆成多个任务；必须合并成一个 task，在同一个 worktree 中连续完成
 - 只有彼此独立、互不依赖、可以各自从 `origin/{base_branch}` 单独实施的工作，才允许拆成多个任务
-- 不要输出需要“先做任务 A，再做任务 B”的链式任务组；这种链式工作应收敛为一个更完整的 task
+- 不要输出需要”先做任务 A，再做任务 B”的链式任务组；这种链式工作应收敛为一个更完整的 task
 - 任务的源码文件只允许落在 `openjiuwen/harness/**`、`openjiuwen/core/**`
 - `openjiuwen/harness/**`、`openjiuwen/core/**` 下的模块内 README/Markdown 仍属于源码目录内容，可作为任务文件，例如 `openjiuwen/harness/cli/README.md`
 - 配套文件只允许落在 `tests/**`、`examples/**`

@@ -3,8 +3,10 @@
 """DeepAgent implementation."""
 from __future__ import annotations
 
+import importlib
 import os
 import sys
+import uuid
 from typing import (
     Any, AsyncIterator, Dict, List, Optional,
     TYPE_CHECKING, Tuple, cast,
@@ -36,9 +38,11 @@ from openjiuwen.harness.rails.task_completion_rail import (
     TaskCompletionRail,
 )
 from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
 from openjiuwen.harness.schema.config import DeepAgentConfig
 from openjiuwen.core.controller.config import ControllerConfig
 from openjiuwen.core.context_engine import ContextEngine
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.controller.schema.event import (
     TaskInteractionEvent,
     FollowUpEvent,
@@ -60,6 +64,9 @@ from openjiuwen.harness.schema.state import (
 )
 from openjiuwen.harness.task_loop.loop_queues import (
     LoopQueues,
+)
+from openjiuwen.harness.harness_config.loader import (
+    HarnessConfigLoader,
 )
 from openjiuwen.harness.task_loop.task_loop_controller import (
     TaskLoopController,
@@ -132,10 +139,11 @@ class DeepAgent(BaseAgent):
         self._auto_invoke_scheduled: bool = False
         self._bound_session_id: Optional[str] = None
         self._session_toolkit: SessionToolkit | None = None
+        self._pending_harness_configs: List[str] = []
         super().__init__(card)
 
     def set_session_toolkit(self, toolkit: SessionToolkit | None) -> None:
-        """Attach or clear the session toolkit (wired by SessionRail)."""
+        """Attach or clear the session toolkit (wired by SubagentRail async)."""
         self._session_toolkit = toolkit
 
     def configure(self, config: DeepAgentConfig) -> "DeepAgent":
@@ -458,6 +466,199 @@ class DeepAgent(BaseAgent):
     def react_agent(self) -> Optional[ReActAgent]:
         """The internal ReActAgent instance."""
         return self._react_agent
+
+    def _resolve_context_session_id(self, session_id: Optional[str] = None) -> str:
+        """Resolve the session id used by context inspection APIs."""
+        resolved = (
+            session_id
+            or self._bound_session_id
+            or (
+                self._loop_session.get_session_id()
+                if self._loop_session is not None
+                else None
+            )
+        )
+        if not resolved:
+            raise build_error(
+                StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                error_msg="session_id is required when no context is bound.",
+            )
+        return resolved
+
+    def _get_context_or_error(
+        self,
+        session_id: Optional[str] = None,
+        context_id: str = "default_context_id",
+    ):
+        """Return the inner ReAct context for a session, or raise."""
+        if self._react_agent is None:
+            raise build_error(
+                StatusCode.DEEPAGENT_RUNTIME_ERROR,
+                error_msg="DeepAgent not configured. Call configure() first.",
+            )
+
+        resolved_session_id = self._resolve_context_session_id(session_id)
+        context = self._react_agent.context_engine.get_context(
+            context_id=context_id,
+            session_id=resolved_session_id,
+        )
+        if context is None:
+            raise build_error(
+                StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                error_msg=(
+                    f"cannot find context '{context_id}' "
+                    f"in session '{resolved_session_id}'"
+                ),
+        )
+        return context
+
+    def _get_react_config(self) -> ReActAgentConfig:
+        """Return inner ReActAgent config for real and test agents."""
+        if self._react_agent is None:
+            raise build_error(
+                StatusCode.DEEPAGENT_RUNTIME_ERROR,
+                error_msg="DeepAgent not configured. Call configure() first.",
+            )
+        config = getattr(
+            self._react_agent,
+            "config",
+            getattr(self._react_agent, "_config", None),
+        )
+        if config is None:
+            raise build_error(
+                StatusCode.DEEPAGENT_RUNTIME_ERROR,
+                error_msg="Inner ReActAgent config is not available.",
+            )
+        return config
+
+    def _resolve_context_window_tokens(self) -> int:
+        """Resolve the configured model context window size."""
+        config = self._get_react_config().context_engine_config
+        model_name = None
+        if self._react_agent is not None:
+            model_name = getattr(self._get_react_config(), "model_name", None)
+        if config is not None and getattr(config, "model_name", None):
+            model_name = config.model_name
+
+        return ContextUtils.resolve_context_max(
+            model_name=model_name,
+            fallback_context_window_tokens=(
+                config.context_window_tokens if config is not None else None
+            ),
+            model_context_window_tokens=(
+                config.model_context_window_tokens if config is not None else None
+            ),
+        )
+
+    def get_context_usage(
+        self,
+        session_id: Optional[str] = None,
+        context_id: str = "default_context_id",
+    ) -> Dict[str, Any]:
+        """Get current context occupancy statistics.
+
+        The underlying ``ContextStats`` already prefers the latest
+        ``AssistantMessage.usage_metadata`` returned by the real model when
+        present; otherwise it falls back to local token counting.
+        """
+        context = self._get_context_or_error(session_id, context_id)
+        resolved_session_id = self._resolve_context_session_id(session_id)
+        stats = context.statistic()
+        context_window_tokens = self._resolve_context_window_tokens()
+        usage_ratio = (
+            stats.total_tokens / context_window_tokens
+            if context_window_tokens > 0
+            else 0.0
+        )
+        return {
+            "session_id": resolved_session_id,
+            "context_id": context.context_id(),
+            "total_tokens": stats.total_tokens,
+            "context_window_tokens": context_window_tokens,
+            "usage_ratio": usage_ratio,
+            "usage_percent": round(usage_ratio * 100, 2),
+            "stats": stats.model_dump(),
+        }
+
+    def get_context_occupancy(
+        self,
+        session_id: Optional[str] = None,
+        context_id: str = "default_context_id",
+    ) -> Dict[str, Any]:
+        """Alias for ``get_context_usage``."""
+        return self.get_context_usage(session_id, context_id)
+
+    def get_current_context(
+        self,
+        session_id: Optional[str] = None,
+        context_id: str = "default_context_id",
+    ) -> List[Any]:
+        """Return current context messages for the given session/context."""
+        context = self._get_context_or_error(session_id, context_id)
+        return context.get_messages()
+
+    @staticmethod
+    def _normalize_context_messages(
+        messages: Optional[List[Any] | Any] = None,
+    ) -> List[BaseMessage]:
+        """Normalize initial message inputs for a fresh context."""
+        if messages is None:
+            return []
+        raw_messages = (
+            messages
+            if isinstance(messages, list)
+            else [messages]
+        )
+        normalized: List[BaseMessage] = []
+        for message in raw_messages:
+            if isinstance(message, BaseMessage):
+                normalized.append(message)
+            elif isinstance(message, str):
+                normalized.append(SystemMessage(content=message))
+            elif isinstance(message, dict):
+                normalized.append(SystemMessage(**message))
+            else:
+                raise build_error(
+                    StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                    error_msg=(
+                        "messages must be a string, dict, "
+                        "BaseMessage, or a list of those values."
+                    ),
+                )
+        return normalized
+
+    async def create_new_context_engine(
+        self,
+        session_id: Optional[str] = None,
+        messages: Optional[List[Any] | Any] = None,
+    ) -> str:
+        """Create a fresh context in the inner ContextEngine and return its session id."""
+        if self._react_agent is None:
+            raise build_error(
+                StatusCode.DEEPAGENT_RUNTIME_ERROR,
+                error_msg="DeepAgent not configured. Call configure() first.",
+            )
+
+        new_session_id = session_id or str(uuid.uuid4())
+        normalized_messages = self._normalize_context_messages(
+            messages
+        )
+        await self._react_agent.context_engine.create_context(
+            session=Session(session_id=new_session_id, card=self.card),
+            history_messages=normalized_messages,
+        )
+        return new_session_id
+
+    async def new_context_engine(
+        self,
+        session_id: Optional[str] = None,
+        messages: Optional[List[Any] | Any] = None,
+    ) -> str:
+        """Alias for ``create_new_context_engine``."""
+        return await self.create_new_context_engine(
+            session_id,
+            messages,
+        )
 
     @property
     def loop_coordinator(self) -> Optional[LoopCoordinator]:
@@ -804,7 +1005,7 @@ class DeepAgent(BaseAgent):
 
         from openjiuwen.harness.factory import create_deep_agent
 
-        return create_deep_agent(**create_kwargs)
+        return create_deep_agent(**create_kwargs, **dict(spec.factory_kwargs or {}))
 
     def _find_subagent_spec(self, subagent_type: str) -> Optional["SubAgentConfig | DeepAgent"]:
         """Find SubAgentConfig matching subagent_type.
@@ -951,6 +1152,414 @@ class DeepAgent(BaseAgent):
             )
         rail.uninit(self)
         return self
+
+    async def load_harness_config(
+        self,
+        config_path: str,
+    ) -> list[str]:
+        """Hot-load resources from a harness_config.yaml.
+
+        Parses the config and registers any declared rails,
+        tools, and skills onto this agent instance.
+
+        Args:
+            config_path: Absolute path to harness_config.yaml.
+
+        Returns:
+            List of human-readable names of loaded resources.
+        """
+        from openjiuwen.harness.harness_config.builder import (
+            _resolve_rails,
+            _resolve_tools,
+        )
+
+        resolved = HarnessConfigLoader.load(config_path)
+        resources = resolved.config.resources
+        if not resources:
+            return []
+
+        loaded: list[str] = []
+        config_path_obj = Path(config_path).resolve()
+        runtime_ext = self._runtime_extension_artifact_for_config(
+            config_path_obj,
+            resources,
+        )
+
+        # Rails
+        if resources.rails:
+            if runtime_ext is not None:
+                from openjiuwen.auto_harness.infra.runtime_extension_loader import (
+                    load_runtime_rails,
+                )
+
+                rail_classes = load_runtime_rails(
+                    runtime_ext,
+                    session_id=self._runtime_extension_session_id(),
+                )
+                rails = [rail_cls() for rail_cls in rail_classes]
+            else:
+                rails = _resolve_rails(resources)
+            for rail in rails:
+                await self.register_rail(rail)
+                loaded.append(
+                    f"rail:{type(rail).__name__}"
+                )
+
+        # Tools
+        if resources.tools:
+            if runtime_ext is not None:
+                from openjiuwen.auto_harness.infra.runtime_extension_loader import (
+                    load_runtime_tools,
+                )
+
+                tool_classes = load_runtime_tools(
+                    runtime_ext,
+                    session_id=self._runtime_extension_session_id(),
+                )
+                tools = [tool_cls() for tool_cls in tool_classes]
+            else:
+                sys_op = self.deep_config.sys_operation
+                tools = _resolve_tools(
+                    resources, sys_op
+                )
+            for tool in tools:
+                existing = Runner.resource_mgr.get_tool(
+                    tool.card.id
+                )
+                if existing is None:
+                    Runner.resource_mgr.add_tool(tool)
+                self.ability_manager.add(tool.card)
+                loaded.append(
+                    f"tool:{type(tool).__name__}"
+                )
+
+        # Skills
+        if resources.skills and resources.skills.dirs:
+            from openjiuwen.harness.rails.skills.skill_use_rail import (
+                SkillUseRail,
+            )
+
+            if runtime_ext is not None:
+                from openjiuwen.auto_harness.infra.runtime_extension_loader import (
+                    load_runtime_skill_dirs,
+                )
+
+                skill_dirs = load_runtime_skill_dirs(runtime_ext)
+            else:
+                source_dir = config_path_obj.parent
+                skill_dirs = [
+                    str((source_dir / d).resolve())
+                    for d in resources.skills.dirs
+                ]
+            # Try appending to existing SkillUseRail
+            existing_skill_rail: (
+                SkillUseRail | None
+            ) = None
+            for r in self._registered_rails:
+                if isinstance(r, SkillUseRail):
+                    existing_skill_rail = r
+                    break
+            if existing_skill_rail is not None:
+                cur = existing_skill_rail.skills_dir
+                if isinstance(cur, str):
+                    existing_skill_rail.skills_dir = [
+                        *skill_dirs,
+                        cur,
+                    ]
+                else:
+                    existing = list(cur)
+                    existing = [
+                        d
+                        for d in existing
+                        if d not in skill_dirs
+                    ]
+                    existing_skill_rail.skills_dir = [
+                        *skill_dirs,
+                        *existing,
+                    ]
+                existing_skill_rail.enable_cache = False
+                await existing_skill_rail.reload_skills()
+            else:
+                mode = (
+                    resources.skills.mode or "all"
+                )
+                new_rail = SkillUseRail(
+                    skills_dir=skill_dirs,
+                    skill_mode=mode,
+                )
+                await self.register_rail(new_rail)
+                await new_rail.reload_skills()
+            for sd in skill_dirs:
+                loaded.append(f"skill_dir:{sd}")
+
+        return loaded
+
+    async def unload_harness_config(
+        self,
+        config_path: str,
+    ) -> list[str]:
+        """Unload resources declared in a harness_config.yaml.
+
+        Parses the config and removes rails, tools, and skill directories
+        that match the declarations in the config file.
+
+        This method does NOT track which resources were previously loaded.
+        Instead, it re-parses the config file and removes matching resources
+        by type/name/module. This means:
+        - Rails are removed by matching type (class name and module)
+        - Tools are removed by matching card.id and card.name
+        - Skill dirs are removed from SkillUseRail if present
+
+        Args:
+            config_path: Absolute path to harness_config.yaml.
+
+        Returns:
+            List of human-readable names of unloaded resources.
+
+        Raises:
+            FileNotFoundError: If the config file does not exist.
+            ValueError: If parsing the config fails.
+        """
+        config_path_obj = Path(config_path).resolve()
+        if not config_path_obj.exists():
+            raise FileNotFoundError(
+                f"Harness config file not found: {config_path_obj}"
+            )
+
+        resolved = HarnessConfigLoader.load(config_path)
+        resources = resolved.config.resources
+        if not resources:
+            return []
+
+        unloaded: list[str] = []
+        runtime_ext = self._runtime_extension_artifact_for_config(
+            config_path_obj,
+            resources,
+        )
+
+        # Unload rails
+        if resources.rails:
+            rail_types_to_remove: set[type] = set()
+            if runtime_ext is not None:
+                from openjiuwen.auto_harness.infra.runtime_extension_loader import (
+                    load_runtime_rails,
+                )
+
+                rail_classes = load_runtime_rails(
+                    runtime_ext,
+                    session_id=self._runtime_extension_session_id(),
+                )
+                rail_types_to_remove = set(rail_classes)
+            else:
+                for spec in resources.rails:
+                    if spec.type == "builtin" and spec.name:
+                        from openjiuwen.harness.harness_config.builder import (
+                            _BUILTIN_RAIL_REGISTRY,
+                            _load_dotted_path,
+                        )
+                        dotted = _BUILTIN_RAIL_REGISTRY.get(spec.name)
+                        if dotted:
+                            rail_types_to_remove.add(_load_dotted_path(dotted))
+                    elif spec.type == "package" and spec.module and spec.class_name:
+                        dotted = f"{spec.module}.{spec.class_name}"
+                        from openjiuwen.harness.harness_config.builder import (
+                            _load_dotted_path,
+                        )
+                        rail_types_to_remove.add(_load_dotted_path(dotted))
+                    elif spec.type == "entry_point" and spec.name:
+                        from openjiuwen.harness.harness_config.builder import (
+                            _load_from_entry_point,
+                        )
+                        rail_types_to_remove.add(
+                            _load_from_entry_point(spec.name, "openjiuwen.rail")
+                        )
+
+            for rail in list(self._registered_rails):
+                if type(rail) in rail_types_to_remove:
+                    await self.unregister_rail(rail)
+                    unloaded.append(f"rail:{type(rail).__name__}")
+
+        # Unload tools
+        if resources.tools:
+            tool_ids_to_remove: list[str] = []
+            tool_names_to_remove: list[str] = []
+            if runtime_ext is not None:
+                from openjiuwen.auto_harness.infra.runtime_extension_loader import (
+                    load_runtime_tools,
+                )
+
+                tool_classes = load_runtime_tools(
+                    runtime_ext,
+                    session_id=self._runtime_extension_session_id(),
+                )
+                for cls in tool_classes:
+                    # Instantiate to get card info
+                    tool_instance = cls()
+                    tool_ids_to_remove.append(tool_instance.card.id)
+                    tool_names_to_remove.append(tool_instance.card.name)
+            else:
+                for spec in resources.tools:
+                    if spec.type == "builtin":
+                        from openjiuwen.harness.harness_config.builder import (
+                            _BUILTIN_TOOL_GROUPS,
+                        )
+                        names = spec.names or ([spec.name] if spec.name else [])
+                        for group in names:
+                            entry = _BUILTIN_TOOL_GROUPS.get(group)
+                            if entry:
+                                module_path, class_names, _ = entry
+                                mod = importlib.import_module(module_path)
+                                for cls_name in class_names:
+                                    cls = getattr(mod, cls_name)
+                                    tool_instance = cls()
+                                    tool_ids_to_remove.append(tool_instance.card.id)
+                                    tool_names_to_remove.append(tool_instance.card.name)
+                    elif spec.type == "package" and spec.module and spec.class_name:
+                        from openjiuwen.harness.harness_config.builder import (
+                            _load_dotted_path,
+                        )
+                        cls = _load_dotted_path(f"{spec.module}.{spec.class_name}")
+                        tool_instance = cls()
+                        tool_ids_to_remove.append(tool_instance.card.id)
+                        tool_names_to_remove.append(tool_instance.card.name)
+                    elif spec.type == "entry_point" and spec.name:
+                        from openjiuwen.harness.harness_config.builder import (
+                            _load_from_entry_point,
+                        )
+                        cls = _load_from_entry_point(spec.name, "openjiuwen.tool")
+                        tool_instance = cls()
+                        tool_ids_to_remove.append(tool_instance.card.id)
+                        tool_names_to_remove.append(tool_instance.card.name)
+
+            for tool_id in tool_ids_to_remove:
+                Runner.resource_mgr.remove_tool(tool_id)
+                unloaded.append(f"tool_id:{tool_id}")
+
+            for tool_name in tool_names_to_remove:
+                self.ability_manager.remove(tool_name)
+                unloaded.append(f"tool:{tool_name}")
+
+        # Unload skill dirs
+        if resources.skills and resources.skills.dirs:
+            from openjiuwen.harness.rails.skills.skill_use_rail import (
+                SkillUseRail,
+            )
+
+            if runtime_ext is not None:
+                from openjiuwen.auto_harness.infra.runtime_extension_loader import (
+                    load_runtime_skill_dirs,
+                )
+
+                skill_dirs = load_runtime_skill_dirs(runtime_ext)
+            else:
+                source_dir = config_path_obj.parent
+                skill_dirs = [
+                    str((source_dir / d).resolve())
+                    for d in resources.skills.dirs
+                ]
+
+            for r in self._registered_rails:
+                if isinstance(r, SkillUseRail):
+                    cur = r.skills_dir
+                    if isinstance(cur, str):
+                        if cur in skill_dirs:
+                            r.skills_dir = []
+                    else:
+                        remaining = [
+                            d for d in cur if d not in skill_dirs
+                        ]
+                        r.skills_dir = remaining
+
+                    # Force clear cache for removed skill dirs
+                    if not r.skills_dir:
+                        r.clear_skills()
+                    else:
+                        # Temporarily disable cache to force refresh, then restore
+                        original_cache = r.enable_cache
+                        r.enable_cache = False
+                        try:
+                            await r.reload_skills()
+                        finally:
+                            r.enable_cache = original_cache
+                    break
+
+            for sd in skill_dirs:
+                unloaded.append(f"skill_dir:{sd}")
+
+        return unloaded
+
+    def _runtime_extension_session_id(self) -> str:
+        """Return a stable namespace key for runtime extension imports."""
+        return (
+            self._bound_session_id
+            or self.card.id
+            or self.card.name
+            or "deep_agent"
+        )
+
+    @staticmethod
+    def _runtime_extension_artifact_for_config(
+        config_path: Path,
+        resources: Any,
+    ) -> Any | None:
+        """Build runtime extension metadata for auto-harness package configs.
+
+        Runtime extensions are stored outside the installed Python package but
+        still declare modules under ``openjiuwen.extensions.harness.<name>``.
+        The normal harness_config package resolver cannot import those modules,
+        so they must be loaded through the runtime extension loader.
+        """
+        extension_name = config_path.parent.name
+        prefix = f"openjiuwen.extensions.harness.{extension_name}"
+        modules: list[str] = []
+        for spec in [
+            *(resources.rails or []),
+            *(resources.tools or []),
+        ]:
+            module = getattr(spec, "module", None)
+            if (
+                getattr(spec, "type", None) == "package"
+                and isinstance(module, str)
+            ):
+                modules.append(module)
+        if not any(
+            module == prefix or module.startswith(f"{prefix}.")
+            for module in modules
+        ):
+            return None
+
+        from openjiuwen.auto_harness.schema import RuntimeExtensionArtifact
+
+        return RuntimeExtensionArtifact(
+            extension_name=extension_name,
+            runtime_path=str(config_path.parent),
+            config_path=str(config_path),
+        )
+
+    def enqueue_harness_config(
+        self, config_path: str,
+    ) -> None:
+        """Schedule a harness_config.yaml for loading on next stream() call."""
+        self._pending_harness_configs.append(config_path)
+
+    async def _drain_pending_harness_configs(
+        self,
+    ) -> None:
+        """Load any enqueued harness configs before processing a query."""
+        while self._pending_harness_configs:
+            path = self._pending_harness_configs.pop(0)
+            try:
+                loaded = await self.load_harness_config(path)
+                logger.info(
+                    "Auto-loaded harness config %s: %s",
+                    path,
+                    loaded,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to load harness config: %s",
+                    path,
+                )
 
     async def _register_rail_selective(self, rail: AgentRail) -> None:
         """Route rail callbacks to the correct agent and record the rail as registered."""
@@ -1524,10 +2133,23 @@ class DeepAgent(BaseAgent):
 
         task = asyncio.create_task(_stream_process())
 
-        async for chunk in session.stream_iterator():
-            yield chunk
+        _stream_task = task
+        try:
+            async for chunk in session.stream_iterator():
+                yield chunk
 
-        await task
+            # Normal completion: wait for background task
+            await _stream_task
+        except asyncio.CancelledError:
+            # Cancel background task explicitly to speed up cleanup.
+            # Without this, await _stream_task could wait for a long-running
+            # operation (e.g., wait_round_completion with 600s timeout).
+            _stream_task.cancel()
+            try:
+                await _stream_task
+            except asyncio.CancelledError:
+                pass  # Expected when we cancelled it
+            raise
 
     async def _write_round_result_to_stream(
         self,
@@ -1625,6 +2247,7 @@ class DeepAgent(BaseAgent):
     ) -> AsyncIterator[Any]:
         """Stream execute DeepAgent in single-round or task-loop mode."""
         await self._ensure_initialized()
+        await self._drain_pending_harness_configs()
 
         if self._react_agent is None:
             raise build_error(

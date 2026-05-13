@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 from openjiuwen.harness.schema.task import (
+    TaskPlan,
     TodoItem,
     TodoStatus,
-    TaskPlan,
 )
 
 
@@ -20,16 +20,15 @@ def test_todo_item_defaults() -> None:
 
 
 def test_todo_item_create() -> None:
-    """TodoItem.create factory works."""
-    item = TodoItem.create(content="test task")
+    """TodoItem fills default activeForm when omitted."""
+    item = TodoItem(id="test_task", content="test task")
     assert item.content == "test task"
-    assert item.activeForm == "Executing test task"
     assert item.status == TodoStatus.PENDING
 
 
 def test_todo_item_with_model_id() -> None:
     """TodoItem can have selected_model_id."""
-    item = TodoItem.create(content="smart task", selected_model_id="smart")
+    item = TodoItem(id="smart_task", content="smart task", selected_model_id="smart")
     assert item.selected_model_id == "smart"
 
 

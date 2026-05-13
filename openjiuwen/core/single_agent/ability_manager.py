@@ -500,9 +500,10 @@ class AbilityManager:
             if names is None:
                 mcp_tool_infos = await Runner.resource_mgr.get_mcp_tool_infos(server_id=mcp_server_id)
                 for mcp_tool in mcp_tool_infos:
-                    mcp_tool_name = mcp_tool.name
-                    mcp_tool_id = f'{mcp_server_id}.{mcp_server_name}.{mcp_tool_name}'
-                    self._tools[mcp_tool.name] = ToolCard(id=mcp_tool_id, name=mcp_tool_name,
+                    mcp_tool_name = f"mcp_{mcp_server_name}_{mcp_tool.name}"
+                    mcp_tool_id = f'{mcp_server_id}.{mcp_server_name}.{mcp_tool.name}'
+                    mcp_tool.name = mcp_tool_name
+                    self._tools[mcp_tool_name] = ToolCard(id=mcp_tool_id, name=mcp_tool_name,
                                                           description=mcp_tool.description,
                                                           input_params=mcp_tool.parameters or {})
                     tool_infos.append(mcp_tool)

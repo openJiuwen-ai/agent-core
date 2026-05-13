@@ -4,7 +4,7 @@
 import json
 from typing import Any, Dict, Iterable, Optional
 
-from a2a.types import AgentCard as A2AAgentCard
+from a2a.types import AgentCapabilities, AgentCard as A2AAgentCard
 from a2a.types import AgentInterface
 
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
@@ -18,16 +18,15 @@ class A2AAgentCardAdapter:
 
     @classmethod
     def to_a2a_agent_card(
-            cls,
-            agent_card: AgentCard,
-            *,
-            interface_url: Optional[str] = None,
-            protocol_binding: str = "HTTP+JSON",
-            protocol_version: str = "1.0",
-            tenant: Optional[str] = None,
-            supported_interfaces: Optional[Iterable[Dict[str, Any]]] = None,
+        cls,
+        agent_card: AgentCard,
+        *,
+        interface_url: Optional[str] = None,
+        protocol_binding: str = "HTTP+JSON",
+        protocol_version: str = "1.0",
+        tenant: Optional[str] = None,
+        supported_interfaces: Optional[Iterable[Dict[str, Any]]] = None,
     ) -> Optional[A2AAgentCard]:
-        # Keep only minimal validation: input must be OJW AgentCard
         if not isinstance(agent_card, AgentCard):
             return None
 
@@ -40,6 +39,7 @@ class A2AAgentCardAdapter:
         card = A2AAgentCard(
             name=agent_card.name or "",
             description=description,
+            capabilities=AgentCapabilities(streaming=True, push_notifications=False),
             default_input_modes=cls.DEFAULT_INPUT_MODES,
             default_output_modes=cls.DEFAULT_OUTPUT_MODES,
         )
@@ -60,7 +60,6 @@ class A2AAgentCardAdapter:
         return AgentCard(
             name=a2a_agent_card.name,
             description=a2a_agent_card.description,
-            # openjiuwen AgentCard requires id; A2A has no id so keep generated default.
         )
 
     @staticmethod
@@ -70,7 +69,6 @@ class A2AAgentCardAdapter:
         if isinstance(value, dict):
             payload = value
         else:
-            # Keep compatibility with BaseModel type-style declarations.
             model_json_schema = getattr(value, "model_json_schema", None)
             if callable(model_json_schema):
                 payload = model_json_schema()
@@ -82,11 +80,11 @@ class A2AAgentCardAdapter:
 
     @classmethod
     def _build_description(
-            cls,
-            *,
-            base_description: str,
-            input_params: Any,
-            output_params: Any,
+        cls,
+        *,
+        base_description: str,
+        input_params: Any,
+        output_params: Any,
     ) -> str:
         sections = [base_description.strip() if base_description else ""]
         input_text = cls._serialize_param_payload(input_params)
@@ -99,12 +97,12 @@ class A2AAgentCardAdapter:
 
     @staticmethod
     def _build_interfaces(
-            *,
-            interface_url: Optional[str],
-            protocol_binding: str,
-            protocol_version: str,
-            tenant: Optional[str],
-            supported_interfaces: Optional[Iterable[Dict[str, Any]]],
+        *,
+        interface_url: Optional[str],
+        protocol_binding: str,
+        protocol_version: str,
+        tenant: Optional[str],
+        supported_interfaces: Optional[Iterable[Dict[str, Any]]],
     ) -> list[AgentInterface]:
         result: list[AgentInterface] = []
         if supported_interfaces:

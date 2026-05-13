@@ -21,7 +21,7 @@ from openjiuwen.agent_teams.schema.events import (
     MemberStatusChangedEvent,
     TeamTopic,
 )
-from openjiuwen.agent_teams.spawn.context import get_session_id
+from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.core.single_agent import AgentCard
 
 

@@ -20,7 +20,7 @@ from openjiuwen.agent_teams.schema.events import (
     MessageEvent,
     TeamTopic,
 )
-from openjiuwen.agent_teams.spawn.context import get_session_id
+from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.tools.database import TeamDatabase, TeamMessageBase
 from openjiuwen.core.common.logging import team_logger
 

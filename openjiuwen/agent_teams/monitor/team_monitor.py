@@ -10,13 +10,20 @@ plus a real-time event stream via an async iterator.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+
 # Avoid hard imports to keep the module self-contained;
 # runtime types are referenced by string or duck-typed.
 from typing import (
-    AsyncIterator,
     TYPE_CHECKING,
+    AsyncIterator,
 )
 
+from openjiuwen.agent_teams.context import (
+    get_session_id,
+    reset_session_id,
+    set_session_id,
+)
 from openjiuwen.agent_teams.monitor.models import (
     MemberInfo,
     MessageInfo,
@@ -98,6 +105,25 @@ class TeamMonitor:
         self._event_queue.put_nowait(None)
         team_logger.info("TeamMonitor stopped for team {}", self._team_id)
 
+    @contextlib.contextmanager
+    def _bound_session(self):
+        """Bind ``self._session_id`` into the session contextvar for one query.
+
+        Per-session dynamic tables (``team_task_<hash>`` etc.) are looked up
+        through the ``agent_teams.context`` contextvar; callers outside the
+        leader's run loop (CLI, SDK) won't have it set, so we bind it for
+        the duration of every query method to avoid hashing an empty
+        session_id and pointing at non-existent tables.
+        """
+        token = None
+        if self._session_id and get_session_id() != self._session_id:
+            token = set_session_id(self._session_id)
+        try:
+            yield
+        finally:
+            if token is not None:
+                reset_session_id(token)
+
     # ------------------------------------------------------------------
     # Query APIs
     # ------------------------------------------------------------------
@@ -108,7 +134,8 @@ class TeamMonitor:
         Returns:
             TeamInfo or None if the team does not exist.
         """
-        team = await self._db.team.get_team(self._team_id)
+        with self._bound_session():
+            team = await self._db.team.get_team(self._team_id)
         if team is None:
             return None
         return TeamInfo.from_internal(team)
@@ -122,7 +149,8 @@ class TeamMonitor:
         Returns:
             List of MemberInfo.
         """
-        members = await self._db.member.get_team_members(self._team_id, status=status)
+        with self._bound_session():
+            members = await self._db.member.get_team_members(self._team_id, status=status)
         return [MemberInfo.from_internal(m) for m in members]
 
     async def get_member(self, member_name: str) -> MemberInfo | None:
@@ -134,7 +162,8 @@ class TeamMonitor:
         Returns:
             MemberInfo or None if not found.
         """
-        member = await self._db.member.get_member(member_name, self._team_id)
+        with self._bound_session():
+            member = await self._db.member.get_member(member_name, self._team_id)
         if member is None:
             return None
         return MemberInfo.from_internal(member)
@@ -148,7 +177,8 @@ class TeamMonitor:
         Returns:
             List of TaskInfo.
         """
-        tasks = await self._db.task.get_team_tasks(self._team_id, status=status)
+        with self._bound_session():
+            tasks = await self._db.task.get_team_tasks(self._team_id, status=status)
         return [TaskInfo.from_internal(t) for t in tasks]
 
     async def get_messages(
@@ -169,14 +199,15 @@ class TeamMonitor:
         Returns:
             List of MessageInfo.
         """
-        if to_member is not None:
-            rows = await self._db.message.get_messages(
-                team_name=self._team_id,
-                to_member_name=to_member,
-                from_member_name=from_member,
-            )
-        else:
-            rows = await self._db.message.get_team_messages(team_name=self._team_id)
+        with self._bound_session():
+            if to_member is not None:
+                rows = await self._db.message.get_messages(
+                    team_name=self._team_id,
+                    to_member_name=to_member,
+                    from_member_name=from_member,
+                )
+            else:
+                rows = await self._db.message.get_team_messages(team_name=self._team_id)
         return [MessageInfo.from_internal(r) for r in rows]
 
     # ------------------------------------------------------------------
@@ -232,7 +263,6 @@ def create_monitor(team_agent: TeamAgent) -> TeamMonitor:
             fully configured.
     """
     from openjiuwen.agent_teams.schema.team import TeamRole
-    from openjiuwen.agent_teams.spawn.context import get_session_id
 
     if team_agent.role != TeamRole.LEADER:
         raise ValueError("TeamMonitor can only be bound to a leader TeamAgent")

@@ -12,6 +12,7 @@ import json
 from abc import ABC
 from functools import wraps
 from typing import (
+    TYPE_CHECKING,
     Any,
     AsyncIterator,
     Awaitable,
@@ -20,13 +21,12 @@ from typing import (
     List,
     Optional,
     Set,
-    TYPE_CHECKING,
 )
 
 from pydantic import PrivateAttr
 
 if TYPE_CHECKING:
-    from openjiuwen.agent_teams.agent.model_allocator import Allocation
+    from openjiuwen.agent_teams.models.allocator import Allocation
 
 from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.tools.locales import Translator
@@ -128,11 +128,20 @@ LEADER_TOOLS: Set[str] = LEADER_ONLY_TOOLS | SHARED_TOOLS
 MEMBER_TOOLS: Set[str] = MEMBER_ONLY_TOOLS | SHARED_TOOLS
 
 # Tools available to the reserved ``human_agent`` role. The human
-# collaborator only needs to talk — no task claim, no team management,
-# no introspection tools. Keeping the surface minimal also makes the
-# model's mental model clear: human_agent is a voice, not a scheduler.
+# agent acts on its corresponding external user's behalf, so it gets
+# read access to tasks and a self-only completion tool. It does not
+# get ``send_message`` — user voice goes through ``HumanAgentInbox``
+# with explicit ``@target`` routing, not through an LLM-controlled
+# tool. It does not get ``claim_task`` — autonomous claiming is a
+# teammate behavior; the user's avatar must wait for explicit leader
+# assignment via ``update_task(assignee=...)`` instead.
+#
+# Workspace lock/version (``workspace_meta``) is attached separately
+# by ``TeamToolRail`` whenever a workspace_manager is configured —
+# same path leader/teammate use — so this set doesn't list it.
 HUMAN_AGENT_TOOLS: Set[str] = {
-    "send_message",
+    "view_task",
+    "member_complete_task",
 }
 
 
@@ -165,7 +174,6 @@ class BuildTeamTool(TeamTool):
                 "leader_desc": {"type": "string", "description": t("build_team", "leader_desc")},
                 "enable_hitt": {
                     "type": "boolean",
-                    "default": False,
                     "description": t("build_team", "enable_hitt"),
                 },
             },
@@ -175,13 +183,16 @@ class BuildTeamTool(TeamTool):
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         display_name = inputs.get("display_name")
         leader_display_name = inputs["leader_display_name"]
-        enable_hitt = bool(inputs.get("enable_hitt", False))
+        # None when LLM omits the field — backend.build_team inherits the
+        # spec ceiling. True/False explicitly set the runtime instance flag
+        # (subject to the spec ceiling check).
+        enable_hitt_arg = inputs.get("enable_hitt")
         await self.team.build_team(
             display_name=display_name,
             desc=inputs.get("team_desc"),
             leader_display_name=leader_display_name,
             leader_desc=inputs["leader_desc"],
-            enable_hitt=enable_hitt,
+            enable_hitt=enable_hitt_arg,
         )
         return ToolOutput(
             success=True,
@@ -190,7 +201,7 @@ class BuildTeamTool(TeamTool):
                 "display_name": display_name,
                 "leader_member_name": self.team.member_name,
                 "leader_display_name": leader_display_name,
-                "enable_hitt": enable_hitt,
+                "enable_hitt": self.team.hitt_enabled(),
             },
         )
 
@@ -198,13 +209,12 @@ class BuildTeamTool(TeamTool):
         if not output.success:
             return output.error or "Failed to build team"
         d = output.data or {}
-        hitt_note = " [human_agent registered]" if d.get("enable_hitt") else ""
         return (
             f"Team created: team_name={d.get('team_name')} "
             f"display_name={d.get('display_name')} "
             f"leader_member_name={d.get('leader_member_name')} "
-            f"leader_display_name={d.get('leader_display_name')}"
-            f"{hitt_note}"
+            f"leader_display_name={d.get('leader_display_name')} "
+            f"hitt_enabled={d.get('enable_hitt')}"
         )
 
 
@@ -253,9 +263,7 @@ class SpawnMemberTool(TeamTool):
         team: TeamBackend,
         t: Translator,
         *,
-        model_config_allocator: Optional[
-            Callable[[Optional[str]], Optional["Allocation"]]
-        ] = None,
+        model_config_allocator: Optional[Callable[[Optional[str]], Optional["Allocation"]]] = None,
     ):
         super().__init__(
             ToolCard(
@@ -278,6 +286,12 @@ class SpawnMemberTool(TeamTool):
                     "description": t("spawn_member", "display_name"),
                 },
                 "desc": {"type": "string", "description": t("spawn_member", "desc")},
+                "role_type": {
+                    "type": "string",
+                    "enum": ["teammate", "human_agent"],
+                    "default": "teammate",
+                    "description": t("spawn_member", "role_type"),
+                },
                 "prompt": {"type": "string", "description": t("spawn_member", "prompt")},
                 "model_name": {
                     "type": "string",
@@ -294,16 +308,53 @@ class SpawnMemberTool(TeamTool):
         member_name = inputs.get("member_name")
         display_name = inputs.get("display_name")
         desc = inputs.get("desc", "")
+        role_type = (inputs.get("role_type") or "teammate").lower()
+
+        if role_type not in {"teammate", "human_agent"}:
+            return ToolOutput(
+                success=False,
+                error=f"Invalid role_type '{role_type}'; expected 'teammate' or 'human_agent'",
+            )
+
+        if role_type == "human_agent":
+            # Capability gate: fail fast to LLM before touching backend.
+            if not self.team.hitt_enabled():
+                return ToolOutput(
+                    success=False,
+                    error=(
+                        "Cannot spawn human agent: HITT capability is disabled "
+                        "(enable_hitt=False on TeamAgentSpec or build_team). "
+                        "Either enable HITT in the team spec or use role_type='teammate'."
+                    ),
+                )
+            if inputs.get("model_name") or inputs.get("prompt"):
+                return ToolOutput(
+                    success=False,
+                    error=(
+                        "role_type='human_agent' does not accept 'model_name' or 'prompt'; "
+                        "human members use the framework template — remove these fields"
+                    ),
+                )
+            result = await self.team.spawn_human_agent(
+                member_name=member_name,
+                display_name=display_name,
+                desc=desc,
+            )
+            return ToolOutput(
+                success=result.ok,
+                data={
+                    "member_name": member_name,
+                    "display_name": display_name,
+                    "role_type": "human_agent",
+                },
+                error=None if result.ok else result.reason,
+            )
+
+        # teammate path (default)
         mode_str = self.team.teammate_mode.value
         mode = MemberMode(mode_str)
-
         model_name = inputs.get("model_name")
-        allocation = (
-            self._allocate_model_config(model_name)
-            if self._allocate_model_config
-            else None
-        )
-
+        allocation = self._allocate_model_config(model_name) if self._allocate_model_config else None
         card_id = f"{self.team.team_name}_{member_name}"
         agent_card = AgentCard(id=card_id, name=display_name, description=desc)
         result = await self.team.spawn_member(
@@ -317,7 +368,11 @@ class SpawnMemberTool(TeamTool):
         )
         return ToolOutput(
             success=result.ok,
-            data={"member_name": member_name, "display_name": display_name},
+            data={
+                "member_name": member_name,
+                "display_name": display_name,
+                "role_type": "teammate",
+            },
             error=None if result.ok else result.reason,
         )
 
@@ -325,7 +380,8 @@ class SpawnMemberTool(TeamTool):
         if not output.success:
             return output.error or "Failed to spawn member"
         d = output.data
-        return f"Member spawned: member_name={d['member_name']} display_name={d['display_name']}"
+        role = d.get("role_type", "teammate")
+        return f"Member spawned: member_name={d['member_name']} display_name={d['display_name']} role={role}"
 
 
 class ShutdownMemberTool(TeamTool):
@@ -818,10 +874,7 @@ class UpdateTaskTool(TeamTool):
         collaborator can release them (by completing, or by the team
         being cleaned). The leader's only recourse is send_message nudges.
         """
-        return (
-            self.agent_team.is_human_agent(task.assignee)
-            and task.status == TaskStatus.CLAIMED.value
-        )
+        return self.agent_team.is_human_agent(task.assignee) and task.status == TaskStatus.CLAIMED.value
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         task_id = inputs.get("task_id")
@@ -1009,6 +1062,94 @@ class ClaimTaskTool(TeamTool):
         return result
 
 
+class MemberCompleteTaskTool(TeamTool):
+    """Complete a task whose ``assignee`` is the calling member.
+
+    Self-only by design: the tool refuses any task whose ``assignee``
+    differs from the caller's ``member_name``. Distinct from
+    ``ClaimTaskTool`` (which couples claim and complete and is
+    teammate-only) and from leader's ``UpdateTaskTool`` (which manages
+    the team-wide task graph). Wired into ``HUMAN_AGENT_TOOLS`` so the
+    user's avatar can mark its leader-assigned tasks as done without
+    inheriting any of leader's coordination authority.
+    """
+
+    def __init__(self, task_manager: TeamTaskManager, t: Translator):
+        super().__init__(
+            ToolCard(
+                id="team.member_complete_task",
+                name="member_complete_task",
+                description=t("member_complete_task"),
+            )
+        )
+        self.task_manager = task_manager
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": t("member_complete_task", "task_id"),
+                },
+                "note": {
+                    "type": "string",
+                    "description": t("member_complete_task", "note"),
+                },
+            },
+            "required": ["task_id"],
+        }
+
+    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+        task_id = (inputs.get("task_id") or "").strip()
+        if not task_id:
+            return ToolOutput(success=False, error="'task_id' is required")
+
+        try:
+            task = await self.task_manager.get(task_id)
+        except Exception as e:
+            team_logger.error("member_complete_task: get(%s) failed: %s", task_id, e)
+            return ToolOutput(success=False, error=f"Internal error: {e}")
+        if not task:
+            return ToolOutput(success=False, error=f"Task '{task_id}' not found")
+
+        caller = self.task_manager.member_name
+        if task.assignee != caller:
+            return ToolOutput(
+                success=False,
+                error=(
+                    f"Task '{task_id}' is assigned to "
+                    f"'{task.assignee or '<unassigned>'}', not '{caller}'; "
+                    "you can only complete tasks assigned to yourself"
+                ),
+            )
+
+        try:
+            result = await self.task_manager.complete(task_id=task_id)
+        except Exception as e:
+            team_logger.error("member_complete_task: complete(%s) failed: %s", task_id, e)
+            return ToolOutput(success=False, error=f"Internal error: {e}")
+        if not result.ok:
+            return ToolOutput(success=False, error=result.reason)
+
+        note = (inputs.get("note") or "").strip() or None
+        return ToolOutput(
+            success=True,
+            data={
+                "task_id": task_id,
+                "status": "completed",
+                "note": note,
+            },
+        )
+
+    def map_result(self, output: ToolOutput) -> str:
+        if not output.success:
+            return output.error or "Failed to complete task"
+        d = output.data
+        line = f"Task #{d['task_id']} completed"
+        if d.get("note"):
+            line += f" (note: {d['note']})"
+        return line
+
+
 # ========== Messaging ==========
 
 
@@ -1035,7 +1176,13 @@ class SendMessageTool(TeamTool):
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "to": {"type": "string", "description": t("send_message", "to")},
+                "to": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                    ],
+                    "description": t("send_message", "to"),
+                },
                 "content": {"type": "string", "description": t("send_message", "content")},
                 "summary": {"type": "string", "description": t("send_message", "summary")},
             },
@@ -1043,22 +1190,34 @@ class SendMessageTool(TeamTool):
         }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
-        to = inputs.get("to", "").strip()
+        to_raw = inputs.get("to")
         content = inputs.get("content", "").strip()
         summary = inputs.get("summary", "").strip()
 
-        if not to:
-            return ToolOutput(success=False, error="'to' is required")
         if not content:
             return ToolOutput(success=False, error="'content' is required")
 
         try:
-            if to == "*":
-                return await self._broadcast(content, summary)
-            return await self._send(to, content, summary)
+            return await self._dispatch(to_raw, content, summary)
         except Exception as e:
             team_logger.error(f"send_message failed: {e}")
             return ToolOutput(success=False, error=f"Internal error: {e}")
+
+    async def _dispatch(self, to_raw: Any, content: str, summary: str) -> ToolOutput:
+        """Route the request based on the runtime type of ``to``."""
+        if isinstance(to_raw, list):
+            return await self._multicast(to_raw, content, summary)
+        if isinstance(to_raw, str):
+            to = to_raw.strip()
+            if not to:
+                return ToolOutput(success=False, error="'to' is required")
+            if to == "*":
+                return await self._broadcast(content, summary)
+            return await self._send(to, content, summary)
+        return ToolOutput(
+            success=False,
+            error="'to' must be a string or an array of strings",
+        )
 
     async def _broadcast(self, content: str, summary: str) -> ToolOutput:
         await self._auto_start_members()
@@ -1095,6 +1254,72 @@ class SendMessageTool(TeamTool):
             },
         )
 
+    async def _multicast(
+        self,
+        targets: list[str],
+        content: str,
+        summary: str,
+    ) -> ToolOutput:
+        """Send identical content to multiple members as independent point-to-point messages.
+
+        Strict success: only returns success=True when every target receives the message.
+        On any failure the data still carries delivered/failed lists so callers can
+        avoid resending to members who already got the message.
+        """
+        # Strip + drop blanks while preserving order, then de-duplicate.
+        stripped = [item.strip() if isinstance(item, str) else "" for item in targets]
+        cleaned = [item for item in stripped if item]
+        deduped = list(dict.fromkeys(cleaned))
+
+        if not deduped:
+            return ToolOutput(
+                success=False,
+                error="'to' list must contain at least one member name",
+            )
+        if "*" in deduped:
+            return ToolOutput(
+                success=False,
+                error="Cannot mix broadcast '*' with member names; use to='*' for broadcast",
+            )
+        if "user" in deduped:
+            return ToolOutput(
+                success=False,
+                error="'user' cannot be combined in multicast; send to user separately",
+            )
+
+        await self._auto_start_members()
+
+        delivered: list[str] = []
+        failed: list[dict[str, str]] = []
+        for name in deduped:
+            if self._team:
+                member = await self._team.get_member(name)
+                if not member:
+                    failed.append({"to": name, "reason": f"Member '{name}' not found"})
+                    continue
+            msg_id = await self.message_manager.send_message(
+                content=content,
+                to_member_name=name,
+            )
+            if not msg_id:
+                failed.append({"to": name, "reason": f"Failed to send message to '{name}'"})
+                continue
+            delivered.append(name)
+
+        total = len(deduped)
+        ok = not failed
+        return ToolOutput(
+            success=ok,
+            error=(None if ok else f"Multicast partially failed: {len(failed)}/{total} target(s) failed"),
+            data={
+                "type": "multicast",
+                "from": self.message_manager.member_name,
+                "delivered": delivered,
+                "failed": failed,
+                "summary": summary or None,
+            },
+        )
+
     async def _auto_start_members(self) -> None:
         """Auto-start unstarted members if leader with startup callback."""
         if self._team and self._on_teammate_created and self._team.is_leader:
@@ -1103,12 +1328,39 @@ class SendMessageTool(TeamTool):
                 team_logger.info(f"Auto-started members: {started}")
 
     def map_result(self, output: ToolOutput) -> str:
-        if not output.success:
-            return output.error or "Failed to send message"
         d = output.data
+        if not output.success:
+            base = output.error or "Failed to send message"
+            if isinstance(d, dict) and d.get("type") == "multicast":
+                return self._format_multicast_text(base, d)
+            return base
         if d["type"] == "broadcast":
             return f"Broadcast sent from {d['from']}"
+        if d["type"] == "multicast":
+            return self._format_multicast_text(None, d)
         return f"Message sent from {d['from']} to {d['to']}"
+
+    @staticmethod
+    def _format_multicast_text(error: str | None, d: Dict[str, Any]) -> str:
+        """Render multicast outcome including delivered/failed lists when present."""
+        delivered: list[str] = d.get("delivered", []) or []
+        failed: list[dict[str, str]] = d.get("failed", []) or []
+        sender = d.get("from", "")
+        parts: list[str] = []
+        if error:
+            parts.append(error)
+        else:
+            head = f"Multicast sent from {sender}"
+            if delivered:
+                head += f" to: {', '.join(delivered)}"
+            head += f" ({len(delivered)} delivered)"
+            parts.append(head)
+        if error and delivered:
+            parts.append(f"delivered: {', '.join(delivered)}")
+        if failed:
+            failed_text = "; ".join(f"{item['to']} — {item['reason']}" for item in failed)
+            parts.append(f"failed: {failed_text}")
+        return "; ".join(parts)
 
 
 # ========== Tool Factory ==========
@@ -1120,9 +1372,7 @@ def create_team_tools(
     agent_team: TeamBackend,
     teammate_mode: str = "build_mode",
     on_teammate_created: Optional[Callable[[str], Awaitable[None]]] = None,
-    model_config_allocator: Optional[
-        Callable[[Optional[str]], Optional["Allocation"]]
-    ] = None,
+    model_config_allocator: Optional[Callable[[Optional[str]], Optional["Allocation"]]] = None,
     exclude_tools: Optional[Set[str]] = None,
     lang: str = "cn",
 ) -> List[Tool]:
@@ -1166,6 +1416,7 @@ def create_team_tools(
         "update_task": UpdateTaskTool(agent_team, t),
         "view_task": ViewTaskToolV2(task_mgr, t),
         "claim_task": ClaimTaskTool(task_mgr, t),
+        "member_complete_task": MemberCompleteTaskTool(task_mgr, t),
         # Messaging
         "send_message": SendMessageTool(
             msg_mgr,

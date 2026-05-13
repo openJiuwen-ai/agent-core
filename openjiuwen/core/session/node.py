@@ -96,3 +96,6 @@ class Session:
         if manager:
             return manager.get_custom_writer()
         return None
+
+    def get_node_config(self):
+        return self._inner.node_config()

@@ -2,20 +2,23 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 from google.protobuf.json_format import MessageToDict
+from unittest.mock import Mock
 
+from a2a.server.agent_execution.context import RequestContext
 from a2a.types.a2a_pb2 import (
     Artifact,
     Message,
     Part,
     Task,
+    SendMessageRequest,
     TaskArtifactUpdateEvent,
-    TaskState,
-    TaskStatus,
+    TaskState as A2ATaskState,
+    TaskStatus as A2ATaskStatus,
     TaskStatusUpdateEvent,
 )
 
 from openjiuwen.extensions.a2a.a2a_transformer import A2ATransformer
-from openjiuwen.core.controller.schema.task import TaskStatus as OJWTaskStatus
+from openjiuwen.core.controller.schema.task import TaskStatus
 
 
 class TestA2ATransformer:
@@ -36,7 +39,7 @@ class TestA2ATransformer:
         }
 
         result = A2ATransformer.to_a2a_request(request)
-        dumped = MessageToDict(result, preserving_proto_field_name=True)
+        dumped = MessageToDict(result.message, preserving_proto_field_name=True)
 
         assert dumped["metadata"]["metadata"] == []
         assert dumped["metadata"]["region"] == "shenzhen"
@@ -51,14 +54,13 @@ class TestA2ATransformer:
 
         result = A2ATransformer.to_a2a_request(request)
         dumped = MessageToDict(result.message, preserving_proto_field_name=True)
-        request_dumped = MessageToDict(result, preserving_proto_field_name=True)
 
         assert dumped["role"] == "ROLE_USER"
         assert dumped["message_id"]
         assert dumped["context_id"] == "conv-1"
         assert dumped["parts"] == [{"text": "hello"}]
-        assert request_dumped["metadata"]["metadata"]["tenant"] == "demo"
-        assert request_dumped["metadata"]["city"] == "shenzhen"
+        assert dumped["metadata"]["metadata"]["tenant"] == "demo"
+        assert dumped["metadata"]["city"] == "shenzhen"
 
     def test_to_a2a_request_should_put_all_other_fields_into_metadata(self):
         request = {
@@ -77,10 +79,10 @@ class TestA2ATransformer:
         }
 
         result = A2ATransformer.to_a2a_request(request)
-        dumped = MessageToDict(result, preserving_proto_field_name=True)
+        dumped = MessageToDict(result.message, preserving_proto_field_name=True)
 
-        assert dumped["message"]["context_id"] == "context-file-1"
-        assert dumped["message"]["parts"] == [{"text": "please analyze this file"}]
+        assert dumped["context_id"] == "context-file-1"
+        assert dumped["parts"] == [{"text": "please analyze this file"}]
         assert dumped["metadata"]["files"] == [
             {
                 "url": "https://example.com/data.csv",
@@ -101,11 +103,49 @@ class TestA2ATransformer:
         }
 
         result = A2ATransformer.to_a2a_request(request)
-        dumped = MessageToDict(result, preserving_proto_field_name=True)
+        dumped = MessageToDict(result.message, preserving_proto_field_name=True)
 
         assert dumped["metadata"]["metadata"]["tenant"] == "demo"
         assert dumped["metadata"]["region"] == "sz"
         assert "city" not in dumped["metadata"]
+
+    def test_from_a2a_request_should_normalize_request_context(self):
+        request = RequestContext(
+            call_context=Mock(),
+            request=SendMessageRequest(
+                message=Message(
+                    task_id="task-1",
+                    context_id="conv-1",
+                    parts=[Part(text="hello from a2a")],
+                )
+            ),
+            task_id="task-1",
+            context_id="conv-1",
+        )
+
+        result = A2ATransformer.from_a2a_request(request)
+
+        assert result["query"] == "hello from a2a"
+        assert result["task_id"] == "task-1"
+        assert result["sessionId"] == "conv-1"
+
+    def test_from_a2a_request_should_merge_request_metadata(self):
+        request = SendMessageRequest(
+            message=Message(
+                task_id="task-2",
+                context_id="conv-2",
+                parts=[Part(text="hello metadata")],
+            )
+        )
+        request.metadata.update({"tenant": "demo", "region": "sz"})
+
+        result = A2ATransformer.from_a2a_request(request)
+
+        assert result["query"] == "hello metadata"
+        assert result["task_id"] == "task-2"
+        assert result["sessionId"] == "conv-2"
+        assert result["tenant"] == "demo"
+        assert result["region"] == "sz"
 
     def test_from_a2a_message_should_return_agent_result(self):
         message = Message(
@@ -120,7 +160,7 @@ class TestA2ATransformer:
 
         assert result.task_id == "task-1"
         assert result.sessionId == "conv-1"
-        assert result.status == OJWTaskStatus.COMPLETED
+        assert result.status == TaskStatus.COMPLETED
         assert result.artifacts[0].artifactId == "message"
         assert result.artifacts[0].parts[0].text == "hello from agent"
         assert result.metadata["source"] == "a2a"
@@ -156,7 +196,7 @@ class TestA2ATransformer:
         task = Task(
             id="task-2",
             context_id="context-2",
-            status=TaskStatus(state=TaskState.TASK_STATE_COMPLETED),
+            status=A2ATaskStatus(state=A2ATaskState.TASK_STATE_COMPLETED),
             artifacts=[
                 Artifact(
                     artifact_id="result",
@@ -172,7 +212,7 @@ class TestA2ATransformer:
 
         assert result.task_id == "task-2"
         assert result.sessionId == "context-2"
-        assert result.status == OJWTaskStatus.COMPLETED
+        assert result.status == TaskStatus.COMPLETED
         assert result.artifacts[0].artifactId == "result"
         assert result.artifacts[0].parts[0].text == "task result body"
         assert result.metadata["priority"] == "high"
@@ -181,7 +221,7 @@ class TestA2ATransformer:
         event = TaskStatusUpdateEvent(
             task_id="task-3",
             context_id="context-3",
-            status=TaskStatus(state=TaskState.TASK_STATE_WORKING),
+            status=A2ATaskStatus(state=A2ATaskState.TASK_STATE_WORKING),
         )
         event.metadata.update({"agent_id": "agent-1"})
 
@@ -189,7 +229,7 @@ class TestA2ATransformer:
 
         assert result.task_id == "task-3"
         assert result.sessionId == "context-3"
-        assert result.status == OJWTaskStatus.WORKING
+        assert result.status == TaskStatus.WORKING
         assert result.artifacts == []
         assert result.metadata["agent_id"] == "agent-1"
 
@@ -197,31 +237,31 @@ class TestA2ATransformer:
         event = TaskStatusUpdateEvent(
             task_id="task-3",
             context_id="context-3",
-            status=TaskStatus(state=TaskState.TASK_STATE_COMPLETED),
+            status=A2ATaskStatus(state=A2ATaskState.TASK_STATE_COMPLETED),
         )
 
         result = A2ATransformer.from_a2a_response(event)
 
-        assert result.status == OJWTaskStatus.COMPLETED
+        assert result.status == TaskStatus.COMPLETED
 
     def test_from_a2a_status_update_should_map_all_task_states_explicitly(self):
         cases = [
-            (TaskState.TASK_STATE_UNSPECIFIED, "unknown"),
-            (TaskState.TASK_STATE_SUBMITTED, "submitted"),
-            (TaskState.TASK_STATE_WORKING, "working"),
-            (TaskState.TASK_STATE_COMPLETED, "completed"),
-            (TaskState.TASK_STATE_FAILED, "failed"),
-            (TaskState.TASK_STATE_CANCELED, "canceled"),
-            (TaskState.TASK_STATE_INPUT_REQUIRED, "input-required"),
-            (TaskState.TASK_STATE_REJECTED, "failed"),
-            (TaskState.TASK_STATE_AUTH_REQUIRED, "input-required"),
+            (A2ATaskState.TASK_STATE_UNSPECIFIED, "unknown"),
+            (A2ATaskState.TASK_STATE_SUBMITTED, "submitted"),
+            (A2ATaskState.TASK_STATE_WORKING, "working"),
+            (A2ATaskState.TASK_STATE_COMPLETED, "completed"),
+            (A2ATaskState.TASK_STATE_FAILED, "failed"),
+            (A2ATaskState.TASK_STATE_CANCELED, "canceled"),
+            (A2ATaskState.TASK_STATE_INPUT_REQUIRED, "input-required"),
+            (A2ATaskState.TASK_STATE_REJECTED, "failed"),
+            (A2ATaskState.TASK_STATE_AUTH_REQUIRED, "input-required"),
         ]
 
         for state, expected in cases:
             event = TaskStatusUpdateEvent(
                 task_id="task-state-map",
                 context_id="context-state-map",
-                status=TaskStatus(state=state),
+                status=A2ATaskStatus(state=state),
             )
 
             result = A2ATransformer.from_a2a_response(event)
@@ -245,7 +285,7 @@ class TestA2ATransformer:
 
         assert result.task_id == "task-4"
         assert result.sessionId == "context-4"
-        assert result.status == OJWTaskStatus.WORKING
+        assert result.status == TaskStatus.WORKING
         assert result.artifacts[0].artifactId == "artifact-4"
         assert result.artifacts[0].parts[0].text == "Technical Specification"
         assert result.metadata["format"] == "markdown"
@@ -254,7 +294,7 @@ class TestA2ATransformer:
         task = Task(
             id="task-event-1",
             context_id="context-event-1",
-            status=TaskStatus(state=TaskState.TASK_STATE_COMPLETED),
+            status=A2ATaskStatus(state=A2ATaskState.TASK_STATE_COMPLETED),
         )
         stream_response = type("FakeStreamResponse", (), {"task": task, "HasField": lambda self, name: name == "task"})()
 
@@ -262,13 +302,13 @@ class TestA2ATransformer:
 
         assert result.task_id == "task-event-1"
         assert result.sessionId == "context-event-1"
-        assert result.status == OJWTaskStatus.COMPLETED
+        assert result.status == TaskStatus.COMPLETED
 
     def test_from_client_event_should_fallback_to_task_when_stream_response_has_no_payload(self):
         task = Task(
             id="task-fallback-1",
             context_id="context-fallback-1",
-            status=TaskStatus(state=TaskState.TASK_STATE_WORKING),
+            status=A2ATaskStatus(state=A2ATaskState.TASK_STATE_WORKING),
         )
         stream_response = type("FakeStreamResponse", (), {"HasField": lambda self, name: False})()
 
@@ -276,13 +316,13 @@ class TestA2ATransformer:
 
         assert result.task_id == "task-fallback-1"
         assert result.sessionId == "context-fallback-1"
-        assert result.status == OJWTaskStatus.WORKING
+        assert result.status == TaskStatus.WORKING
 
     def test_from_unknown_response_should_return_minimal_completed_agent_result(self):
         result = A2ATransformer.from_a2a_response(object())
 
         assert result.task_id is None
         assert result.sessionId is None
-        assert result.status == OJWTaskStatus.COMPLETED
+        assert result.status == TaskStatus.COMPLETED
         assert result.artifacts == []
         assert result.metadata == {}

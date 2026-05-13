@@ -24,7 +24,7 @@ tools:
 
 ## 任务约束
 
-- 默认优先输出适合 `meta_evolve_pipeline` 的通用改进任务
+- 当前 select pipeline 固定走 `extended_evolve_pipeline`；如仍调用本 skill，应输出可转成 runtime extension 设计输入的最高优先级任务
 - 本轮只允许输出 1 个 task；即使你识别到多个候选项，也必须先比较优先级，只保留最值得做的那个
 - 每个任务最多涉及 3 个源文件
 - 源码文件只允许落在 `openjiuwen/harness/**`、`openjiuwen/core/**`

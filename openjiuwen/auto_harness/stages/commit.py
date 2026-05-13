@@ -159,6 +159,17 @@ async def _collect_commit_facts(
 ) -> "CommitFacts":
     status = await git.collect_status()
     edited_files = edit_safety_rail.edited_files()
+    # Fallback: when edit_safety_rail tracked nothing
+    # (e.g. extension pipeline where the task agent writes
+    # files directly), treat all dirty files minus
+    # preexisting ones as edited.
+    if not edited_files:
+        pre_set = set(preexisting_dirty_files)
+        edited_files = [
+            f
+            for f in status["dirty_files"]
+            if f not in pre_set
+        ]
     verify_related_files = extract_verify_related_files(
         ci_result,
         fix_errors,
@@ -266,6 +277,8 @@ class CommitStage(TaskStage):
     """Create a git commit for the current task."""
 
     name = "commit"
+    slot = "commit"
+    display_name = "提交变更"
     description = "Create a git commit for the task."
     consumes = ["verify_report"]
     produces = ["commit_result"]
@@ -292,8 +305,8 @@ class CommitStage(TaskStage):
             fix_errors=verify_report.fix_errors,
         )
         messages = [
-            "[4/5] 检查提交范围",
-            "[5/5] 提交变更",
+            "检查提交范围",
+            "提交变更",
         ]
         commit_ok = False
         reason = ""

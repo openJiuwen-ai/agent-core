@@ -16,25 +16,27 @@ from openjiuwen.auto_harness.contexts import (
 )
 from openjiuwen.auto_harness.pipelines.base import (
     BasePipeline,
+    PipelineStageMap,
 )
 from openjiuwen.auto_harness.schema import (
     CycleResult,
     Experience,
     ExperienceType,
     OptimizationTask,
+    StageSlot,
     TaskStatus,
 )
 from openjiuwen.auto_harness.stages.commit import (
     CommitStage,
 )
 from openjiuwen.auto_harness.stages.implement import (
-    ImplementStage,
+    MetaImplementStage,
 )
 from openjiuwen.auto_harness.stages.publish_pr import (
     PublishPRStage,
 )
 from openjiuwen.auto_harness.stages.verify import (
-    VerifyStage,
+    MetaVerifyStage,
 )
 
 if TYPE_CHECKING:
@@ -82,6 +84,7 @@ async def prepare_task_runtime(
         orchestrator.config,
         workspace_override=wt_path,
         edit_safety_rail=edit_safety_rail,
+        extra_rails=orchestrator.stream_rails or None,
     )
     fix_agent = create_auto_harness_agent(
         orchestrator.config,
@@ -90,10 +93,12 @@ async def prepare_task_runtime(
         enable_task_loop=False,
         enable_task_planning=False,
         enable_progress_repeat=False,
+        extra_rails=orchestrator.stream_rails or None,
     )
     commit_agent = create_commit_agent(
         orchestrator.config,
         workspace_override=wt_path,
+        extra_rails=orchestrator.stream_rails or None,
     )
     task_session = create_agent_session(
         session_id=f"auto-harness-{Path(wt_path).name}",
@@ -114,6 +119,13 @@ async def prepare_task_runtime(
 
 class PRTaskPipeline(BasePipeline):
     """Explicit task-scoped pipeline for meta evolve work."""
+
+    stage_map = PipelineStageMap(mapping={
+        StageSlot.IMPLEMENT: MetaImplementStage,
+        StageSlot.VERIFY: MetaVerifyStage,
+        StageSlot.COMMIT: CommitStage,
+        StageSlot.PUBLISH: PublishPRStage,
+    })
 
     async def stream(
         self,
@@ -146,7 +158,7 @@ class PRTaskPipeline(BasePipeline):
         self,
         ctx: TaskContext,
     ) -> AsyncIterator[Any]:
-        stage = ImplementStage()
+        stage = MetaImplementStage()
         result_holder = []
         async for chunk in self._stream_stage(
             stage,
@@ -161,7 +173,7 @@ class PRTaskPipeline(BasePipeline):
         self,
         ctx: TaskContext,
     ) -> AsyncIterator[Any]:
-        stage = VerifyStage()
+        stage = MetaVerifyStage()
         result_holder = []
         async for chunk in self._stream_stage(
             stage,

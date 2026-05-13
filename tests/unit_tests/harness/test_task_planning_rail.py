@@ -152,11 +152,13 @@ def _make_todos(
 ) -> List[TodoItem]:
     """Build TodoItem list from (title, status[, selected_model_id]) tuples."""
     items = []
-    for spec in specs:
+    for i, spec in enumerate(specs):
         content, status = spec[0], spec[1]
         selected_model_id = spec[2] if len(spec) > 2 else None
+        task_id = f"task_{i + 1}"
         items.append(
-            TodoItem.create(
+            TodoItem(
+                id=task_id,
                 content=content,
                 status=status,
                 selected_model_id=selected_model_id,

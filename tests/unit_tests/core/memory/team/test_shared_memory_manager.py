@@ -11,7 +11,7 @@ import tempfile
 
 import pytest
 
-from openjiuwen.core.memory.team.shared_memory import SharedMemoryManager
+from openjiuwen.agent_teams.memory.shared_memory import SharedMemoryManager
 
 TEAM_MEMORY_FILENAME = "TEAM_MEMORY.md"
 TEAM_MEMORY_MAX_READ_LINES = 200

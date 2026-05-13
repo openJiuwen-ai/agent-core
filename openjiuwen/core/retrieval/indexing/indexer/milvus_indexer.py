@@ -7,6 +7,7 @@ Responsible for building, updating and deleting Milvus indices.
 """
 
 import asyncio
+import os
 from typing import Any, Dict, List, Optional
 
 from pymilvus import DataType, Function, FunctionType, MilvusClient, MilvusException
@@ -21,6 +22,7 @@ from openjiuwen.core.retrieval.common.document import TextChunk
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
 from openjiuwen.core.retrieval.utils.common import create_milvus_alias
+from openjiuwen.core.retrieval.indexing.indexer.embed_chunks import compute_chunk_embeddings
 from openjiuwen.core.retrieval.vector_store.milvus_store import MilvusVectorStore
 
 
@@ -151,17 +153,18 @@ class MilvusIndexer(Indexer):
                 )
 
             # If vector index is needed, generate embeddings
-            embeddings = None
             if config.index_type in ("vector", "hybrid"):
                 if not embed_model:
                     raise build_error(
                         StatusCode.RETRIEVAL_INDEXING_EMBED_MODEL_NOT_FOUND,
                         error_msg="embed_model is required for vector/hybrid index type",
                     )
-                texts = [chunk.text for chunk in chunks]
-                embeddings = await embed_model.embed_documents(texts, callback_cls=self.doc_index_callback)
-                for chunk, embedding in zip(chunks, embeddings):
-                    chunk.embedding = embedding
+                await compute_chunk_embeddings(
+                    chunks,
+                    embed_model,
+                    doc_index_callback=self.doc_index_callback,
+                    use_caption_for_images=config.use_caption_for_images,
+                )
 
             vector_store_config = VectorStoreConfig(
                 store_provider="milvus", collection_name=collection_name, database_name=kwargs.pop("database_name", "")

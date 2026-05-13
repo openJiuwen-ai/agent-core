@@ -23,7 +23,7 @@ Tools never reach into `TeamDatabase` directly — they go through `TeamBackend`
 |---|---|---|---|
 | `build_team` | ✓ | | entry point — description carries the full workflow |
 | `clean_team` | ✓ | | requires every teammate shutdown first |
-| `spawn_member` | ✓ | | takes optional `model_config_allocator` callback |
+| `spawn_member` | ✓ | | takes optional `model_config_allocator` callback; `role_type ∈ {teammate (default), human_agent}`; `human_agent` rejects `model_name`/`prompt` and requires HITT to be engaged on the backend |
 | `shutdown_member` | ✓ | | `force=True` skips the normal shutdown sequence |
 | `approve_plan` | ✓ (plan_mode only) | | wired only when `teammate_mode == "plan_mode"` |
 | `approve_tool` | ✓ (plan_mode only) | | same gating as `approve_plan` |
@@ -42,7 +42,7 @@ if role == "leader" and teammate_mode != "plan_mode":
     allowed = allowed - {"approve_plan", "approve_tool"}
 ```
 
-Worktree tools (`enter_worktree`, `exit_worktree`) have locale files under `descs/` but are currently commented out in the permission set — keep the Markdown descriptions in sync if they are re-enabled.
+Worktree tools (`enter_worktree`, `exit_worktree`) have moved to `openjiuwen.harness.tools.worktree`. Their description and parameter schema live in `harness/prompts/tools/{enter,exit}_worktree.py`, and they are mounted by `TeamToolRail` whenever `agent_configurator.create_worktree_manager()` returns a `WorktreeManager` for the agent. There is nothing left to maintain in `tools/locales/descs/` for these two tools.
 
 ## Tool Design Principles
 
@@ -159,7 +159,7 @@ Locale files live in `locales/` — flat `STRINGS` dict per language (`cn.py`, `
 Long `_desc` entries can live in Markdown files under `locales/descs/<lang>/<tool_name>.md` instead of the `STRINGS` dict. Markdown files take precedence over dict entries when both exist. This is optional — short descriptions and parameter strings stay in `cn.py`/`en.py`.
 
 - File naming: `descs/cn/build_team.md` → resolves as `build_team._desc` for lang `"cn"`.
-- Files are loaded via `PromptTemplate` (same as `agent/prompts/`) and cached with `@cache`.
+- Files are loaded via `PromptTemplate` (same as `agent_teams/prompts/`) and cached with `@cache`.
 - Supports `{{placeholder}}` interpolation — pass keyword arguments through `t("tool", param="value")`.
 - When migrating a `_desc` from `STRINGS` to a `.md` file, delete the dict entry and leave a comment.
 
@@ -170,7 +170,7 @@ Current `descs/` population: `approve_plan`, `approve_tool`, `build_team`, `clai
 | Layer | Owns | Example file |
 |---|---|---|
 | Tool description (`locales/descs/`) | Operational procedure, call order, workflow steps, anti-patterns, usage scenarios | `build_team.md` |
-| System prompt (`agent/prompts/`) | Role identity, decision principles, state transitions | `leader_policy.md` |
+| System prompt (`agent_teams/prompts/`) | Role identity, decision principles, state transitions | `leader_policy.md` |
 
 Rule: **don't duplicate content across layers**. If the workflow lives in the tool description, the system prompt should not repeat it.
 

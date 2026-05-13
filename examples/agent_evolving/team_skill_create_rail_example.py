@@ -25,7 +25,7 @@ from typing import AsyncIterator
 from dotenv import load_dotenv
 
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig, create_messager
-from openjiuwen.agent_teams.spawn.context import reset_session_id, set_session_id
+from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType, TeamDatabase
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import create_team_tools

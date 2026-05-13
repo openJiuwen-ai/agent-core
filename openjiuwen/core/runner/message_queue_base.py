@@ -24,10 +24,11 @@ class QueueMessage(BaseModel):
 
 class LocalMessageQueue:
     async def start(self):
-        pass
+        """Return True so :meth:`Runner.start` treats local MQ startup as success."""
+        return True
 
     async def stop(self):
-        pass
+        return True
 
 
 class InvokeQueueMessage(QueueMessage):

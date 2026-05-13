@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Spawn a teammate as an in-process coroutine (asyncio.Task)."""
 
 from __future__ import annotations
@@ -41,7 +43,7 @@ async def inprocess_spawn(
         An InProcessSpawnHandle wrapping the teammate's asyncio.Task.
     """
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent as _TeamAgent
-    from openjiuwen.agent_teams.spawn.context import set_session_id
+    from openjiuwen.agent_teams.context import set_session_id
     from openjiuwen.core.runner.runner import Runner
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
@@ -72,7 +74,9 @@ async def inprocess_spawn(
             set_session_id(session_id)
         team_logger.info("[inprocess] teammate {} started", member_name)
         try:
-            return await Runner.run_agent_team(agent_team=teammate, inputs=inputs, session=session_id)
+            # Spawned teammates are not leaders and never enter the pool —
+            # ``member=True`` skips activate/dispatch (leader-only pool invariant).
+            return await Runner.run_agent_team(teammate, inputs, member=True, session=session_id)
         except asyncio.CancelledError:
             team_logger.info("[inprocess] teammate {} cancelled", member_name)
             raise
@@ -89,6 +93,7 @@ async def inprocess_spawn(
     handle = InProcessSpawnHandle(
         process_id=f"inproc-{member_name}",
         _task=task,
+        agent_ref=teammate,
     )
     team_logger.info(
         "[inprocess] spawned teammate {} as task {}",

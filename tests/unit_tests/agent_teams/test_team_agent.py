@@ -6,11 +6,12 @@ import json
 
 import pytest
 
-from openjiuwen.agent_teams import create_agent_team
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
-from openjiuwen.agent_teams.agent.team_rail import TeamRail, TeamSectionName
+from openjiuwen.agent_teams.prompts import TeamSectionName
+from openjiuwen.agent_teams.rails import TeamPolicyRail
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
+    TeamAgentSpec,
     TransportSpec,
 )
 from openjiuwen.agent_teams.schema.team import (
@@ -30,27 +31,28 @@ def _dummy_agents(**overrides) -> dict[str, DeepAgentSpec]:
 
 @pytest.mark.level0
 def test_team_agent_leader_policy() -> None:
-    leader = create_agent_team(
-        _dummy_agents(),
+    leader = TeamAgentSpec(
+        agents=_dummy_agents(),
         team_name="delivery",
-    )
+    ).build()
 
     assert leader.role == TeamRole.LEADER
-    # TeamLeader policy is injected by TeamRail as a PromptSection before each
-    # model call, not stored in deep_config.system_prompt (which stays None).
-    team_rail = next(
-        r for r in leader.deep_agent._pending_rails if isinstance(r, TeamRail)
+    # TeamLeader policy is injected by TeamPolicyRail as a PromptSection
+    # before each model call, not stored in deep_config.system_prompt
+    # (which stays None).
+    policy_rail = next(
+        r for r in leader.harness.inner_agent._pending_rails if isinstance(r, TeamPolicyRail)
     )
     role_section = next(
-        s for s in team_rail._static_sections if s.name == TeamSectionName.ROLE
+        s for s in policy_rail._static_sections if s.name == TeamSectionName.ROLE
     )
     assert "TeamLeader" in role_section.render("cn")
 
 
 @pytest.mark.level0
 def test_spawn_payload_contains_member_identity() -> None:
-    leader = create_agent_team(
-        _dummy_agents(),
+    leader = TeamAgentSpec(
+        agents=_dummy_agents(),
         team_name="delivery",
         transport=TransportSpec(type="pyzmq", params={
             "team_id": "delivery-team",
@@ -59,7 +61,7 @@ def test_spawn_payload_contains_member_identity() -> None:
             "pubsub_publish_addr": "tcp://127.0.0.1:19100",
             "pubsub_subscribe_addr": "tcp://127.0.0.1:19101",
         }),
-    )
+    ).build()
     ctx = leader.build_member_context(TeamMemberSpec(
         member_name="fe-1",
         display_name="Frontend Expert",
@@ -81,8 +83,8 @@ def test_spawn_payload_contains_member_identity() -> None:
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_spawn_config_contains_serializable_team_agent_payload() -> None:
-    leader = create_agent_team(
-        _dummy_agents(workspace=None),
+    leader = TeamAgentSpec(
+        agents=_dummy_agents(workspace=None),
         team_name="delivery",
         transport=TransportSpec(type="pyzmq", params={
             "team_id": "delivery-team",
@@ -91,7 +93,7 @@ async def test_spawn_config_contains_serializable_team_agent_payload() -> None:
             "pubsub_publish_addr": "tcp://127.0.0.1:19100",
             "pubsub_subscribe_addr": "tcp://127.0.0.1:19101",
         }),
-    )
+    ).build()
     ctx = leader.build_member_context(TeamMemberSpec(
         member_name="be-1",
         display_name="Backend Expert",

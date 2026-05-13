@@ -171,13 +171,16 @@ async def execute_agent(
         from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 
         agent = await TeamAgent.from_spawn_payload(agent_config.payload)
+        # Spawned member (teammate / human-agent), never a leader —
+        # ``member=True`` skips activate/dispatch and keeps the leader-only
+        # pool invariant intact.
         if streaming:
             result_chunks = []
             async for chunk in Runner.run_agent_team_streaming(
-                agent_team=agent,
-                inputs=inputs,
+                agent,
+                inputs,
+                member=True,
                 session=session,
-                stream_modes=stream_modes,
             ):
                 stream_message = Message(
                     type=MessageType.STREAM_CHUNK,
@@ -187,7 +190,7 @@ async def execute_agent(
                 result_chunks.append(chunk)
             return result_chunks
         else:
-            return await Runner.run_agent_team(agent_team=agent, inputs=inputs, session=session)
+            return await Runner.run_agent_team(agent, inputs, member=True, session=session)
     else:
         raise ValueError(f"Unsupported spawned agent kind: {agent_config.agent_kind}")
 

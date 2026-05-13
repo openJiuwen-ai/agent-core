@@ -384,7 +384,6 @@ class TeamRuntime:
             )
 
         await self._ensure_started()
-
         try:
             return await self._message_bus.send(
                 message=message,

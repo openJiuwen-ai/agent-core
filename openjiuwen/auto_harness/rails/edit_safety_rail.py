@@ -8,6 +8,7 @@ Merges the former ``AtomicChangeRail`` and
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
 from openjiuwen.auto_harness.infra.edit_scope import (
@@ -55,7 +56,7 @@ class EditSafetyRail(DeepAgentRail):
         if inputs.tool_name not in _WRITE_TOOLS:
             return
 
-        args = inputs.tool_args or {}
+        args = _normalize_tool_args(inputs.tool_args)
         file_path: str = args.get("file_path", "")
         if not file_path:
             return
@@ -87,7 +88,7 @@ class EditSafetyRail(DeepAgentRail):
         if inputs.tool_name not in _WRITE_TOOLS:
             return
 
-        args = inputs.tool_args or {}
+        args = _normalize_tool_args(inputs.tool_args)
         file_path: str = args.get("file_path", "")
         if not file_path:
             return
@@ -166,3 +167,17 @@ class EditSafetyRail(DeepAgentRail):
             content=error_msg,
             tool_call_id=tool_call_id,
         )
+
+
+def _normalize_tool_args(raw_args) -> dict:
+    """Return tool args as a dict, tolerating JSON-string args."""
+    if isinstance(raw_args, dict):
+        return raw_args
+    if isinstance(raw_args, str) and raw_args.strip():
+        try:
+            parsed = json.loads(raw_args)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}

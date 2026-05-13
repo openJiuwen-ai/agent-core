@@ -18,10 +18,12 @@ STRINGS: dict[str, str] = {
     "build_team.leader_display_name": "Leader 的显示名（纯展示，不作为标识符）",
     "build_team.leader_desc": "Leader 的人设描述（专业背景、领域专长），影响成员的信任和沟通方式",
     "build_team.enable_hitt": (
-        "是否启用 HITT（Human in the Team）模式。true 会把保留成员 "
-        "human_agent 作为一等 teammate 注册到团队中。当 user 表达 "
-        "「我要加入团队/也来一起做」之类的加入意图时应设为 true；"
-        "默认 false"
+        "本次实例是否启用 HITT（Human in the Team）模式。可选 true / false / 不传。"
+        "不传：继承 TeamAgentSpec.enable_hitt（spec 层能力天花板）。"
+        "true：本次显式启用，要求 spec.enable_hitt=True，否则报错。"
+        "false：本次显式禁用，spawn 任何 human_agent 的请求都会被拒绝，"
+        "predefined_members 中声明的 HUMAN_AGENT 成员也会被跳过。"
+        "用户表达「我要加入团队」时设为 true；明确不需要人类协作时设为 false"
     ),
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/cn/clean_team.md
@@ -30,8 +32,21 @@ STRINGS: dict[str, str] = {
     "spawn_member.member_name": "成员唯一名（语义化 slug，如 backend-dev-1），同时作为主键和消息/审批/任务路由键；在同一团队内必须唯一",
     "spawn_member.display_name": "成员的显示名（如「后端开发专家」），仅用于展示，不用于路由",
     "spawn_member.desc": "成员的长期角色画像，包括专业背景、核心专长、优先认领的任务类型、协作风格以及不负责的边界，用于任务匹配和角色定位",
-    "spawn_member.prompt": "成员启动时收到的首条指令。用于说明首次启动后的优先关注点、任务选择原则、约束或协作要求；应提供明确方向，不要只写空泛的启动语句，也不要重复通用工作流程",
-    "spawn_member.model_name": "可选。建议该成员使用的模型名称（如 gpt-4、claude-sonnet-4 等）；未指定时由系统自动选择合适的模型",
+    "spawn_member.role_type": (
+        "可选。成员角色类型：'teammate'（默认）= 普通 LLM 队友，需提供 model_name/prompt；"
+        "'human_agent' = 人类成员，由真人通过 HumanAgentInbox 驱动，"
+        "**不接受** model_name 与 prompt（由框架内置模板托管），传入这两个字段会报错。"
+        "选用 'human_agent' 需要 spec.enable_hitt=True 且当前 build_team 实例未禁用 HITT"
+    ),
+    "spawn_member.prompt": (
+        "成员启动时收到的首条指令。用于说明首次启动后的优先关注点、任务选择原则、约束或协作要求；"
+        "应提供明确方向，不要只写空泛的启动语句，也不要重复通用工作流程。"
+        "当 role_type='human_agent' 时禁止传入"
+    ),
+    "spawn_member.model_name": (
+        "可选。建议该成员使用的模型名称（如 gpt-4、claude-sonnet-4 等）；"
+        "未指定时由系统自动选择合适的模型。当 role_type='human_agent' 时禁止传入"
+    ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/cn/shutdown_member.md
     "shutdown_member.member_name": "要请求关闭的成员 member_name（语义化 slug，不是显示名）",
@@ -72,29 +87,34 @@ STRINGS: dict[str, str] = {
     "update_task.assignee": "指派任务的目标 member_name（仅当任务当前无 assignee 时生效）。系统会向被指派成员发送通知",
     "update_task.add_blocked_by": "要添加为新依赖的任务 ID 列表（本任务将被阻塞直到这些任务完成）",
     "update_task.error_human_agent_locked_cancel": (
-        "任务 {task_id} 已由人类成员认领，该任务不允许被取消；"
-        "如需变更，请通过 send_message 与对应的人类成员协商"
+        "任务 {task_id} 已由人类成员认领，该任务不允许被取消；如需变更，请通过 send_message 与对应的人类成员协商"
     ),
     "update_task.error_human_agent_locked_reassign": (
-        "任务 {task_id} 已由人类成员认领，不能改派给 {new_assignee}；"
-        "人类成员锁定的任务必须由对应人类本人完成"
+        "任务 {task_id} 已由人类成员认领，不能改派给 {new_assignee}；人类成员锁定的任务必须由对应人类本人完成"
     ),
     # ===== claim_task =========================================================
     # claim_task._desc lives in descs/cn/claim_task.md
     "claim_task.task_id": "要领取或完成的任务 ID",
     "claim_task.status": "目标状态：'claimed'（领取）或 'completed'（完成）",
+    # ===== member_complete_task ===============================================
+    # member_complete_task._desc lives in descs/cn/member_complete_task.md
+    "member_complete_task.task_id": "要标记完成的任务 ID（必须是 leader 已经指派给你的任务）",
+    "member_complete_task.note": "可选的完成说明，便于团队了解你的执行结果或后续注意事项",
     # ===== send_message ========================================================
     # send_message._desc lives in descs/cn/send_message.md
-    "send_message.to": '收件人：填 member_name（如 "backend-dev-1"）发送点对点消息；填 "user"（仅 teammate 用于回复用户）；填 "*" 广播给所有成员',
+    "send_message.to": (
+        '收件人：填 member_name（如 "backend-dev-1"）发送点对点消息；'
+        '填成员名数组（如 ["m1","m2"]）多播——同一份内容分别发给每个成员，'
+        "开销随接收人数线性增长，同等规模下比广播更贵，仅在必要时使用，"
+        '禁止与 "*"/"user" 混用；'
+        '填 "user"（仅 teammate 用于回复用户）；填 "*" 广播给所有成员'
+    ),
     "send_message.content": "消息内容，应包含明确的行动指引或信息",
     "send_message.summary": "5-10 词摘要，用于消息预览和日志",
-    # ===== enter_worktree =====================================================
-    # enter_worktree._desc lives in descs/cn/enter_worktree.md
-    "enter_worktree.name": '可选的 worktree 名称。每个 "/" 分隔的段只能包含字母、数字、点、下划线和短横线；总长度最多 64 字符。不提供则自动生成随机名称',
-    # ===== exit_worktree ======================================================
-    # exit_worktree._desc lives in descs/cn/exit_worktree.md
-    "exit_worktree.action": '"keep" 保留 worktree 目录和分支在磁盘上；"remove" 删除目录和分支',
-    "exit_worktree.discard_changes": '仅在 action="remove" 且 worktree 有未提交文件或未合并提交时需设为 true。工具会先拒绝并列出变更，确认后再设此参数重新调用',
+    # NOTE: worktree tools (enter_worktree / exit_worktree) live in
+    # ``openjiuwen.harness.tools.worktree`` and resolve their description
+    # / param schema via ``harness.prompts.tools`` providers — no entries
+    # in this dict.
     # ===== workspace_meta =====================================================
     # workspace_meta._desc lives in descs/cn/workspace_meta.md
     "workspace_meta.action": "操作类型：lock（获取文件锁）、unlock（释放文件锁）、locks（列出所有活跃锁）、history（查看文件版本历史）",

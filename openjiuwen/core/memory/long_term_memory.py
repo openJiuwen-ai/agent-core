@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import copy
 from datetime import datetime, timedelta, timezone
-from typing import Tuple
+from typing import Any, Tuple
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
@@ -11,30 +11,34 @@ from openjiuwen.core.memory.config.config import MemoryEngineConfig, MemoryScope
 from openjiuwen.core.memory.process.extract.generation import Generator
 from openjiuwen.core.memory.manage.mem_model.data_id_manager import DataIdManager
 from openjiuwen.core.memory.manage.mem_model.message_manager import MessageManager, MessageAddRequest
+from openjiuwen.core.foundation.store.base_message_store import BaseMessageStore
 from openjiuwen.core.memory.manage.index.fragment_memory_manager import FragmentMemoryManager
 from openjiuwen.core.memory.manage.index.variable_manager import VariableManager
 from openjiuwen.core.memory.manage.index.write_manager import WriteManager
 from openjiuwen.core.memory.manage.index.summary_manager import SummaryManager
-from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType
+from openjiuwen.core.memory.manage.mem_model.memory_unit import FragmentMemoryUnit, MemoryType,\
+    SummaryUnit, VariableUnit
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.manage.search.search_manager import SearchManager, SearchParams
 from openjiuwen.core.foundation.store.base_db_store import BaseDbStore
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
-from openjiuwen.core.memory.manage.mem_model.semantic_store import SemanticStore
 from openjiuwen.core.memory.manage.mem_model.db_model import create_tables
 from openjiuwen.core.memory.manage.mem_model.sql_db_store import SqlDbStore
-from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
+from openjiuwen.core.memory.manage.mem_model.sql_message_store import SqlMessageStore
 from openjiuwen.core.foundation.llm import UserMessage, BaseMessage, Model
 from openjiuwen.core.common.utils.singleton import Singleton
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.embedding.api_embedding import APIEmbedding
 from openjiuwen.core.foundation.store.base_vector_store import BaseVectorStore
+from openjiuwen.core.foundation.store.base_memory_index import BaseMemoryIndex, MemoryDoc
+from openjiuwen.core.foundation.store.index.simple_memory_index import SimpleMemoryIndex
 from openjiuwen.core.memory.manage.mem_model.scope_user_mapping_manager import ScopeUserMappingManager
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
-from openjiuwen.core.memory.migration.run_migrations import run_kv_migrations, run_vector_migrations, run_sql_migrations
+from openjiuwen.core.memory.migration.run_migrations import run_kv_migrations,\
+    run_vector_migrations, run_sql_migrations, run_message_migrations
 from openjiuwen.core.runner.callback import trigger, lazy_callback_framework as _fw
 from openjiuwen.core.runner.callback.events import MemoryEvents
 
@@ -43,11 +47,20 @@ class MemInfo(BaseModel):
     mem_id: str = Field(default="", description="memory id")
     content: str = Field(default="", description="memory content")
     type: MemoryType = Field(default=MemoryType.USER_PROFILE, description="memory type")
+    timestamp: datetime | None = Field(default=None, description="memory timestamp")
 
 
 class MemResult(BaseModel):
     mem_info: MemInfo = Field(default=None, description="memory information")
     score: float = Field(default=0.0, description="memory score of relevance")
+
+
+class AddMemResult(BaseModel):
+    variables: list[VariableUnit] = Field(default=list, description="variables result")
+    user_profile: list[FragmentMemoryUnit] = Field(default=list, description="user_profile memory result")
+    semantic_memory: list[FragmentMemoryUnit] = Field(default=list, description="semantic memory result")
+    episodic_memory: list[FragmentMemoryUnit] = Field(default=list, description="episodic memory result")
+    summary: list[SummaryUnit] = Field(default=list, description="summary result")
 
 
 class LongTermMemory(metaclass=Singleton):
@@ -75,6 +88,9 @@ class LongTermMemory(metaclass=Singleton):
         self.kv_store: BaseKVStore | None = None
         self.vector_store: BaseVectorStore | None = None
         self.db_store: BaseDbStore | None = None
+        self.message_store: BaseMessageStore | None = None
+        # memory index
+        self.memory_index: BaseMemoryIndex | None = None
         # managers
         self.scope_user_mapping_manager = None
         self.message_manager: MessageManager | None = None
@@ -92,10 +108,35 @@ class LongTermMemory(metaclass=Singleton):
         # embedding model cache
         self._scope_embedding: dict[str, Embedding] = {}
 
+    async def register_plugin(self, name: str, cls: type, params: dict[str, Any]):
+        """
+        Register BaseMemoryIndex plugin.
+
+        Args:
+            name: Plugin name, describing the plugin type (e.g., 'vector', 'semantic_index')
+            cls: Plugin class, inheriting from BaseMemoryIndex
+            params: Initialization parameters for the plugin class
+
+        Example:
+            await memory.register_plugin(
+                name='semantic_index',
+                cls=SimpleMemoryIndex,
+                params={'kv_store': kv_store,
+                        'vector_store': vector_store,
+                        'embedding_model': embedding_model}
+            )
+        """
+        # Instantiate plugin
+        plugin_instance = cls(**params)
+        # Set default index if not already set
+        if self.memory_index is None:
+            self.memory_index = plugin_instance
+
     async def register_store(self, kv_store: BaseKVStore,
                              vector_store: BaseVectorStore | None = None,
                              db_store: BaseDbStore | None = None,
-                             embedding_model: Embedding | None = None):
+                             embedding_model: Embedding | None = None,
+                             message_store: BaseMessageStore | None = None):
         """
         Register store instance.
 
@@ -126,13 +167,36 @@ class LongTermMemory(metaclass=Singleton):
                 error_msg="db store must be instance of BaseDbStore",
             )
 
+        if message_store is not None and not isinstance(message_store, BaseMessageStore):
+            raise build_error(
+                StatusCode.MEMORY_REGISTER_STORE_EXECUTION_ERROR,
+                store_type="message store",
+                error_msg="message store must be instance of BaseMessageStore",
+            )
+
         self.kv_store = kv_store
         self.vector_store = vector_store
         self.db_store = db_store
         self._base_embed = embedding_model
+        self.message_store = message_store
+
+        # Auto register SimpleMemoryIndex if vector_store is provided
+        if self.vector_store and self.kv_store:
+            await self.register_plugin(
+                name='semantic_index',
+                cls=SimpleMemoryIndex,
+                params={'kv_store': self.kv_store,
+                        'vector_store': self.vector_store,
+                        'embedding_model': self._base_embed}
+            )
 
         if self.db_store:
             await create_tables(self.db_store)
+
+        # Create internal SqlMessageStore if not provided externally, so it can be migrated
+        if not self.message_store and self.db_store:
+            sql_db_store = SqlDbStore(self.db_store)
+            self.message_store = SqlMessageStore(sql_db_store=sql_db_store)
 
         self.set_config(MemoryEngineConfig())
 
@@ -156,6 +220,55 @@ class LongTermMemory(metaclass=Singleton):
                 store=sql_db_store,
                 store_type="db store"
             )
+        if self.message_store:
+            await self._run_migration(
+                migrate_func=run_message_migrations,
+                store=self.message_store,
+                store_type="message store"
+            )
+
+    @staticmethod
+    async def migrate_between_indices(source_index: BaseMemoryIndex,
+                                      target_index: BaseMemoryIndex) -> None:
+        """
+        Migrate data from one BaseMemoryIndex to another.
+
+        Copies all memory documents from source index to target index in batches.
+        Source data is preserved after migration.
+
+        Args:
+            source_index: Source BaseMemoryIndex to migrate data from.
+            target_index: Target BaseMemoryIndex to migrate data into.
+        """
+        scopes = await source_index.list_user_scopes()
+
+        for user_id, scope_id in scopes:
+            offset = 0
+            batch_size = 100
+
+            while True:
+                documents = await source_index.list_memories(user_id, scope_id, offset, batch_size)
+                if not documents:
+                    break
+
+                target_documents = [
+                    MemoryDoc(
+                        id=doc.id,
+                        text=doc.text,
+                        type=doc.type,
+                        timestamp=doc.timestamp,
+                        fields=doc.fields.copy()
+                    )
+                    for doc in documents
+                ]
+                await target_index.add_memories(user_id, scope_id, target_documents)
+                offset += batch_size
+
+        memory_logger.info(
+            "Cross-index migration completed",
+            event_type=LogEventType.MEMORY_INIT,
+            metadata={"scope_count": len(scopes)}
+        )
 
     def set_config(self, config: MemoryEngineConfig):
         """
@@ -164,36 +277,42 @@ class LongTermMemory(metaclass=Singleton):
         Args:
             config: memory engine configuration parameters
         """
-        if not self.kv_store or not self.db_store or not self.vector_store:
+        if not self.kv_store or not self.db_store:
             raise build_error(
                 StatusCode.MEMORY_SET_CONFIG_EXECUTION_ERROR,
                 config_type="system",
-                error_msg="stores must be registered before setting config",
+                error_msg="kv store and db store must be registered before setting config",
+            )
+        if not self.memory_index:
+            raise build_error(
+                StatusCode.MEMORY_SET_CONFIG_EXECUTION_ERROR,
+                config_type="system",
+                error_msg="memory_index must be provided (via register_plugin or register_store)",
             )
         self._sys_mem_config = config
         data_id_generator = DataIdManager()
-        user_mem_store = UserMemStore(self.kv_store)
 
-        if self.db_store:
-            sql_db_store = SqlDbStore(self.db_store)
+        sql_db_store = SqlDbStore(self.db_store) if self.db_store else None
+        if sql_db_store:
             self.scope_user_mapping_manager = ScopeUserMappingManager(sql_db_store)
-            self.message_manager = MessageManager(
-                sql_db_store,
-                data_id_generator,
-                config.crypto_key
-            )
+
+        if self.message_store:
+            if isinstance(self.message_store, SqlMessageStore) and self.message_store.crypto_key is None:
+                self.message_store.crypto_key = config.crypto_key
+            self.message_manager = MessageManager(store=self.message_store)
         self.fragment_memory_manager = FragmentMemoryManager(
-            user_mem_store=user_mem_store,
+            memory_index=self.memory_index,
             data_id_generator=data_id_generator,
             crypto_key=config.crypto_key
         )
+        self.summary_manager = SummaryManager(
+            memory_index=self.memory_index,
+            crypto_key=self._sys_mem_config.crypto_key
+        )
+        
         self.variable_manager = VariableManager(
             self.kv_store,
             config.crypto_key
-        )
-        self.summary_manager = SummaryManager(
-            user_mem_store=user_mem_store,
-            crypto_key=self._sys_mem_config.crypto_key
         )
         managers = {
             MemoryType.USER_PROFILE.value: self.fragment_memory_manager,
@@ -204,13 +323,12 @@ class LongTermMemory(metaclass=Singleton):
         }
         self.fragment_type = [MemoryType.USER_PROFILE.value, MemoryType.EPISODIC_MEMORY.value,
                               MemoryType.SEMANTIC_MEMORY.value]
-        self.write_manager = WriteManager(managers, user_mem_store)
+        self.write_manager = WriteManager(managers, self.memory_index)
         self.search_manager = SearchManager(
             managers,
-            user_mem_store,
             config.crypto_key
         )
-        self.generator = Generator(data_id_generator=data_id_generator)
+        self.generator = Generator(data_id_generator=data_id_generator, search_manager=self.search_manager)
         # set init llm
         if config.default_model_cfg and config.default_model_client_cfg:
             llm = LongTermMemory._get_llm_from_config(model_config=config.default_model_cfg,
@@ -235,7 +353,11 @@ class LongTermMemory(metaclass=Singleton):
                 event_type=LogEventType.MEMORY_STORE,
                 scope_id=scope_id
             )
-            return False
+            raise build_error(
+                StatusCode.MEMORY_SET_CONFIG_EXECUTION_ERROR,
+                config_type="scope",
+                error_msg="invalid scope_id format",
+            )
         # Create a deep copy of the config to avoid modifying the original
         encrypted_config = copy.deepcopy(memory_scope_config)
 
@@ -280,7 +402,11 @@ class LongTermMemory(metaclass=Singleton):
                 event_type=LogEventType.MEMORY_RETRIEVE,
                 scope_id=scope_id
             )
-            return None
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type="scope_config",
+                error_msg="invalid scope_id format",
+            )
         config_key = f"{self.SCOPE_CONFIG_KEY}/{scope_id}"
         config_json = await self.kv_store.get(config_key)
 
@@ -321,7 +447,11 @@ class LongTermMemory(metaclass=Singleton):
                 event_type=LogEventType.MEMORY_DELETE,
                 scope_id=scope_id
             )
-            return False
+            raise build_error(
+                StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
+                memory_type="scope_config",
+                error_msg="invalid scope_id format",
+            )
         try:
             config_key = f"{self.SCOPE_CONFIG_KEY}/{scope_id}"
             await self.kv_store.delete(config_key)
@@ -345,7 +475,12 @@ class LongTermMemory(metaclass=Singleton):
                 exception=str(e),
                 scope_id=scope_id
             )
-            return False
+            raise build_error(
+                StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
+                memory_type="scope_config",
+                error_msg=f"failed to delete scope config: {str(e)}",
+                cause=e
+            ) from e
 
     async def delete_mem_by_scope(self, scope_id: str) -> bool:
         """
@@ -363,19 +498,20 @@ class LongTermMemory(metaclass=Singleton):
                 event_type=LogEventType.MEMORY_DELETE,
                 scope_id=scope_id
             )
-            return False
-        scope_user_data = await self.scope_user_mapping_manager.get_by_scope_id(scope_id=scope_id)
+            raise build_error(
+                StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
+                memory_type="all",
+                error_msg="invalid scope_id format",
+            )
+        scope_user_data = await self.scope_user_mapping_manager.get_by_scope_id(scope_id=scope_id) or []
         user_ids = [scope_user["user_id"] for scope_user in scope_user_data]
-        # Use write_manager to delete all memories associated with the scope
-        semantic_store = await self._create_semantic_store_with_embedding(scope_id)
         if self.write_manager:
             for user_id in user_ids:
                 lock = DistributedLock(self.kv_store, f"user/{user_id}")
                 async with lock:
                     await self.write_manager.delete_mem_by_user_id(
                         scope_id=scope_id,
-                        user_id=user_id,
-                        semantic_store=semantic_store
+                        user_id=user_id
                     )
         await self.scope_user_mapping_manager.delete_by_scope_id(scope_id=scope_id)
         memory_logger.debug(
@@ -396,8 +532,8 @@ class LongTermMemory(metaclass=Singleton):
             session_id: str = DEFAULT_VALUE,
             timestamp: datetime | None = None,
             gen_mem: bool = True,
-            gen_mem_with_history_msg_num: int = 2
-    ):
+            gen_mem_with_history_msg_num: int = 2,
+    ) -> AddMemResult:
         if not self._validate_id(event_type=LogEventType.MEMORY_STORE, scope_id=scope_id):
             memory_logger.error(
                 "Invalid scope_id format.",
@@ -405,11 +541,15 @@ class LongTermMemory(metaclass=Singleton):
                 scope_id=scope_id,
                 user_id=user_id
             )
-            return
+            raise build_error(
+                StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                memory_type="all",
+                error_msg="invalid scope_id format",
+            )
 
         msg_id = "-1"
         llm = await self._get_scope_llm(scope_id)
-        semantic_store = await self._create_semantic_store_with_embedding(scope_id)
+        scope_config = await self._get_scope_config(scope_id)
         # user level distributed lock
         lock = DistributedLock(self.kv_store, f"user/{user_id}")
         async with lock:
@@ -420,7 +560,11 @@ class LongTermMemory(metaclass=Singleton):
                     user_id=user_id,
                     scope_id=scope_id
                 )
-                return
+                raise build_error(
+                    StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                    memory_type="all",
+                    error_msg="LLM is not initialized",
+                )
             history_messages = await self._get_history_messages(
                 user_id=user_id,
                 scope_id=scope_id,
@@ -446,7 +590,7 @@ class LongTermMemory(metaclass=Singleton):
                 msg_id = await self.message_manager.add(add_req)
 
             if not gen_mem:
-                return
+                return AddMemResult()
 
             check_res, messages = self._check_messages(messages=messages)
             if not check_res:
@@ -458,7 +602,7 @@ class LongTermMemory(metaclass=Singleton):
                     user_id=user_id,
                     scope_id=scope_id
                 )
-                return
+                return AddMemResult()
 
             all_memory = await self.generator.gen_all_memory(
                 scope_id=scope_id,
@@ -471,15 +615,15 @@ class LongTermMemory(metaclass=Singleton):
                 message_mem_id=msg_id,
                 timestamp=timestamp_str,
                 forbidden_variables=self._sys_mem_config.forbidden_variables,
-                summary_max_token=self._sys_mem_config.single_turn_history_summary_max_token
+                summary_max_token=self._sys_mem_config.single_turn_history_summary_max_token,
+                scope_config=scope_config
             )
             try:
                 await self.write_manager.add_memories(
                     user_id=user_id,
                     scope_id=scope_id,
                     memories=all_memory,
-                    llm=llm,
-                    semantic_store=semantic_store
+                    llm=llm
                 )
                 memory_logger.debug(
                     "Successfully added memory units.",
@@ -504,7 +648,13 @@ class LongTermMemory(metaclass=Singleton):
                     error_msg=f"{str(e)}",
                     cause=e
                 ) from e
-        return
+        return AddMemResult(
+            variables=all_memory.get(MemoryType.VARIABLE.value, []),
+            user_profile=all_memory.get(MemoryType.USER_PROFILE.value, []),
+            semantic_memory=all_memory.get(MemoryType.SEMANTIC_MEMORY.value, []),
+            episodic_memory=all_memory.get(MemoryType.EPISODIC_MEMORY.value, []),
+            summary=all_memory.get(MemoryType.SUMMARY.value, [])
+        )
 
     async def get_recent_messages(
             self,
@@ -533,7 +683,11 @@ class LongTermMemory(metaclass=Singleton):
                 scope_id=scope_id,
                 memory_type="message"
             )
-            return []
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type="message",
+                error_msg="invalid scope_id format",
+            )
         recent_messages_tuple = await self.message_manager.get(
             user_id=user_id,
             scope_id=scope_id,
@@ -560,7 +714,11 @@ class LongTermMemory(metaclass=Singleton):
                 memory_type="message",
                 memory_id=[msg_id]
             )
-            return None
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type="message",
+                error_msg="message manager is not initialized",
+            )
         return await self.message_manager.get_by_id(msg_id)
 
     async def delete_messages_by_user_and_scope(
@@ -576,7 +734,11 @@ class LongTermMemory(metaclass=Singleton):
                 scope_id=scope_id,
                 memory_type="message"
             )
-            return
+            raise build_error(
+                StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
+                memory_type="message",
+                error_msg="invalid scope_id format",
+            )
         await self.message_manager.delete_by_user_and_scope(
             user_id=user_id,
             scope_id=scope_id
@@ -603,8 +765,11 @@ class LongTermMemory(metaclass=Singleton):
                 scope_id=scope_id,
                 memory_id=[mem_id]
             )
-            return
-        semantic_store = await self._create_semantic_store_with_embedding(scope_id)
+            raise build_error(
+                StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
+                memory_type="all",
+                error_msg="invalid scope_id format",
+            )
         lock = DistributedLock(self.kv_store, f"user/{user_id}")
         async with lock:
             if not self.write_manager:
@@ -616,8 +781,7 @@ class LongTermMemory(metaclass=Singleton):
             await self.write_manager.delete_mem_by_id(
                 user_id=user_id,
                 scope_id=scope_id,
-                mem_id=mem_id,
-                semantic_store=semantic_store
+                mem_id=mem_id
             )
 
     @_fw.emit_before(MemoryEvents.MEMORY_DELETED)
@@ -640,8 +804,11 @@ class LongTermMemory(metaclass=Singleton):
                 user_id=user_id,
                 scope_id=scope_id
             )
-            return
-        semantic_store = await self._create_semantic_store_with_embedding(scope_id)
+            raise build_error(
+                StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
+                memory_type="all",
+                error_msg="invalid scope_id format",
+            )
         lock = DistributedLock(self.kv_store, f"user/{user_id}")
         async with lock:
             if not self.write_manager:
@@ -652,8 +819,7 @@ class LongTermMemory(metaclass=Singleton):
                 )
             await self.write_manager.delete_mem_by_user_id(
                 user_id=user_id,
-                scope_id=scope_id,
-                semantic_store=semantic_store
+                scope_id=scope_id
             )
 
     @_fw.emit_before(MemoryEvents.MEMORY_UPDATED)
@@ -679,8 +845,11 @@ class LongTermMemory(metaclass=Singleton):
                 scope_id=scope_id,
                 memory_id=[mem_id]
             )
-            return
-        semantic_store = await self._create_semantic_store_with_embedding(scope_id)
+            raise build_error(
+                StatusCode.MEMORY_UPDATE_MEMORY_EXECUTION_ERROR,
+                memory_type="all",
+                error_msg="invalid scope_id format",
+            )
         lock = DistributedLock(self.kv_store, f"user/{user_id}")
         async with lock:
             if not self.write_manager:
@@ -690,7 +859,7 @@ class LongTermMemory(metaclass=Singleton):
                     error_msg=f"write manager is not initialized",
                 )
             await self.write_manager.update_mem_by_id(user_id=user_id, scope_id=scope_id,
-                                                      mem_id=mem_id, memory=memory, semantic_store=semantic_store)
+                                                      mem_id=mem_id, memory=memory)
 
     async def get_variables(self,
                             names: list[str] | str | None = None,
@@ -718,7 +887,11 @@ class LongTermMemory(metaclass=Singleton):
                 scope_id=scope_id,
                 memory_type=MemoryType.VARIABLE.value,
             )
-            return {}
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type=MemoryType.VARIABLE.value,
+                error_msg="invalid scope_id format",
+            )
         if not self.search_manager:
             raise build_error(
                 StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
@@ -759,8 +932,11 @@ class LongTermMemory(metaclass=Singleton):
                 user_id=user_id,
                 scope_id=scope_id
             )
-            return []
-        semantic_store = await self._create_semantic_store_with_embedding(scope_id)
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type="user_mem",
+                error_msg="invalid scope_id format",
+            )
         if not self.search_manager:
             raise build_error(
                 StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
@@ -778,7 +954,7 @@ class LongTermMemory(metaclass=Singleton):
             search_data = []
             for mem_type in self.fragment_type:
                 params.search_type = mem_type
-                res = await self.search_manager.search(params, semantic_store)
+                res = await self.search_manager.search(params)
                 search_data.extend(res)
             search_data = sorted(search_data, key=lambda x: x.get("score", 0.0), reverse=True)[:num]
             mem_results: list[MemResult] = [
@@ -786,7 +962,8 @@ class LongTermMemory(metaclass=Singleton):
                     mem_info=MemInfo(
                         mem_id=item["id"],
                         content=item["mem"],
-                        type=item.get("mem_type", None)
+                        type=item.get("mem_type", None),
+                        timestamp=item.get("timestamp")
                     ),
                     score=item.get("score", 0.0)
                 )
@@ -805,7 +982,12 @@ class LongTermMemory(metaclass=Singleton):
                 scope_id=scope_id,
                 query=query,
             )
-            return []
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type="user_mem",
+                error_msg=str(e),
+                cause=e
+            ) from e
         except ValueError as e:
             memory_logger.warning(
                 "Search user mem has value exception.",
@@ -815,7 +997,12 @@ class LongTermMemory(metaclass=Singleton):
                 exception=str(e),
                 query=query
             )
-            return []
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type="user_mem",
+                error_msg=str(e),
+                cause=e
+            ) from e
         except Exception as e:
             memory_logger.warning(
                 "Search user mem has exception.",
@@ -825,7 +1012,12 @@ class LongTermMemory(metaclass=Singleton):
                 exception=str(e),
                 query=query
             )
-            return []
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type="user_mem",
+                error_msg=str(e),
+                cause=e
+            ) from e
 
     @_fw.emit_before(MemoryEvents.MEMORY_SEARCH_STARTED)
     async def search_user_history_summary(
@@ -858,8 +1050,11 @@ class LongTermMemory(metaclass=Singleton):
                 user_id=user_id,
                 scope_id=scope_id
             )
-            return []
-        semantic_store = await self._create_semantic_store_with_embedding(scope_id)
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type="history_summary",
+                error_msg="invalid scope_id format",
+            )
         if not self.search_manager:
             raise build_error(
                 StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
@@ -875,13 +1070,14 @@ class LongTermMemory(metaclass=Singleton):
             search_type=MemoryType.SUMMARY.value
         )
         try:
-            search_data = await self.search_manager.search(params, semantic_store)
+            search_data = await self.search_manager.search(params)
             mem_results: list[MemResult] = [
                 MemResult(
                     mem_info=MemInfo(
                         mem_id=item["id"],
                         content=item["mem"],
-                        type=item.get("mem_type", MemoryType.SUMMARY)
+                        type=item.get("mem_type", MemoryType.SUMMARY),
+                        timestamp=item.get("timestamp")
                     ),
                     score=item.get("score", 0.0)
                 )
@@ -901,7 +1097,12 @@ class LongTermMemory(metaclass=Singleton):
                 query=query,
                 memory_type=MemoryType.SUMMARY.value
             )
-            return []
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type="history_summary",
+                error_msg=str(e),
+                cause=e
+            ) from e
         except ValueError as e:
             memory_logger.warning(
                 "Search user history summary has value exception.",
@@ -912,7 +1113,12 @@ class LongTermMemory(metaclass=Singleton):
                 memory_type=MemoryType.SUMMARY.value,
                 query=query
             )
-            return []
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type="history_summary",
+                error_msg=str(e),
+                cause=e
+            ) from e
         except Exception as e:
             memory_logger.warning(
                 "Search user history summary has exception.",
@@ -923,7 +1129,12 @@ class LongTermMemory(metaclass=Singleton):
                 memory_type=MemoryType.SUMMARY.value,
                 query=query
             )
-            return []
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type="history_summary",
+                error_msg=str(e),
+                cause=e
+            ) from e
 
     async def user_mem_total_num(self,
                                  user_id: str = DEFAULT_VALUE,
@@ -938,7 +1149,11 @@ class LongTermMemory(metaclass=Singleton):
                 user_id=user_id,
                 scope_id=scope_id
             )
-            return 0
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type="all",
+                error_msg="invalid scope_id format",
+            )
         # Get all user profiles by using get_in_range with a large range
         search_data = await self.search_manager.list_user_profile(user_id=user_id,
                                                                   scope_id=scope_id)
@@ -972,9 +1187,13 @@ class LongTermMemory(metaclass=Singleton):
                 event_type=LogEventType.MEMORY_RETRIEVE,
                 user_id=user_id,
                 scope_id=scope_id,
-                
+
             )
-            return []
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type="all",
+                error_msg="invalid scope_id format",
+            )
         if not self.search_manager:
             raise build_error(
                 StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
@@ -1000,7 +1219,8 @@ class LongTermMemory(metaclass=Singleton):
                 MemInfo(
                     mem_id=item["id"],
                     content=item["mem"],
-                    type=mem_type
+                    type=mem_type,
+                    timestamp=item.get("timestamp")
                 )
             )
         return mem_results
@@ -1026,7 +1246,11 @@ class LongTermMemory(metaclass=Singleton):
                 scope_id=scope_id,
                 memory_type=MemoryType.VARIABLE.value
             )
-            return
+            raise build_error(
+                StatusCode.MEMORY_UPDATE_MEMORY_EXECUTION_ERROR,
+                memory_type="variable",
+                error_msg="invalid scope_id format",
+            )
         lock = DistributedLock(self.kv_store, f"user/{user_id}")
         async with lock:
             if not self.variable_manager:
@@ -1063,7 +1287,11 @@ class LongTermMemory(metaclass=Singleton):
                 scope_id=scope_id,
                 memory_type=MemoryType.VARIABLE.value
             )
-            return False
+            raise build_error(
+                StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
+                memory_type="variable",
+                error_msg="invalid scope_id format",
+            )
         lock = DistributedLock(self.kv_store, f"user/{user_id}")
         async with lock:
             if not self.variable_manager:
@@ -1198,26 +1426,6 @@ class LongTermMemory(metaclass=Singleton):
             )
             # If the LLM fails to be obtained, try to use the system default configuration.
             return self._base_llm
-
-    async def _create_semantic_store_with_embedding(self, scope_id: str) -> SemanticStore:
-        """
-        Create a new semantic store instance and initialize it with the appropriate embedding model.
-
-        Args:
-            scope_id: Scope identifier
-
-        Returns:
-            SemanticStore: New semantic store instance with embedding model initialized
-        """
-        semantic_store = SemanticStore(vector_store=self.vector_store)
-        embedding_model = await self._get_scope_embedding_model(scope_id)
-        if embedding_model:
-            semantic_store.initialize_embedding_model(embedding_model)
-        elif self._base_embed:
-            semantic_store.initialize_embedding_model(self._base_embed)
-        else:
-            pass
-        return semantic_store
 
     def _check_messages(self, messages: list[BaseMessage]) -> Tuple[bool, list[BaseMessage]]:
         out_messages = []

@@ -87,7 +87,7 @@ class TestAutoHarnessConfigLoading:
         )
         assert cfg.git_remote == ""
         assert cfg.fork_owner == ""
-        assert cfg.session_budget_secs == 3600.0
+        assert cfg.session_budget_secs == 900000.0
         assert cfg.git_base_branch == "develop"
 
     def test_partial_config_merges(self, tmp_path):
@@ -104,7 +104,7 @@ class TestAutoHarnessConfigLoading:
         assert cfg.git_remote == "partial-fork"
         # 其他字段保持默认
         assert cfg.git_base_branch == "develop"
-        assert cfg.session_budget_secs == 3600.0
+        assert cfg.session_budget_secs == 900000.0
 
 
 # ------------------------------------------------------------------
@@ -498,7 +498,7 @@ class TestSubcmdRunIntegration:
 
         captured_config = None
 
-        def _capture_create(config):
+        def _capture_create(config, **_kwargs):
             nonlocal captured_config
             captured_config = config
 

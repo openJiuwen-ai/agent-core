@@ -198,6 +198,7 @@ def _build_ctx(
         git=git,
         artifacts=ArtifactStore(),
         experience_store=SimpleNamespace(record=AsyncMock()),
+        stream_rails=None,
     )
     runtime = SimpleNamespace(
         wt_path="/tmp/worktree",

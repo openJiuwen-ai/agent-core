@@ -31,8 +31,12 @@ class TestTodoItem(unittest.TestCase):
         self.test_active_form = "Executing test task"
 
     def test_todo_item_create(self):
-        """TodoItem.create sets content, activeForm, status correctly."""
-        todo = TodoItem.create(content=self.test_content, active_form=self.test_active_form)
+        """TodoItem sets content, activeForm, status correctly."""
+        todo = TodoItem(
+            id="test_task",
+            content=self.test_content,
+            activeForm=self.test_active_form,
+        )
         self.assertEqual(todo.content, self.test_content)
         self.assertEqual(todo.activeForm, self.test_active_form)
         self.assertEqual(todo.status, TodoStatus.PENDING)
@@ -40,7 +44,11 @@ class TestTodoItem(unittest.TestCase):
 
     def test_todo_item_to_dict(self):
         """TodoItem.to_dict includes all fields."""
-        todo = TodoItem.create(content=self.test_content, active_form=self.test_active_form)
+        todo = TodoItem(
+            id="test_task",
+            content=self.test_content,
+            activeForm=self.test_active_form,
+        )
         d = todo.to_dict()
         self.assertEqual(d["content"], self.test_content)
         self.assertEqual(d["activeForm"], self.test_active_form)
@@ -68,8 +76,8 @@ class TestTodoItem(unittest.TestCase):
         self.assertEqual(todo.selected_model_id, "fast")
 
     def test_todo_item_create_with_model_id(self):
-        """TodoItem.create stores selected_model_id."""
-        todo = TodoItem.create(content="task", selected_model_id="smart")
+        """TodoItem stores selected_model_id."""
+        todo = TodoItem(id="test_task", content="task", selected_model_id="smart")
         self.assertEqual(todo.selected_model_id, "smart")
 
 
@@ -78,8 +86,8 @@ class TestTodoTool(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         self.test_todos = [
-            TodoItem.create(content="Task 1", status=TodoStatus.IN_PROGRESS),
-            TodoItem.create(content="Task 2", status=TodoStatus.PENDING),
+            TodoItem(id="task_1", content="Task 1", status=TodoStatus.IN_PROGRESS),
+            TodoItem(id="task_2", content="Task 2", status=TodoStatus.PENDING),
         ]
         self.mock_operation = MagicMock(spec=SysOperation)
         self.mock_fs = MagicMock(spec=BaseFsOperation)
@@ -239,10 +247,10 @@ class TestTodoListTool(unittest.IsolatedAsyncioTestCase):
         self.mock_operation.fs.return_value = self.mock_fs
         self.tool = TodoListTool(operation=self.mock_operation)
         self.test_todos = [
-            TodoItem.create(content="In Progress Task", status=TodoStatus.IN_PROGRESS),
-            TodoItem.create(content="Pending Task", status=TodoStatus.PENDING),
-            TodoItem.create(content="Completed Task", status=TodoStatus.COMPLETED),
-            TodoItem.create(content="Cancelled Task", status=TodoStatus.CANCELLED),
+            TodoItem(id="in_progress_task", content="In Progress Task", status=TodoStatus.IN_PROGRESS),
+            TodoItem(id="pending_task", content="Pending Task", status=TodoStatus.PENDING),
+            TodoItem(id="completed_task", content="Completed Task", status=TodoStatus.COMPLETED),
+            TodoItem(id="cancelled_task", content="Cancelled Task", status=TodoStatus.CANCELLED),
         ]
         self.tool.load_todos = AsyncMock(return_value=self.test_todos)
         self.mock_session = MagicMock()
@@ -281,9 +289,24 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
         self.mock_operation.fs.return_value = self.mock_fs
         self.tool = TodoModifyTool(operation=self.mock_operation)
         self.test_todos = [
-            TodoItem.create(content="Task 1", status=TodoStatus.IN_PROGRESS, active_form="Executing Task 1"),
-            TodoItem.create(content="Task 2", status=TodoStatus.PENDING, active_form="Executing Task 2"),
-            TodoItem.create(content="Task 3", status=TodoStatus.PENDING, active_form="Executing Task 3"),
+            TodoItem(
+                id="task_1",
+                content="Task 1",
+                status=TodoStatus.IN_PROGRESS,
+                activeForm="Executing Task 1",
+            ),
+            TodoItem(
+                id="task_2",
+                content="Task 2",
+                status=TodoStatus.PENDING,
+                activeForm="Executing Task 2",
+            ),
+            TodoItem(
+                id="task_3",
+                content="Task 3",
+                status=TodoStatus.PENDING,
+                activeForm="Executing Task 3",
+            ),
         ]
         self.test_todo_ids = [todo.id for todo in self.test_todos]
         self.tool.load_todos = AsyncMock(return_value=self.test_todos.copy())
@@ -415,17 +438,19 @@ class TestTodoGetTool(unittest.IsolatedAsyncioTestCase):
         self.mock_operation.fs.return_value = self.mock_fs
         self.tool = TodoGetTool(operation=self.mock_operation)
         self.test_todos = [
-            TodoItem.create(
+            TodoItem(
+                id="task_1",
                 content="Task 1",
                 status=TodoStatus.IN_PROGRESS,
-                active_form="Executing Task 1",
+                activeForm="Executing Task 1",
                 description="Detailed description for Task 1",
                 selected_model_id="smart",
             ),
-            TodoItem.create(
+            TodoItem(
+                id="task_2",
                 content="Task 2",
                 status=TodoStatus.PENDING,
-                active_form="Executing Task 2",
+                activeForm="Executing Task 2",
                 description="Detailed description for Task 2",
             ),
         ]

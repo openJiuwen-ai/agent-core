@@ -38,6 +38,6 @@ session_budget:
   task_timeout_secs: 1200
 
 task_constraints:
-  max_tasks_per_session: 3
+  max_tasks_per_session: 10
   max_files_per_task: 3
   self_driven_slots: 1

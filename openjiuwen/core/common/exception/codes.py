@@ -401,6 +401,9 @@ class StatusCode(Enum):
     AGENT_TEAM_EXECUTION_ERROR = (132002, "agent team execution error, reason: {error_msg}")
     AGENT_TEAM_AGENT_NOT_FOUND = (132003, "agent team agent not found error, reason: {error_msg}")
     AGENT_TEAM_CONFIG_INVALID = (132004, "agent team config invalid, reason: {reason}")
+    AGENT_TEAM_BUSY_INVALID = (132005,
+                               "agent team is busy, team='{team_name}', session='{session_id}', reason: {reason}")
+    AGENT_TEAM_STATE_INVALID = (132006, "agent team state inconsistent, reason: {reason}")
 
     # =========================
     # DevTools / AgentBuilder 140000 - 140099
@@ -847,6 +850,9 @@ class StatusCode(Enum):
     TOOL_WEB_API_KEY_NOT_SET = (182508, "web tool api key is not set, key_name='{key_name}'")
     TOOL_SESSION_TOOL_INVOKED = (182509, "session tool invoked failed, error='{reason}'")
 
+    # worktree tool 182510 - 182519
+    TOOL_WORKTREE_EXIT_INVALID = (182510, "worktree exit is invalid, reason='{reason}'")
+
     # Foundation - Logger 183000 - 183999
     COMMON_LOG_PATH_INVALID = (183000, "common log_path is invalid, reason: {error_msg}")
     COMMON_LOG_PATH_INIT_FAILED = (183001, "common log_path initialization failed, reason: {error_msg}")
@@ -878,6 +884,8 @@ class StatusCode(Enum):
     COMMON_JSON_EXECUTION_PROCESS_ERROR = (188003, "common json_execution process error, reason: {error_msg}")
     COMMON_URL_INPUT_INVALID = (188004, "common url_input is invalid, reason: {error_msg}")
     COMMON_SSL_CERT_INVALID = (188005, "common ssl_cert is invalid, reason: {error_msg}")
+    COMMON_ENCRYPTION_ERROR = (188006, "encryption failed, reason: {error_msg}")
+    COMMON_DECRYPTION_ERROR = (188007, "decryption failed, reason: {error_msg}")
 
     # Foundation - Schema 189000 - 189999
     SCHEMA_VALIDATE_INVALID = (189001, "validate data with schema failed, error='{reason}', data={data}")

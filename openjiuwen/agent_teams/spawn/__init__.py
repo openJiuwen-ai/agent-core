@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """In-process spawn and process-global shared resources for agent teams."""
 
 from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle

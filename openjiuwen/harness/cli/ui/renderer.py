@@ -371,8 +371,16 @@ async def render_stream(
 
         elif chunk_type == CHUNK_INTERACTION:
             payload = chunk.payload
-            iid = getattr(payload, "id", "unknown")
-            value = getattr(payload, "value", payload)
+            if isinstance(payload, dict):
+                iid = payload.get(
+                    "interaction_id", "unknown"
+                )
+                value = payload
+            else:
+                iid = getattr(payload, "id", "unknown")
+                value = getattr(
+                    payload, "value", payload
+                )
 
             # Render the interaction question to terminal
             if on_interaction is not None:

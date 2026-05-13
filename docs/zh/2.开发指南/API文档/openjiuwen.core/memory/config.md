@@ -59,7 +59,7 @@ class openjiuwen.core.memory.config.config.MemoryEngineConfig(default_model_cfg:
 ## class openjiuwen.core.memory.config.config.MemoryScopeConfig
 
 ```
-class openjiuwen.core.memory.config.config.MemoryScopeConfig(model_cfg: ModelRequestConfig | None = None, model_client_cfg: ModelClientConfig | None = None, embedding_cfg: EmbeddingConfig | None = None)
+class openjiuwen.core.memory.config.config.MemoryScopeConfig(model_cfg: ModelRequestConfig | None = None, model_client_cfg: ModelClientConfig | None = None, embedding_cfg: EmbeddingConfig | None = None, user_profile_definition: str = "用户本人的肯定或否定表述（包含不限于基本身份、兴趣偏好、人际关系、资产状况）", semantic_memory_definition: str = "用户对话中涉及的和时间无明确关系的事实性内容或概念", episodic_memory_definition: str = "用户对话中涉及的和时间有明确关系的事实性内容或概念")
 ```
 
 作用域级记忆配置，用于为不同的 `scope_id` 定义独立的模型和向量参数。
@@ -69,6 +69,9 @@ class openjiuwen.core.memory.config.config.MemoryScopeConfig(model_cfg: ModelReq
 * **model_cfg**(ModelRequestConfig | None, 可选)：该 scope 下使用的大模型请求配置（模型名、温度等）；若为 `None`，则使用全局 `MemoryEngineConfig.default_model_cfg`。默认值：`None`。
 * **model_client_cfg**(ModelClientConfig | None, 可选)：该 scope 下使用的大模型客户端配置（`client_id / api_base / api_key` 等）；若为 `None`，则使用全局 `MemoryEngineConfig.default_model_client_cfg`。默认值：`None`。
 * **embedding_cfg**(EmbeddingConfig | None, 可选)：该 scope 下使用的嵌入模型配置（`model_name / base_url / api_key` 等）；若为 `None`，则语义检索功能可能不可用（取决于全局是否提供了嵌入模型）。默认值：`None`。
+* **user_profile_definition**(str, 可选)：用户画像记忆提取的定义规则，用于自定义从对话中提取用户画像信息的范围。默认值：`"用户本人的肯定或否定表述（包含不限于基本身份、兴趣偏好、人际关系、资产状况）"`。
+* **semantic_memory_definition**(str, 可选)：语义记忆提取的定义规则，用于自定义从对话中提取语义记忆信息的范围。默认值：`"用户对话中涉及的和时间无明确关系的事实性内容或概念"`。
+* **episodic_memory_definition**(str, 可选)：情景记忆提取的定义规则，用于自定义从对话中提取情景记忆信息的范围。默认值：`"用户对话中涉及的和时间有明确关系的事实性内容或概念"`。
 
 > **说明**：`MemoryScopeConfig` 中的 `api_key` 参数在保存到 `kv_store` 时会被自动加密（使用 `MemoryEngineConfig.crypto_key`），读取时会自动解密。
 

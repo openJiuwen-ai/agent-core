@@ -21,7 +21,11 @@ build_index(chunks: List[TextChunk], config: IndexConfig, embed_model: Optional[
 
 **返回**：
 
-**bool**，如果构建成功则返回True，否则返回False。
+**bool**，构建成功时返回 True。
+
+**异常**：
+
+实现可能在校验失败时抛出 **BaseError** 而非返回 False（例如当 `index_type` 为 `"vector"` 或 `"hybrid"` 时未提供 `embed_model`，或存在重复文档 ID）。具体错误码见各索引器文档（如 ChromaIndexer、MilvusIndexer）。
 
 ### abstractmethod async update_index
 

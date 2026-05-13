@@ -25,7 +25,6 @@ class TestA2AAgentCardAdapter:
         assert "[output_params]" in result.description
         assert list(result.default_input_modes) == ["text/plain", "application/json"]
         assert list(result.default_output_modes) == ["text/plain", "application/json"]
-        # id has no mapping in A2A AgentCard.
         assert "1234567890abcdef1234567890abcdef" not in result.description
 
     def test_to_a2a_agent_card_should_fill_supported_interfaces_from_config(self):

@@ -10,6 +10,7 @@ from openjiuwen.core.common.exception.errors import BaseError, ExecutionError, R
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
+from openjiuwen.core.runner.drunner.remote_client.remote_client_config import ProtocolEnum
 from openjiuwen.core.runner.drunner.server_adapter.agent_adapter import AgentAdapter
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.runner.runner_config import RunnerConfig, DistributedConfig, MessageQueueConfig, \
@@ -147,6 +148,14 @@ class TestRunnerIntegration:
             logger.info("Request timed out as expected")
         finally:
             await Runner.stop()
+
+    async def test_remote_agent_should_require_card_for_a2a_protocol(self):
+        with pytest.raises(ValueError, match="card is required when protocol is A2A"):
+            RemoteAgent(
+                agent_id="a2a-agent",
+                protocol=ProtocolEnum.A2A,
+                config={"url": "http://127.0.0.1:41241"},
+            )
 
     @pytest.mark.asyncio
     async def test_agent_runner_shutdown_cancels_clients(self):

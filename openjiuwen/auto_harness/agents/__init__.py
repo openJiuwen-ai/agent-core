@@ -3,9 +3,11 @@
 """Agent factories for auto-harness."""
 
 from openjiuwen.auto_harness.agents.factory import (
+    create_activate_guide_agent,
     create_assess_agent,
     create_auto_harness_agent,
     create_commit_agent,
+    create_design_ext_agent,
     create_eval_agent,
     create_learnings_agent,
     create_plan_agent,
@@ -14,9 +16,11 @@ from openjiuwen.auto_harness.agents.factory import (
 )
 
 __all__ = [
+    "create_activate_guide_agent",
     "create_assess_agent",
     "create_auto_harness_agent",
     "create_commit_agent",
+    "create_design_ext_agent",
     "create_eval_agent",
     "create_learnings_agent",
     "create_plan_agent",

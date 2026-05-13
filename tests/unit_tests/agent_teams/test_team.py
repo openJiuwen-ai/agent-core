@@ -17,7 +17,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamSpec,
     TeamRole,
 )
-from openjiuwen.agent_teams.spawn.context import (
+from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
 )

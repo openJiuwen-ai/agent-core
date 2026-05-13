@@ -8,13 +8,20 @@ import os
 import re
 from asyncio import CancelledError
 from pathlib import Path
-from typing import Any
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Optional,
+)
 
 import yaml
 
-from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.runner import Runner
+
+OnRuntimeReady = Callable[[str, str], Awaitable[None]]
 
 # ---------------------------------------------------------------------------
 # Config loading
@@ -94,20 +101,49 @@ def _extract_content(payload: Any) -> str:
     return str(payload)
 
 
-async def consume_stream(leader: TeamAgent, query: str, session_id: str) -> None:
-    logger.info("Starting leader stream with query: %s", query)
+async def consume_stream(
+    spec: TeamAgentSpec,
+    query: str,
+    session_id: str,
+    *,
+    on_runtime_ready: Optional[OnRuntimeReady] = None,
+) -> None:
+    """Drive ``Runner.run_agent_team_streaming`` for ``spec`` and render chunks.
+
+    Args:
+        spec: TeamAgentSpec passed straight to the Runner facade. Avoid
+            calling ``spec.build()`` here — the agent_teams runtime
+            owns the lifecycle.
+        query: First god-view input forwarded as the leader's seed.
+        session_id: Session id to bind for this run.
+        on_runtime_ready: Optional async callback invoked once with
+            ``(team_name, session_id)`` the first time the stream
+            yields a ``team.runtime_ready`` event. Use it to wire up
+            facade APIs that need the team to be in the pool (e.g.
+            ``Runner.register_human_agent_inbound``).
+    """
+    logger.info("Starting team stream with query: %s", query)
 
     cur_type = ""
     buf: list[str] = []
     has_llm_output = False
+    ready_pending = on_runtime_ready
 
     async for chunk in Runner.run_agent_team_streaming(
-        agent_team=leader,
+        agent_team=spec,
         inputs={"query": query},
         session=session_id,
     ):
         chunk_type = getattr(chunk, "type", "")
         payload = getattr(chunk, "payload", None)
+
+        if (
+            ready_pending is not None
+            and isinstance(payload, dict)
+            and payload.get("event_type") == "team.runtime_ready"
+        ):
+            await ready_pending(spec.team_name, session_id)
+            ready_pending = None
 
         if chunk_type == _CHUNK_TOOL_CALL:
             _flush_buffer(cur_type, buf)
@@ -152,23 +188,42 @@ async def consume_stream(leader: TeamAgent, query: str, session_id: str) -> None
         buf.append(_extract_content(payload))
 
     _flush_buffer(cur_type, buf)
-    logger.info("Leader stream finished.")
+    logger.info("Team stream finished.")
 
 
 # ---------------------------------------------------------------------------
 # Interactive loop
 # ---------------------------------------------------------------------------
 async def run_interactive(
-    leader: TeamAgent,
+    spec: TeamAgentSpec,
     runtime_cfg: dict[str, Any],
     default_session_id: str,
     default_initial_query: str = "hello",
+    *,
+    on_runtime_ready: Optional[OnRuntimeReady] = None,
 ) -> None:
-    """Run the standard interactive CLI loop."""
+    """Run the standard interactive CLI loop against ``spec``.
+
+    All routing goes through Runner facades (``run_agent_team_streaming`` for
+    the leader stream, ``interact_agent_team`` for stdin), so the caller never
+    has to ``spec.build()`` or hold a ``TeamAgent`` reference.
+
+    Args:
+        spec: TeamAgentSpec to drive.
+        runtime_cfg: Runtime overrides parsed from the YAML ``runtime`` block.
+        default_session_id: Fallback session id when ``runtime_cfg`` omits one.
+        default_initial_query: Fallback initial query when ``runtime_cfg`` omits one.
+        on_runtime_ready: Optional async ``(team_name, session_id)`` callback
+            fired once after the first ``team.runtime_ready`` chunk. Use it
+            to register facade-bound listeners that need the pool entry to
+            exist (e.g. ``Runner.register_human_agent_inbound``).
+    """
     session_id = runtime_cfg.get("session_id", default_session_id)
     initial_query = runtime_cfg.get("initial_query", default_initial_query)
 
-    stream_task = asyncio.create_task(consume_stream(leader, initial_query, session_id))
+    stream_task = asyncio.create_task(
+        consume_stream(spec, initial_query, session_id, on_runtime_ready=on_runtime_ready)
+    )
 
     try:
         while True:
@@ -183,8 +238,15 @@ async def run_interactive(
             if not user_input.strip():
                 continue
 
-            await leader.interact(user_input)
-            print(f"[System] Input sent to leader: {user_input}")
+            result = await Runner.interact_agent_team(
+                user_input,
+                team_name=spec.team_name,
+                session_id=session_id,
+            )
+            if result.ok:
+                print(f"[System] Input dispatched (message_id={result.message_id})")
+            else:
+                _write(f"{_COLOR_YELLOW}[Deliver failed] {result.reason}{_COLOR_RESET}\n")
 
     except KeyboardInterrupt:
         print("\nInterrupted by user.")

@@ -27,9 +27,23 @@ Use the todo tools (todo_create, todo_modify, todo_list) to break down and manag
 
 Identify the planning need and call todo_create BEFORE starting execution.
 
+**Parallel awareness when breaking down tasks:**
+- If a phase involves applying the same processing to multiple independent objects
+  (multiple documents, sources, or files), design it as a **single "parallel batch" task**
+  rather than creating one todo item per object.
+- The task's description MUST explicitly list all parallel sub-items, for example:
+  "Read and analyse the following 5 papers in parallel: [Paper A, Paper B, Paper C, Paper D, Paper E],
+  each delegated to an independent subagent."
+  This makes it unambiguous that one task_tool call should be dispatched per sub-item at execution time.
+
 **Task management rules:**
 - Update status in real-time: call todo_modify the moment a task status changes
 - Only one task can be in_progress at a time; complete it before starting the next
+  - Exception: if an in_progress task needs to process multiple independent sub-items in parallel
+    (e.g., reading several documents simultaneously, concurrently searching multiple sources),
+    you may issue multiple task_tool calls at once within that task and wait for all to return
+    before marking the task completed. This is intra-task parallelism and does not violate the
+    "one in_progress at a time" rule.
 - Batch updates: consolidate multiple status changes into a single todo_modify call
 - Cancel tasks that are no longer needed
 - Can understand the current task planning progress by calling todo_list.
@@ -50,9 +64,19 @@ TODO_SYSTEM_PROMPT_CN = """
 
 **识别到规划需求后，在开始执行前立即调用 todo_create。**
 
+**拆解任务时的并行意识：**
+- 若某个阶段涉及对多个独立对象（多篇文档、多个来源、多个文件）进行相同处理，
+  应将其设计为**单个"并行批处理"任务**，而非为每个对象单独建立一条 todo。
+- 该任务的 description 中必须明确列出所有并行子项，例如：
+  "并行阅读并分析以下5篇论文：[论文A, 论文B, 论文C, 论文D, 论文E]，每篇委派独立子代理处理"
+  这样执行时才能清楚地为每个子项发出一个 task_tool 调用。
+
 **任务管理规则：**
 - 实时更新状态：任务状态变化时立即调用 todo_modify
 - 同一时间只能有一个任务处于 in_progress，完成后再开始下一个
+  - 例外：若某个 in_progress 任务内部需要并行处理多个独立子项（如同时阅读多篇文档、并发搜索多个来源），
+    可在该任务内一次性发出多个 task_tool 调用，等全部返回后再将任务标记为 completed。
+    这属于任务内部的并行执行，不违反"同一时间只有一个 in_progress"原则。
 - 批量更新：将多个状态变更合并为一次 todo_modify 调用
 - 不再需要的任务用 todo_modify 标记为 cancelled
 - 可通过调用 todo_list 了解当前任务规划进展

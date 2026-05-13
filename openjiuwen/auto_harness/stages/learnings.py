@@ -43,6 +43,8 @@ class LearningsStage(SessionStage):
     """Record learnings after a session completes."""
 
     name = "learnings"
+    slot = "learnings"
+    display_name = "总结经验"
     description = "Record learnings after a session."
     consumes = ["session_results"]
     produces = ["session_results"]
@@ -63,6 +65,7 @@ class LearningsStage(SessionStage):
             ctx.orchestrator.config,
             results,
             ctx.orchestrator.experience_store,
+            extra_rails=ctx.orchestrator.stream_rails or None,
         ):
             yield chunk
         yield StageResult(
@@ -78,6 +81,8 @@ async def run_learnings(
     config: AutoHarnessConfig,
     results: List[CycleResult],
     experience_store: "ExperienceStore",
+    *,
+    extra_rails: list | None = None,
 ) -> AsyncIterator[Any]:
     """Session 结束后的反思与经验记录（流式）。
 
@@ -85,6 +90,7 @@ async def run_learnings(
         config: Auto Harness 配置。
         results: 本次 session 的执行结果列表。
         experience_store: ExperienceStore 实例。
+        extra_rails: 由调用方注入的额外 rails。
 
     Yields:
         OutputSchema chunks from learnings agent.
@@ -97,7 +103,7 @@ async def run_learnings(
     )
 
     results_text = "\n".join(
-        f"- {r.pr_url or r.error or 'completed'} "
+        f"- {r.summary or r.pr_url or r.error or 'completed'} "
         f"(success={r.success}, "
         f"reverted={r.reverted})"
         for r in results
@@ -114,6 +120,7 @@ async def run_learnings(
         config,
         session_results=results_text,
         existing_memories=existing_text,
+        extra_rails=extra_rails,
     )
 
     query = (

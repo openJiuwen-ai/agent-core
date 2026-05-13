@@ -266,6 +266,10 @@ class GuardrailError(ValidationError):
     pass
 
 
+class CryptError(FrameworkError):
+    pass
+
+
 STATUS_TO_EXCEPTION = build_status_exception_map()
 
 

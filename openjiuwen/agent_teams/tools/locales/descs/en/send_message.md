@@ -2,7 +2,8 @@ Send a message to team members. Use for task assignment notifications, progress 
 
 | `to` | |
 |---|---|
-| member name | Point-to-point message |
+| member name | Point-to-point message — visible ONLY to that member; no other teammate (and not even the leader) receives it. To reach a subset of members with the same content, use multicast; to reach everyone, use broadcast |
+| array of member names (e.g. `["m1","m2"]`) | Multicast — the same content is sent as separate point-to-point messages to each listed member, each with its own read state. **Cost grows linearly with the number of recipients (one message row + one event per target), and for the same audience size this is MORE expensive than broadcast.** Use only when a specific subset of members must see the identical content AND broadcast is not appropriate; choose carefully. Cannot be mixed with `"*"` or `"user"`. Treated as a whole-success only when every target succeeds; on partial failure the result lists who was delivered and who failed — do NOT resend to members already in the delivered list |
 | `"user"` | Teammates only — when an incoming message has `from = user`, a teammate MUST use this tool with `to = "user"` to deliver its reply, since teammate plain text never reaches the user. The leader does NOT use this value: every leader plain-text output is shown directly to the user |
 | `"*"` | Broadcast — expensive (linear in team size), use only for global decisions, constraint changes, or announcements everyone needs |
 

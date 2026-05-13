@@ -403,7 +403,7 @@ class AutoHarnessRunRequest:
     no_push: bool = False
     budget: float | None = None
     goal: str | None = None
-    competitor: str | None = None
+    pipeline: str | None = None
 
     @classmethod
     def from_kwargs(
@@ -418,7 +418,7 @@ class AutoHarnessRunRequest:
             no_push=bool(kwargs.get("no_push", False)),
             budget=kwargs.get("budget"),
             goal=kwargs.get("goal"),
-            competitor=kwargs.get("competitor"),
+            pipeline=kwargs.get("pipeline"),
         )
 
 
@@ -437,9 +437,13 @@ async def _run_auto_harness(
     from pathlib import Path
 
     from openjiuwen.auto_harness.schema import (
+        normalize_pipeline_preference,
         OptimizationTask,
         is_placeholder_local_repo,
         load_auto_harness_config,
+    )
+    from openjiuwen.auto_harness.pipelines import (
+        META_EVOLVE_PIPELINE,
     )
     from openjiuwen.auto_harness.orchestrator import (
         create_auto_harness_orchestrator,
@@ -564,8 +568,9 @@ async def _run_auto_harness(
         config.git_remote = ""
     if request.goal:
         config.optimization_goal = request.goal
-    if request.competitor:
-        config.competitor = request.competitor
+    config.pipeline_preference = normalize_pipeline_preference(
+        request.pipeline or META_EVOLVE_PIPELINE
+    )
 
     if request.stage in (None, "assess", "plan"):
         ensure_github_cli_ready(click.echo)
@@ -632,33 +637,6 @@ async def _run_auto_harness(
                 click.echo(f"  {err}", err=True)
         return 0 if passed else 1
 
-    if request.stage == "implement":
-        if not tasks:
-            raise click.UsageError(
-                "--stage implement 需要 "
-                "--task 或 --task-file"
-            )
-        from rich.console import Console
-        from openjiuwen.harness.cli.ui.renderer import (
-            render_stream,
-        )
-
-        console = Console()
-        orch = create_auto_harness_orchestrator(config)
-        stream = orch.run_session_stream(tasks=tasks)
-        await render_stream(stream, console)
-        results = orch.results
-        for i, r in enumerate(results):
-            s = "OK" if r.success else "FAIL"
-            click.echo(
-                f"Task {i + 1}: {s}"
-                f" | pr={r.pr_url or 'N/A'}"
-                f" | error={r.error or 'none'}"
-            )
-            if r.summary:
-                click.echo(f"  summary={r.summary}")
-        return 0
-
     # Full session or dry-run
     t0 = time.monotonic()
 
@@ -694,7 +672,14 @@ async def _run_auto_harness(
         click.echo(f"[dry-run] 任务列表 → {out_path}")
         return 0
 
-    orch = create_auto_harness_orchestrator(config)
+    from openjiuwen.harness.cli.rails.tool_tracker import (
+        ToolTrackingRail,
+    )
+
+    orch = create_auto_harness_orchestrator(
+        config,
+        stream_rails=[ToolTrackingRail()],
+    )
     stream = orch.run_session_stream(tasks=tasks or None)
     from rich.console import Console
     from openjiuwen.harness.cli.ui.renderer import (
@@ -702,7 +687,54 @@ async def _run_auto_harness(
     )
 
     console = Console()
-    await render_stream(stream, console)
+
+    async def _on_activate_interaction(
+        iid: str, value: Any,
+    ) -> str:
+        if (
+            isinstance(value, dict)
+            and value.get("interaction_type")
+            == "activate_confirm"
+        ):
+            ext_name = value.get(
+                "extension_name", "unknown"
+            )
+            click.echo()
+            click.echo(f"扩展 {ext_name} 已就绪")
+            if value.get("runtime_path"):
+                click.echo(
+                    f"  路径: {value['runtime_path']}"
+                )
+            click.echo()
+            click.echo("  [A] 接受并热加载")
+            click.echo("  [R] 拒绝并清理")
+            click.echo()
+            while True:
+                choice = click.prompt(
+                    "选择 (A/R)",
+                    default="A",
+                ).strip().lower()
+                if choice in ("a", "accept"):
+                    action = "accept"
+                    break
+                if choice in ("r", "reject"):
+                    action = "reject"
+                    break
+                click.echo("请输入 A 或 R")
+            orch.run_session_stream(
+                message={
+                    "interaction_id": iid,
+                    "action": action,
+                },
+            )
+            return action
+        return ""
+
+    await render_stream(
+        stream,
+        console,
+        on_interaction=_on_activate_interaction,
+    )
     results = orch.results
     elapsed = time.monotonic() - t0
     ok = sum(1 for r in results if r.success)
@@ -782,7 +814,7 @@ async def _run_experience_list(
 
 
 async def _run_gap_analyze(
-    workspace: str, competitor: str,
+    workspace: str,
 ) -> None:
     """Run competitive gap analysis."""
     import os
@@ -797,7 +829,7 @@ async def _run_gap_analyze(
     ws = workspace or os.getcwd()
     config = AutoHarnessConfig(workspace=ws)
     gaps = await run_gap_analysis(
-        config, competitor=competitor, harness_state="",
+        config, harness_state="",
     )
     if not gaps:
         click.echo(
@@ -857,8 +889,10 @@ def auto_harness(ctx: click.Context) -> None:
     help="指定本轮自然语言优化目标，驱动 assess/plan 全流程。",
 )
 @click.option(
-    "--competitor", default=None,
-    help="指定重点对标竞品，驱动 assess/plan 全流程。",
+    "--pipeline",
+    type=click.Choice(["meta", "extended", "auto"]),
+    default=None,
+    help="选择 session pipeline；默认 meta。",
 )
 @click.pass_context
 def auto_harness_run(
@@ -922,20 +956,232 @@ def experience_list(
     )
 
 
-@auto_harness.command("gap-analyze")
+@auto_harness.command("verify-ext")
 @click.option(
-    "--competitor", required=True,
-    help="竞品名称。",
+    "--ext-path",
+    default=None,
+    type=click.Path(exists=True, file_okay=False),
+    help=(
+        "扩展包根目录（含 harness_config.yaml）。"
+        "不传则自动生成 smoke-test scaffold。"
+    ),
 )
 @click.pass_context
+def auto_harness_verify_ext(
+    ctx: click.Context,
+    ext_path: str | None,
+) -> None:
+    """轻量验证扩展包（结构+lint）。"""
+    asyncio.run(_run_verify_ext(ext_path))
+
+
+def _generate_smoke_scaffold(
+    base_dir: str | None = None,
+) -> str:
+    """Generate a minimal extension scaffold and return its path."""
+    import tempfile
+    from pathlib import Path as _P
+
+    ext_name = "smoke_test_ext"
+    if base_dir:
+        root = _P(base_dir) / ext_name
+    else:
+        root = _P(
+            tempfile.mkdtemp(prefix="verify_ext_")
+        ) / ext_name
+    rails_dir = root / "rails"
+    tools_dir = root / "tools"
+    for d in (root, rails_dir, tools_dir):
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "__init__.py").write_text(
+            "", encoding="utf-8",
+        )
+    mod = (
+        f"openjiuwen.extensions.harness.{ext_name}"
+    )
+    (rails_dir / "smoke_rail.py").write_text(
+        "from openjiuwen.harness.rails.base "
+        "import DeepAgentRail\n\n\n"
+        "class SmokeRail(DeepAgentRail):\n"
+        '    """Smoke-test rail."""\n\n'
+        "    pass\n",
+        encoding="utf-8",
+    )
+    (tools_dir / "helper.py").write_text(
+        f"EXTENSION_NAME = '{ext_name}'\n",
+        encoding="utf-8",
+    )
+    (tools_dir / "smoke_tool.py").write_text(
+        "from __future__ import annotations\n\n"
+        "from typing import Any, AsyncIterator, "
+        "Dict\n\n"
+        "from .helper import EXTENSION_NAME\n"
+        "from openjiuwen.core.foundation.tool "
+        "import Tool, ToolCard\n\n\n"
+        "class SmokeTool(Tool):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(\n"
+        "            ToolCard(\n"
+        "                id='smoke_tool',\n"
+        "                name='smoke_tool',\n"
+        "                description=(\n"
+        '                    "Smoke test tool "\n'
+        "                    + EXTENSION_NAME\n"
+        "                ),\n"
+        "            )\n"
+        "        )\n\n"
+        "    async def invoke(\n"
+        "        self,\n"
+        "        inputs: Dict[str, Any],\n"
+        "        **kwargs: Any,\n"
+        "    ) -> Dict[str, Any]:\n"
+        "        return {'ext': EXTENSION_NAME}\n\n"
+        "    async def stream(\n"
+        "        self,\n"
+        "        inputs: Dict[str, Any],\n"
+        "        **kwargs: Any,\n"
+        "    ) -> AsyncIterator[Dict[str, Any]]:\n"
+        "        yield await self.invoke("
+        "inputs, **kwargs)\n",
+        encoding="utf-8",
+    )
+    (root / "harness_config.yaml").write_text(
+        "schema_version: harness_config.v0.1\n"
+        f"name: {ext_name}\n"
+        "resources:\n"
+        "  rails:\n"
+        "    - type: package\n"
+        f"      module: {mod}.rails.smoke_rail\n"
+        "      class: SmokeRail\n"
+        "  tools:\n"
+        "    - type: package\n"
+        f"      module: {mod}.tools.smoke_tool\n"
+        "      class: SmokeTool\n",
+        encoding="utf-8",
+    )
+    return str(root)
+
+
+async def _run_verify_ext(
+    ext_path: str | None,
+) -> None:
+    import uuid
+    from pathlib import Path as _Path
+
+    from openjiuwen.auto_harness.infra.runtime_extension_loader import (
+        load_runtime_rails,
+        load_runtime_skill_dirs,
+        load_runtime_tools,
+    )
+    from openjiuwen.auto_harness.schema import (
+        RuntimeExtensionArtifact,
+    )
+    from openjiuwen.auto_harness.stages.verify import (
+        _check_ruff,
+    )
+
+    generated = False
+    if ext_path is None:
+        click.echo("== Generating smoke-test scaffold ==")
+        ext_path = _generate_smoke_scaffold()
+        generated = True
+        click.echo(f"  {ext_path}")
+
+    root = _Path(ext_path).resolve()
+    manifest = root / "harness_config.yaml"
+    if not manifest.is_file():
+        raise click.ClickException(
+            f"{manifest} not found"
+        )
+
+    ext_name = root.name
+    session_id = f"cli_verify_{uuid.uuid4().hex[:8]}"
+    runtime_ext = RuntimeExtensionArtifact(
+        extension_name=ext_name,
+        runtime_path=str(root),
+        config_path=str(manifest),
+    )
+
+    errors: list[str] = []
+    rails_count = 0
+    tools_count = 0
+    skills_count = 0
+
+    # Layer 1: structure check
+    click.echo("== Layer 1: structure check ==")
+    try:
+        rails = load_runtime_rails(
+            runtime_ext, session_id=session_id,
+        )
+        tools = load_runtime_tools(
+            runtime_ext, session_id=session_id,
+        )
+        for cls in rails:
+            cls()
+        for cls in tools:
+            cls()
+        rails_count = len(rails)
+        tools_count = len(tools)
+        skill_dirs = load_runtime_skill_dirs(runtime_ext)
+        for sd in skill_dirs:
+            sd_path = _Path(sd)
+            skill_mds = list(sd_path.rglob("SKILL.md"))
+            skills_count += len(skill_mds)
+            if not skill_mds:
+                errors.append(
+                    f"Skill dir has no SKILL.md: {sd}"
+                )
+        click.echo(
+            f"  rails={rails_count} tools={tools_count}"
+            f" skills={skills_count}"
+        )
+    except Exception as exc:
+        errors.append(f"Structure check failed: {exc}")
+        click.echo(f"  FAILED: {exc}", err=True)
+
+    # Layer 2: ruff lint
+    click.echo("== Layer 2: ruff lint ==")
+    if root.is_dir():
+        lint_errors = await _check_ruff(root)
+        errors.extend(lint_errors)
+        if lint_errors:
+            for e in lint_errors:
+                click.echo(f"  {e}", err=True)
+        else:
+            click.echo("  OK")
+
+    # Cleanup generated scaffold
+    if generated:
+        import shutil
+        shutil.rmtree(root.parent, ignore_errors=True)
+
+    if errors:
+        click.echo(
+            f"\nFAILED ({len(errors)} error(s)):",
+            err=True,
+        )
+        for e in errors:
+            click.echo(f"  - {e}", err=True)
+        raise click.ClickException(
+            f"verify_ext failed ({len(errors)} error(s))"
+        )
+    click.echo(
+        f"\nPASSED: rails={rails_count}"
+        f" tools={tools_count}"
+        f" skills={skills_count}"
+    )
+
+
+@auto_harness.command("gap-analyze")
+@click.pass_context
 def gap_analyze(
-    ctx: click.Context, competitor: str,
+    ctx: click.Context,
 ) -> None:
     """差距分析。"""
     opts: CLIOptions = ctx.obj["opts"]
     asyncio.run(
         _run_gap_analyze(
-            opts.workspace or "", competitor,
+            opts.workspace or "",
         ),
     )
 

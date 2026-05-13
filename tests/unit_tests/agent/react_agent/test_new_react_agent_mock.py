@@ -1004,6 +1004,7 @@ class TestAbilityManagerFixes(unittest.IsolatedAsyncioTestCase):
             }
         )
         mock_get_mcp_tool_infos.return_value = [mock_mcp_tool]
+        raw_mcp_tool_name = mock_mcp_tool.name
 
         # 添加 MCP 服务器配置
         mcp_config = McpServerConfig(
@@ -1016,16 +1017,23 @@ class TestAbilityManagerFixes(unittest.IsolatedAsyncioTestCase):
         # 获取 tool_infos
         tool_infos = await self.ability_manager.list_tool_info()
 
-        # 验证 MCP 工具在返回列表中
+        # 验证 MCP 工具在返回列表中（对外名称带服务器前缀，避免跨 MCP 重名）
+        expected_tool_name = f"mcp_{mcp_config.server_name}_{raw_mcp_tool_name}"
         self.assertEqual(len(tool_infos), 1)
-        self.assertEqual(tool_infos[0].name, "mcp_tool")
+        self.assertEqual(tool_infos[0].name, expected_tool_name)
 
         # 验证 MCP 工具被添加到 _tools 字典（用于映射）
         self.assertEqual(len(self.ability_manager._tools), 1)
-        self.assertIn("mcp_tool", self.ability_manager._tools)
+        self.assertIn(expected_tool_name, self.ability_manager._tools)
         # 验证 ID 格式为 {server_id}.{server_name}.{tool_name}
-        self.assertEqual(self.ability_manager._tools["mcp_tool"].id, "mcp_001.test_mcp.mcp_tool")
-        self.assertEqual(self.ability_manager._tools["mcp_tool"].input_params, mock_mcp_tool.parameters)
+        self.assertEqual(
+            self.ability_manager._tools[expected_tool_name].id,
+            "mcp_001.test_mcp.mcp_tool",
+        )
+        self.assertEqual(
+            self.ability_manager._tools[expected_tool_name].input_params,
+            mock_mcp_tool.parameters,
+        )
 
     @patch('openjiuwen.core.runner.Runner.resource_mgr.get_mcp_tool_infos')
     async def test_remove_mcp_server_also_removes_mcp_tools(self, mock_get_mcp_tool_infos):
@@ -1052,8 +1060,8 @@ class TestAbilityManagerFixes(unittest.IsolatedAsyncioTestCase):
 
         # 验证 MCP 工具被添加到 _tools
         self.assertEqual(len(self.ability_manager._tools), 2)
-        self.assertIn("tool1", self.ability_manager._tools)
-        self.assertIn("tool2", self.ability_manager._tools)
+        self.assertIn(f"mcp_{mcp_config.server_name}_tool1", self.ability_manager._tools)
+        self.assertIn(f"mcp_{mcp_config.server_name}_tool2", self.ability_manager._tools)
 
         # 删除 MCP 服务器
         result = self.ability_manager.remove("test_mcp")
@@ -1064,8 +1072,8 @@ class TestAbilityManagerFixes(unittest.IsolatedAsyncioTestCase):
 
         # 验证对应的 MCP 工具也被删除
         self.assertEqual(len(self.ability_manager._tools), 0)
-        self.assertNotIn("tool1", self.ability_manager._tools)
-        self.assertNotIn("tool2", self.ability_manager._tools)
+        self.assertNotIn(f"mcp_{mcp_config.server_name}_tool1", self.ability_manager._tools)
+        self.assertNotIn(f"mcp_{mcp_config.server_name}_tool2", self.ability_manager._tools)
 
 
 class TestAbilityManagerAgentCardInputParams(unittest.IsolatedAsyncioTestCase):
