@@ -206,6 +206,31 @@ class TestCleanTeamTool:
         assert "shutdown_member" in result.error
 
 
+class TestCleanTeamLifecycleGate:
+    """clean_team is wired only when lifecycle == 'temporary'."""
+
+    @pytest.mark.level0
+    def test_temporary_leader_has_clean_team(self, agent_team):
+        """Temporary leader keeps the tear-down tool — the leader is the
+        only one who can wind a temporary team down."""
+        from openjiuwen.agent_teams.tools.team_tools import create_team_tools
+
+        tools = create_team_tools(role="leader", agent_team=agent_team, lifecycle="temporary")
+        names = {tool.card.name for tool in tools}
+        assert "clean_team" in names
+
+    @pytest.mark.level0
+    def test_persistent_leader_drops_clean_team(self, agent_team):
+        """Persistent leader must not see clean_team — operator SDK facades
+        own tear-down, exposing it mid-round races pool invariants."""
+        from openjiuwen.agent_teams.tools.team_tools import create_team_tools
+
+        tools = create_team_tools(role="leader", agent_team=agent_team, lifecycle="persistent")
+        names = {tool.card.name for tool in tools}
+        assert "clean_team" not in names
+        assert "build_team" in names
+
+
 # ========== Member Management Tools ==========
 
 
