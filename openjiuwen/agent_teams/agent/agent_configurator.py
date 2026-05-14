@@ -338,6 +338,7 @@ class AgentConfigurator:
             team_backend=self.team_backend,
             role=ctx.role.value,
             teammate_mode=spec.teammate_mode,
+            lifecycle=spec.lifecycle,
             language=resolved_language,
             on_teammate_created=self._on_teammate_created,
             model_config_allocator=self.model_allocator.allocate if self.model_allocator else None,

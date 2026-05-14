@@ -30,7 +30,7 @@
 | coordination/ 内部的事件总线、dispatcher、handler | S_03 coordination |
 | SessionManager / RecoveryManager 的状态机与 checkpoint 字段 | S_04 session-recovery |
 | SpawnManager 的进程生命周期 / StreamController 的 round 状态机 / pending input 队列语义 | S_05 spawn-stream |
-| `runtime/` 的对象池、9 路 dispatch、并发门禁 | runtime/ 自身 spec |
+| `runtime/` 的对象池、7 路 dispatch、并发门禁、finalize 决策 | runtime/ 自身 spec |
 | `interaction/` 的三视角输入、`@member` 路由、HITT | interaction/ 自身 spec |
 
 跨子系统的字段引用走 `runtime_context.py` 与 `schema/` 的公共类型；本规约只规定 `agent/` 内部如何拆。
@@ -403,6 +403,6 @@ TeamAgent (composition root)
 | **S_03 coordination** | 本 spec 描述 `CoordinationKernel` 在 TeamAgent 拓扑中的归属与对外契约（构造 / start / stop / 事件入队接口）；S_03 描述 EventBus / EventDispatcher / handlers 的内部结构、触发规则、role-scoped protocol 切分。 |
 | **S_04 session-recovery** | 本 spec 列出 `SessionManager` / `RecoveryManager` 的归属象限、对 `TeamAgentState` 的读写边界；S_04 描述 session checkpoint 字段、teams namespace 分桶布局、状态恢复流程。 |
 | **S_05 spawn-stream** | 本 spec 固定 `SpawnManager` / `StreamController` 的拓扑位置与 `payload.py` wire 契约；S_05 描述 spawn 的 process / inprocess 分支、teammate 拉起 / 心跳 / 重启细节，以及 round 状态机、pending input / interrupt 队列语义。 |
-| `runtime/` 自身 spec | `runtime/` 在 `agent/` 之外管 TeamAgent 对象池、9 路 dispatch、并发门禁。本 spec 不重复，仅约定：`TeamAgent.configure` 必须经 `runtime/` 的 `manager.activate` 路径写入对象池（leader 入口），spawn 出来的 teammate 不入 pool。 |
+| `runtime/` 自身 spec | `runtime/` 在 `agent/` 之外管 TeamAgent 对象池、7 路 dispatch、并发门禁、finalize 决策。本 spec 不重复，仅约定：`TeamAgent.configure` 必须经 `runtime/` 的 `manager.activate` 路径写入对象池（leader 入口），spawn 出来的 teammate 不入 pool。 |
 | `interaction/` 自身 spec | 三视角输入（GodView / Operator / HumanAgent）通过 `interaction/` 进 `coordination`；本 spec 只规定 `TeamAgent.broadcast` / `human_agent_say` / `interact` 是公共入口，路由解析交给 `interaction/router.py`。 |
 | `schema/` | 本 spec 引用 `TeamAgentSpec` / `TeamRuntimeContext` / `TeamSpec` / `TeamRole` / `TeamMemberSpec` 等，不在此重复字段定义；schema 层声明字段引用，实现归 `models/` / `agent/`。 |

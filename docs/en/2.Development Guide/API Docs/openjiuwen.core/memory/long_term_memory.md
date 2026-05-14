@@ -33,6 +33,7 @@ Initialize `LongTermMemory` instance (singleton pattern, multiple calls return t
 
 - Configuration related: `_sys_mem_config: MemoryEngineConfig | None = None`, `_scope_config: dict[str, MemoryScopeConfig] = {}`;
 - Storage related: `kv_store / vector_store / db_store / message_store` are all `None`, need to register through `register_store` (and optionally `register_message_store`);
+- Memory index: `memory_index: BaseMemoryIndex | None = None`, can be registered via `register_plugin` with a custom index implementation, or automatically registered as `SimpleMemoryIndex` during `register_store`;
 - Manager related: `scope_user_mapping_manager / message_manager / fragment_memory_manager / variable_manager / write_manager / search_manager / generator` are all `None`, initialized during `set_config`;
 - LLM related: `_base_llm: Model | None = None` (set during `set_config`);
 - Embedding model cache: `_scope_embedding: dict[str, Embedding] = {}`.
@@ -57,7 +58,11 @@ Register underlying storage instances, must be completed before calling `set_con
 * **kv_store** (BaseKVStore): **Required**, key-value storage instance for fast access to structured data (such as scope configuration, user variables, etc.). If `None`, will raise `build_error` (`MEMORY_REGISTER_STORE_EXECUTION_ERROR`).
 * **vector_store** (BaseVectorStore | None, optional): Vector storage instance for semantic similarity retrieval. If `None`, semantic retrieval functionality is unavailable. Default value: `None`.
 * **db_store** (BaseDbStore | None, optional): Relational database storage instance for persisting messages, scope-user mappings, etc. If `None`, message persistence functionality is unavailable. Default value: `None`.
-* **embedding_model** (Embedding | None, optional): Global embedding model instance for initializing `semantic_store` embedding capability during registration. If `None`, independent embedding models can be configured for different scopes later through `set_scope_config`. Default value: `None`.
+* **embedding_model** (Embedding | None, optional): Global embedding model instance for initializing the vector index embedding capability during registration. If `None`, independent embedding models can be configured for different scopes later through `set_scope_config`. Default value: `None`.
+
+**Behavior**:
+
+When both `vector_store` and `embedding_model` are provided, `register_store` automatically calls `register_plugin` to register the default `SimpleMemoryIndex` as `memory_index`. To use a custom `BaseMemoryIndex` implementation, call `register_plugin` manually after `register_store`.
 
 **Exceptions**:
 
@@ -115,6 +120,66 @@ Register underlying storage instances, must be completed before calling `set_con
 >>>     db_store=db_store
 >>> )
 >>>
+```
+
+
+### async register_plugin
+
+```
+async def register_plugin(
+    self,
+    name: str,
+    cls: type,
+    params: dict[str, Any],
+) -> None
+```
+
+Register a custom `BaseMemoryIndex` plugin instance, used to replace or extend the default vector index implementation.
+
+**Parameters**:
+
+* **name** (str): Plugin name, describing the plugin type (e.g., `'vector'`, `'inverted'`, `'hybrid'`).
+* **cls** (type): Plugin class, must inherit from `BaseMemoryIndex`.
+* **params** (dict[str, Any]): Initialization parameters passed to the plugin class constructor.
+
+**Behavior**:
+
+- This method instantiates the plugin via `cls(**params)`;
+- The **first registered** plugin becomes the default `memory_index` (`self.memory_index`); subsequent registrations do not overwrite the default;
+- If `register_store` has already auto-registered `SimpleMemoryIndex`, subsequent manual calls to `register_plugin` will not override the existing default index.
+
+**Prerequisites**:
+
+- No strict prerequisites, but recommended to call after `register_store` and before `set_config`.
+
+**Example**:
+
+```python
+>>> from openjiuwen.core.memory.long_term_memory import LongTermMemory
+>>> from openjiuwen.core.foundation.store.index.vector_memory_index import VectorMemoryIndex
+>>> from openjiuwen.core.foundation.store.base_vector_store import BaseVectorStore
+>>> from openjiuwen.core.foundation.store.base_embedding import Embedding
+>>>
+>>> # Use default VectorMemoryIndex
+>>> memory = LongTermMemory()
+>>> await memory.register_plugin(
+>>>     name="vector",
+>>>     cls=VectorMemoryIndex,
+>>>     params={
+>>>         "vector_store": my_vector_store,
+>>>         "embedding_model": my_embedding_model,
+>>>     }
+>>> )
+>>>
+>>> # Or use a custom BaseMemoryIndex implementation
+>>> class MyCustomIndex(BaseMemoryIndex):
+>>>     ...
+>>>
+>>> await memory.register_plugin(
+>>>     name="custom",
+>>>     cls=MyCustomIndex,
+>>>     params={"custom_param": "value"}
+>>> )
 ```
 
 
@@ -177,7 +242,12 @@ Set global memory engine configuration and initialize internal managers.
 
 **Prerequisites**:
 
-- Must have called `register_store` to register `kv_store`, `vector_store`, `db_store`, otherwise will raise `build_error` (`MEMORY_SET_CONFIG_EXECUTION_ERROR`).
+- Must have called `register_store` to register `kv_store` and `db_store`, otherwise will raise `build_error` (`MEMORY_SET_CONFIG_EXECUTION_ERROR`).
+- Must have registered `memory_index` (via `register_plugin` or auto-registered by `register_store`), otherwise will raise `build_error`.
+
+**Behavior**:
+
+- Managers (`FragmentMemoryManager`, `SummaryManager`, `WriteManager`) uniformly use `memory_index` (`BaseMemoryIndex`) as the backend. The `UserMemStore` fallback path is no longer supported.
 
 **Exceptions**:
 
@@ -226,6 +296,43 @@ This method initializes the following internal managers:
 >>> # Set configuration
 >>> memory = LongTermMemory()
 >>> memory.set_config(config)
+```
+
+
+### async migrate_between_indices
+
+```
+async def migrate_between_indices(
+    source_index: BaseMemoryIndex,
+    target_index: BaseMemoryIndex,
+) -> None
+```
+
+Copy data from one `BaseMemoryIndex` to another. Suitable for data migration between different index implementations (e.g., from `SimpleMemoryIndex` to `VectorMemoryIndex`). Source data is preserved after migration.
+
+**Parameters**:
+
+* **source_index** (BaseMemoryIndex): Source `BaseMemoryIndex` instance to read data from.
+* **target_index** (BaseMemoryIndex): Target `BaseMemoryIndex` instance to write data into.
+
+**Behavior**:
+
+- This method iterates through all `(user_id, scope_id)` combinations in `source_index`, reads documents in batches (100 per batch), and writes them to `target_index`;
+- Source data remains unchanged after migration;
+- Migration is idempotent — if a document with the same ID already exists in the target index, it will be overwritten (upsert semantics).
+
+**Example**:
+
+```python
+>>> from openjiuwen.core.memory.long_term_memory import LongTermMemory
+>>> from openjiuwen.core.foundation.store.index.simple_memory_index import SimpleMemoryIndex
+>>>
+>>> # Assume an existing SimpleMemoryIndex instance
+>>> old_index = SimpleMemoryIndex(kv_store=kv_store, vector_store=vector_store, embedding_model=embed)
+>>> new_index = VectorMemoryIndex(...)
+>>>
+>>> # Migrate data from old index to new index
+>>> await LongTermMemory.migrate_between_indices(source_index=old_index, target_index=new_index)
 ```
 
 
@@ -811,7 +918,7 @@ Search user memories (user profiles, variables, etc.) based on semantic similari
 **Returns**:
 
 * **list[MemResult]**: Memory result list, each `MemResult` contains:
-  * `mem_info: MemInfo` (`mem_id / content / type`);
+  * `mem_info: MemInfo` (`mem_id / content / type / timestamp`);
   * `score: float` (similarity score).
 
 **Exceptions**:
@@ -902,7 +1009,7 @@ Search user summary memories based on semantic similarity, returning the N most 
 **Returns**:
 
 * **list[MemResult]**: List of memory results, each `MemResult` contains:
-  * `mem_info: MemInfo` (`mem_id / content / type`);
+  * `mem_info: MemInfo` (`mem_id / content / type / timestamp`);
   * `score: float` (similarity score).
 
 **Exceptions**:

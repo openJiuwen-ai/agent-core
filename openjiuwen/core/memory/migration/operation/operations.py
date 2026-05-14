@@ -153,3 +153,54 @@ class UpdateMessageOperation(BaseOperation):
         update_func (MessageUpdateCallable): Callable that performs the message store update.
     """
     update_func: MessageUpdateCallable
+
+
+# ==================== Index Version Migration Operations ====================
+@dataclass
+class RenameMemoryDocFieldOperation(BaseOperation):
+    """
+    Rename a field in MemoryDoc objects.
+
+    Attributes:
+        old_field_name (str): Original name of the field to rename.
+        new_field_name (str): New name for the field.
+    """
+    old_field_name: str
+    new_field_name: str
+
+
+@dataclass
+class TransformMemoryDocFieldOperation(BaseOperation):
+    """
+    Transform the value of a field in MemoryDoc objects.
+
+    Attributes:
+        field_name (str): Name of the field to transform.
+        transform_func (Callable[[Any], Any]): Function to apply to the field value.
+    """
+    field_name: str
+    transform_func: Callable[[Any], Any]
+
+
+@dataclass
+class AddMemoryDocFieldOperation(BaseOperation):
+    """
+    Add a new field to MemoryDoc objects.
+
+    Attributes:
+        field_name (str): Name of the field to add.
+        default_value_or_func (Any | Callable[[], Any]): Default value or function to generate the default.
+    """
+    field_name: str
+    default_value_or_func: Any | Callable[[], Any]
+
+
+@dataclass
+class RemoveMemoryDocFieldOperation(BaseOperation):
+    """
+    Remove a field from MemoryDoc objects.
+
+    Attributes:
+        field_name (str): Name of the field to remove.
+    """
+    field_name: str

@@ -356,6 +356,78 @@ class TestResourceMgrToolTagIsolation:
         assert len(found_list) == 1
 
 
+class TestResourceMgrAddToolRefresh:
+    """Cover the `refresh` switch on add_tool.
+
+    The default contract still rejects duplicate ids. Passing ``refresh=True``
+    swaps the existing registration for the new instance so stateful team
+    tools bound to a specific agent/session can rebind on restart.
+    """
+
+    @pytest.fixture
+    def resource_mgr(self):
+        return ResourceMgr()
+
+    @staticmethod
+    def test_default_rejects_duplicate_tool_id(resource_mgr):
+        first = _make_tool("dup_tool")
+        second = _make_tool("dup_tool")
+
+        assert resource_mgr.add_tool(first).is_ok()
+
+        result = resource_mgr.add_tool(second)
+        assert result.is_err()
+        # Existing instance is preserved.
+        assert resource_mgr.get_tool(tool_id="dup_tool") is first
+
+    @staticmethod
+    def test_refresh_replaces_existing_tool_instance(resource_mgr):
+        first = _make_tool("stateful_tool")
+        second = _make_tool("stateful_tool")
+
+        assert resource_mgr.add_tool(first).is_ok()
+        result = resource_mgr.add_tool(second, refresh=True)
+
+        assert result.is_ok()
+        assert resource_mgr.get_tool(tool_id="stateful_tool") is second
+
+    @staticmethod
+    def test_refresh_on_missing_id_behaves_as_plain_add(resource_mgr):
+        tool = _make_tool("fresh_tool")
+
+        result = resource_mgr.add_tool(tool, refresh=True)
+
+        assert result.is_ok()
+        assert resource_mgr.get_tool(tool_id="fresh_tool") is tool
+
+    @staticmethod
+    def test_refresh_rebinds_tag_for_existing_tool(resource_mgr):
+        first = _make_tool("scoped_tool")
+        second = _make_tool("scoped_tool")
+
+        resource_mgr.add_tool(first, tag="agent_old")
+        result = resource_mgr.add_tool(second, tag="agent_new", refresh=True)
+
+        assert result.is_ok()
+        assert not resource_mgr.resource_has_tag("scoped_tool", "agent_old")
+        assert resource_mgr.resource_has_tag("scoped_tool", "agent_new")
+        assert resource_mgr.get_tool(tool_id="scoped_tool", tag="agent_new") is second
+
+    @staticmethod
+    def test_refresh_list_input_replaces_only_existing_ids(resource_mgr):
+        existing = _make_tool("list_existing")
+        resource_mgr.add_tool(existing)
+
+        replacement = _make_tool("list_existing")
+        fresh = _make_tool("list_fresh")
+
+        results = resource_mgr.add_tool([replacement, fresh], refresh=True)
+
+        assert all(r.is_ok() for r in results)
+        assert resource_mgr.get_tool(tool_id="list_existing") is replacement
+        assert resource_mgr.get_tool(tool_id="list_fresh") is fresh
+
+
 class TestResourceMgrGetSysOpToolCards:
     """
     Test get_sys_op_tool_cards method.

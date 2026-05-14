@@ -42,7 +42,7 @@ features/ F_NN_<slug>.md
 |---|---|
 | 类型 | spec |
 | 关联模块 | openjiuwen/agent_teams/<path> |
-| 最近一次修订 commit | <hash> |
+| 最近一次修订日期 | <YYYY-MM-DD> |
 | 关联 feature | F_NN_<slug>.md（可选） |
 
 ## 范围 / 边界
@@ -69,7 +69,6 @@ features/ F_NN_<slug>.md
 | 项 | 值 |
 |---|---|
 | 日期 | YYYY-MM-DD |
-| 涉及 commit | <hash>（多个用换行列出） |
 | 范围 | <修改路径> |
 | 测试基线 | <pytest 结果> |
 | Refs | #<issue> |

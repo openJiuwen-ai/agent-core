@@ -5,7 +5,7 @@ from __future__ import annotations
 
 
 from openjiuwen.harness.rails.base import DeepAgentRail
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunKind
 from openjiuwen.harness.prompts.sections.workspace import build_workspace_section as _build_workspace
 from openjiuwen.harness.prompts.sections.context import build_context_section as _build_context, \
     build_tools_section
@@ -57,10 +57,12 @@ class ContextAssembleRail(DeepAgentRail):
             lang,
         )
         tools_section = build_tools_section(self._ability_manager, lang)
+        is_heartbeat = ctx.extra.get("run_kind") == RunKind.HEARTBEAT
         context_section = await _build_context(
             self.sys_operation,
             workspace,
             lang,
+            include_daily_memory=not is_heartbeat,
         )
 
         if workspace_section is not None:
@@ -77,6 +79,4 @@ class ContextAssembleRail(DeepAgentRail):
             self.system_prompt_builder.add_section(context_section)
         else:
             self.system_prompt_builder.remove_section("context")
-
-
 

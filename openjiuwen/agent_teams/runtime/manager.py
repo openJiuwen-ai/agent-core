@@ -54,6 +54,7 @@ from openjiuwen.agent_teams.runtime.pool import (
     RuntimeState,
     TeamRuntimePool,
 )
+from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
@@ -111,6 +112,25 @@ class TeamRuntimeManager:
         team_name = spec.team_name
 
         pool_entry = await self._pool.get(team_name)
+        # Session switch policy: any pool entry on a different session is
+        # torn down before dispatch. This collapses the old WARM_RECOVER /
+        # NEW_TEAM_IN_SESSION_WARM paths (which reused the same TeamAgent
+        # across sessions) into stop+remove+cold-rebuild, so every
+        # cross-session run starts from a freshly built agent on the new
+        # session and stale contextvars / state cannot leak across.
+        if pool_entry is not None and pool_entry.current_session_id != target_session_id:
+            team_logger.info(
+                "activate: stale pool entry for team {} on session {}; "
+                "stop+remove before rebuilding on session {}",
+                team_name,
+                pool_entry.current_session_id,
+                target_session_id,
+            )
+            await self.stop_team(
+                team_name=team_name,
+                session_id=pool_entry.current_session_id,
+            )
+            pool_entry = None
         team_in_session, team_in_db = await self._inspect_session(
             spec,
             team_session,
@@ -130,6 +150,117 @@ class TeamRuntimeManager:
             pool_entry=pool_entry,
             inputs=inputs,
         )
+
+    async def finalize(
+        self,
+        *,
+        team_name: str,
+        session_id: str,
+    ) -> None:
+        """Settle a leader run cycle: choose pause vs stop, sync pool entry.
+
+        Called from the Runner's stream/invoke finally for the leader path.
+        Owns the pause-vs-stop decision so ``CoordinationKernel.finalize_round``
+        can stay a pure round-end cleanup hook and external ``stop_team``
+        calls cannot be silently overridden by a finally-time re-pause.
+
+        Decision rule:
+          - shutdown_requested (teammate explicitly asked to leave) → stop
+          - ``agent.lifecycle != "persistent"`` → stop
+          - otherwise → pause
+
+        Idempotent: when the pool entry is already gone (an external
+        ``stop_team`` ran first), this is a no-op. Re-entry against an
+        already-stopped/paused kernel is also safe thanks to the lifecycle
+        state-machine guards in :class:`CoordinationKernel`.
+        """
+        entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
+        if entry is None:
+            return
+        agent = entry.agent
+        try:
+            if await agent.is_shutdown_requested() or agent.lifecycle != "persistent":
+                await agent.stop_coordination()
+                await self._pool.remove(team_name)
+            else:
+                await agent.pause_coordination()
+                entry.state = RuntimeState.PAUSED
+        except Exception as exc:
+            team_logger.warning(
+                "Failed to finalize team {} on session {}: {}",
+                team_name,
+                session_id,
+                exc,
+            )
+
+    # team_member statuses that already encode a finalize-side outcome
+    # written by some other party (leader stop/pause marks, shutdown_self,
+    # or a still-in-flight shutdown request). Manager.finalize_member must
+    # not overwrite these — doing so would silently undo
+    # ``shutdown_self``'s SHUTDOWN write or the leader's STOPPED/PAUSED
+    # marks set just before tearing down the in-process task.
+    _MEMBER_FINALIZED_STATUSES = frozenset(
+        {
+            MemberStatus.STOPPED,
+            MemberStatus.PAUSED,
+            MemberStatus.SHUTDOWN_REQUESTED,
+            MemberStatus.SHUTDOWN,
+        }
+    )
+
+    @staticmethod
+    async def finalize_member(agent: "TeamAgent") -> None:
+        """Settle a non-leader run cycle (teammate / human-agent).
+
+        Spawned teammates do not enter the pool; the run cycle still has
+        to choose between pause (persistent — keep the kernel ready for
+        the next assignment) and stop (shutdown_requested or temporary).
+
+        Persisted ``team_member`` status is owned here for the natural
+        round-end path:
+          - lifecycle != "persistent" → stop + mark SHUTDOWN.
+          - persistent → pause + mark READY (next assignment can pick it up).
+
+        When ``team_member`` is already in
+        :data:`_MEMBER_FINALIZED_STATUSES` someone else has written the
+        outcome (leader's ``_mark_live_teammates``, ``shutdown_self``, or
+        ``shutdown_member`` setting SHUTDOWN_REQUESTED) so we only tear
+        down the kernel and skip the status write entirely.
+        """
+        member = agent.team_member
+        try:
+            current_status: Optional[MemberStatus] = None
+            if member is not None:
+                try:
+                    current_status = await member.status()
+                except Exception as exc:
+                    team_logger.debug(
+                        "Failed to read team_member status during finalize_member: {}",
+                        exc,
+                    )
+            already_finalized = (
+                current_status is not None
+                and current_status in TeamRuntimeManager._MEMBER_FINALIZED_STATUSES
+            )
+            if already_finalized:
+                # External party (leader stop/pause, shutdown_self) already
+                # wrote a terminal/quiescent status. Just close the kernel.
+                await agent.stop_coordination()
+                return
+            if agent.lifecycle != "persistent":
+                await agent.stop_coordination()
+                if member is not None:
+                    await member.update_status(MemberStatus.SHUTDOWN)
+                return
+            await agent.pause_coordination()
+            if member is not None:
+                await member.update_status(MemberStatus.READY)
+        except Exception as exc:
+            team_logger.warning(
+                "Failed to finalize team member {}: {}",
+                getattr(agent, "member_name", "?"),
+                exc,
+            )
 
     async def pause(
         self,
@@ -609,26 +740,8 @@ class TeamRuntimeManager:
             await pool_entry.interact_gate.reset()
             return TeamRuntimeActivation(agent=pool_entry.agent, session=team_session, action=action)
 
-        if kind is RunActionKind.WARM_RECOVER:
-            if pool_entry is None:
-                raise RuntimeError(f"{kind.value} requires an active pool entry")
-            await pool_entry.agent.recover_for_existing_session(team_session)
-            pool_entry.current_session_id = session_id
-            pool_entry.state = RuntimeState.RUNNING
-            await pool_entry.interact_gate.reset()
-            return TeamRuntimeActivation(agent=pool_entry.agent, session=team_session, action=action)
-
-        if kind is RunActionKind.NEW_TEAM_IN_SESSION_WARM:
-            if pool_entry is None:
-                raise RuntimeError(f"{kind.value} requires an active pool entry")
-            await self._pre_run_with_inputs(team_session, inputs)
-            await pool_entry.agent.resume_for_new_session(team_session)
-            pool_entry.current_session_id = session_id
-            pool_entry.state = RuntimeState.RUNNING
-            await pool_entry.interact_gate.reset()
-            return TeamRuntimeActivation(agent=pool_entry.agent, session=team_session, action=action)
-
-        # Cold paths — no pool entry. Make sure the pool stays clean.
+        # Cold paths — no pool entry. ``activate`` has already torn down
+        # any stale entry from a different session before reaching here.
         if kind is RunActionKind.COLD_RECOVER:
             # Lazy import: TeamAgent's module pulls in heavy deps (rails,
             # prompts) that the rest of manager.py doesn't need at import time.
@@ -640,6 +753,14 @@ class TeamRuntimeManager:
             await self._pre_run_with_inputs(team_session, inputs)
             agent = spec.build()
             await agent.resume_for_new_session(team_session)
+            # team_in_db is True at this point — the team row exists, so
+            # there may be teammate rows left over from before the stop
+            # (status STOPPED / PAUSED / etc). Replay them onto the new
+            # session so "recover with a fresh session" actually brings
+            # the original members back, not just an empty leader. Safe
+            # on never-built teams: recover_team iterates DB members and
+            # is a no-op when none exist.
+            await agent.recover_team()
         elif kind is RunActionKind.CREATE:
             await self._pre_run_with_inputs(team_session, inputs)
             agent = spec.build()

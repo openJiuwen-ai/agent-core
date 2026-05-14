@@ -105,7 +105,17 @@ class RecoveryManager:
         if current_status == MemberStatus.RESTARTING:
             return True
 
-        if current_status not in {MemberStatus.ERROR, MemberStatus.SHUTDOWN}:
+        # PAUSED / STOPPED / ERROR / SHUTDOWN are all directly transitionable
+        # to RESTARTING per ``MEMBER_TRANSITIONS``. Only the "active" states
+        # (READY / BUSY / SHUTDOWN_REQUESTED / UNSTARTED) need the ERROR
+        # normalization step to clear an invalid direct hop.
+        directly_restartable = {
+            MemberStatus.PAUSED,
+            MemberStatus.STOPPED,
+            MemberStatus.ERROR,
+            MemberStatus.SHUTDOWN,
+        }
+        if current_status not in directly_restartable:
             updated = await db.member.update_member_status(
                 member_name,
                 team_name,
@@ -160,7 +170,15 @@ class RecoveryManager:
             if member.member_name not in live_teammates:
                 continue
             member_status = MemberStatus(member.status)
-            if member_status in {MemberStatus.UNSTARTED, MemberStatus.SHUTDOWN}:
+            # UNSTARTED never ran; SHUTDOWN/STOPPED are not "live" by
+            # definition (runtime gone). Spawned-handles filtering above
+            # already excludes most of these, but the status guard keeps
+            # the snapshot honest when a stale handle is still registered.
+            if member_status in {
+                MemberStatus.UNSTARTED,
+                MemberStatus.SHUTDOWN,
+                MemberStatus.STOPPED,
+            }:
                 continue
             result.append((member.member_name, member_status))
         return result

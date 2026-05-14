@@ -174,7 +174,7 @@ class _TeamRunnerMixin:
         """
         if member:
             return await self._run_team_member(agent_team, inputs, session=session)
-        spec = await self._resolve_team_agent_spec(agent_team)
+        spec = await self._resolve_team_agent_spec(agent_team, session=session)
         with self._root_task_group_scope():
             activation = await self._get_team_runtime_manager().activate(spec, session, inputs)
             try:
@@ -190,6 +190,10 @@ class _TeamRunnerMixin:
                     return None
                 return await activation.agent.invoke(inputs, session=activation.session)
             finally:
+                await self._get_team_runtime_manager().finalize(
+                    team_name=spec.team_name,
+                    session_id=activation.session.get_session_id(),
+                )
                 await self._close_team_interact_gate(
                     team_name=spec.team_name,
                     session_id=activation.session.get_session_id(),
@@ -216,7 +220,7 @@ class _TeamRunnerMixin:
             async for chunk in self._run_team_member_streaming(agent_team, inputs, session=session):
                 yield chunk
             return
-        spec = await self._resolve_team_agent_spec(agent_team)
+        spec = await self._resolve_team_agent_spec(agent_team, session=session)
         with self._root_task_group_scope():
             activation = await self._get_team_runtime_manager().activate(spec, session, inputs)
             try:
@@ -243,6 +247,10 @@ class _TeamRunnerMixin:
                 async for chunk in activation.agent.stream(inputs, session=activation.session):
                     yield chunk
             finally:
+                await self._get_team_runtime_manager().finalize(
+                    team_name=spec.team_name,
+                    session_id=activation.session.get_session_id(),
+                )
                 await self._close_team_interact_gate(
                     team_name=spec.team_name,
                     session_id=activation.session.get_session_id(),
@@ -334,6 +342,7 @@ class _TeamRunnerMixin:
             try:
                 return await agent.invoke(inputs, session=team_session)
             finally:
+                await self._get_team_runtime_manager().finalize_member(agent)
                 if team_runtime is not None:
                     team_runtime.unbind_team_session(team_session.get_session_id())
                 await team_session.post_run()
@@ -356,6 +365,7 @@ class _TeamRunnerMixin:
                 async for chunk in agent.stream(inputs, session=team_session):
                     yield chunk
             finally:
+                await self._get_team_runtime_manager().finalize_member(agent)
                 if team_runtime is not None:
                     team_runtime.unbind_team_session(team_session.get_session_id())
                 await team_session.post_run()
@@ -514,13 +524,27 @@ class _TeamRunnerMixin:
     async def _resolve_team_agent_spec(
         self,
         agent_team: Union[str, "TeamAgentSpec"],
+        *,
+        session: Optional[Union[str, AgentTeamSession]] = None,
     ) -> "TeamAgentSpec":
         """Resolve ``run_agent_team`` input into a concrete ``TeamAgentSpec``.
 
-        ``TeamAgentSpec`` is returned as-is. ``str`` is treated as a
-        ``team_name`` and resolved against the runtime pool — the first
-        call for a given team must pass a spec to seed the pool.
-        Anything else raises ``AGENT_TEAM_CONFIG_INVALID``.
+        Input contract for the team runtime:
+
+        * ``TeamAgentSpec`` + new session → CREATE / NEW_TEAM_IN_SESSION.
+          Used for first-time starts and for booting a stopped team onto
+          a fresh session.
+        * ``str`` (``team_name``) + old session → RESUME_FROM_PAUSE (pool
+          still holds the entry) or COLD_RECOVER (pool empty — e.g. the
+          process restarted, or a pause/stop tore the entry down).
+
+        The ``team_name`` recover path reads the spec from the session
+        bucket persisted by ``persist_leader_config`` at the previous
+        ``bind_session``; the in-memory pool entry is no longer required.
+        First-ever runs (no pool entry AND no session bucket) must pass
+        a TeamAgentSpec.
+
+        Other shapes (raw ``BaseAgent``, etc.) raise ``AGENT_TEAM_CONFIG_INVALID``.
         """
         from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
         from openjiuwen.core.common.exception.codes import StatusCode
@@ -530,15 +554,23 @@ class _TeamRunnerMixin:
             return agent_team
         if isinstance(agent_team, str):
             entry = await self._get_team_runtime_manager().pool.get(agent_team)
-            if entry is None or entry.agent.spec is None:
-                raise_error(
-                    StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                    reason=(
-                        f"team '{agent_team}' is not active; the first run_agent_team "
-                        f"call for a team must pass a TeamAgentSpec to seed the pool"
-                    ),
+            if entry is not None and entry.agent.spec is not None:
+                return entry.agent.spec
+            if session is not None:
+                spec_from_bucket = await self._resolve_spec_from_session_bucket(
+                    team_name=agent_team,
+                    session=session,
                 )
-            return entry.agent.spec
+                if spec_from_bucket is not None:
+                    return spec_from_bucket
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason=(
+                    f"team '{agent_team}' has no live pool entry and no "
+                    f"persisted spec in the supplied session; first-time runs "
+                    f"must pass a TeamAgentSpec on a new session"
+                ),
+            )
         raise_error(
             StatusCode.AGENT_TEAM_CONFIG_INVALID,
             reason=(
@@ -546,6 +578,59 @@ class _TeamRunnerMixin:
                 f"{type(agent_team).__name__}. For BaseTeam pass base=True."
             ),
         )
+
+    @staticmethod
+    async def _resolve_spec_from_session_bucket(
+        *,
+        team_name: str,
+        session: Union[str, AgentTeamSession],
+    ) -> Optional["TeamAgentSpec"]:
+        """Read a persisted ``TeamAgentSpec`` from the session's team bucket.
+
+        Returns ``None`` when the session has no checkpoint, no bucket for
+        ``team_name``, or no ``spec`` payload in the bucket — the caller
+        decides whether that absence is fatal. Errors during restore are
+        swallowed and logged at warning level so the caller can fall
+        through to a clearer error message rather than re-raising a
+        cryptic checkpoint failure.
+
+        ``agent_customizer`` is dropped by serialization
+        (``Field(exclude=True)``) and is not reinjected here because no
+        live ``runtime_spec`` is available on the ``name`` path; callers
+        relying on a customizer must use the explicit ``spec`` form.
+        """
+        from openjiuwen.agent_teams.runtime.metadata import read_team_namespace
+        from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
+
+        if isinstance(session, AgentTeamSession):
+            team_session = session
+        else:
+            team_session = create_agent_team_session(session_id=session)
+        try:
+            await team_session.pre_run()
+        except Exception as exc:
+            logger.warning(
+                "failed to restore session {} for spec lookup: {}",
+                team_session.get_session_id(),
+                exc,
+            )
+            return None
+        bucket = read_team_namespace(team_session, team_name)
+        if not bucket:
+            return None
+        spec_data = bucket.get("spec")
+        if spec_data is None:
+            return None
+        try:
+            return TeamAgentSpec.model_validate(spec_data)
+        except Exception as exc:
+            logger.warning(
+                "failed to parse persisted spec for team {} in session {}: {}",
+                team_name,
+                team_session.get_session_id(),
+                exc,
+            )
+            return None
 
     async def _prepare_base_team(self, base_team: Union[str, BaseTeam]) -> BaseTeam:
         """Resolve ``_run_base_team`` input into a concrete ``BaseTeam``.

@@ -29,7 +29,7 @@ from openjiuwen.core.session.stream.base import OutputSchema
 
 def _make_controller(harness: TeamHarness) -> StreamController:
     """Wire a StreamController against a fake harness, no team_member needed."""
-    state = TeamAgentState(session_id="sess")
+    state = TeamAgentState()
     blueprint = SimpleNamespace(member_name="m", role=TeamRole.LEADER)
 
     async def _noop(_: Any) -> None:
@@ -130,7 +130,7 @@ async def test_cancel_agent_records_execution_transitions(
     abort_calls: list[None] = []
     harness = _make_harness_with_abort(abort_calls)
 
-    state = TeamAgentState(session_id="sess")
+    state = TeamAgentState()
     blueprint = SimpleNamespace(member_name="m", role=TeamRole.LEADER)
     transitions: list[ExecutionStatus] = []
 
@@ -162,6 +162,42 @@ async def test_cancel_agent_records_execution_transitions(
 
 
 @pytest.mark.asyncio
+async def test_cancel_agent_no_in_flight_round_is_silent() -> None:
+    """cancel_agent with no live round must not write the state machine.
+
+    Previously ``cancel_agent`` unconditionally wrote
+    CANCEL_REQUESTED, which fails the IDLE -> CANCEL_REQUESTED guard
+    and surfaces as an ``Invalid state transition`` ERROR log even
+    though nothing was actually wrong.
+    """
+    abort_calls: list[None] = []
+    harness = _make_harness_with_abort(abort_calls)
+
+    state = TeamAgentState()
+    blueprint = SimpleNamespace(member_name="m", role=TeamRole.LEADER)
+    transitions: list[ExecutionStatus] = []
+
+    async def _record_exec(status: ExecutionStatus) -> None:
+        transitions.append(status)
+
+    async def _noop_status(_: MemberStatus) -> None:
+        return None
+
+    sc = StreamController(
+        blueprint_getter=lambda: blueprint,
+        state=state,
+        resources=PrivateAgentResources(harness=harness),
+        status_updater=_noop_status,
+        execution_updater=_record_exec,
+    )
+
+    await sc.cancel_agent()
+
+    assert transitions == []
+    assert abort_calls == []
+
+
+@pytest.mark.asyncio
 async def test_drain_agent_task_clears_pending_inputs_and_cancels() -> None:
     """drain wipes queued user input AND uses the cooperative cancel path."""
     abort_calls: list[None] = []
@@ -184,6 +220,85 @@ async def test_drain_agent_task_clears_pending_inputs_and_cancels() -> None:
 
 
 @pytest.mark.asyncio
+async def test_drain_agent_task_advances_state_machine() -> None:
+    """drain must walk RUNNING -> CANCEL_REQUESTED -> CANCELLING.
+
+    Regression guard for the ``Invalid state transition`` errors caused
+    by kernel pause/stop bypassing ``cancel_agent`` and writing
+    ``CANCELLED`` / ``IDLE`` directly from ``RUNNING``.
+    """
+    abort_calls: list[None] = []
+    harness = _make_harness_with_abort(abort_calls)
+
+    state = TeamAgentState()
+    blueprint = SimpleNamespace(member_name="m", role=TeamRole.LEADER)
+    transitions: list[ExecutionStatus] = []
+
+    async def _record_exec(status: ExecutionStatus) -> None:
+        transitions.append(status)
+
+    async def _noop_status(_: MemberStatus) -> None:
+        return None
+
+    sc = StreamController(
+        blueprint_getter=lambda: blueprint,
+        state=state,
+        resources=PrivateAgentResources(harness=harness),
+        status_updater=_noop_status,
+        execution_updater=_record_exec,
+    )
+
+    async def _round() -> None:
+        await asyncio.sleep(0.01)
+
+    sc.agent_task = asyncio.create_task(_round())
+
+    await sc.drain_agent_task()
+
+    assert transitions == [ExecutionStatus.CANCEL_REQUESTED, ExecutionStatus.CANCELLING]
+    assert abort_calls == [None]
+
+
+@pytest.mark.asyncio
+async def test_drain_agent_task_no_in_flight_round_is_silent() -> None:
+    """drain with no live round must not poke the execution state machine.
+
+    Without an in-flight task the state is typically IDLE — writing
+    CANCEL_REQUESTED would fail validation. Pending queues are still
+    cleared so teardown leaves no dangling references.
+    """
+    abort_calls: list[None] = []
+    harness = _make_harness_with_abort(abort_calls)
+
+    state = TeamAgentState()
+    blueprint = SimpleNamespace(member_name="m", role=TeamRole.LEADER)
+    transitions: list[ExecutionStatus] = []
+
+    async def _record_exec(status: ExecutionStatus) -> None:
+        transitions.append(status)
+
+    async def _noop_status(_: MemberStatus) -> None:
+        return None
+
+    sc = StreamController(
+        blueprint_getter=lambda: blueprint,
+        state=state,
+        resources=PrivateAgentResources(harness=harness),
+        status_updater=_noop_status,
+        execution_updater=_record_exec,
+    )
+    sc.pending_inputs = ["queued"]
+    sc.pending_interrupt_resumes = [MagicMock()]
+
+    await sc.drain_agent_task()
+
+    assert transitions == []
+    assert abort_calls == []
+    assert sc.pending_inputs == []
+    assert sc.pending_interrupt_resumes == []
+
+
+@pytest.mark.asyncio
 async def test_execute_round_emits_cancelled_on_cooperative_abort_success() -> None:
     """Even when the inner stream finishes without raising, the
     ExecutionStatus must surface CANCELLED whenever the round was
@@ -193,7 +308,7 @@ async def test_execute_round_emits_cancelled_on_cooperative_abort_success() -> N
     abort_calls: list[None] = []
     harness = _make_harness_with_abort(abort_calls)
 
-    state = TeamAgentState(session_id="sess")
+    state = TeamAgentState()
     blueprint = SimpleNamespace(member_name="m", role=TeamRole.LEADER)
     transitions: list[ExecutionStatus] = []
 
@@ -226,7 +341,7 @@ async def test_execute_round_emits_completed_on_normal_finish() -> None:
     abort_calls: list[None] = []
     harness = _make_harness_with_abort(abort_calls)
 
-    state = TeamAgentState(session_id="sess")
+    state = TeamAgentState()
     blueprint = SimpleNamespace(member_name="m", role=TeamRole.LEADER)
     transitions: list[ExecutionStatus] = []
 
@@ -417,7 +532,7 @@ def _make_controller_with(
     *, member_name: str, harness: TeamHarness, role: TeamRole = TeamRole.TEAMMATE
 ) -> StreamController:
     """Variant of _make_controller that lets the test fix member identity."""
-    state = TeamAgentState(session_id="sess")
+    state = TeamAgentState()
     blueprint = SimpleNamespace(member_name=member_name, role=role)
 
     async def _noop(_: Any) -> None:

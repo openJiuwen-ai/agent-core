@@ -9,10 +9,13 @@ currently bound to, its lifecycle state, and the :class:`InteractGate`
 that gates concurrent interact deliveries.
 
 Pool key is ``team_name`` only — a given team is bound to at most one
-session at a time. Switching sessions for the same team goes through
-``recover_for_existing_session`` (warm recover), not through pool
-duplication. Multi-team-per-session is supported naturally by having
-multiple ``ActiveTeam`` entries that share a session id.
+session at a time. Switching sessions for the same team is a hard
+boundary: ``TeamRuntimeManager.activate`` tears down the stale entry
+via ``stop_team`` before dispatch and the new session enters through
+``CREATE`` / ``NEW_TEAM_IN_SESSION`` / ``COLD_RECOVER`` against an
+empty pool slot, ensuring no in-memory state leaks across sessions.
+Multi-team-per-session is supported naturally by having multiple
+``ActiveTeam`` entries that share a session id.
 """
 
 from __future__ import annotations

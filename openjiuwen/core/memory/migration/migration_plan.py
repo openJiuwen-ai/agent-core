@@ -7,6 +7,7 @@ sql_registry = OperationRegistry()
 vector_registry = OperationRegistry()
 kv_registry = OperationRegistry()
 message_registry = OperationRegistry()
+index_registry = OperationRegistry()
 
 """
 # SQL Example
@@ -81,4 +82,55 @@ message_registry.register(
     )
 )
 
+
+# Index Example - Rename MemoryDoc Field
+from openjiuwen.core.memory.migration.operation.operations import RenameMemoryDocFieldOperation
+index_registry.register(
+    "index_fragment",
+    RenameMemoryDocFieldOperation(
+        metadata=OperationMetadata(schema_version=1, description="Rename memory_text to text in MemoryDoc"),
+        old_field_name="memory_text",
+        new_field_name="text"
+    )
+)
+
+# Index Example - Add MemoryDoc Field
+from openjiuwen.core.memory.migration.operation.operations import AddMemoryDocFieldOperation
+index_registry.register(
+    "index_fragment",
+    AddMemoryDocFieldOperation(
+        metadata=OperationMetadata(schema_version=2, description="Add priority field to MemoryDoc"),
+        field_name="priority",
+        default_value_or_func=0
+    )
+)
+
+# Index Example - Remove MemoryDoc Field
+from openjiuwen.core.memory.migration.operation.operations import RemoveMemoryDocFieldOperation
+index_registry.register(
+    "index_fragment",
+    RemoveMemoryDocFieldOperation(
+        metadata=OperationMetadata(schema_version=3, description="Remove deprecated tag field from MemoryDoc"),
+        field_name="tag"
+    )
+)
+
+# Index Example - Transform MemoryDoc Field
+from openjiuwen.core.memory.migration.operation.operations import TransformMemoryDocFieldOperation
+index_registry.register(
+    "index_fragment",
+    TransformMemoryDocFieldOperation(
+        metadata=OperationMetadata(schema_version=4, description="Convert score from int to percentage"),
+        field_name="score",
+        transform_func=lambda score: score * 100
+    )
+)
+
+# Cross-Index Migration Example
+# Use LongTermMemory.migrate_between_indices() for migrating data between different BaseMemoryIndex instances.
+
+await LongTermMemory.migrate_between_indices(
+    source_index=old_index,
+    target_index=new_index,
+)
 """

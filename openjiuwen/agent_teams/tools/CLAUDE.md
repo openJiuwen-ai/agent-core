@@ -17,12 +17,12 @@ Tools never reach into `TeamDatabase` directly — they go through `TeamBackend`
 
 ## Tool Catalogue & Role Filters
 
-`create_team_tools(role=..., teammate_mode=..., exclude_tools=..., lang=...)` is the single entry point. It builds every tool once and filters by role.
+`create_team_tools(role=..., teammate_mode=..., lifecycle=..., exclude_tools=..., lang=...)` is the single entry point. It builds every tool once and filters by role.
 
 | Tool | Leader | Teammate | Notes |
 |---|---|---|---|
 | `build_team` | ✓ | | entry point — description carries the full workflow |
-| `clean_team` | ✓ | | requires every teammate shutdown first |
+| `clean_team` | ✓ (temporary only) | | requires every teammate shutdown first; not wired for `lifecycle="persistent"` (operator tears those down via SDK facades) |
 | `spawn_member` | ✓ | | takes optional `model_config_allocator` callback; `role_type ∈ {teammate (default), human_agent}`; `human_agent` rejects `model_name`/`prompt` and requires HITT to be engaged on the backend |
 | `shutdown_member` | ✓ | | `force=True` skips the normal shutdown sequence |
 | `approve_plan` | ✓ (plan_mode only) | | wired only when `teammate_mode == "plan_mode"` |
@@ -41,6 +41,20 @@ Plan-mode gating is enforced in the factory:
 if role == "leader" and teammate_mode != "plan_mode":
     allowed = allowed - {"approve_plan", "approve_tool"}
 ```
+
+Persistent-team gating is enforced in the same factory, right after:
+
+```python
+if lifecycle == "persistent":
+    allowed = allowed - {"clean_team"}
+```
+
+Rationale: persistent teams live across rounds and are torn down by the
+operator through SDK facades (`delete_agent_team` etc.). Exposing a
+leader-callable `clean_team` mid-round would race the runtime pool
+invariants and silently de-register a team the operator still considers
+live. Temporary teams keep the tool — they have no external operator;
+the leader is the only one who can wind them down.
 
 Worktree tools (`enter_worktree`, `exit_worktree`) have moved to `openjiuwen.harness.tools.worktree`. Their description and parameter schema live in `harness/prompts/tools/{enter,exit}_worktree.py`, and they are mounted by `TeamToolRail` whenever `agent_configurator.create_worktree_manager()` returns a `WorktreeManager` for the agent. There is nothing left to maintain in `tools/locales/descs/` for these two tools.
 

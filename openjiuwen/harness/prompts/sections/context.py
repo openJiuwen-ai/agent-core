@@ -165,6 +165,8 @@ async def _build_context_content(
         language: str = "cn",
         extra_content: Optional[str] = None,
         timezone: Optional[str] = None,
+        *,
+        include_daily_memory: bool = True,
 ) -> str:
     """Build the complete context file contents section.
 
@@ -175,6 +177,7 @@ async def _build_context_content(
         extra_content: Optional content to append at the end (e.g. tools list).
         timezone: IANA timezone name for date formatting (e.g. 'Asia/Shanghai', 'UTC').
                   Uses local timezone if None.
+        include_daily_memory: Whether to include today's daily memory file.
 
     Returns:
         Formatted context content string.
@@ -200,11 +203,12 @@ async def _build_context_content(
             "empty files are skipped]\n\n"
         )
 
-    daily_content = await _read_daily_memory(sys_operation, workspace, timezone)
-    if daily_content:
-        date = _format_date(timezone or "Asia/Shanghai")
-        title = daily_title_tpl.format(date=date)
-        parts.append(f"{title}\n\n{daily_content}\n\n")
+    if include_daily_memory:
+        daily_content = await _read_daily_memory(sys_operation, workspace, timezone)
+        if daily_content:
+            date = _format_date(timezone or "Asia/Shanghai")
+            title = daily_title_tpl.format(date=date)
+            parts.append(f"{title}\n\n{daily_content}\n\n")
 
     if extra_content:
         parts.append(extra_content)
@@ -218,6 +222,8 @@ async def build_context_section(
         language: str = "cn",
         tools_content: Optional[str] = None,
         timezone: Optional[str] = None,
+        *,
+        include_daily_memory: bool = True,
 ) -> Optional["PromptSection"]:
     """Build a PromptSection for context files.
 
@@ -228,6 +234,7 @@ async def build_context_section(
         tools_content: Optional pre-rendered tools content string for the given language.
         timezone: IANA timezone name for date formatting (e.g. 'Asia/Shanghai', 'UTC').
                   Uses local timezone if None.
+        include_daily_memory: Whether to include today's daily memory file.
 
     Returns:
         A PromptSection instance with context content, or None if workspace is None.
@@ -238,7 +245,12 @@ async def build_context_section(
         return None
 
     content = await _build_context_content(
-        sys_operation, workspace, language, extra_content=tools_content, timezone=timezone
+        sys_operation,
+        workspace,
+        language,
+        extra_content=tools_content,
+        timezone=timezone,
+        include_daily_memory=include_daily_memory,
     )
 
     return PromptSection(

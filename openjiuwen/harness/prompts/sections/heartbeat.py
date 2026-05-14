@@ -23,6 +23,7 @@ HEARTBEAT_SYSTEM_PROMPT_CN = """
 重要约束：
 - 若需修改 HEARTBEAT.md 文件，禁止给原本没有 <!-- --> 注释的内容添加注释标记
 - 非注释文本仅可在用户明确要求时修改或删除，否则必须保持原样
+- 心跳执行结果必须直接返回；除非心跳内容明确要求更新 HEARTBEAT.md，不要写入 daily memory 或其他记忆文件
 """
 
 HEARTBEAT_SYSTEM_PROMPT_EN = """
@@ -38,6 +39,7 @@ The system recognizes HEARTBEAT_OK as a heartbeat acknowledgment.
 Important Constraints:
 - When modifying HEARTBEAT.md, DO NOT add <!-- --> comment markers to content that originally had no such markers
 - Non-commented text may only be modified or deleted when explicitly requested by the user; otherwise preserve it as-is
+- Return heartbeat execution results directly; unless heartbeat content explicitly asks you to update HEARTBEAT.md, do not write them to daily memory or other memory files
 """
 
 

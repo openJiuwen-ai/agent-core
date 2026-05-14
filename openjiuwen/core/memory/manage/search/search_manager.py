@@ -1,16 +1,16 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+from datetime import datetime, timezone
 from typing import Optional, Any
 
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.manage.index.summary_manager import SummaryManager
-from openjiuwen.core.memory.manage.index.fragment_memory_manager import FragmentMemoryManager
+from openjiuwen.core.memory.manage.index.fragment_memory_manager import FragmentMemoryManager, FRAGMENT_MEMORY_TYPE
 from openjiuwen.core.memory.manage.index.variable_manager import VariableManager
 from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType
-from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 
@@ -29,13 +29,11 @@ class SearchManager:
 
     def __init__(self,
                  managers: dict[str, BaseMemoryManager],
-                 user_mem_store: UserMemStore,
                  crypto_key: bytes):
         self.managers = managers
-        self.mem_store = user_mem_store
         self.crypto_key = crypto_key
 
-    async def search(self, params: SearchParams, semantic_store, **kwargs) -> list[dict[str, Any]] | None:
+    async def search(self, params: SearchParams, **kwargs) -> list[dict[str, Any]] | None:
         user_id = params.user_id
         scope_id = params.scope_id
         query = params.query
@@ -61,14 +59,13 @@ class SearchManager:
         # search_type not specified, traverse available managers
         if search_type is None:
             for manager in set(self.managers.values()):
-                res = await manager.search(user_id=user_id, scope_id=scope_id, query=query, top_k=top_k,
-                                            semantic_store=semantic_store, **kwargs)
+                res = await manager.search(user_id=user_id, scope_id=scope_id, query=query, top_k=top_k, **kwargs)
                 if res is not None:
                     result.extend(res)
         # call the manager corresponding to search_type
         else:
-            res = await self.managers[search_type].search(user_id=user_id, scope_id=scope_id, query=query, top_k=top_k,
-                                                          semantic_store=semantic_store, **kwargs)
+            res = await self.managers[search_type].search(user_id=user_id, scope_id=scope_id,
+                                                          query=query, top_k=top_k, **kwargs)
             if res:
                 result = res
         
@@ -85,15 +82,42 @@ class SearchManager:
         pages: int,
         mem_type: str = None
     ) -> list[dict[str, Any]] | None:
-        list_res = await self.mem_store.get_in_range(user_id, scope_id, nums * (pages - 1), nums * pages, mem_type)
-        if not list_res:
-            return list_res
-        for item in list_res:
-            item["mem"] = BaseMemoryManager.decrypt_memory_if_needed(key=self.crypto_key, ciphertext=item["mem"])
-        return list_res
+        result = []
+        start = nums * (pages - 1)
+        end = start + nums
+
+        if mem_type:
+            if mem_type not in self.managers:
+                return []
+            manager = self.managers[mem_type]
+
+            if isinstance(manager, FragmentMemoryManager):
+                memories = await manager.list_fragment_memories(user_id, scope_id, mem_type=MemoryType(mem_type))
+            elif isinstance(manager, SummaryManager):
+                memories = await manager.list_user_summary(user_id, scope_id)
+            else:
+                memories = []
+
+            result = memories[start:end]
+        else:
+            all_memories = []
+            for manager in set(self.managers.values()):
+                if isinstance(manager, FragmentMemoryManager):
+                    memories = await manager.list_fragment_memories(user_id, scope_id)
+                elif isinstance(manager, SummaryManager):
+                    memories = await manager.list_user_summary(user_id, scope_id)
+                else:
+                    continue
+                all_memories.extend(memories)
+
+            all_memories.sort(key=lambda x: x.get('timestamp') or
+                              datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+            result = all_memories[start:end]
+
+        return result
 
     async def list_user_profile(self, user_id: str, scope_id: str) -> list[dict]:
-        if any(item not in self.managers for item in UserMemStore.FRAGMENT_MEMORY_TYPE):
+        if any(item not in self.managers for item in FRAGMENT_MEMORY_TYPE):
             raise build_error(
                 StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
                 memory_type="fragment_memory",

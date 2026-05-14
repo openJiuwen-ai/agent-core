@@ -45,6 +45,12 @@ class CoordinationKernel:
         self._subscribed_topics: list[str] = []
         self._event_bus: Optional[EventBus] = None
         self._dispatcher: Optional["EventDispatcher"] = None
+        # Lifecycle state machine for pause/stop idempotency.
+        # Transitions: idle -> running (start) -> paused (pause) -> stopped (stop).
+        # ``stopped`` is terminal for this kernel instance; subsequent
+        # pause/stop calls become no-ops so the Runner-level finally can
+        # safely re-trigger them after an external stop_coordination.
+        self._lifecycle_state: str = "idle"
 
     def setup(self, *, role: TeamRole) -> None:
         """Construct the event bus and dispatcher for the given role.
@@ -113,8 +119,7 @@ class CoordinationKernel:
         set_member_id(member_name)
         if session is not None and not isinstance(session, AgentTeamSession):
             team_logger.warning(
-                "[{}] TeamAgent expects AgentTeamSession; got {}. "
-                "Please invoke via Runner.run_agent_team_streaming.",
+                "[{}] TeamAgent expects AgentTeamSession; got {}. Please invoke via Runner.run_agent_team_streaming.",
                 member_name,
                 type(session).__name__,
             )
@@ -123,7 +128,7 @@ class CoordinationKernel:
         if session is not None:
             await sess_mgr.bind_session(session)
         else:
-            sess_mgr.unbind_session()
+            sess_mgr.release_session()
 
         if host.role == TeamRole.LEADER and infra.team_backend:
             existing = await infra.team_backend.db.team.get_team(infra.team_backend.team_name)
@@ -170,25 +175,32 @@ class CoordinationKernel:
             team_name = host.team_name
             if team_name and not self._subscribed_topics:
                 await self.subscribe_transport(team_name)
+        self._lifecycle_state = "running"
 
     async def pause(self) -> None:
+        # Idempotent: ignore if not currently running. Pause is only a valid
+        # transition from running; paused/stopped/idle short-circuit so the
+        # Runner-level finally can safely call pause even after an external
+        # stop_coordination has already torn things down.
+        if self._lifecycle_state != "running":
+            return
         host = self._host
         team_logger.info("[{}] coordination pausing (persistent)", host.member_name or "?")
         await self.drain_agent_task()
         host.persist_allocator_state()
         if host.role == TeamRole.LEADER:
-            await self._mark_live_teammates_paused()
+            await self._mark_live_teammates(MemberStatus.PAUSED)
             await host.spawn_manager.cancel_recovery_tasks()
             await host.spawn_manager.shutdown_all_handles()
             self._persist_team_lifecycle("paused")
         messager = host.infra.messager
         if messager and host.role == TeamRole.LEADER:
+            from openjiuwen.agent_teams.context import get_session_id
             from openjiuwen.agent_teams.schema.events import (
                 EventMessage,
                 TeamStandbyEvent,
                 TeamTopic,
             )
-            from openjiuwen.agent_teams.context import get_session_id
 
             team_name = host.team_name
             if team_name:
@@ -204,13 +216,23 @@ class CoordinationKernel:
             await self._event_bus.stop()
         self.close_stream()
         host.session_manager.release_session()
+        # team_member status update is owned by ``TeamRuntimeManager.finalize_member``
+        # so persistence-layer status (lives across restarts) stays decoupled
+        # from kernel runtime teardown (volatile). External stop_coordination
+        # from leader path must not silently mark teammates SHUTDOWN — that
+        # would trip the kernel.start ``all-SHUTDOWN -> clean_team`` guard and
+        # delete a team that should be recoverable.
+        self._lifecycle_state = "paused"
 
-    async def _mark_live_teammates_paused(self) -> None:
-        """Persist PAUSED status for every spawned teammate before tearing down handles.
+    async def _mark_live_teammates(self, target_status: MemberStatus) -> None:
+        """Persist ``target_status`` for every spawned teammate before tearing down handles.
 
         Members that were never started (UNSTARTED) or already gone (SHUTDOWN)
-        keep their existing status — PAUSED only applies to runtime that was
-        actually live during this round.
+        keep their existing status — the mark only applies to runtime that
+        was actually live during this round. Used by both pause (writes
+        PAUSED — natural round-end idle) and stop (writes STOPPED —
+        external teardown without disbanding the team) so the persistence
+        layer captures *why* the teammate runtime went away.
         """
         host = self._host
         team_backend = host.infra.team_backend
@@ -237,13 +259,14 @@ class CoordinationKernel:
                 await team_backend.db.member.update_member_status(
                     member.member_name,
                     team_name,
-                    MemberStatus.PAUSED.value,
+                    target_status.value,
                 )
             except Exception as e:
                 team_logger.error(
-                    "[{}] failed to mark teammate {} PAUSED: {}",
+                    "[{}] failed to mark teammate {} {}: {}",
                     leader or "?",
                     member.member_name,
+                    target_status.value,
                     e,
                 )
 
@@ -266,29 +289,46 @@ class CoordinationKernel:
             )
 
     async def stop(self) -> None:
+        # Idempotent: terminal state. Pause -> stop is allowed (resources
+        # still need close), running -> stop is the normal path, idle/stopped
+        # are no-ops.
+        if self._lifecycle_state in ("idle", "stopped"):
+            return
         host = self._host
         team_logger.info("[{}] coordination stopping", host.member_name or "?")
         await self.drain_agent_task()
         host.persist_allocator_state()
+        if host.role == TeamRole.LEADER:
+            # Mirror of the pause path: mark every spawned teammate so the
+            # persistence layer captures why the runtime went away. STOPPED
+            # is a non-disbanding teardown — ``recover_team`` re-spawns from
+            # here. Done before ``shutdown_all_handles`` so the in-process
+            # task cancellations cannot race with the status write.
+            await self._mark_live_teammates(MemberStatus.STOPPED)
         await self.unsubscribe_transport()
         await host.spawn_manager.cancel_recovery_tasks()
         await host.spawn_manager.shutdown_all_handles()
         memory_manager = host.resources.memory_manager
         if memory_manager:
             await memory_manager.close()
-        if self._event_bus is None:
-            return
-        await self._event_bus.stop()
+        if self._event_bus is not None:
+            await self._event_bus.stop()
         self.close_stream()
         host.session_manager.release_session()
+        # See pause(): team_member status update for the agent's own
+        # ``team_member`` handle is owned by
+        # ``TeamRuntimeManager.finalize_member`` so stop_coordination on a
+        # teammate kernel only tears down runtime and leaves persisted
+        # status alone — that is what makes stop -> recover possible.
+        self._lifecycle_state = "stopped"
 
     async def subscribe_transport(self, team_name: str) -> None:
         host = self._host
         messager = host.infra.messager
         if not messager or not self._event_bus:
             return
-        from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
         from openjiuwen.agent_teams.context import get_session_id
+        from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
 
         local_member_name = host.member_name or ""
 
@@ -374,18 +414,16 @@ class CoordinationKernel:
         )
 
     async def finalize_round(self) -> None:
+        """Run round-end cleanup; lifecycle decisions live at the Runner layer.
+
+        Limited to memory extraction and stream queue release. Whether to
+        pause (persistent) or stop (temporary / shutdown_requested) is now
+        decided by the run entry point in ``core/runner/team_runner.py`` so
+        external ``stop_coordination`` calls cannot be silently overridden
+        by the stream finally path.
+        """
         host = self._host
-        team_member = host.state.team_member
-        shutdown_requested = team_member is not None and await team_member.status() == MemberStatus.SHUTDOWN_REQUESTED
         memory_manager = host.resources.memory_manager
         if memory_manager:
             await memory_manager.extract_after_round()
-        if host.lifecycle == "persistent" and not shutdown_requested:
-            await self.pause()
-            if team_member:
-                await team_member.update_status(MemberStatus.READY)
-        else:
-            await self.stop()
-            if team_member:
-                await team_member.update_status(MemberStatus.SHUTDOWN)
         host.stream_controller.stream_queue = None

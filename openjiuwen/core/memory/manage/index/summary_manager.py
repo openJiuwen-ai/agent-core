@@ -4,268 +4,239 @@ from datetime import datetime, timezone
 from typing import Any, List, Tuple
 
 from openjiuwen.core.foundation.llm import Model
-from openjiuwen.core.memory.manage.mem_model.semantic_store import SemanticStore
-from openjiuwen.core.memory.common.base import generate_idx_name, parse_memory_hit_infos
+from openjiuwen.core.foundation.store.base_memory_index import BaseMemoryIndex, MemoryDoc
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.manage.mem_model.memory_unit import SummaryUnit, BaseMemoryUnit, MemoryType
-from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
-from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
 
 
 class SummaryManager(BaseMemoryManager):
-    """Manages summary memory CRUD with encryption and vector storage"""
 
     def __init__(self,
-                 user_mem_store: UserMemStore,
-                 crypto_key: bytes):
-        self.mem_store = user_mem_store
+                 memory_index: BaseMemoryIndex,
+                 crypto_key: bytes = None):
+        self.memory_index = memory_index
         self.crypto_key = crypto_key
         self.mem_type = MemoryType.SUMMARY.value
 
-    async def add_memories(self, user_id: str, scope_id: str, memories: dict[str, list[BaseMemoryUnit]],
-                           llm: Tuple[str, Model] | None = None, **kwargs):
-        """add memories in batch."""
-        semantic_store = self._get_semantic_store("add", **kwargs)
-        valid_units: list[SummaryUnit] = []
-        for mem_type, memory in memories.items():
+    @staticmethod
+    def _parse_timestamp(ts: str) -> datetime:
+        if not ts:
+            return datetime.now(timezone.utc).astimezone()
+        for fmt in ("%Y-%m-%d %H-%M-%S", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(ts, fmt).replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+        try:
+            return datetime.fromisoformat(ts)
+        except ValueError:
+            pass
+        return datetime.now(timezone.utc).astimezone()
+
+    def _convert_to_memory_docs(self, memories: dict[str, list[BaseMemoryUnit]]) -> List[MemoryDoc]:
+        memory_docs = []
+        for mem_type, memory_list in memories.items():
             if mem_type != self.mem_type:
                 continue
-            for unit in memory:
-                if not isinstance(unit, SummaryUnit):
-                    memory_logger.warning(
-                        "mem_unit is not a SummaryUnit",
-                        event_type=LogEventType.MEMORY_STORE,
-                        memory_type=self.mem_type,
-                        user_id=user_id,
-                        scope_id=scope_id
-                    )
+            for mem_unit in memory_list:
+                if not isinstance(mem_unit, SummaryUnit):
                     continue
-                if not unit.summary:
-                    memory_logger.warning(
-                        "summary is empty, skipping",
-                        event_type=LogEventType.MEMORY_STORE,
-                        memory_type=self.mem_type,
-                        user_id=user_id,
-                        scope_id=scope_id
-                    )
-                    continue
-                valid_units.append(unit)
+                plaintext_content = BaseMemoryManager.decrypt_memory_if_needed(
+                    key=self.crypto_key,
+                    ciphertext=mem_unit.summary
+                ) if self.crypto_key else mem_unit.summary
 
-        if not valid_units:
+                memory_doc = MemoryDoc(
+                    id=mem_unit.mem_id,
+                    text=plaintext_content,
+                    type=mem_type,
+                    timestamp=self._parse_timestamp(mem_unit.timestamp),
+                    fields={
+                        "source_id": mem_unit.message_mem_id,
+                        "metadata": {}
+                    }
+                )
+                memory_docs.append(memory_doc)
+        return memory_docs
+
+    async def add_memories(self, user_id: str, scope_id: str, memories: dict[str, list[BaseMemoryUnit]],
+                           llm: Tuple[str, Model] | None = None, **kwargs):
+        if not self.memory_index:
             memory_logger.warning(
-                "No valid summary units to add",
+                "memory_index is not initialized, cannot add memories",
                 event_type=LogEventType.MEMORY_STORE,
                 memory_type=self.mem_type,
                 user_id=user_id,
                 scope_id=scope_id
             )
             return
-
-        for unit in valid_units:
-            vector_success = await self._add_summary_memory_to_vector(
-                summary_unit=unit,
+        memory_docs = self._convert_to_memory_docs(memories)
+        if not memory_docs:
+            memory_logger.warning(
+                "No valid summary docs to add",
+                event_type=LogEventType.MEMORY_STORE,
+                memory_type=self.mem_type,
                 user_id=user_id,
-                scope_id=scope_id,
-                semantic_store=semantic_store
+                scope_id=scope_id
             )
-            if not vector_success:
-                raise build_error(
-                    StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
-                    memory_type=self.mem_type,
-                    error_msg="summary add to vector store failed",
-                )
-            await self._add_summary_memory_to_mem_store(user_id, scope_id, unit)
+            return
+        await self.memory_index.add_memories(user_id, scope_id, memory_docs)
 
     async def update(self, user_id: str, scope_id: str, mem_id: str, new_memory: str, **kwargs):
-        """update memory by its id."""
-        semantic_store = self._get_semantic_store("update", **kwargs)
-        time = datetime.now(timezone.utc).astimezone().strftime('%Y-%m-%d %H:%M:%S')
-        encrypt_new_memory = BaseMemoryManager.encrypt_memory_if_needed(key=self.crypto_key, plaintext=new_memory)
-        new_data = {'mem': encrypt_new_memory, 'time': time}
-        await self.mem_store.update(mem_id=mem_id, user_id=user_id, scope_id=scope_id, data=new_data)
-        table_name = generate_idx_name(usr_id=user_id, scope_id=scope_id, mem_type=MemoryType.SUMMARY.value)
-        await semantic_store.delete_docs([mem_id], table_name)
-        # semantic memory embedding must not encrypt
-        await semantic_store.add_docs([(mem_id, new_memory)], table_name)
+        if not self.memory_index:
+            memory_logger.warning(
+                "memory_index is not initialized, cannot update memory",
+                event_type=LogEventType.MEMORY_STORE,
+                memory_type=self.mem_type,
+                user_id=user_id,
+                scope_id=scope_id
+            )
+            return False
+        memory_doc = await self.memory_index.get_by_id(user_id, scope_id, mem_id)
+        if not memory_doc:
+            return False
+        updated_doc = MemoryDoc(
+            id=mem_id,
+            text=new_memory,
+            type=self.mem_type,
+            timestamp=datetime.now(timezone.utc).astimezone(),
+            fields=memory_doc.fields
+        )
+        await self.memory_index.delete_memories(user_id, scope_id, [mem_id])
+        await self.memory_index.add_memories(user_id, scope_id, [updated_doc])
         return True
 
     async def delete(self, user_id: str, scope_id: str, mem_id: str, **kwargs):
-        """delete memory by its id."""
-        semantic_store = self._get_semantic_store("delete", **kwargs)
-        data = await self.mem_store.get(user_id=user_id, scope_id=scope_id, mem_id=mem_id)
-        if data is None:
-            memory_logger.error(
-                "Delete summary in store failed, the mem of mem_id is not exist.",
+        if not self.memory_index:
+            memory_logger.warning(
+                "memory_index is not initialized, cannot delete memory",
                 event_type=LogEventType.MEMORY_STORE,
-                memory_id=mem_id,
+                memory_type=self.mem_type,
                 user_id=user_id,
                 scope_id=scope_id
             )
             return False
-        await self.mem_store.delete(mem_id=mem_id, user_id=user_id, scope_id=scope_id)
-        await self._delete_vector_summary_memory(memory_id=[mem_id],
-                                                 user_id=user_id,
-                                                 scope_id=scope_id,
-                                                 semantic_store=semantic_store)
+        await self.memory_index.delete_memories(user_id, scope_id, [mem_id])
         return True
 
     async def delete_by_user_id(self, user_id: str, scope_id: str, **kwargs):
-        """delete memory by user id and app id."""
-        semantic_store = self._get_semantic_store("delete", **kwargs)
-        data = await self.mem_store.get_all(user_id=user_id, scope_id=scope_id, mem_type=MemoryType.SUMMARY.value)
-        if data is None:
-            memory_logger.error(
-                "Delete summary in store failed, the mem of user_id is not exist.",
+        if not self.memory_index:
+            memory_logger.warning(
+                "memory_index is not initialized, cannot delete by user_id",
                 event_type=LogEventType.MEMORY_STORE,
+                memory_type=self.mem_type,
                 user_id=user_id,
                 scope_id=scope_id
             )
             return False
-        mem_ids = [item['id'] for item in data]
-        await self.mem_store.batch_delete(user_id=user_id, scope_id=scope_id, mem_ids=mem_ids)
-        await self._delete_vector_store_table(user_id=user_id,
-                                              scope_id=scope_id,
-                                              semantic_store=semantic_store)
+        await self.memory_index.delete_by_user_and_scope(user_id, scope_id)
         return True
 
     async def get(self, user_id: str, scope_id: str, mem_id: str) -> dict[str, Any] | None:
-        """get memory by its id."""
-        retrieve_res = await self.mem_store.get(user_id=user_id, scope_id=scope_id, mem_id=mem_id)
-        retrieve_res["mem"] = BaseMemoryManager.decrypt_memory_if_needed(key=self.crypto_key,
-                                                                         ciphertext=retrieve_res["mem"])
-        return retrieve_res
+        if not self.memory_index:
+            memory_logger.warning(
+                "memory_index is not initialized, cannot get memory",
+                event_type=LogEventType.MEMORY_RETRIEVE,
+                memory_type=self.mem_type,
+                user_id=user_id,
+                scope_id=scope_id
+            )
+            return None
+        memory_doc = await self.memory_index.get_by_id(user_id, scope_id, mem_id)
+        if not memory_doc:
+            return None
+
+        encrypted_content = BaseMemoryManager.encrypt_memory_if_needed(
+            key=self.crypto_key,
+            plaintext=memory_doc.text
+        ) if self.crypto_key else memory_doc.text
+
+        return {
+            "id": memory_doc.id,
+            "mem": encrypted_content,
+            "mem_type": memory_doc.type,
+            "timestamp": memory_doc.timestamp,
+            "source_id": memory_doc.fields.get("source_id"),
+            "metadata": memory_doc.fields.get("metadata")
+        }
 
     async def search(self, user_id: str, scope_id: str, query: str, top_k: int, **kwargs):
-        """query memory, return top k results"""
-        semantic_store = self._get_semantic_store("search", **kwargs)
-        mem_ids, scores = await self._recall_by_vector(query, user_id, scope_id, semantic_store, top_k)
-        retrieve_res = await self.mem_store.batch_get(user_id=user_id, scope_id=scope_id, mem_ids=mem_ids)
-        if retrieve_res is None:
-            return None
-        for item in retrieve_res:
-            item["score"] = scores.get(item['id'], 0)
-            item["mem"] = BaseMemoryManager.decrypt_memory_if_needed(key=self.crypto_key, ciphertext=item["mem"])
-
-        retrieve_res.sort(key=lambda x: x["score"], reverse=True)
-        return retrieve_res
-
-    async def _add_summary_memory_to_mem_store(self, user_id: str, scope_id: str, summary_unit: SummaryUnit):
-        """Encrypt and write summary memory to persistent storage."""
-        mem = BaseMemoryManager.encrypt_memory_if_needed(key=self.crypto_key,
-                                                         plaintext=summary_unit.summary)
-        data = {
-            'id': summary_unit.mem_id,
-            'user_id': user_id or '',
-            'scope_id': scope_id or '',
-            'mem': mem,
-            'source_id': summary_unit.message_mem_id,
-            'mem_type': self.mem_type,
-            'timestamp': summary_unit.timestamp
-        }
-        await self.mem_store.write(user_id=user_id,
-                                   scope_id=scope_id,
-                                   mem_id=summary_unit.mem_id,
-                                   data=data)
-
-    async def _add_summary_memory_to_vector(
-        self,
-        summary_unit: SummaryUnit,
-        user_id: str,
-        scope_id: str,
-        semantic_store: SemanticStore
-    ) -> bool:
-        """Add plaintext summary to vector store for semantic recall."""
-        if not semantic_store:
-            raise build_error(
-                StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+        if not self.memory_index:
+            memory_logger.warning(
+                "memory_index is not initialized, cannot search memories",
+                event_type=LogEventType.MEMORY_RETRIEVE,
                 memory_type=self.mem_type,
-                error_msg="vector store must not be None",
+                user_id=user_id,
+                scope_id=scope_id
             )
-        table_name = generate_idx_name(usr_id=user_id,
-                                       scope_id=scope_id,
-                                       mem_type=self.mem_type)
-        return await semantic_store.add_docs(
-            docs=[(summary_unit.mem_id, summary_unit.summary)],
-            table_name=table_name,
-            scope_id=scope_id
+            return []
+        search_results = await self.memory_index.search(
+            user_id=user_id,
+            scope_id=scope_id,
+            query=query,
+            mem_type=self.mem_type,
+            top_k=top_k
         )
 
-    async def _delete_vector_summary_memory(
-            self,
-            user_id: str,
-            scope_id: str,
-            memory_id: List[str],
-            semantic_store: SemanticStore
-    ):
-        """Delete summary memory from vector store by IDs."""
-        if not semantic_store:
-            raise build_error(
-                StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
+        result = []
+        for memory_doc, score in search_results:
+            encrypted_content = BaseMemoryManager.encrypt_memory_if_needed(
+                key=self.crypto_key,
+                plaintext=memory_doc.text
+            ) if self.crypto_key else memory_doc.text
+
+            result.append({
+                "id": memory_doc.id,
+                "mem": encrypted_content,
+                "mem_type": memory_doc.type,
+                "timestamp": memory_doc.timestamp,
+                "score": score,
+                "source_id": memory_doc.fields.get("source_id"),
+                "metadata": memory_doc.fields.get("metadata")
+            })
+        return result
+
+    async def list_user_summary(self, user_id: str, scope_id: str) -> list[dict[str, Any]]:
+        if not self.memory_index:
+            memory_logger.warning(
+                "memory_index is not initialized, cannot list user summary",
+                event_type=LogEventType.MEMORY_RETRIEVE,
                 memory_type=self.mem_type,
-                error_msg="vector store must not be None",
+                user_id=user_id,
+                scope_id=scope_id
             )
-        table_name = generate_idx_name(usr_id=user_id, scope_id=scope_id, mem_type=self.mem_type)
-        await semantic_store.delete_docs(memory_id, table_name)
+            return []
+        offset = 0
+        batch_size = 100
+        all_memories = []
+        while True:
+            batch = await self.memory_index.list_memories(user_id, scope_id, offset, batch_size)
+            if not batch:
+                break
+            all_memories.extend(batch)
+            if len(batch) < batch_size:
+                break
+            offset += batch_size
 
-    async def _recall_by_vector(
-            self,
-            query: str,
-            user_id: str,
-            scope_id: str,
-            semantic_store: SemanticStore,
-            top_k: int = 5,
-    ) -> tuple[List[str], dict[str, float]]:
-        """Semantic recall summary memory IDs and similarity scores."""
-        table_name = generate_idx_name(usr_id=user_id, scope_id=scope_id, mem_type=MemoryType.SUMMARY.value)
-        memory_hit_info = await semantic_store.search(query=query, table_name=table_name,
-                                                      scope_id=scope_id, top_k=top_k)
-        return parse_memory_hit_infos(memory_hit_info)
+        summary_memories = [m for m in all_memories if m.type == self.mem_type]
 
-    async def _delete_vector_store_table(
-            self,
-            user_id: str,
-            scope_id: str,
-            semantic_store: SemanticStore
-    ):
-        """Delete entire vector table for user + scope summary memory."""
-        if not semantic_store:
-            raise build_error(
-                StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
-                memory_type=self.mem_type,
-                error_msg="vector store must not be None",
-            )
-        table_name = generate_idx_name(usr_id=user_id, scope_id=scope_id, mem_type=self.mem_type)
-        await semantic_store.delete_table(table_name=table_name)
+        result = []
+        for memory_doc in summary_memories:
+            encrypted_content = BaseMemoryManager.encrypt_memory_if_needed(
+                key=self.crypto_key,
+                plaintext=memory_doc.text
+            ) if self.crypto_key else memory_doc.text
 
-    def _get_semantic_store(self, operation_type: str, **kwargs) -> SemanticStore:
-        """
-        Get semantic store from kwargs or raise appropriate error based on operation type.
+            result.append({
+                "id": memory_doc.id,
+                "mem": encrypted_content,
+                "mem_type": memory_doc.type,
+                "timestamp": memory_doc.timestamp,
+                "source_id": memory_doc.fields.get("source_id"),
+                "metadata": memory_doc.fields.get("metadata")
+            })
 
-        Args:
-            operation_type: Type of operation being performed ("add", "update", "delete", "search")
-            **kwargs: Keyword arguments containing semantic_store
-
-        Returns:
-            SemanticStore: The semantic store instance
-
-        Raises:
-            Error: If semantic_store is not provided
-        """
-        semantic_store = kwargs.get('semantic_store')
-        if not semantic_store:
-            error_codes = {
-                "add": StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
-                "update": StatusCode.MEMORY_UPDATE_MEMORY_EXECUTION_ERROR,
-                "delete": StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
-                "search": StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
-            }
-            error_code = error_codes.get(operation_type, StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR)
-            raise build_error(
-                error_code,
-                memory_type=self.mem_type,
-                error_msg="semantic_store is required",
-            )
-        return semantic_store
+        result.sort(key=lambda x: x['timestamp'], reverse=True)
+        return result

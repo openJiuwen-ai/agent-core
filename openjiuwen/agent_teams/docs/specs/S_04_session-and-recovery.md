@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/session_manager.py`、`openjiuwen/agent_teams/agent/recovery_manager.py`、`openjiuwen/agent_teams/runtime/metadata.py`、`openjiuwen/agent_teams/context.py` |
-| 最近一次修订 commit | `18823271` |
-| 关联 feature | `F_01_coordination-protocol-cleanup.md` |
+| 最近一次修订日期 | 2026-05-12 |
+| 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md` |
 
 ## 范围 / 边界
 
@@ -28,7 +28,7 @@
 
 - 协调层（`coordination/`）的事件分发与 round 调度——session 状态机只暴露给 kernel
   调用，路由细节归 `S_03_coordination-protocol`。
-- `runtime/manager.py` 的 9 路 dispatch truth table——dispatch 决定要不要
+- `runtime/manager.py` 的 7 路 dispatch truth table——dispatch 决定要不要
   `recover_for_existing_session` / `resume_for_new_session`，但具体决策见
   `S_06_runtime-pool-dispatch`，不在此重复。
 - 多 team 共享 session 的 pool 拓扑——本规约只关心单 team 视角下的 session 字段。
@@ -135,16 +135,25 @@ state["teams"][team_name] = {
 
 session 切换有两条入口，差异**只在是否先清理旧 handle**：
 
-- `resume_for_new_session`：来自 `manager.activate` 的
-  `NEW_TEAM_IN_SESSION` / `NEW_TEAM_IN_SESSION_WARM` / `RESUME_FROM_PAUSE` 分支
-  （`_apply_action` 直接调 `agent.resume_for_new_session`，不再有 factory wrapper），
-  上层未做 spawn handle 清理，由本路径以 `cleanup_first=True` 自清。
-- `recover_for_existing_session`：来自 checkpoint 恢复（`COLD_RECOVER`
-  / `WARM_RECOVER`），coordination 已在重建前清过一次，本路径以
-  `cleanup_first=False` 跳过重复清理。
+- `resume_for_new_session`：来自 `manager.activate` 的 `NEW_TEAM_IN_SESSION` 分支
+  （`_apply_action` 先 `spec.build()` 出新 `TeamAgent`，再调
+  `agent.resume_for_new_session(session)`）。新 agent 上 spawn_manager 是空的，本
+  路径以 `cleanup_first=True` 走 cleanup 不会找到任何活 handle，对单次 build 是
+  no-op；保留 `True` 是为了 cold-recover 之外、由调用方手动 `resume_for_new_session`
+  的低阶用法仍有清理保障。`RESUME_FROM_PAUSE` 不调用此方法——pause 后 pool 里同
+  实例继续跑，没有 session 切换。
+- `recover_for_existing_session`：来自 `COLD_RECOVER` 分支
+  （`TeamAgent.recover_from_session(...)` 之后 `agent.recover_team()`）。recover_team
+  自身在 leader 路径里会重新拉起 teammate，因此调用方此前已经把旧 spawn handle
+  清空（或干脆是新 build 的 agent），本路径以 `cleanup_first=False` 跳过重复清理。
 
 两条入口在 leader-only 路径下都收敛到 `RecoveryManager.restart_for_session_switch`，
 区别只剩 `cleanup_first`。teammate / 非 leader 路径直接早返回。
+
+**`WARM_RECOVER` / `NEW_TEAM_IN_SESSION_WARM` 两条入口已下线**（见 F_05）：跨 session
+切换不再复用 pool 里的同一个 `TeamAgent` 实例，由 `manager.activate` 在 dispatch
+前 `stop_team` 拆掉 stale entry，下一轮走 cold-build 路径重新构造。这消除了"in-memory
+状态（contextvars / 客户端缓存）跨 session 漂移"的边界条件。
 
 ## 接口契约
 
@@ -250,13 +259,17 @@ class RecoveryManager:
 
 - **`collect_live_teammates_for_session_switch`** 只对 `role == LEADER` 且
   `team_backend` 存在的情况下返回非空。它的判定条件是
-  "DB 里 status 不是 UNSTARTED/SHUTDOWN" **且** "spawn_manager 上仍持有非 None
-  handle"——两个条件都满足才认为该 teammate 需要在新 session 下重新拉起。
+  "DB 里 status 不在 `{UNSTARTED, SHUTDOWN, STOPPED}`" **且** "spawn_manager 上仍持有
+  非 None handle"——两个条件都满足才认为该 teammate 需要在新 session 下重新拉起。
+  `STOPPED` 被加入过滤集合（与 `UNSTARTED` / `SHUTDOWN` 同列）是因为它表示
+  "runtime 已被外部 stop_team 拆掉"，没有 live handle 可恢复；spawn 过滤已经能挡
+  大部分情况，状态过滤是为了 stale handle 仍在注册时也不漏到 live 列表里。
 - **`restart_for_session_switch`** 内部对每个成员的处理：
   1. 若 `cleanup_first` → `await spawn_manager.cleanup_teammate(member_name)`
-  2. `_mark_teammate_restarting_for_session_switch`：READY/BUSY 不能直跳
-     RESTARTING，先归一到 ERROR 再到 RESTARTING；ERROR/SHUTDOWN/RESTARTING
-     可直接到 RESTARTING；任何 DB 更新失败 → 跳过该成员、不抛
+  2. `_mark_teammate_restarting_for_session_switch`：READY/BUSY/UNSTARTED/SHUTDOWN_REQUESTED
+     不能直跳 RESTARTING，先归一到 ERROR 再到 RESTARTING；PAUSED/STOPPED/ERROR/SHUTDOWN
+     是"directly restartable"，按 `MEMBER_TRANSITIONS` 可直接到 RESTARTING；任何
+     DB 更新失败 → 跳过该成员、不抛
   3. `await spawn_manager.restart_teammate(member_name)`
 - **`persist_leader_config`** 是**全量覆盖** `spec` + `context`
   （+ optional `model_allocator_state`）通过 `write_team_namespace`，这是
@@ -337,7 +350,8 @@ def reset_session_id(token: Token[str]) -> None: ...
 ```
                 ┌─────────────────────────────────────────┐
                 │   resume_for_new_session(session)       │
-                │   入口：SDK facade / dispatch NEW_*     │
+                │   入口：dispatch NEW_TEAM_IN_SESSION    │
+                │        (spec.build() 后立即调用)         │
                 │   ─────────────────────────────────     │
                 │   collect_live_teammates_for_         │
                 │       session_switch()                  │
@@ -353,14 +367,20 @@ def reset_session_id(token: Token[str]) -> None: ...
                 │   ─────────────────────────────────     │
                 │   for (name, status) in recoverable:    │
                 │     [cleanup_first] cleanup_teammate    │
-                │     mark RESTARTING (经 ERROR 归一)     │
+                │     mark RESTARTING                     │
+                │       (READY/BUSY/UNSTARTED/SHUTDOWN_   │
+                │        REQUESTED 经 ERROR 归一；        │
+                │        PAUSED/STOPPED/ERROR/SHUTDOWN    │
+                │        directly restartable)            │
                 │     restart_teammate                    │
                 └─────────────────────────────────────────┘
                                  ▲
                                  │
                 ┌────────────────┴────────────────────────┐
                 │   recover_for_existing_session(session) │
-                │   入口：dispatch COLD/WARM_RECOVER      │
+                │   入口：dispatch COLD_RECOVER           │
+                │        (TeamAgent.recover_from_session  │
+                │         + recover_team)                  │
                 │   ─────────────────────────────────     │
                 │   collect_live_teammates_for_         │
                 │       session_switch()                  │
@@ -409,10 +429,12 @@ session.state
 - **F_01_coordination-protocol-cleanup.md**：本规约直接来自 F_01 的决策落地。
   F_01 把"`bind_session(None)` 兼任解绑"这个特殊情况砍掉，拆出本规约描述的
   三方法。本 spec 是 F_01 的当前态快照。
-- **`S_06_runtime-pool-dispatch`**：`manager.activate` 的 9 路 truth
-  table 决定 `_apply_action` 走 `recover_for_existing_session`（`COLD_RECOVER`
-  / `WARM_RECOVER`）还是 `resume_for_new_session`（`NEW_TEAM_IN_SESSION*`
-  / `RESUME_FROM_PAUSE`），是 I-8 的上游决策层；本 spec 只描述被调用面。
+- **`S_06_runtime-pool-dispatch`**：`manager.activate` 的 7 路 truth
+  table 决定 `_apply_action` 走 `recover_for_existing_session`（`COLD_RECOVER`，
+  内部用 `recover_from_session` + `recover_team`）还是 `resume_for_new_session`
+  （`NEW_TEAM_IN_SESSION`），是 I-8 的上游决策层；本 spec 只描述被调用面。原
+  `WARM_RECOVER` / `NEW_TEAM_IN_SESSION_WARM` 已在 F_05 中废止，跨 session 切换
+  改走 `activate` 的 stop+rebuild 路径，详见 S_06。
 - **`S_02_team-agent-architecture` 四象限**：`session_id` / `team_session` 是
   `TeamAgentState` 的字段，遵守"跨 operator 才放 state"原则；spec / ctx /
   allocator 在 `AgentConfigurator` / `models/` 各自归宿，本规约只规定它们

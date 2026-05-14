@@ -6,18 +6,19 @@
 
 | 文件 | 职责 |
 |---|---|
-| `pool.py` | `TeamRuntimePool` / `ActiveTeam` / `RuntimeState`。pool key 是 `team_name`，同一 team 在内存中至多一个 `ActiveTeam` 实例；同 session 多 team 通过 pool 多 entry 自然支持。`RuntimeState.RUNNING / PAUSED` 是运行时状态（与 `schema.team.TeamLifecycle` "temporary/persistent" 不同） |
+| `pool.py` | `TeamRuntimePool` / `ActiveTeam` / `RuntimeState`。pool key 是 `team_name`，同一 team 在内存中至多一个 `ActiveTeam` 实例；同 session 多 team 通过 pool 多 entry 自然支持；切 session 由 `manager.activate` 在 dispatch 前 `stop_team` 拆掉 stale entry。`RuntimeState.RUNNING / PAUSED` 是运行时状态（与 `schema.team.TeamLifecycle` "temporary/persistent" 不同） |
 | `gate.py` | `InteractGate` / `AdmissionTicket`。run / interact 并发门禁：`admit / consume_done / close_and_drain / reset`。每个 `ActiveTeam` 自带一个 gate |
-| `dispatch.py` | `decide_run_action(...)` 纯函数 + `RunAction` / `RunActionKind`。9 路 truth table：`CREATE / NEW_TEAM_IN_SESSION / NEW_TEAM_IN_SESSION_WARM / COLD_RECOVER / WARM_RECOVER / RESUME_FROM_PAUSE / REJECT_RUNNING / REJECT_ORPHANED / REJECT_INCONSISTENT` |
+| `dispatch.py` | `decide_run_action(...)` 纯函数 + `RunAction` / `RunActionKind`。7 路 truth table：`CREATE / NEW_TEAM_IN_SESSION / COLD_RECOVER / RESUME_FROM_PAUSE / REJECT_RUNNING / REJECT_ORPHANED / REJECT_INCONSISTENT`。前置契约：调到这里时 `pool_entry` 要么是 None，要么 `current_session_id == target_session_id`——跨 session entry 由 `manager.activate` 提前 tear-down |
 | `metadata.py` | session checkpoint 的 per-team namespace 读写：`read_team_namespace / write_team_namespace / merge_team_namespace / read_team_names_in_session`。状态结构 `state["teams"][team_name] = {spec, context, model_allocator_state, lifecycle}`，按 team 分桶 |
-| `manager.py` | `TeamRuntimeManager`：持有 `TeamRuntimePool`；`activate` 用 `decide_run_action` 派发后调用 `_apply_action` 执行副作用；`pause / interact / stop_team / release_session / delete_team` 通过 pool 查 entry。`interact` 接 `InteractPayload`，走 gate 的 `admit / consume_done`，分发到 `UserInbox`（GodView / Operator）或 `HumanAgentInbox`（HumanAgent） |
+| `manager.py` | `TeamRuntimeManager`：持有 `TeamRuntimePool`；`activate` 先 tear-down stale cross-session entry，再用 `decide_run_action` 派发后调用 `_apply_action` 执行副作用；`finalize` / `finalize_member` 在 Runner finally 上决定 pause vs stop（kernel 的 `finalize_round` 不再决策）；`pause / interact / stop_team / release_session / delete_team` 通过 pool 查 entry。`interact` 接 `InteractPayload`，走 gate 的 `admit / consume_done`，分发到 `UserInbox`（GodView / Operator）或 `HumanAgentInbox`（HumanAgent） |
 
 ## 行为铁律
 
 - **派发决策是纯函数**：`decide_run_action` 只看 `(team_in_db, team_in_session, pool_entry, target_session_id, target_team_name)`，无副作用。manager 把 IO 收集进派发输入，然后 `_apply_action` 才动 TeamAgent / pool / session 这三类副作用源。改派发时改 `dispatch.py`，不要把决策逻辑塞回 manager。
-- **lifecycle 直达 TeamAgent**：`_apply_action` 直接调 `TeamAgent.recover_from_session` / `agent.recover_team` / `agent.resume_for_new_session` / `agent.recover_for_existing_session`，没有任何 `factory.*` 中间层（已删除）——避免 wrapper 上沉淀 runtime 透传参数。
-- **同一 team 在内存中只有一个实例**：切 session 走 `agent.recover_for_existing_session`（warm），不要让 pool 出现多个相同 `team_name` 的 entry。
-- **InteractGate 的生命周期与 run cycle 对齐**：`run_agent_team[_streaming]` 退出 `finally` 调 `_close_team_interact_gate`（Runner 内 helper）；warm 路径 activate 时调 `gate.reset()` 让下一个 cycle 重新放行。
+- **lifecycle 直达 TeamAgent**：`_apply_action` 直接调 `TeamAgent.recover_from_session` / `agent.recover_team` / `agent.resume_for_new_session`，没有任何 `factory.*` 中间层（已删除）——避免 wrapper 上沉淀 runtime 透传参数。
+- **同一 team 在内存中只有一个实例，跨 session 必走 stop+rebuild**：`activate` 在 dispatch 前检查 `pool_entry.current_session_id`，与目标 session 不一致就 `await stop_team(...)` + `pool.remove`、再走 cold 路径重建；不要让 pool 出现多个相同 `team_name` 的 entry，也不要让同一个 `TeamAgent` 实例跨 session 复用（曾经的 `WARM_RECOVER` / `NEW_TEAM_IN_SESSION_WARM` 已删，见 F_05）。
+- **InteractGate 的生命周期与 run cycle 对齐**：`run_agent_team[_streaming]` 退出 `finally` 先调 `manager.finalize`（leader 路径，决定 pause/stop + 更新 pool entry），再调 `_close_team_interact_gate`（Runner 内 helper）；`RESUME_FROM_PAUSE` 在 activate 时调 `gate.reset()` 让下一个 cycle 重新放行。`member=True` 路径在 finally 调 `manager.finalize_member` 收 teammate / human-agent 的 kernel。
+- **finalize 决策权归 manager，不归 kernel**：`CoordinationKernel.finalize_round` 只做 memory extract + 释放 stream_queue；pause vs stop（`shutdown_requested or lifecycle != "persistent"` → stop+remove；否则 pause+state=PAUSED）的判定与 leader pool entry / teammate `team_member` 持久状态的写入都属 `manager.finalize` / `finalize_member`。不要让 kernel 反向决定团队去向——那条路径会被外部 `stop_team` 撞穿。
 - **静止前置**：`release_session` / `delete_team` 在 pool 仍持有相关 entry 时报 `AGENT_TEAM_BUSY_INVALID`（ValidationError），调用方必须先 `stop_team`。
 - `Runner` 在 `_get_team_runtime_manager()` 里 lazy import 它，避免子进程 bootstrap 时拉链。
 

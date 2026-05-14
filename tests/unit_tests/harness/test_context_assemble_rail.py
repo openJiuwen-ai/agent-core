@@ -15,7 +15,7 @@ from openjiuwen.core.foundation.llm import (
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCallInputs
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCallInputs, RunKind
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode, SysOperationCard
 from openjiuwen.harness import Workspace, DeepAgentConfig, DeepAgent
@@ -200,6 +200,28 @@ async def test_build_context_section_skips_when_today_daily_memory_missing(tmp_p
     assert "## daily_memory/" not in cn_content
 
 
+@pytest.mark.asyncio
+async def test_build_context_section_can_exclude_daily_memory(tmp_path: Path):
+    """build_context_section can skip today's daily memory for lightweight runs."""
+    sys_operation = _make_sys_operation(tmp_path)
+    date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+    await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent Config\nreal body")
+    await sys_operation.fs().write_file(f"{tmp_path}/memory/daily_memory/{date}.md", "# Today")
+
+    workspace = Workspace(root_path=str(tmp_path))
+    section_cn = await build_context_section(
+        sys_operation,
+        workspace,
+        "cn",
+        timezone="Asia/Shanghai",
+        include_daily_memory=False,
+    )
+    cn_content = section_cn.render("cn")
+    assert "# Agent Config" in cn_content
+    assert "# Today" not in cn_content
+    assert "## daily_memory/" not in cn_content
+
+
 # =============================================================================
 # build_tools_content Tests
 # =============================================================================
@@ -358,6 +380,43 @@ async def test_before_model_call_injects_sections(tmp_path: Path):
     assert "# 工作空间" in ws.render("cn")
     assert "## AGENT.md" in ctx_section.render("cn")
     assert "# 可用工具" not in ctx_section.render("cn")  # no tools
+
+
+@pytest.mark.asyncio
+async def test_before_model_call_heartbeat_uses_lightweight_context(tmp_path: Path):
+    """Heartbeat runs keep HEARTBEAT.md context but skip daily memory."""
+    sys_operation = _make_sys_operation(tmp_path)
+    date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+    await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent Config\nreal body")
+    await sys_operation.fs().write_file(f"{tmp_path}/SOUL.md", "# Soul Content\nreal body")
+    await sys_operation.fs().write_file(f"{tmp_path}/HEARTBEAT.md", "# Heartbeat Tasks\nreal body")
+    await sys_operation.fs().write_file(f"{tmp_path}/memory/daily_memory/{date}.md", "# Today")
+
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+    await agent.ensure_initialized()
+
+    ctx = _make_model_call_context(agent)
+    ctx.extra["run_kind"] = RunKind.HEARTBEAT
+    rail = ContextAssembleRail()
+    await agent.register_rail(rail)
+    await rail.before_invoke(ctx)
+    await rail.before_model_call(ctx)
+
+    builder = agent.system_prompt_builder
+    ws = builder.get_section("workspace")
+    ctx_section = builder.get_section("context")
+    assert ws is not None
+    assert ctx_section is not None
+
+    cn_content = ctx_section.render("cn")
+    assert "## AGENT.md" in cn_content
+    assert "# Agent Config" in cn_content
+    assert "## SOUL.md" in cn_content
+    assert "## HEARTBEAT.md" in cn_content
+    assert "# Heartbeat Tasks" in cn_content
+    assert "# Today" not in cn_content
+    assert "## daily_memory/" not in cn_content
 
 
 @pytest.mark.asyncio

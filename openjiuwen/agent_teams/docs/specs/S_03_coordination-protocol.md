@@ -1,6 +1,6 @@
 # Coordination Protocol
 
-`agent_teams.agent.coordination` 子系统的设计规约：事件总线 + 分发器 + 5 个场景 handler + kernel 装配。本文描述"系统当前是什么样"，对应 commit `18823271`。
+`agent_teams.agent.coordination` 子系统的设计规约：事件总线 + 分发器 + 5 个场景 handler + kernel 装配。本文描述"系统当前是什么样"。
 
 ## 元信息
 
@@ -8,8 +8,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/coordination/` |
-| 最近一次修订 commit | `18823271` |
-| 关联 feature | `F_01_coordination-protocol-cleanup.md` |
+| 最近一次修订日期 | 2026-05-12 |
+| 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md` |
 
 ## 范围 / 边界
 
@@ -19,7 +19,7 @@
 - `EventDispatcher` 的粗筛触发规则（`agent_ready` / inner-vs-transport / 角色级 whitelist）以及 5 个 handler 的注册顺序与 fan-out 顺序。
 - `BaseCoordinationHandler` 的注入面（5 类窄依赖）、`EVENT_METHOD_MAP` 协议与 `get_callbacks()` 语义。
 - `AgentLifecycleHandler` / `MemberHandler` / `MessageHandler` / `TaskBoardHandler` / `StaleTaskHandler` 各自监听的 event_key、共享状态、关键方法。
-- `CoordinationKernel` 的构造装配序、`start` / `pause` / `stop` 路径与 `SessionManager` 的三方法状态机协作。
+- `CoordinationKernel` 的构造装配序、内部 lifecycle state machine（`idle → running → paused → stopped`，pause/stop 幂等）、`start` / `pause` / `stop` / `finalize_round` 路径与 `SessionManager` 的三方法状态机协作。
 - 三类窄 protocol（`AgentRoundController` / `TeamLifecycleController` / `PollController`）在 host ↔ handler 之间的契约。
 - 异常语义：`AsyncCallbackFramework.trigger` 吞 `Exception`、放行 `AbortError`。
 
@@ -48,6 +48,10 @@
 11. **dispatch 前置检查 `is_agent_ready()`**：未就绪时直接 return，handler 不会被触发。
 12. **`SHUTDOWN` inner 事件是 EventBus 自身的停机信号**，仅由 `EventBus.stop()` 写入；handler 不监听该事件。
 13. **session 绑定状态机是三态**：未绑（id=None, ts=None）/ 完整（id=X, ts=session）/ 半绑（id=X, ts=None）。`bind_session(session)` 进完整态、`release_session()` 完整→半绑、`unbind_session()` 任意态→未绑。`kernel.start` 在调用面显式分流：session 非 None 走 bind，否则走 unbind；不依赖被调方分支。
+14. **kernel lifecycle 单调推进**：`CoordinationKernel._lifecycle_state` 是显式状态机 `idle → running → paused → stopped`：`start()` 把状态推到 `running`，`pause()` 把 `running → paused`，`stop()` 把 `running | paused → stopped`，`stopped`/`idle` 上调 `pause()` 是 no-op，`idle`/`stopped` 上调 `stop()` 是 no-op。这保证 Runner-level finally（`manager.finalize`）即使在外部 `stop_coordination` 已经发生后再调 `pause_coordination`，也只是空转，不会把"已经 stop"的状态机硬倒回 paused。
+15. **finalize_round 不做团队去向决策**：`finalize_round` 只负责 memory extract + 释放 stream_queue 引用——这是**纯**的 round-end cleanup hook。pause vs stop 的决策由 Runner finally 路径上的 `TeamRuntimeManager.finalize` / `finalize_member` 拥有（详见 `S_06_runtime-pool-dispatch`），coordination 不可在此处偷偷 pause/stop kernel。
+16. **leader stop 也 mark teammate 持久状态**：`kernel.stop()`（leader 角色）在 tear down spawn handles 之前调 `_mark_live_teammates(STOPPED)`，与 pause 路径调 `_mark_live_teammates(PAUSED)` 对称。区分点是**为什么** teammate runtime 不在了——团队仍 live、由外部 stop_team 触发就是 `STOPPED`；自然 round 间 idle 就是 `PAUSED`。该写入是 `_mark_live_teammates` 唯一调用方，禁止散落 `team_member.update_status(STOPPED)` 字面量。
+17. **teammate `stop_coordination` 不写持久状态**：teammate 侧 kernel 的 `stop()` 不调 `team_member.update_status(...)`——`team_member` 的持久态由 `TeamRuntimeManager.finalize_member` 在 Runner finally 中决定（详见 `S_06`），让 kernel 只关心进程内 runtime。理由：leader 主动 stop 团队时已经把每个 teammate 的 `team_member.status` 写成 `STOPPED`，若 teammate 自己 kernel.stop 再回写一次 `SHUTDOWN`，会触发 `kernel.start` 启动期的"所有成员都 SHUTDOWN → clean_team"自保，把一个本应可恢复的团队误删。
 
 ## 接口契约
 
@@ -260,7 +264,7 @@ class CoordinationKernel:
 构造与启动序约束：
 
 1. `setup(role=...)`：先建 `EventBus(role=role)`，再建 `EventDispatcher(host, blueprint, infra, poll_ctrl=event_bus)`。**此时不绑 wake_callback**——避免引入"构造完但 callback 缺失"的中间态。
-2. `start(session=...)`：在子系统初始化（DB、recover、workspace、memory toolkit）之后调用 `event_bus.start(wake_callback=dispatcher.dispatch)`，闭合 EventBus ↔ EventDispatcher 的循环依赖。这是 wake_callback 唯一允许出现的绑定时机。
+2. `start(session=...)`：在子系统初始化（DB、recover、workspace、memory toolkit）之后调用 `event_bus.start(wake_callback=dispatcher.dispatch)`，闭合 EventBus ↔ EventDispatcher 的循环依赖。这是 wake_callback 唯一允许出现的绑定时机。`start` 末尾把 `_lifecycle_state` 推进到 `"running"`。
 3. session 绑定状态转换走 `SessionManager` 的三方法，**不在 kernel 里手工写 session_id / contextvar / DB 表初始化 / persist_leader_config**：
 
    | 调用位点 | 方法 | 状态转换 |
@@ -269,9 +273,27 @@ class CoordinationKernel:
    | `start(session=None)` | `sess_mgr.unbind_session()` | * → 未绑态 |
    | `pause()` / `stop()` | `sess_mgr.release_session()` | 完整 → 半绑 |
 
-4. `pause()` 路径：`drain_agent_task` → `persist_allocator_state` → leader 额外 `_mark_live_teammates_paused` + `cancel_recovery_tasks` + `shutdown_all_handles` + 持久化 lifecycle="paused" → leader 发布 `TEAM_STANDBY` → `unsubscribe_transport` → `event_bus.stop()` → `close_stream` → `release_session`。
-5. `stop()` 路径：`drain_agent_task` → `persist_allocator_state` → `unsubscribe_transport` → `cancel_recovery_tasks` + `shutdown_all_handles` → `memory_manager.close()` → `event_bus.stop()` → `close_stream` → `release_session`。
-6. `subscribe_transport`：`messager.register_direct_message_handler(event_bus.enqueue)` + 对每个 `TeamTopic` `subscribe(topic_str, _filter_self)`；`_filter_self` 先派发 listener、再过滤 `sender_id == local_member_name` 的自发事件，最后 `event_bus.enqueue(event)`。
+4. `pause()` 路径（仅 `_lifecycle_state == "running"` 时执行；否则 no-op）：`drain_agent_task` → `persist_allocator_state` → leader 额外 `_mark_live_teammates(PAUSED)` + `cancel_recovery_tasks` + `shutdown_all_handles` + 持久化 lifecycle="paused" → leader 发布 `TEAM_STANDBY` → `unsubscribe_transport` → `event_bus.stop()` → `close_stream` → `release_session` → `_lifecycle_state = "paused"`。`team_member` 持久态不在此处改（持久状态归 `manager.finalize_member`）。
+5. `stop()` 路径（`_lifecycle_state ∈ {"idle", "stopped"}` 时 no-op；`"paused"` 也允许进入，跑剩下的资源清理）：`drain_agent_task` → `persist_allocator_state` → leader 额外 `_mark_live_teammates(STOPPED)`（与 pause 路径对称，写"为什么 runtime 不在了"）→ `unsubscribe_transport` → `cancel_recovery_tasks` + `shutdown_all_handles` → `memory_manager.close()` → `event_bus.stop()` → `close_stream` → `release_session` → `_lifecycle_state = "stopped"`。teammate kernel 的 `stop()` 不写 `team_member.status`（让 `manager.finalize_member` 决定该写 SHUTDOWN 还是保留外部已写的 STOPPED）。
+6. `finalize_round()`：纯 round-end hook，仅做两件事——`memory_manager.extract_after_round()` + `stream_controller.stream_queue = None`。**不调** `pause()` / `stop()`、不读 `lifecycle` / `shutdown_requested`、不写 `team_member.status`。pause vs stop 决策已上移到 Runner finally 路径的 `manager.finalize` / `finalize_member`（见 `S_06`）。
+7. `subscribe_transport`：`messager.register_direct_message_handler(event_bus.enqueue)` + 对每个 `TeamTopic` `subscribe(topic_str, _filter_self)`；`_filter_self` 先派发 listener、再过滤 `sender_id == local_member_name` 的自发事件，最后 `event_bus.enqueue(event)`。
+
+### `_mark_live_teammates(target_status)`
+
+```python
+async def _mark_live_teammates(self, target_status: MemberStatus) -> None: ...
+```
+
+leader-only。遍历 spawn_manager 持有的 live teammate handle，跳过 `UNSTARTED` /
+`SHUTDOWN` 等"runtime 未起" 或 "已永久退场"的成员，把剩下成员的 `team_member.status`
+写成 `target_status`：
+
+- `pause()` 传 `MemberStatus.PAUSED` ——自然 round-end，下一次 `recover_team` 把它们当 live teammate 接着拉起。
+- `stop()` 传 `MemberStatus.STOPPED` ——外部 stop_team，team 未解散，`recover_team` 也能从这里恢复（`MEMBER_TRANSITIONS` 允许 `STOPPED → RESTARTING`）。
+
+调用顺序刻意放在 `shutdown_all_handles` 之前：进程内 task 一旦 cancel，messager
+事件可能立即吐出（teammate 退出广播 `MEMBER_SHUTDOWN`），如果先 cancel 再写持久
+状态，会与 teammate 自己写下的状态产生 race。
 
 ### Inner 事件入队工具
 
@@ -281,11 +303,12 @@ class CoordinationKernel:
 | `enqueue_mailbox_after_first_iteration()` | 等 `first_iter_gate` 后投 `POLL_MAILBOX`，让 teammate 第一次邮箱 sweep 不与启动竞争 | 仅 teammate（leader 直接 return） |
 | `wake_mailbox_if_interrupt_cleared()` | 在没有 pending interrupt 时投 `POLL_MAILBOX`，避免 interrupt 解除后邮件留底 | 仅 teammate |
 
-### 三铁律
+### 四铁律
 
 1. **coordination 不做决策。** EventBus / EventDispatcher / handler 都只做 wake-up 与粗筛触发；业务行为由内部 DeepAgent + team tools 驱动。新功能想塞进 `dispatcher.py` 或 handler 之前先问：**是不是应该实现成一个新工具，让 LLM 自己决定调？**
 2. **每个 handler 一个业务域，跨域协作走 framework fan-out。** 新事件类型 = 在对应场景 handler 的 `EVENT_METHOD_MAP` 加一行 + 写方法，不需要改 `dispatch()`。同一 event_key 的多 handler 通过注册顺序串行 fan-out；handler 不互相 import、不互相调用。
 3. **异常语义。** `AsyncCallbackFramework.trigger()` 吞普通 `Exception`（log + continue），仅 `AbortError` 上抛。handler 必须自己用 `team_logger.error("...", exc_info=True)` 记录关键失败，不允许把 framework swallow 当作隐式错误处理。
+4. **kernel 不决策团队去向。** `pause()` / `stop()` 是 idempotent 的 runtime tear-down 原语（含 leader 写 PAUSED/STOPPED 标记），但**它们何时被调用、能不能被调用**由 Runner finally 上的 `manager.finalize` / `finalize_member` 决定。kernel 自己的 `finalize_round` 仅做 memory extract + stream_queue 释放，**禁止**在那里隐式 pause/stop——否则外部 `stop_team` 会被 finally 偷偷盖回 paused。
 
 ## 数据结构
 
@@ -358,6 +381,28 @@ StaleTaskHandler.EVENT_METHOD_MAP = {
 | `_last_stale_nudge` | `dict[str, float]` | `MemberHandler` + `StaleTaskHandler` 共享同一引用 | dispatcher 生命周期内 |
 | `_last_pending_nudge` | `dict[str, float]` | `StaleTaskHandler` 私有 | 同上 |
 
+CoordinationKernel 自身的 lifecycle state：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `_lifecycle_state` | `Literal["idle", "running", "paused", "stopped"]` | kernel 内部状态机；`setup` 后 `idle`，`start` 推到 `running`，`pause` 把 `running → paused`，`stop` 把 `running \| paused → stopped`。`stopped` / `idle` 上的 `pause` / `stop` 是 no-op。Runner finally 重复调用安全。 |
+
+合法转移：
+
+```
+idle    --start()--> running
+running --pause()--> paused
+running --stop()--> stopped
+paused  --stop()--> stopped     (清剩下的资源)
+paused  --pause()--> paused     (no-op)
+stopped --pause()--> stopped    (no-op)
+stopped --stop()--> stopped     (no-op)
+idle    --pause()--> idle       (no-op)
+idle    --stop()--> idle        (no-op)
+```
+
+`stopped` 是该 kernel 实例的终态。重新启动需要重建 kernel（`setup` 之后从 `idle` 起步）。
+
 EventBus 自身的运行态：
 
 | 字段 | 类型 | 含义 |
@@ -373,6 +418,6 @@ EventBus 自身的运行态：
 
 - **`S_04_session-and-recovery`**：本文规约 `kernel.start / pause / stop` 调 `SessionManager.bind_session / release_session / unbind_session` 的语义与时机；session checkpoint 的字段布局、namespace 分桶（`teams` 子命名空间）、`metadata.read_team_namespace / merge_team_namespace` 的契约归 S_04。本文只断言"kernel 不在调用面手写 session_id / contextvar / DB 表初始化 / persist_leader_config"。
 - **`S_07_interaction-views-and-hitt`**：三视角入口（GodView / Operator / HumanAgent）解析为 `EventMessage` 的过程归 `interaction/`；`@<member>` 路由用 `interaction/router.py` 的 `parse_mention`。本文只断言"事件到达 EventBus 时已经是结构化对象，dispatcher / handler 不解析字符串"。
-- **`S_06_runtime-pool-dispatch`**：跨 team 的对象池、9 路 dispatch truth table、`InteractGate` 等并发门禁归 `runtime/`。本文管单个 TeamAgent 内部的事件循环，不感知 pool。
+- **`S_06_runtime-pool-dispatch`**：跨 team 的对象池、7 路 dispatch truth table、`InteractGate` 等并发门禁归 `runtime/`。本文管单个 TeamAgent 内部的事件循环，不感知 pool。**pause vs stop 决策**也在该 spec：`manager.finalize` / `finalize_member` 在 Runner finally 路径决定是否调本文规约的 `pause()` / `stop()`，并写入 leader pool entry 状态与 teammate `team_member` 持久状态。
 - **harness（已存在 docs）**：`AgentRoundController` 的 `deliver_input / cancel_agent / resume_interrupt` 最终落到 `TeamHarness` → `DeepAgent`；具体 round 状态机（pre-stream / streaming / finalize）与 HITL interrupt 语义归 harness。本文只规约"handler 通过窄 protocol 调进去，host 自己分流到 start/follow_up/steer"。
 - **`S_02_team-agent-architecture`**：TeamAgent 四象限分解（blueprint / state / resources / infra）、`SpawnManager` / `RecoveryManager` / `StreamController` 的职责拆分归该 spec。本文复用 `TeamAgentBlueprint` 与 `TeamInfra` 作为 handler 的注入面，但不规约其内部字段。

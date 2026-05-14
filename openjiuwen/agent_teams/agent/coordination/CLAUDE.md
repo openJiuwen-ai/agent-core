@@ -51,11 +51,10 @@ handler **不持有原始 host 引用**。新增依赖一律通过 narrow protoc
 - **`kernel.pause` 会等 in-flight round drain**：相关 `contextlib.suppress(asyncio.CancelledError, Exception)` 在 `stream_controller.drain_agent_task` —— 改清理路径时检查 `import contextlib` 是否还在（之前漏过一次）。
 - **三个 narrow protocol 是 host ↔ handler 的公共契约**：`AgentRoundController` / `TeamLifecycleController` 由 TeamAgent 实现，`PollController` 由 EventBus 实现。新增 handler 依赖前先想清楚：是 round 行为、TeamAgent 级生命周期、还是 poll 控制？把方法加到对应 protocol，不要把所有东西重新塞回 `DispatcherHost`。`start_agent` / `follow_up` / `steer` 故意不在 `AgentRoundController` 上——handler 走 `deliver_input` 让 host 按 round 状态自己分流。
 - **构造顺序敏感**：`kernel.setup()` 先建 EventBus，再建 EventDispatcher（注入 `poll_ctrl=event_bus`）；`kernel.start()` 调 `event_bus.start(wake_callback=dispatcher.dispatch)` 闭合循环依赖。EventBus 在 `__init__` 期间不接受 wake_callback——晚到 `start()` 时绑定，避免暴露 setter。
-- **session 绑定走 `SessionManager` 的状态机三方法**：
-  - `await bind_session(session)`：完整绑定，session 必须非 None。kernel.start 在拿到 session 时调它（同时落 contextvar、建 per-session DB 表、leader 持久化 config）。
-  - `release_session()`：pause/stop tear-down 用，丢弃 live `AgentTeamSession`，**保留 `session_id` 与 contextvar**——log correlation、resume 路径要复用同一个 id。
-  - `unbind_session()`：完全解绑，两字段一并清掉。kernel.start 在 session=None 路径走它，避免上一轮 `release_session` 留下的 session_id 渗到新一轮无 session 的启动里。
-  在 kernel 里手工再写一遍 session_id + contextvar + DB 表初始化 + persist_leader_config 就是在重复 `_switch_session` 时代的烂代码。
+- **session 绑定走 `SessionManager` 的两方法**：
+  - `await bind_session(session)`：完整绑定，session 必须非 None。kernel.start 在拿到 session 时调它（落 contextvar 并持 Token、建 per-session DB 表、leader 持久化 config）。
+  - `release_session()`：单一 tear-down 路径——pause / stop / session=None 启动全部走这里。reset contextvar Token + 丢 live `AgentTeamSession`。session_id 现在只活在 contextvar 里（参见 [`agent/CLAUDE.md`](../CLAUDE.md) 四象限），release 后即不可见；resume 路径在重新 `bind_session(new_session)` 时由新 session 提供 id，不再依赖任何缓存。
+  在 kernel 里手工再写一遍 contextvar set + DB 表初始化 + persist_leader_config 就是在重复 `_switch_session` 时代的烂代码。
 
 ## 跟其它子目录的边界
 

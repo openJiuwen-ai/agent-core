@@ -33,6 +33,7 @@ LongTermMemory()
 
 - 配置相关：`_sys_mem_config: MemoryEngineConfig | None = None`、`_scope_config: dict[str, MemoryScopeConfig] = {}`；
 - 存储相关：`kv_store / vector_store / db_store / message_store` 均为 `None`，需通过 `register_store`（以及可选的 `register_message_store`）注册；
+- 记忆索引：`memory_index: BaseMemoryIndex | None = None`，可通过 `register_plugin` 注册自定义索引实现，或在 `register_store` 时自动注册 `SimpleMemoryIndex`；
 - 管理器相关：`scope_user_mapping_manager / message_manager / fragment_memory_manager / variable_manager / write_manager / search_manager / generator` 均为 `None`，在 `set_config` 时初始化；
 - LLM 相关：`_base_llm: Model | None = None`（在 `set_config` 时设置）；
 - 嵌入模型缓存：`_scope_embedding: dict[str, Embedding] = {}`。
@@ -57,7 +58,11 @@ async def register_store(
 * **kv_store**(BaseKVStore)：**必填**，键值存储实例，用于快速访问结构化数据（如 scope 配置、用户变量等）。若为 `None`，会抛出 `build_error`（`MEMORY_REGISTER_STORE_EXECUTION_ERROR`）。
 * **vector_store**(BaseVectorStore | None, 可选)：向量存储实例，用于语义相似度检索。若为 `None`，则语义检索功能不可用。默认值：`None`。
 * **db_store**(BaseDbStore | None, 可选)：关系型数据库存储实例，用于持久化消息、scope-user 映射等。若为 `None`，则消息持久化功能不可用。默认值：`None`。
-* **embedding_model**(Embedding | None, 可选)：全局嵌入模型实例，用于在注册时初始化 `semantic_store` 的嵌入能力。若为 `None`，后续可通过 `set_scope_config` 为不同 scope 配置独立的嵌入模型。默认值：`None`。
+* **embedding_model**(Embedding | None, 可选)：全局嵌入模型实例，用于在注册时初始化向量索引的嵌入能力。若为 `None`，后续可通过 `set_scope_config` 为不同 scope 配置独立的嵌入模型。默认值：`None`。
+
+**行为说明**：
+
+当同时提供 `vector_store` 和 `embedding_model` 时，`register_store` 会自动调用 `register_plugin` 注册默认的 `SimpleMemoryIndex` 作为 `memory_index`。若需要使用自定义的 `BaseMemoryIndex` 实现，可在 `register_store` 之后手动调用 `register_plugin` 进行覆盖。
 
 **异常**：
 
@@ -115,6 +120,66 @@ async def register_store(
 >>>     db_store=db_store
 >>> )
 >>>
+```
+
+
+### async register_plugin
+
+```
+async def register_plugin(
+    self,
+    name: str,
+    cls: type,
+    params: dict[str, Any],
+) -> None
+```
+
+注册自定义 `BaseMemoryIndex` 插件实例，用于替换或扩展默认的向量索引实现。
+
+**参数**：
+
+* **name**(str)：插件名称，描述插件类型（如 `'vector'`、`'inverted'`、`'hybrid'`）。
+* **cls**(type)：插件类，必须继承自 `BaseMemoryIndex`。
+* **params**(dict[str, Any])：传递给插件类构造函数的初始化参数。
+
+**行为说明**：
+
+- 该方法会将 `cls(**params)` 实例化为插件实例；
+- **首次注册**的插件会成为默认的 `memory_index`（即 `self.memory_index`），后续注册的插件不会覆盖默认值；
+- 若 `register_store` 已自动注册了 `SimpleMemoryIndex`，则后续手动调用 `register_plugin` 不会覆盖已有的默认索引。
+
+**前置条件**：
+
+- 无严格前置条件，但建议在 `register_store` 之后、`set_config` 之前调用。
+
+**样例**：
+
+```python
+>>> from openjiuwen.core.memory.long_term_memory import LongTermMemory
+>>> from openjiuwen.core.foundation.store.index.vector_memory_index import VectorMemoryIndex
+>>> from openjiuwen.core.foundation.store.base_vector_store import BaseVectorStore
+>>> from openjiuwen.core.foundation.store.base_embedding import Embedding
+>>>
+>>> # 使用默认 VectorMemoryIndex
+>>> memory = LongTermMemory()
+>>> await memory.register_plugin(
+>>>     name="vector",
+>>>     cls=VectorMemoryIndex,
+>>>     params={
+>>>         "vector_store": my_vector_store,
+>>>         "embedding_model": my_embedding_model,
+>>>     }
+>>> )
+>>>
+>>> # 或使用自定义 BaseMemoryIndex 实现
+>>> class MyCustomIndex(BaseMemoryIndex):
+>>>     ...
+>>>
+>>> await memory.register_plugin(
+>>>     name="custom",
+>>>     cls=MyCustomIndex,
+>>>     params={"custom_param": "value"}
+>>> )
 ```
 
 
@@ -177,7 +242,12 @@ def set_config(self, config: MemoryEngineConfig) -> None
 
 **前置条件**：
 
-- 必须已调用 `register_store` 注册 `kv_store`、`vector_store`、`db_store`，否则会抛出 `build_error`（`MEMORY_SET_CONFIG_EXECUTION_ERROR`）。
+- 必须已调用 `register_store` 注册 `kv_store` 和 `db_store`，否则会抛出 `build_error`（`MEMORY_SET_CONFIG_EXECUTION_ERROR`）。
+- 必须已注册 `memory_index`（通过 `register_plugin` 或 `register_store` 自动注册），否则会抛出 `build_error`。
+
+**行为说明**：
+
+- 管理器（`FragmentMemoryManager`、`SummaryManager`、`WriteManager`）统一使用 `memory_index`（`BaseMemoryIndex`）作为后端，不再支持 `UserMemStore` 回退路径。
 
 **异常**：
 
@@ -226,6 +296,43 @@ def set_config(self, config: MemoryEngineConfig) -> None
 >>> # 设置配置
 >>> memory = LongTermMemory()
 >>> memory.set_config(config)
+```
+
+
+### async migrate_between_indices
+
+```
+async def migrate_between_indices(
+    source_index: BaseMemoryIndex,
+    target_index: BaseMemoryIndex,
+) -> None
+```
+
+将数据从一个 `BaseMemoryIndex` 复制到另一个 `BaseMemoryIndex`。适用于不同索引实现之间的数据迁移（如从 `SimpleMemoryIndex` 迁移到 `VectorMemoryIndex`）。源数据在迁移后保留。
+
+**参数**：
+
+* **source_index**(BaseMemoryIndex)：源 `BaseMemoryIndex` 实例，从中读取待迁移的数据。
+* **target_index**(BaseMemoryIndex)：目标 `BaseMemoryIndex` 实例，数据将写入此索引。
+
+**行为说明**：
+
+- 该方法会遍历 `source_index` 中的所有 `(user_id, scope_id)` 组合，分批（每批 100 条）读取文档并写入 `target_index`；
+- 源数据在迁移后保持不变；
+- 迁移是幂等的——若目标索引中已存在相同 ID 的文档，会被覆盖（upsert 语义）。
+
+**样例**：
+
+```python
+>>> from openjiuwen.core.memory.long_term_memory import LongTermMemory
+>>> from openjiuwen.core.foundation.store.index.simple_memory_index import SimpleMemoryIndex
+>>>
+>>> # 假设已有旧的 SimpleMemoryIndex 实例
+>>> old_index = SimpleMemoryIndex(kv_store=kv_store, vector_store=vector_store, embedding_model=embed)
+>>> new_index = VectorMemoryIndex(...)
+>>>
+>>> # 从旧索引迁移数据到新索引
+>>> await LongTermMemory.migrate_between_indices(source_index=old_index, target_index=new_index)
 ```
 
 
@@ -808,7 +915,7 @@ async def search_user_mem(
 **返回**：
 
 * **list[MemResult]**：记忆结果列表，每个 `MemResult` 包含：
-  * `mem_info: MemInfo`（`mem_id / content / type`）；
+  * `mem_info: MemInfo`（`mem_id / content / type / timestamp`）；
   * `score: float`（相似度分数）。
 
 **异常**：
@@ -899,7 +1006,7 @@ async def search_user_history_summary(
 **返回**：
 
 * **list[MemResult]**：记忆结果列表，每个 `MemResult` 包含：
-  * `mem_info: MemInfo`（`mem_id / content / type`）；
+  * `mem_info: MemInfo`（`mem_id / content / type / timestamp`）；
   * `score: float`（相似度分数）。
 
 **异常**：
