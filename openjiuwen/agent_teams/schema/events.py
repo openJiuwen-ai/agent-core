@@ -51,6 +51,7 @@ class TeamEvent:
     CREATED = "team_created"
     CLEANED = "team_cleaned"
     STANDBY = "team_standby"
+    TEAM_COMPLETED = "team_completed"
 
     # Member lifecycle events
     MEMBER_SPAWNED = "member_spawned"
@@ -75,6 +76,7 @@ class TeamEvent:
     TASK_COMPLETED = "task_completed"
     TASK_CANCELLED = "task_cancelled"
     TASK_UNBLOCKED = "task_unblocked"
+    TASK_LIST_DRAINED = "task_list_drained"
 
     # Worktree events
     WORKTREE_CREATED = "worktree_created"
@@ -114,6 +116,18 @@ class TeamCleanedEvent(BaseEventMessage):
 class TeamStandbyEvent(BaseEventMessage):
     """Event published when a persistent team enters standby between rounds."""
     pass
+
+
+class TeamCompletedEvent(BaseEventMessage):
+    """Event published when the whole team has reached a completed state.
+
+    All three conditions hold at once: every member (including the leader)
+    is in a settled status, every task is terminal, and no direct or
+    broadcast message is left unread by any member. Team-scoped — member_name
+    stays at its default None.
+    """
+    member_count: int = Field(..., description="Total team member count at completion time")
+    task_count: int = Field(..., description="Total task count at completion time")
 
 
 class MemberSpawnedEvent(BaseEventMessage):
@@ -204,6 +218,16 @@ class TaskUnblockedEvent(BaseEventMessage):
     task_id: str = Field(..., description="Task unique identifier")
 
 
+class TaskListDrainedEvent(BaseEventMessage):
+    """Event published when every task in the team task list is terminal.
+
+    Fired only when at least one task exists and all tasks are in a terminal
+    status (completed / cancelled). Team-scoped — member_name stays at its
+    default None.
+    """
+    task_count: int = Field(..., description="Total number of tasks in the all-terminal task list")
+
+
 class WorktreeCreatedEvent(BaseEventMessage):
     """Published when a worktree is created or recovered."""
     worktree_name: str = Field(..., description="Worktree slug name")
@@ -248,6 +272,7 @@ _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model cl
     TeamEvent.CREATED: TeamCreatedEvent,
     TeamEvent.CLEANED: TeamCleanedEvent,
     TeamEvent.STANDBY: TeamStandbyEvent,
+    TeamEvent.TEAM_COMPLETED: TeamCompletedEvent,
     TeamEvent.MEMBER_SPAWNED: MemberSpawnedEvent,
     TeamEvent.MEMBER_RESTARTED: MemberRestartedEvent,
     TeamEvent.MEMBER_STATUS_CHANGED: MemberStatusChangedEvent,
@@ -264,6 +289,7 @@ _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model cl
     TeamEvent.TASK_COMPLETED: TaskCompletedEvent,
     TeamEvent.TASK_CANCELLED: TaskCancelledEvent,
     TeamEvent.TASK_UNBLOCKED: TaskUnblockedEvent,
+    TeamEvent.TASK_LIST_DRAINED: TaskListDrainedEvent,
     TeamEvent.WORKTREE_CREATED: WorktreeCreatedEvent,
     TeamEvent.WORKTREE_REMOVED: WorktreeRemovedEvent,
     TeamEvent.WORKSPACE_ARTIFACT_UPDATED: WorkspaceArtifactEvent,

@@ -31,6 +31,7 @@ from openjiuwen.agent_teams.tools.database import (
 from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
+    MemberMode,
     MemberStatus,
     TaskStatus,
 )
@@ -979,3 +980,92 @@ class TestTeamRuntimeContextDbConfig:
         )
         assert isinstance(context.db_config, DatabaseConfig)
         assert context.db_config.db_type == DatabaseType.SQLITE
+
+
+async def _seed_member(db: TeamDatabase, member_name: str, status: str) -> None:
+    """Insert a team_member row for the 'test_team' fixture team."""
+    await db.member.create_member(
+        member_name=member_name,
+        team_name="test_team",
+        display_name=member_name,
+        agent_card=AgentCard().model_dump_json(),
+        status=status,
+        mode=MemberMode.BUILD_MODE.value,
+    )
+
+
+async def _drain_one_task(agent_team: TeamBackend) -> None:
+    """Add a single task and drive it to a terminal (completed) status."""
+    task = await agent_team.task_manager.add(title="T", content="c")
+    assert await agent_team.task_manager.claim(task.task_id)
+    await agent_team.task_manager.complete(task.task_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_is_team_completed_all_conditions_met(agent_team, db):
+    """All members settled + all tasks terminal + no unread → snapshot returned."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.READY.value)
+    await _drain_one_task(agent_team)
+
+    snapshot = await agent_team.is_team_completed()
+
+    assert snapshot is not None
+    assert snapshot.member_count == 2
+    assert snapshot.task_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_is_team_completed_member_busy_returns_none(agent_team, db):
+    """A non-leader member still BUSY blocks completion."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.BUSY.value)
+    await _drain_one_task(agent_team)
+
+    assert await agent_team.is_team_completed() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_is_team_completed_leader_busy_returns_none(agent_team, db):
+    """The leader counts as a member — a busy leader blocks completion."""
+    await _seed_member(db, "leader1", MemberStatus.BUSY.value)
+    await _seed_member(db, "member1", MemberStatus.READY.value)
+    await _drain_one_task(agent_team)
+
+    assert await agent_team.is_team_completed() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_is_team_completed_pending_task_returns_none(agent_team, db):
+    """A non-terminal task blocks completion."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.READY.value)
+    await agent_team.task_manager.add(title="T", content="c")
+
+    assert await agent_team.is_team_completed() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_is_team_completed_empty_task_list_returns_none(agent_team, db):
+    """An empty task board is not a completed team."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.READY.value)
+
+    assert await agent_team.is_team_completed() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_is_team_completed_unread_message_returns_none(agent_team, db):
+    """An unread message blocks completion even when members and tasks are settled."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.READY.value)
+    await _drain_one_task(agent_team)
+    await agent_team.message_manager.send_message(content="ping", to_member_name="member1")
+
+    assert await agent_team.is_team_completed() is None

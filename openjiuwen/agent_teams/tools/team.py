@@ -36,13 +36,20 @@ from openjiuwen.agent_teams.schema.events import (
     ToolApprovalResultEvent,
 )
 from openjiuwen.agent_teams.schema.status import (
+    MEMBER_SETTLED_STATUSES,
     ExecutionStatus,
     MemberMode,
     MemberStatus,
     TaskStatus,
 )
-from openjiuwen.agent_teams.schema.team import MemberOpResult, TeamMemberSpec, TeamRole
+from openjiuwen.agent_teams.schema.team import (
+    MemberOpResult,
+    TeamCompletionSnapshot,
+    TeamMemberSpec,
+    TeamRole,
+)
 from openjiuwen.agent_teams.tools.database import (
+    TASK_TERMINAL_STATUSES,
     Team,
     TeamDatabase,
     TeamMember,
@@ -698,6 +705,41 @@ class TeamBackend:
             Team information
         """
         return await self.db.team.get_team(self.team_name)
+
+    async def is_team_completed(self) -> Optional[TeamCompletionSnapshot]:
+        """Evaluate whether the whole team has reached a completed state.
+
+        Returns a snapshot only when all three conditions hold at once:
+            1. Every member -- including the leader -- is in a settled
+               status (``MEMBER_SETTLED_STATUSES``).
+            2. At least one task exists and every task is terminal
+               (``TASK_TERMINAL_STATUSES``).
+            3. No direct or broadcast message is left unread by any member.
+
+        Read-only; safe to call repeatedly. Queries the member DAO directly
+        so the leader itself is part of the roster check (``list_members``
+        excludes the calling member).
+
+        Returns:
+            A ``TeamCompletionSnapshot`` when the team is complete,
+            otherwise ``None``.
+        """
+        members = await self.db.member.get_team_members(self.team_name)
+        if not members:
+            return None
+        if any(member.status not in MEMBER_SETTLED_STATUSES for member in members):
+            return None
+
+        tasks = await self.task_manager.list_tasks()
+        if not tasks:
+            return None
+        if any(task.status not in TASK_TERMINAL_STATUSES for task in tasks):
+            return None
+
+        if await self.message_manager.has_unread_messages():
+            return None
+
+        return TeamCompletionSnapshot(member_count=len(members), task_count=len(tasks))
 
     async def get_team_updated_at(self) -> int:
         """Probe ``team_info.updated_at`` for change detection.

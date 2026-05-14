@@ -104,6 +104,21 @@ MEMBER_TRANSITIONS: Dict[MemberStatus, List[MemberStatus]] = {
 }
 
 
+# Statuses a member can rest in when it has no active work. Consumed by the
+# team-completion check. Co-located with MemberStatus as its single source of
+# truth: status.py has no dependencies, whereas TASK_TERMINAL_STATUSES lives in
+# tools/database/graph.py only to avoid an import edge from the SQL layer back
+# into status.py.
+MEMBER_SETTLED_STATUSES = frozenset(
+    {
+        MemberStatus.READY.value,
+        MemberStatus.PAUSED.value,
+        MemberStatus.STOPPED.value,
+        MemberStatus.SHUTDOWN.value,
+    }
+)
+
+
 class ExecutionStatus(str, Enum):
     """Execution status enum - detailed status for task execution
 

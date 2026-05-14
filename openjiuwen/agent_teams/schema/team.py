@@ -43,6 +43,19 @@ class MemberOpResult:
         return cls(ok=False, reason=reason)
 
 
+@dataclass(frozen=True, slots=True)
+class TeamCompletionSnapshot:
+    """Counts captured the moment a team satisfies all completion conditions.
+
+    Returned by ``TeamBackend.is_team_completed`` when every member is
+    settled, every task is terminal, and no message is left unread. Purely
+    informational — consumers re-query the backend if they need detail.
+    """
+
+    member_count: int
+    task_count: int
+
+
 class TeamLifecycle(str, Enum):
     """Team lifecycle mode."""
 
@@ -150,6 +163,7 @@ class TeamRuntimeContext(BaseModel):
 
 
 __all__ = [
+    "TeamCompletionSnapshot",
     "TeamLifecycle",
     "TeamMemberSpec",
     "TeamRole",
