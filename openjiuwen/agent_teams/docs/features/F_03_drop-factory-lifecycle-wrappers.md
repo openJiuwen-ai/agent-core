@@ -5,7 +5,6 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-05-09 |
-| 涉及 commit | 待提交（与本文档同 PR） |
 | 范围 | 删除 `openjiuwen/agent_teams/factory.py`；改 `openjiuwen/agent_teams/runtime/manager.py`、`openjiuwen/agent_teams/__init__.py`；同步 `tests/unit_tests/agent_teams/test_team_agent.py` / `test_team_agent_tools.py` / `test_runner_team_runtime.py`；同步 `docs/zh|en/...AgentTeams.md` / `概述.md` / `Overview.md` / `API文档/agent_teams.md`；同步 `agent_teams/CLAUDE.md`、`runtime/CLAUDE.md`、`docs/specs/S_01` / `S_04` / `S_06` / `S_12` |
 | 测试基线 | `tests/unit_tests/agent_teams/test_runner_team_runtime.py` 45 passed；`test_team_agent.py` 3 passed；`test_team_agent_tools.py` 4 passed |
 | Refs | `#751` |

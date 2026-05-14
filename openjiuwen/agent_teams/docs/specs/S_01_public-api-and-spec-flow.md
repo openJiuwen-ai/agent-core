@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/__init__.py`、`openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/runtime/manager.py`、`openjiuwen/core/runner/team_runner.py`、`openjiuwen/core/runner/runner.py` |
-| 最近一次修订 commit | 18823271 |
+| 最近一次修订日期 | 2026-05-14 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界

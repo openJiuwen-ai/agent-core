@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/interaction/`、`openjiuwen/agent_teams/constants.py`、`openjiuwen/agent_teams/runtime/manager.py`（`_dispatch_payload`）、`openjiuwen/agent_teams/agent/coordination/handlers/message.py`（HITT inbound 钩子）|
-| 最近一次修订 commit | 18823271 |
+| 最近一次修订日期 | 2026-05-14 |
 | 关联 feature | — |
 
 ## 范围 / 边界

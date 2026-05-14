@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/monitor/`、`openjiuwen/agent_teams/observability/`（预留） |
-| 最近一次修订 commit | (待补) |
+| 最近一次修订日期 | 2026-05-14 |
 | 关联 feature | F_09_team-stream-logging.md |
 
 ## 范围 / 边界

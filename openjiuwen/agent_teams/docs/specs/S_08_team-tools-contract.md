@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订 commit | 29c248fa |
+| 最近一次修订日期 | 2026-05-14 |
 | 关联 feature | F_10_temporary-leader-clean-team-stream-end.md |
 
 ## 范围 / 边界

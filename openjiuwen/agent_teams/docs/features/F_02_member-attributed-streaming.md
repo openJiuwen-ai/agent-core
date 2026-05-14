@@ -5,7 +5,6 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-05-09 |
-| 涉及 commit | 待提交（与本文档同 PR） |
 | 范围 | `openjiuwen/agent_teams/schema/stream.py`（新增）、`openjiuwen/agent_teams/agent/stream_controller.py`、`openjiuwen/agent_teams/agent/spawn_manager.py`、`openjiuwen/agent_teams/spawn/inprocess_handle.py`、`openjiuwen/core/runner/team_runner.py`、`openjiuwen/agent_teams/__init__.py`、`openjiuwen/agent_teams/schema/__init__.py` |
 | 测试基线 | `tests/unit_tests/agent_teams/test_stream_controller.py` 16 passed；`tests/unit_tests/agent_teams/test_spawn_manager_chunk_forward.py` 3 passed |
 | Refs | `#751` |

@@ -7,7 +7,6 @@
 | 范围 | openjiuwen/agent_teams/agent/state.py、tools/team.py、agent/agent_configurator.py、agent/team_agent.py、agent/stream_controller.py、agent/coordination/handlers/agent_lifecycle.py |
 | 测试基线 | `pytest tests/unit_tests/agent_teams/` → 976 passed, 16 skipped；新增 `test_team.py` 4 例 + `test_stream_controller.py` 4 例 |
 | Refs | #751 |
-| 最近一次修订 commit | 29c248fa |
 
 ## 背景
 

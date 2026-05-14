@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/messager/base.py`、`openjiuwen/agent_teams/messager/messager.py`、`openjiuwen/agent_teams/messager/inprocess.py`、`openjiuwen/agent_teams/messager/pyzmq_backend.py`、`openjiuwen/agent_teams/schema/blueprint.py`（`TransportSpec` / `register_transport` / `_TRANSPORT_REGISTRY`） |
-| 最近一次修订 commit | 18823271 |
+| 最近一次修订日期 | 2026-05-09 |
 | 关联 feature | — |
 
 ## 范围 / 边界
