@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """DeepAgent implementation."""
 from __future__ import annotations
 
@@ -1100,6 +1100,17 @@ class DeepAgent(BaseAgent):
             ]
         self._pending_rails.append(rail)
         return self
+
+    def find_rails_by_type(self, rail_types: tuple[type, ...]) -> List[AgentRail]:
+        """Return queued + registered rails matching any of the given types.
+
+        Public counterpart to ``strip_rails_by_type`` for callers that need to
+        locate a rail instance without touching DeepAgent's internal rail lists
+        directly.
+        """
+        if not rail_types:
+            return []
+        return [rail for rail in (*self._pending_rails, *self._registered_rails) if isinstance(rail, rail_types)]
 
     def strip_rails_by_type(self, rail_types: tuple[type, ...]) -> int:
         """Remove queued rails by type and mark registered ones as stale.

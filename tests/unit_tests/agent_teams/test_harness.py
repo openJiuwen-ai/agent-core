@@ -231,6 +231,32 @@ async def test_register_and_unregister_rail_forward() -> None:
     deep_agent.unregister_rail.assert_awaited_once_with(rail)
 
 
+def test_find_rails_delegates_to_deep_agent() -> None:
+    """find_rails forwards the type query to the underlying agent."""
+    from openjiuwen.harness.rails import TeamSkillRail
+
+    deep_agent = _stub_deep_agent()
+    skill_rail = MagicMock(name="TeamSkillRail")
+    deep_agent.find_rails_by_type = MagicMock(return_value=[skill_rail])
+    harness = _make_harness(deep_agent)
+
+    found = harness.find_rails(TeamSkillRail)
+
+    deep_agent.find_rails_by_type.assert_called_once_with((TeamSkillRail,))
+    assert found == [skill_rail]
+
+
+def test_find_rails_returns_empty_when_no_match() -> None:
+    """find_rails returns an empty list when no rail of the type is mounted."""
+    from openjiuwen.harness.rails import TeamSkillRail
+
+    deep_agent = _stub_deep_agent()
+    deep_agent.find_rails_by_type = MagicMock(return_value=[])
+    harness = _make_harness(deep_agent)
+
+    assert harness.find_rails(TeamSkillRail) == []
+
+
 @pytest.mark.asyncio
 async def test_run_streaming_delegates_to_runner(monkeypatch: pytest.MonkeyPatch) -> None:
     """``run_streaming`` is the seam where a remote runtime would replace

@@ -417,15 +417,16 @@ class TeamAgent(BaseAgent):
     def _setup_agent(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> None:
         self._configurator.setup_agent(spec, ctx)
 
-        # Teammate path: team row already exists in DB by the time
-        # configure() runs, so we can build the handle synchronously.
-        # Leader path: handle is created lazily in
-        # ``_on_teammate_created(self.member_name)`` because the
-        # leader's own team row only materializes after BuildTeamTool.
-        # Human agents go through the same spawn path as teammates and
-        # need the same status / execution handle so their READY/BUSY
-        # transitions show up in the leader's roster view.
-        if ctx.role in (TeamRole.TEAMMATE, TeamRole.HUMAN_AGENT) and ctx.member_name:
+        # Build the member handle once for every role. ``create_member_handle``
+        # is a pure constructor: it only needs the bound ``team_backend``
+        # (``setup_infra`` wires that up for all roles before this runs) and
+        # never touches the database. The leader's own DB row may not exist
+        # yet at this point -- it only materializes when the leader calls
+        # ``BuildTeamTool`` mid-round -- but ``TeamMember`` tolerates a missing
+        # row, so the handle is created eagerly here just like teammates. This
+        # keeps status / execution transitions flowing to the DB for every
+        # role, including the leader and cold-recovered agents.
+        if ctx.member_name:
             self._state.team_member = create_member_handle(
                 member_name=ctx.member_name,
                 blueprint=self._configurator.blueprint,
@@ -434,6 +435,26 @@ class TeamAgent(BaseAgent):
             )
 
         self._coordination.setup(role=ctx.role)
+        self._register_team_completion_callbacks()
+
+    def _register_team_completion_callbacks(self) -> None:
+        """Wire optional team-completion callbacks into the coordination layer.
+
+        Runs once, after the DeepAgent is fully built (rails mounted,
+        ``agent_customizer`` applied) and the dispatcher exists. Extracts
+        any ``TeamSkillRail`` mounted on the agent and registers its
+        ``notify_team_completed`` hook with the ``TeamCompletionHandler``
+        so a drained task board triggers skill evolution — no per-event
+        rail lookup. No-op when the harness, dispatcher, or rail is absent.
+        """
+        harness = self._configurator.harness
+        dispatcher = self._coordination.dispatcher
+        if harness is None or dispatcher is None:
+            return
+        from openjiuwen.harness.rails import TeamSkillRail
+
+        for rail in harness.find_rails(TeamSkillRail):
+            dispatcher.team_completion.register_completion_callback(rail.notify_team_completed)
 
     def _resolve_agent_spec(
         self,
@@ -667,19 +688,8 @@ class TeamAgent(BaseAgent):
         agent.configure(spec, context)
         return agent
 
-    def _init_leader_member(self, member_name: str) -> None:
-        self._state.team_member = create_member_handle(
-            member_name=member_name,
-            blueprint=self._configurator.blueprint,
-            infra=self._configurator.infra,
-            agent_card=self.card,
-        )
-
     async def _on_teammate_created(self, teammate_id: str):
         team_logger.info("[{}] on_teammate_created: {}", self._member_name() or "?", teammate_id)
-        if teammate_id == self._member_name():
-            self._init_leader_member(teammate_id)
-            return
         ctx = await self._spawn_manager.build_context_from_db(teammate_id)
         if ctx is None:
             return

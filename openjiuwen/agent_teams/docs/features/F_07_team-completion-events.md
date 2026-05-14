@@ -60,9 +60,19 @@
   注册同一 key、framework 串行 fan-out（coordination 铁律 2），所以新 handler 复用该 tick，
   不碰 `StaleTaskHandler`、不动 `stream_controller`。
 - **新增 `TeamCompletionHandler` 既驱动又消费**：`on_poll_task` 驱动 Event B 评估 + 发射；
-  `on_task_list_drained` / `on_team_completed` 消费两个新事件（当前仅结构化记日志，是未来
-  SDK-facing 通知的挂载点）。注册元组里放在 `stale_task` 之后，保证 stale 清扫（可能
-  `deliver_input` 让 leader 转 busy）先跑、完成判定后跑。
+  `on_task_list_drained` 记日志并 fire 已注册的完成回调；`on_team_completed` 消费记日志
+  （未来 SDK-facing 通知的挂载点）。注册元组里放在 `stale_task` 之后，保证 stale 清扫
+  （可能 `deliver_input` 让 leader 转 busy）先跑、完成判定后跑。
+- **`on_task_list_drained` 触发 `TeamSkillRail.notify_team_completed` 走「构造期注册回调」**：
+  不在事件到达时临时去查 rail。`TeamCompletionHandler` 持有 `_completion_callbacks` 列表 +
+  `register_completion_callback`；`TeamAgent._register_team_completion_callbacks` 在
+  `configure` 末尾（deepagent 已建好、`agent_customizer` 已跑、dispatcher 已存在）一次性
+  把 `TeamSkillRail.notify_team_completed` 注册进去。提取链路：
+  `TeamHarness.find_rails(TeamSkillRail)` → `DeepAgent.find_rails_by_type`（新增公共访问器，
+  对标 `strip_rails_by_type`）。`TeamSkillRail` 由用户 `agent_customizer` 选择性挂载，未挂
+  则注册表为空、`on_task_list_drained` 不 fire 任何回调 —— 注册表非空本身就是 leader gate。
+  这条事件驱动路径与 `TeamSkillRail._on_after_tool_call`（leader 调 `view_task` 看到全完成）
+  互补，二者都受 `TeamSkillRail._evolution_in_progress` 去重。
 - **「全部消息已读」新增 `MessageDao.has_unread_messages(team_name)`**：此前没有 team 级
   「是否有未读」聚合查询。direct 看 `is_read IS FALSE`；broadcast 用 per-member 高水位线
   （`MessageReadStatus.read_at`）逐 (成员, 广播) 比对，判定逻辑与 `get_broadcast_messages`
