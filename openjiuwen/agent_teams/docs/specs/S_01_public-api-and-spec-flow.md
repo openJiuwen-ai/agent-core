@@ -17,7 +17,7 @@
 2. `Spec → build() → Runtime` 单向流的**形态约束**——Spec 携带什么、不携带什么；build 在哪里发生；Runtime 是否回写 Spec。
 
 不在本规约范围内（落到其它 spec）：
-- 运行时对象池、9 路 dispatch 决策表、`InteractGate` 并发门禁——见 `S_06_runtime-pool-dispatch`。
+- 运行时对象池、7 路 dispatch 决策表、`InteractGate` 并发门禁、`finalize` / `finalize_member` 决策——见 `S_06_runtime-pool-dispatch`。
 - 三视角交互 inbox、HITT 启用与人类成员路由——见 `S_07_interaction-views-and-hitt`。
 - TeamAgent 内部装配链（spawn / coordination / stream / session manager）——见 `S_02_team-agent-architecture` / `S_03_coordination-protocol` / `S_04_session-and-recovery` / `S_05_member-spawn-and-stream`。
 - Prompt 模板 / 工具描述 / i18n 文本归属——见 `S_08_team-tools-contract` / `S_09_prompts-and-rails` / `S_16_top-level-utilities`。
@@ -272,7 +272,7 @@ async def Runner.release(self, session_id: str, *, force: bool = False) -> None
 
 ## 与其它 spec 的关系
 
-- 本 spec 描述**入口形态**与 **Spec → build 单向流**；进入 build 后 `TeamRuntimeManager` 内部的 9 路 dispatch、对象池写入、并发门禁、session 状态机等留给后续 runtime spec。
+- 本 spec 描述**入口形态**与 **Spec → build 单向流**；进入 build 后 `TeamRuntimeManager` 内部的 7 路 dispatch、对象池写入、并发门禁、finalize 决策、session 状态机等留给后续 runtime spec。
 - `RESERVED_MEMBER_NAMES` 的具体语义、`@member` 路由的解析规则属于 interaction spec，不在本规约展开。
 - `TeamAgentSpec` 上的 `model_pool` / `model_router` 字段在本规约只承诺"互斥校验 + build 时由 router 展开为 pool"；具体分配策略（round_robin / by_model_name / router）的语义、`inherit_pool_ids` 的行为属于模型分配 spec。
 - `TransportSpec` / `StorageSpec` 的注册表机制是本规约的不变量；**具体内置后端**（inprocess / pyzmq / sqlite / memory）的协议属于 messager / 存储后端的子模块规约。

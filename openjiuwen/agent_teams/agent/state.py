@@ -33,9 +33,15 @@ def _empty_listener_list() -> list:
 
 @dataclass
 class TeamAgentState:
-    """Mutable runtime state shared across TeamAgent operators."""
+    """Mutable runtime state shared across TeamAgent operators.
 
-    session_id: Optional[str] = None
+    Note: session_id is intentionally NOT a field here. The single source of
+    truth for the current session_id is the agent_teams contextvar exposed by
+    ``openjiuwen.agent_teams.context.get_session_id``. Holding a cached string
+    on the state would re-introduce the "two truths" problem that previously
+    required complex Token bookkeeping in SessionManager.
+    """
+
     team_session: Optional["AgentTeamSession"] = None
     team_member: Optional["TeamMember"] = None
     pending_user_query: str = ""

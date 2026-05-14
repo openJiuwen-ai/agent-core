@@ -176,12 +176,15 @@ class TeamAgent(BaseAgent):
 
     @property
     def session_id(self) -> Optional[str]:
-        """Return the current session ID."""
-        return self._session_manager.session_id
+        """Return the current session ID from the agent_teams contextvar.
 
-    def set_session_id(self, session_id: Optional[str]) -> None:
-        """Set the session ID for this agent."""
-        self._session_manager.session_id = session_id
+        The contextvar is the single source of truth; reading from a cached
+        state field would re-introduce double-bookkeeping bugs that the
+        contextvar-only design was meant to eliminate.
+        """
+        from openjiuwen.agent_teams.context import get_session_id
+
+        return get_session_id() or None
 
     @property
     def session_manager(self) -> SessionManager:
@@ -212,6 +215,23 @@ class TeamAgent(BaseAgent):
     def team_member(self) -> Optional[TeamMember]:
         """Return the TeamMember handle for this agent, if set."""
         return self._state.team_member
+
+    async def is_shutdown_requested(self) -> bool:
+        """Whether this teammate has been asked to shut down or already has.
+
+        Leaders never carry a TeamMember handle (only teammates and human
+        agents do), so this always returns False for leader agents.
+        Includes ``SHUTDOWN`` itself because ``shutdown_self`` writes the
+        terminal status directly before tearing down the stream — the
+        finalize path must treat that as "already heading out" and not
+        flip the status back to READY through a pause decision.
+        Consumed by ``TeamRuntimeManager.finalize_member``.
+        """
+        member = self._state.team_member
+        if member is None:
+            return False
+        status = await member.status()
+        return status in (MemberStatus.SHUTDOWN_REQUESTED, MemberStatus.SHUTDOWN)
 
     @property
     def pending_user_query(self) -> str:
@@ -299,6 +319,12 @@ class TeamAgent(BaseAgent):
         await self._cancel_agent()
 
     async def destroy_team(self, force: bool = True) -> bool:
+        # Snapshot session_id BEFORE coordination teardown. ``stop_coordination``
+        # triggers ``SessionManager.release_session`` which resets the
+        # contextvar; without the snapshot, ``_remove_self_from_pool`` would
+        # be unable to identify which pool entry it owns and silently leak it.
+        session_id_snapshot = self.session_id
+
         try:
             await self.cancel_agent()
         except Exception as e:
@@ -309,10 +335,51 @@ class TeamAgent(BaseAgent):
         except Exception as e:
             team_logger.warning("[{}] stop coordination during destroy failed: {}", self._member_name() or "?", e)
 
+        # Drop any pool entry for this team so the next ``run_agent_team*``
+        # call sees a clean slate. ``destroy_team`` is the leader-level
+        # teardown sibling of ``TeamRuntimeManager.stop_team`` / ``delete_team``
+        # — invoked directly on the TeamAgent it must still honor the
+        # "stop_coordination implies pool.remove" invariant. Best-effort:
+        # any failure is logged but does not break the destroy contract.
+        await self._remove_self_from_pool(session_id_snapshot)
+
         if not self._configurator.team_backend:
             return False
 
         return await self._configurator.team_backend.force_clean_team(shutdown_members=force)
+
+    async def _remove_self_from_pool(self, session_id: Optional[str]) -> None:
+        """Best-effort detach from the process-global team runtime pool.
+
+        Takes ``session_id`` as an explicit argument because the caller has
+        to snapshot it before coordination teardown resets the contextvar.
+        Reaches into ``GLOBAL_RUNNER`` to find the runtime manager rather
+        than holding a back reference, because pool ownership is a
+        runtime-layer concern that the TeamAgent must not couple to at
+        construction time. Idempotent — a missing pool entry, a manager
+        that was never lazily created, or any access failure all become
+        no-ops with a warning log.
+        """
+        team_name = self._configurator.team_name
+        if not team_name or not session_id:
+            return
+        try:
+            from openjiuwen.core.runner.runner import GLOBAL_RUNNER
+
+            manager = getattr(GLOBAL_RUNNER, "_team_runtime_manager", None)
+            if manager is None:
+                return
+            pool = manager.pool
+            entry = await pool.get(team_name)
+            if entry is None or entry.current_session_id != session_id:
+                return
+            await pool.remove(team_name)
+        except Exception as exc:
+            team_logger.warning(
+                "[{}] destroy_team pool cleanup failed: {}",
+                self._member_name() or "?",
+                exc,
+            )
 
     async def steer(self, content: str) -> None:
         await self._stream_controller.steer(content)
@@ -620,7 +687,7 @@ class TeamAgent(BaseAgent):
         await self.spawn_teammate(
             ctx,
             initial_message=teammate.prompt if teammate else None,
-            session=self._session_manager.session_id,
+            session=self.session_id,
             spawn_config=SpawnConfig(health_check_timeout=30, health_check_interval=50),
         )
 
@@ -724,7 +791,17 @@ class TeamAgent(BaseAgent):
         allocator_state = bucket.get("model_allocator_state")
         if allocator_state:
             agent.restore_allocator_state(allocator_state)
-        agent.set_session_id(session.get_session_id())
+        # Inject session_id into the agent_teams contextvar so the immediately
+        # following ``recover_team`` flow (and its restart_teammate -> spawn
+        # chain) can read it via ``get_session_id``. We deliberately do NOT
+        # take a Token here: this is a classmethod and the bind / release
+        # contract is owned by ``SessionManager``; the caller's context is
+        # short-lived (manager._apply_action) and the pool entry that holds
+        # the leader will eventually go through bind_session for proper
+        # Token-managed lifecycle.
+        from openjiuwen.agent_teams.context import set_session_id
+
+        set_session_id(session.get_session_id())
         return agent
 
 

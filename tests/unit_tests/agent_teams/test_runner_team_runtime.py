@@ -243,10 +243,19 @@ async def test_team_runtime_manager_cold_recover_reinjects_runtime_spec():
 
 
 @pytest.mark.asyncio
-async def test_runner_team_runtime_manager_resumes_new_session_and_recovers_history(
+async def test_runner_session_switch_stops_and_rebuilds(
     isolated_checkpointer,
     stateful_team_db,
 ):
+    """Switching sessions for the same team tears down the pool entry
+    (stop_coordination + pool.remove) before redispatching cold.
+
+    Replaces the old warm-session-switch path (WARM_RECOVER /
+    NEW_TEAM_IN_SESSION_WARM) which reused the same TeamAgent instance
+    across sessions and was prone to state bleed. The new contract:
+    every cross-session activation starts from a freshly built or
+    cold-recovered agent against an empty pool slot.
+    """
     await Runner.start()
     session_one = f"resume_{uuid.uuid4().hex}"
     session_two = f"resume_{uuid.uuid4().hex}"
@@ -277,22 +286,16 @@ async def test_runner_team_runtime_manager_resumes_new_session_and_recovers_hist
                 session=session_two,
             )
         ]
-        third_chunks = [
-            chunk
-            async for chunk in Runner.run_agent_team_streaming(
-                agent_team=spec,
-                inputs={"query": "third"},
-                session=session_one,
-            )
-        ]
 
     assert first_chunks[0].payload["activation_kind"] == "create"
-    # session_two has no bucket yet for the team; pool already holds the
-    # team from round one, so this is the warm "new team in session" path.
-    assert second_chunks[0].payload["activation_kind"] == "new_team_in_session_warm"
-    assert active_agent.resume_calls == [session_two, session_one]
-    # round 3 reuses session_one which already carries the team bucket.
-    assert third_chunks[0].payload["activation_kind"] == "warm_recover"
+    # session_two has no bucket for the team yet (round 1 wrote into
+    # session_one). The stale session_one pool entry is torn down before
+    # dispatch, so the cold path picks NEW_TEAM_IN_SESSION (team_in_db
+    # True via the manual create_team above; team_in_session False).
+    assert second_chunks[0].payload["activation_kind"] == "new_team_in_session"
+    assert active_agent.resume_calls == [session_two]
+    # The pool teardown on session switch must have called stop_coordination
+    # at least once on the round-one agent (session_one -> session_two).
     assert active_agent.stop_calls >= 1
 
     await Runner.stop()
@@ -490,11 +493,12 @@ async def test_team_agent_cancelled_round_does_not_restart_follow_up():
     async def _noop(*_a, **_kw):
         return None
 
+    from unittest.mock import MagicMock
+
     from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
     from openjiuwen.agent_teams.agent.state import TeamAgentState
     from openjiuwen.agent_teams.harness import TeamHarness, _MountedRails
     from openjiuwen.agent_teams.schema.team import TeamRole
-    from unittest.mock import MagicMock
 
     fake_deep_agent = SimpleNamespace(deep_config=None)
     fake_rails = _MountedRails(team_tool=MagicMock(), team_policy=MagicMock())
@@ -568,7 +572,7 @@ async def test_team_agent_resume_for_new_session_rebinds_only_live_teammates():
 
     await agent.resume_for_new_session(new_session)
 
-    assert agent._session_manager.session_id == new_session.get_session_id()
+    assert agent.session_id == new_session.get_session_id()
     fake_db.create_cur_session_tables.assert_awaited_once()
     assert agent._spawn_manager.cleanup_teammate.await_args_list == [
         call("worker_busy"),
@@ -629,7 +633,7 @@ async def test_team_agent_recover_for_existing_session_rebinds_live_teammates():
 
     await agent.recover_for_existing_session(existing_session)
 
-    assert agent._session_manager.session_id == existing_session.get_session_id()
+    assert agent.session_id == existing_session.get_session_id()
     agent._coordination.stop.assert_awaited_once()
     fake_db.create_cur_session_tables.assert_awaited_once()
     assert agent._spawn_manager.restart_teammate.await_args_list == [
@@ -676,7 +680,7 @@ def test_team_agent_recover_from_session_restores_session_id():
 
     agent = TeamAgent.recover_from_session(session, "persistent_team")
 
-    assert agent._session_manager.session_id == session_id
+    assert agent.session_id == session_id
 
 
 def test_team_agent_recover_from_session_reinjects_runtime_spec_customizer():
@@ -735,7 +739,7 @@ def test_team_agent_recover_from_session_reinjects_runtime_spec_customizer():
         )
 
     assert captured["spec"].agent_customizer is customizer
-    assert agent._session_manager.session_id == session_id
+    assert agent.session_id == session_id
 
 
 def test_team_agent_recover_from_session_without_runtime_spec_keeps_customizer_none():
@@ -919,12 +923,15 @@ class TestTeamRuntimeManagerReleaseSession:
         fake_db.initialize = AsyncMock()
         fake_db.drop_session_tables_by_id = AsyncMock(return_value=[])
 
-        with patch(
-            "openjiuwen.agent_teams.runtime.manager.TeamRuntimeManager.resolve_team_session_release_info",
-            return_value=release_info,
-        ), patch(
-            "openjiuwen.agent_teams.spawn.shared_resources.get_shared_db",
-            return_value=fake_db,
+        with (
+            patch(
+                "openjiuwen.agent_teams.runtime.manager.TeamRuntimeManager.resolve_team_session_release_info",
+                return_value=release_info,
+            ),
+            patch(
+                "openjiuwen.agent_teams.spawn.shared_resources.get_shared_db",
+                return_value=fake_db,
+            ),
         ):
             await manager.release_session(session_id, force=True)
 
@@ -1199,15 +1206,19 @@ class TestTeamRuntimeManagerStopTeam:
         fake_checkpointer = AsyncMock()
         fake_checkpointer.release = AsyncMock()
 
-        with patch(
-            "openjiuwen.agent_teams.runtime.manager.TeamRuntimeManager.resolve_team_session_release_info",
-            return_value=release_info,
-        ), patch(
-            "openjiuwen.agent_teams.spawn.shared_resources.get_shared_db",
-            return_value=fake_db,
-        ), patch(
-            "openjiuwen.agent_teams.runtime.manager.CheckpointerFactory.get_checkpointer",
-            return_value=fake_checkpointer,
+        with (
+            patch(
+                "openjiuwen.agent_teams.runtime.manager.TeamRuntimeManager.resolve_team_session_release_info",
+                return_value=release_info,
+            ),
+            patch(
+                "openjiuwen.agent_teams.spawn.shared_resources.get_shared_db",
+                return_value=fake_db,
+            ),
+            patch(
+                "openjiuwen.agent_teams.runtime.manager.CheckpointerFactory.get_checkpointer",
+                return_value=fake_checkpointer,
+            ),
         ):
             result = await manager.delete_team(team_name, [session_id])
 
@@ -1293,15 +1304,19 @@ class TestTeamRuntimeManagerDeleteTeam:
                 return release_info
             return None
 
-        with patch(
-            "openjiuwen.agent_teams.runtime.manager.TeamRuntimeManager.resolve_team_session_release_info",
-            side_effect=_fake_resolve,
-        ), patch(
-            "openjiuwen.agent_teams.spawn.shared_resources.get_shared_db",
-            return_value=fake_db,
-        ), patch(
-            "openjiuwen.agent_teams.runtime.manager.CheckpointerFactory.get_checkpointer",
-            return_value=fake_checkpointer,
+        with (
+            patch(
+                "openjiuwen.agent_teams.runtime.manager.TeamRuntimeManager.resolve_team_session_release_info",
+                side_effect=_fake_resolve,
+            ),
+            patch(
+                "openjiuwen.agent_teams.spawn.shared_resources.get_shared_db",
+                return_value=fake_db,
+            ),
+            patch(
+                "openjiuwen.agent_teams.runtime.manager.CheckpointerFactory.get_checkpointer",
+                return_value=fake_checkpointer,
+            ),
         ):
             result = await manager.delete_team(team_name, [bad_session_id, good_session_id])
 
@@ -1449,15 +1464,19 @@ class TestTeamRuntimeManagerDeleteTeam:
         fake_checkpointer = AsyncMock()
         fake_checkpointer.release = AsyncMock()
 
-        with patch(
-            "openjiuwen.agent_teams.runtime.manager.TeamRuntimeManager.resolve_team_session_release_info",
-            return_value=release_info,
-        ), patch(
-            "openjiuwen.agent_teams.spawn.shared_resources.get_shared_db",
-            return_value=fake_db,
-        ), patch(
-            "openjiuwen.agent_teams.runtime.manager.CheckpointerFactory.get_checkpointer",
-            return_value=fake_checkpointer,
+        with (
+            patch(
+                "openjiuwen.agent_teams.runtime.manager.TeamRuntimeManager.resolve_team_session_release_info",
+                return_value=release_info,
+            ),
+            patch(
+                "openjiuwen.agent_teams.spawn.shared_resources.get_shared_db",
+                return_value=fake_db,
+            ),
+            patch(
+                "openjiuwen.agent_teams.runtime.manager.CheckpointerFactory.get_checkpointer",
+                return_value=fake_checkpointer,
+            ),
         ):
             ok = await manager.delete_team(team_name, [session_id], force=True)
 
@@ -1644,11 +1663,18 @@ class TestRunnerReleaseAutoDispatch:
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_run_agent_team_rejects_unactivated_team_name():
-    """``str`` input must fail when no pool entry seeded the team yet."""
+    """``str`` input must fail when no pool entry and no session bucket exist.
+
+    The recover path through ``name + old_session`` reads the spec from
+    the session bucket when the pool is empty (e.g. after a stop or a
+    process restart). With ``session=None`` neither source is available,
+    so the request must be rejected with a clear "first-time runs need
+    a TeamAgentSpec" message.
+    """
     from openjiuwen.core.common.exception.errors import ValidationError
 
     await Runner.start()
-    with pytest.raises(ValidationError, match="is not active"):
+    with pytest.raises(ValidationError, match="has no live pool entry"):
         await Runner.run_agent_team(agent_team="never-seeded-team", inputs={"query": "x"})
 
 

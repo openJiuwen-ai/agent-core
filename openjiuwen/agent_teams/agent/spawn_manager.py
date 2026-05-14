@@ -14,6 +14,7 @@ from typing import (
     Optional,
 )
 
+from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import (
     TeamRole,
@@ -74,7 +75,7 @@ class SpawnManager:
                 team_agent=self._get_team_agent(),
                 ctx=ctx,
                 initial_message=initial_message,
-                session_id=self._state.session_id or session,
+                session_id=get_session_id() or session,
             )
             # Wire chunk fan-out so the teammate's stream chunks reach
             # the leader's stream_queue. Subprocess teammates skip this
@@ -184,7 +185,7 @@ class SpawnManager:
                 await self.spawn_teammate(
                     ctx,
                     initial_message=initial_message,
-                    session=self._state.session_id,
+                    session=get_session_id() or None,
                     spawn_config=spawn_config,
                 )
                 await self.publish_restart_event(member_name, attempt)
@@ -271,7 +272,6 @@ class SpawnManager:
         team_backend = self._configurator.team_backend
         if not messager or not team_backend:
             return
-        from openjiuwen.agent_teams.context import get_session_id
         from openjiuwen.agent_teams.schema.events import (
             EventMessage,
             MemberRestartedEvent,

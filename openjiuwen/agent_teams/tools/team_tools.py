@@ -1371,6 +1371,7 @@ def create_team_tools(
     role: str,
     agent_team: TeamBackend,
     teammate_mode: str = "build_mode",
+    lifecycle: str = "temporary",
     on_teammate_created: Optional[Callable[[str], Awaitable[None]]] = None,
     model_config_allocator: Optional[Callable[[Optional[str]], Optional["Allocation"]]] = None,
     exclude_tools: Optional[Set[str]] = None,
@@ -1386,6 +1387,11 @@ def create_team_tools(
             are only wired when teammate_mode == "plan_mode", since that's the
             only mode where teammates submit plans and tool calls can be held
             for leader sign-off.
+        lifecycle: Team lifecycle — "temporary" or "persistent". The
+            ``clean_team`` tool is only wired for temporary teams; persistent
+            teams are torn down through operator-level SDK facades
+            (``delete_agent_team`` etc.), so exposing a leader-callable
+            tear-down tool inside a round would race the pool invariants.
         on_teammate_created: Callback invoked when a teammate is created.
         model_config_allocator: Callback that returns the next
             ``Allocation`` for teammate allocation. Receives an
@@ -1437,6 +1443,12 @@ def create_team_tools(
     # build_mode has no such workflow, so keep the leader's toolset clean.
     if role == "leader" and teammate_mode != "plan_mode":
         allowed = allowed - {"approve_plan", "approve_tool"}
+    # clean_team is a temporary-team primitive only. Persistent teams are
+    # torn down by the operator through SDK facades (delete_agent_team etc.);
+    # letting the leader LLM call clean_team mid-round would race the runtime
+    # pool invariants, so the tool is simply not wired in that lifecycle.
+    if lifecycle == "persistent":
+        allowed = allowed - {"clean_team"}
     if exclude_tools:
         allowed = allowed - exclude_tools
     tools = [tool for name, tool in all_tools.items() if name in allowed]

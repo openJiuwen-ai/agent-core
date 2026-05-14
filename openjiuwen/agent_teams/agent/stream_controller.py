@@ -18,6 +18,7 @@ from typing import (
     Tuple,
 )
 
+from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberStatus,
@@ -193,22 +194,37 @@ class StreamController:
             await harness.follow_up(content)
 
     async def cancel_agent(self) -> None:
+        """Cancel the in-flight round, advancing the execution state machine.
+
+        Idempotent: when no round is running (``agent_task`` is ``None``
+        or already ``done``) this is a no-op. The ``RUNNING ->
+        CANCEL_REQUESTED -> CANCELLING`` walk is required by
+        ``EXECUTION_TRANSITIONS`` so the downstream ``CANCELLED`` and
+        ``IDLE`` writes in ``_execute_round`` land on legal edges.
+        """
+        if self.agent_task is None or self.agent_task.done():
+            return
         await self._update_execution(ExecutionStatus.CANCEL_REQUESTED)
-        if self.agent_task and not self.agent_task.done():
-            await self._update_execution(ExecutionStatus.CANCELLING)
-            await self.cooperative_cancel()
+        await self._update_execution(ExecutionStatus.CANCELLING)
+        await self.cooperative_cancel()
 
     def close_stream(self) -> None:
         if self.stream_queue is not None:
             self.stream_queue.put_nowait(None)
 
     async def drain_agent_task(self) -> None:
-        task = self.agent_task
-        if task is None or task.done():
-            return
+        """Tear down the in-flight round during lifecycle pause/stop.
+
+        Equivalent to ``cancel_agent`` plus pending-queue cleanup:
+        ``pending_inputs`` / ``pending_interrupt_resumes`` are wiped so
+        any teardown-time follow-up cannot survive the kernel
+        pause/stop. State-machine advancement lives entirely in
+        ``cancel_agent`` — the two entry points must never diverge on
+        what they tell the execution status machine.
+        """
         self.pending_inputs.clear()
         self.pending_interrupt_resumes.clear()
-        await self.cooperative_cancel()
+        await self.cancel_agent()
 
     async def cooperative_cancel(self) -> None:
         """Ask the underlying task loop to abort, then hard-cancel if needed.
@@ -320,7 +336,7 @@ class StreamController:
         try:
             async for chunk in harness.run_streaming(
                 inputs,
-                session_id=self._state.session_id,
+                session_id=get_session_id() or None,
             ):
                 if error_seen:
                     continue

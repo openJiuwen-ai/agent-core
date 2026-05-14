@@ -9,8 +9,12 @@ collect the inputs (DB existence, checkpoint bucket presence, pool entry)
 and let this function pick the path. The runtime manager is then free to
 execute the corresponding effect (create / recover / resume / reject).
 
-The decision table mirrors the design in
-``runtime-manager-whimsical-emerson.md`` § 三:
+Pre-dispatch contract enforced by ``TeamRuntimeManager.activate``: any
+``pool_entry`` passed in here belongs to ``target_session_id``. Cross-
+session pool entries are torn down with ``stop_team`` before dispatch
+runs, so this function never has to choose between "warm" and "cold"
+rebuild paths — stop+remove+cold-rebuild is the only cross-session
+path.
 
 ================ ================ ============== ==================== =======
 team_in_db       team_in_session  pool_entry     same_session?         kind
@@ -22,8 +26,6 @@ True             False            None           —                    NEW_TEAM
 True             True             None           —                    COLD_RECOVER
 True             True             present        yes (RUNNING)        REJECT_RUNNING
 True             True             present        yes (PAUSED)         RESUME_FROM_PAUSE
-True             True             present        no                   WARM_RECOVER
-True             False            present        any                  NEW_TEAM_IN_SESSION_WARM
 ================ ================ ============== ==================== =======
 """
 
@@ -44,9 +46,7 @@ class RunActionKind(str, Enum):
 
     CREATE = "create"
     NEW_TEAM_IN_SESSION = "new_team_in_session"
-    NEW_TEAM_IN_SESSION_WARM = "new_team_in_session_warm"
     COLD_RECOVER = "cold_recover"
-    WARM_RECOVER = "warm_recover"
     RESUME_FROM_PAUSE = "resume_from_pause"
     REJECT_RUNNING = "reject_running"
     REJECT_ORPHANED = "reject_orphaned"
@@ -114,23 +114,26 @@ def decide_run_action(
             return RunAction(kind=RunActionKind.COLD_RECOVER, require_spec=False)
         return RunAction(kind=RunActionKind.NEW_TEAM_IN_SESSION, require_spec=False)
 
-    # Warm paths: pool already holds this team.
-    if pool_entry.current_session_id == target_session_id:
-        if pool_entry.state == RuntimeState.PAUSED:
-            return RunAction(kind=RunActionKind.RESUME_FROM_PAUSE, require_spec=False)
-        return RunAction(
-            kind=RunActionKind.REJECT_RUNNING,
-            require_spec=False,
-            reason=(
-                f"team {target_team_name!r} already running on session "
-                f"{target_session_id!r}; use interact"
-            ),
+    # Pool entry exists. Manager.activate guarantees it belongs to
+    # ``target_session_id`` — cross-session entries are torn down before
+    # dispatch runs, so reaching this branch on a different session is a
+    # contract violation.
+    if pool_entry.current_session_id != target_session_id:
+        raise RuntimeError(
+            f"dispatch invariant violated: pool entry for {target_team_name!r} "
+            f"on session {pool_entry.current_session_id!r} must be torn down "
+            f"before dispatching to session {target_session_id!r}",
         )
-
-    # Pool entry on a different session.
-    if team_in_session:
-        return RunAction(kind=RunActionKind.WARM_RECOVER, require_spec=False)
-    return RunAction(kind=RunActionKind.NEW_TEAM_IN_SESSION_WARM, require_spec=False)
+    if pool_entry.state == RuntimeState.PAUSED:
+        return RunAction(kind=RunActionKind.RESUME_FROM_PAUSE, require_spec=False)
+    return RunAction(
+        kind=RunActionKind.REJECT_RUNNING,
+        require_spec=False,
+        reason=(
+            f"team {target_team_name!r} already running on session "
+            f"{target_session_id!r}; use interact"
+        ),
+    )
 
 
 __all__ = ["RunAction", "RunActionKind", "decide_run_action"]

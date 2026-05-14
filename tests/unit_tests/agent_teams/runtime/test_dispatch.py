@@ -114,42 +114,33 @@ def test_resume_from_pause_when_pool_paused_on_same_session():
     assert action.kind is RunActionKind.RESUME_FROM_PAUSE
 
 
-def test_warm_recover_when_pool_on_other_session_and_target_bucket_exists():
+def test_raises_when_pool_entry_on_other_session():
+    """Cross-session pool entries must be torn down by Manager.activate
+    before dispatch runs; reaching this branch is a contract violation."""
     pool = _pool_entry(team_name="alpha", session_id="other")
-    action = decide_run_action(
-        team_in_db=True,
-        team_in_session=True,
-        pool_entry=pool,
-        target_session_id="s1",
-        target_team_name="alpha",
-    )
-    assert action.kind is RunActionKind.WARM_RECOVER
-
-
-def test_new_team_in_session_warm_when_pool_on_other_session_and_target_bucket_missing():
-    pool = _pool_entry(team_name="alpha", session_id="other")
-    action = decide_run_action(
-        team_in_db=True,
-        team_in_session=False,
-        pool_entry=pool,
-        target_session_id="s1",
-        target_team_name="alpha",
-    )
-    assert action.kind is RunActionKind.NEW_TEAM_IN_SESSION_WARM
+    with pytest.raises(RuntimeError, match="dispatch invariant"):
+        decide_run_action(
+            team_in_db=True,
+            team_in_session=True,
+            pool_entry=pool,
+            target_session_id="s1",
+            target_team_name="alpha",
+        )
 
 
 @pytest.mark.parametrize(
     "team_in_db,team_in_session,has_pool,session_match,paused,expected",
     [
         (False, False, False, False, False, RunActionKind.CREATE),
-        (False, False, True, False, False, RunActionKind.REJECT_INCONSISTENT),
+        # REJECT_INCONSISTENT triggers on (not team_in_db && pool present)
+        # regardless of session match — keep session_match True so the
+        # cross-session assertion below does not preempt the case.
+        (False, False, True, True, False, RunActionKind.REJECT_INCONSISTENT),
         (False, True, False, False, False, RunActionKind.REJECT_ORPHANED),
         (True, False, False, False, False, RunActionKind.NEW_TEAM_IN_SESSION),
         (True, True, False, False, False, RunActionKind.COLD_RECOVER),
         (True, True, True, True, False, RunActionKind.REJECT_RUNNING),
         (True, True, True, True, True, RunActionKind.RESUME_FROM_PAUSE),
-        (True, True, True, False, False, RunActionKind.WARM_RECOVER),
-        (True, False, True, False, False, RunActionKind.NEW_TEAM_IN_SESSION_WARM),
     ],
 )
 def test_truth_table_full_coverage(
@@ -163,9 +154,11 @@ def test_truth_table_full_coverage(
     target_session = "s1"
     pool = None
     if has_pool:
-        pool_session = target_session if session_match else "other-session"
+        # ``activate`` only forwards same-session pool entries to dispatch
+        # now, so the truth table no longer exercises cross-session pool.
+        assert session_match, "cross-session pool entries are torn down before dispatch"
         pool_state = RuntimeState.PAUSED if paused else RuntimeState.RUNNING
-        pool = _pool_entry(session_id=pool_session, state=pool_state)
+        pool = _pool_entry(session_id=target_session, state=pool_state)
     action = decide_run_action(
         team_in_db=team_in_db,
         team_in_session=team_in_session,

@@ -27,7 +27,7 @@ def _make_stream_controller(member_name: str, *, role: TeamRole = TeamRole.TEAMM
     from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
     from openjiuwen.agent_teams.agent.state import TeamAgentState
 
-    state = TeamAgentState(session_id="sess")
+    state = TeamAgentState()
     blueprint = SimpleNamespace(member_name=member_name, role=role)
 
     async def _noop(_: Any) -> None:
@@ -48,7 +48,7 @@ def _make_spawn_manager_with(leader_sc: StreamController) -> SpawnManager:
 
     leader_agent = SimpleNamespace(stream_controller=leader_sc)
     sm = SpawnManager(
-        state=TeamAgentState(session_id="sess"),
+        state=TeamAgentState(),
         configurator=SimpleNamespace(member_name="leader"),
         team_agent_getter=lambda: leader_agent,
     )

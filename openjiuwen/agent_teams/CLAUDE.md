@@ -94,7 +94,7 @@ task.py            # TaskSummary / TaskDetail —— 任务返回模型
 - `TeamRuntimeContext`：运行时上下文，携带 role / messager_config / db_config 等资源配置，是 `Spec → Runtime` 的边界。
 - 新增 spec 字段要想清楚：**属于装配数据**（放 Spec）还是**运行时资源**（放 Config/Manager/Runtime）。不要让 Spec 持有 `Runner`、`Session`、文件句柄。
 - **Session checkpoint 状态结构按 team 分桶**：`session.update_state` 的全局状态根上有一个 `teams` namespace —— `state["teams"][team_name] = {spec, context, model_allocator_state, lifecycle}`。同一 session 可以承载多个 team 的状态；读写一律走 `runtime/metadata.py` 的 `read_team_namespace / merge_team_namespace`，不要直接在 root 上 `update_state({"spec": ...})`。
-- `MemberStatus.PAUSED`：teammate 协程退出但状态保留，可经 `RESTARTING` 重新拉起；与 `SHUTDOWN`（永久退出）区分。`schema.team.TeamLifecycle`（temporary / persistent）描述静态团队类型，`runtime.pool.RuntimeState`（running / paused）描述对象池中 team 的运行时状态——两个枚举各管各的。
+- `MemberStatus` 三态分得清：`PAUSED` 是自然 round-end idle（persistent team，coordination kernel `pause` 路径写）；`STOPPED` 是外部 `stop_team` 拆掉 runtime、但 team 仍 live（kernel `stop` 路径写）；`SHUTDOWN` 是永久退场。三者都可经 `RESTARTING` 复活，DB 写状态选谁取决于"为什么 runtime 不在了"。`schema.team.TeamLifecycle`（temporary / persistent）描述静态团队类型，`runtime.pool.RuntimeState`（running / paused）描述对象池中 team 的运行时状态——和 MemberStatus 是不同层次的枚举，不要混用。
 - `TeamOutputSchema` 是 `core.session.stream.OutputSchema` 的子类（不污染 core 层），扩出 `source_member: str | None` 与 `role: TeamRole | None`。`Runner.run_agent_team_streaming` 的所有输出 chunk 在 team 路径下都会被 `StreamController` 自动升级为 `TeamOutputSchema` 并打上 `(member_name, role)` 标签。**inprocess 模式**下，`SpawnManager` 在 spawn teammate 时通过 `StreamController.add_chunk_observer` 把 teammate chunk fan-out 到 leader 的 `stream_queue`，让 leader 的 streaming 流出全成员 chunk；subprocess 模式不做转发（chunk 留在 teammate 进程内），扩展点已留好（messager-driven observer）。详见 `agent/CLAUDE.md` 的 StreamController 段。
 
 ### models/ — 多模型部署原语
@@ -157,7 +157,7 @@ Messager 是点对点 + broadcast 的统一抽象，**任何直接新建 socket 
 
 ### runtime/ — TeamAgent 对象池 + 派发 + 并发门禁
 
-`TeamRuntimePool` + `TeamRuntimeManager` + 9 路 dispatch truth table + `InteractGate`，是 `Runner.run_agent_team*` / `interact_agent_team` / `register_human_agent_inbound` / `pause_agent_team` / `stop_team` / `release_session` / `delete_team` 这一组 SDK facade 的实现层。`Runner.run_agent_team*` 公共入口接 `str | TeamAgentSpec`（默认）：spec 走 `manager.activate`（dispatch 决策 + pool 写入），str 是 `team_name`、复用已激活的 pool entry。spawn 出来的 teammate / human-agent 实例走 `Runner.run_agent_team*(member=True)` 入口、跳过 activate/dispatch、不入 pool。
+`TeamRuntimePool` + `TeamRuntimeManager` + 7 路 dispatch truth table + `InteractGate` + `finalize` / `finalize_member` lifecycle hooks，是 `Runner.run_agent_team*` / `interact_agent_team` / `register_human_agent_inbound` / `pause_agent_team` / `stop_team` / `release_session` / `delete_team` 这一组 SDK facade 的实现层。`Runner.run_agent_team*` 公共入口接 `str | TeamAgentSpec`（默认）：spec 走 `manager.activate`（dispatch 决策 + pool 写入），str 是 `team_name`、复用已激活的 pool entry。跨 session 切换由 `activate` 在 dispatch 前 `stop_team` + pool.remove stale entry，再走 cold rebuild；不再保留"warm 跨 session 复用同一 TeamAgent 实例"的路径。run cycle 退出时由 Runner finally 调 `manager.finalize` / `finalize_member` 决定 pause vs stop（coordination kernel 的 `finalize_round` 不再决策）。spawn 出来的 teammate / human-agent 实例走 `Runner.run_agent_team*(member=True)` 入口、跳过 activate/dispatch、不入 pool；退出 finally 调 `finalize_member`。
 
 详见 [`runtime/CLAUDE.md`](runtime/CLAUDE.md)。
 
@@ -214,11 +214,16 @@ prompt_toolkit + rich 驱动的交互式 CLI。`run_team_cli(*, specs, yaml_path
 - 多成员场景优先用 `spawn_mode="inprocess"`，避免子进程拉起开销。
 - `pytest` 纯函数风格；禁止 `print`，改用 `team_logger` 或 test_logger。
 
-## 设计文档归档
+## 设计文档归档与双向同步（仅本模块强制）
 
 本模块的设计文档**全部**落在 `docs/` 下，命名与结构规约见 [`docs/CLAUDE.md`](docs/CLAUDE.md)。
 
-两条强制约束，提交时必查：
+把 **`openjiuwen/agent_teams/` 下的代码 + 本目录 `docs/specs/` + `docs/features/`
++ 各级 `<subdir>/CLAUDE.md`** 当作**一个一致性单元**来维护——`agent_teams` 子系统
+对契约一致性的要求高于仓库其它模块（多角色 + 多进程 + 持久化状态 + 公共 SDK 表面），
+所以本节的强制约束**只限于** `openjiuwen/agent_teams/` 子树，不上推到仓库其它模块。
+
+三条强制约束，提交时必查：
 
 1. **每次特性更新提交代码前必须归档 feature 文档**：在 `docs/features/` 下新增一份
    `F_NN_<slug>.md`，记录决策、拒绝的方案、验证基线、已知遗留。commit message 只写 what，
@@ -227,9 +232,19 @@ prompt_toolkit + rich 驱动的交互式 CLI。`run_team_cli(*, specs, yaml_path
 2. **所有模块设计规约变动必须更新 specs 文档**：模块契约、跨子模块的公共协议、不变量、
    公共 API 形态发生变化时，同步修订对应 `docs/specs/S_NN_<slug>.md`；新规约 = 新 spec 文件。
    规约变了但 specs 没改，下次读 spec 的人就被误导——这是设计债，不是文档懒。
+3. **双向同步：读到与代码不一致的描述必须当场修文档**。在本模块任何一份
+   `CLAUDE.md` / `docs/specs/S_*` / `docs/features/F_*` 里读到的接口名、枚举值、
+   truth table 行数、文件路径、不变量等只要与当前代码不符，**不要**把过时表述当作新约束去执行、
+   也不要原样转述给用户；先 `grep` 代码、以代码为准刷新文档，在同一次改动里落地。
+   `CLAUDE.md` 里每条点名了"X 个分支 / Y 路 dispatch / Z 方法"的句子都是契约的一部分。
 
-子模块自身的本地约定继续放各 `<subdir>/CLAUDE.md`；跨子模块的设计规约一律落到 `docs/specs/`，
-不要塞进单一子目录的 CLAUDE.md。
+收尾规范：
+
+- spec / feature 头部"最近一次修订 commit"字段如标 `(待补)` / `(pending)`，提交后回填真实 hash。
+- 子模块自身的本地约定继续放各 `<subdir>/CLAUDE.md`；跨子模块的设计规约一律落到 `docs/specs/`，
+  不要塞进单一子目录的 CLAUDE.md。
+- 拿不准某次改动算 feature-grade（要 `F_NN_*.md`）还是普通修复（不必归档）时，先问用户。
+  歧义情况默认**归档**——多一份 markdown 的成本远低于丢失设计上下文。
 
 ## 提交约定
 

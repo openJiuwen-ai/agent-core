@@ -122,16 +122,25 @@ class CIGateRunner:
         self._workspace = workspace
 
     def _command_env(self) -> dict[str, str]:
-        """Build shell env that points tools at the chosen Python env."""
+        """Build shell env that points tools at the chosen Python env.
+
+        Note: We intentionally unset VIRTUAL_ENV here. In auto-harness
+        scenarios, the host environment may have VIRTUAL_ENV set (e.g.,
+        jiuwenclaw's .venv), while install_command like "uv sync --active"
+        should operate on the workspace's .venv. Removing VIRTUAL_ENV
+        ensures uv determines the target environment based on cwd/project
+        location, not the inherited host environment.
+        """
         env = {**os.environ, "CI": "1"}
+        # Remove inherited VIRTUAL_ENV to prevent uv --active from
+        # targeting the host tool's environment instead of workspace.
+        env.pop("VIRTUAL_ENV", None)
         python_executable = self._resolve_python_executable()
         python_path = Path(python_executable)
         env["AUTO_HARNESS_PYTHON"] = python_executable
         if python_path.name.startswith("python"):
             bin_dir = str(python_path.parent)
-            env["VIRTUAL_ENV"] = str(
-                python_path.parent.parent
-            )
+            # Prepend bin_dir to PATH so tools use the configured Python.
             existing_path = env.get("PATH", "")
             env["PATH"] = (
                 f"{bin_dir}:{existing_path}"
