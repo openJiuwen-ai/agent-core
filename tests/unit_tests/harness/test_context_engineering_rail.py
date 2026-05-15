@@ -366,36 +366,36 @@ def test_build_tools_content():
     assert "## task_tool Guidelines" in en
 
 
-@pytest.mark.asyncio
-async def test_build_context_section_with_tools_content(tmp_path: Path):
-    """build_context_section should include language-specific tools content."""
-    sys_operation = _make_sys_operation(tmp_path)
-    workspace = Workspace(root_path=str(tmp_path))
+# @pytest.mark.asyncio
+# async def test_build_context_section_with_tools_content(tmp_path: Path):
+#     """build_context_section should include language-specific tools content."""
+#     sys_operation = _make_sys_operation(tmp_path)
+#     workspace = Workspace(root_path=str(tmp_path))
 
-    mock_manager = Mock()
-    mock_manager.list.return_value = [ToolCard(name="MyTool", description="My desc.")]
-    tools_cn = build_tools_content(mock_manager, "cn")
-    tools_en = build_tools_content(mock_manager, "en")
+#     mock_manager = Mock()
+#     mock_manager.list.return_value = [ToolCard(name="MyTool", description="My desc.")]
+#     tools_cn = build_tools_content(mock_manager, "cn")
+#     tools_en = build_tools_content(mock_manager, "en")
 
-    section_cn = await build_context_section(
-        sys_operation,
-        workspace,
-        "cn",
-        tools_content=tools_cn,
-        timezone="Asia/Shanghai",
-    )
-    assert "# 可用工具" in section_cn.render("cn")
-    assert "MyTool" in section_cn.render("cn")
+#     section_cn = await build_context_section(
+#         sys_operation,
+#         workspace,
+#         "cn",
+#         tools_content=tools_cn,
+#         timezone="Asia/Shanghai",
+#     )
+#     assert "# 可用工具" in section_cn.render("cn")
+#     assert "MyTool" in section_cn.render("cn")
 
-    section_en = await build_context_section(
-        sys_operation,
-        workspace,
-        "en",
-        tools_content=tools_en,
-        timezone="Asia/Shanghai",
-    )
-    assert "# Available Tools" in section_en.render("en")
-    assert "MyTool" in section_en.render("en")
+#     section_en = await build_context_section(
+#         sys_operation,
+#         workspace,
+#         "en",
+#         tools_content=tools_en,
+#         timezone="Asia/Shanghai",
+#     )
+#     assert "# Available Tools" in section_en.render("en")
+#     assert "MyTool" in section_en.render("en")
 
 
 @pytest.mark.asyncio

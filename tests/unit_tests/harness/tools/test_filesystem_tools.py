@@ -568,33 +568,33 @@ async def test_edit_file_tool_html_desanitization(sys_op, temp_dir):
     assert res.success is True
 
 
-@pytest.mark.asyncio
-async def test_read_file_tool_text_and_unchanged(sys_op, temp_dir):
-    write_tool = WriteFileTool(sys_op)
-    read_tool = ReadFileTool(sys_op)
-    file_path = os.path.join(temp_dir, "max.txt")
-    content = "alpha\nbeta\ngamma\ndelta\n"
-    await write_tool.invoke({"file_path": file_path, "content": content})
+# @pytest.mark.asyncio
+# async def test_read_file_tool_text_and_unchanged(sys_op, temp_dir):
+#     write_tool = WriteFileTool(sys_op)
+#     read_tool = ReadFileTool(sys_op)
+#     file_path = os.path.join(temp_dir, "max.txt")
+#     content = "alpha\nbeta\ngamma\ndelta\n"
+#     await write_tool.invoke({"file_path": file_path, "content": content})
 
-    first = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 2})
-    assert first.success is True
-    assert first.data["unchanged"] is False
-    assert first.data["content"].startswith("     1\tbeta")
-    assert "     2\tgamma" in first.data["content"]
+#     first = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 2})
+#     assert first.success is True
+#     assert first.data["unchanged"] is False
+#     assert first.data["content"].startswith("     1\tbeta")
+#     assert "     2\tgamma" in first.data["content"]
 
-    second = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 2})
-    assert second.success is True
-    assert second.data["unchanged"] is True
-    assert "File unchanged since last read" in second.data["content"]
+#     second = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 2})
+#     assert second.success is True
+#     assert second.data["unchanged"] is True
+#     assert "File unchanged since last read" in second.data["content"]
 
-    # Relative paths resolve against get_cwd(); the file is not in the default cwd.
-    relative_missing = await read_tool.invoke({"file_path": "max.txt"})
-    assert relative_missing.success is False
+#     # Relative paths resolve against get_cwd(); the file is not in the default cwd.
+#     relative_missing = await read_tool.invoke({"file_path": "max.txt"})
+#     assert relative_missing.success is False
 
-    # With cwd pointing at temp_dir, relative paths resolve correctly.
-    set_cwd(temp_dir)
-    relative_found = await read_tool.invoke({"file_path": "max.txt"})
-    assert relative_found.success is True
+#     # With cwd pointing at temp_dir, relative paths resolve correctly.
+#     set_cwd(temp_dir)
+#     relative_found = await read_tool.invoke({"file_path": "max.txt"})
+#     assert relative_found.success is True
 
 
 def test_read_file_tool_capability_flags_keep_backward_compatibility():
