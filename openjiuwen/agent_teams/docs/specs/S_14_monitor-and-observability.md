@@ -200,12 +200,17 @@ flush / close**，**不走 `team_logger`**。
 
 **与契约相关的细节**：
 
-- chunk 上的 `source_member` / `role` 来自 `TeamOutputSchema`（S_05 / S_12）；非
-  `TeamOutputSchema`（裸 `OutputSchema`）的 chunk 走 `<unknown>` 兜底。
+- chunk 上的 `source_member` / `role` 来自 `TeamOutputSchema`（S_05 / S_12）；**非
+  `TeamOutputSchema`（裸 `OutputSchema`）的 chunk 直接跳过**——tracer span 等基础设施
+  层通过 session 归一化漏进 stream 时全是裸 `OutputSchema`，不属于团队成员输出，留在日志
+  里只会淹没真正的团队流程（chunk 计数仍 +1，只是不写记录）。
 - `answer` chunk 在**同一 source** 已出现过 `llm_output` 时丢弃（per-source 去重，对齐 CLI
   renderer 的 `has_llm_output` 但按 source 维度）。
 - `team.runtime_ready`（`message` chunk 且 `payload.event_type` 命中）单列为
   `runtime_ready` 类别。
+- `tool_call` / `tool_result` 的 payload 在缺少标准 `tool_name` / `tool_args` /
+  `tool_result` 字段时（非 `tool_tracker` 路径的不同 schema），fallback 为整个 payload 的
+  capped 字符串——保证记录有实际内容而不是 `tool_name= tool_args=` 两个空字段。
 - `tool_result` / `tool_args` 内容超阈值截断；模型文本输出（`llm_output` /
   `llm_reasoning` / `answer`）永不截断。
 - `feed` / `flush` 内部出错时，best-effort 写一行 `[WARN] ... error: ...` 标记到同一文件；

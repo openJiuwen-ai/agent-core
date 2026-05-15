@@ -281,21 +281,56 @@ def test_multiline_markdown_preserved(tmp_path):
 
 
 @pytest.mark.level1
-def test_plain_outputschema_chunk_no_attrs(tmp_path):
+def test_plain_outputschema_chunk_is_skipped(tmp_path):
+    """Plain (untagged) ``OutputSchema`` chunks come from infrastructure
+    layers (tracer, workflow normalisation) -- not team flow -- and are
+    dropped so they don't drown the diagnostic file."""
     log_path = tmp_path / "stream.log"
     agg = TeamStreamLogger(log_path)
     agg.feed(_plain_chunk("llm_output", {"content": "untagged text"}))
+    agg.feed(_plain_chunk("message", {"traceId": "abc", "invokeId": "def"}))
+    agg.flush()
+
+    assert _headers(log_path) == []
+    # Both chunks were counted (the "stream end" summary reports total fed).
+    assert "stream end, 2 chunks" in _text(log_path)
+
+
+@pytest.mark.level1
+def test_tool_call_empty_fields_falls_back_to_payload(tmp_path):
+    """Non-``tool_tracker`` paths emit ``tool_call`` chunks without the
+    canonical ``tool_name`` / ``tool_args`` keys. Fall back to a capped
+    payload dump so the record carries actual info."""
+    log_path = tmp_path / "stream.log"
+    agg = TeamStreamLogger(log_path)
+    payload = {"tool_update": {"name": "send_message", "status": "in_progress"}}
+    agg.feed(_team_chunk("tool_call", payload))
     agg.flush()
 
     recs = _headers(log_path)
     assert len(recs) == 1
-    assert recs[0][1] == "member=<unknown> role=<unknown> category=text"
-    assert "  | untagged text" in _text(log_path)
+    assert recs[0][0] == "DEBUG"
+    assert "tool_name=" not in _text(log_path)
+    assert "tool_update" in _text(log_path)
+
+
+@pytest.mark.level1
+def test_tool_result_empty_fields_falls_back_to_payload(tmp_path):
+    log_path = tmp_path / "stream.log"
+    agg = TeamStreamLogger(log_path)
+    payload = {"tool_update": {"name": "send_message", "status": "finish"}}
+    agg.feed(_team_chunk("tool_result", payload))
+    agg.flush()
+
+    recs = _headers(log_path)
+    assert len(recs) == 1
+    assert recs[0][0] == "DEBUG"
+    assert "tool_update" in _text(log_path)
 
 
 @pytest.mark.level1
 def test_feed_never_raises(tmp_path):
-    log_path = tmp_path / "stream.log"
+    """Bad / non-OutputSchema chunks are skipped without raising."""
 
     class _Exploding:
         @property
@@ -304,11 +339,35 @@ def test_feed_never_raises(tmp_path):
 
         payload = None
 
+    log_path = tmp_path / "stream.log"
     agg = TeamStreamLogger(log_path)
-    agg.feed(_Exploding())  # must not raise
-    agg.feed(None)  # must not raise
+    agg.feed(_Exploding())  # not TeamOutputSchema -> skipped, no raise
+    agg.feed(None)  # not TeamOutputSchema -> skipped, no raise
 
-    # The aggregator stays usable after a bad chunk.
+    # The aggregator stays usable after the bad chunks.
+    agg.feed(_team_chunk("llm_output", {"content": "still works"}))
+    agg.flush()
+    assert "  | still works" in _text(log_path)
+
+
+@pytest.mark.level1
+def test_feed_swallows_internal_exception(tmp_path):
+    """If processing a tagged chunk raises mid-pipeline, the error
+    marker is written to the file and the aggregator stays usable."""
+    import openjiuwen.agent_teams.monitor.stream_logger as sl_mod
+
+    def _raise_boom(*_args, **_kwargs):
+        raise RuntimeError("classifier boom")
+
+    log_path = tmp_path / "stream.log"
+    agg = TeamStreamLogger(log_path)
+    original = sl_mod._classify
+    try:
+        sl_mod._classify = _raise_boom
+        agg.feed(_team_chunk("llm_output", {"content": "triggers boom"}))
+    finally:
+        sl_mod._classify = original
+
     agg.feed(_team_chunk("llm_output", {"content": "still works"}))
     agg.flush()
 

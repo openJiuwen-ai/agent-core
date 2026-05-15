@@ -137,21 +137,37 @@ def _classify(ctype: str, payload: Any) -> str:
 
 
 def _tool_call_summary(payload: Any) -> str:
-    """One-line summary of a ``tool_call`` chunk."""
+    """One-line summary of a ``tool_call`` chunk.
+
+    When the standard top-level ``tool_name`` / ``tool_args`` keys are
+    missing (non-``tool_tracker`` emission paths use different shapes),
+    fall back to a capped dump of the whole payload so the record stays
+    informative instead of showing two empty fields.
+    """
     if not isinstance(payload, dict):
         return _cap(str(payload), _GENERIC_CAP)
     name = payload.get("tool_name", "")
-    args = _cap(str(payload.get("tool_args", "")), _TOOL_ARGS_CAP)
+    args_raw = payload.get("tool_args", "")
+    if not name and not args_raw:
+        return _cap(str(payload), _GENERIC_CAP)
+    args = _cap(str(args_raw), _TOOL_ARGS_CAP)
     return f"tool_name={name} tool_args={args}"
 
 
 def _tool_result_summary(payload: Any) -> str:
-    """Two-line summary of a ``tool_result`` chunk, result capped."""
+    """Two-line summary of a ``tool_result`` chunk, result capped.
+
+    Same empty-field fallback as :func:`_tool_call_summary`.
+    """
     if not isinstance(payload, dict):
         return _cap(str(payload), _GENERIC_CAP)
     name = payload.get("tool_name", "")
-    args = _cap(str(payload.get("tool_args", "")), _TOOL_ARGS_CAP)
-    result = _cap(str(payload.get("tool_result", "")), _TOOL_RESULT_CAP)
+    args_raw = payload.get("tool_args", "")
+    result_raw = payload.get("tool_result", "")
+    if not name and not args_raw and not result_raw:
+        return _cap(str(payload), _GENERIC_CAP)
+    args = _cap(str(args_raw), _TOOL_ARGS_CAP)
+    result = _cap(str(result_raw), _TOOL_RESULT_CAP)
     return f"tool_name={name} tool_args={args}\nresult: {result}"
 
 
@@ -288,14 +304,17 @@ class TeamStreamLogger:
     def _feed(self, chunk: OutputSchema) -> None:
         """Core (exception-raising) body of :meth:`feed`."""
         self._chunk_count += 1
+        # Untagged chunks come from infrastructure layers (tracer
+        # spans, workflow normalisation, etc.) that bypass the team
+        # ``StreamController._tag_chunk`` path. They are not team-member
+        # output -- skipping them keeps the diagnostic file focused on
+        # team flow and prevents tracer-span dumps from drowning the log.
+        if not isinstance(chunk, TeamOutputSchema):
+            return
         ctype = chunk.type or ""
         payload = chunk.payload
-        if isinstance(chunk, TeamOutputSchema):
-            member = chunk.source_member
-            role = _render_role(chunk.role)
-        else:
-            member = None
-            role = None
+        member = chunk.source_member
+        role = _render_role(chunk.role)
         key = (member, role)
 
         # `answer` duplicates the same source's already-streamed
