@@ -347,17 +347,26 @@ async def test_backend_spawn_human_agent_blocked_when_hitt_disabled(team_backend
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_human_agent_role_tool_set(team_backend):
-    """human_agent gets only view_task + member_complete_task — no send_message,
-    no claim_task, no team coordination tools.
+    """human_agent gets view_task + member_complete_task + send_message —
+    no claim_task and no leader-only coordination tools.
+
+    ``send_message`` is exposed so the user can ask the avatar to relay
+    outbound messages ("tell the leader I'm in a meeting"); the HITT
+    prompt section enforces the "user-driven only" constraint, not the
+    tool's ``invoke()``.
+
     workspace_meta is attached by TeamToolRail elsewhere when a
     workspace_manager is configured, so it's not part of this set.
     """
     tools = create_team_tools(role="human_agent", agent_team=team_backend)
     names = sorted(tool.card.name for tool in tools if tool.card is not None)
     assert names == sorted(HUMAN_AGENT_TOOLS)
-    assert "send_message" not in names
+    assert "send_message" in names
+    assert "member_complete_task" in names
+    assert "view_task" in names
     assert "claim_task" not in names
     assert "update_task" not in names
+    assert "spawn_member" not in names
 
 
 @pytest.mark.asyncio
@@ -815,6 +824,45 @@ def test_hitt_section_human_agent_describes_constrained_tools():
     body = section.content["en"]
     assert "send_message" in body
     assert "claim_task" in body or "do not" in body.lower()
+
+
+@pytest.mark.level0
+def test_hitt_section_human_agent_send_message_is_user_driven_cn():
+    """human_agent has send_message, but the prompt must bind it to
+    user-issued relay instructions and forbid autonomous use."""
+    section = build_team_hitt_section(
+        role=TeamRole.HUMAN_AGENT,
+        human_agent_names=[HUMAN_AGENT_MEMBER_NAME],
+        language="cn",
+        self_member_name=HUMAN_AGENT_MEMBER_NAME,
+    )
+    assert section is not None
+    body = section.content["cn"]
+    # The avatar must have send_message available...
+    assert "有 `send_message`" in body
+    # ...but explicitly framed as a user-driven relay, with autonomous
+    # use prohibited.
+    assert "转发通道" in body or "转告" in body
+    assert "不允许" in body
+    # The old "no send_message" claim must not survive.
+    assert "没有 `send_message`" not in body
+
+
+@pytest.mark.level0
+def test_hitt_section_human_agent_send_message_is_user_driven_en():
+    """English mirror of the cn user-driven send_message constraint."""
+    section = build_team_hitt_section(
+        role=TeamRole.HUMAN_AGENT,
+        human_agent_names=[HUMAN_AGENT_MEMBER_NAME],
+        language="en",
+        self_member_name=HUMAN_AGENT_MEMBER_NAME,
+    )
+    assert section is not None
+    body = section.content["en"]
+    assert "do have `send_message`" in body
+    assert "user-driven" in body or "relay channel" in body
+    assert "Never" in body or "never" in body
+    assert "no `send_message`" not in body
 
 
 @pytest.mark.level0

@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-05-14 |
-| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md |
+| 最近一次修订日期 | 2026-05-15 |
+| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md |
 
 ## 范围 / 边界
 
@@ -69,13 +69,19 @@
     - leader = `LEADER_ONLY_TOOLS ∪ SHARED_TOOLS`
     - teammate = `MEMBER_ONLY_TOOLS ∪ SHARED_TOOLS`
     - human_agent = 显式枚举的 `HUMAN_AGENT_TOOLS`，**不沿用** `SHARED_TOOLS`。
-    Human agent 不得拿到 `send_message` / `claim_task`——前者人类用户经
-    `HumanAgentInbox` 表达意图，不让 LLM 控；后者属于 teammate 自治路径，
+    Human agent 不得拿到 `claim_task`——它属于 teammate 自治路径，
     人类化身只能等 leader 通过 `update_task(assignee=...)` 显式指派。
+    Human agent **可以**拿到 `send_message`，但其使用规则由 `team_hitt`
+    prompt section 强约束：仅在用户当轮 Inbox 输入里明确下达「转告 /
+    通知 / 回复 `<member>`」时调用，禁止自主发声。选择 prompt 而非
+    `invoke()` 内的 caller-role 分支，是因为「该不该转发」属语义判断，
+    适合 LLM 在 prompt 引导下处理；工具实现保持单一职责。
 11. **`view_task` 是唯一对 leader / teammate / human_agent 三方都开放的
     任务读取工具**。teammate 用 `claim_task`，human_agent 用
     `member_complete_task`，leader 用 `update_task`——三个写入路径
-    不互相替代，也禁止用同一个工具按调用方角色分支。
+    不互相替代，也禁止用同一个工具按调用方角色分支。`send_message`
+    是另一个三方共享的工具，但 human_agent 视角下的语义约束在 prompt
+    层（见上一条），不在 `invoke()` 内。
 12. **`spawn_member` 的 `role_type='human_agent'` 在 HITT 关闭时必须在
     工具边界拒绝**，配合给出明确指引（`enable_hitt=False`）；
     `model_name` / `prompt` 与 `human_agent` 互斥也在工具边界报错。
@@ -183,7 +189,7 @@ openjiuwen/agent_teams/tools/locales/
 | `LEADER_ONLY_TOOLS` | `build_team`, `clean_team`, `spawn_member`, `shutdown_member`, `approve_plan`, `approve_tool`, `create_task`, `update_task`, `list_members` |
 | `MEMBER_ONLY_TOOLS` | `claim_task` |
 | `SHARED_TOOLS` | `view_task`, `send_message` |
-| `HUMAN_AGENT_TOOLS` | `view_task`, `member_complete_task` |
+| `HUMAN_AGENT_TOOLS` | `view_task`, `member_complete_task`, `send_message` |
 | `LEADER_TOOLS` | `LEADER_ONLY_TOOLS ∪ SHARED_TOOLS` |
 | `MEMBER_TOOLS` | `MEMBER_ONLY_TOOLS ∪ SHARED_TOOLS` |
 

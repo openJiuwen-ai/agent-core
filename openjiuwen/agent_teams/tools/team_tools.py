@@ -129,10 +129,17 @@ MEMBER_TOOLS: Set[str] = MEMBER_ONLY_TOOLS | SHARED_TOOLS
 
 # Tools available to the reserved ``human_agent`` role. The human
 # agent acts on its corresponding external user's behalf, so it gets
-# read access to tasks and a self-only completion tool. It does not
-# get ``send_message`` — user voice goes through ``HumanAgentInbox``
-# with explicit ``@target`` routing, not through an LLM-controlled
-# tool. It does not get ``claim_task`` — autonomous claiming is a
+# read access to tasks, a self-only completion tool, and the shared
+# ``send_message`` tool so the user can ask the avatar to relay a
+# message to other members ("tell the leader I'm in a meeting").
+# The behavioural constraint — that the avatar must **not** speak on
+# its own initiative and may only send when the user explicitly
+# instructs a relay — is enforced in the HITT system prompt section,
+# not in the tool's ``invoke``. The user's own voice still flows
+# through ``HumanAgentInbox`` with explicit ``@target`` routing; this
+# tool is a complementary path for user-driven outbound speech.
+#
+# ``claim_task`` is intentionally absent — autonomous claiming is a
 # teammate behavior; the user's avatar must wait for explicit leader
 # assignment via ``update_task(assignee=...)`` instead.
 #
@@ -142,6 +149,7 @@ MEMBER_TOOLS: Set[str] = MEMBER_ONLY_TOOLS | SHARED_TOOLS
 HUMAN_AGENT_TOOLS: Set[str] = {
     "view_task",
     "member_complete_task",
+    "send_message",
 }
 
 

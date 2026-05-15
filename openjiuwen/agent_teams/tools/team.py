@@ -1037,8 +1037,11 @@ class TeamBackend:
         ``_on_teammate_created`` callback spawns them just like any other
         member; role-aware rail filtering inside the configurator then
         strips the team-coordination rails (FirstIterationGate /
-        TeamToolApprovalRail) and replaces ``send_message`` /
-        ``claim_task`` with the human agent's dedicated tool surface.
+        TeamToolApprovalRail) and swaps the autonomous-claim path
+        (``claim_task``) for a self-only completion tool. The shared
+        ``send_message`` is still attached so the user can ask the
+        avatar to relay outbound messages; the HITT prompt section
+        binds it to user-driven instructions only.
 
         Args:
             member_name: Unique member identifier for the human.
