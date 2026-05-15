@@ -1287,6 +1287,21 @@ class SendMessageTool(TeamTool):
                 error="'user' cannot be combined in multicast; send to user separately",
             )
 
+        # A multicast covering every other team member is just a more
+        # expensive broadcast — reject it and force the caller onto the
+        # broadcast path. list_members() already excludes the caller, so
+        # an exact set match means the targets are the whole roster.
+        if self._team:
+            roster = {member.member_name for member in await self._team.list_members()}
+            if roster and set(deduped) == roster:
+                return ToolOutput(
+                    success=False,
+                    error=(
+                        "Multicast targets cover every other team member; "
+                        "use to='*' to broadcast instead — same delivery, lower cost."
+                    ),
+                )
+
         await self._auto_start_members()
 
         delivered: list[str] = []
