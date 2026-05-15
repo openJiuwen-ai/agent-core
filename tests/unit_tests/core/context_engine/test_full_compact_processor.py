@@ -197,8 +197,8 @@ class TestFullCompactProcessor:
                 },
             )
 
-            async def _fake_invoke(*, full_context_messages, notes_path, current_notes):
-                _ = full_context_messages, current_notes
+            async def _fake_invoke(*, context_messages, notes_path, current_notes, is_incremental=False, trigger_tokens=0, full_scan_tokens=0):
+                _ = context_messages, current_notes, is_incremental, trigger_tokens, full_scan_tokens
                 notes_path.write_text("updated notes", encoding="utf-8")
 
             manager._update_agent.invoke = AsyncMock(side_effect=_fake_invoke)  # type: ignore[method-assign]

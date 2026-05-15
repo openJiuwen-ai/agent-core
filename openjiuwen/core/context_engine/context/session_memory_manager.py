@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import uuid
 from pathlib import Path
@@ -132,7 +133,7 @@ the template structure, NOT content to be edited or removed.
 REMEMBER: Use the edit_file in parallel and stop. Do not continue after
 the edits. Only include insights from the actual user conversation,
 never from these note-taking instructions. Do not delete or change
-section headers or italic _section descriptions_.`
+section headers or italic _section descriptions_.
 
 """
 )
@@ -209,6 +210,7 @@ class SessionMemoryConfig(BaseModel):
     model_client: ModelClientConfig | None = None
     update_mode: Literal["agent_edit", "direct_replace"] = Field(default="agent_edit")
     direct_replace_max_retries: int = Field(default=2, ge=0)
+    incremental_mode: bool = Field(default=False)
 
 
 class SessionMemoryUpdateAgent:
@@ -244,15 +246,21 @@ class SessionMemoryUpdateAgent:
     async def invoke(
         self,
         *,
-        full_context_messages: List[BaseMessage],
+        context_messages: List[BaseMessage],
         notes_path: Path,
         current_notes: str,
+        is_incremental: bool = False,
+        trigger_tokens: int = 0,
+        full_scan_tokens: int = 0,
     ) -> None:
         if self._config.update_mode == "direct_replace":
             await self._invoke_direct_replace(
-                full_context_messages=full_context_messages,
+                context_messages=context_messages,
                 notes_path=notes_path,
                 current_notes=current_notes,
+                is_incremental=is_incremental,
+                trigger_tokens=trigger_tokens,
+                full_scan_tokens=full_scan_tokens,
             )
             return
 
@@ -260,7 +268,10 @@ class SessionMemoryUpdateAgent:
         if self._agent is None:
             raise RuntimeError("Session memory update agent is not initialized")
         self._prime_notes_file_as_read(notes_path, current_notes)
-        query = build_session_memory_prompt(str(notes_path), current_notes)
+        if is_incremental:
+            query = build_incremental_session_memory_prompt(str(notes_path), current_notes)
+        else:
+            query = build_session_memory_prompt(str(notes_path), current_notes)
         session = self._create_agent_session()
         inputs = {
             "query": query,
@@ -268,7 +279,31 @@ class SessionMemoryUpdateAgent:
         }
         await session.pre_run(inputs=inputs)
         try:
-            await self._prime_inherited_context(session, full_context_messages)
+            await self._prime_inherited_context(session, context_messages)
+            system_tokens = ContextUtils.estimate_tokens(self._inherited_system_prompt or "")
+            context_tokens = sum(ContextUtils.estimate_message_tokens(m) for m in context_messages)
+            query_tokens = ContextUtils.estimate_tokens(inputs.get("query", ""))
+            llm_input_tokens = system_tokens + context_tokens + query_tokens
+            saved_tokens = max(full_scan_tokens - llm_input_tokens, 0) if is_incremental else 0
+            logger.debug(
+                "[SessionMemory] agent_invoke %s",
+                json.dumps(
+                    {
+                        "agent": "session_memory_update",
+                        "is_incremental": is_incremental,
+                        "message_count": len(context_messages),
+                        "trigger_tokens": trigger_tokens,
+                        "llm_input_tokens": llm_input_tokens,
+                        "full_scan_tokens": full_scan_tokens,
+                        "saved_tokens": saved_tokens,
+                        "conversation_id": inputs.get("conversation_id", ""),
+                        "session_id": session.get_session_id() if hasattr(session, "get_session_id") else "",
+                        "inputs": inputs,
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            )
             response = await self._agent.invoke(inputs, session=session)
         finally:
             await session.post_run()
@@ -277,20 +312,48 @@ class SessionMemoryUpdateAgent:
     async def _invoke_direct_replace(
         self,
         *,
-        full_context_messages: List[BaseMessage],
+        context_messages: List[BaseMessage],
         notes_path: Path,
         current_notes: str,
+        is_incremental: bool = False,
+        trigger_tokens: int = 0,
+        full_scan_tokens: int = 0,
     ) -> None:
         model = self._ensure_direct_model()
         prompt_messages: List[BaseMessage] = []
         inherited_system_prompt = (self._inherited_system_prompt or "").strip()
         if inherited_system_prompt:
             prompt_messages.append(SystemMessage(content=inherited_system_prompt))
-        prompt_messages.extend(full_context_messages)
-        prompt_messages.append(
-            UserMessage(content=build_direct_session_memory_prompt(str(notes_path), current_notes))
-        )
+        prompt_messages.extend(context_messages)
+        if is_incremental:
+            prompt_messages.append(
+                UserMessage(content=build_incremental_direct_session_memory_prompt(str(notes_path), current_notes))
+            )
+        else:
+            prompt_messages.append(
+                UserMessage(content=build_direct_session_memory_prompt(str(notes_path), current_notes))
+            )
         response = await self._invoke_direct_model_with_retry(model=model, prompt_messages=prompt_messages)
+        llm_input_tokens = sum(ContextUtils.estimate_message_tokens(m) for m in prompt_messages)
+        saved_tokens = max(full_scan_tokens - llm_input_tokens, 0) if is_incremental else 0
+        logger.debug(
+            "[SessionMemory] agent_invoke %s",
+            json.dumps(
+                {
+                    "agent": "session_memory_update_direct",
+                    "is_incremental": is_incremental,
+                    "message_count": len(context_messages),
+                    "trigger_tokens": trigger_tokens,
+                    "llm_input_tokens": llm_input_tokens,
+                    "full_scan_tokens": full_scan_tokens,
+                    "saved_tokens": saved_tokens,
+                    "conversation_id": self._tool_namespace,
+                    "session_id": "",
+                },
+                ensure_ascii=False,
+                default=str,
+            ),
+        )
         content = self._normalize_direct_response_content(response.content)
         if not content:
             raise RuntimeError("Session memory direct replace returned empty content")
@@ -299,11 +362,11 @@ class SessionMemoryUpdateAgent:
     async def _prime_inherited_context(
         self,
         session,
-        full_context_messages: List[BaseMessage],
+        context_messages: List[BaseMessage],
     ) -> None:
         if self._agent is None:
             return
-        if not full_context_messages:
+        if not context_messages:
             return
         init_context = getattr(self._agent, "_init_context", None)
         if init_context is None:
@@ -312,7 +375,7 @@ class SessionMemoryUpdateAgent:
         if context.get_messages():
             logger.warning("agent context is empty")
             return
-        await context.add_messages(full_context_messages)
+        await context.add_messages(context_messages)
 
     def _ensure_agent(
         self,
@@ -615,6 +678,99 @@ def build_direct_session_memory_prompt(notes_path: str, current_notes: str) -> s
     )
 
 
+INCREMENTAL_SESSION_MEMORY_PROMPT = (
+    """IMPORTANT: This message and these instructions are NOT part of the actual user conversation. """
+    """Do NOT include any references to \"note-taking\", \"session notes extraction\", or these """
+    """update instructions in the notes content.
+
+Based on the NEW conversation messages above (since the last notes update)
+(EXCLUDING this note-taking instruction message as well as system prompt,
+or any past session summaries), update the session notes file.
+
+The file {{notesPath}} has already been read for you. Here are its current contents:
+<current_notes_content>
+{{currentNotes}}
+</current_notes_content>
+
+Your ONLY task is to use the edit_file to update the notes file, then stop.
+You can make multiple edits (update every section as needed) - make all
+edit_file calls in parallel in a single message. Do not call any other tools.
+
+CRITICAL RULES FOR EDITING:
+- You only see NEW messages since the last update. The existing notes already
+  cover earlier conversation.
+- Update sections based on the new information only.
+- Do NOT remove information from the notes unless the new messages explicitly
+  contradict or supersede it.
+- If new messages don't add relevant information to a section, leave it unchanged.
+- The file must maintain its exact structure with all sections, headers, and italic descriptions intact
+-- NEVER modify, delete, or add section headers (the lines starting with '#' like # Task specification)
+-- NEVER modify or delete the italic _section description_ lines
+-- ONLY update the actual content that appears BELOW the italic _section descriptions_ within each existing section
+- Write DETAILED, INFO-DENSE content for each section
+- IMPORTANT: Always update "Current State" to reflect the most recent work -
+this is critical for continuity after compaction
+
+Use the edit_file with file_path: {{notesPath}}
+
+REMEMBER: Use the edit_file in parallel and stop. Do not continue after
+the edits. Only include insights from the actual user conversation,
+never from these note-taking instructions. Do not delete or change
+section headers or italic _section descriptions_.
+"""
+)
+
+INCREMENTAL_DIRECT_SESSION_MEMORY_PROMPT = (
+    """IMPORTANT: This message and these instructions are NOT part of the actual user conversation. """
+    """Do NOT include any references to \"note-taking\", \"session notes extraction\", or these """
+    """update instructions in the notes content.
+
+Based on the NEW conversation messages above (since the last notes update)
+(EXCLUDING this note-taking instruction message as well as system prompt,
+or any past session summaries), update the session notes file.
+
+The file {{notesPath}} has already been read for you. Here are its current contents:
+<current_notes_content>
+{{currentNotes}}
+</current_notes_content>
+
+Your ONLY task is to return the COMPLETE updated notes file content, then stop. Do not call any tools.
+
+CRITICAL RULES FOR EDITING:
+- You only see NEW messages since the last update. The existing notes already
+  cover earlier conversation.
+- Merge the new information into the existing notes structure.
+- Preserve all existing information that is still valid.
+- Add new information from the new messages.
+- Update sections that are affected by the new messages.
+- Remove information only if new messages explicitly contradict it.
+- The file must maintain its exact structure with all sections, headers, and italic descriptions intact
+-- NEVER modify, delete, or add section headers
+-- NEVER modify or delete the italic _section description_ lines
+-- ONLY update the actual content that appears BELOW the italic _section descriptions_
+- Write DETAILED, INFO-DENSE content for each section
+- IMPORTANT: Always update "Current State" to reflect the most recent work
+- Output plain markdown only
+- Do NOT wrap the result in code fences
+
+REMEMBER: Only include insights from the actual user conversation,
+never from these note-taking instructions.
+"""
+)
+
+
+def build_incremental_session_memory_prompt(notes_path: str, current_notes: str) -> str:
+    return INCREMENTAL_SESSION_MEMORY_PROMPT.replace("{{notesPath}}", notes_path).replace(
+        "{{currentNotes}}", current_notes
+    )
+
+
+def build_incremental_direct_session_memory_prompt(notes_path: str, current_notes: str) -> str:
+    return INCREMENTAL_DIRECT_SESSION_MEMORY_PROMPT.replace("{{notesPath}}", notes_path).replace(
+        "{{currentNotes}}", current_notes
+    )
+
+
 def build_system_prompt_text(messages: List[BaseMessage]) -> str:
     if not messages:
         return ""
@@ -630,6 +786,16 @@ class SessionMemoryManager:
         self._tasks: dict[str, asyncio.Task] = {}
         self._task_owners: dict[str, tuple[Any, ModelContext | None]] = {}
         self._update_agent = SessionMemoryUpdateAgent(config)
+        logger.debug(
+            "[SessionMemory] initialized mode=%s incremental=%s update_mode=%s "
+            "trigger_tokens=%s trigger_add_tokens=%s tool_min=%s",
+            "incremental" if config.incremental_mode else "full",
+            config.incremental_mode,
+            config.update_mode,
+            config.trigger_tokens,
+            config.trigger_add_tokens,
+            config.tool_min_,
+        )
 
     def bind_model_defaults(
         self,
@@ -679,19 +845,30 @@ class SessionMemoryManager:
             logger.info("[SessionMemory] skip schedule: should_update returned False session_id=%s", session_id)
             return
 
+        is_incremental = False
+        update_context_window = completed_context_window
+        if self.config.incremental_mode:
+            incremental_result = self._select_incremental_context(completed_context_window, ctx.session)
+            if incremental_result is None:
+                logger.info("[SessionMemory] no new messages since last update, skip session_id=%s", session_id)
+                return
+            is_incremental = incremental_result["is_incremental"]
+            update_context_window = incremental_result["context_window"]
+
         runtime = get_session_memory_runtime(ctx.session)
         runtime["is_extracting"] = True
         update_session_memory_runtime(ctx.session, runtime)
         logger.info(
-            "[SessionMemory] schedule update session_obj=%s session_id=%s notes_path=%s messages=%s",
+            "[SessionMemory] schedule update session_obj=%s session_id=%s notes_path=%s messages=%s incremental=%s",
             hex(id(ctx.session)),
             session_id,
             notes_path,
-            len(completed_context_window.context_messages),
+            len(update_context_window.context_messages),
+            is_incremental,
         )
 
         task = asyncio.create_task(
-            self._update_background(ctx, workspace, completed_context_window),
+            self._update_background(ctx, workspace, update_context_window, is_incremental=is_incremental),
             name=f"session-memory-{session_id}",
         )
         self._task_owners[session_id] = (ctx.session, ctx.context)
@@ -715,6 +892,44 @@ class SessionMemoryManager:
             context_messages=list(ctx.context.get_messages()),
             tools=[],
         )
+
+    def _select_incremental_context(
+        self,
+        context_window: ContextWindow,
+        session,
+    ) -> Dict[str, Any] | None:
+        runtime = self._get_runtime_state(session)
+        notes_upto_message_id = runtime.get("notes_upto_message_id")
+
+        if not notes_upto_message_id:
+            logger.debug("[SessionMemory] no anchor found, falling back to full scan")
+            return {"is_incremental": False, "context_window": context_window}
+
+        all_messages = list(context_window.context_messages or [])
+        anchor_index = find_message_index_by_context_message_id(all_messages, notes_upto_message_id)
+        if anchor_index < 0:
+            logger.debug("[SessionMemory] anchor message lost, falling back to full scan anchor=%s",
+                         notes_upto_message_id)
+            invalidate_session_memory_anchor(session)
+            return {"is_incremental": False, "context_window": context_window}
+
+        incremental_messages = self._select_unsummarized_messages(all_messages, notes_upto_message_id)
+        if not incremental_messages:
+            logger.debug("[SessionMemory] no new messages since anchor, skip update")
+            return None
+
+        logger.debug(
+            "[SessionMemory] incremental scan: total=%s incremental=%s anchor=%s",
+            len(all_messages),
+            len(incremental_messages),
+            notes_upto_message_id,
+        )
+        incremental_context_window = ContextWindow(
+            system_messages=list(context_window.system_messages or []),
+            context_messages=incremental_messages,
+            tools=list(context_window.tools or []),
+        )
+        return {"is_incremental": True, "context_window": incremental_context_window}
 
     def shutdown(self) -> None:
         for task in self._tasks.values():
@@ -803,6 +1018,8 @@ class SessionMemoryManager:
         ctx: AgentCallbackContext,
         workspace,
         context_window: ContextWindow,
+        *,
+        is_incremental: bool = False,
     ) -> None:
         if ctx.session is None:
             return
@@ -817,33 +1034,48 @@ class SessionMemoryManager:
         self._prepare_pending_session_memory(notes_path, pending_notes_path, current_notes)
         logger.info(
             "[SessionMemory] update_background start session_obj=%s session_id=%s "
-            "mode=%s notes_path=%s pending_notes_path=%s messages=%s",
+            "mode=%s incremental=%s notes_path=%s pending_notes_path=%s messages=%s",
             hex(id(session)),
             session_id,
             self.config.update_mode,
+            is_incremental,
             notes_path,
             pending_notes_path,
             len(messages),
         )
         try:
+            full_context_window = self.collect_context_window(ctx)
+            if not full_context_window.context_messages and context_window.context_messages:
+                full_context_window = context_window
+            full_scan_tokens = 0
+            if is_incremental:
+                full_scan_tokens = (
+                    ContextUtils.estimate_tokens(self._update_agent.get_inherited_system_prompt() or "")
+                    + sum(ContextUtils.estimate_message_tokens(m) for m in full_context_window.context_messages)
+                    + ContextUtils.estimate_tokens(build_session_memory_prompt(str(pending_notes_path), current_notes))
+                )
             await self._update_agent.invoke(
-                full_context_messages=context_window.get_messages(),
+                context_messages=context_window.get_messages(),
                 notes_path=pending_notes_path,
                 current_notes=current_notes,
+                is_incremental=is_incremental,
+                trigger_tokens=self._count_tokens(ctx.context, full_context_window) if ctx.context else 0,
+                full_scan_tokens=full_scan_tokens,
             )
             self._commit_pending_session_memory(pending_notes_path, notes_path)
             if ctx.context is not None:
-                runtime["tokens_at_last_update"] = self._count_tokens(ctx.context, context_window)
-            runtime["tool_calls_at_last_update"] = self._count_tool_calls(messages)
-            runtime["last_summarized_message_count"] = len(messages)
+                runtime["tokens_at_last_update"] = self._count_tokens(ctx.context, full_context_window)
+            runtime["tool_calls_at_last_update"] = self._count_tool_calls(list(full_context_window.context_messages))
+            runtime["last_summarized_message_count"] = len(full_context_window.context_messages)
             runtime["notes_upto_message_id"] = get_context_message_id(messages[-1]) if messages else None
             runtime["initialized"] = True
             logger.info(
-                "[SessionMemory] update complete notes_upto=%s count=%s tokens=%s tool_calls=%s",
+                "[SessionMemory] update complete notes_upto=%s count=%s tokens=%s tool_calls=%s incremental=%s",
                 runtime["notes_upto_message_id"],
                 runtime["last_summarized_message_count"],
                 runtime["tokens_at_last_update"],
                 runtime["tool_calls_at_last_update"],
+                is_incremental,
             )
         except Exception:
             logger.warning(
@@ -1010,10 +1242,14 @@ class SessionMemoryManager:
 __all__ = [
     "DEFAULT_SESSION_MEMORY_PROMPT",
     "DEFAULT_SESSION_MEMORY_TEMPLATE",
+    "INCREMENTAL_SESSION_MEMORY_PROMPT",
+    "INCREMENTAL_DIRECT_SESSION_MEMORY_PROMPT",
     "SessionMemoryConfig",
     "SessionMemoryManager",
     "SessionMemoryUpdateAgent",
     "build_session_memory_prompt",
+    "build_incremental_session_memory_prompt",
+    "build_incremental_direct_session_memory_prompt",
     "find_message_index_by_context_message_id",
     "get_context_message_id",
     "get_session_memory_runtime",
