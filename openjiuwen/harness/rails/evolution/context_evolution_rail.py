@@ -2,17 +2,23 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from __future__ import annotations
+
 from typing import Any, Dict, List, Optional
+
 from openjiuwen.core.common.logging import context_engine_logger as logger
 from openjiuwen.core.single_agent.rail import AgentCallbackContext
-from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.extensions.context_evolver.service import (
-    TaskMemoryService,
     SummarizeTrajectoriesInput,
+    TaskMemoryService,
     format_trajectory,
-    summarize_trajectories as _summarize_trajectories,
+)
+from openjiuwen.extensions.context_evolver.service import (
     evaluate_trial as _evaluate_trial,
 )
+from openjiuwen.extensions.context_evolver.service import (
+    summarize_trajectories as _summarize_trajectories,
+)
+from openjiuwen.harness.rails.base import DeepAgentRail
 
 # ---------------------------------------------------------------------------
 # ContextEvolutionRail

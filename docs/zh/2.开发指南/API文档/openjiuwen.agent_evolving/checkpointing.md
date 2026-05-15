@@ -4,7 +4,7 @@
 
 ---
 
-## class openjiuwen.agent_evolving.checkpointing.types.EvolveCheckpoint
+## class openjiuwen.agent_evolving.checkpointing.state.EvolveCheckpoint
 
 单次训练检查点数据结构（用于恢复与审计）。
 

@@ -134,4 +134,4 @@ Inherits from LLMCallOptimizerBase, targets default to system_prompt, user_promp
 
 ## Team Skill Optimizer
 
-See [team_skill_optimizer](team_skill_optimizer.md) for details.
+See [team_skill_experience_optimizer](./skill_call/team_skill_experience_optimizer.md) for details.

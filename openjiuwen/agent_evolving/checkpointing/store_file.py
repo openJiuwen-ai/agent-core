@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
-import os
 import json
+import os
 from dataclasses import asdict
 from typing import Any, Dict, Optional
 
-from openjiuwen.agent_evolving.checkpointing.types import EvolveCheckpoint
+from openjiuwen.agent_evolving.checkpointing.state import EvolveCheckpoint
 
 
 def _to_json_compatible(obj: Any) -> Any:

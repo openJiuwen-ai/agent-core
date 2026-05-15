@@ -10,6 +10,7 @@ from openjiuwen.agent_evolving.trajectory.types import (
     UpdateKey,
     Updates,
 )
+from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, UserMessage
 
 
 def make_step(kind="llm", detail=None, error=None, **kwargs):
@@ -253,6 +254,43 @@ class TestTrajectory:
         assert traj.source == "online"
         assert traj.session_id == "session-123"
         assert traj.case_id is None
+
+    @staticmethod
+    def test_to_messages_normalizes_message_objects():
+        """Runtime callback message objects should be preserved as dict messages."""
+        traj = make_trajectory(
+            steps=[
+                make_llm_step(
+                    messages=[
+                        SystemMessage(content="system prompt"),
+                        UserMessage(content="user request"),
+                        AssistantMessage(
+                            content="I'll read the skill",
+                            tool_calls=[
+                                {
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "name": "read_file",
+                                    "arguments": '{"file_path": "/skills/demo/SKILL.md"}',
+                                }
+                            ],
+                        ),
+                    ],
+                    response=AssistantMessage(content="done"),
+                )
+            ]
+        )
+
+        messages = traj.to_messages()
+
+        assert [message["role"] for message in messages] == [
+            "system",
+            "user",
+            "assistant",
+            "assistant",
+        ]
+        assert messages[2]["tool_calls"][0]["name"] == "read_file"
+        assert messages[2]["tool_calls"][0]["arguments"] == '{"file_path": "/skills/demo/SKILL.md"}'
 
 
 class TestUpdateKey:

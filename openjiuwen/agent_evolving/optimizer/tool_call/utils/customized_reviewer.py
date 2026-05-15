@@ -1,9 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-import re
 import json
-from typing import Callable, Optional, List
+import re
+from typing import Callable, List, Optional
 
 from openjiuwen.agent_evolving.optimizer.tool_call.utils.rits import get_rits_response
 

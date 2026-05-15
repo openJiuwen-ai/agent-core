@@ -6,7 +6,7 @@ LLM invocation operators: LLMCallOperator with prompt tunables.
 LLMCall: Backward compatible alias for LLMCallOperator.
 """
 
-from openjiuwen.core.operator.llm_call.base import LLMCallOperator, LLMCall
+from openjiuwen.core.operator.llm_call.base import LLMCall, LLMCallOperator
 
 __all__ = [
     "LLMCallOperator",

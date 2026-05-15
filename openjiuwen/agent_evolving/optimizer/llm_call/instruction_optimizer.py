@@ -8,21 +8,20 @@ InstructionOptimizer: Uses LLM to rewrite system/user prompts based on error cas
 """
 
 import re
-from typing import List, Optional, Any, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-from openjiuwen.agent_evolving.utils import TuneUtils
-from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
-from openjiuwen.core.foundation.prompt.assemble.assembler import PromptAssembler
-from openjiuwen.agent_evolving.trajectory.types import Updates
 from openjiuwen.agent_evolving.optimizer.base import TextualParameter
 from openjiuwen.agent_evolving.optimizer.llm_call.base import LLMCallOptimizerBase
 from openjiuwen.agent_evolving.optimizer.llm_call.templates import (
-    PROMPT_INSTRUCTION_OPTIMIZE_TEMPLATE,
-    PROMPT_INSTRUCTION_OPTIMIZE_BOTH_TEMPLATE,
-    CREATE_PROMPT_TEXTUAL_GRADIENT_TEMPLATE,
     CREATE_BAD_CASE_TEMPLATE,
+    CREATE_PROMPT_TEXTUAL_GRADIENT_TEMPLATE,
     PLACEHOLDER_RESTORE_TEMPLATE,
+    PROMPT_INSTRUCTION_OPTIMIZE_BOTH_TEMPLATE,
+    PROMPT_INSTRUCTION_OPTIMIZE_TEMPLATE,
 )
+from openjiuwen.agent_evolving.utils import TuneUtils
+from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.foundation.prompt.assemble.assembler import PromptAssembler
 
 if TYPE_CHECKING:
     from openjiuwen.agent_evolving.signal.base import EvolutionSignal
@@ -54,6 +53,21 @@ class InstructionOptimizer(LLMCallOptimizerBase):
         super().__init__()
         self._model = Model(model_client_config, model_config)
 
+    def _select_signals(self, signals: List["EvolutionSignal"]) -> List["EvolutionSignal"]:
+        """Consume only failure-driven signals for prompt optimization."""
+        selected: List["EvolutionSignal"] = []
+        failure_signal_types = {
+            "execution_failure",
+            "low_score",
+            "user_correction",
+            "collaboration_failure",
+        }
+        for signal in signals:
+            context = signal.context or {}
+            if context.get("score", 1) == 0 or signal.signal_type in failure_signal_types:
+                selected.append(signal)
+        return selected
+
     async def _backward(self, signals: List["EvolutionSignal"]) -> None:
         """Generate textual gradients and pre-compute optimized prompts (all LLM calls here)."""
         for op_id, param in self._parameters.items():
@@ -66,8 +80,8 @@ class InstructionOptimizer(LLMCallOptimizerBase):
             param.set_gradient("system_prompt_optimized", None)
             param.set_gradient("user_prompt_optimized", None)
 
-            # No bad signals means no failure cases to learn from; skip all LLM calls.
-            if not self._bad_signals:
+            # No selected failure-driven signals means no cases to learn from.
+            if not self._selected_signals:
                 continue
 
             textual_gradient = await self._generate_textual_gradient(op)
@@ -95,9 +109,9 @@ class InstructionOptimizer(LLMCallOptimizerBase):
                 if val:
                     param.set_gradient("user_prompt_optimized", val)
 
-    def _step(self) -> Optional[Updates]:
+    def _step(self) -> Optional[Dict[tuple[str, str], Any]]:
         """Return pre-computed optimized prompts; all LLM calls were done in _backward."""
-        updates: Updates = {}
+        updates: Dict[tuple[str, str], Any] = {}
 
         for op_id, param in self._parameters.items():
             sys_val = param.get_gradient("system_prompt_optimized")
@@ -180,9 +194,9 @@ class InstructionOptimizer(LLMCallOptimizerBase):
         return optimized
 
     def _format_bad_cases(self) -> str:
-        """Format bad signals for LLM prompts."""
+        """Format selected failure-driven signals for LLM prompts."""
         parts: List[str] = []
-        for signal in self._bad_signals:
+        for signal in self._selected_signals:
             ctx = signal.context or {}
             formatted = CREATE_BAD_CASE_TEMPLATE.format({
                 "question": ctx.get("question", ""),

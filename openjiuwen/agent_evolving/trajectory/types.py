@@ -5,8 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union, Literal
-
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 # --- Common types ---
 StepKind = Literal["llm", "tool"]
@@ -15,6 +14,27 @@ UpdateKey = Tuple[str, str]  # (operator_id, target)
 Updates = Dict[UpdateKey, Any]
 
 
+def _json_safe(value: Any) -> Any:
+    """Convert common message/tool-call objects to plain JSON-like values."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump()
+        except Exception:
+            dumped = None
+        if isinstance(dumped, dict):
+            return _json_safe(dumped)
+
+    return str(value)
 # =============================================================================
 # StepDetail Union Types
 # =============================================================================
@@ -25,8 +45,8 @@ class LLMCallDetail:
     """Complete LLM call execution data."""
 
     model: str
-    messages: List[Dict[str, Any]]
-    response: Optional[Dict[str, Any]] = None
+    messages: List[Any]
+    response: Optional[Any] = None
     tools: Optional[List[Dict[str, Any]]] = None
     usage: Optional[Dict[str, Any]] = None
     meta: Dict[str, Any] = field(default_factory=dict)
@@ -137,3 +157,50 @@ class Trajectory:
     - member_id: team member identifier for trajectory aggregation
     - member_count: number of members in a combined team trajectory
     """
+
+    @staticmethod
+    def _message_to_dict(message: Any) -> Dict[str, Any]:
+        """Normalize runtime message objects into message-like dicts."""
+        if isinstance(message, dict):
+            return _json_safe(message)
+
+        role = getattr(message, "role", None)
+        if role is not None:
+            item: Dict[str, Any] = {
+                "role": role,
+                "content": _json_safe(getattr(message, "content", "")),
+            }
+            name = getattr(message, "name", None)
+            if name is not None:
+                item["name"] = name
+            metadata = getattr(message, "metadata", None)
+            if metadata:
+                item["metadata"] = _json_safe(metadata)
+            tool_calls = getattr(message, "tool_calls", None)
+            if tool_calls:
+                item["tool_calls"] = _json_safe(tool_calls)
+            return item
+
+        model_dump = getattr(message, "model_dump", None)
+        if callable(model_dump):
+            try:
+                dumped = model_dump()
+            except Exception:
+                dumped = None
+            if isinstance(dumped, dict):
+                return _json_safe(dumped)
+
+        return {"role": "unknown", "content": str(message)}
+
+    def to_messages(self) -> List[Dict[str, Any]]:
+        """Return message-like dicts recorded by LLM trajectory steps."""
+        messages: List[Dict[str, Any]] = []
+        for step in self.steps:
+            if step.kind != "llm" or not isinstance(step.detail, LLMCallDetail):
+                continue
+            messages.extend(self._message_to_dict(message) for message in step.detail.messages)
+            response = step.detail.response
+            response_message = self._message_to_dict(response) if response is not None else None
+            if response_message and ("role" in response_message or "content" in response_message):
+                messages.append(response_message)
+        return messages

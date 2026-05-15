@@ -13,7 +13,7 @@
 The `openjiuwen.agent_evolving.updater` module exports the following public interfaces:
 
 ```python
-from openjiuwen.agent_evolving import Updater, SingleDimUpdater, MultiDimUpdater
+from openjiuwen.agent_evolving.updater import Updater, SingleDimUpdater, MultiDimUpdater
 ```
 
 ---

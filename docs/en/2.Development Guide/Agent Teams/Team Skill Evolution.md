@@ -31,8 +31,8 @@ Unlike regular Skills, Team Skills:
 | Module | Function |
 |--------|----------|
 | `TeamSkillCreateRail` | Auto-detect collaboration patterns, suggest team skill creation |
-| `TeamSkillRail` | Online evolution: trajectory analysis, user request, PATCH generation/approval |
-| `TeamSkillOptimizer` | LLM-driven PATCH generation |
+| `TeamSkillRail` | Public rail for online evolution: trajectory analysis, user request, aggregated experience record generation/approval. It is the compatibility public alias for `TeamSkillEvolutionRail`. |
+| `TeamSkillExperienceOptimizer` | LLM-driven experience record generation. `TeamSkillOptimizer` remains available as a compatibility alias. |
 | `ExperienceScorer` | Experience scoring and simplify maintenance |
 | `TeamTrajectoryAggregator` | Aggregate team member trajectories |
 
@@ -89,7 +89,7 @@ team_rail = TeamSkillRail(
     llm=model_client,
     model="gpt-4",
     language="en",
-    auto_save=False,           # PATCH requires user approval
+    auto_save=False,           # generated records require user approval
     async_evolution=True,      # Execute evolution asynchronously
     evolution_total_timeout_secs=600.0,
 )
@@ -120,7 +120,7 @@ Rail analyzes team execution trajectory, detecting:
 - **Workflow inefficiency**: Redundant calls, extra steps
 - **Role capability gaps**: Repeated failures, poor output quality
 
-When issues detected, Rail calls `TeamSkillOptimizer.generate_trajectory_patch()` to generate PATCH.
+When issues are detected, Rail aggregates signals and calls `TeamSkillExperienceOptimizer.generate_records(EvolutionContext)` to generate experience records.
 
 #### 2. User Request Evolution
 
@@ -133,14 +133,14 @@ request_id = await team_rail.request_user_evolution(
 )
 ```
 
-Rail calls `TeamSkillOptimizer.generate_user_patch()` to generate PATCH.
+Rail merges user intent into the same aggregated `generate_records(EvolutionContext)` flow to generate experience records.
 
-### PATCH Approval Flow
+### Record Approval Flow
 
-1. Rail generates PATCH and stages it
-2. PATCH is sent to TUI via `OutputSchema`
+1. Rail generates experience records and stages them
+2. Staged records are sent to TUI via `OutputSchema`
 3. User selects "Accept" or "Reject"
-4. On approval, calls `on_approve_patch(request_id)` to write to `evolutions.json`
+4. On approval, calls `approve_record(request_id)` to write to `evolutions.json`
 
 ```python
 # Get pending approval events
@@ -150,7 +150,7 @@ for event in events:
     if event.type == "chat.ask_user_question":
         request_id = event.payload["request_id"]
         # User approval
-        await team_rail.on_approve_patch(request_id)
+        await team_rail.approve_record(request_id)
 ```
 
 ---

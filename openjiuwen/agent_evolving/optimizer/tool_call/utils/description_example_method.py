@@ -1,13 +1,13 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-import os
 import json
-from typing import List, Dict, Tuple, Any, Optional, Union
+import os
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from openjiuwen.agent_evolving.optimizer.tool_call.utils.base_method import BaseMethod
-from openjiuwen.agent_evolving.optimizer.tool_call.utils.rits import get_rits_response
 from openjiuwen.agent_evolving.optimizer.tool_call.utils.format import format_prompt_llama, parse_json
+from openjiuwen.agent_evolving.optimizer.tool_call.utils.rits import get_rits_response
 from openjiuwen.core.common.logging import logger
 
 

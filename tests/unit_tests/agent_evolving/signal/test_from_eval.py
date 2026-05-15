@@ -6,7 +6,6 @@ import unittest
 from typing import List
 
 from openjiuwen.agent_evolving.dataset import Case, EvaluatedCase
-from openjiuwen.agent_evolving.signal.base import EvolutionCategory
 from openjiuwen.agent_evolving.signal.from_eval import (
     from_evaluated_case,
     from_evaluated_cases,
@@ -45,10 +44,10 @@ class TestFromEvaluatedCase(unittest.TestCase):
 
         self.assertIsNotNone(signal)
         self.assertEqual(signal.signal_type, "low_score")
-        self.assertEqual(signal.evolution_type, EvolutionCategory.SKILL_EXPERIENCE)
         self.assertEqual(signal.section, "Troubleshooting")
         self.assertEqual(signal.skill_name, "test_operator")
         self.assertIn("score", signal.excerpt)
+        self.assertEqual(signal.context["source"], "offline_evaluation")
 
     def test_high_score_returns_none_with_threshold(self) -> None:
         """Case with score >= threshold should return None when threshold is set."""
@@ -115,6 +114,13 @@ class TestFromEvaluatedCase(unittest.TestCase):
 
         self.assertIsNotNone(signal)
         self.assertEqual(signal.skill_name, "skill_call_test_skill")
+
+    def test_context_includes_provenance_fields(self) -> None:
+        case = self._make_case(score=0.5)
+        signal = from_evaluated_case(case, "test_operator")
+
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.context["source"], "offline_evaluation")
 
 
 class TestFromEvaluatedCases(unittest.TestCase):

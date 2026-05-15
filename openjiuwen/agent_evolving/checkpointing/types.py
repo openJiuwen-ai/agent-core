@@ -7,13 +7,11 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
-from openjiuwen.agent_evolving.signal.base import EvolutionSignal, EvolutionTarget
-
-
-# Valid sections for skill evolution
-VALID_SECTIONS = {"Instructions", "Examples", "Troubleshooting", "Scripts", "Collaboration", "Roles", "Constraints"}
+from openjiuwen.agent_evolving.checkpointing.state import EvolveCheckpoint
+from openjiuwen.agent_evolving.protocols import VALID_PATCH_ACTIONS, VALID_SECTIONS
+from openjiuwen.agent_evolving.signal.base import EvolutionTarget
 
 
 @dataclass
@@ -68,6 +66,19 @@ class EvolutionPatch:
 
     _OPTIONAL_FIELDS = ("skip_reason", "merge_target", "script_filename", "script_language", "script_purpose")
 
+    def __post_init__(self) -> None:
+        if self.action not in VALID_PATCH_ACTIONS:
+            raise ValueError(f"invalid evolution patch action: {self.action}")
+        if not isinstance(self.target, EvolutionTarget):
+            try:
+                self.target = EvolutionTarget(self.target)
+            except ValueError as exc:
+                raise ValueError(f"invalid evolution patch target: {self.target}") from exc
+        if self.action == "skip":
+            return
+        if self.section not in VALID_SECTIONS:
+            raise ValueError(f"invalid evolution patch section: {self.section}")
+
     def to_dict(self) -> dict:
         payload = {
             "section": self.section,
@@ -84,10 +95,7 @@ class EvolutionPatch:
     @classmethod
     def from_dict(cls, data: dict) -> "EvolutionPatch":
         raw_target = data.get("target", "body")
-        try:
-            target = EvolutionTarget(raw_target)
-        except ValueError:
-            target = EvolutionTarget.BODY
+        target = EvolutionTarget(raw_target)
         return cls(
             section=data.get("section", "Troubleshooting"),
             action=data.get("action", "append"),
@@ -207,81 +215,6 @@ class EvolutionLog:
         return cls(skill_id=skill_id)
 
 
-@dataclass
-class EvolveCheckpoint:
-    """Training checkpoint (for resume)."""
-
-    version: str
-    run_id: str
-    step: Dict[str, int]
-    best: Dict[str, Any]
-    seed: Optional[int]
-    operators_state: Dict[str, Dict[str, Any]]
-    updater_state: Dict[str, Any]
-    searcher_state: Dict[str, Any]
-    last_metrics: Dict[str, Any]
-
-
-@dataclass
-class PendingChange:
-    """Snapshot of staged evolution records awaiting user approval."""
-
-    operator_id: str
-    skill_name: str
-    change_type: str
-    payload: List[EvolutionRecord]
-    created_at: str
-    change_id: str = field(default_factory=lambda: f"skill_evolve_{uuid.uuid4().hex[:8]}")
-
-    @classmethod
-    def make(cls, skill_name: str, records: List[EvolutionRecord]) -> "PendingChange":
-        return cls(
-            operator_id=f"skill_call_{skill_name}",
-            skill_name=skill_name,
-            change_type="experience_entry",
-            payload=list(records),
-            created_at=datetime.now(tz=timezone.utc).isoformat(),
-        )
-
-
-@dataclass
-class PendingSkillCreation:
-    """Snapshot of a new skill proposal awaiting user approval."""
-
-    name: str
-    description: str
-    body: str
-    reason: str
-    created_at: str = field(default_factory=lambda: datetime.now(tz=timezone.utc).isoformat())
-    proposal_id: str = field(default_factory=lambda: f"skill_create_{uuid.uuid4().hex[:8]}")
-
-
-@dataclass
-class PendingTeamSkillCreation(PendingSkillCreation):
-    """Snapshot of a team skill proposal awaiting user approval.
-
-    Extends PendingSkillCreation with extra_files for multi-file team skill
-    packages (roles/*.md, workflow.md, bind.md, etc.).
-    """
-
-    extra_files: Dict[str, str] = field(default_factory=dict)
-    frontmatter: str = ""
-    proposal_id: str = field(default_factory=lambda: f"team_skill_create_{uuid.uuid4().hex[:8]}")
-
-
-@dataclass
-class EvolutionContext:
-    """All inputs required for LLM-based experience generation."""
-
-    skill_name: str
-    signals: List[EvolutionSignal]
-    skill_content: str
-    messages: List[dict]
-    existing_desc_records: List[EvolutionRecord]
-    existing_body_records: List[EvolutionRecord]
-    user_query: str = ""
-
-
 __all__ = [
     "VALID_SECTIONS",
     "UsageStats",
@@ -289,8 +222,4 @@ __all__ = [
     "EvolutionRecord",
     "EvolutionLog",
     "EvolveCheckpoint",
-    "PendingChange",
-    "PendingSkillCreation",
-    "PendingTeamSkillCreation",
-    "EvolutionContext",
 ]

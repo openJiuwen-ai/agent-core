@@ -5,16 +5,17 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from openjiuwen.core.operator import Operator
-from openjiuwen.agent_evolving.trajectory import Trajectory, Updates
 from openjiuwen.agent_evolving.optimizer import BaseOptimizer
+from openjiuwen.agent_evolving.signal.base import EvolutionSignal
 from openjiuwen.agent_evolving.signal.from_eval import from_evaluated_case
+from openjiuwen.agent_evolving.trajectory import Trajectory
+from openjiuwen.core.operator import Operator
 
 
 class SingleDimUpdater:
     """
     Single-dimension update updater: Reuses BaseOptimizer (backward/step),
-    Updates-first applied uniformly by Trainer.
+    Update mappings are applied uniformly by Trainer.
     """
 
     def __init__(self, optimizer: BaseOptimizer):
@@ -30,15 +31,29 @@ class SingleDimUpdater:
         """Delegate to internal optimizer."""
         return self._opt.requires_forward_data()
 
-    async def update(
-        self, trajectories: List[Trajectory], evaluated_cases: List[Any], config: Dict[str, Any]
-    ) -> Updates:
-        """Write trajectories -> backward -> update, return Updates applied uniformly by Trainer.apply_updates."""
+    async def process(
+        self,
+        trajectories: List[Trajectory],
+        signals: List[EvolutionSignal],
+        config: Dict[str, Any],
+    ) -> Dict[tuple[str, str], Any]:
+        """Signal-first entry: write trajectories, run backward, and return updates."""
         for traj in trajectories:
             self._opt.add_trajectory(traj)
-        signals = [from_evaluated_case(c) for c in evaluated_cases]
         await self._opt.backward(signals)
         return self._opt.step()
+
+    async def update(
+        self, trajectories: List[Trajectory], evaluated_cases: List[Any], config: Dict[str, Any]
+    ) -> Dict[tuple[str, str], Any]:
+        """Offline compatibility adapter that converts evaluated cases to signals."""
+        score_threshold = config.get("score_threshold")
+        signals = []
+        for case in evaluated_cases:
+            signal = from_evaluated_case(case, score_threshold=score_threshold)
+            if signal is not None:
+                signals.append(signal)
+        return await self.process(trajectories, signals, config)
 
     @staticmethod
     def get_state() -> Dict[str, Any]:
