@@ -1,6 +1,6 @@
 # Coordination Protocol
 
-`agent_teams.agent.coordination` 子系统的设计规约：事件总线 + 分发器 + 5 个场景 handler + kernel 装配。本文描述"系统当前是什么样"。
+`agent_teams.agent.coordination` 子系统的设计规约：事件总线 + 分发器 + 6 个场景 handler + kernel 装配。本文描述"系统当前是什么样"。
 
 ## 元信息
 
@@ -8,17 +8,17 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/coordination/` |
-| 最近一次修订日期 | 2026-05-12 |
-| 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md` |
+| 最近一次修订日期 | 2026-05-14 |
+| 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_07_team-completion-events.md` |
 
 ## 范围 / 边界
 
 **这个规约管：**
 
 - `EventBus` 的事件入队、唤醒回调绑定时机、生命周期与 poll 暂停/恢复语义。
-- `EventDispatcher` 的粗筛触发规则（`agent_ready` / inner-vs-transport / 角色级 whitelist）以及 5 个 handler 的注册顺序与 fan-out 顺序。
+- `EventDispatcher` 的粗筛触发规则（`agent_ready` / inner-vs-transport / 角色级 whitelist）以及 6 个 handler 的注册顺序与 fan-out 顺序。
 - `BaseCoordinationHandler` 的注入面（5 类窄依赖）、`EVENT_METHOD_MAP` 协议与 `get_callbacks()` 语义。
-- `AgentLifecycleHandler` / `MemberHandler` / `MessageHandler` / `TaskBoardHandler` / `StaleTaskHandler` 各自监听的 event_key、共享状态、关键方法。
+- `AgentLifecycleHandler` / `MemberHandler` / `MessageHandler` / `TaskBoardHandler` / `StaleTaskHandler` / `TeamCompletionHandler` 各自监听的 event_key、共享状态、关键方法。
 - `CoordinationKernel` 的构造装配序、内部 lifecycle state machine（`idle → running → paused → stopped`，pause/stop 幂等）、`start` / `pause` / `stop` / `finalize_round` 路径与 `SessionManager` 的三方法状态机协作。
 - 三类窄 protocol（`AgentRoundController` / `TeamLifecycleController` / `PollController`）在 host ↔ handler 之间的契约。
 - 异常语义：`AsyncCallbackFramework.trigger` 吞 `Exception`、放行 `AbortError`。
@@ -40,7 +40,7 @@
 3. **每个 `BaseCoordinationHandler` 子类必须声明 `EVENT_METHOD_MAP: ClassVar[dict[str, str]]`**，并提供同名 `async` 方法；`get_callbacks()` 输出的 `event_key → bound method` 是 framework 注册的唯一来源。
 4. **handler 不持有原始 host 引用**。`BaseCoordinationHandler.__init__` 把 host 同时绑成 `self._round`（`AgentRoundController`）与 `self._lifecycle`（`TeamLifecycleController`），子类只准通过这两个窄字段 + `self._poll` / `self._blueprint` / `self._infra` 访问外部状态。
 5. **`EventDispatcher` 不做 event_type → handler 路由**。`dispatch()` 只承担"是否该 trigger"的粗筛，具体 event_key → callback 由 `AsyncCallbackFramework` 解决；同一 event_key 上的多个 handler 走稳定排序的 fan-out。
-6. **fan-out 顺序由 `EventDispatcher.__init__` 元组顺序决定**：`(lifecycle, member, message, task_board, stale_task)` 即 framework 注册顺序；同 priority（默认 0）下 Python `list.sort` 稳定，因此 `MEMBER_SHUTDOWN` 上 `MemberHandler.on_member_event` 永远先于 `MessageHandler.on_member_shutdown_drain`。
+6. **fan-out 顺序由 `EventDispatcher.__init__` 元组顺序决定**：`(lifecycle, member, message, task_board, stale_task, team_completion)` 即 framework 注册顺序；同 priority（默认 0）下 Python `list.sort` 稳定，因此 `MEMBER_SHUTDOWN` 上 `MemberHandler.on_member_event` 永远先于 `MessageHandler.on_member_shutdown_drain`，`POLL_TASK` 上 `StaleTaskHandler.on_poll_task` 永远先于 `TeamCompletionHandler.on_poll_task`。
 7. **handler 之间不直接互调**。跨域响应必须通过让两个 handler 各自注册同一个 `event_key`、走 framework fan-out 实现。
 8. **`AsyncCallbackFramework.trigger` 的异常语义是吞 + 续跑**：普通 `Exception` 被框架 log + continue，仅 `AbortError` 上抛。handler 必须自己用 `team_logger.error("...", exc_info=True)` 记录关键失败，**禁止依赖 framework swallow 当作隐式错误处理**。
 9. **`MemberHandler` 与 `StaleTaskHandler` 共享同一个 `dict[str, float]` 引用作为 stale-claim throttle**（在 `EventDispatcher.__init__` 中创建一次、传两个 handler）。同一 task 在一个 stale 窗口内不会被两条路径重复 nudge。
@@ -172,6 +172,7 @@ class EventDispatcher:
     message:   MessageHandler
     task_board: TaskBoardHandler
     stale_task: StaleTaskHandler
+    team_completion: TeamCompletionHandler
 
     async def dispatch(self, event: CoordinationEvent) -> None: ...
 ```
@@ -218,7 +219,7 @@ class BaseCoordinationHandler:
 - 不通过 `host` 间接访问外部状态——只走 `_round` / `_lifecycle` / `_poll` / `_blueprint` / `_infra` 五个窄字段。
 - 新增依赖时不允许重新塞回 `DispatcherHost`：是 round 行为加到 `AgentRoundController`，是 TeamAgent 级生命周期加到 `TeamLifecycleController`，是 poll 控制加到 `PollController`，否则通过显式构造参数注入。
 
-### 5 个场景 Handler
+### 6 个场景 Handler
 
 下表列出每个 handler 的事件订阅、共享状态与关键方法。所有 handler 的 `__init__` 至少接收 `(host, blueprint, infra, poll_ctrl)`；`MemberHandler` 与 `StaleTaskHandler` 额外接收同一个 `stale_claim_throttle: dict[str, float]`。
 
@@ -229,6 +230,7 @@ class BaseCoordinationHandler:
 | `MessageHandler` | `TeamEvent.MESSAGE` / `TeamEvent.BROADCAST` / `InnerEventType.POLL_MAILBOX` / `TeamEvent.MEMBER_SHUTDOWN`（fan-out） | 无 | `on_message_or_broadcast`：leader 在 MESSAGE 上 `_ack_user_bound_message` + `_notify_human_agent_inbound`，所有 role 接着 `_poll.resume_polls` + `_process_unread_messages`；`on_poll_mailbox` 周期 sweep；`on_member_shutdown_drain` 仅 teammate 给自己 drain（`use_steer=True`） |
 | `TaskBoardHandler` | `TeamEvent.TASK_CLAIMED` + 5 个 `TASK_*`：`CREATED` / `UPDATED` / `COMPLETED` / `CANCELLED` / `UNBLOCKED` | 无 | `on_task_claimed`：targeted 自身 → `deliver_input`；非自身 → 走 `on_task_board_event` 兜底（防 idle leader 错过 board 变更）。`on_task_board_event` 在 `has_in_flight_round()` 否时 `_nudge_idle_agent`，向 idle agent 喂任务清单；leader 全部任务终结时按 lifecycle 喂 all-done prompt |
 | `StaleTaskHandler` | `InnerEventType.POLL_TASK` | `_last_stale_nudge`（共享）+ `_last_pending_nudge: dict[str, float]`（私有，仅 leader 用） | `on_poll_task` → `_check_stale_claimed_tasks` + `_check_stale_pending_tasks`。stale claim：`task.updated_at` 超过 `_STALE_CLAIM_SECONDS` (10min) 触发；自己持有 → `deliver_input`，leader 观察他人 → `message_manager.send_message`。stale pending（仅 leader）：超过 `_STALE_PENDING_SECONDS` (10min) 自喂 prompt、由 LLM 决定如何分派 |
+| `TeamCompletionHandler` | `InnerEventType.POLL_TASK` / `TeamEvent.TASK_LIST_DRAINED` / `TeamEvent.TEAM_COMPLETED` | `_team_completed_emitted: bool` + `_completion_callbacks: list`（私有） | `on_poll_task`：leader 且 idle 时评估 `TeamBackend.is_team_completed()`（成员全 settled + 任务全终态 + 无未读消息），按上升沿发 `TEAM_COMPLETED`、下降沿重新武装。`on_task_list_drained`：记日志 + fire `_completion_callbacks`（`TeamAgent` 在 deepagent 建好后经 `register_completion_callback` 把 `TeamSkillRail.notify_team_completed` 注册进来，注册表非空即 gate）。`on_team_completed`：消费记日志。`POLL_TASK` 与 `StaleTaskHandler` 共享 event_key，注册靠后 → fan-out 在其之后 |
 
 ### CoordinationKernel
 
@@ -365,9 +367,15 @@ TaskBoardHandler.EVENT_METHOD_MAP = {
 StaleTaskHandler.EVENT_METHOD_MAP = {
     InnerEventType.POLL_TASK.value: "on_poll_task",
 }
+
+TeamCompletionHandler.EVENT_METHOD_MAP = {
+    InnerEventType.POLL_TASK.value: "on_poll_task",
+    TeamEvent.TASK_LIST_DRAINED:    "on_task_list_drained",
+    TeamEvent.TEAM_COMPLETED:       "on_team_completed",
+}
 ```
 
-`MEMBER_SHUTDOWN` 同时被 `MemberHandler` 和 `MessageHandler` 注册——这是合规的 fan-out 用法，不是冲突。注册顺序 `(lifecycle, member, message, task_board, stale_task)` 决定了 `member.on_member_event` 先跑、`message.on_member_shutdown_drain` 后跑。
+`MEMBER_SHUTDOWN` 同时被 `MemberHandler` 和 `MessageHandler` 注册、`POLL_TASK` 同时被 `StaleTaskHandler` 和 `TeamCompletionHandler` 注册——这是合规的 fan-out 用法，不是冲突。注册顺序 `(lifecycle, member, message, task_board, stale_task, team_completion)` 决定了 `member.on_member_event` 先跑、`message.on_member_shutdown_drain` 后跑，以及 `stale_task.on_poll_task` 先跑、`team_completion.on_poll_task` 后跑。
 
 ### handler 实例字段
 
@@ -380,6 +388,8 @@ StaleTaskHandler.EVENT_METHOD_MAP = {
 | `_infra` | `TeamInfra` | 所有 handler、dispatcher | 同上（per-process 容器） |
 | `_last_stale_nudge` | `dict[str, float]` | `MemberHandler` + `StaleTaskHandler` 共享同一引用 | dispatcher 生命周期内 |
 | `_last_pending_nudge` | `dict[str, float]` | `StaleTaskHandler` 私有 | 同上 |
+| `_team_completed_emitted` | `bool` | `TeamCompletionHandler` 私有 | 同上（上升沿发射 / 下降沿重新武装的进程内幂等标志）|
+| `_completion_callbacks` | `list[Callable[[], Awaitable[None]]]` | `TeamCompletionHandler` 私有 | 同上（`register_completion_callback` 在 deepagent 建好后一次性注册，`on_task_list_drained` fire）|
 
 CoordinationKernel 自身的 lifecycle state：
 

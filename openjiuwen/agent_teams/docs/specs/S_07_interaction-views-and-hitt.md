@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/interaction/`、`openjiuwen/agent_teams/constants.py`、`openjiuwen/agent_teams/runtime/manager.py`（`_dispatch_payload`）、`openjiuwen/agent_teams/agent/coordination/handlers/message.py`（HITT inbound 钩子）|
-| 最近一次修订 commit | 18823271 |
+| 最近一次修订日期 | 2026-05-14 |
 | 关联 feature | — |
 
 ## 范围 / 边界
@@ -333,7 +333,7 @@ RESERVED_MEMBER_NAMES: frozenset[str] = frozenset({
 3. 一旦 `task.assignee` 指向某个 human-agent 且状态 CLAIMED，`UpdateTaskTool` 拒绝 reassign 和 cancel；批量 cancel 链路也跳过。
 4. 发送给 human-agent 的点对点消息 `is_read=True`；广播后 human-agent 的 `read_at` 立即跟进。
 5. `TeamPolicyRail` 注入 `team_hitt` section（priority=12），按 role 给 leader / teammate / human_agent 下达角色特定的行为约束。section 注入条件来自 `backend.hitt_enabled()`——反映运行时 effective flag，不依赖 roster 是否已 spawn。
-6. `_resolve_team_mode` 只把**非 HUMAN_AGENT** 的 predefined member 计入 predefined 派生——所以纯 HITT 团队（仅声明人类成员）仍然是 `default` 模式，leader 保留 `spawn_member` 工具。
+6. `_resolve_team_mode` 只把**非 HUMAN_AGENT** 的 predefined member 计入 `hybrid` 派生——所以纯 HITT 团队（仅声明人类成员）仍然是 `default` 模式，leader 保留 `spawn_member` 工具。
 
 ## 与其它 spec 的关系
 

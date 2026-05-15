@@ -64,12 +64,17 @@ class AgentLifecycleHandler(BaseCoordinationHandler):
 
         The leader must NEVER ``shutdown_self`` from its own CLEANED
         event: persistent leaders have to survive ``clean_team`` to
-        accept the next interaction, and the teardown for temporary
-        leaders is handled by the natural ``_finalize_round`` path
-        instead. Skipping the leader branch is defense in depth on top
-        of the sender_id self-filter at transport level. Teammates and
-        human-agent avatars must abandon their loop here so they don't
-        spin forever waiting for events on a dead team.
+        accept the next interaction. For a TEMPORARY-team leader the
+        round-end teardown is driven NOT by this bus event but by
+        ``StreamController._run_one_round`` checking
+        ``state.team_cleaned`` — a latch set synchronously by the
+        ``clean_team`` tool's success callback (see
+        ``TeamAgent._mark_team_cleaned``) — and closing the stream.
+        Relying on this bus event for the leader would race round-end,
+        so the leader branch stays a no-op; skipping it is also defense
+        in depth on top of the sender_id self-filter at transport level.
+        Teammates and human-agent avatars must abandon their loop here so
+        they don't spin forever waiting for events on a dead team.
         """
         member_name = self._blueprint.member_name
         if self._blueprint.role == TeamRole.LEADER:

@@ -58,10 +58,12 @@ def _resolve_team_mode(spec: TeamAgentSpec) -> str:
     if spec.team_mode is not None:
         return spec.team_mode
     # HUMAN_AGENT predefined members are HITT roster declarations, not a
-    # signal to lock the team into "predefined" mode. Only non-human
-    # predefined teammates should drop the leader's spawn_member tool.
+    # signal to flip the team away from "default". A non-human predefined
+    # roster derives "hybrid": the leader keeps its spawn_member tool so
+    # the roster can still grow at runtime. Lock it down by setting an
+    # explicit "predefined" team_mode.
     non_human_predefined = [m for m in spec.predefined_members if m.role_type != TeamRole.HUMAN_AGENT]
-    return "predefined" if non_human_predefined else "default"
+    return "hybrid" if non_human_predefined else "default"
 
 
 class AgentConfigurator:
@@ -191,7 +193,14 @@ class AgentConfigurator:
         self.setup_infra(spec, ctx)
         return self.setup_agent(spec, ctx)
 
-    def setup_infra(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext, *, on_teammate_created=None) -> None:
+    def setup_infra(
+        self,
+        spec: TeamAgentSpec,
+        ctx: TeamRuntimeContext,
+        *,
+        on_teammate_created=None,
+        on_team_cleaned=None,
+    ) -> None:
         """Phase 1: set spec/context, create messager, workspace manager, prepare team backend."""
         agent_spec = self.resolve_agent_spec(spec, ctx.role, ctx.member_name)
         resolved_language = _resolve_language(agent_spec.language)
@@ -222,7 +231,7 @@ class AgentConfigurator:
 
             self.model_allocator = build_model_allocator(spec, ctx.team_spec)
 
-        self.setup_team_backend(spec, ctx, self.messager)
+        self.setup_team_backend(spec, ctx, self.messager, on_team_cleaned=on_team_cleaned)
 
         if ctx.role != TeamRole.LEADER and spec.worktree and spec.worktree.enabled:
             self.worktree_manager = self.create_worktree_manager(spec)
@@ -487,12 +496,21 @@ class AgentConfigurator:
         spec: TeamAgentSpec,
         ctx: TeamRuntimeContext,
         messager: Messager,
+        *,
+        on_team_cleaned=None,
     ) -> TeamBackend:
         """Construct the TeamBackend and register cleanup paths.
 
         Tool wiring is done by ``TeamToolRail`` during the agent's lazy
         rail init, so this stage only owns the backend itself plus the
         team / workspace cleanup-path registry.
+
+        Args:
+            on_team_cleaned: Optional async callback threaded into the
+                ``TeamBackend`` so the hosting ``TeamAgent`` is notified
+                on the ``clean_team`` success path. Wired for every role;
+                only the leader can ever fire it (``clean_team`` is a
+                leader-only tool).
         """
         from openjiuwen.agent_teams.schema.status import MemberMode
         from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
@@ -514,6 +532,7 @@ class AgentConfigurator:
             model_config_allocator=self.model_allocator.allocate if self.model_allocator else None,
             leader_allocation=self.leader_allocation if is_leader else None,
             enable_hitt=spec.enable_hitt,
+            on_team_cleaned=on_team_cleaned,
         )
         self.team_backend = agent_team
         self.task_manager = agent_team.task_manager

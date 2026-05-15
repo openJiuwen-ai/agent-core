@@ -261,6 +261,17 @@ async def test_register_and_unregister_rail() -> None:
     assert fake_react.agent_callback_manager.unregister_calls[0][0] is rail
 
 
+def test_find_rails_by_type_returns_matching_rails() -> None:
+    """find_rails_by_type locates queued rails by type without exposing internals."""
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=False))
+    counting = CountingRail()
+    agent.add_rail(counting)
+
+    assert agent.find_rails_by_type((CountingRail,)) == [counting]
+    assert agent.find_rails_by_type((SysOperationRail,)) == []
+    assert agent.find_rails_by_type(()) == []
+
+
 @pytest.mark.asyncio
 async def test_invoke_runtime_error_when_not_configured() -> None:
     agent = DeepAgent(AgentCard(name="deep", description="test"))

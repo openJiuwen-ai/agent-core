@@ -45,7 +45,7 @@ agent_teams/
 ├── tools/               # 团队工具（Leader / Teammate / Human Agent 可调用的原子操作）
 ├── messager/            # 消息传输层（inprocess / pyzmq）
 ├── spawn/               # 成员启动（process / inprocess）
-├── monitor/             # 团队运行态监控
+├── monitor/             # 团队运行态监控（TeamMonitor 只读视图 + TeamStreamLogger 流式诊断日志）
 ├── team_workspace/      # 团队共享工作空间（跨成员的文件/锁/版本）
 ├── cli/                 # 交互式 TUI / 斜杠命令子模块（prompt_toolkit + rich）
 └── worktree_remote.py   # 跨机器 worktree 后端（团队专属，generic 实现见 harness/tools/worktree）
@@ -240,7 +240,9 @@ prompt_toolkit + rich 驱动的交互式 CLI。`run_team_cli(*, specs, yaml_path
 
 收尾规范：
 
-- spec / feature 头部"最近一次修订 commit"字段如标 `(待补)` / `(pending)`，提交后回填真实 hash。
+- spec 头部"最近一次修订日期"字段在每次修订该 spec 时填当天日期（`YYYY-MM-DD`）；feature 文档用
+  头部"日期"字段记录归档当天，不设独立修订字段。**不要在元信息里写 commit hash**——避免"提交后
+  回填"的来回反复。
 - 子模块自身的本地约定继续放各 `<subdir>/CLAUDE.md`；跨子模块的设计规约一律落到 `docs/specs/`，
   不要塞进单一子目录的 CLAUDE.md。
 - 拿不准某次改动算 feature-grade（要 `F_NN_*.md`）还是普通修复（不必归档）时，先问用户。

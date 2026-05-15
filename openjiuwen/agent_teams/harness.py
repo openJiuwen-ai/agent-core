@@ -268,6 +268,15 @@ class TeamHarness:
     # Rail / tool registration
     # ------------------------------------------------------------------
 
+    def find_rails(self, rail_type: type) -> list["AgentRail"]:
+        """Return rails of ``rail_type`` mounted on the underlying agent.
+
+        Used once after construction to wire optional rails (e.g. a
+        ``TeamSkillRail`` mounted by the user's ``agent_customizer``) into
+        the coordination layer, instead of looking them up per event.
+        """
+        return self._deep_agent.find_rails_by_type((rail_type,))
+
     async def register_rail(self, rail: "AgentRail") -> None:
         """Register an additional rail on the running agent."""
         await self._deep_agent.register_rail(rail)

@@ -37,6 +37,7 @@ from openjiuwen.agent_teams.agent.coordination.handlers import (
     MessageHandler,
     StaleTaskHandler,
     TaskBoardHandler,
+    TeamCompletionHandler,
 )
 from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.schema.events import TeamEvent
@@ -143,9 +144,9 @@ class EventDispatcher:
     dispatcher so coordination events never enter the global
     ``Runner.callback_framework``.
 
-    The five scenario handlers are exposed as public attributes
+    The six scenario handlers are exposed as public attributes
     (``lifecycle`` / ``member`` / ``message`` / ``task_board`` /
-    ``stale_task``) for direct access in tests.
+    ``stale_task`` / ``team_completion``) for direct access in tests.
     """
 
     def __init__(
@@ -172,6 +173,7 @@ class EventDispatcher:
         self.message = MessageHandler(host, blueprint, infra, poll_ctrl)
         self.task_board = TaskBoardHandler(host, blueprint, infra, poll_ctrl)
         self.stale_task = StaleTaskHandler(host, blueprint, infra, poll_ctrl, stale_claim_throttle)
+        self.team_completion = TeamCompletionHandler(host, blueprint, infra, poll_ctrl)
 
         self._framework = AsyncCallbackFramework(
             enable_metrics=False,
@@ -183,12 +185,17 @@ class EventDispatcher:
         # MessageHandler.on_member_shutdown_drain flushes the mailbox.
         # Same priority (default 0) → Python's stable sort keeps this
         # registration order.
+        # team_completion is registered last so its POLL_TASK callback
+        # fans out after StaleTaskHandler's: a stale sweep may deliver
+        # input and make the leader non-idle, and the completion check
+        # must see that before deciding the team is done.
         for handler in (
             self.lifecycle,
             self.member,
             self.message,
             self.task_board,
             self.stale_task,
+            self.team_completion,
         ):
             for event_key, callback in handler.get_callbacks().items():
                 self._framework.register_sync(event_key, callback)

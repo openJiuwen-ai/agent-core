@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订 commit | 18823271 |
+| 最近一次修订日期 | 2026-05-09 |
 | 关联 feature | — |
 
 ## 范围 / 边界

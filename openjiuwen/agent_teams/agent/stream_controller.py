@@ -26,7 +26,7 @@ from openjiuwen.agent_teams.schema.status import (
 from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.common.logging import set_member_id, team_logger
 from openjiuwen.core.session.stream.base import OutputSchema
 
 if TYPE_CHECKING:
@@ -279,6 +279,16 @@ class StreamController:
         )
 
     async def _run_one_round(self, message: Any) -> None:
+        # Re-assert the member identity on this round task. A round may
+        # be driven from a task context that never ran the coordination
+        # kernel's ``set_member_id`` -- a human agent's round, for
+        # instance, is started by ``HumanAgentInbox`` from the leader's
+        # interact path rather than from the agent's own coordination
+        # loop. Without this, status updates, event publishing and logs
+        # inside the round carry an empty ``member_id`` contextvar.
+        member_name = self._member_name()
+        if member_name:
+            set_member_id(member_name)
         # Reset cancel state for the new round. cooperative_cancel sets
         # this flag for the *current* round only; otherwise a stale True
         # from a prior aborted round would suppress restarts here.
@@ -306,9 +316,25 @@ class StreamController:
             await self._update_status(MemberStatus.ERROR)
         finally:
             self.agent_task = None
+            # Highest-priority terminal condition: this round just cleaned
+            # the team (the clean_team success callback latched
+            # state.team_cleaned). Close the stream so the leader's
+            # invoke/stream loop breaks on the None sentinel — the leader
+            # deliberately ignores its own TeamCleanedEvent, so this is the
+            # only path that ends a TEMPORARY-team leader's stream. Do NOT
+            # restart for pending interrupt resumes / pending inputs: the
+            # team is gone. A double None enqueue (e.g. the cancel path
+            # also enqueued one) is harmless — the outer loop breaks on the
+            # first None and finalize_round nulls the queue.
+            if self._state.team_cleaned:
+                team_logger.info(
+                    "[{}] team_cleaned set; closing stream after round",
+                    self._member_name() or "?",
+                )
+                self.close_stream()
             # Cooperative abort exits without CancelledError, so check
             # _cancel_requested as well to suppress the restart paths.
-            if not cancelled and not self._cancel_requested:
+            elif not cancelled and not self._cancel_requested:
                 next_resume = self._dequeue_valid_interrupt_resume()
                 if next_resume is not None and self.stream_queue is not None:
                     await self.start_round(next_resume)

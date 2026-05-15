@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/spawn/`、`openjiuwen/agent_teams/agent/spawn_manager.py`、`openjiuwen/agent_teams/agent/stream_controller.py`、`openjiuwen/agent_teams/agent/payload.py`、`openjiuwen/agent_teams/agent/agent_configurator.py`、`openjiuwen/agent_teams/context.py` |
-| 最近一次修订 commit | 18823271 |
+| 最近一次修订日期 | 2026-05-09 |
 | 关联 feature | — |
 
 ## 范围 / 边界

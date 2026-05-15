@@ -858,7 +858,8 @@ def test_reserved_member_names_set_content():
 
 
 # ---------------------------------------------------------------------------
-# _resolve_team_mode — HUMAN_AGENT must not flip the team into "predefined"
+# _resolve_team_mode — non-human predefined members derive "hybrid";
+# HUMAN_AGENT-only rosters stay "default"
 # ---------------------------------------------------------------------------
 
 
@@ -886,8 +887,8 @@ def test_resolve_team_mode_ignores_human_agent_in_predefined():
 
 
 @pytest.mark.level0
-def test_resolve_team_mode_predefined_when_non_human_member():
-    """A regular teammate in predefined_members triggers predefined mode."""
+def test_resolve_team_mode_hybrid_when_non_human_member():
+    """A regular teammate in predefined_members derives hybrid mode."""
     from openjiuwen.agent_teams.agent.agent_configurator import _resolve_team_mode
 
     pre = TeamMemberSpec(
@@ -897,12 +898,12 @@ def test_resolve_team_mode_predefined_when_non_human_member():
         persona="x",
     )
     spec = _minimal_spec(predefined_members=[pre])
-    assert _resolve_team_mode(spec) == "predefined"
+    assert _resolve_team_mode(spec) == "hybrid"
 
 
 @pytest.mark.level0
-def test_resolve_team_mode_predefined_with_mixed_roster():
-    """A mixed roster (human + teammate) still resolves to predefined."""
+def test_resolve_team_mode_hybrid_with_mixed_roster():
+    """A mixed roster (human + teammate) still resolves to hybrid."""
     from openjiuwen.agent_teams.agent.agent_configurator import _resolve_team_mode
 
     spec = _minimal_spec(
@@ -922,6 +923,21 @@ def test_resolve_team_mode_predefined_with_mixed_roster():
             ),
         ],
     )
+    assert _resolve_team_mode(spec) == "hybrid"
+
+
+@pytest.mark.level0
+def test_resolve_team_mode_explicit_predefined_overrides_derivation():
+    """An explicit team_mode is honored verbatim, never re-derived."""
+    from openjiuwen.agent_teams.agent.agent_configurator import _resolve_team_mode
+
+    pre = TeamMemberSpec(
+        member_name="dev_1",
+        display_name="Dev",
+        role_type=TeamRole.TEAMMATE,
+        persona="x",
+    )
+    spec = _minimal_spec(predefined_members=[pre], team_mode="predefined")
     assert _resolve_team_mode(spec) == "predefined"
 
 

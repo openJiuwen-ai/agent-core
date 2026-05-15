@@ -12,7 +12,10 @@ from unittest.mock import (
 
 import pytest
 
-from openjiuwen.agent_teams.agent.coordination.event_bus import InnerEventType
+from openjiuwen.agent_teams.agent.coordination.event_bus import (
+    InnerEventMessage,
+    InnerEventType,
+)
 from openjiuwen.agent_teams.agent.team_agent import (
     TeamAgent,
 )
@@ -26,10 +29,14 @@ from openjiuwen.agent_teams.schema.events import (
     MemberStatusChangedEvent,
     MessageEvent,
     TaskClaimedEvent,
+    TaskListDrainedEvent,
     TeamCleanedEvent,
+    TeamCompletedEvent,
+    TeamEvent,
     ToolApprovalResultEvent,
 )
 from openjiuwen.agent_teams.schema.team import (
+    TeamCompletionSnapshot,
     TeamRole,
     TeamRuntimeContext,
     TeamSpec,
@@ -574,7 +581,7 @@ async def test_stale_claim_throttles_follow_up_polls():
 async def test_stale_claim_self_nudge_when_idle():
     """Teammate nudges itself via start_agent when idle on a stale self-claim."""
     agent = _make_teammate()
-    agent._team_member = None
+    agent._state.team_member = None
     own_task = _make_claimed_task("task-3", assignee="dev-1", updated_at=0)
 
     agent._configurator.task_manager = MagicMock()
@@ -596,7 +603,7 @@ async def test_stale_claim_self_nudge_when_idle():
 async def test_stale_claim_self_nudge_steers_when_running():
     """A running self-owned stale task is nudged via steer rather than start."""
     agent = _make_teammate()
-    agent._team_member = None
+    agent._state.team_member = None
     own_task = _make_claimed_task("task-4", assignee="dev-1", updated_at=0)
 
     agent._configurator.task_manager = MagicMock()
@@ -721,7 +728,7 @@ async def test_stale_pending_throttled_after_first_nudge():
 async def test_stale_pending_teammate_skips_check():
     """Only the leader should self-prompt about pending tasks."""
     agent = _make_teammate()
-    agent._team_member = None
+    agent._state.team_member = None
     stale = _make_pending_task("p-5", updated_at=0)
 
     agent._configurator.task_manager = MagicMock()
@@ -740,7 +747,7 @@ async def test_stale_pending_teammate_skips_check():
 async def test_team_cleaned_event_shuts_down_teammate():
     """A teammate receiving TEAM_CLEANED must call shutdown_self exactly once."""
     agent = _make_teammate()
-    agent._team_member = None
+    agent._state.team_member = None
     agent.shutdown_self = AsyncMock()
 
     event = EventMessage.from_event(TeamCleanedEvent(team_name="test-team"))
@@ -777,7 +784,7 @@ async def test_shutdown_self_cancels_running_round_and_closes_stream():
     cancel must still terminate it so stream() can drain its sentinel.
     """
     agent = _make_teammate()
-    agent._team_member = None
+    agent._state.team_member = None
     agent._stream_controller.stream_queue = asyncio.Queue()
 
     abort_calls: list[None] = []
@@ -816,9 +823,9 @@ async def test_teammate_round_completion_wakes_mailbox_after_interrupt_clears():
     agent = _make_teammate()
     # _make_teammate wires a real TeamBackend (with a default sqlite DB path)
     # during configure(). _update_status would then hit the DB on BUSY/READY
-    # transitions -- skip it by detaching _team_member for this unit test,
-    # which is scoped to the mailbox-wake behavior in _run_one_round.
-    agent._team_member = None
+    # transitions -- skip it by detaching the team_member handle for this unit
+    # test, which is scoped to the mailbox-wake behavior in _run_one_round.
+    agent._state.team_member = None
     agent.coordination_loop.enqueue = AsyncMock()
     agent._stream_controller._execute_round = AsyncMock(return_value=None)
     agent._stream_controller.has_pending_interrupt = lambda: False
@@ -874,3 +881,187 @@ def test_streaming_session_id_reads_from_contextvar():
             reset_session_id(token)
     finally:
         reset_session_id(baseline)
+
+
+def _wire_completion_handler(agent: TeamAgent, snapshot_result):
+    """Point the team_completion handler at a stub backend + messager.
+
+    ``snapshot_result`` is forwarded to ``is_team_completed``: pass a
+    ``TeamCompletionSnapshot`` (or ``None``) for a fixed return, or a list
+    for a per-call ``side_effect``. Returns the captured messager mock.
+    """
+    handler = agent._coordination.dispatcher.team_completion
+    backend = MagicMock()
+    backend.team_name = "test-team"
+    if isinstance(snapshot_result, list):
+        backend.is_team_completed = AsyncMock(side_effect=snapshot_result)
+    else:
+        backend.is_team_completed = AsyncMock(return_value=snapshot_result)
+    messager = AsyncMock()
+    handler._infra.team_backend = backend
+    handler._infra.messager = messager
+    agent._is_agent_running = lambda: False
+    return messager
+
+
+@pytest.mark.level0
+def test_dispatcher_registers_team_completion_handler():
+    """EventDispatcher exposes team_completion and registers its event keys."""
+    agent = _make_leader()
+    handler = agent._coordination.dispatcher.team_completion
+    assert handler is not None
+    callbacks = handler.get_callbacks()
+    assert InnerEventType.POLL_TASK.value in callbacks
+    assert TeamEvent.TASK_LIST_DRAINED in callbacks
+    assert TeamEvent.TEAM_COMPLETED in callbacks
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_team_completion_emits_on_idle_leader_when_complete():
+    """An idle leader emits TEAM_COMPLETED once the backend reports completion."""
+    agent = _make_leader()
+    snapshot = TeamCompletionSnapshot(member_count=2, task_count=3)
+    messager = _wire_completion_handler(agent, snapshot)
+
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK, payload={})
+    await agent._coordination.dispatcher.team_completion.on_poll_task(event)
+
+    messager.publish.assert_awaited_once()
+    published = messager.publish.await_args.kwargs["message"]
+    assert published.event_type == TeamEvent.TEAM_COMPLETED
+    assert published.payload["member_count"] == 2
+    assert published.payload["task_count"] == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_team_completion_not_re_emitted_on_repeated_tick():
+    """A still-completed team does not re-emit TEAM_COMPLETED on the next tick."""
+    agent = _make_leader()
+    snapshot = TeamCompletionSnapshot(member_count=1, task_count=1)
+    messager = _wire_completion_handler(agent, snapshot)
+
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK, payload={})
+    await agent._coordination.dispatcher.team_completion.on_poll_task(event)
+    await agent._coordination.dispatcher.team_completion.on_poll_task(event)
+
+    assert messager.publish.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_team_completion_re_arms_after_falling_edge():
+    """Leaving and re-entering the completed state emits TEAM_COMPLETED again."""
+    agent = _make_leader()
+    snapshot = TeamCompletionSnapshot(member_count=1, task_count=1)
+    messager = _wire_completion_handler(agent, [snapshot, None, snapshot])
+
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK, payload={})
+    await agent._coordination.dispatcher.team_completion.on_poll_task(event)
+    await agent._coordination.dispatcher.team_completion.on_poll_task(event)
+    await agent._coordination.dispatcher.team_completion.on_poll_task(event)
+
+    assert messager.publish.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_team_completion_never_emits_for_teammate():
+    """Only the leader owns the team-level conclusion; a teammate never emits."""
+    agent = _make_teammate()
+    agent._state.team_member = None
+    snapshot = TeamCompletionSnapshot(member_count=1, task_count=1)
+    messager = _wire_completion_handler(agent, snapshot)
+
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK, payload={})
+    await agent._coordination.dispatcher.team_completion.on_poll_task(event)
+
+    messager.publish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_team_completion_skipped_when_round_in_flight():
+    """A leader mid-round must not emit — its own status is BUSY anyway."""
+    agent = _make_leader()
+    snapshot = TeamCompletionSnapshot(member_count=1, task_count=1)
+    messager = _wire_completion_handler(agent, snapshot)
+
+    in_flight = MagicMock()
+    in_flight.done = MagicMock(return_value=False)
+    agent._stream_controller.agent_task = in_flight
+
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK, payload={})
+    await agent._coordination.dispatcher.team_completion.on_poll_task(event)
+
+    messager.publish.assert_not_awaited()
+    agent._coordination.dispatcher.team_completion._infra.team_backend.is_team_completed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_team_completion_consumers_accept_their_events():
+    """on_task_list_drained / on_team_completed decode their payloads cleanly.
+
+    With no completion callbacks registered (the default), on_task_list_drained
+    is log-only and must not raise.
+    """
+    agent = _make_leader()
+    handler = agent._coordination.dispatcher.team_completion
+
+    drained = EventMessage.from_event(TaskListDrainedEvent(team_name="test-team", task_count=4))
+    completed = EventMessage.from_event(TeamCompletedEvent(team_name="test-team", member_count=2, task_count=4))
+
+    await handler.on_task_list_drained(drained)
+    await handler.on_team_completed(completed)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_drained_fires_registered_completion_callbacks():
+    """on_task_list_drained fires every registered completion callback."""
+    agent = _make_leader()
+    handler = agent._coordination.dispatcher.team_completion
+    callback = AsyncMock()
+    handler.register_completion_callback(callback)
+
+    drained = EventMessage.from_event(TaskListDrainedEvent(team_name="test-team", task_count=2))
+    await handler.on_task_list_drained(drained)
+
+    callback.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_drained_callback_failure_is_isolated():
+    """One failing completion callback does not skip the others."""
+    agent = _make_leader()
+    handler = agent._coordination.dispatcher.team_completion
+    failing = AsyncMock(side_effect=RuntimeError("boom"))
+    healthy = AsyncMock()
+    handler.register_completion_callback(failing)
+    handler.register_completion_callback(healthy)
+
+    drained = EventMessage.from_event(TaskListDrainedEvent(team_name="test-team", task_count=1))
+    await handler.on_task_list_drained(drained)
+
+    failing.assert_awaited_once()
+    healthy.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_register_team_completion_callbacks_wires_skill_rail():
+    """_register_team_completion_callbacks extracts mounted rails and registers them."""
+    agent = _make_leader()
+    handler = agent._coordination.dispatcher.team_completion
+    handler._completion_callbacks.clear()
+
+    skill_rail = MagicMock(name="TeamSkillRail")
+    skill_rail.notify_team_completed = AsyncMock()
+    agent._configurator.harness.find_rails = MagicMock(return_value=[skill_rail])
+
+    agent._register_team_completion_callbacks()
+
+    assert skill_rail.notify_team_completed in handler._completion_callbacks

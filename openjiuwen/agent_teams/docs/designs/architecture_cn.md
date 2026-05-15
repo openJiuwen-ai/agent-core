@@ -381,7 +381,7 @@ class TeamAgentSpec(BaseModel):
     team_mode: Literal["default", "predefined", "hybrid"] | None = None
 ```
 
-- `None`（默认）→ `agent_configurator._resolve_team_mode` 自动派生：`predefined_members` 中有**非 HUMAN_AGENT** 成员则 `predefined`，否则 `default`
+- `None`（默认）→ `agent_configurator._resolve_team_mode` 自动派生：`predefined_members` 中有**非 HUMAN_AGENT** 成员则 `hybrid`，否则 `default`
 - `default`：动态团队，Leader 拥有 `spawn_member` 工具，无预定义成员
 - `predefined`：固定成员，从 Leader 工具集移除 `spawn_member`
 - `hybrid`：预注册基础成员 + 仍允许动态 `spawn_member`

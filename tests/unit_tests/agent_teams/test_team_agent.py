@@ -135,3 +135,59 @@ def test_runtime_context_roundtrips_with_pydantic_serialization() -> None:
     assert restored.role == TeamRole.LEADER
     assert restored.member_name == "leader-1"
     assert restored.persona == "pm"
+
+
+@pytest.mark.level0
+def test_setup_agent_builds_leader_member_handle() -> None:
+    """Leader gets a TeamMember handle eagerly during configure().
+
+    Regression guard: the leader's status / execution transitions are
+    silent no-ops unless ``_state.team_member`` is populated. The handle
+    must be built for the leader just like for teammates, not deferred
+    to a callback path that never fires for a BUSY-registered leader.
+    """
+    leader = TeamAgentSpec(
+        agents=_dummy_agents(),
+        team_name="delivery",
+    ).build()
+
+    assert leader.role == TeamRole.LEADER
+    handle = leader._state.team_member
+    assert handle is not None
+    assert handle.member_name == leader.member_name
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_setup_agent_builds_teammate_member_handle() -> None:
+    """Teammate still gets its TeamMember handle from configure() (no regression)."""
+    leader = TeamAgentSpec(
+        agents=_dummy_agents(workspace=None),
+        team_name="delivery",
+        transport=TransportSpec(
+            type="pyzmq",
+            params={
+                "team_id": "delivery-team",
+                "node_id": "leader",
+                "direct_addr": "tcp://127.0.0.1:19002",
+                "pubsub_publish_addr": "tcp://127.0.0.1:19102",
+                "pubsub_subscribe_addr": "tcp://127.0.0.1:19103",
+            },
+        ),
+    ).build()
+    ctx = leader.build_member_context(
+        TeamMemberSpec(
+            member_name="be-1",
+            display_name="Backend Expert",
+            role_type=TeamRole.TEAMMATE,
+            persona="严谨的后端架构师",
+        )
+    )
+    spawn_config = leader.build_spawn_config(ctx)
+
+    teammate = await TeamAgent.from_spawn_payload(spawn_config.payload)
+
+    assert teammate.role == TeamRole.TEAMMATE
+    handle = teammate._state.team_member
+    assert handle is not None
+    assert handle.member_name == "be-1"

@@ -47,5 +47,15 @@ class TeamAgentState:
     pending_user_query: str = ""
     event_listeners: list = field(default_factory=_empty_listener_list)
 
+    # One-shot latch raised on the ``clean_team`` success path, wired via
+    # ``TeamBackend.on_team_cleaned`` -> ``TeamAgent._mark_team_cleaned``.
+    # ``StreamController._run_one_round``'s finally block reads it as the
+    # highest-priority terminal condition so a TEMPORARY-team leader closes
+    # its stream after the round that cleaned the team instead of hanging on
+    # the ``None`` sentinel forever. Cross-operator (written from the
+    # tool/clean path, read from the stream round-end path), so it belongs
+    # in TeamAgentState per the four-quadrant rule.
+    team_cleaned: bool = False
+
 
 __all__ = ["TeamAgentState"]

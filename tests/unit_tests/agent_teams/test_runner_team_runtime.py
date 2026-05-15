@@ -207,6 +207,75 @@ async def test_runner_run_agent_team_streaming_accepts_spec_and_emits_runtime_re
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
+async def test_runner_run_agent_team_streaming_without_stream_logger_is_silent(isolated_checkpointer):
+    """Omitting ``stream_logger`` leaves the diagnostic logger untouched."""
+    await Runner.start()
+    session_id = f"team_spec_{uuid.uuid4().hex}"
+    spec = TeamAgentSpec.model_construct(team_name="spec_team", agents={})
+    agent = FakeTeamAgent("spec_team", stream_label="team.chunk")
+
+    with (
+        patch.object(TeamAgentSpec, "build", return_value=agent),
+        patch("openjiuwen.agent_teams.monitor.stream_logger.team_logger") as log_mock,
+    ):
+        chunks = [
+            chunk
+            async for chunk in Runner.run_agent_team_streaming(
+                agent_team=spec,
+                inputs={"query": "hello"},
+                session=session_id,
+            )
+        ]
+
+    assert len(chunks) == 2
+    assert log_mock.info.call_count == 0
+    assert log_mock.debug.call_count == 0
+    assert log_mock.warning.call_count == 0
+
+    await Runner.stop()
+    await isolated_checkpointer.release(session_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_runner_run_agent_team_streaming_with_stream_logger_logs(isolated_checkpointer):
+    """Passing a ``TeamStreamLogger`` logs chunks without perturbing the stream."""
+    from openjiuwen.agent_teams.monitor import TeamStreamLogger
+
+    await Runner.start()
+    session_id = f"team_spec_{uuid.uuid4().hex}"
+    spec = TeamAgentSpec.model_construct(team_name="spec_team", agents={})
+    agent = FakeTeamAgent("spec_team", stream_label="team.chunk")
+    stream_logger = TeamStreamLogger()
+
+    with (
+        patch.object(TeamAgentSpec, "build", return_value=agent),
+        patch("openjiuwen.agent_teams.monitor.stream_logger.team_logger") as log_mock,
+    ):
+        chunks = [
+            chunk
+            async for chunk in Runner.run_agent_team_streaming(
+                agent_team=spec,
+                inputs={"query": "hello"},
+                session=session_id,
+                stream_logger=stream_logger,
+            )
+        ]
+
+    # Stream is unperturbed by the observer.
+    assert len(chunks) == 2
+    assert chunks[0].payload["event_type"] == "team.runtime_ready"
+    assert chunks[1].payload["event_type"] == "team.chunk"
+    # The runtime_ready chunk + the FakeTeamAgent message were logged.
+    emitted = log_mock.info.call_args_list + log_mock.debug.call_args_list
+    assert len(emitted) >= 1
+
+    await Runner.stop()
+    await isolated_checkpointer.release(session_id)
+
+
+@pytest.mark.asyncio
 async def test_team_runtime_manager_cold_recover_reinjects_runtime_spec():
     from openjiuwen.agent_teams.runtime.dispatch import RunActionKind
     from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
@@ -681,6 +750,50 @@ def test_team_agent_recover_from_session_restores_session_id():
     agent = TeamAgent.recover_from_session(session, "persistent_team")
 
     assert agent.session_id == session_id
+
+
+def test_team_agent_recover_from_session_builds_leader_member_handle():
+    """A cold-recovered leader gets its TeamMember handle via configure().
+
+    Recovery rebuilds the leader through ``configure()`` -> ``_setup_agent``;
+    the team row already exists in the DB, so the handle must be populated
+    and able to track status -- not left ``None`` as it was while the
+    leader handle depended on a never-firing lazy-init callback.
+    """
+    from openjiuwen.agent_teams.runtime.metadata import write_team_namespace
+
+    session_id = f"recover_handle_{uuid.uuid4().hex}"
+    session = create_agent_team_session(session_id=session_id, team_id="persistent_team")
+    write_team_namespace(
+        session,
+        "persistent_team",
+        {
+            "spec": {
+                "team_name": "persistent_team",
+                "agents": {
+                    "leader": {},
+                },
+            },
+            "context": {
+                "role": "leader",
+                "member_name": "leader",
+                "persona": "leader",
+                "team_spec": {
+                    "team_name": "persistent_team",
+                    "display_name": "persistent_team",
+                    "leader_member_name": "leader",
+                },
+                "messager_config": {},
+                "db_config": {},
+            },
+        },
+    )
+
+    agent = TeamAgent.recover_from_session(session, "persistent_team")
+
+    handle = agent._state.team_member
+    assert handle is not None
+    assert handle.member_name == "leader"
 
 
 def test_team_agent_recover_from_session_reinjects_runtime_spec_customizer():
@@ -1204,6 +1317,7 @@ class TestTeamRuntimeManagerStopTeam:
         fake_db.team = AsyncMock()
         fake_db.team.delete_team = AsyncMock(return_value=True)
         fake_checkpointer = AsyncMock()
+        fake_checkpointer.session_exists = AsyncMock(return_value=True)
         fake_checkpointer.release = AsyncMock()
 
         with (
@@ -1295,6 +1409,7 @@ class TestTeamRuntimeManagerDeleteTeam:
         fake_db.team = AsyncMock()
         fake_db.team.delete_team = AsyncMock(return_value=True)
         fake_checkpointer = AsyncMock()
+        fake_checkpointer.session_exists = AsyncMock(return_value=True)
         fake_checkpointer.release = AsyncMock()
 
         async def _fake_resolve(session_id: str):
@@ -1357,6 +1472,7 @@ class TestTeamRuntimeManagerDeleteTeam:
         fake_db.team = AsyncMock()
         fake_db.team.delete_team = AsyncMock(return_value=True)
         fake_checkpointer = AsyncMock()
+        fake_checkpointer.session_exists = AsyncMock(return_value=True)
         fake_checkpointer.release = AsyncMock()
 
         async def _fake_resolve(session_id: str):
@@ -1387,8 +1503,8 @@ class TestTeamRuntimeManagerDeleteTeam:
 
     @pytest.mark.asyncio
     @pytest.mark.level0
-    async def test_delete_team_raises_when_no_session_resolves(self):
-        """delete_team must raise when every supplied session is unusable.
+    async def test_delete_team_raises_when_existing_sessions_do_not_resolve(self):
+        """delete_team must raise when every existing session is unusable.
 
         Pins the helper-returns-Optional / caller-raises contract so the
         two never drift back into the old dual-raise shape.
@@ -1405,12 +1521,53 @@ class TestTeamRuntimeManagerDeleteTeam:
                 raise RuntimeError(f"Cannot resolve team session release info for {session_id}")
             return None
 
-        with patch(
-            "openjiuwen.agent_teams.runtime.manager.TeamRuntimeManager.resolve_team_session_release_info",
-            side_effect=_fake_resolve,
+        fake_checkpointer = AsyncMock()
+        fake_checkpointer.session_exists = AsyncMock(return_value=True)
+
+        with (
+            patch(
+                "openjiuwen.agent_teams.runtime.manager.TeamRuntimeManager.resolve_team_session_release_info",
+                side_effect=_fake_resolve,
+            ),
+            patch(
+                "openjiuwen.agent_teams.runtime.manager.CheckpointerFactory.get_checkpointer",
+                return_value=fake_checkpointer,
+            ),
         ):
             with pytest.raises(RuntimeError, match="any supplied sessions"):
                 await manager.delete_team(team_name, [bad_session_id, empty_session_id])
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_delete_team_succeeds_when_supplied_sessions_are_already_released(self):
+        """delete_team should be idempotent after supplied sessions are gone."""
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+
+        manager = TeamRuntimeManager()
+        team_name = "delete_already_released_team"
+        session_id = f"released_{uuid.uuid4().hex}"
+        fake_checkpointer = AsyncMock()
+        fake_checkpointer.session_exists = AsyncMock(return_value=False)
+        fake_checkpointer.release = AsyncMock()
+
+        with (
+            patch(
+                "openjiuwen.agent_teams.runtime.manager.CheckpointerFactory.get_checkpointer",
+                return_value=fake_checkpointer,
+            ),
+            patch(
+                "openjiuwen.agent_teams.runtime.manager.TeamRuntimeManager.resolve_team_session_release_info",
+                new_callable=AsyncMock,
+            ) as resolve_mock,
+            patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db") as get_shared_db_mock,
+        ):
+            result = await manager.delete_team(team_name, [session_id])
+
+        assert result is True
+        fake_checkpointer.session_exists.assert_awaited_once_with(session_id)
+        fake_checkpointer.release.assert_not_awaited()
+        resolve_mock.assert_not_awaited()
+        get_shared_db_mock.assert_not_called()
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -1462,6 +1619,7 @@ class TestTeamRuntimeManagerDeleteTeam:
         fake_db.team = AsyncMock()
         fake_db.team.delete_team = AsyncMock(return_value=True)
         fake_checkpointer = AsyncMock()
+        fake_checkpointer.session_exists = AsyncMock(return_value=True)
         fake_checkpointer.release = AsyncMock()
 
         with (

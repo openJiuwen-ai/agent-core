@@ -206,10 +206,12 @@ class TeamAgentSpec(BaseModel):
     team_mode: Literal["default", "predefined", "hybrid"] | None = None
     """Team operating mode.
 
-    ``None`` (default) derives the mode automatically: "predefined" when
-    ``predefined_members`` is non-empty, "default" otherwise. Set
-    explicitly to "hybrid" to keep predefined members while still
-    allowing ``spawn_member`` calls during execution.
+    ``None`` (default) derives the mode automatically: "hybrid" when
+    ``predefined_members`` has non-human members, "default" otherwise.
+    "hybrid" keeps the predefined roster while still allowing
+    ``spawn_member`` calls during execution. Set explicitly to
+    "predefined" to lock the roster and drop the leader's
+    ``spawn_member`` tool.
     """
     transport: Optional[TransportSpec] = None
     """Pluggable transport layer specification.

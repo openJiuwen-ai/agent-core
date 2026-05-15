@@ -268,7 +268,7 @@ session checkpoint 全局状态根上有一个 `teams` namespace：
 | `model_pool` | `list[ModelPoolEntry]` | `[]` | LLM endpoint 池 |
 | `model_router` | `Optional[ModelRouterConfig]` | `None` | 单端点路由便利输入；与 `model_pool` 互斥 |
 | `model_pool_strategy` | `Literal["round_robin", "by_model_name", "router"]` | `"round_robin"` | 分配策略；`router` 在 `model_router` 设时强制 |
-| `team_mode` | `Literal["default", "predefined", "hybrid"] \| None` | `None` | 默认派生：predefined 非空→`predefined`，否则 `default`；`hybrid` 显式 |
+| `team_mode` | `Literal["default", "predefined", "hybrid"] \| None` | `None` | 默认派生：非 HUMAN_AGENT predefined 非空→`hybrid`，否则 `default`；`predefined` 显式 |
 | `transport` | `Optional[TransportSpec]` | `None` | inprocess spawn 时自动补 `TransportSpec(type="inprocess")` |
 | `storage` | `Optional[StorageSpec]` | `None` | 缺省走 `DatabaseConfig()` 默认；sqlite 无 connection_string 时回填 `get_agent_teams_home() / "team.db"` |
 | `worktree` | `Optional[WorktreeConfig]` | `None` | 跨成员 worktree 隔离配置 |

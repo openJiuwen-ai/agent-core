@@ -34,7 +34,7 @@
 - `enable_hitt=False` 且 `predefined_members` 含 HUMAN_AGENT → `AGENT_TEAM_CONFIG_INVALID`（特性禁了但预配了人）。
 - `enable_hitt=True` 且 `predefined_members` 无 HUMAN_AGENT → 允许（动态 spawn 路径）。
 
-`_resolve_team_mode`（`agent_configurator.py:55`）只把**非 HUMAN_AGENT** 的 predefined member 计入 predefined 派生 —— 所以纯 HITT 团队（仅声明人类成员）仍然是 `default` 模式，leader 保留 `spawn_member` 工具。
+`_resolve_team_mode`（`agent_configurator.py:57`）只把**非 HUMAN_AGENT** 的 predefined member 计入 `hybrid` 派生 —— 所以纯 HITT 团队（仅声明人类成员）仍然是 `default` 模式，leader 保留 `spawn_member` 工具。
 
 ### 运行约束（代码层 + Prompt 层双重保证）
 

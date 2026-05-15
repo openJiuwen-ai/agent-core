@@ -194,16 +194,14 @@ class TeamRuntimeManager:
             )
 
     # team_member statuses that already encode a finalize-side outcome
-    # written by some other party (leader stop/pause marks, shutdown_self,
-    # or a still-in-flight shutdown request). Manager.finalize_member must
-    # not overwrite these — doing so would silently undo
-    # ``shutdown_self``'s SHUTDOWN write or the leader's STOPPED/PAUSED
-    # marks set just before tearing down the in-process task.
+    # written by some other party (leader stop/pause marks or shutdown_self).
+    # Manager.finalize_member must not overwrite these because doing so would
+    # silently undo ``shutdown_self``'s SHUTDOWN write or the leader's
+    # STOPPED/PAUSED marks set just before tearing down the in-process task.
     _MEMBER_FINALIZED_STATUSES = frozenset(
         {
             MemberStatus.STOPPED,
             MemberStatus.PAUSED,
-            MemberStatus.SHUTDOWN_REQUESTED,
             MemberStatus.SHUTDOWN,
         }
     )
@@ -213,19 +211,18 @@ class TeamRuntimeManager:
         """Settle a non-leader run cycle (teammate / human-agent).
 
         Spawned teammates do not enter the pool; the run cycle still has
-        to choose between pause (persistent — keep the kernel ready for
-        the next assignment) and stop (shutdown_requested or temporary).
+        to consume a pending shutdown request or pause the kernel for the
+        next assignment.
 
         Persisted ``team_member`` status is owned here for the natural
         round-end path:
-          - lifecycle != "persistent" → stop + mark SHUTDOWN.
-          - persistent → pause + mark READY (next assignment can pick it up).
+          - SHUTDOWN_REQUESTED -> stop + mark SHUTDOWN.
+          - otherwise -> pause + mark READY (next assignment can pick it up).
 
         When ``team_member`` is already in
         :data:`_MEMBER_FINALIZED_STATUSES` someone else has written the
-        outcome (leader's ``_mark_live_teammates``, ``shutdown_self``, or
-        ``shutdown_member`` setting SHUTDOWN_REQUESTED) so we only tear
-        down the kernel and skip the status write entirely.
+        outcome (leader's ``_mark_live_teammates`` or ``shutdown_self``),
+        so we only tear down the kernel and skip the status write entirely.
         """
         member = agent.team_member
         try:
@@ -247,7 +244,7 @@ class TeamRuntimeManager:
                 # wrote a terminal/quiescent status. Just close the kernel.
                 await agent.stop_coordination()
                 return
-            if agent.lifecycle != "persistent":
+            if current_status == MemberStatus.SHUTDOWN_REQUESTED:
                 await agent.stop_coordination()
                 if member is not None:
                     await member.update_status(MemberStatus.SHUTDOWN)
@@ -491,9 +488,26 @@ class TeamRuntimeManager:
                     session_id=entry.current_session_id,
                 )
 
+        checkpointer = CheckpointerFactory.get_checkpointer()
+        if session_ids:
+            existing_session_ids: list[str] = []
+            for session_id in session_ids:
+                if await checkpointer.session_exists(session_id):
+                    existing_session_ids.append(session_id)
+            if not existing_session_ids:
+                team_logger.info(
+                    "delete_team: supplied sessions already released team={} sessions={} checkpointer={}",
+                    team_name,
+                    session_ids,
+                    type(checkpointer).__name__,
+                )
+                return True
+        else:
+            existing_session_ids = []
+
         db_config: Optional[DatabaseConfig] = None
         if session_ids:
-            release_info = await self._resolve_any_team_session_release_info(session_ids)
+            release_info = await self._resolve_any_team_session_release_info(existing_session_ids)
             if release_info is None:
                 raise RuntimeError(
                     "Cannot resolve team session release info for any supplied sessions: "
@@ -508,7 +522,6 @@ class TeamRuntimeManager:
         for session_id in session_ids:
             await db.drop_session_tables_by_id(session_id)
 
-        checkpointer = CheckpointerFactory.get_checkpointer()
         for session_id in session_ids:
             await checkpointer.release(session_id)
 

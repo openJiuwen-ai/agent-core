@@ -56,6 +56,14 @@ invariants and silently de-register a team the operator still considers
 live. Temporary teams keep the tool — they have no external operator;
 the leader is the only one who can wind them down.
 
+`TeamBackend.__init__` takes a keyword-only `on_team_cleaned` async
+callback fired **only** on the `clean_team` success path (best-effort —
+a raising callback is logged, not propagated). The hosting `TeamAgent`
+wires it to latch `TeamAgentState.team_cleaned` synchronously inside the
+leader's round, which is how a temporary-team leader ends its own stream
+after `clean_team` (the leader ignores its own `TeamCleanedEvent`). See
+`docs/specs/S_08` + `docs/features/F_10`.
+
 Worktree tools (`enter_worktree`, `exit_worktree`) have moved to `openjiuwen.harness.tools.worktree`. Their description and parameter schema live in `harness/prompts/tools/{enter,exit}_worktree.py`, and they are mounted by `TeamToolRail` whenever `agent_configurator.create_worktree_manager()` returns a `WorktreeManager` for the agent. There is nothing left to maintain in `tools/locales/descs/` for these two tools.
 
 ## Tool Design Principles

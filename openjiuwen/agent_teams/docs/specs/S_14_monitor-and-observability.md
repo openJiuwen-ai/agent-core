@@ -6,14 +6,16 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/monitor/`、`openjiuwen/agent_teams/observability/`（预留） |
-| 最近一次修订 commit | 18823271 |
-| 关联 feature | — |
+| 最近一次修订日期 | 2026-05-14 |
+| 关联 feature | F_09_team-stream-logging.md |
 
 ## 范围 / 边界
 
 本规约只管两件事：
 
-1. **`monitor/` 子模块**——团队运行态的**只读观察面**：`TeamMonitor` 暴露给 SDK / CLI / 上层 UI 的查询 API（团队/成员/任务/邮箱）+ 实时事件流（`MonitorEvent` 异步迭代器），以及 `Runner.get_agent_team_monitor` 这个公共 facade。
+1. **`monitor/` 子模块**——团队运行态的**只读观察面**：
+   - `TeamMonitor` 暴露给 SDK / CLI / 上层 UI 的查询 API（团队/成员/任务/邮箱）+ 实时事件流（`MonitorEvent` 异步迭代器），以及 `Runner.get_agent_team_monitor` 这个公共 facade。
+   - `TeamStreamLogger`——`Runner.run_agent_team_streaming` 流式输出的**聚合诊断日志**处理对象：调用方构造后经 `stream_logger` 入参注入，runner 把每个 chunk 喂给它，它按 `(成员, 角色, 类别)` 聚合后用 `team_logger` 落日志。它是 `monitor/` 里唯一会主动写日志的设施，但仍是只读观察者（不碰 team 运行时状态）。
 2. **`observability/` 子模块**——OpenTelemetry / 结构化日志 / metrics 的可观测性接入点。**当前仅 `__init__.py` 占位、源文件为空**（git 历史里有 `f151dad0` / `dd634e54` / `69a9354d` 三次 OTel 接入提交，目前实现已被回退/重构中），本规约把它当作"已规划但未上线"的扩展点处理。
 
 **不管**的事情：
@@ -39,6 +41,8 @@
 9. **不直接订阅 EventBus / messager**。monitor 通过 `TeamAgent.add_event_listener(handler)` 挂在 leader 的 `event_listeners` 列表上；fan-out 在 `coordination/kernel.py:_filter_self` 里。这是有意为之的"事件已经过 dispatcher 粗筛"的二次消费点，避免监控自己再去 messager 上多订一份 topic、跟 EventBus 抢消息。
 10. **`get_agent_team_monitor` 寻址语义与其它 lifecycle facade 一致**。Key 是 `(team_name, session_id)`；pool 里没匹配 entry 返回 `None`、不抛异常（与 `pause_agent_team` / `stop_agent_team` 的失败语义对齐，见 S_01）。
 11. **`observability/` 不挂载 monitor**。即便后续 OTel 上线，监控数据流（`TeamMonitor.events()` 队列）与遥测数据流（OTel span / metrics）是**两条独立通路**。一边给"想看"的调用方，一边给 APM / 日志后端。不要让其中一条退化成另一条的派生。
+12. **`TeamStreamLogger` 永不向流式路径抛异常**。`feed` / `flush` 整体被 `try / except Exception` 包住，失败只 `team_logger.exception` 留痕——诊断日志挂掉绝不能搞挂它观察的 stream。与不变量 2「监控失败不阻断 team 运行」同源。
+13. **`TeamStreamLogger` 是一次性的、与单次 run 绑定**。每次 `run_agent_team_streaming` 调用配一个新实例（`_has_llm_output` 等去重门控、token 累积缓冲贯穿整个 run）。runner 不构造、不复用——构造责任在调用方（CLI / SDK），runner 只 `feed` / `flush`，类型在 `TYPE_CHECKING` 下引用。
 
 ## 接口契约
 
@@ -56,6 +60,7 @@ __all__ = [
     "TaskInfo",
     "TeamInfo",
     "TeamMonitor",
+    "TeamStreamLogger",
 ]
 ```
 
@@ -70,14 +75,14 @@ def create_monitor(team_agent: TeamAgent) -> TeamMonitor:
     """
 ```
 
-直接构造 `TeamMonitor(...)` 不是公共路径——`team_id` / `session_id` / `db` 全靠 `create_monitor` 从 `TeamAgent` 上拉，绕过工厂自己拼参数容易拼错（特别是 `session_id` 必须取 contextvar 当前值）。
+直接构造 `TeamMonitor(...)` 不是公共路径——`team_name` / `session_id` / `db` 全靠 `create_monitor` 从 `TeamAgent` 上拉，绕过工厂自己拼参数容易拼错（特别是 `session_id` 必须取 contextvar 当前值）。
 
 #### `TeamMonitor` lifecycle
 
 ```python
 class TeamMonitor:
     @property
-    def team_id(self) -> str: ...
+    def team_name(self) -> str: ...
     @property
     def session_id(self) -> str: ...
 
@@ -96,7 +101,7 @@ class TeamMonitor:
 | `get_members(status=None)` | 可选 `MemberStatus` 字符串 | `list[MemberInfo]` | 全成员 / 按状态过滤 |
 | `get_member(member_name)` | `str` | `MemberInfo \| None` | 单成员；不存在返回 None |
 | `get_tasks(status=None)` | 可选 `TaskStatus` 字符串 | `list[TaskInfo]` | 全任务 / 按状态过滤 |
-| `get_messages(*, to_member=None, from_member=None)` | keyword-only | `list[MessageInfo]` | 邮箱消息；`to_member` 走单成员收件箱视图，否则全 team |
+| `get_messages(*, to_member_name=None, from_member_name=None)` | keyword-only | `list[MessageInfo]` | 邮箱消息；`to_member_name` 走单成员收件箱视图，否则全 team |
 
 所有查询 API 都在 `_bound_session()` 上下文管理器中执行——调用方协程不需要预先 `set_session_id`。
 
@@ -139,6 +144,47 @@ async def Runner.get_agent_team_monitor(
 - 无匹配 → `None`；
 - entry 存在但 leader 已不再是 `LEADER` 角色（理论不应出现）→ `create_monitor` 直接 `ValueError`，让上游早暴露。
 
+### `TeamStreamLogger` 流式诊断日志
+
+```python
+class TeamStreamLogger:
+    def feed(self, chunk: OutputSchema) -> None:
+        """Consume one stream chunk: buffer it (token streams) or log it
+        immediately (discrete chunks). Never raises."""
+
+    def flush(self) -> None:
+        """Emit any buffered run; call once after the stream ends.
+        Never raises."""
+```
+
+用法：调用方构造一个实例，经 `Runner.run_agent_team_streaming(..., stream_logger=...)` 注入；
+runner 在 leader 路径上对每个 chunk 调 `feed`，并在 `finally` 里第一时间调 `flush`。
+
+**聚合模型**：`feed` 把 chunk 按 `type` 归到一个 *category*，再分两类处理——
+
+- **累积型**（`llm_output` / `llm_reasoning`）：token 流缓冲，直到 `(成员, 角色, category)`
+  任一变化或遇到离散 chunk 时，把整段拼成一条记录落日志。
+- **离散型**（`tool_call` / `tool_result` / `__interaction__` / `controller_output` /
+  `message` / `todo.updated` / 未知类型）：先 flush 待定的累积段，再立即单独落一条。
+
+**级别映射**：文本输出（`llm_output` / `answer`）→ INFO；思考（`llm_reasoning`）与工具调用
+（`tool_call` / `tool_result`）→ DEBUG；中断（`__interaction__`）与任务失败
+（`controller_output`）→ WARN；其余（`message` / `todo.updated` / 未知）→ INFO。
+
+**日志格式**：单条记录 = 一行 header（`[team.stream] member=<名> role=<角色> category=<类别>`）
++ 每行加 `  | ` 前缀的原始内容块，换行原样保留，多行 markdown 完整可读。内容作为单个位置
+参数传给 `team_logger`，模型输出 / 工具参数里的字面 `{}` 不会被 formatter 误解析。
+
+**与契约相关的细节**：
+
+- chunk 上的 `source_member` / `role` 来自 `TeamOutputSchema`（S_05 / S_12）；非
+  `TeamOutputSchema`（裸 `OutputSchema`）的 chunk 走 `<unknown>` 兜底。
+- `answer` chunk 在已出现过 `llm_output` 时丢弃（去重，对齐 CLI renderer）。
+- `team.runtime_ready`（`message` chunk 且 `payload.event_type` 命中）单列为
+  `runtime_ready` 类别。
+- `tool_result` / `tool_args` 内容超阈值截断；模型文本输出（`llm_output` /
+  `llm_reasoning` / `answer`）永不截断。
+
 ### `observability/` 占位
 
 当前 `openjiuwen/agent_teams/observability/` **不导出任何符号**（目录里仅 `__pycache__/`，没有提交的 `.py`）。git 历史保留了 OTel callback handler / span context / semconv / redaction / monitor handler / rail 的模块骨架（commits `f151dad0` / `69a9354d` / `dd634e54`），未来扩展点：
@@ -179,13 +225,13 @@ class MonitorEventType(str, Enum):
 class MonitorEvent(BaseModel):
     # Common (always present)
     event_type: MonitorEventType
-    team_id: str
-    member_id: str | None
+    team_name: str
+    member_name: str | None
     timestamp: int                # monitor receive time (ms)
 
     # Team subset
-    name: str | None
-    leader_id: str | None
+    display_name: str | None
+    leader_member_name: str | None
     created: int | None
 
     # Member subset
@@ -201,8 +247,8 @@ class MonitorEvent(BaseModel):
 
     # Message subset
     message_id: str | None
-    from_member: str | None
-    to_member: str | None
+    from_member_name: str | None
+    to_member_name: str | None
 ```
 
 每种事件只填相关子集，其余保持 `None`。`timestamp` 是**监控收到事件的本地时钟（毫秒）**，不是事件原始产生时间——后者在 db 行的 `updated_at` / `timestamp` 字段里，需要历史精确时刻请走 query API。
@@ -211,10 +257,10 @@ class MonitorEvent(BaseModel):
 
 | 模型 | `from_internal` 输入 | 关键字段 |
 |---|---|---|
-| `TeamInfo` | `Team` SQLModel | `team_id` (= `team_name`), `name` (= `display_name`), `leader_id`, `desc`, `created` (ms) |
-| `MemberInfo` | `TeamMember` SQLModel | `member_id` (= `member_name`), `team_id`, `name` (= `display_name`), `status`, `execution_status`, `mode` |
-| `TaskInfo` | `TeamTaskBase` SQLModel | `task_id`, `team_id`, `title`, `content`, `status`, `assignee`, `updated_at` (ms, 与当前 `status` 绑定) |
-| `MessageInfo` | `TeamMessageBase` SQLModel | `message_id`, `team_id`, `from_member`, `to_member`, `content`, `timestamp` (ms), `is_broadcast`, `is_read` |
+| `TeamInfo` | `Team` SQLModel | `team_name`, `display_name`, `leader_member_name`, `desc`, `created` (ms) |
+| `MemberInfo` | `TeamMember` SQLModel | `member_name`, `team_name`, `display_name`, `desc`, `status`, `execution_status`, `mode` |
+| `TaskInfo` | `TeamTaskBase` SQLModel | `task_id`, `team_name`, `title`, `content`, `status`, `assignee`, `updated_at` (ms, 与当前 `status` 绑定) |
+| `MessageInfo` | `TeamMessageBase` SQLModel | `message_id`, `team_name`, `from_member_name`, `to_member_name`, `content`, `timestamp` (ms), `broadcast`, `is_read` |
 
 适配层的存在意义：让监控 API 与内部 db schema 解耦。新增 db 字段不会自动暴露给 monitor 消费方；要暴露需要**显式**在对应 `Info` 上加字段并改 `from_internal`。
 
@@ -282,6 +328,7 @@ class MonitorEvent(BaseModel):
 - **S_01 Public API**：`Runner.get_agent_team_monitor` 是 lifecycle facade 之一，按 `(team_name, session_id)` 寻址、无匹配 entry 返回 `None`（与 `pause_agent_team` / `stop_agent_team` 同口径）。
 - **S_02 TeamAgent Architecture**：`event_listeners` 字段属于 `TeamAgentState`（跨 operator 可变状态象限），由 `add_event_listener` / `remove_event_listener` 维护；monitor 是该字段的**唯一公共生产者**。
 - **S_03 Coordination Protocol**：fan-out 实际入口在 `_filter_self`；监听器异常吞没策略由 coordination 提供，monitor 不感知。新增对外可见事件类型时同步动 `TeamEvent` + `MonitorEventType` + `MonitorEvent` 三处。
+- **S_05 Member Spawn & Stream**：`TeamStreamLogger` 消费的就是 S_05 定义的 leader 路径流式 chunk——inprocess 模式下 teammate chunk 经 `StreamController` fan-out 已带 `source_member` / `role` 标签汇入 leader stream，logger 直接读这些标签归属成员，不自己再做寻址。
 - **S_06 Runtime Pool & Dispatch**：`TeamRuntimeManager.get_monitor` 复用 pool 的 `_resolve_entry` 寻址；entry 不存在直接返回 `None`，不影响 dispatch / gate。`get_monitor` 只读 pool，不参与决策。
 - **S_07 Interaction Views & HITT**：HumanAgent inbox 与 monitor 是两条独立观察通道——前者面向"扮演成员"的人类输入交互，后者面向"旁观团队运行"的纯读数据。共用 `TeamDatabase`，不共用任何 listener / 队列。
 - **S_08 Team Tools Contract**：team tools 修改任务 / 邮箱时通过 `TeamMessageManager` / `TeamTaskManager` 发出 `TeamEvent.TASK_*` / `MESSAGE` / `BROADCAST` 事件，由 monitor 翻译为 `MonitorEvent`。工具与监控解耦：工具不知道有 monitor 在看。

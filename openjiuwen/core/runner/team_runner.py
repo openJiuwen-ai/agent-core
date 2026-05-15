@@ -72,7 +72,10 @@ from openjiuwen.core.single_agent import (
 )
 
 if TYPE_CHECKING:
-    from openjiuwen.agent_teams.monitor import TeamMonitor
+    from openjiuwen.agent_teams.monitor import (
+        TeamMonitor,
+        TeamStreamLogger,
+    )
     from openjiuwen.agent_teams.runtime import (
         ActiveTeamInfo,
         RunActionKind,
@@ -210,11 +213,18 @@ class _TeamRunnerMixin:
         context: Optional[ModelContext] = None,
         stream_modes: Optional[list[BaseStreamMode]] = None,
         envs: Optional[dict[str, Any]] = None,
+        stream_logger: Optional["TeamStreamLogger"] = None,
     ) -> AsyncIterator[Any]:
         """Stream-run an agent_teams TeamAgent identified by spec or team_name.
 
         Same input contract as :meth:`run_agent_team`. Pass ``member=True``
         for the spawned-teammate path (``agent_team`` is a ``BaseAgent``).
+
+        When ``stream_logger`` is supplied (a ``TeamStreamLogger`` built by
+        the caller), every chunk on the leader path is fed through it for
+        aggregated diagnostic logging. The spawned-teammate ``member=True``
+        path is not logged here -- in-process teammate chunks already
+        surface on the leader stream.
         """
         if member:
             async for chunk in self._run_team_member_streaming(agent_team, inputs, session=session):
@@ -237,16 +247,23 @@ class _TeamRunnerMixin:
                 blueprint = getattr(activation.agent, "blueprint", None)
                 leader_member_name = getattr(blueprint, "member_name", None)
                 leader_role = getattr(blueprint, "role", None)
-                yield self._build_team_runtime_ready_chunk(
+                ready_chunk = self._build_team_runtime_ready_chunk(
                     team_name=spec.team_name,
                     session_id=activation.session.get_session_id(),
                     action_kind=action.kind,
                     leader_member_name=leader_member_name,
                     leader_role=leader_role,
                 )
+                if stream_logger is not None:
+                    stream_logger.feed(ready_chunk)
+                yield ready_chunk
                 async for chunk in activation.agent.stream(inputs, session=activation.session):
+                    if stream_logger is not None:
+                        stream_logger.feed(chunk)
                     yield chunk
             finally:
+                if stream_logger is not None:
+                    stream_logger.flush()
                 await self._get_team_runtime_manager().finalize(
                     team_name=spec.team_name,
                     session_id=activation.session.get_session_id(),
@@ -781,12 +798,18 @@ class _TeamRunnerClassMixin:
         context: Optional[ModelContext] = None,
         stream_modes: Optional[list[BaseStreamMode]] = None,
         envs: Optional[dict[str, Any]] = None,
+        stream_logger: Optional["TeamStreamLogger"] = None,
     ) -> AsyncIterator[Any]:
         """Stream-run a team. ``base=True`` switches to the multi_agent
         ``BaseTeam`` path (``str | BaseTeam``); default goes through the
         agent_teams TeamAgent path (``str | TeamAgentSpec``). Pass
         ``member=True`` to stream an already-built teammate / human-agent
         ``BaseAgent`` (spawn-only entry; bypasses pool / activate).
+
+        Pass ``stream_logger`` (a ``TeamStreamLogger`` from
+        ``openjiuwen.agent_teams.monitor``) to emit aggregated per-chunk
+        diagnostic logs via ``team_logger``; honoured on the TeamAgent
+        path only (not ``base=True``).
         """
         if base:
             # pylint: disable=protected-access — designated internal facade hook, see module docstring.
@@ -808,6 +831,7 @@ class _TeamRunnerClassMixin:
             context=context,
             stream_modes=stream_modes,
             envs=envs,
+            stream_logger=stream_logger,
         ):
             yield chunk
 

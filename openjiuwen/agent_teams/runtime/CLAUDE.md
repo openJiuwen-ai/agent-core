@@ -24,7 +24,7 @@
 
 ## Stream 生命周期 ≠ OuterLoop 单轮
 
-`Runner.run_agent_team_streaming` 的 stream 不会因为 leader DeepAgent 单轮 OuterLoop "all tasks completed, controller cleaned up" 就结束。stream 的真正终止由 team 层显式动作触发：`pause_agent_team` / `stop_agent_team` / `clean_team`（或退出时 `_close_team_interact_gate` 的 finally 收尾，但那也得 `agent.stream(...)` 自身先返回）。leader OuterLoop 跑完一轮后会 idle 等下一个唤醒事件（worker 回报、用户 interact 等），dispatcher 仍在调度，pool entry 仍 `RUNNING`。基于"OuterLoop 完成 = stream 结束 = entry 失活"做的判断都是错的——遇到 `interact_agent_team` 返回 `not_active` 时，先查 entry 是否在 pool 里，而不是怀疑 stream 已收尾。
+`Runner.run_agent_team_streaming` 的 stream 不会因为 leader DeepAgent 单轮 OuterLoop "all tasks completed, controller cleaned up" 就结束。stream 的真正终止由 team 层显式动作触发：`pause_agent_team` / `stop_agent_team` / `clean_team`（或退出时 `_close_team_interact_gate` 的 finally 收尾，但那也得 `agent.stream(...)` 自身先返回）。临时团队 leader 调用 `clean_team` 工具时，stream 的结束机制是：`TeamBackend.clean_team` 成功回调同步置位 `TeamAgentState.team_cleaned`，`StreamController._run_one_round` 在 round-end 读到后 `close_stream()` 入队 `None`——不依赖会与 round-end 竞态的 `TeamCleanedEvent` 总线事件（leader 故意忽略自己的 CLEANED 事件，见 F_10 / S_02）。leader OuterLoop 跑完一轮后会 idle 等下一个唤醒事件（worker 回报、用户 interact 等），dispatcher 仍在调度，pool entry 仍 `RUNNING`。基于"OuterLoop 完成 = stream 结束 = entry 失活"做的判断都是错的——遇到 `interact_agent_team` 返回 `not_active` 时，先查 entry 是否在 pool 里，而不是怀疑 stream 已收尾。
 
 ## 公共入口：spec / team_name + base 分流（leader-only pool）
 

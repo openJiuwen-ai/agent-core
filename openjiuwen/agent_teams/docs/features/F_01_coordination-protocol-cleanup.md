@@ -5,7 +5,6 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-05-09 |
-| 涉及 commit | `18823271`（本次修补）；`b1d09037`（上游重构，本次基于此 follow-up） |
 | 范围 | `openjiuwen/agent_teams/agent/coordination/`、`openjiuwen/agent_teams/agent/session_manager.py` |
 | 测试基线 | `tests/unit_tests/agent_teams/` 864 passed / 16 skipped |
 | Refs | `#751` |

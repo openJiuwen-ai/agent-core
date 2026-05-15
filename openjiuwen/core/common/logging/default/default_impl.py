@@ -14,6 +14,7 @@ Provides default logging implementations, including:
 import json
 import logging
 import os
+import shutil
 import sys
 from collections.abc import Mapping
 from logging.handlers import RotatingFileHandler
@@ -102,28 +103,79 @@ class SafeRotatingFileHandler(RotatingFileHandler):
         """
         Perform log rotation
 
-        Set backup file permissions during rotation to ensure security.
-        On Windows, close the file stream before rotation to avoid PermissionError.
-        Also restore write permission on oldest backup before deletion.
+        Uses copy + truncate for the active log to handle Windows file locks (WinError 32).
+        Backup file permissions are set during rotation for security.
         """
         if self.stream:
             self.stream.close()
             self.stream = None  # type: ignore[assignment]
 
         if self.backupCount > 0:
-            oldest_backup = self.backup_file_pattern.format(baseFilename=self.baseFilename, index=self.backupCount)
+            # Restore write permission on oldest backup before deletion
+            oldest_backup = self.backup_file_pattern.format(
+                baseFilename=self.baseFilename, index=self.backupCount
+            )
             if os.path.exists(oldest_backup):
                 try:
                     os.chmod(oldest_backup, 0o640)
-                except OSError:
+                except OSError:  # File may be locked
                     pass
 
-        try:
-            super().doRollover()
-        finally:
-            if self.stream is None:
-                self.stream = self._open()
+            # Shift existing backups: .1 -> .2, .2 -> .3, etc.
+            for i in range(self.backupCount - 1, 0, -1):
+                sfn = self.backup_file_pattern.format(baseFilename=self.baseFilename, index=i)
+                dfn = self.backup_file_pattern.format(baseFilename=self.baseFilename, index=i + 1)
+                if os.path.exists(sfn):
+                    if os.path.exists(dfn):
+                        try:
+                            os.remove(dfn)
+                        except OSError:  # Try chmod fallback
+                            try:
+                                os.chmod(dfn, 0o640)
+                                os.remove(dfn)
+                            except OSError:  # File locked, skip
+                                pass
+                    try:
+                        os.rename(sfn, dfn)
+                    except OSError:  # Rename failed, try copy + delete
+                        try:
+                            shutil.copy2(sfn, dfn)
+                            os.chmod(sfn, 0o640)
+                            os.remove(sfn)
+                        except OSError:  # Skip on failure
+                            pass
 
+            # Copy active log to .1 backup (Windows-safe)
+            dfn = self.backup_file_pattern.format(baseFilename=self.baseFilename, index=1)
+            if os.path.exists(dfn):
+                try:
+                    os.remove(dfn)
+                except OSError:  # Try chmod fallback
+                    try:
+                        os.chmod(dfn, 0o640)
+                        os.remove(dfn)
+                    except OSError:  # File locked, skip
+                        pass
+
+            if os.path.exists(self.baseFilename):
+                try:
+                    shutil.copy2(self.baseFilename, dfn)
+                except OSError:  # Copy failed, continue
+                    pass
+
+            # Truncate active log file
+            try:
+                with open(self.baseFilename, "r+b") as f:
+                    f.seek(0)
+                    f.truncate(0)
+            except OSError:  # Truncate failed, continue
+                pass
+
+        # Reopen stream
+        if not self.delay:
+            self.stream = self._open()
+
+        # Apply read-only permissions to backup files
         for i in range(self.backupCount, 0, -1):
             sfn = self.backup_file_pattern.format(baseFilename=self.baseFilename, index=i)
             if os.path.exists(sfn):
@@ -135,6 +187,7 @@ class SafeRotatingFileHandler(RotatingFileHandler):
                         error_msg=f"failed to set backup file permissions: {e}"
                     ) from e
 
+        # Apply write permission to active log
         try:
             os.chmod(self.baseFilename, 0o640)
         except OSError as e:

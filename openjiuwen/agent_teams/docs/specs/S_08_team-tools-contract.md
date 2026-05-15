@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订 commit | 18823271 |
-| 关联 feature | — |
+| 最近一次修订日期 | 2026-05-14 |
+| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md |
 
 ## 范围 / 边界
 
@@ -266,6 +266,22 @@ SendMessageTool        → TeamMessageManager (+ TeamBackend roster check + on_t
 事件发布与状态迁移由 manager 集中负责；工具只是把入参打包后转发给
 manager / backend。新增工具如果发现"我得绕过 manager 直接写表"，
 说明 manager 缺方法——补 manager，不要在工具里偷偷打数据库。
+
+### `TeamBackend.on_team_cleaned` — `clean_team` 成功回调契约
+
+`TeamBackend.__init__` 接受一个 keyword-only 可选参数
+`on_team_cleaned: Callable[[], Awaitable[None]] | None`。语义固定：
+
+- **仅在 `clean_team()` 成功路径触发**：成功日志 + `TeamCleanedEvent` 发布之后、
+  `return True` 之前。early `return False`（成员未全部 SHUTDOWN）**不触发**——
+  那条路径团队没被清理，round 也不结束。
+- **best-effort**：回调抛异常只 `team_logger.error`、不上抛——一个接线 bug 不能
+  把一次成功清理倒灌成工具错误。
+- **接线方**：`AgentConfigurator.setup_team_backend` 从 `setup_infra` 透传，
+  `TeamAgent` 注入 `_mark_team_cleaned`，在 leader 本轮内同步把
+  `TeamAgentState.team_cleaned` 置位，供 `StreamController` 在 round-end 关流。
+  对每个角色都接线，但 `clean_team` 是 `LEADER_ONLY_TOOLS`，回调只可能在 leader
+  上触发。详见 F_10 / S_02。
 
 ### 静态注册表是新工具的唯一注入路径
 

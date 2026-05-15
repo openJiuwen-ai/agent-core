@@ -3,8 +3,8 @@
 """Scenario-scoped coordination event handlers.
 
 Each handler class owns one business domain: agent lifecycle, member
-events, messages, task board, or stale-task sweep. They share the
-``DispatcherHost`` contract and register through
+events, messages, task board, stale-task sweep, or team completion.
+They share the ``DispatcherHost`` contract and register through
 :class:`BaseCoordinationHandler.get_callbacks`.
 """
 
@@ -19,6 +19,7 @@ from openjiuwen.agent_teams.agent.coordination.handlers.member import MemberHand
 from openjiuwen.agent_teams.agent.coordination.handlers.message import MessageHandler
 from openjiuwen.agent_teams.agent.coordination.handlers.stale_task import StaleTaskHandler
 from openjiuwen.agent_teams.agent.coordination.handlers.task_board import TaskBoardHandler
+from openjiuwen.agent_teams.agent.coordination.handlers.team_completion import TeamCompletionHandler
 
 __all__ = [
     "AgentLifecycleHandler",
@@ -28,4 +29,5 @@ __all__ = [
     "MessageHandler",
     "StaleTaskHandler",
     "TaskBoardHandler",
+    "TeamCompletionHandler",
 ]

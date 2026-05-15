@@ -7,8 +7,8 @@
 | 类型 | spec |
 | 编号 / slug | S_02 / team-agent-architecture |
 | 关联模块 | `openjiuwen/agent_teams/agent/` |
-| 最近一次修订 commit | 18823271 |
-| 关联 feature | — |
+| 最近一次修订日期 | 2026-05-14 |
+| 关联 feature | F_11_leader-member-status-tracking.md、F_10_temporary-leader-clean-team-stream-end.md |
 
 ## 范围 / 边界
 
@@ -157,8 +157,14 @@ class AgentConfigurator:
         ctx: TeamRuntimeContext,
         *,
         on_teammate_created: Callable | None = None,
+        on_team_cleaned: Callable | None = None,
     ) -> None:
-        """Phase 1: blueprint, spawn payload builder, messager, workspace, model allocator, team backend, worktree."""
+        """Phase 1: blueprint, spawn payload builder, messager, workspace, model allocator, team backend, worktree.
+
+        ``on_team_cleaned`` is threaded down to ``setup_team_backend`` ->
+        ``TeamBackend``; it fires on the ``clean_team`` success path so the
+        hosting ``TeamAgent`` can latch ``state.team_cleaned``.
+        """
 
     def setup_agent(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> TeamHarness:
         """Phase 2: build TeamHarness (which owns DeepAgent), attach rails, build memory manager."""
@@ -207,11 +213,11 @@ class TeamAgentBlueprint:
 
 @dataclass
 class TeamAgentState:
-    session_id: str | None
     team_session: AgentTeamSession | None
     team_member: TeamMember | None
     pending_user_query: str
     event_listeners: list
+    team_cleaned: bool
 
 
 @dataclass
@@ -246,10 +252,9 @@ def create_member_handle(
     """Returns None when infra.team_backend is None."""
 ```
 
-`TeamMember` 是单成员的 DB / 消息总线投影：负责 status / execution_status 的写入 + 状态变更事件发布。**LEADER 与 TEAMMATE 调用同一份 `create_member_handle`**，但触发时机不同：
+`TeamMember` 是单成员的 DB / 消息总线投影：负责 status / execution_status 的写入 + 状态变更事件发布。`create_member_handle` 是**纯构造函数**——只需已绑定的 `team_backend`，不碰 DB——所以 **LEADER / TEAMMATE / HUMAN_AGENT 一律在 `configure()` → `_setup_agent` 内同步创建**，单一构造点、无角色分支。
 
-- TEAMMATE / HUMAN_AGENT：`configure()` 内同步创建（team row 在 spawn 时已落库）。
-- LEADER：`_on_teammate_created(self.member_name)` 回调里懒创建（leader 自己的 team row 由 `BuildTeamTool` 物化）。
+leader 自己的 team row 由 `BuildTeamTool` 物化，比 handle 晚——freshly built 的 leader 持有一个"行尚未存在"的 handle。这没问题：`TeamMember` 容忍行缺失（status 读返回 `None`，写静默返回 `False`），所以无需等行落库再构造 handle。
 
 ### `SpawnPayloadBuilder`
 
@@ -295,11 +300,11 @@ class SpawnPayloadBuilder:
 | Blueprint | `ctx` | `TeamRuntimeContext` | `setup_infra` | 一次性（frozen） |
 | Blueprint | `role_policy` | `str` | `setup_infra` 调用 `prompts.role_policy(role, language)` | 一次性 |
 | Blueprint | `language` | `str` | `setup_infra` 调用 `_resolve_language(agent_spec.language)` | 一次性 |
-| State | `session_id` | `str | None` | `SessionManager` start / resume | SessionManager |
 | State | `team_session` | `AgentTeamSession | None` | `SessionManager` start / resume | SessionManager |
-| State | `team_member` | `TeamMember | None` | `setup_agent`（teammate / human）/ `_on_teammate_created`（leader） | TeamAgent |
+| State | `team_member` | `TeamMember | None` | `setup_agent`（所有角色同步创建） | TeamAgent |
 | State | `pending_user_query` | `str` | `invoke` / `stream` 入口 | TeamAgent |
 | State | `event_listeners` | `list` | `add_event_listener` / `remove_event_listener` | 调用方 |
+| State | `team_cleaned` | `bool` | `clean_team` 成功回调（`TeamBackend.on_team_cleaned` → `TeamAgent._mark_team_cleaned`） | TeamAgent |
 | Resources | `harness` | `TeamHarness | None` | `setup_agent` 调用 `TeamHarness.build(...)` | 一次性 |
 | Resources | `worktree_manager` | `WorktreeManager | None` | `setup_infra`（非 LEADER 且启用 worktree） | 一次性 |
 | Resources | `memory_manager` | `TeamMemoryManager | None` | `setup_agent`（启用 memory） | 一次性 |
@@ -381,7 +386,7 @@ TeamAgent (composition root)
 - `SpawnManager → AgentConfigurator + TeamAgent`（用 getter 闭包避免硬引用环）。
 - `RecoveryManager → AgentConfigurator + SpawnManager`。
 - `SessionManager → state + AgentConfigurator + RecoveryManager`。
-- `StreamController → blueprint + state + resources +` 三个回调（status / execution / wake mailbox）。回调由 `TeamAgent` 注入，`StreamController` 不反向持有 `TeamAgent`。
+- `StreamController → blueprint + state + resources +` 三个回调（status / execution / wake mailbox）。回调由 `TeamAgent` 注入，`StreamController` 不反向持有 `TeamAgent`。`StreamController._run_one_round` 的 round-end finally 把 `state.team_cleaned` 作为**最高优先级终止条件**：置位则 `close_stream()` 入队 `None`，不 restart pending input / interrupt resume——这是临时团队 leader 调用 `clean_team` 后唯一能结束自身 stream 的路径（leader 故意忽略自己的 `TeamCleanedEvent`，见 F_10）。
 - `CoordinationKernel → TeamAgent`（构造时持引用，是事件驱动的总线 + dispatcher 容器；细节见 S_03）。
 
 每个 manager 的**内部**状态留在自己里（`SpawnManager.spawned_handles`、`StreamController.pending_inputs` 等），不进 `TeamAgentState`。这是不变量 5 在拓扑层的具体落点。

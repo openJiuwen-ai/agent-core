@@ -3,20 +3,20 @@
 
 """Member handle factory.
 
-Centralizes TeamMember construction so leader and teammate paths share
-one implementation. The two paths still differ in *when* they call this
-factory:
+Centralizes TeamMember construction so every role shares one
+implementation and one call site.
 
-* teammate: synchronous during ``configure()`` — the team row already
-  exists in the database by the time a teammate is spawned, so the
-  handle can be created immediately.
-* leader: lazy from ``_on_teammate_created(self.member_name)`` — the
-  leader's own team row only materializes after ``BuildTeamTool`` runs,
-  so the handle has to wait for the resulting member-created callback.
+``create_member_handle`` is a pure constructor: it only needs a bound
+``team_backend`` (``setup_infra`` provides that for all roles) and never
+touches the database. It is therefore called once per agent during
+``configure()`` -- ``_setup_agent`` -- identically for leader, teammate,
+and human agent.
 
-This timing asymmetry is a *data* dependency (team_row.exists), not a
-code-organization issue, so it cannot be unified — only the construction
-call itself can.
+The leader's own DB row only materializes after ``BuildTeamTool`` runs,
+so a freshly built leader holds a handle whose row does not exist yet.
+That is fine: ``TeamMember`` tolerates a missing row (status reads
+return ``None``, writes return ``False`` silently), so there is no need
+to defer construction until the row exists.
 """
 
 from __future__ import annotations

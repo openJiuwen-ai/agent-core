@@ -5,7 +5,6 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-05-12 |
-| 涉及 commit | `6964bc57` feat: give human agent a real DeepAgent runtime；`9903e16e` refactor: centralise interact() routing parser；`904b8525` refactor: make HITT capability layered and explicit |
 | 范围 | `openjiuwen/agent_teams/{interaction,runtime,agent,tools,prompts,rails}`；`tests/unit_tests/agent_teams/{interaction,runtime,agent,tools}` |
 | 测试基线 | `pytest tests/unit_tests/agent_teams/` → 843 passed, 16 skipped |
 | Refs | `#751` |

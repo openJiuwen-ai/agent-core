@@ -36,13 +36,20 @@ from openjiuwen.agent_teams.schema.events import (
     ToolApprovalResultEvent,
 )
 from openjiuwen.agent_teams.schema.status import (
+    MEMBER_SETTLED_STATUSES,
     ExecutionStatus,
     MemberMode,
     MemberStatus,
     TaskStatus,
 )
-from openjiuwen.agent_teams.schema.team import MemberOpResult, TeamMemberSpec, TeamRole
+from openjiuwen.agent_teams.schema.team import (
+    MemberOpResult,
+    TeamCompletionSnapshot,
+    TeamMemberSpec,
+    TeamRole,
+)
 from openjiuwen.agent_teams.tools.database import (
+    TASK_TERMINAL_STATUSES,
     Team,
     TeamDatabase,
     TeamMember,
@@ -78,6 +85,8 @@ class TeamBackend:
         model_config_allocator: Optional[Callable[[Optional[str]], Optional["Allocation"]]] = None,
         leader_allocation: Optional["Allocation"] = None,
         enable_hitt: bool = False,
+        *,
+        on_team_cleaned: Callable[[], Awaitable[None]] | None = None,
     ):
         """Initialize agent team manager.
 
@@ -106,6 +115,15 @@ class TeamBackend:
                 when True, the runtime instance flag (mutated by
                 ``build_team``) decides whether the capability is
                 actually engaged.
+            on_team_cleaned: Optional async callback fired exactly once
+                on the ``clean_team`` SUCCESS path (after the success
+                log + ``TeamCleanedEvent`` publish, before
+                ``return True``). NOT fired on the early ``return
+                False`` path (active members remain). The hosting
+                ``TeamAgent`` wires this to ``_mark_team_cleaned`` so the
+                leader's StreamController can end the round
+                deterministically — the racy ``on_cleaned`` bus event is
+                deliberately not relied on for the leader.
         """
         self.team_name = team_name
         self.member_name = member_name
@@ -123,6 +141,10 @@ class TeamBackend:
         # enable beyond it.
         self._spec_enable_hitt: bool = enable_hitt
         self._enable_hitt: bool = enable_hitt
+        # Fired once on the clean_team success path so the hosting
+        # TeamAgent can latch state.team_cleaned deterministically inside
+        # the leader's round.
+        self._on_team_cleaned = on_team_cleaned
 
         self.task_manager = TeamTaskManager(self.team_name, member_name, self.db, messager)
         # Roster of human-collaborator members. Shared by reference with
@@ -635,6 +657,19 @@ class TeamBackend:
             team_logger.error(f"Failed to publish team cleaned event for {self.team_name}: {e}")
 
         team_logger.info(f"Team {self.team_name} cleaned successfully")
+
+        # Notify the hosting TeamAgent so it can latch state.team_cleaned.
+        # Deliberately on the success path only: the early `return False`
+        # branch (active members remain) must NOT fire this — the round is
+        # not ending there. Best-effort: a callback failure is logged, not
+        # raised, so a wiring bug cannot turn a successful clean into a
+        # tool error.
+        if self._on_team_cleaned is not None:
+            try:
+                await self._on_team_cleaned()
+            except Exception as e:
+                team_logger.error(f"on_team_cleaned callback failed for team {self.team_name}: {e}")
+
         return True
 
     async def force_clean_team(self, shutdown_members: bool = True) -> bool:
@@ -698,6 +733,41 @@ class TeamBackend:
             Team information
         """
         return await self.db.team.get_team(self.team_name)
+
+    async def is_team_completed(self) -> Optional[TeamCompletionSnapshot]:
+        """Evaluate whether the whole team has reached a completed state.
+
+        Returns a snapshot only when all three conditions hold at once:
+            1. Every member -- including the leader -- is in a settled
+               status (``MEMBER_SETTLED_STATUSES``).
+            2. At least one task exists and every task is terminal
+               (``TASK_TERMINAL_STATUSES``).
+            3. No direct or broadcast message is left unread by any member.
+
+        Read-only; safe to call repeatedly. Queries the member DAO directly
+        so the leader itself is part of the roster check (``list_members``
+        excludes the calling member).
+
+        Returns:
+            A ``TeamCompletionSnapshot`` when the team is complete,
+            otherwise ``None``.
+        """
+        members = await self.db.member.get_team_members(self.team_name)
+        if not members:
+            return None
+        if any(member.status not in MEMBER_SETTLED_STATUSES for member in members):
+            return None
+
+        tasks = await self.task_manager.list_tasks()
+        if not tasks:
+            return None
+        if any(task.status not in TASK_TERMINAL_STATUSES for task in tasks):
+            return None
+
+        if await self.message_manager.has_unread_messages():
+            return None
+
+        return TeamCompletionSnapshot(member_count=len(members), task_count=len(tasks))
 
     async def get_team_updated_at(self) -> int:
         """Probe ``team_info.updated_at`` for change detection.
