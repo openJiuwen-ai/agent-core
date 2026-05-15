@@ -12,6 +12,7 @@ from openjiuwen.core.sys_operation.result.code_operation_result import ExecuteCo
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.sys_operation.code import BaseCodeOperation
+from openjiuwen.core.sys_operation.cwd import get_cwd
 from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.registry import operation
 from openjiuwen.core.sys_operation.result import (
@@ -154,7 +155,8 @@ class CodeOperation(BaseCodeOperation):
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=env
+                env=env,
+                cwd=get_cwd(),
             )
 
             encoding = (options or {}).get("encoding", "utf-8")
@@ -294,7 +296,8 @@ class CodeOperation(BaseCodeOperation):
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=env
+                env=env,
+                cwd=get_cwd(),
             )
             chunk_size = (options or {}).get("chunk_size", 1024)
             encoding = (options or {}).get("encoding", "utf-8")
