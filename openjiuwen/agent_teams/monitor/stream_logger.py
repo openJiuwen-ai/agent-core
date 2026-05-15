@@ -6,11 +6,18 @@
 ``Runner.run_agent_team_streaming`` yields every leader and (in-process)
 teammate chunk through one stream, each tagged with ``source_member`` /
 ``role`` (see ``TeamOutputSchema``). :class:`TeamStreamLogger` is an
-opt-in processing object the caller passes into the runner: it buffers
-token-streamed chunks per ``(member, role, category)`` run and emits one
-readable, multi-line log record per run via ``team_logger`` -- text at
-INFO, thinking / tool calls at DEBUG, interruptions / task failures at
-WARN.
+opt-in processing object the caller builds with a target file path and
+passes into the runner: it buffers token-streamed chunks **per source**
+and writes one readable, multi-line record per run directly to that
+file -- text at INFO, thinking / tool calls at DEBUG, interruptions /
+task failures at WARN.
+
+Chunks from different members are interleaved on the single leader
+stream, so aggregation is tracked **per ``(member, role)`` source**
+independently: a teammate's reasoning tokens landing between two leader
+text tokens must not split the leader's run. Each source keeps its own
+pending run, flushed when that source switches category, emits a
+discrete chunk, or the stream ends.
 
 The chunk-handling flow mirrors the team CLI renderer
 (``openjiuwen/harness/cli/ui/renderer.py`` +
@@ -21,11 +28,13 @@ controller-output extraction.
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any, TextIO
 
 from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
 from openjiuwen.agent_teams.schema.team import TeamRole
-from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session.stream import OutputSchema
 
 # Chunk ``type`` values. ``OutputSchema.type`` is a plain ``str`` with no
@@ -56,19 +65,19 @@ _GENERIC_CAP = 2000
 
 _UNKNOWN = "<unknown>"
 
-# Log category -> team_logger level. Declarative so every category's
-# level is visible in one place; _emit dispatches explicitly.
+# Log category -> level label written into each record. Declarative so
+# every category's level is visible in one place.
 _CATEGORY_LEVEL = {
-    "text": "info",
-    "reasoning": "debug",
-    "tool_call": "debug",
-    "tool_result": "debug",
-    "interaction": "warning",
-    "controller_output": "warning",
-    "runtime_ready": "info",
-    "message": "info",
-    "todo": "info",
-    "other": "info",
+    "text": "INFO",
+    "reasoning": "DEBUG",
+    "tool_call": "DEBUG",
+    "tool_result": "DEBUG",
+    "interaction": "WARN",
+    "controller_output": "WARN",
+    "runtime_ready": "INFO",
+    "message": "INFO",
+    "todo": "INFO",
+    "other": "INFO",
 }
 
 
@@ -197,32 +206,52 @@ def _generic_summary(payload: Any) -> str:
     return _cap(str(payload), _GENERIC_CAP)
 
 
-class TeamStreamLogger:
-    """Opt-in processing object that logs aggregated team stream chunks.
+@dataclass
+class _Run:
+    """A pending per-source accumulation run of token-streamed chunks."""
 
-    Construct one per ``run_agent_team_streaming`` call and pass it via
-    the ``stream_logger`` keyword argument. The runner feeds every chunk
-    through :meth:`feed` and calls :meth:`flush` once the stream ends.
+    category: str
+    buf: list[str] = field(default_factory=list)
+
+
+class TeamStreamLogger:
+    """Opt-in processing object that writes aggregated team stream records.
+
+    Construct one per ``run_agent_team_streaming`` call with the target
+    file path and pass it via the ``stream_logger`` keyword argument. The
+    runner feeds every chunk through :meth:`feed` and calls :meth:`flush`
+    once the stream ends.
 
     Token-streamed chunks (``llm_output`` / ``llm_reasoning``) are
-    buffered and emitted as one record per contiguous
-    ``(member, role, category)`` run; every other chunk type is logged
-    immediately. Both :meth:`feed` and :meth:`flush` swallow their own
-    exceptions -- a diagnostic logger must never break the stream it
-    observes.
+    buffered **per ``(member, role)`` source** and emitted as one record
+    per contiguous same-category run; every other chunk type is written
+    immediately. Tracking runs per source -- rather than with a single
+    cursor -- is what keeps interleaved teammate / leader chunks from
+    splitting each other's runs.
+
+    Both :meth:`feed` and :meth:`flush` swallow their own exceptions (a
+    best-effort marker is written to the file instead) -- a diagnostic
+    logger must never break the stream it observes. The constructor does
+    *not* swallow: an unusable path fails fast at construction time.
     """
 
-    def __init__(self) -> None:
-        """Initialize an empty aggregator."""
-        self._buf: list[str] = []
-        self._cat: str | None = None
-        self._member: str | None = None
-        self._role: str | None = None
-        self._has_llm_output: bool = False
+    def __init__(self, file_path: str | Path) -> None:
+        """Open *file_path* for appending aggregated stream records.
+
+        Args:
+            file_path: Destination file. Parent directories are created
+                if missing. Opened in append mode; raises on an unusable
+                path so the caller fails fast at construction time.
+        """
+        self._path = Path(file_path)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._file: TextIO | None = open(self._path, "a", encoding="utf-8")
+        self._runs: dict[tuple[str | None, str | None], _Run] = {}
+        self._llm_output_seen: set[tuple[str | None, str | None]] = set()
         self._chunk_count: int = 0
 
     def feed(self, chunk: OutputSchema) -> None:
-        """Consume one stream chunk, buffering or logging as appropriate.
+        """Consume one stream chunk, buffering or writing as appropriate.
 
         Args:
             chunk: An ``OutputSchema`` (``TeamOutputSchema`` on the team
@@ -230,17 +259,28 @@ class TeamStreamLogger:
         """
         try:
             self._feed(chunk)
-        except Exception:
-            team_logger.exception("[team.stream] failed to log a stream chunk")
+        except Exception as exc:  # diagnostic logger must never break the stream
+            self._safe_write(f"[WARN] stream logger feed error: {exc!r}")
 
     def flush(self) -> None:
-        """Emit any buffered run; call once after the stream ends."""
+        """Flush every pending per-source run and close the file.
+
+        Call once after the stream ends. Never raises.
+        """
         try:
-            self._flush_accumulated()
+            for key in list(self._runs.keys()):
+                self._flush_key(key)
             if self._chunk_count:
-                team_logger.debug("[team.stream] end, {} chunks", self._chunk_count)
-        except Exception:
-            team_logger.exception("[team.stream] failed to flush stream log")
+                self._safe_write(f"[INFO] stream end, {self._chunk_count} chunks")
+        except Exception as exc:
+            self._safe_write(f"[WARN] stream logger flush error: {exc!r}")
+        finally:
+            if self._file is not None:
+                try:
+                    self._file.close()
+                except Exception:
+                    pass
+                self._file = None
 
     # ------------------------------------------------------------------
     # internals
@@ -256,10 +296,11 @@ class TeamStreamLogger:
         else:
             member = None
             role = None
+        key = (member, role)
 
-        # `answer` duplicates the already-streamed `llm_output` text;
-        # drop it once any llm_output has been seen (mirrors renderer).
-        if ctype == _CHUNK_ANSWER and self._has_llm_output:
+        # `answer` duplicates the same source's already-streamed
+        # llm_output; drop it once that source has produced llm_output.
+        if ctype == _CHUNK_ANSWER and key in self._llm_output_seen:
             return
 
         category = _classify(ctype, payload)
@@ -268,25 +309,27 @@ class TeamStreamLogger:
             content = _extract_content(payload)
             if not content:
                 return
-            run_changed = category != self._cat or member != self._member or role != self._role
-            if self._cat is not None and run_changed:
-                self._flush_accumulated()
-            self._cat = category
-            self._member = member
-            self._role = role
-            self._buf.append(content)
+            run = self._runs.get(key)
+            if run is not None and run.category != category:
+                # Same source switched category -> flush its old run.
+                self._flush_key(key)
+                run = None
+            if run is None:
+                run = _Run(category=category)
+                self._runs[key] = run
+            run.buf.append(content)
             if ctype == _CHUNK_LLM_OUTPUT:
-                self._has_llm_output = True
+                self._llm_output_seen.add(key)
             return
 
-        # Discrete chunk: flush any pending run, then log immediately.
-        self._flush_accumulated()
+        # Discrete chunk: flush this source's pending run, then write now.
+        self._flush_key(key)
         summary = self._discrete_summary(category, payload)
         self._emit(category, member, role, summary)
 
     @staticmethod
     def _discrete_summary(category: str, payload: Any) -> str:
-        """Build the log content for a discrete (non-accumulating) chunk."""
+        """Build the record content for a discrete (non-accumulating) chunk."""
         if category == "tool_call":
             return _tool_call_summary(payload)
         if category == "tool_result":
@@ -299,46 +342,39 @@ class TeamStreamLogger:
             return _interaction_summary(payload)
         return _generic_summary(payload)
 
-    def _flush_accumulated(self) -> None:
-        """Emit the buffered token run, if any, and reset run state."""
-        if not self._buf:
-            self._reset_run()
+    def _flush_key(self, key: tuple[str | None, str | None]) -> None:
+        """Write and drop the pending run for *key*, if any."""
+        run = self._runs.pop(key, None)
+        if run is None or not run.buf:
             return
-        content = "".join(self._buf)
-        category = self._cat or "other"
-        member = self._member
-        role = self._role
-        self._reset_run()
-        self._emit(category, member, role, content)
+        member, role = key
+        self._emit(run.category, member, role, "".join(run.buf))
 
-    def _reset_run(self) -> None:
-        """Clear the current accumulation run (keeps ``_has_llm_output``)."""
-        self._buf = []
-        self._cat = None
-        self._member = None
-        self._role = None
-
-    @staticmethod
     def _emit(
+        self,
         category: str,
         member: str | None,
         role: str | None,
         content: str,
     ) -> None:
-        """Format and dispatch one log record at the category's level."""
+        """Format one record and write it to the file."""
         if not content:
             return
+        level = _CATEGORY_LEVEL.get(category, "INFO")
         prefixed = "\n".join(f"  | {line}" for line in content.split("\n"))
-        block = f"[team.stream] member={member or _UNKNOWN} role={role or _UNKNOWN} category={category}\n{prefixed}"
-        level = _CATEGORY_LEVEL.get(category, "info")
-        # Pass the rendered block as a single positional arg so literal
-        # braces in model output / tool args never reach the formatter.
-        if level == "debug":
-            team_logger.debug("{}", block)
-        elif level == "warning":
-            team_logger.warning("{}", block)
-        else:
-            team_logger.info("{}", block)
+        header = f"[{level}] member={member or _UNKNOWN} role={role or _UNKNOWN} category={category}"
+        self._safe_write(f"{header}\n{prefixed}")
+
+    def _safe_write(self, body: str) -> None:
+        """Write one timestamped record to the file; swallow any I/O error."""
+        if self._file is None:
+            return
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        try:
+            self._file.write(f"{timestamp} {body}\n")
+            self._file.flush()
+        except Exception:
+            pass
 
 
 __all__ = ["TeamStreamLogger"]

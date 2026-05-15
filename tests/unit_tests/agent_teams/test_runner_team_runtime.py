@@ -208,17 +208,15 @@ async def test_runner_run_agent_team_streaming_accepts_spec_and_emits_runtime_re
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_runner_run_agent_team_streaming_without_stream_logger_is_silent(isolated_checkpointer):
-    """Omitting ``stream_logger`` leaves the diagnostic logger untouched."""
+async def test_runner_run_agent_team_streaming_without_stream_logger(isolated_checkpointer, tmp_path):
+    """Omitting ``stream_logger`` leaves no diagnostic file behind."""
     await Runner.start()
     session_id = f"team_spec_{uuid.uuid4().hex}"
     spec = TeamAgentSpec.model_construct(team_name="spec_team", agents={})
     agent = FakeTeamAgent("spec_team", stream_label="team.chunk")
+    target = tmp_path / "stream.log"
 
-    with (
-        patch.object(TeamAgentSpec, "build", return_value=agent),
-        patch("openjiuwen.agent_teams.monitor.stream_logger.team_logger") as log_mock,
-    ):
+    with patch.object(TeamAgentSpec, "build", return_value=agent):
         chunks = [
             chunk
             async for chunk in Runner.run_agent_team_streaming(
@@ -229,9 +227,7 @@ async def test_runner_run_agent_team_streaming_without_stream_logger_is_silent(i
         ]
 
     assert len(chunks) == 2
-    assert log_mock.info.call_count == 0
-    assert log_mock.debug.call_count == 0
-    assert log_mock.warning.call_count == 0
+    assert not target.exists()
 
     await Runner.stop()
     await isolated_checkpointer.release(session_id)
@@ -239,20 +235,19 @@ async def test_runner_run_agent_team_streaming_without_stream_logger_is_silent(i
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_runner_run_agent_team_streaming_with_stream_logger_logs(isolated_checkpointer):
-    """Passing a ``TeamStreamLogger`` logs chunks without perturbing the stream."""
+async def test_runner_run_agent_team_streaming_with_stream_logger_writes_file(isolated_checkpointer, tmp_path):
+    """Passing a ``TeamStreamLogger`` writes aggregated records to its file
+    without perturbing the streamed chunks."""
     from openjiuwen.agent_teams.monitor import TeamStreamLogger
 
     await Runner.start()
     session_id = f"team_spec_{uuid.uuid4().hex}"
     spec = TeamAgentSpec.model_construct(team_name="spec_team", agents={})
     agent = FakeTeamAgent("spec_team", stream_label="team.chunk")
-    stream_logger = TeamStreamLogger()
+    log_path = tmp_path / "stream.log"
+    stream_logger = TeamStreamLogger(log_path)
 
-    with (
-        patch.object(TeamAgentSpec, "build", return_value=agent),
-        patch("openjiuwen.agent_teams.monitor.stream_logger.team_logger") as log_mock,
-    ):
+    with patch.object(TeamAgentSpec, "build", return_value=agent):
         chunks = [
             chunk
             async for chunk in Runner.run_agent_team_streaming(
@@ -267,9 +262,10 @@ async def test_runner_run_agent_team_streaming_with_stream_logger_logs(isolated_
     assert len(chunks) == 2
     assert chunks[0].payload["event_type"] == "team.runtime_ready"
     assert chunks[1].payload["event_type"] == "team.chunk"
-    # The runtime_ready chunk + the FakeTeamAgent message were logged.
-    emitted = log_mock.info.call_args_list + log_mock.debug.call_args_list
-    assert len(emitted) >= 1
+    # File got the runtime_ready record at minimum; flush ran in finally.
+    text = log_path.read_text(encoding="utf-8")
+    assert "category=runtime_ready" in text
+    assert "stream end" in text
 
     await Runner.stop()
     await isolated_checkpointer.release(session_id)
