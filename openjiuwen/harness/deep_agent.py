@@ -257,6 +257,7 @@ class DeepAgent(BaseAgent):
             self._hot_reload_system_prompt(config)
 
         self._queue_pending_rails(config)
+        self._sync_builder_to_active_rails()
 
     def _hot_reload_rails(self, config: DeepAgentConfig) -> None:
         """Cycle stale rails out and prepare replacement rails during hot-reconfigure.
@@ -391,6 +392,17 @@ class DeepAgent(BaseAgent):
         self._react_agent.prompt_builder = prompt_builder
         self._react_agent.system_prompt_builder = prompt_builder
         logger.info("[DeepAgent] System prompt hot reloaded")
+
+    def _sync_builder_to_active_rails(self) -> None:
+        """Push the current system_prompt_builder reference to active rails.
+
+        Syncs to _registered_rails and _stale_rails only.  _pending_rails do not
+        need syncing because they will acquire the correct builder from the agent
+        during init() in _ensure_initialized.
+        """
+        for rail in (*self._registered_rails, *self._stale_rails):
+            if hasattr(rail, "system_prompt_builder"):
+                rail.system_prompt_builder = self.system_prompt_builder
 
     def _queue_pending_rails(self, config: DeepAgentConfig) -> None:
         """Append config-driven rails to _pending_rails for lazy registration."""
