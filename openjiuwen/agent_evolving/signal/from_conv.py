@@ -8,19 +8,20 @@ import json
 import re
 from typing import Dict, List, Optional, Set, Tuple, Union
 
-from openjiuwen.core.common.logging import logger
+from openjiuwen.agent_evolving.protocols import USER_INTENT_SIGNAL
 from openjiuwen.agent_evolving.signal.base import (
-    EvolutionCategory,
     EvolutionSignal,
+    make_evolution_signal,
     make_signal_fingerprint,
 )
+from openjiuwen.agent_evolving.trajectory.aggregator import CROSS_MEMBER_META_KEYS
 from openjiuwen.agent_evolving.trajectory.types import (
     LLMCallDetail,
+    ToolCallDetail,
     Trajectory,
     TrajectoryStep,
-    ToolCallDetail,
 )
-from openjiuwen.agent_evolving.trajectory.aggregator import CROSS_MEMBER_META_KEYS
+from openjiuwen.core.common.logging import logger
 
 
 def _get_field(obj: object, key: str, default: object = "") -> object:
@@ -38,6 +39,15 @@ def _extract_around_match(
     start = max(0, match.start() - before)
     end = min(len(content), match.end() + after)
     return content[start:end]
+
+
+def _response_to_text(response: object) -> str:
+    """Convert common LLM response shapes to plain text."""
+    if hasattr(response, "content"):
+        return str(getattr(response, "content") or "")
+    if isinstance(response, dict):
+        return str(response.get("content", "") or response.get("text", "") or "")
+    return str(response or "")
 
 
 _FAILURE_KEYWORDS = re.compile(
@@ -72,40 +82,85 @@ _CORRECTION_PATTERNS = [
     r"fix(ed)?:",
 ]
 _CORRECTION_PATTERN = re.compile("|".join(_CORRECTION_PATTERNS), re.IGNORECASE)
+
 _SKILL_MD_PATTERN = re.compile(r"[/\\]+([^/\\]+)[/\\]+SKILL\.md", re.IGNORECASE)
 _TOOL_SCHEMA_PATTERN = re.compile(r"\{'content': '---\\nname: [^\n]+\\ndescription:")
+_USER_FEEDBACK_PROMPT_CN = (
+    "判断以下用户消息是否包含对当前 skill 的被动纠正或可沉淀的改进反馈。\n"
+    "只有当用户消息明确指出 agent 的理解、步骤、顺序或工具使用需要调整时，"
+    "才认为值得转成演进信号。\n\n"
+    "当前 skill：{skill_name}\n"
+    "最近用户消息：{user_messages}\n\n"
+    '输出 JSON: {{"is_feedback": true/false, "excerpt": "str"}}\n'
+)
+_USER_FEEDBACK_PROMPT_EN = (
+    "Determine whether the following user messages contain passive corrective feedback "
+    "or reusable improvement guidance for the current skill.\n"
+    "Only treat the messages as an evolution signal when the user is clearly correcting "
+    "the agent's understanding, ordering, steps, or tool usage.\n\n"
+    "Current skill: {skill_name}\n"
+    "Recent user messages: {user_messages}\n\n"
+    'Output JSON: {{"is_feedback": true/false, "excerpt": "str"}}\n'
+)
 
 # Tools whose output is fetched content (web pages, files, search results).
-_DATA_FETCH_TOOLS = frozenset({
-    "mcp_fetch_webpage", "fetch_webpage", "web_fetch",
-    "search", "web_search", "google_search", "bing_search",
-    "view_file", "read_file", "cat_file",
-    "list_directory", "ls",
-    "get_url", "curl", "wget",
-})
+_DATA_FETCH_TOOLS = frozenset(
+    {
+        "mcp_fetch_webpage",
+        "fetch_webpage",
+        "web_fetch",
+        "search",
+        "web_search",
+        "google_search",
+        "bing_search",
+        "view_file",
+        "read_file",
+        "cat_file",
+        "list_directory",
+        "ls",
+        "get_url",
+        "curl",
+        "wget",
+    }
+)
 
 # Tools that execute inline code or shell commands.
-_CODE_EXEC_TOOLS = frozenset({
-    "code", "bash",
-    "execute_python_code", "run_python", "exec_code",
-    "execute_code", "python_exec", "run_code",
-})
+_CODE_EXEC_TOOLS = frozenset(
+    {
+        "code",
+        "bash",
+        "execute_python_code",
+        "run_python",
+        "exec_code",
+        "execute_code",
+        "python_exec",
+        "run_code",
+    }
+)
 
 # Parameter keys where executable content (code or commands) can be found.
 _EXEC_CONTENT_KEYS = (
-    "code", "code_block", "script", "source", "python_code",
-    "command", "cmd", "shell_command",
+    "code",
+    "code_block",
+    "script",
+    "source",
+    "python_code",
+    "command",
+    "cmd",
+    "shell_command",
 )
 
 # ===== Collaboration Signal Detection =====
 # Collaboration signal types
-_COLLABORATION_SIGNAL_TYPES = frozenset({
-    "collaboration_send",    # send_message to other member
-    "collaboration_claim",   # claim_task by teammate
-    "collaboration_view",    # view_task status check
-    "collaboration_receive", # receive context from parent_invoke_id
-    "collaboration_failure", # collaboration-related error/timeout
-})
+_COLLABORATION_SIGNAL_TYPES = frozenset(
+    {
+        "collaboration_send",  # send_message to other member
+        "collaboration_claim",  # claim_task by teammate
+        "collaboration_view",  # view_task status check
+        "collaboration_receive",  # receive context from parent_invoke_id
+        "collaboration_failure",  # collaboration-related error/timeout
+    }
+)
 
 # Collaboration failure pattern
 _COLLABORATION_FAILURE_PATTERN = re.compile(
@@ -132,10 +187,11 @@ class ConversationSignalDetector:
             existing_skills: Set of skill names for skill_name resolution.
         """
         self._existing_skills = existing_skills or set()
+        self._llm: object | None = None
+        self._model = ""
+        self._language = "cn"
 
-    def detect(
-        self, trajectory_or_messages: Union[Trajectory, List[dict]]
-    ) -> List[EvolutionSignal]:
+    def detect(self, trajectory_or_messages: Union[Trajectory, List[dict]]) -> List[EvolutionSignal]:
         """Detect evolution signals from Trajectory or messages.
 
         Main entry: accepts Trajectory or List[dict], returns deduplicated EvolutionSignal list.
@@ -158,6 +214,106 @@ class ConversationSignalDetector:
 
         return self._deduplicate(signals)
 
+    def detect_trajectory_signals(
+        self,
+        trajectory: Optional[Trajectory],
+        messages: Optional[List[dict]] = None,
+    ) -> List[EvolutionSignal]:
+        """Detect passive trajectory signals using the regular conversation rules."""
+        if messages is not None:
+            signals = self._detect_from_messages(messages)
+            if trajectory is not None:
+                signals.extend(self._detect_collaboration_signals(trajectory))
+            return self._deduplicate(signals)
+        if trajectory is None:
+            return []
+        return self.detect(trajectory)
+
+    def bind_llm(
+        self,
+        *,
+        llm: object,
+        model: str,
+        language: str = "cn",
+    ) -> "ConversationSignalDetector":
+        """Attach optional LLM context for passive user-message detection."""
+        self._llm = llm
+        self._model = model
+        self._language = language
+        return self
+
+    async def detect_user_message_feedback(
+        self,
+        trajectory_or_messages: Union[Trajectory, List[dict]],
+    ) -> List[EvolutionSignal]:
+        """Use the legacy user_correction type for passive user-message feedback."""
+        signals = await self.detect_user_intent(trajectory_or_messages)
+        return [
+            make_evolution_signal(
+                signal_type="user_correction",
+                section="Examples",
+                excerpt=signal.excerpt,
+                skill_name=signal.skill_name,
+                context=signal.context,
+            )
+            for signal in signals
+        ]
+
+    async def detect_user_intent(
+        self,
+        trajectory_or_messages: Union[Trajectory, List[dict]],
+    ) -> List[EvolutionSignal]:
+        """Use LLM judgment to turn passive user messages into standard signals."""
+        messages = (
+            self._convert_trajectory_to_messages(trajectory_or_messages)
+            if isinstance(trajectory_or_messages, Trajectory)
+            else list(trajectory_or_messages)
+        )
+        user_messages = [
+            str(_get_field(msg, "content")).strip()
+            for msg in messages
+            if str(_get_field(msg, "role")) == "user" and str(_get_field(msg, "content")).strip()
+        ][-5:]
+        if not user_messages:
+            return []
+
+        skill_name = self._infer_skill_from_messages(messages)
+        if not skill_name:
+            return []
+
+        if self._llm is None or not self._model:
+            return self._fallback_user_feedback_signals(user_messages, skill_name)
+
+        prompt_template = _USER_FEEDBACK_PROMPT_CN if self._language == "cn" else _USER_FEEDBACK_PROMPT_EN
+        prompt = prompt_template.format(
+            skill_name=skill_name,
+            user_messages="\n".join(user_messages)[:2000],
+        )
+
+        try:
+            response = await self._llm.invoke(
+                model=self._model,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=30,
+            )
+            raw = _response_to_text(response)
+        except Exception as exc:
+            logger.warning("[ConversationSignalDetector] user feedback detection failed: %s", exc)
+            return self._fallback_user_feedback_signals(user_messages, skill_name)
+
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return self._fallback_user_feedback_signals(user_messages, skill_name)
+        if not isinstance(parsed, dict):
+            return self._fallback_user_feedback_signals(user_messages, skill_name)
+
+        if not parsed.get("is_feedback"):
+            return []
+
+        excerpt = str(parsed.get("excerpt") or user_messages[-1]).strip()
+        return [self._make_user_feedback_signal(excerpt, skill_name)]
+
     @staticmethod
     def _convert_trajectory_to_messages(trajectory: Trajectory) -> List[dict]:
         """Convert Trajectory.steps to message list format.
@@ -179,20 +335,17 @@ class ConversationSignalDetector:
             if step.kind == "llm" and isinstance(step.detail, LLMCallDetail):
                 for msg in step.detail.messages:
                     messages.append(msg)
-                    tool_calls = msg.get("tool_calls", [])
+                    tool_calls = _get_field(msg, "tool_calls", [])
                     if tool_calls:
                         for tc in tool_calls:
-                            tc_id = tc.get("id", "")
-                            tc_name = tc.get("name", "")
+                            tc_id = _get_field(tc, "id", "")
+                            tc_name = _get_field(tc, "name", "")
                             if tc_id and tc_name:
                                 tool_call_id_to_name[tc_id] = tc_name
 
             elif step.kind == "tool" and isinstance(step.detail, ToolCallDetail):
                 tool_name = step.detail.tool_name
-                tool_call_id = (
-                    step.detail.tool_call_id
-                    or step.meta.get("tool_call_id", "")
-                )
+                tool_call_id = step.detail.tool_call_id or step.meta.get("tool_call_id", "")
 
                 if not tool_name and tool_call_id:
                     tool_name = tool_call_id_to_name.get(tool_call_id, "")
@@ -256,13 +409,13 @@ class ConversationSignalDetector:
                     has_failure = bool(_FAILURE_KEYWORDS.search(content)) if content else False
                     if not has_failure:
                         signals.append(
-                            EvolutionSignal(
+                            make_evolution_signal(
                                 signal_type="script_artifact",
-                                evolution_type=self._classify_type(active_skill),
                                 section="Scripts",
                                 excerpt=pending_scripts[tool_call_id][:600],
                                 tool_name=tool_name,
                                 skill_name=active_skill,
+                                source="passive_conversation",
                             )
                         )
                     del pending_scripts[tool_call_id]
@@ -276,37 +429,16 @@ class ConversationSignalDetector:
                         continue
                     excerpt = _extract_around_match(content, match)
                     signals.append(
-                        EvolutionSignal(
+                        make_evolution_signal(
                             signal_type="execution_failure",
-                            evolution_type=self._classify_type(active_skill),
                             section="Troubleshooting",
                             excerpt=excerpt,
                             tool_name=tool_name or None,
                             skill_name=active_skill,
+                            source="passive_conversation",
                         )
                     )
-            elif role == "user":
-                active_skill = self._resolve_active_skill(msg_idx, skill_read_history)
-                match = _CORRECTION_PATTERN.search(content)
-                if match:
-                    excerpt = _extract_around_match(content, match)
-                    signals.append(
-                        EvolutionSignal(
-                            signal_type="user_correction",
-                            evolution_type=self._classify_type(active_skill),
-                            section="Examples",
-                            excerpt=excerpt,
-                            skill_name=active_skill,
-                        )
-                    )
-
         return signals
-
-    @staticmethod
-    def _classify_type(skill_name: Optional[str]) -> EvolutionCategory:
-        """Classify evolution signal type."""
-        _ = skill_name
-        return EvolutionCategory.SKILL_EXPERIENCE
 
     @staticmethod
     def _resolve_active_skill(
@@ -326,11 +458,9 @@ class ConversationSignalDetector:
             arguments = str(_get_field(tool_call, "arguments"))
             skill_name: Optional[str] = None
 
-            # Path 1: Detect file read tools that access SKILL.md
-            if "file" in name or "read" in name:
-                matched = _SKILL_MD_PATTERN.search(arguments)
-                if matched:
-                    skill_name = matched.group(1)
+            matched = _SKILL_MD_PATTERN.search(arguments)
+            if matched and self._is_skill_md_read_tool(name):
+                skill_name = matched.group(1)
             elif name == "skill_tool":
                 try:
                     args_dict = json.loads(arguments) if isinstance(arguments, str) else arguments
@@ -339,9 +469,47 @@ class ConversationSignalDetector:
                 except (json.JSONDecodeError, TypeError) as exc:
                     logger.debug("[ConversationSignalDetector] failed to parse skill_tool arguments: %s", exc)
 
-            if skill_name and (not self._existing_skills or skill_name in self._existing_skills):
+            if skill_name and self._is_existing_skill(skill_name):
                 return skill_name
         return None
+
+    def _is_existing_skill(self, skill_name: str) -> bool:
+        return not self._existing_skills or skill_name in self._existing_skills
+
+    @staticmethod
+    def _is_skill_md_read_tool(name: str) -> bool:
+        return not name or any(token in name for token in ("file", "read"))
+
+    def _infer_skill_from_messages(self, messages: List[dict]) -> Optional[str]:
+        skill_read_history: List[Tuple[int, str]] = []
+        for msg_idx, msg in enumerate(messages):
+            role = str(_get_field(msg, "role"))
+            tool_calls = _get_field(msg, "tool_calls", [])
+            if role == "assistant" and tool_calls:
+                detected = self._detect_skill_from_tool_calls(tool_calls)
+                if detected:
+                    skill_read_history.append((msg_idx, detected))
+        return self._resolve_active_skill(len(messages), skill_read_history)
+
+    def _fallback_user_feedback_signals(
+        self,
+        user_messages: List[str],
+        skill_name: str,
+    ) -> List[EvolutionSignal]:
+        for message in reversed(user_messages):
+            if _CORRECTION_PATTERN.search(message):
+                return [self._make_user_feedback_signal(message, skill_name)]
+        return []
+
+    @staticmethod
+    def _make_user_feedback_signal(excerpt: str, skill_name: str) -> EvolutionSignal:
+        return make_evolution_signal(
+            signal_type=USER_INTENT_SIGNAL,
+            section="Instructions",
+            excerpt=excerpt[:600],
+            skill_name=skill_name,
+            source="passive_conversation",
+        )
 
     @staticmethod
     def _extract_code_from_args(tool_call: object) -> str:
@@ -384,7 +552,8 @@ class ConversationSignalDetector:
         for idx, step in enumerate(trajectory.steps):
             if step.kind == "llm" and isinstance(step.detail, LLMCallDetail):
                 for msg in step.detail.messages:
-                    tool_calls = msg.get("tool_calls", [])
+                    # Handle both dict and Pydantic model objects
+                    tool_calls = _get_field(msg, "tool_calls", [])
                     if tool_calls:
                         skill_name = self._detect_skill_from_tool_calls(tool_calls)
                         if skill_name:
@@ -398,9 +567,7 @@ class ConversationSignalDetector:
             step_meta = step.meta or {}
 
             # Resolve active skill for this step
-            active_skill = self._resolve_active_skill_for_step(
-                step, trajectory.steps, skill_read_history
-            )
+            active_skill = self._resolve_active_skill_for_step(step, trajectory.steps, skill_read_history)
 
             # 1. Detect send_message
             if tool_name == "send_message":
@@ -408,13 +575,13 @@ class ConversationSignalDetector:
                 to_member = self._extract_to_member(call_args)
                 if to_member and to_member != member_id:
                     signals.append(
-                        EvolutionSignal(
+                        make_evolution_signal(
                             signal_type="collaboration_send",
-                            evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
                             section="Collaboration",
                             excerpt=f"发送消息给成员 {to_member}",
                             tool_name=tool_name,
                             skill_name=active_skill,
+                            source="passive_collaboration",
                             context={"from_member": member_id, "to_member": to_member},
                         )
                     )
@@ -425,13 +592,13 @@ class ConversationSignalDetector:
                 task_id = self._extract_task_id(call_args)
                 if task_id:
                     signals.append(
-                        EvolutionSignal(
+                        make_evolution_signal(
                             signal_type="collaboration_claim",
-                            evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
                             section="Collaboration",
                             excerpt=f"认领任务 {task_id}",
                             tool_name=tool_name,
                             skill_name=active_skill,
+                            source="passive_collaboration",
                             context={"member_id": member_id, "task_id": task_id},
                         )
                     )
@@ -439,13 +606,13 @@ class ConversationSignalDetector:
             # 3. Detect view_task (indirect collaboration)
             if tool_name == "view_task":
                 signals.append(
-                    EvolutionSignal(
+                    make_evolution_signal(
                         signal_type="collaboration_view",
-                        evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
                         section="Collaboration",
                         excerpt="查看团队任务状态",
                         tool_name=tool_name,
                         skill_name=active_skill,
+                        source="passive_collaboration",
                         context={"member_id": member_id},
                     )
                 )
@@ -454,12 +621,13 @@ class ConversationSignalDetector:
             if "parent_invoke_id" in step_meta:
                 parent_id = step_meta.get("parent_invoke_id", "")
                 signals.append(
-                    EvolutionSignal(
+                    make_evolution_signal(
                         signal_type="collaboration_receive",
-                        evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
                         section="Collaboration",
                         excerpt=f"接收来自 {parent_id} 的上下文/结果",
+                        tool_name=tool_name or None,
                         skill_name=active_skill,
+                        source="passive_collaboration",
                         context={"member_id": member_id, "parent_invoke_id": parent_id},
                     )
                 )
@@ -470,13 +638,13 @@ class ConversationSignalDetector:
             if match:
                 excerpt = _extract_around_match(content, match)
                 signals.append(
-                    EvolutionSignal(
+                    make_evolution_signal(
                         signal_type="collaboration_failure",
-                        evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
                         section="Collaboration",
                         excerpt=excerpt,
                         tool_name=tool_name,
                         skill_name=active_skill,
+                        source="passive_collaboration",
                         context={"member_id": member_id},
                     )
                 )
@@ -582,7 +750,7 @@ class ConversationSignalDetector:
 
     @staticmethod
     def _deduplicate(signals: List[EvolutionSignal]) -> List[EvolutionSignal]:
-        """Deduplicate by (type, tool_name, skill_name, excerpt[:200])."""
+        """Deduplicate by (type, context.tool_name, skill_name, excerpt[:200])."""
         seen: set[tuple] = set()
         deduped: List[EvolutionSignal] = []
         for signal in signals:

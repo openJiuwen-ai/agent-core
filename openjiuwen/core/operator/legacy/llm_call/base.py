@@ -1,12 +1,12 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import Dict, Any, Optional, List, Callable, AsyncIterator
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
-from openjiuwen.core.session.agent import Session
+from openjiuwen.core.foundation.llm import BaseMessage, Model, SystemMessage
 from openjiuwen.core.foundation.prompt import PromptTemplate
-from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage, Model
 from openjiuwen.core.foundation.tool import ToolInfo
+from openjiuwen.core.session.agent import Session
 
 DEFAULT_USER_PROMPT: str = "{{query}}"
 

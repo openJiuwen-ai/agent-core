@@ -44,6 +44,9 @@ class VectorMemoryIndex(BaseMemoryIndex):
         self._created_collections: set[str] = set()
         self._schema_version = 0
         self._backups: dict[str, list[dict[str, Any]]] = {}
+    
+    def set_embedding_model(self, embedding_model: Any) -> None:
+        self._embedding_model = embedding_model
 
     def _get_collection_name(self, user_id: str, scope_id: str, mem_type: str) -> str:
         """Generate collection name based on user_id, scope_id, and memory type."""

@@ -1,125 +1,168 @@
 # openjiuwen.agent_evolving.trajectory
 
-`openjiuwen.agent_evolving.trajectory` 定义执行轨迹的类型（Trajectory、TrajectoryStep、ExecutionSpec、UpdateKey、Updates），以及从 Session 抽取轨迹与按条件筛选步的接口。
+`openjiuwen.agent_evolving.trajectory` 定义 agent-evolving 流程对外公开的轨迹数据模型、轨迹抽取接口、轨迹存储接口，以及团队轨迹聚合能力。
 
 ---
 
 ## 类型别名
 
-* **UpdateKey**：`Tuple[str, str]`，表示 (operator_id, target)。
-* **Updates**：`Dict[UpdateKey, Any]`，算子参数更新集合。
-* **StepKind**：`Literal["llm", "tool", "memory", "workflow", "agent"]`，单步类型。
+* **StepKind**：`Literal["llm", "tool"]`，抽取后轨迹中的步骤类型。
+* **CostInfo**：`Dict[str, int]`，聚合 token 成本，例如 `{"input_tokens": N, "output_tokens": M}`。
 
 ---
 
-## class openjiuwen.agent_evolving.trajectory.types.ExecutionSpec
+## class openjiuwen.agent_evolving.trajectory.types.LLMCallDetail
 
-单次执行的元信息（只读 dataclass）。
+单个 LLM 步骤的结构化详情。
 
-* **case_id**(str)：样本 ID。
-* **execution_id**(str)：执行 ID。
-* **seed**(int，可选)：随机种子。默认值：`None`。
-* **tags**(Dict[str, Any]，可选)：标签。默认值：`None`。
+* **model**(str)：模型名。
+* **messages**(List[Dict[str, Any]])：输入消息。
+* **response**(Dict[str, Any]，可选)：解析后的响应内容。
+* **tools**(List[Dict[str, Any]]，可选)：传给模型的工具 schema。
+* **usage**(Dict[str, Any]，可选)：usage 元数据。
+* **meta**(Dict[str, Any])：扩展元数据。
+
+---
+
+## class openjiuwen.agent_evolving.trajectory.types.ToolCallDetail
+
+单个工具步骤的结构化详情。
+
+* **tool_name**(str)：工具名。
+* **call_args**(Any)：工具输入参数。
+* **call_result**(Any)：工具执行结果。
+* **tool_description**(str，可选)：来自资源元数据的工具描述。
+* **tool_schema**(Dict[str, Any]，可选)：工具参数 schema。
+* **tool_call_id**(str，可选)：用于产物追踪的工具调用 ID。
 
 ---
 
 ## class openjiuwen.agent_evolving.trajectory.types.TrajectoryStep
 
-轨迹中的单步。
+抽取后的单个轨迹步骤。
 
-* **kind**(StepKind)：步类型（llm/tool/memory/workflow/agent）。
-* **operator_id**(str，可选)：算子 ID。
-* **agent_id**(str，可选)：智能体 ID。
-* **role**(str，可选)：角色。
-* **node_id**(str，可选)：节点 ID。
-* **inputs**(Any)：输入。
-* **outputs**(Any)：输出。
+* **kind**(StepKind)：步骤类型。
 * **error**(Dict[str, Any]，可选)：错误信息。
-* **start_time_ms**(int，可选)：开始时间（毫秒）。
-* **end_time_ms**(int，可选)：结束时间（毫秒）。
-* **meta**(Dict[str, Any])：元数据（如 invoke_id、parent_invoke_id、child_invokes 等）。
+* **start_time_ms**(int，可选)：步骤开始时间，毫秒。
+* **end_time_ms**(int，可选)：步骤结束时间，毫秒。
+* **detail**(LLMCallDetail | ToolCallDetail，可选)：结构化步骤详情。
+* **reward**(float，可选)：后注入的标量奖励。
+* **prompt_token_ids**(List[int]，可选)：从 LLM 响应中提取的 prompt token ID。
+* **completion_token_ids**(List[int]，可选)：从 LLM 响应中提取的 completion token ID。
+* **logprobs**(Any，可选)：token 级 log probabilities。
+* **meta**(Dict[str, Any])：扩展元数据，例如 `operator_id`、`agent_id`、调用链关系等。
 
 ---
 
 ## class openjiuwen.agent_evolving.trajectory.types.Trajectory
 
-完整执行轨迹。
+完整的抽取轨迹。
 
-* **case_id**(str)：样本 ID。
-* **execution_id**(str)：执行 ID。
-* **trace_id**(str，可选)：链路 ID。
-* **steps**(List[TrajectoryStep])：步骤列表。
-* **edges**(List[Tuple[int, int]]，可选)：步骤间依赖边（索引对）。默认值：`None`。
+* **execution_id**(str)：唯一执行 ID。
+* **steps**(List[TrajectoryStep])：有序步骤列表。
+* **source**(str)：执行来源，默认 `"offline"`。
+* **case_id**(str，可选)：离线训练 case 标识。
+* **session_id**(str，可选)：会话 ID。
+* **cost**(CostInfo，可选)：聚合后的 token 成本。
+* **meta**(Dict[str, Any])：轨迹级元数据。
 
 ---
 
-## class openjiuwen.agent_evolving.trajectory.operation.TracerTrajectoryExtractor
+## class openjiuwen.agent_evolving.trajectory.extractor.TrajectoryExtractor
 
-从 Session 的 tracer 中抽取 Trajectory。会解析 agent 与 workflow 的 span，构建 steps 与 edges，不依赖 core 内部实现细节（仅依赖 invoke_type、name、inputs、outputs、error、meta_data、llm_call_id 等字段）。
+从 `Session.tracer()` span 中抽取 `Trajectory`，并把 span 数据规范化为轨迹步骤。
 
-### extract(session, execution: ExecutionSpec) -> Trajectory
+```text
+class TrajectoryExtractor(resource_manager: Any = None)
+```
 
-从 session 的 tracer 中抽取一条轨迹。
+### extract(session, case_id=None) -> Trajectory
+
+从会话 tracer 中抽取一条轨迹。
 
 **参数**：
 
-* **session**：带 tracer 属性的会话对象。
-* **execution**(ExecutionSpec)：本次执行的元信息。
+* **session**：暴露 `tracer` 的 Session 对象。
+* **case_id**(str，可选)：离线训练使用的 case 标识。
 
 **返回**：
 
-**Trajectory**，包含所有步骤及依赖关系。
+* **Trajectory**：包含规范化步骤的轨迹对象。
 
 ---
 
-## func openjiuwen.agent_evolving.trajectory.operation.iter_steps(trajectories, *, case_id=None, operator_id=None, kind=None)
+## class openjiuwen.agent_evolving.trajectory.builder.TrajectoryBuilder
 
-按可选条件迭代 TrajectoryStep。
+以增量方式记录 `TrajectoryStep`，并构建最终 `Trajectory`。
 
-**参数**：
+```text
+class TrajectoryBuilder(
+    execution_id: str | None = None,
+    *,
+    session_id: str | None = None,
+    source: str = "offline",
+    case_id: str | None = None,
+)
+```
 
-* **trajectories**(List[Trajectory])：轨迹列表。
-* **case_id**(str，可选)：按 case_id 过滤。
-* **operator_id**(str，可选)：按 operator_id 过滤。
-* **kind**(StepKind，可选)：按步类型过滤（如 `"llm"`、`"tool"`）。
+### record_step(step) -> None
 
-**返回**：
+向 builder 追加一个步骤。
 
-**Iterator[TrajectoryStep]**，满足所有给定条件的步骤。
+### build() -> Trajectory
 
----
-
-## func openjiuwen.agent_evolving.trajectory.operation.get_steps_for_case_operator(trajectories, case_id, operator_id, kind='llm')
-
-获取指定 case 与算子的所有匹配步。
-
-**参数**：
-
-* **trajectories**(List[Trajectory])：轨迹列表。
-* **case_id**(str)：样本 ID。
-* **operator_id**(str)：算子 ID。
-* **kind**(StepKind，可选)：步类型，默认 `"llm"`。
-
-**返回**：
-
-**List[TrajectoryStep]**，匹配的步骤列表。
+构建最终轨迹对象。
 
 ---
 
-## class TeamTrajectory
+## class openjiuwen.agent_evolving.trajectory.store.TrajectoryStore
 
-聚合的团队轨迹数据类，用于单个 session 的团队级别视图。
+用于保存、加载、查询轨迹的持久化协议。
 
-* **team_id** (str): 团队 ID。
-* **session_id** (str): 会话 ID。
-* **combined** (Trajectory): 所有成员轨迹合并后的视图，按 `start_time_ms` 排序。
-* **members** (Dict[str, Trajectory]): 成员 ID 到其独立轨迹的映射。
+### save(trajectory, version=None) -> None
+
+保存一条轨迹。
+
+### load(execution_id, version=None) -> Optional[Trajectory]
+
+按 execution ID 加载一条轨迹。
+
+### query(version=None, **filters) -> List[Trajectory]
+
+按 `session_id`、`case_id`、`source` 等元数据过滤查询轨迹。
 
 ---
 
-## class TeamTrajectoryAggregator
+## class openjiuwen.agent_evolving.trajectory.store.InMemoryTrajectoryStore
 
-聚合团队成员轨迹，生成团队级别视图。
+用于测试和开发的内存轨迹存储。
+
+---
+
+## class openjiuwen.agent_evolving.trajectory.store.FileTrajectoryStore
+
+基于 JSONL 的轨迹文件存储。
+
+```text
+class FileTrajectoryStore(base_dir: Path)
+```
+
+---
+
+## class openjiuwen.agent_evolving.trajectory.aggregator.TeamTrajectory
+
+单个 session 的团队聚合轨迹。
+
+* **team_id**(str)：团队 ID。
+* **session_id**(str)：会话 ID。
+* **combined**(Trajectory)：团队合并轨迹。
+* **members**(Dict[str, Trajectory])：成员 ID 到个人轨迹的映射。
+
+---
+
+## class openjiuwen.agent_evolving.trajectory.aggregator.TeamTrajectoryAggregator
+
+把成员轨迹聚合为团队级视图。
 
 ```text
 class TeamTrajectoryAggregator(
@@ -130,74 +173,21 @@ class TeamTrajectoryAggregator(
 )
 ```
 
-**参数**：
+### aggregate(session_id, filter_collaborative=True) -> TeamTrajectory
 
-* **store** (TrajectoryStore, 可选): 轨迹存储实例。
-* **trajectories_dir** (Path, 可选): 轨迹目录路径（向后兼容）。
-* **team_id** (str): 团队 ID。
-
-**必须提供 `store` 或 `trajectories_dir` 其中之一**。
-
-### aggregate(session_id, filter_collaborative) -> TeamTrajectory
-
-聚合指定会话的所有成员轨迹。
+聚合一个 session 下的全部成员轨迹。
 
 **参数**：
 
-* **session_id** (str): 会话 ID。
-* **filter_collaborative** (bool): 是否过滤协作相关步骤，默认 `True`。
+* **session_id**(str)：要聚合的会话 ID。
+* **filter_collaborative**(bool)：是否仅保留协作相关步骤。
 
 **返回**：
 
-* **TeamTrajectory**：包含 `members` 字典和 `combined` 合并视图。
+* **TeamTrajectory**：团队聚合视图。
 
 ---
 
-## func filter_member_trajectory(trajectory: Trajectory) -> Trajectory
+## func openjiuwen.agent_evolving.trajectory.aggregator.filter_member_trajectory(trajectory: Trajectory) -> Trajectory
 
-过滤成员轨迹，仅保留协作相关步骤。
-
-保留步骤类型：
-
-* 包含跨成员 meta 标记（`invoke_id`、`parent_invoke_id`、`child_invokes`）
-* 协作工具调用（`view_task`、`claim_task`、`send_message` 等）
-* 技能文件读取（包含 "skill" 的 `read_file` 调用）
-
-**参数**：
-
-* **trajectory** (Trajectory): 成员轨迹。
-
-**返回**：
-
-* **Trajectory**: 过滤后的轨迹，保留其他字段。
-
----
-
-## 常量
-
-### COLLABORATIVE_TOOLS
-
-协作工具名称集合：
-
-```python
-COLLABORATIVE_TOOLS = frozenset({
-    "view_task",
-    "claim_task",
-    "send_message",
-    "workspace_meta",
-    "read_file",
-    "write_file",
-})
-```
-
-### CROSS_MEMBER_META_KEYS
-
-跨成员交互 meta 键集合：
-
-```python
-CROSS_MEMBER_META_KEYS = frozenset({
-    "invoke_id",
-    "parent_invoke_id",
-    "child_invokes",
-})
-```
+把单个成员轨迹过滤为仅包含协作相关步骤的版本。

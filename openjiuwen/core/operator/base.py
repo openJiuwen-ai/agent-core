@@ -14,7 +14,10 @@ the consumer (Agent) using the parameters managed by Operator.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_evolving.types import ApplyResult, UpdateValue
 
 
 # TunableSpec kind: "prompt" | "continuous" | "discrete" | "tool_selector" | "memory_selector"
@@ -108,6 +111,42 @@ class Operator(ABC):
         """
         ...
 
+    def apply_update(self, target: str, update: "UpdateValue") -> "ApplyResult":
+        """Apply a structured evolution update.
+
+        Default compatibility behavior preserves replace-only operators by
+        delegating ``replace/state`` updates to ``set_parameter``.
+        """
+        from openjiuwen.agent_evolving.types import ApplyResult
+
+        if update.mode != "replace" or update.effect != "state":
+            return ApplyResult(
+                operator_id=self.operator_id,
+                target=target,
+                applied=False,
+                mode=update.mode,
+                effect=update.effect,
+                value=update.payload,
+                errors=[
+                    f"unsupported update mode/effect for compatibility operator: {update.mode}/{update.effect}"
+                ],
+                metadata=dict(update.metadata),
+            )
+
+        before_state = self.get_state()
+        self.set_parameter(target, update.payload)
+        after_state = self.get_state()
+        applied = before_state != after_state
+        return ApplyResult(
+            operator_id=self.operator_id,
+            target=target,
+            applied=applied,
+            mode=update.mode,
+            effect=update.effect,
+            value=update.payload,
+            metadata=dict(update.metadata),
+        )
+
     @abstractmethod
     def load_state(self, state: Dict[str, Any]) -> None:
         """Restore state from checkpoint (checkpoint recovery).
@@ -123,3 +162,20 @@ class Operator(ABC):
             state: State dict to restore from
         """
         ...
+
+
+class PreviewableOperator(Operator):
+    """Optional extension for operators that support local preview updates.
+
+    Preview updates produce local apply results only. Approval and persistence
+    remain owned by the caller's lifecycle manager, not by the operator.
+    """
+
+    @abstractmethod
+    def preview_update(self, target: str, update: "UpdateValue") -> "ApplyResult":
+        """Apply a local preview update without entering pending or persistence."""
+        ...
+
+    def apply_update(self, target: str, update: "UpdateValue") -> "ApplyResult":
+        """Route standard update execution to preview semantics."""
+        return self.preview_update(target, update)

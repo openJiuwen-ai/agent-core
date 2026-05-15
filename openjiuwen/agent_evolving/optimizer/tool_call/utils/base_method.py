@@ -1,10 +1,10 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-import os
-from typing import List, Dict, Any, Optional, Union
 import ast
 import json
+import os
+from typing import Any, Dict, List, Optional, Union
 
 from openjiuwen.agent_evolving.optimizer.tool_call.utils.rits import get_rits_response
 

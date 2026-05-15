@@ -7,17 +7,17 @@ Includes parameter validation, case/message/template serialization,
 JSON/list parsing from LLM outputs, and skill trace inference helpers.
 """
 
-import re
 import json
+import re
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any, Union, Iterable
+from typing import Any, Dict, Iterable, List, Optional, Union
 
-from openjiuwen.core.common.logging import logger
+from openjiuwen.agent_evolving.dataset import Case, EvaluatedCase
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage
 from openjiuwen.core.foundation.prompt import PromptTemplate
-from openjiuwen.core.foundation.llm import BaseMessage, AssistantMessage
-from openjiuwen.agent_evolving.dataset import Case, EvaluatedCase
 
 _LEGACY_SKILL_MD_RE = re.compile(r"[/\\]([^/\\]+)[/\\]SKILL\.md", re.IGNORECASE)
 _SKILLS_PATH_RE = re.compile(r"[/\\]skills[/\\]([^/\\]+)(?=[/\\])", re.IGNORECASE)

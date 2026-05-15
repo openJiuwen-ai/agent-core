@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+from openjiuwen.agent_evolving.signal.from_eval import from_evaluated_case
 
 if TYPE_CHECKING:
-    from openjiuwen.agent_evolving.trajectory.types import Trajectory, Updates
+    from openjiuwen.agent_evolving.signal.base import EvolutionSignal
+    from openjiuwen.agent_evolving.trajectory.types import Trajectory
     from openjiuwen.core.operator.base import Operator
 
 
@@ -15,7 +18,7 @@ class MultiDimUpdater:
     """
     Multi-dimensional update updater: Internally handles "attribution/allocation"
     (distributes bad case signals to multiple operators), then runs corresponding
-    dimension optimizer for attributed operators, merges Updates applied uniformly
+    dimension optimizer for attributed operators, merges update mappings applied uniformly
     by Trainer.
 
     **Consistency (user-facing stable interface, recommended)**
@@ -54,13 +57,28 @@ class MultiDimUpdater:
         return False
 
     @abstractmethod
+    async def process(
+        self,
+        trajectories: List["Trajectory"],
+        signals: List["EvolutionSignal"],
+        config: Dict[str, Any],
+    ) -> Dict[tuple[str, str], Any]:
+        ...
+
     async def update(
         self,
         trajectories: List["Trajectory"],
         evaluated_cases: List[Any],
         config: Dict[str, Any],
-    ) -> "Updates":
-        ...
+    ) -> Dict[tuple[str, str], Any]:
+        """Offline compatibility adapter that converts evaluated cases to signals."""
+        score_threshold = config.get("score_threshold")
+        signals = []
+        for case in evaluated_cases:
+            signal = from_evaluated_case(case, score_threshold=score_threshold)
+            if signal is not None:
+                signals.append(signal)
+        return await self.process(trajectories, signals, config)
 
     @abstractmethod
     def get_state(self) -> Dict[str, Any]:

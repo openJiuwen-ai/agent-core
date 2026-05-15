@@ -13,7 +13,7 @@ class Trainer(
     *,
     updater: Updater,
     evaluator: BaseEvaluator,
-    extractor: Optional[TracerTrajectoryExtractor] = None,
+    extractor: Optional[TrajectoryExtractor] = None,
     callbacks: Optional[Callbacks] = None,
     num_parallel: int = TuneConstant.default_parallel_num,
     early_stop_score: float = TuneConstant.default_early_stop_score,
@@ -29,7 +29,7 @@ class Trainer(
 
 * **updater**(Updater): Generates parameter updates based on trajectories and evaluation results.
 * **evaluator**(BaseEvaluator): Scores model outputs against expected answers.
-* **extractor**(TracerTrajectoryExtractor, optional): Extracts trajectories from Session; default `TracerTrajectoryExtractor()`.
+* **extractor**(TrajectoryExtractor, optional): Extracts trajectories from Session; default `TrajectoryExtractor()`.
 * **callbacks**(Callbacks, optional): Training lifecycle hooks.
 * **num_parallel**(int, optional): Parallelism for inference and evaluation. Default: `TuneConstant.default_parallel_num`.
 * **early_stop_score**(float, optional): Stops when validation score reaches this value. Default: `TuneConstant.default_early_stop_score`.

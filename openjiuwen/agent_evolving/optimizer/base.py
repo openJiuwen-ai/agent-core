@@ -3,23 +3,23 @@
 """
 Base classes for dimension-specific optimizers.
 
-BaseOptimizer: Filters optimizable Operators, caches Trajectory, generates Updates.
+BaseOptimizer: Filters optimizable Operators, caches Trajectory, generates update mappings.
 TextualParameter: Gradient container for operator_id.
 """
 
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from openjiuwen.agent_evolving.trajectory.types import Trajectory
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.agent_evolving.trajectory.types import Trajectory, Updates
 
 if TYPE_CHECKING:
-    from openjiuwen.core.operator.base import Operator
     from openjiuwen.agent_evolving.signal.base import EvolutionSignal
+    from openjiuwen.core.operator.base import Operator
 
 
 class BaseOptimizer:
@@ -28,8 +28,9 @@ class BaseOptimizer:
 
     bind(): Filters optimizable Operators, returns count (0 triggers soft-exit).
     add_trajectory / get_trajectories: Caches Trajectory for backward.
-    step(): Returns Updates, applied by Trainer.apply_updates.
+    step(): Returns update mappings, applied by Trainer.apply_updates.
     """
+
     domain: str = ""
 
     def __init__(self, **kwargs):
@@ -37,7 +38,7 @@ class BaseOptimizer:
         self._parameters: Dict[str, TextualParameter] = {}
         self._targets: List[str] = []
         self._trajectories: List[Trajectory] = []
-        self._bad_signals: List["EvolutionSignal"] = []
+        self._selected_signals: List["EvolutionSignal"] = []
 
     @staticmethod
     def requires_forward_data() -> bool:
@@ -52,13 +53,6 @@ class BaseOptimizer:
         optimizers that don't consume train_cases.
         """
         return True
-
-    @staticmethod
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        return None
-
-    def __enter__(self):
-        return self
 
     async def __aenter__(self):
         return self
@@ -98,7 +92,7 @@ class BaseOptimizer:
         self._operators = self.filter_operators(operators, self._targets)
         self._parameters = {op_id: TextualParameter(operator_id=op_id) for op_id in self._operators}
         self._trajectories = []
-        self._bad_signals = []
+        self._selected_signals = []
         if not self._operators:
             logger.error(
                 "[optimizer] no operator matches targets=%s; will soft-exit",
@@ -124,7 +118,7 @@ class BaseOptimizer:
 
     async def backward(self, signals: List["EvolutionSignal"]) -> None:
         self._validate_parameters()
-        self._get_bad_signals(signals)
+        self._selected_signals = self._select_signals(signals)
         try:
             await self._backward(signals)
         except Exception as e:
@@ -132,8 +126,8 @@ class BaseOptimizer:
                 StatusCode.TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR, error_msg=f"{str(e)}", cause=e
             ) from e
 
-    def step(self) -> Updates:
-        """Execute _step() and return Updates; applied uniformly by Trainer.apply_updates."""
+    def step(self) -> Dict[tuple[str, str], Any]:
+        """Execute _step() and return update mappings; applied uniformly by Trainer.apply_updates."""
         self._validate_parameters()
         try:
             updates = self._step()
@@ -150,22 +144,22 @@ class BaseOptimizer:
         pass
 
     @abstractmethod
-    def _step(self) -> Updates:
-        """Subclass implements: generates Updates based on gradients written during backward."""
+    def _step(self) -> Dict[tuple[str, str], Any]:
+        """Subclass implements: generates updates based on gradients written during backward."""
         pass
 
     def parameters(self) -> Dict[str, "TextualParameter"]:
         return self._parameters.copy()
 
-    def _get_bad_signals(self, signals: List["EvolutionSignal"]) -> List["EvolutionSignal"]:
-        """Filter signals for backward.
+    @staticmethod
+    def _select_signals(signals: List["EvolutionSignal"]) -> List["EvolutionSignal"]:
+        """Select consumable signals for this optimizer.
 
-        - context is None → online signal, keep all
-        - context has value → offline signal, filter by score == 0
+        Default behavior keeps all signals. Optimizers with failure-driven
+        semantics should override this explicitly instead of relying on a
+        framework-level "bad signal" default.
         """
-        bad = [s for s in signals if s.context is None or s.context.get("score", 1) == 0]
-        self._bad_signals = bad
-        return bad
+        return list(signals)
 
     def _validate_parameters(self):
         if not self._parameters:

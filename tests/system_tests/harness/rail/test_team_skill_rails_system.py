@@ -172,6 +172,7 @@ async def test_team_skill_rail_generates_and_persists_patch_after_completion(tmp
             ),
         )
     )
+    await rail.after_invoke(_ctx(agent, InvokeInputs(query="run team skill", conversation_id="team-evolve")))
 
     events = await rail.drain_pending_approval_events()
     approval_events = [event for event in events if event.type == "chat.ask_user_question"]
@@ -179,7 +180,7 @@ async def test_team_skill_rail_generates_and_persists_patch_after_completion(tmp
     assert len(approval_events) == 1
     request_id = approval_events[0].payload["request_id"]
 
-    await rail.on_approve_patch(request_id)
+    await rail.on_approve_record(request_id)
 
     evo_log = await rail.store.load_full_evolution_log("research-team")
     assert len(evo_log.entries) == 1

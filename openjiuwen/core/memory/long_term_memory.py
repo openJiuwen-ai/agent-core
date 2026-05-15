@@ -550,6 +550,7 @@ class LongTermMemory(metaclass=Singleton):
         msg_id = "-1"
         llm = await self._get_scope_llm(scope_id)
         scope_config = await self._get_scope_config(scope_id)
+        await self._apply_scope_embedding(scope_id)
         # user level distributed lock
         lock = DistributedLock(self.kv_store, f"user/{user_id}")
         async with lock:
@@ -858,6 +859,7 @@ class LongTermMemory(metaclass=Singleton):
                     memory_type="all",
                     error_msg=f"write manager is not initialized",
                 )
+            await self._apply_scope_embedding(scope_id)
             await self.write_manager.update_mem_by_id(user_id=user_id, scope_id=scope_id,
                                                       mem_id=mem_id, memory=memory)
 
@@ -943,6 +945,7 @@ class LongTermMemory(metaclass=Singleton):
                 memory_type="all",
                 error_msg=f"search manager is not initialized",
             )
+        await self._apply_scope_embedding(scope_id)
         params = SearchParams(
             query=query,
             scope_id=scope_id,
@@ -1061,6 +1064,7 @@ class LongTermMemory(metaclass=Singleton):
                 memory_type="all",
                 error_msg=f"search manager is not initialized",
             )
+        await self._apply_scope_embedding(scope_id)
         params = SearchParams(
             query=query,
             scope_id=scope_id,
@@ -1343,6 +1347,22 @@ class LongTermMemory(metaclass=Singleton):
 
         # If not in memory, get from kv_store
         return await self.get_scope_config(scope_id)
+
+    async def _apply_scope_embedding(self, scope_id: str) -> None:
+        """
+        Apply the scope-specific embedding model to the memory_index.
+
+        Retrieves the embedding model for the given scope from cache / scope config
+        and updates the memory_index so that subsequent add / search operations
+        use the correct embedding model.
+        """
+        if not self.memory_index:
+            return
+
+        scope_embed = await self._get_scope_embedding_model(scope_id)
+        if scope_embed is not None:
+            if hasattr(self.memory_index, 'set_embedding_model'):
+                self.memory_index.set_embedding_model(scope_embed)
 
     async def _get_scope_embedding_model(self, scope_id: str) -> Embedding | None:
         """

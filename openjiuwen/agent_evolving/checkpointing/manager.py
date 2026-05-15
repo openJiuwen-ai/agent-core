@@ -6,7 +6,8 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol
 
-from openjiuwen.agent_evolving.checkpointing.types import EvolveCheckpoint, PendingChange
+from openjiuwen.agent_evolving.checkpointing.state import EvolveCheckpoint
+from openjiuwen.agent_evolving.experience.types import PendingChange
 from openjiuwen.core.operator import Operator
 
 if TYPE_CHECKING:

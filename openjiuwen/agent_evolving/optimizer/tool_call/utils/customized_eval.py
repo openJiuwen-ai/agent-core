@@ -3,17 +3,13 @@
 
 import json
 from typing import Any, Dict, List, Tuple
-import anyio
 
+import anyio
 import numpy as np
 
 from openjiuwen.agent_evolving.optimizer.tool_call.utils.rits import rits_response
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.llm import (
-    ModelClientConfig,
-    ModelRequestConfig
-)
-from openjiuwen.core.foundation.llm import OpenAIModelClient
+from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig, OpenAIModelClient
 
 
 class SimpleEval:

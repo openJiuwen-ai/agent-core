@@ -17,10 +17,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
-from openjiuwen.agent_evolving.checkpointing.types import (
-    EvolutionContext,
-    EvolutionTarget,
-)
+from openjiuwen.agent_evolving.checkpointing.types import EvolutionTarget
+from openjiuwen.agent_evolving.experience.types import EvolutionContext
 from openjiuwen.agent_evolving.optimizer.skill_call import SkillExperienceOptimizer
 from openjiuwen.agent_evolving.signal import SignalDetector
 

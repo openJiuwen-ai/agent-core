@@ -1,29 +1,30 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""SKILL.md content parameter handle for self-evolution."""
+"""Skill experience preview operator for self-evolution."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
-from openjiuwen.core.common.logging import logger
-from openjiuwen.core.operator.base import Operator, TunableSpec
+from openjiuwen.agent_evolving.protocols import (
+    APPEND_MODE,
+    EXPERIENCES_TARGET,
+    LOCAL_APPLY_COMPLETED,
+    MERGE_MODE,
+    PENDING_CHANGE_EFFECT,
+)
+from openjiuwen.core.operator.base import PreviewableOperator, TunableSpec
 
 if TYPE_CHECKING:
-    from openjiuwen.agent_evolving.checkpointing import EvolutionStore
-    from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord, EvolutionTarget
+    from openjiuwen.agent_evolving.types import ApplyResult, UpdateValue
 
 
-class SkillCallOperator(Operator):
-    """SKILL.md content parameter handle for self-evolution.
+class SkillExperienceOperator(PreviewableOperator):
+    """Preview-only parameter handle for skill experience records.
 
-    Manages skill experience records in memory until user approves:
-    - set_parameter("experiences", record_or_list): sync, enqueue into _staged_records
-    - flush_to_store(store): async, write staged records to EvolutionStore one by one
-    - discard_staged(): sync, drop all staged records (user rejection path)
-
-    Does NOT read or write files directly. All persistent IO via EvolutionStore.
+    The operator owns only ``updates_generated -> local_apply_completed``.
+    Pending approval is owned by ExperienceManager, and persistence is owned by
+    EvolutionStore.
     """
 
     def __init__(
@@ -33,18 +34,15 @@ class SkillCallOperator(Operator):
     ) -> None:
         self._skill_name = skill_name
         self._on_parameter_updated = on_parameter_updated
-        self._staged_records: List[Any] = []    # List[EvolutionRecord]; head-first write queue
-        self._flushed_records: List[Any] = []   # records successfully written to store
-        self._cached_state: Dict[str, Any] = {}
 
     @property
     def operator_id(self) -> str:
-        return f"skill_call_{self._skill_name}"
+        return f"skill_experience_{self._skill_name}"
 
     def get_tunables(self) -> Dict[str, TunableSpec]:
         return {
-            "experiences": TunableSpec(
-                name="experiences",
+            EXPERIENCES_TARGET: TunableSpec(
+                name=EXPERIENCES_TARGET,
                 kind="skill_experience",
                 path="content",
                 constraint={"type": "record"},
@@ -52,119 +50,70 @@ class SkillCallOperator(Operator):
         }
 
     def set_parameter(self, target: str, value: Any) -> None:
-        """Sync: enqueue EvolutionRecord(s) into _staged_records.
-
-        value may be a single EvolutionRecord or a List[EvolutionRecord].
-        Records are appended to the tail of the staging queue in order.
-        """
-        if target != "experiences" or value is None:
+        """Notify consumers for direct compatibility calls without staging."""
+        if target != EXPERIENCES_TARGET or value is None:
             return
         items = value if isinstance(value, list) else [value]
-        self._staged_records.extend(items)
         if self._on_parameter_updated is not None:
             self._on_parameter_updated(target, items)
 
-    @dataclass
-    class FlushResult:
-        """Result of flushing an explicit record batch to EvolutionStore."""
+    def preview_update(self, target: str, update: "UpdateValue") -> "ApplyResult":
+        """Return a local preview result for generated experience records."""
+        from openjiuwen.agent_evolving.types import ApplyResult
 
-        flushed_count: int
-        remaining_records: List[Any]
+        if target != EXPERIENCES_TARGET:
+            return ApplyResult(
+                operator_id=self.operator_id,
+                target=target,
+                applied=False,
+                mode=update.mode,
+                effect=update.effect,
+                value=update.payload,
+                change_type=update.change_type,
+                errors=[f"unsupported target for SkillExperienceOperator: {target}"],
+                metadata=dict(update.metadata),
+            )
 
-    async def flush_records_to_store(
-        self,
-        store: "EvolutionStore",
-        records: List[Any],
-    ) -> FlushResult:
-        """Async: write only the specified records to EvolutionStore.
-
-        This method is used by approval flows that operate on immutable
-        snapshot batches. It never reads or mutates ``_staged_records``.
-        """
-        remaining_records = list(records)
-        flushed = 0
-        while remaining_records:
-            record = remaining_records[0]
-            try:
-                await store.append_record(self._skill_name, record)
-                remaining_records.pop(0)
-                self._flushed_records.append(record)
-                flushed += 1
-            except Exception as exc:
-                logger.warning(
-                    "[SkillCallOperator] flush failed at record %s: %s; "
-                    "%d record(s) remain in explicit batch",
-                    getattr(record, "id", repr(record)), exc, len(remaining_records),
-                )
-                break
-
-        return self.FlushResult(
-            flushed_count=flushed,
-            remaining_records=remaining_records,
+        if update.effect != PENDING_CHANGE_EFFECT or update.mode not in {APPEND_MODE, MERGE_MODE}:
+            return ApplyResult(
+                operator_id=self.operator_id,
+                target=target,
+                applied=False,
+                mode=update.mode,
+                effect=update.effect,
+                value=update.payload,
+                change_type=update.change_type,
+                errors=[
+                    "unsupported update mode/effect for SkillExperienceOperator: "
+                    f"{update.mode}/{update.effect}"
+                ],
+                metadata=dict(update.metadata),
         )
 
-    async def flush_to_store(self, store: "EvolutionStore") -> int:
-        """Async: write staged records to EvolutionStore one by one.
-
-        The current staging queue is snapshotted and cleared before any IO.
-        Records staged concurrently while this method awaits store writes are
-        appended to the now-empty live queue and are preserved for the next
-        flush call. If the snapshotted batch partially fails, its unwritten
-        tail is prepended back ahead of any newer staged records.
-
-        Returns count flushed in this call.
-        """
-        snapshot = self.take_snapshot()
-        result = await self.flush_records_to_store(store, snapshot)
-        if result.remaining_records:
-            self._staged_records[:0] = result.remaining_records
-        return result.flushed_count
-
-    def discard_staged(self) -> int:
-        """Discard all in-memory staged records on user rejection.
-
-        Only clears the in-memory buffer; nothing is written to or deleted
-        from EvolutionStore (records were never persisted before approval).
-        Returns count discarded.
-        """
-        count = len(self._staged_records)
-        self._staged_records.clear()
-        return count
-
-    def take_snapshot(self) -> List[Any]:
-        """Atomically snapshot the current staged records and clear the queue.
-
-        Returns a stable copy of whatever was staged at the time of the call.
-        Subsequent records will start a fresh queue independent of this snapshot,
-        so concurrent approval requests for the same skill operate on disjoint
-        batches.
-        """
-        snapshot = list(self._staged_records)
-        self._staged_records.clear()
-        return snapshot
-
-    @property
-    def staged_records(self) -> List[Any]:
-        """Get a copy of current staged records pending approval."""
-        return list(self._staged_records)
-
-    async def refresh_state(self, store: "EvolutionStore") -> None:
-        """Load skill content + existing records from store into _cached_state."""
-        from openjiuwen.agent_evolving.checkpointing.types import EvolutionTarget
-        skill_content = await store.read_skill_content(self._skill_name)
-        desc_records = await store.get_pending_records(self._skill_name, EvolutionTarget.DESCRIPTION)
-        body_records = await store.get_pending_records(self._skill_name, EvolutionTarget.BODY)
-        # Preserve messages if they were set externally (e.g., from conversation context)
-        existing_messages = self._cached_state.get("messages", [])
-        self._cached_state = {
-            "skill_content": skill_content,
-            "desc_records": desc_records,
-            "body_records": body_records,
-            "messages": existing_messages,
-        }
+        records = update.payload if isinstance(update.payload, list) else [update.payload]
+        return ApplyResult(
+            operator_id=self.operator_id,
+            target=target,
+            applied=bool(records),
+            mode=update.mode,
+            effect=update.effect,
+            value=update.payload,
+            records=records,
+            change_type=update.change_type,
+            lifecycle_stage=LOCAL_APPLY_COMPLETED,
+            metadata={
+                **dict(update.metadata),
+                "skill_name": self._skill_name,
+            },
+        )
 
     def get_state(self) -> Dict[str, Any]:
-        return dict(self._cached_state)
+        return {}
 
     def load_state(self, state: Dict[str, Any]) -> None:
-        self._cached_state = dict(state)
+        return None
+
+
+SkillCallOperator = SkillExperienceOperator
+
+__all__ = ["SkillExperienceOperator", "SkillCallOperator"]

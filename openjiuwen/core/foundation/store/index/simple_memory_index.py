@@ -63,6 +63,9 @@ class SimpleMemoryIndex(BaseMemoryIndex):
         self._schema_version = 0
         self._backups: dict[str, dict[str, Any]] = {}
 
+    def set_embedding_model(self, embedding_model: Any) -> None:
+        self._embedding_model = embedding_model
+
     # ------------------------------------------------------------------ #
     #  KV helpers                                                         #
     # ------------------------------------------------------------------ #

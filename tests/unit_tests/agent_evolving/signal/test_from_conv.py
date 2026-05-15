@@ -2,9 +2,11 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Tests for ConversationSignalDetector."""
 
+import pytest
 from typing import List
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from openjiuwen.agent_evolving.signal.base import EvolutionCategory, make_signal_fingerprint
+from openjiuwen.agent_evolving.signal.base import make_signal_fingerprint
 from openjiuwen.agent_evolving.signal.from_conv import ConversationSignalDetector
 from openjiuwen.agent_evolving.trajectory.types import (
     LLMCallDetail,
@@ -12,6 +14,7 @@ from openjiuwen.agent_evolving.trajectory.types import (
     Trajectory,
     TrajectoryStep,
 )
+from openjiuwen.core.foundation.llm import SystemMessage
 
 
 def _build_trajectory_from_messages(messages: List[dict]) -> Trajectory:
@@ -100,6 +103,26 @@ class TestConversationSignalDetector:
         signals = detector.detect(trajectory)
         assert signals == []
 
+    def test_trajectory_with_message_objects_does_not_require_dict_get(self) -> None:
+        """Object-style messages in trajectory should not crash signal detection."""
+        detector = ConversationSignalDetector()
+        trajectory = Trajectory(
+            execution_id="message-object",
+            steps=[
+                TrajectoryStep(
+                    kind="llm",
+                    detail=LLMCallDetail(
+                        model="test-model",
+                        messages=[SystemMessage(content="system prompt")],
+                    ),
+                )
+            ],
+        )
+
+        signals = detector.detect_trajectory_signals(trajectory)
+
+        assert signals == []
+
     def test_execution_failure_signal(self) -> None:
         """Tool result with failure keywords should produce execution_failure signal."""
         messages = [
@@ -126,11 +149,14 @@ class TestConversationSignalDetector:
         assert len(signals) == 1
         signal = signals[0]
         assert signal.signal_type == "execution_failure"
-        assert signal.evolution_type == EvolutionCategory.SKILL_EXPERIENCE
         assert "failed" in signal.excerpt.lower()
+        assert signal.context == {
+            "source": "passive_conversation",
+            "tool_name": "bash",
+        }
 
     def test_user_correction_signal(self) -> None:
-        """User message with correction keywords should produce user_correction signal."""
+        """Rule detector should not directly convert user messages into user_correction."""
         messages = [
             {"role": "user", "content": "Use the read_file tool"},
             {
@@ -148,12 +174,8 @@ class TestConversationSignalDetector:
         detector = ConversationSignalDetector()
         signals = detector.detect(trajectory)
 
-        # Should have user_correction signal
         correction_signals = [s for s in signals if s.signal_type == "user_correction"]
-        assert len(correction_signals) == 1
-        signal = correction_signals[0]
-        assert signal.signal_type == "user_correction"
-        assert signal.section == "Examples"
+        assert len(correction_signals) == 0
 
     def test_script_artifact_signal(self) -> None:
         """Successful code execution should produce script_artifact signal."""
@@ -188,6 +210,10 @@ class TestConversationSignalDetector:
         signal = script_signals[0]
         assert signal.signal_type == "script_artifact"
         assert signal.section == "Scripts"
+        assert signal.context == {
+            "source": "passive_conversation",
+            "tool_name": "python_exec",
+        }
 
     def test_fingerprint_consistency_with_signal_detector(self) -> None:
         """ConversationSignalDetector signals should match SignalDetector fingerprints."""
@@ -254,7 +280,7 @@ class TestConversationSignalDetector:
         detector = ConversationSignalDetector()
         signals = detector.detect(trajectory)
 
-        # Should deduplicate to 1 signal (same type, tool_name, excerpt)
+        # Should deduplicate to 1 signal (same type, context.tool_name, excerpt)
         failure_signals = [s for s in signals if s.signal_type == "execution_failure"]
         assert len(failure_signals) == 1
 
@@ -287,10 +313,147 @@ class TestConversationSignalDetector:
         detector = ConversationSignalDetector(existing_skills={"my_skill"})
         signals = detector.detect(trajectory)
 
-        # Should have user_correction signal with skill_name="my_skill"
+        # Rule detector should not emit user_correction directly.
         correction_signals = [s for s in signals if s.signal_type == "user_correction"]
-        assert len(correction_signals) == 1
-        assert correction_signals[0].skill_name == "my_skill"
+        assert len(correction_signals) == 0
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_uses_llm_judgment() -> None:
+        messages = [
+            {"role": "user", "content": "Use the read_file tool"},
+            {
+                "role": "assistant",
+                "content": "I'll read the file",
+                "tool_calls": [
+                    {
+                        "id": "tc_1",
+                        "name": "read_file",
+                        "type": "function",
+                        "arguments": '{"path": "/skills/my_skill/SKILL.md"}',
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tc_1", "content": "file content"},
+            {"role": "user", "content": "不对，你应该先检查文件是否存在"},
+        ]
+        trajectory = _build_trajectory_from_messages(messages)
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            return_value={"content": '{"is_feedback": true, "excerpt": "不对，你应该先检查文件是否存在"}'}
+        )
+
+        detector = ConversationSignalDetector(existing_skills={"my_skill"}).bind_llm(
+            llm=llm,
+            model="test-model",
+        )
+        signals = await detector.detect_user_intent(trajectory)
+
+        assert len(signals) == 1
+        assert signals[0].signal_type == "user_intent"
+        assert signals[0].skill_name == "my_skill"
+        assert signals[0].context == {"source": "passive_conversation"}
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_without_bound_llm_uses_rule_fallback() -> None:
+        messages = [
+            {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/my_skill/SKILL.md"}]},
+            {"role": "user", "content": "不对，你应该先检查文件是否存在"},
+        ]
+        detector = ConversationSignalDetector(existing_skills={"my_skill"})
+
+        signals = await detector.detect_user_intent(messages)
+
+        assert len(signals) == 1
+        assert signals[0].signal_type == "user_intent"
+        assert signals[0].excerpt == "不对，你应该先检查文件是否存在"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_message_feedback_keeps_legacy_user_correction_type() -> None:
+        messages = [
+            {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/my_skill/SKILL.md"}]},
+            {"role": "user", "content": "不对，你应该先检查文件是否存在"},
+        ]
+        detector = ConversationSignalDetector(existing_skills={"my_skill"})
+
+        signals = await detector.detect_user_message_feedback(messages)
+
+        assert len(signals) == 1
+        assert signals[0].signal_type == "user_correction"
+        assert signals[0].section == "Examples"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_invalid_json_uses_rule_fallback() -> None:
+        messages = [
+            {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/my_skill/SKILL.md"}]},
+            {"role": "user", "content": "不对，你应该先检查文件是否存在"},
+        ]
+        llm = MagicMock()
+        llm.invoke = AsyncMock(return_value={"content": "not-json"})
+        detector = ConversationSignalDetector(existing_skills={"my_skill"}).bind_llm(
+            llm=llm,
+            model="test-model",
+        )
+
+        signals = await detector.detect_user_intent(messages)
+
+        assert len(signals) == 1
+        assert signals[0].signal_type == "user_intent"
+        assert signals[0].excerpt == "不对，你应该先检查文件是否存在"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_non_object_json_falls_back_to_rule() -> None:
+        messages = [
+            {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/my_skill/SKILL.md"}]},
+            {"role": "user", "content": "不对，你应该先检查文件是否存在"},
+        ]
+        llm = MagicMock()
+        llm.invoke = AsyncMock(return_value={"content": '["not-an-object"]'})
+        detector = ConversationSignalDetector(existing_skills={"my_skill"}).bind_llm(
+            llm=llm,
+            model="test-model",
+        )
+
+        signals = await detector.detect_user_intent(messages)
+
+        assert len(signals) == 1
+        assert signals[0].signal_type == "user_intent"
+        assert signals[0].excerpt == "不对，你应该先检查文件是否存在"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_returns_empty_when_llm_fails_and_rule_does_not_match() -> None:
+        messages = [
+            {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/my_skill/SKILL.md"}]},
+            {"role": "user", "content": "你好"},
+        ]
+        llm = MagicMock()
+        llm.invoke = AsyncMock(side_effect=RuntimeError("llm down"))
+        detector = ConversationSignalDetector(existing_skills={"my_skill"}).bind_llm(
+            llm=llm,
+            model="test-model",
+        )
+
+        signals = await detector.detect_user_intent(messages)
+
+        assert signals == []
+
+    @staticmethod
+    def test_detect_skill_from_tool_calls_ignores_non_read_tools_with_skill_path() -> None:
+        detector = ConversationSignalDetector(existing_skills={"my_skill"})
+
+        skill_name = detector._detect_skill_from_tool_calls([
+            {
+                "name": "bash",
+                "arguments": '{"command": "cat /skills/my_skill/SKILL.md"}',
+            }
+        ])
+
+        assert skill_name is None
 
 
 class TestCollaborationSignalDetection:
@@ -319,9 +482,43 @@ class TestCollaborationSignalDetection:
         assert len(collab_signals) == 1
         signal = collab_signals[0]
         assert signal.section == "Collaboration"
-        assert signal.evolution_type == EvolutionCategory.SKILL_EXPERIENCE
+        assert signal.context.get("source") == "passive_collaboration"
+        assert signal.context.get("tool_name") == "send_message"
         assert signal.context.get("from_member") == "researcher"
         assert signal.context.get("to_member") == "coder"
+
+    def test_collaboration_detection_handles_message_objects(self) -> None:
+        """Team-member trajectories may contain BaseMessage objects from runtime callbacks."""
+        trajectory = Trajectory(
+            execution_id="message-object-team-member",
+            session_id="session-team",
+            source="online",
+            steps=[
+                TrajectoryStep(
+                    kind="llm",
+                    detail=LLMCallDetail(
+                        model="test-model",
+                        messages=[SystemMessage(content="system prompt")],
+                    ),
+                ),
+                TrajectoryStep(
+                    kind="tool",
+                    detail=ToolCallDetail(
+                        tool_name="send_message",
+                        call_args={"to_member_name": "coder"},
+                    ),
+                ),
+            ],
+            meta={"member_id": "researcher", "team_id": "team-1"},
+        )
+
+        detector = ConversationSignalDetector()
+        signals = detector.detect_trajectory_signals(
+            trajectory,
+            messages=[{"role": "system", "content": "system prompt"}],
+        )
+
+        assert [signal.signal_type for signal in signals] == ["collaboration_send"]
 
     def test_collaboration_claim_signal(self) -> None:
         """claim_task should produce collaboration_claim signal."""
@@ -338,6 +535,8 @@ class TestCollaborationSignalDetection:
         assert len(collab_signals) == 1
         signal = collab_signals[0]
         assert signal.section == "Collaboration"
+        assert signal.context.get("source") == "passive_collaboration"
+        assert signal.context.get("tool_name") == "claim_task"
         assert signal.context.get("member_id") == "coder"
         assert signal.context.get("task_id") == "task-123"
 
@@ -356,6 +555,8 @@ class TestCollaborationSignalDetection:
         assert len(collab_signals) == 1
         signal = collab_signals[0]
         assert signal.section == "Collaboration"
+        assert signal.context.get("source") == "passive_collaboration"
+        assert signal.context.get("tool_name") == "view_task"
         assert signal.context.get("member_id") == "researcher"
 
     def test_collaboration_receive_signal(self) -> None:
@@ -374,6 +575,8 @@ class TestCollaborationSignalDetection:
         assert len(collab_signals) == 1
         signal = collab_signals[0]
         assert signal.section == "Collaboration"
+        assert signal.context.get("source") == "passive_collaboration"
+        assert signal.context.get("tool_name") == "write_file"
         assert signal.context.get("member_id") == "coder"
         assert signal.context.get("parent_invoke_id") == "invoke-researcher-001"
 
@@ -394,6 +597,8 @@ class TestCollaborationSignalDetection:
         signal = collab_signals[0]
         assert signal.section == "Collaboration"
         assert "timeout" in signal.excerpt.lower()
+        assert signal.context.get("source") == "passive_collaboration"
+        assert signal.context.get("tool_name") == "send_message"
 
     def test_no_collaboration_signals_for_standalone_agent(self) -> None:
         """Standalone agent (no member_id) should not produce collaboration signals."""
