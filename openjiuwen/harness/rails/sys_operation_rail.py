@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import os
+
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
-from openjiuwen.harness.tools import BashTool
+from openjiuwen.harness.tools import BashTool, PowerShellTool
 from openjiuwen.harness.tools.code import CodeTool
 from openjiuwen.harness.tools.filesystem import (
     EditFileTool,
@@ -39,6 +41,11 @@ class SysOperationRail(DeepAgentRail):
         list_dir_tool = ListDirTool(self.sys_operation, lang, agent_id)
         grep_tool = GrepTool(self.sys_operation, lang, agent_id)
         bash_tool = BashTool(self.sys_operation, lang, agent_id=agent_id)
+        powershell_tool = (
+            PowerShellTool(self.sys_operation, lang, agent_id=agent_id)
+            if os.name == "nt"
+            else None
+        )
 
         self.tools = [
             read_tool,
@@ -49,6 +56,8 @@ class SysOperationRail(DeepAgentRail):
             grep_tool,
             bash_tool,
         ]
+        if powershell_tool is not None:
+            self.tools.append(powershell_tool)
 
         if self._with_code_tool:
             self.tools.append(CodeTool(self.sys_operation, lang, agent_id))
