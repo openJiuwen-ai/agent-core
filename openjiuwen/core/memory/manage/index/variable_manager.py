@@ -53,7 +53,7 @@ class VariableManager(BaseMemoryManager):
                         user_id=user_id,
                         scope_id=scope_id
                     )
-                    return
+                    return []
                 key, value = self._make_variable_pairs(
                     user_id,
                     False,
@@ -64,6 +64,7 @@ class VariableManager(BaseMemoryManager):
                     None
                 )
                 await self.kv_store.set(key, value)
+        return memories.get(self.mem_type, [])
 
     async def update(self, user_id: str, scope_id: str, mem_id: str, new_memory: str, **kwargs):
         memory_logger.warning(

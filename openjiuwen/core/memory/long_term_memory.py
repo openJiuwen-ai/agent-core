@@ -302,7 +302,6 @@ class LongTermMemory(metaclass=Singleton):
             self.message_manager = MessageManager(store=self.message_store)
         self.fragment_memory_manager = FragmentMemoryManager(
             memory_index=self.memory_index,
-            data_id_generator=data_id_generator,
             crypto_key=config.crypto_key
         )
         self.summary_manager = SummaryManager(
@@ -326,7 +325,8 @@ class LongTermMemory(metaclass=Singleton):
         self.write_manager = WriteManager(managers, self.memory_index)
         self.search_manager = SearchManager(
             managers,
-            config.crypto_key
+            config.crypto_key,
+            self.memory_index
         )
         self.generator = Generator(data_id_generator=data_id_generator, search_manager=self.search_manager)
         # set init llm
@@ -620,7 +620,7 @@ class LongTermMemory(metaclass=Singleton):
                 scope_config=scope_config
             )
             try:
-                await self.write_manager.add_memories(
+                write_result = await self.write_manager.add_memories(
                     user_id=user_id,
                     scope_id=scope_id,
                     memories=all_memory,
@@ -650,11 +650,11 @@ class LongTermMemory(metaclass=Singleton):
                     cause=e
                 ) from e
         return AddMemResult(
-            variables=all_memory.get(MemoryType.VARIABLE.value, []),
-            user_profile=all_memory.get(MemoryType.USER_PROFILE.value, []),
-            semantic_memory=all_memory.get(MemoryType.SEMANTIC_MEMORY.value, []),
-            episodic_memory=all_memory.get(MemoryType.EPISODIC_MEMORY.value, []),
-            summary=all_memory.get(MemoryType.SUMMARY.value, [])
+            variables=[var for var in write_result if var.mem_type.value == MemoryType.VARIABLE.value],
+            user_profile=[var for var in write_result if var.mem_type.value == MemoryType.USER_PROFILE.value],
+            semantic_memory=[var for var in write_result if var.mem_type.value == MemoryType.SEMANTIC_MEMORY.value],
+            episodic_memory=[var for var in write_result if var.mem_type.value == MemoryType.EPISODIC_MEMORY.value],
+            summary=[var for var in write_result if var.mem_type.value == MemoryType.SUMMARY.value]
         )
 
     async def get_recent_messages(
@@ -952,13 +952,12 @@ class LongTermMemory(metaclass=Singleton):
             top_k=num,
             user_id=user_id,
             threshold=threshold,
+            search_type=self.fragment_type
         )
         try:
             search_data = []
-            for mem_type in self.fragment_type:
-                params.search_type = mem_type
-                res = await self.search_manager.search(params)
-                search_data.extend(res)
+            search_data = await self.search_manager.search(params)
+
             search_data = sorted(search_data, key=lambda x: x.get("score", 0.0), reverse=True)[:num]
             mem_results: list[MemResult] = [
                 MemResult(
@@ -1167,7 +1166,7 @@ class LongTermMemory(metaclass=Singleton):
                                    user_id: str = DEFAULT_VALUE,
                                    scope_id: str = DEFAULT_VALUE,
                                    page_size: int = 10,
-                                   page_idx: int = 0,
+                                   page_idx: int = 1,
                                    memory_type: MemoryType = MemoryType.UNKNOWN) -> list[MemInfo]:
         """
         List user memories with pagination support.
@@ -1179,7 +1178,7 @@ class LongTermMemory(metaclass=Singleton):
             user_id: User identifier to search within
             scope_id: Unique identifier for the scope
             page_size: Number of memories per page
-            page_idx: Page index (0-based)
+            page_idx: Page index (1-based)
             memory_type: Memory type to filter. If UNKNOWN, no filtering is applied.
 
         Returns:

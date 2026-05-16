@@ -15,15 +15,16 @@ class WriteManager:
         self.memory_index = memory_index
 
     async def add_memories(self, user_id: str, scope_id: str, memories: dict[str, list[BaseMemoryUnit]],
-                           llm: Model | None, **kwargs) -> None:
+                           llm: Model | None, **kwargs) -> list[BaseMemoryUnit]:
         if not memories:
             memory_logger.debug("No memory units to add", event_type=LogEventType.MEMORY_STORE)
-            return
-
+            return []
+        result = []
         for manager in set(self.managers.values()):
             try:
-                await manager.add_memories(
+                mem_units = await manager.add_memories(
                     user_id=user_id, scope_id=scope_id, memories=memories, llm=llm, **kwargs)
+                result.extend(mem_units)
             except Exception as e:
                 memory_logger.error(
                     "Failed to add mem",
@@ -32,6 +33,7 @@ class WriteManager:
                     event_type=LogEventType.MEMORY_STORE,
                 )
                 raise e
+        return result
 
     async def update_mem_by_id(self, user_id: str, scope_id: str, mem_id: str, memory: str, **kwargs):
         mem_type = await self.__get_mem_type_from_index(user_id, scope_id, mem_id)

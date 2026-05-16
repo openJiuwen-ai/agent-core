@@ -71,7 +71,7 @@ class SummaryManager(BaseMemoryManager):
                 user_id=user_id,
                 scope_id=scope_id
             )
-            return
+            return []
         memory_docs = self._convert_to_memory_docs(memories)
         if not memory_docs:
             memory_logger.warning(
@@ -81,8 +81,9 @@ class SummaryManager(BaseMemoryManager):
                 user_id=user_id,
                 scope_id=scope_id
             )
-            return
+            return []
         await self.memory_index.add_memories(user_id, scope_id, memory_docs)
+        return memories[self.mem_type]
 
     async def update(self, user_id: str, scope_id: str, mem_id: str, new_memory: str, **kwargs):
         if not self.memory_index:
@@ -104,8 +105,7 @@ class SummaryManager(BaseMemoryManager):
             timestamp=datetime.now(timezone.utc).astimezone(),
             fields=memory_doc.fields
         )
-        await self.memory_index.delete_memories(user_id, scope_id, [mem_id])
-        await self.memory_index.add_memories(user_id, scope_id, [updated_doc])
+        await self.memory_index.update_memories(user_id, scope_id, [updated_doc])
         return True
 
     async def delete(self, user_id: str, scope_id: str, mem_id: str, **kwargs):
@@ -198,7 +198,8 @@ class SummaryManager(BaseMemoryManager):
             })
         return result
 
-    async def list_user_summary(self, user_id: str, scope_id: str) -> list[dict[str, Any]]:
+    async def list_user_summary(self, user_id: str, scope_id: str,
+                                offset: int, batch_size: int) -> list[dict[str, Any]]:
         if not self.memory_index:
             memory_logger.warning(
                 "memory_index is not initialized, cannot list user summary",
@@ -208,20 +209,11 @@ class SummaryManager(BaseMemoryManager):
                 scope_id=scope_id
             )
             return []
-        offset = 0
-        batch_size = 100
-        all_memories = []
-        while True:
-            batch = await self.memory_index.list_memories(user_id, scope_id, offset, batch_size)
-            if not batch:
-                break
-            all_memories.extend(batch)
-            if len(batch) < batch_size:
-                break
-            offset += batch_size
 
-        summary_memories = [m for m in all_memories if m.type == self.mem_type]
-
+        summary_memories = await self.memory_index.list_memories(user_id, scope_id,
+                                                    offset, batch_size, [self.mem_type])
+        if not summary_memories:
+            return []
         result = []
         for memory_doc in summary_memories:
             encrypted_content = BaseMemoryManager.encrypt_memory_if_needed(

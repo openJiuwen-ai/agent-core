@@ -6,8 +6,7 @@ Backward-compatible memory index for legacy KV + Vector store data.
 .. deprecated::
     This module provides ``SimpleMemoryIndex`` for operating on data created by
     the old SemanticStore + UserMemStore architecture.  It may be removed in a
-    future release once migration to VectorMemoryIndex is complete.
-    Do **not** build new features on this class — use VectorMemoryIndex instead.
+    future release once migration is complete.
 
 Legacy data layout
 ------------------
@@ -40,8 +39,8 @@ class SimpleMemoryIndex(BaseMemoryIndex):
 
     WARNING: This class exists solely for backward compatibility with data written
     by the old SemanticStore + UserMemStore architecture.  It may be removed in a
-    future version.  New code should use VectorMemoryIndex instead.  Do not build
-    new features or long-lived components on top of this class.
+    future version.  Do not build new features or long-lived components on top of
+    this class.
     """
 
     _KV_PREFIX = "UMD"
@@ -272,7 +271,7 @@ class SimpleMemoryIndex(BaseMemoryIndex):
         user_id: str,
         scope_id: str,
         query: str,
-        mem_type: str | None = None,
+        mem_types: list[str] | None = None,
         top_k: int = 10,
     ) -> list[tuple[MemoryDoc, float]]:
         """Search memories via vector similarity, then fetch content from KV store."""
@@ -286,8 +285,8 @@ class SimpleMemoryIndex(BaseMemoryIndex):
 
         query_vec = await self._embedding_model.embed_query(query)
 
-        if mem_type:
-            types = [mem_type]
+        if mem_types:
+            types = mem_types
         else:
             cols = await self._collections_for(user_id, scope_id)
             types = [t for t in (self._parse_mem_type_from_collection(c) for c in cols) if t]
@@ -404,7 +403,8 @@ class SimpleMemoryIndex(BaseMemoryIndex):
             return None
         return self._kv_data_to_memory_doc(json.loads(raw), mem_id)
 
-    async def list_memories(self, user_id: str, scope_id: str, offset: int, limit: int) -> list[MemoryDoc]:
+    async def list_memories(self, user_id: str, scope_id: str, offset: int,
+                            limit: int, mem_types: list[str] | None = None) -> list[MemoryDoc]:
         """List memory documents with pagination, reading from the KV store."""
         ids_key = self._kv_ids_key(user_id, scope_id)
         raw = self._decode(await self._kv_store.get(ids_key)) or ""
@@ -423,9 +423,12 @@ class SimpleMemoryIndex(BaseMemoryIndex):
             decoded = self._decode(val)
             if decoded is None:
                 continue
-            docs.append(self._kv_data_to_memory_doc(json.loads(decoded), mid))
-
-        docs.sort(key=lambda d: d.timestamp, reverse=True)
+            doc = self._kv_data_to_memory_doc(json.loads(decoded), mid)
+            if not mem_types or doc.type in mem_types:
+                docs.append(doc)
+        if mem_types:
+            type_order = {mt: i for i, mt in enumerate(mem_types)}
+            docs.sort(key=lambda d: (type_order.get(d.type, len(type_order)), -d.timestamp.timestamp()))
         return docs[offset:offset + limit]
 
     def get_schema_version(self) -> int:

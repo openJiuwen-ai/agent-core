@@ -374,11 +374,9 @@ class Generator:
             )
             fragment_type = [MemoryType.USER_PROFILE.value, MemoryType.EPISODIC_MEMORY.value,
                              MemoryType.SEMANTIC_MEMORY.value]
-            search_data = []
-            for mem_type in fragment_type:
-                params.search_type = mem_type
-                res = await self.search_manager.search(params, semantic_store=memory_operation_params.semantic_store)
-                search_data.extend(res)
+            params.search_type = fragment_type
+            search_data = await self.search_manager.search(params,
+                                        semantic_store=memory_operation_params.semantic_store)
             search_data = sorted(search_data, key=lambda x: x.get("score", 0.0), reverse=True)
             obtained_mem = [search_data[0]] if search_data else []
             if not obtained_mem:

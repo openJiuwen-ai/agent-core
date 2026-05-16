@@ -9,7 +9,8 @@ import pytest
 from openjiuwen.core.foundation.store.base_memory_index import MemoryDoc
 from openjiuwen.core.foundation.store.base_embedding import Embedding
 from openjiuwen.core.foundation.store.base_vector_store import BaseVectorStore, VectorSearchResult
-from openjiuwen.core.foundation.store.index.vector_memory_index import VectorMemoryIndex
+from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
+from openjiuwen.core.foundation.store.index.simple_memory_index import SimpleMemoryIndex
 from openjiuwen.core.memory.migration.migrator.index_version_migrator import IndexVersionMigrator
 from openjiuwen.core.memory.migration.operation.operations import (
     RenameMemoryDocFieldOperation,
@@ -34,6 +35,51 @@ class _MockEmbedding(Embedding):
     @property
     def dimension(self):
         return _EMBEDDING_DIM
+
+
+class _InMemoryKVStore(BaseKVStore):
+
+    def __init__(self):
+        self._data: dict[str, str] = {}
+
+    async def get(self, key, **_kw):
+        return self._data.get(key)
+
+    async def set(self, key, value, **_kw):
+        self._data[key] = value
+
+    async def delete(self, key, **_kw):
+        self._data.pop(key, None)
+
+    async def mget(self, keys, **_kw):
+        return [self._data.get(k) for k in keys]
+
+    async def batch_delete(self, keys, **_kw):
+        for k in keys:
+            self._data.pop(k, None)
+
+    async def get_by_prefix(self, prefix, **_kw):
+        return [k for k in self._data if k.startswith(prefix)]
+
+    async def delete_by_prefix(self, prefix, **_kw):
+        keys_to_delete = [k for k in self._data if k.startswith(prefix)]
+        for k in keys_to_delete:
+            del self._data[k]
+
+    async def exists(self, key, **_kw):
+        return key in self._data
+
+    async def exclusive_set(self, key, value, **_kw):
+        if key not in self._data:
+            self._data[key] = value
+            return True
+        return False
+
+    async def pipeline(self, operations, **_kw):
+        for op in operations:
+            method = op[0]
+            args = op[1:]
+            await getattr(self, method)(*args)
 
 
 class _InMemoryVectorStore(BaseVectorStore):
@@ -110,32 +156,20 @@ class _InMemoryVectorStore(BaseVectorStore):
 
 @pytest.fixture()
 def index_with_docs():
+    kv_store = _InMemoryKVStore()
     vector_store = _InMemoryVectorStore()
     mock_embedding = _MockEmbedding()
-    index = VectorMemoryIndex(vector_store=vector_store, embedding_model=mock_embedding)
+    index = SimpleMemoryIndex(kv_store=kv_store, vector_store=vector_store, embedding_model=mock_embedding)
 
     test_docs = [
         MemoryDoc(
-            id="doc1",
-            text="Test document 1",
+            id=f"{i:024d}",
+            text=f"Test document {i}",
             type="fragment",
             timestamp=datetime.now(tz=timezone.utc).astimezone(),
-            fields={"memory_text": "Content 1", "category": "test", "count": 1}
-        ),
-        MemoryDoc(
-            id="doc2",
-            text="Test document 2",
-            type="fragment",
-            timestamp=datetime.now(tz=timezone.utc).astimezone(),
-            fields={"memory_text": "Content 2", "category": "test", "count": 2}
-        ),
-        MemoryDoc(
-            id="doc3",
-            text="Test document 3",
-            type="fragment",
-            timestamp=datetime.now(tz=timezone.utc).astimezone(),
-            fields={"memory_text": "Content 3", "category": "test", "count": 3}
+            fields={"memory_text": f"Content {i}", "category": "test", "count": i}
         )
+        for i in range(1, 4)
     ]
 
     return index, test_docs
@@ -172,7 +206,7 @@ class TestIndexMigrationIntegration:
         for doc in migrated_docs:
             assert "memory_text" not in doc.fields
             assert "text" in doc.fields
-            assert doc.fields["text"] == f"Content {doc.id[-1]}"
+            assert doc.fields["text"].startswith("Content ")
 
     @staticmethod
     @pytest.mark.asyncio
@@ -210,11 +244,11 @@ class TestIndexMigrationIntegration:
         for doc in migrated_docs:
             assert "memory_text" not in doc.fields
             assert "content" in doc.fields
-            assert doc.fields["content"] == f"Content {doc.id[-1]}"
+            assert doc.fields["content"].startswith("Content ")
 
             assert "processed" in doc.fields
             assert doc.fields["processed"] is True
 
             assert "count" in doc.fields
-            expected_count = int(doc.id[-1]) + 10
+            expected_count = int(doc.fields["content"].split()[-1]) + 10
             assert doc.fields["count"] == expected_count

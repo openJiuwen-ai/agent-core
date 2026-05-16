@@ -117,7 +117,7 @@ class BaseMemoryIndex(ABC):
         user_id: str,
         scope_id: str,
         query: str,
-        mem_type: str | None = None,
+        mem_types: list[str] | None = None,
         top_k: int = 10
     ) -> list[tuple[MemoryDoc, float]]:
         """
@@ -130,7 +130,9 @@ class BaseMemoryIndex(ABC):
             user_id: The user identifier to scope memories under
             scope_id: The scope identifier for grouping related memories
             query: The search query text
-            mem_type: Optional filter for memory type. If None, searches all types
+            mem_types: Filter of memory types to search. Can be:
+                - A list with one or more specific memory types (e.g., ["user_profile"]).
+                - An empty list [] to search all memory types.
             top_k: Maximum number of results to return (default: 10)
 
         Returns:
@@ -158,7 +160,8 @@ class BaseMemoryIndex(ABC):
         """
         pass
 
-    async def list_memories(self, user_id: str, scope_id: str, offset: int, limit: int) -> list[MemoryDoc]:
+    async def list_memories(self, user_id: str, scope_id: str, offset: int,
+                            limit: int, mem_types: list[str]) -> list[MemoryDoc]:
         """
         Retrieve a paginated list of memory documents for a specific user and scope.
 
@@ -170,6 +173,10 @@ class BaseMemoryIndex(ABC):
             scope_id: The scope identifier for grouping related memories.
             offset: The starting index of the documents to retrieve.
             limit: The maximum number of documents to return.
+            mem_types: Filter of memory types to search. Can be:
+                - A list with one or more specific memory types (e.g., ["user_profile"]).
+                - An empty list [] to search all memory types.
+                - If multiple mem_types are provided, output them in the order of mem_type.
 
         Returns:
             list[MemoryDoc]: A list of memory documents matching the criteria.

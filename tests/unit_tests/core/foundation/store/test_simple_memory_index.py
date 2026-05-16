@@ -1,12 +1,11 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Tests for SimpleMemoryIndex: old-framework compatibility and migration.
+"""Tests for SimpleMemoryIndex: old-framework compatibility and operations.
 
-The three phases tested are:
+The phases tested are:
   1. Write data using the old framework (UserMemStore + SemanticStore).
   2. Operate on that data through SimpleMemoryIndex.
-  3. Migrate data from SimpleMemoryIndex into VectorMemoryIndex.
 """
 
 import asyncio
@@ -16,15 +15,12 @@ from datetime import datetime, timezone
 import pytest
 
 from openjiuwen.core.foundation.store.base_memory_index import MemoryDoc
-from openjiuwen.core.foundation.store.base_db_store import BaseDbStore
 from openjiuwen.core.foundation.store.base_vector_store import (
     BaseVectorStore,
     VectorSearchResult,
 )
 from openjiuwen.core.foundation.store.index.simple_memory_index import SimpleMemoryIndex
-from openjiuwen.core.foundation.store.index.vector_memory_index import VectorMemoryIndex
 from openjiuwen.core.foundation.store.kv.in_memory_kv_store import InMemoryKVStore
-from openjiuwen.core.memory.long_term_memory import LongTermMemory
 from openjiuwen.core.memory.common.base import generate_idx_name
 from openjiuwen.core.memory.manage.mem_model.semantic_store import SemanticStore
 from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
@@ -247,7 +243,7 @@ class TestSimpleMemoryIndexReadsOldData:
         await _write_via_old_framework(kv, vec, emb)
         idx = SimpleMemoryIndex(kv, vec, emb)
 
-        results = await idx.search(_UID, _SID, "programming", mem_type=_MEM_TYPE, top_k=5)
+        results = await idx.search(_UID, _SID, "programming", mem_types=[_MEM_TYPE], top_k=5)
         assert len(results) >= 1
         for doc, _ in results:
             assert doc.type == _MEM_TYPE
@@ -439,267 +435,6 @@ class TestSimpleMemoryIndexWriteOperations:
         # Total count stays the same
         all_docs = await idx.list_memories(_UID, _SID, 0, 100)
         assert len(all_docs) == 3
-
-
-# ===========================================================================
-#  Phase 3: migrate SimpleMemoryIndex → VectorMemoryIndex
-# ===========================================================================
-
-
-class TestMigrationToVectorMemoryIndex:
-    """Read all data via SimpleMemoryIndex, then write to VectorMemoryIndex."""
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_migration_round_trip(kv, vec, emb):
-        # 1. Write old data
-        await _write_via_old_framework(kv, vec, emb)
-        simple = SimpleMemoryIndex(kv, vec, emb)
-
-        # 2. Read everything through SimpleMemoryIndex
-        old_docs = await simple.list_memories(_UID, _SID, 0, 100)
-        assert len(old_docs) == 3
-
-        # 3. Write to a fresh VectorMemoryIndex (separate vec_store to avoid name clash)
-        new_vec = _MemVectorStore()
-        new_idx = VectorMemoryIndex(new_vec, emb)
-        await new_idx.add_memories(_UID, _SID, old_docs)
-
-        # 4. Verify search works in the new index
-        results = await new_idx.search(
-            _UID, _SID, "Alice likes Python", mem_type=_MEM_TYPE, top_k=3,
-        )
-        assert len(results) >= 1
-        assert "Alice" in results[0][0].text
-
-        # 5. Verify get_by_id works
-        doc = await new_idx.get_by_id(_UID, _SID, _make_id(1))
-        assert doc is not None
-        assert doc.text == "Alice likes Python"
-
-        # 6. Verify list_memories returns all migrated docs
-        migrated = await new_idx.list_memories(_UID, _SID, 0, 100)
-        assert len(migrated) == 3
-        migrated_texts = {d.text for d in migrated}
-        assert migrated_texts == {"Alice likes Python", "Bob prefers Go", "Charlie works on AI"}
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_migration_preserves_type_and_timestamp(kv, vec, emb):
-        await _write_via_old_framework(kv, vec, emb)
-        simple = SimpleMemoryIndex(kv, vec, emb)
-
-        old_docs = await simple.list_memories(_UID, _SID, 0, 100)
-
-        new_vec = _MemVectorStore()
-        new_idx = VectorMemoryIndex(new_vec, emb)
-        await new_idx.add_memories(_UID, _SID, old_docs)
-
-        for old_doc in old_docs:
-            new_doc = await new_idx.get_by_id(_UID, _SID, old_doc.id)
-            assert new_doc is not None
-            assert new_doc.type == old_doc.type
-            assert new_doc.timestamp == old_doc.timestamp
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_migration_preserves_extra_fields(kv, vec, emb):
-        """Fields like source_id survive the migration path."""
-        await _write_via_old_framework(kv, vec, emb)
-        simple = SimpleMemoryIndex(kv, vec, emb)
-
-        old_docs = await simple.list_memories(_UID, _SID, 0, 100)
-
-        new_vec = _MemVectorStore()
-        new_idx = VectorMemoryIndex(new_vec, emb)
-        await new_idx.add_memories(_UID, _SID, old_docs)
-
-        doc = await new_idx.get_by_id(_UID, _SID, _make_id(1))
-        assert doc is not None
-        assert "source_id" in doc.fields
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_migration_then_delete_in_new_index(kv, vec, emb):
-        """After migration, new index supports full CRUD."""
-        await _write_via_old_framework(kv, vec, emb)
-        simple = SimpleMemoryIndex(kv, vec, emb)
-
-        old_docs = await simple.list_memories(_UID, _SID, 0, 100)
-
-        new_vec = _MemVectorStore()
-        new_idx = VectorMemoryIndex(new_vec, emb)
-        await new_idx.add_memories(_UID, _SID, old_docs)
-
-        # Delete one doc in the new index
-        await new_idx.delete_memories(_UID, _SID, [_make_id(2)])
-
-        remaining = await new_idx.list_memories(_UID, _SID, 0, 100)
-        assert len(remaining) == 2
-        remaining_ids = {d.id for d in remaining}
-        assert _make_id(2) not in remaining_ids
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_old_and_new_coexist(kv, vec, emb):
-        """Old SimpleMemoryIndex and new VectorMemoryIndex can coexist on
-        different collection namespaces in the same vector store."""
-        await _write_via_old_framework(kv, vec, emb)
-        simple = SimpleMemoryIndex(kv, vec, emb)
-
-        old_docs = await simple.list_memories(_UID, _SID, 0, 100)
-
-        # Reuse the same vec_store — namespace difference prevents collision
-        new_idx = VectorMemoryIndex(vec, emb)
-        await new_idx.add_memories(_UID, _SID, old_docs)
-
-        # Old collections still exist
-        old_cols = [c for c in await vec.list_collection_names()
-                    if c.startswith(f"uid_{_UID}_gid_{_SID}_")]
-        assert len(old_cols) >= 1
-
-        # New collections also exist
-        new_cols = [c for c in await vec.list_collection_names()
-                    if c.startswith(f"memory_{_UID}_{_SID}_")]
-        assert len(new_cols) >= 1
-
-        # Both can search independently
-        old_results = await simple.search(_UID, _SID, "Python", top_k=3)
-        new_results = await new_idx.search(
-            _UID, _SID, "Python", mem_type=_MEM_TYPE, top_k=3,
-        )
-        assert len(old_results) >= 1
-        assert len(new_results) >= 1
-
-
-# ===========================================================================
-#  Phase 4: LongTermMemory.register_store → SimpleMemoryIndex → migrate_from_index
-# ===========================================================================
-
-
-class _MockDbStore(BaseDbStore):
-    """Minimal db_store mock satisfying register_store / create_tables."""
-
-    def get_async_engine(self):
-        from unittest.mock import AsyncMock, MagicMock
-        mock_engine = MagicMock()
-        mock_engine.begin = MagicMock(return_value=AsyncMock())
-        return mock_engine
-
-
-class TestMigrateFromIndexViaLongTermMemory:
-    """End-to-end: register_store creates SimpleMemoryIndex, then
-    migrate_from_index copies data to a fresh VectorMemoryIndex."""
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_migrate_simple_to_vector_after_register_store():
-        # -- 1. Set up stores ------------------------------------------------
-        kv_store = InMemoryKVStore()
-        vec_store = _MemVectorStore()
-        embedding = FakeEmbedding()
-        db_store = _MockDbStore()
-
-        # -- 2. LongTermMemory.register_store auto-creates SimpleMemoryIndex -
-        ltm = LongTermMemory()
-        await ltm.register_store(
-            kv_store=kv_store,
-            vector_store=vec_store,
-            db_store=db_store,
-            embedding_model=embedding,
-        )
-        assert isinstance(ltm.memory_index, SimpleMemoryIndex)
-
-        # -- 3. Write data directly to the SimpleMemoryIndex -----------------
-        docs = [
-            MemoryDoc(
-                id=_make_id(1), text="Alice likes Python", type="user_profile",
-                timestamp=datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc), fields={"source_id": "msg_1"},
-            ),
-            MemoryDoc(
-                id=_make_id(2), text="Bob prefers Go", type="user_profile",
-                timestamp=datetime(2025, 1, 1, 0, 0, 1, tzinfo=timezone.utc), fields={"source_id": "msg_2"},
-            ),
-            MemoryDoc(
-                id=_make_id(3), text="Charlie works on AI", type="semantic_memory",
-                timestamp=datetime(2025, 1, 1, 0, 0, 2, tzinfo=timezone.utc), fields={"source_id": "msg_3"},
-            ),
-        ]
-        await ltm.memory_index.add_memories(_UID, _SID, docs)
-
-        # Verify data landed in SimpleMemoryIndex
-        source_docs = await ltm.memory_index.list_memories(_UID, _SID, 0, 100)
-        assert len(source_docs) == 3
-
-        # -- 4. Create a fresh VectorMemoryIndex ------------------------------
-        new_vec = _MemVectorStore()
-        vector_index = VectorMemoryIndex(new_vec, embedding)
-
-        # -- 5. Migrate via LongTermMemory.migrate_from_index ----------------
-        await LongTermMemory.migrate_between_indices(
-            source_index=ltm.memory_index,
-            target_index=vector_index,
-        )
-
-        # -- 6. Verify data in VectorMemoryIndex ------------------------------
-        # 6a. get_by_id
-        doc = await vector_index.get_by_id(_UID, _SID, _make_id(1))
-        assert doc is not None
-        assert doc.text == "Alice likes Python"
-        assert doc.type == "user_profile"
-
-        # 6b. list_memories
-        all_docs = await vector_index.list_memories(_UID, _SID, 0, 100)
-        assert len(all_docs) == 3
-        texts = {d.text for d in all_docs}
-        assert texts == {"Alice likes Python", "Bob prefers Go", "Charlie works on AI"}
-
-        # 6c. search
-        results = await vector_index.search(
-            _UID, _SID, "Python programming",
-            mem_type="user_profile", top_k=3,
-        )
-        assert len(results) >= 1
-        assert "Alice" in results[0][0].text
-
-        # -- 7. Source data is preserved --------------------------------------
-        source_after = await ltm.memory_index.list_memories(_UID, _SID, 0, 100)
-        assert len(source_after) == 3
-
-    @staticmethod
-    @pytest.mark.asyncio
-    async def test_migrate_preserves_fields_and_timestamps():
-        kv_store = InMemoryKVStore()
-        vec_store = _MemVectorStore()
-        embedding = FakeEmbedding()
-        db_store = _MockDbStore()
-
-        ltm = LongTermMemory()
-        await ltm.register_store(
-            kv_store=kv_store, vector_store=vec_store,
-            db_store=db_store, embedding_model=embedding,
-        )
-
-        original = MemoryDoc(
-            id=_make_id(10), text="Test with fields", type="user_profile",
-            timestamp=datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
-            fields={"source_id": "msg_10", "confidence": 0.95},
-        )
-        await ltm.memory_index.add_memories(_UID, _SID, [original])
-
-        new_vec = _MemVectorStore()
-        target = VectorMemoryIndex(new_vec, embedding)
-        await LongTermMemory.migrate_between_indices(
-            source_index=ltm.memory_index, target_index=target,
-        )
-
-        migrated = await target.get_by_id(_UID, _SID, _make_id(10))
-        assert migrated is not None
-        assert migrated.text == original.text
-        assert migrated.type == original.type
-        assert migrated.timestamp == original.timestamp
-        assert migrated.fields.get("source_id") == "msg_10"
-        assert migrated.fields.get("confidence") == 0.95
 
 
 if __name__ == "__main__":

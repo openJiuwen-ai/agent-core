@@ -8,13 +8,11 @@ from typing import Any
 import pytest
 
 os.environ['HF_ENDPOINT'] = "https://hf-mirror.com"
-from openjiuwen.core.memory.manage.mem_model.data_id_manager import DataIdManager
 from openjiuwen.core.memory.manage.index.fragment_memory_manager import FragmentMemoryManager
 from openjiuwen.core.memory.manage.index.variable_manager import VariableManager
 from openjiuwen.core.memory.manage.index.write_manager import WriteManager
 from openjiuwen.core.memory.manage.mem_model.memory_unit import FragmentMemoryUnit, \
     VariableUnit, MemoryType
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.store.base_memory_index import BaseMemoryIndex, MemoryDoc
 from openjiuwen.core.foundation.store.kv.in_memory_kv_store import InMemoryKVStore
 
@@ -63,12 +61,12 @@ class MockMemoryIndex(BaseMemoryIndex):
             self._data[user_id].pop(scope_id, None)
 
     async def search(self, user_id: str, scope_id: str, query: str,
-                     mem_type: str | None = None, top_k: int = 10) -> list[tuple[MemoryDoc, float]]:
+                     mem_types: list[str] | None = None, top_k: int = 10) -> list[tuple[MemoryDoc, float]]:
         if user_id not in self._data or scope_id not in self._data[user_id]:
             return []
         results = []
         for doc in self._data[user_id][scope_id].values():
-            if mem_type and doc.type != mem_type:
+            if mem_types and doc.type not in mem_types:
                 continue
             score = 1.0 if query in doc.text else 0.5
             results.append((doc, score))
@@ -80,10 +78,12 @@ class MockMemoryIndex(BaseMemoryIndex):
             return self._data[user_id][scope_id].get(mem_id)
         return None
 
-    async def list_memories(self, user_id: str, scope_id: str, offset: int, limit: int) -> list[MemoryDoc]:
+    async def list_memories(self, user_id: str, scope_id: str, offset: int, limit: int, mem_types: list[str] | None = None) -> list[MemoryDoc]:
         if user_id not in self._data or scope_id not in self._data[user_id]:
             return []
         docs = sorted(self._data[user_id][scope_id].values(), key=lambda d: d.timestamp, reverse=True)
+        if mem_types:
+            docs = [d for d in docs if d.type in mem_types]
         return docs[offset:offset + limit]
 
     def get_schema_version(self) -> int:
@@ -118,12 +118,10 @@ class TestManage:
     @pytest.mark.asyncio
     async def test_basic(self):
         mock_kv_store = InMemoryKVStore()
-        data_id_generator = DataIdManager()
         mock_memory_index = MockMemoryIndex()
 
         user_profile_manager = FragmentMemoryManager(
             memory_index=mock_memory_index,
-            data_id_generator=data_id_generator,
             crypto_key=b""
         )
         variable_manager = VariableManager(mock_kv_store, b"")
@@ -175,7 +173,7 @@ class TestManage:
         ret = await user_profile_manager.get("usrZH2025", "fitnesstrackerv3", res[0]['id'])
         assert ret['mem'] == "用户不是软件工程师，是系统"
 
-        res = await user_profile_manager.list_fragment_memories("usrZH2025", "fitnesstrackerv3")
+        res = await user_profile_manager.list_fragment_memories("usrZH2025", "fitnesstrackerv3", 0, 10)
         assert len(res) == 6
         for rr in res[0:2]:
             await write_manager.delete_mem_by_id("usrZH2025", "fitnesstrackerv3", rr["id"])
