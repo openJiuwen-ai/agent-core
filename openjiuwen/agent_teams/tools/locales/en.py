@@ -188,13 +188,14 @@ STRINGS: dict[str, str] = {
     # ===== send_message ========================================================
     # send_message._desc lives in descs/en/send_message.md
     "send_message.to": (
-        'Recipient: member_name for point-to-point (e.g. "backend-dev-1"); '
+        'Recipient: member_name for a point-to-point DM (e.g. "backend-dev-1"), '
+        "visible only to you and that member; "
         'array of member names (e.g. ["m1","m2"]) for multicast — same content sent '
         "as separate messages to each member, cost is linear in recipient count and "
         "MORE expensive than broadcast for the same audience, use only when truly needed "
         'and cannot mix with "*"/"user"; '
         '"user" (teammates only, to reply to the user); '
-        '"*" for broadcast'
+        '"*" to broadcast on the team channel, visible to all members'
     ),
     "send_message.content": "Message content with clear action guidance or information",
     "send_message.summary": "5-10 word summary for message preview and logging",

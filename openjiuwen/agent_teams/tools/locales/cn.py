@@ -119,11 +119,11 @@ STRINGS: dict[str, str] = {
     # ===== send_message ========================================================
     # send_message._desc lives in descs/cn/send_message.md
     "send_message.to": (
-        '收件人：填 member_name（如 "backend-dev-1"）发送点对点消息；'
+        '收件人：填 member_name（如 "backend-dev-1"）发送点对点 DM/私聊，仅你与该成员可见；'
         '填成员名数组（如 ["m1","m2"]）多播——同一份内容分别发给每个成员，'
         "开销随接收人数线性增长，同等规模下比广播更贵，仅在必要时使用，"
         '禁止与 "*"/"user" 混用；'
-        '填 "user"（仅 teammate 用于回复用户）；填 "*" 广播给所有成员'
+        '填 "user"（仅 teammate 用于回复用户）；填 "*" 广播到团队频道 channel，所有成员可见'
     ),
     "send_message.content": "消息内容，应包含明确的行动指引或信息",
     "send_message.summary": "5-10 词摘要，用于消息预览和日志",
