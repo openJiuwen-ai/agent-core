@@ -44,6 +44,36 @@ def test_mount_into_workspace_uses_symlink(monkeypatch, tmp_path):
     assert calls == [(manager.workspace_path, expected_link, True)]
 
 
+@pytest.mark.level0
+def test_mount_into_workspace_replaces_stale_directory_and_merges_files(monkeypatch, tmp_path):
+    manager = _make_manager(tmp_path)
+    workspace_root = tmp_path / "agent-workspace"
+    stale_mount = workspace_root / ".team" / "team-alpha"
+    stale_artifacts = stale_mount / "artifacts"
+    canonical_artifacts = tmp_path / "shared-workspace" / "artifacts"
+    stale_artifacts.mkdir(parents=True)
+    canonical_artifacts.mkdir(parents=True)
+    (stale_artifacts / "only-stale.md").write_text("from stale", encoding="utf-8")
+    (stale_artifacts / "existing.md").write_text("old", encoding="utf-8")
+    (canonical_artifacts / "existing.md").write_text("new", encoding="utf-8")
+    calls = []
+
+    def fake_mount(target, link):
+        calls.append((target, link))
+
+    monkeypatch.setattr(manager, "_mount_directory", fake_mount)
+
+    manager.mount_into_workspace(str(workspace_root))
+
+    expected_link = os.path.join(str(workspace_root), ".team", "team-alpha")
+    assert calls == [(manager.workspace_path, expected_link)]
+    assert (canonical_artifacts / "only-stale.md").read_text(encoding="utf-8") == "from stale"
+    assert (canonical_artifacts / "existing.md").read_text(encoding="utf-8") == "new"
+    assert not stale_mount.exists()
+    backups = list((workspace_root / ".team").glob("team-alpha.stale-*"))
+    assert len(backups) == 1
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction fallback only applies on Windows")
 @pytest.mark.level0
 def test_mount_into_workspace_falls_back_to_junction_on_windows_1314(monkeypatch, tmp_path):

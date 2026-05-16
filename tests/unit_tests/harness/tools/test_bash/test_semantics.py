@@ -29,12 +29,14 @@ class TestClassifyCommand:
         ("head -20 file.log", CommandKind.READ),
         ("wc -l *.py", CommandKind.READ),
         ("jq .name data.json", CommandKind.READ),
+        ("Select-Object Name, Length", CommandKind.READ),
     ])
     def test_read(self, cmd: str, expected: CommandKind) -> None:
         assert classify_command(cmd) == expected
 
     @pytest.mark.parametrize("cmd,expected", [
         ("ls -la", CommandKind.LIST),
+        ("Get-ChildItem C:\\tmp", CommandKind.LIST),
         ("tree src/", CommandKind.LIST),
         ("du -sh .", CommandKind.LIST),
     ])
@@ -89,6 +91,9 @@ class TestIsReadOnly:
 
     def test_single_list(self) -> None:
         assert is_read_only("ls -la") is True
+
+    def test_powershell_read_pipeline(self) -> None:
+        assert is_read_only("Get-Item missing.md | Select-Object Name, Length") is True
 
     def test_empty(self) -> None:
         assert is_read_only("") is False
@@ -162,3 +167,16 @@ class TestInterpretExitCode:
     def test_rg_1_no_match(self) -> None:
         m = interpret_exit_code("rg pattern .", 1)
         assert m.is_error is False
+
+    def test_powershell_read_1_without_stderr_is_no_output(self) -> None:
+        command = (
+            "powershell -Command "
+            "\"Get-Item 'C:\\tmp\\missing.md' -ErrorAction SilentlyContinue | Select-Object Name, Length\""
+        )
+        m = interpret_exit_code(command, 1, "", "")
+        assert m.is_error is False
+        assert m.message == "No output returned"
+
+    def test_powershell_read_1_with_stderr_is_error(self) -> None:
+        m = interpret_exit_code("Get-Item missing.md | Select-Object Name", 1, "", "Cannot find path")
+        assert m.is_error is True

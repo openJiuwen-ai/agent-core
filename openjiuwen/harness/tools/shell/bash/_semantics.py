@@ -32,7 +32,7 @@ class ExitCodeMeaning:
 
 _SEARCH_COMMANDS: frozenset[str] = frozenset({
     "find", "grep", "egrep", "fgrep", "rg", "ag", "ack",
-    "locate", "which", "whereis", "type", "command",
+    "locate", "which", "whereis", "type", "command", "findstr",
 })
 
 _READ_COMMANDS: frozenset[str] = frozenset({
@@ -40,10 +40,11 @@ _READ_COMMANDS: frozenset[str] = frozenset({
     "file", "strings", "jq", "yq", "awk", "gawk", "cut",
     "sort", "uniq", "tr", "tee", "od", "xxd", "hexdump",
     "sha256sum", "sha1sum", "md5sum", "md5", "shasum",
+    "get-content", "get-item", "test-path", "select-object", "where-object",
 })
 
 _LIST_COMMANDS: frozenset[str] = frozenset({
-    "ls", "tree", "du", "df", "lsof", "lsblk",
+    "ls", "dir", "tree", "du", "df", "lsof", "lsblk", "get-childitem",
 })
 
 _NEUTRAL_COMMANDS: frozenset[str] = frozenset({
@@ -89,7 +90,10 @@ def _extract_base_command(segment: str) -> str:
         if "=" in token and not token.startswith("-"):
             continue
         # strip path: /usr/bin/grep -> grep
-        return token.rsplit("/", maxsplit=1)[-1]
+        base = token.strip("\"'").rsplit("/", maxsplit=1)[-1].rsplit("\\", maxsplit=1)[-1].lower()
+        if base.endswith(".exe"):
+            base = base[:-4]
+        return base
     return ""
 
 
@@ -175,6 +179,14 @@ def _test_semantics(code: int, _stdout: str, _stderr: str) -> ExitCodeMeaning:
     return ExitCodeMeaning(is_error=True, message=f"test error (exit {code})")
 
 
+def _powershell_read_semantics(code: int, _stdout: str, stderr: str) -> ExitCodeMeaning:
+    if code == 0:
+        return ExitCodeMeaning(is_error=False)
+    if code == 1 and not stderr.strip():
+        return ExitCodeMeaning(is_error=False, message="No output returned")
+    return ExitCodeMeaning(is_error=True, message=f"PowerShell read command error (exit {code})")
+
+
 _SEMANTICS_TABLE: dict[str, Callable[[int, str, str], ExitCodeMeaning]] = {
     "grep": _grep_semantics,
     "egrep": _grep_semantics,
@@ -182,10 +194,16 @@ _SEMANTICS_TABLE: dict[str, Callable[[int, str, str], ExitCodeMeaning]] = {
     "rg": _grep_semantics,
     "ag": _grep_semantics,
     "ack": _grep_semantics,
+    "findstr": _grep_semantics,
     "find": _find_semantics,
     "diff": _diff_semantics,
     "test": _test_semantics,
     "[": _test_semantics,
+    "get-content": _powershell_read_semantics,
+    "get-item": _powershell_read_semantics,
+    "get-childitem": _powershell_read_semantics,
+    "select-object": _powershell_read_semantics,
+    "where-object": _powershell_read_semantics,
 }
 
 

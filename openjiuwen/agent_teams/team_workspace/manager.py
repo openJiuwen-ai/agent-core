@@ -17,6 +17,7 @@ Two operating modes:
 
 import asyncio
 import os
+import shutil
 import subprocess
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -193,6 +194,61 @@ class TeamWorkspaceManager:
             error_output = result.stderr.strip() or result.stdout.strip()
             raise OSError(f"Failed to create junction {link_path} -> {target_path}: {error_output}")
 
+    def _is_mounted_to_workspace(self, link_path: str) -> bool:
+        try:
+            return os.path.samefile(link_path, self.workspace_path)
+        except OSError:
+            return False
+
+    def _merge_existing_mount_contents(self, link_path: str) -> None:
+        """Copy files from a stale mount directory into the canonical workspace.
+
+        A stale real ``.team/<team_name>`` directory can be created when file
+        tools write before the mount exists.  Merge missing files so user
+        artifacts are not stranded before the directory is replaced by a mount.
+        Existing canonical files win to avoid overwriting newer workspace data.
+        """
+        if not os.path.isdir(link_path) or os.path.islink(link_path):
+            return
+        for root, dirs, files in os.walk(link_path):
+            rel_root = os.path.relpath(root, link_path)
+            dst_root = self.workspace_path if rel_root == "." else os.path.join(self.workspace_path, rel_root)
+            os.makedirs(dst_root, exist_ok=True)
+            for dirname in dirs:
+                os.makedirs(os.path.join(dst_root, dirname), exist_ok=True)
+            for filename in files:
+                src = os.path.join(root, filename)
+                dst = os.path.join(dst_root, filename)
+                if not os.path.exists(dst):
+                    shutil.copy2(src, dst)
+
+    @staticmethod
+    def _backup_existing_mount_path(link_path: str) -> str:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        backup_path = f"{link_path}.stale-{stamp}"
+        counter = 1
+        while os.path.exists(backup_path) or os.path.islink(backup_path):
+            counter += 1
+            backup_path = f"{link_path}.stale-{stamp}-{counter}"
+        os.rename(link_path, backup_path)
+        return backup_path
+
+    def _prepare_mount_path(self, link_path: str) -> bool:
+        """Return True when a mount should be created at ``link_path``."""
+        if not os.path.exists(link_path) and not os.path.islink(link_path):
+            return True
+        if self._is_mounted_to_workspace(link_path):
+            return False
+
+        self._merge_existing_mount_contents(link_path)
+        backup_path = self._backup_existing_mount_path(link_path)
+        team_logger.warning(
+            "Replaced stale team workspace mount path %s; previous contents moved to %s",
+            link_path,
+            backup_path,
+        )
+        return True
+
     def mount_into_workspace(self, workspace_root: str) -> None:
         """Create .team/{team_name} symlink in an agent workspace.
 
@@ -205,7 +261,7 @@ class TeamWorkspaceManager:
         team_dir = os.path.join(workspace_root, ".team")
         os.makedirs(team_dir, exist_ok=True)
         link_path = os.path.join(team_dir, self.team_name)
-        if not os.path.exists(link_path):
+        if self._prepare_mount_path(link_path):
             self._mount_directory(self.workspace_path, link_path)
             team_logger.debug(
                 "Mounted team workspace %s into %s",
@@ -263,7 +319,7 @@ class TeamWorkspaceManager:
             worktree_path: Absolute path to the worktree directory.
         """
         link_path = os.path.join(worktree_path, ".team")
-        if not os.path.exists(link_path):
+        if self._prepare_mount_path(link_path):
             self._mount_directory(self.workspace_path, link_path)
 
         gitignore_path = os.path.join(worktree_path, ".gitignore")

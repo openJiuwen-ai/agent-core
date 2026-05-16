@@ -17,7 +17,9 @@ from openjiuwen.core.sys_operation import (
     OperationMode,
     SysOperationCard,
 )
+from openjiuwen.core.sys_operation.local.shell_operation import ShellOperation
 from openjiuwen.core.sys_operation.result import ExecuteCmdStreamResult
+from openjiuwen.core.sys_operation.shell import ShellType
 
 
 @pytest.fixture
@@ -47,6 +49,83 @@ async def sys_op_fixture(work_dir):
 
     Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
     await Runner.stop()
+
+
+def test_windows_auto_unwraps_nested_powershell_command(monkeypatch):
+    """Avoid launching a second PowerShell process from auto mode on Windows."""
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+
+    exe = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    command = (
+        "powershell -Command "
+        "\"Get-Item 'C:\\tmp\\voiceover_timeline.md' -ErrorAction SilentlyContinue | Select-Object Name, Length\""
+    )
+
+    monkeypatch.setattr(shell_operation.os, "name", "nt", raising=False)
+    monkeypatch.setattr(shell_operation, "_available_powershell", lambda: exe)
+
+    args, use_shell, resolved_shell = ShellOperation._resolve_execution_plan(command, ShellType.AUTO)
+
+    assert use_shell is False
+    assert resolved_shell == "powershell"
+    assert args == [
+        exe,
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-Item 'C:\\tmp\\voiceover_timeline.md' -ErrorAction SilentlyContinue | Select-Object Name, Length",
+    ]
+
+
+def test_windows_explicit_powershell_unwraps_nested_command(monkeypatch):
+    """Explicit powershell shell_type should also execute the inner script."""
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+
+    exe = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    command = 'pwsh -NoProfile -NonInteractive -Command "Write-Output ok"'
+
+    monkeypatch.setattr(shell_operation.os, "name", "nt", raising=False)
+    monkeypatch.setattr(shell_operation, "_available_powershell", lambda: exe)
+
+    args, use_shell, resolved_shell = ShellOperation._resolve_execution_plan(command, ShellType.POWERSHELL)
+
+    assert use_shell is False
+    assert resolved_shell == "powershell"
+    assert args[-1] == "Write-Output ok"
+
+
+def test_windows_auto_routes_posix_ls_to_git_bash(monkeypatch):
+    """Common POSIX ls checks should run through Git Bash in Windows auto mode."""
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+
+    exe = r"C:\Program Files\Git\bin\bash.exe"
+    command = 'ls -la ".team/jiuwen_team_sess_abc/artifacts/"'
+
+    monkeypatch.setattr(shell_operation.os, "name", "nt", raising=False)
+    monkeypatch.setattr(shell_operation, "_available_bash", lambda *, allow_wsl=True: exe)
+
+    args, use_shell, resolved_shell = ShellOperation._resolve_execution_plan(command, ShellType.AUTO)
+
+    assert use_shell is False
+    assert resolved_shell == "bash"
+    assert args == [exe, "-lc", command]
+
+
+def test_windows_auto_routes_posix_ls_grep_pipeline_to_git_bash(monkeypatch):
+    """Common ls | grep checks should run through Git Bash in Windows auto mode."""
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+
+    exe = r"C:\Program Files\Git\bin\bash.exe"
+    command = 'ls -la "C:\\tmp\\artifacts" | grep -i "分镜"'
+
+    monkeypatch.setattr(shell_operation.os, "name", "nt", raising=False)
+    monkeypatch.setattr(shell_operation, "_available_bash", lambda *, allow_wsl=True: exe)
+
+    args, use_shell, resolved_shell = ShellOperation._resolve_execution_plan(command, ShellType.AUTO)
+
+    assert use_shell is False
+    assert resolved_shell == "bash"
+    assert args == [exe, "-lc", 'ls -la "C:/tmp/artifacts" | grep -i "分镜"']
 
 
 @pytest.mark.asyncio
