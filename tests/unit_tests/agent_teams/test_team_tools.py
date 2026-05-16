@@ -270,7 +270,7 @@ class TestSpawnMemberTool:
         tool = SpawnMemberTool(agent_team, t)
         result = await tool.invoke(
             {
-                "member_name": "member_explicit_tm",
+                "member_name": "member-explicit-tm",
                 "display_name": "Member",
                 "desc": "Test member",
                 "role_type": "teammate",
@@ -404,6 +404,49 @@ class TestSpawnMemberTool:
         assert result.success is True, result.error
         assert result.data["role_type"] == "human_agent"
         assert team.is_human_agent("alice") is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    @pytest.mark.parametrize(
+        "bad_name",
+        [
+            "后端开发1",
+            "Member1",
+            "backend_dev_1",
+            "backend dev",
+            "backend.dev",
+            "1backend",
+            "-backend",
+            "",
+        ],
+    )
+    async def test_invoke_rejects_non_portable_member_name(self, agent_team, t, bad_name):
+        """member_name must follow DNS-label kebab-case (a-z + 0-9 + hyphen, leading letter)."""
+        tool = SpawnMemberTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "member_name": bad_name,
+                "display_name": "x",
+                "desc": "x",
+            }
+        )
+        assert result.success is False
+        assert "Invalid member_name" in (result.error or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_accepts_kebab_case_member_name(self, agent_team, t):
+        """Lowercase kebab-case names with a leading letter pass validation."""
+        tool = SpawnMemberTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "backend-dev-1",
+                "display_name": "Backend Dev",
+                "desc": "ok",
+            }
+        )
+        assert result.success is True, result.error
+        assert result.data["member_name"] == "backend-dev-1"
 
 
 class TestShutdownMemberTool:

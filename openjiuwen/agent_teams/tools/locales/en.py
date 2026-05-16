@@ -37,9 +37,13 @@ STRINGS: dict[str, str] = {
     # ===== spawn_member ========================================================
     # spawn_member._desc lives in descs/en/spawn_member.md
     "spawn_member.member_name": (
-        "Unique member name (semantic slug, e.g. 'backend-dev-1'); "
-        "serves as primary identifier and routing key "
-        "for all message/approval/task operations"
+        "Unique member name (semantic slug, e.g. 'backend-dev-1', "
+        "DNS-label-style kebab-case). **Must start with a lowercase ASCII "
+        "letter (a-z); the rest may be lowercase letters, digits (0-9) or "
+        "hyphen (-)** — no uppercase, underscore, whitespace, CJK or any "
+        "other non-ASCII characters. Serves as the primary identifier and "
+        "the routing key for all message/approval/task operations; must be "
+        "unique within the team"
     ),
     "spawn_member.display_name": (
         "Human-readable display label for the member (e.g. 'Backend Expert'). "

@@ -9,6 +9,7 @@ and messaging capabilities as tools for agents to use.
 """
 
 import json
+import re
 from abc import ABC
 from functools import wraps
 from typing import (
@@ -151,6 +152,18 @@ HUMAN_AGENT_TOOLS: Set[str] = {
     "member_complete_task",
     "send_message",
 }
+
+
+# ``member_name`` is used verbatim as a primary key, a message routing
+# token, and a path segment under ``team_home``. Allowing non-ASCII
+# (e.g. CJK) or shell-significant characters in any of those positions
+# silently breaks routing on some transports and produces unreadable
+# directory layouts on disk. Restrict to the DNS-label-style alphabet
+# used everywhere else in the ecosystem (k8s pods, docker containers):
+# lowercase ASCII letters, digits, and hyphen, with a leading letter so
+# the name is never a bare number or starts with a separator. Enforced
+# at the only LLM-facing entry point (``spawn_member``).
+_MEMBER_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]*$")
 
 
 # ========== Team Management ==========
@@ -317,6 +330,19 @@ class SpawnMemberTool(TeamTool):
         display_name = inputs.get("display_name")
         desc = inputs.get("desc", "")
         role_type = (inputs.get("role_type") or "teammate").lower()
+
+        if not member_name or not _MEMBER_NAME_PATTERN.match(member_name):
+            return ToolOutput(
+                success=False,
+                error=(
+                    f"Invalid member_name {member_name!r}: must start with a "
+                    "lowercase ASCII letter (a-z), followed by lowercase "
+                    "letters, digits (0-9) or hyphen (-); no uppercase, "
+                    "underscore, whitespace, or non-ASCII characters "
+                    "(including CJK) — member_name is reused as a routing "
+                    "token and a filesystem path segment"
+                ),
+            )
 
         if role_type not in {"teammate", "human_agent"}:
             return ToolOutput(

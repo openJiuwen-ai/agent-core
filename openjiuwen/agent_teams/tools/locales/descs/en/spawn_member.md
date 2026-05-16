@@ -2,7 +2,7 @@ Create a new team member with domain expertise. Members are long-lived entities 
 
 | Parameter | Usage |
 |---|---|
-| **member_name** | Unique semantic slug (e.g. `backend-dev-1`); must not collide with any existing member |
+| **member_name** | Unique semantic slug (e.g. `backend-dev-1`, DNS-label-style kebab-case); **must start with a lowercase letter; the rest may be lowercase letters, digits, or hyphen**; must not collide with any existing member |
 | **display_name** | Human-readable role label (e.g. "Backend Developer Expert") |
 | **desc** | Long-term role definition: professional background, core expertise, the domains this member owns, and the boundaries it does not own. **Do not put current-batch tasks here** |
 | **role_type** | Optional. `teammate` (default) = regular LLM teammate; `human_agent` = human collaborator driven via HumanAgentInbox |
@@ -23,7 +23,7 @@ You must call build_team before calling spawn_member. Call order: build_team →
 - Good: `backend-dev-1`, `frontend-lead`, `test-engineer`, `db-architect`, `devops-1`, `qa-lead` — semantic kebab-case, reflects domain
 - Bad: `xx1`, `mem-a`, `worker`, `a` — no semantics, useless for task routing
 
-**Recommended syntax**: lowercase letters, digits, and hyphens (`-`) in kebab-case; first character must be a letter; length 3–32. Since `member_name` feeds message routing and file paths, avoid spaces, leading underscores, uppercase letters, and other special characters.
+**Required syntax**: DNS-label style — must start with a lowercase ASCII letter (`a-z`); the rest may be lowercase letters, digits (`0-9`), or hyphen (`-`). **Uppercase, underscore (`_`), whitespace, and any non-ASCII characters (CJK, etc.) are rejected** — the tool fails fast on any violation. `member_name` doubles as a message-routing key and a filesystem path segment, so non-ASCII / uppercase / underscore would break routing and produce unreadable directory layouts. The hyphen choice matches the convention used by k8s pods and docker containers, and avoids being mistaken for a shell variable (`$foo_bar`).
 
 **Avoiding collisions**:
 - Multiple members in one domain: add a numeric suffix — `backend-dev-1`, `backend-dev-2`

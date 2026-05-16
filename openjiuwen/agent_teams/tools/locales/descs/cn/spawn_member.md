@@ -2,7 +2,7 @@
 
 | 参数 | 用法 |
 |---|---|
-| **member_name** | 唯一标识成员的语义化名（如 `backend-dev-1`），必须确保不与现有成员重复 |
+| **member_name** | 唯一标识成员的语义化名（如 `backend-dev-1`，DNS label 风格 kebab-case），**首字符必须是小写字母，其余仅允许小写字母、数字和连字符**，必须确保不与现有成员重复 |
 | **display_name** | 成员显示名称，体现角色定位（如「后端开发专家」） |
 | **desc** | 长期角色定义：写清专业背景、核心专长、负责的领域范围以及不负责的边界。**不要写当前批次的具体任务** |
 | **role_type** | 可选；`teammate`（默认）= 普通 LLM 队友；`human_agent` = 人类成员，由真人通过 HumanAgentInbox 驱动 |
@@ -23,7 +23,7 @@
 - 好：`backend-dev-1`、`frontend-lead`、`test-engineer`、`db-architect`、`devops-1`、`qa-lead` — 语义化 kebab-case，反映领域
 - 差：`xx1`、`mem-a`、`worker`、`a` — 无语义，无法用于任务匹配
 
-**推荐语法**：小写字母、数字、连字符（`-`）组成 kebab-case；首字符必须是字母；长度 3–32 字符。member_name 会作为消息路由和文件路径的一部分，避免空格、下划线首字符、大写或其他特殊字符。
+**强制语法**：DNS label 风格 — 首字符必须是小写英文字母（`a-z`），其后仅允许小写字母、数字（`0-9`）和连字符（`-`）。**禁止大写字母、下划线（`_`）、空白以及中文等任何非 ASCII 字符** —— 违反者 tool 会直接拒绝。member_name 同时作为消息路由键和文件路径片段，CJK / 大写 / 下划线会破坏路由并产生不可读的目录布局。选用连字符与 k8s pod / docker container 等业界资源命名约定保持一致，shell 中也不会与环境变量 `$xxx` 混淆。
 
 **防冲突建议**：
 - 同领域多成员：加数字后缀 — `backend-dev-1`、`backend-dev-2`

@@ -29,7 +29,12 @@ STRINGS: dict[str, str] = {
     # clean_team._desc lives in descs/cn/clean_team.md
     # ===== spawn_member ========================================================
     # spawn_member._desc lives in descs/cn/spawn_member.md
-    "spawn_member.member_name": "成员唯一名（语义化 slug，如 backend-dev-1），同时作为主键和消息/审批/任务路由键；在同一团队内必须唯一",
+    "spawn_member.member_name": (
+        "成员唯一名（语义化 slug，如 backend-dev-1，DNS label 风格 kebab-case）。"
+        "**首字符必须是小写英文字母（a-z），其后仅允许小写字母、数字（0-9）和连字符（-）**；"
+        "禁止大写字母、下划线、空白、中文及其他非 ASCII 字符。"
+        "同时作为主键和消息/审批/任务路由键，在同一团队内必须唯一"
+    ),
     "spawn_member.display_name": "成员的显示名（如「后端开发专家」），仅用于展示，不用于路由",
     "spawn_member.desc": "成员的长期角色画像，包括专业背景、核心专长、优先认领的任务类型、协作风格以及不负责的边界，用于任务匹配和角色定位",
     "spawn_member.role_type": (
