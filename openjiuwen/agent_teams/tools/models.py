@@ -60,6 +60,18 @@ class TeamMember(SQLModel, table=True):
     status: str = Field(nullable=False)
     execution_status: Optional[str] = Field(default=None, nullable=True)
     mode: str = Field(nullable=False)
+    # Member role, persisted so cold-recovery can rebuild the right
+    # runtime (tools / rails / prompt sections) without inferring from
+    # leader-process memory. Stores the ``TeamRole`` enum value
+    # (``leader`` / ``teammate`` / ``human_agent``). Hard-coded to the
+    # ``teammate`` string literal rather than ``TeamRole.TEAMMATE.value``
+    # because ``schema.team`` already imports this module's parent
+    # subtree — pulling ``TeamRole`` in here closes a circular import.
+    # Keep in sync with ``TeamRole.TEAMMATE`` if that enum value ever
+    # changes. Older DB files created before this column existed get
+    # the same backfilled default via the schema-migration step in
+    # ``database/engine.py``.
+    role: str = Field(nullable=False, default="teammate")
     prompt: Optional[str] = Field(default=None, nullable=True)
     model_ref_json: Optional[str] = Field(default=None, nullable=True)
     """Lightweight reference to the assigned ``ModelPoolEntry`` as JSON.

@@ -147,14 +147,15 @@ class TeamBackend:
         self._on_team_cleaned = on_team_cleaned
 
         self.task_manager = TeamTaskManager(self.team_name, member_name, self.db, messager)
-        # Roster of human-collaborator members. Shared by reference with
-        # TeamMessageManager below so auto-read and similar HITT hooks
-        # can consult a single source of truth without wiring a back
-        # reference to this backend. Seeded from predefined_members so
-        # restart paths reconstruct the set without replaying spawn.
-        self._human_agent_names: set[str] = {
-            m.member_name for m in self.predefined_members if m.role_type == TeamRole.HUMAN_AGENT
-        }
+        # Roster of human-collaborator members. Sync in-memory cache so
+        # the many sync callers (coordination handlers, rails, prompt
+        # sections) can consult it cheaply. **DB is the source of truth**:
+        # this set is empty at construction time and rebuilt from
+        # ``team_member.role`` by ``refresh_human_agent_roster()`` at
+        # backend bootstrap. ``spawn_member`` also writes through to the
+        # set when it persists a HUMAN_AGENT row, so the cache and DB
+        # never diverge for the lifetime of this backend.
+        self._human_agent_names: set[str] = set()
         # Per-human-agent callback fired by the leader's dispatcher when
         # a team-side message reaches the avatar — see
         # ``register_human_agent_inbound`` for the registration surface.
@@ -226,6 +227,7 @@ class TeamBackend:
         execution_status: ExecutionStatus = ExecutionStatus.IDLE,
         mode: MemberMode = MemberMode.BUILD_MODE,
         allocation: Optional["Allocation"] = None,
+        role: TeamRole = TeamRole.TEAMMATE,
     ) -> MemberOpResult:
         """Create a team member record in the database.
 
@@ -246,6 +248,10 @@ class TeamBackend:
                 can refresh in-place via the live session pool. ``None``
                 when the team is not configured with a pool, in which
                 case the member uses its per-agent default model.
+            role: ``TeamRole`` enum value persisted on the member row.
+                Defaults to ``TEAMMATE`` for the ordinary teammate
+                spawn paths; ``spawn_human_agent`` overrides with
+                ``HUMAN_AGENT`` so the role survives cold recovery.
 
         Returns:
             ``MemberOpResult`` describing the outcome. ``__bool__`` falls
@@ -266,6 +272,7 @@ class TeamBackend:
             display_name=display_name,
             agent_card=agent_card.model_dump_json(),
             status=status,
+            role=role.value,
             desc=desc,
             execution_status=execution_status,
             mode=mode.value,
@@ -274,6 +281,12 @@ class TeamBackend:
         )
         if not success:
             return MemberOpResult.fail(f"Database rejected create_member for {member_name} in team {self.team_name}")
+
+        # Write through to the in-memory HITT roster cache so sync
+        # callers (coordination handlers, rails) see the new human
+        # immediately, without waiting for the next ``refresh_human_agent_roster``.
+        if role == TeamRole.HUMAN_AGENT:
+            self._human_agent_names.add(member_name)
 
         team_logger.info(f"Member {member_name} created successfully")
         return MemberOpResult.success()
@@ -1078,6 +1091,7 @@ class TeamBackend:
             status=MemberStatus.UNSTARTED,
             execution_status=ExecutionStatus.IDLE,
             mode=MemberMode.BUILD_MODE,
+            role=TeamRole.HUMAN_AGENT,
         )
         if not result.ok:
             team_logger.warning(
@@ -1086,13 +1100,41 @@ class TeamBackend:
                 self.team_name,
                 result.reason,
             )
-            return result
-
-        # Mutate the shared set in place so TeamMessageManager (which
-        # holds the same reference) observes the registration without
-        # extra wiring.
-        self._human_agent_names.add(member_name)
         return result
+
+    async def refresh_human_agent_roster(self) -> None:
+        """Rebuild the in-memory HITT roster from ``team_member.role``.
+
+        Cold-recovery entry points (leader ``recover_team``, teammate
+        ``from_spawn_payload``) call this before the backend serves any
+        sync ``is_human_agent`` / ``human_agent_names()`` lookups so the
+        cache picks up dynamically-spawned humans that were never in
+        ``predefined_members``. Idempotent — replaces the cache wholesale
+        with the DB snapshot.
+
+        Calls ``db.initialize()`` first so callers can drive the refresh
+        before any other DB-touching method has lazily warmed the DAOs.
+        Test setups that build a half-wired backend (no engine, no
+        session) survive as a no-op rather than crashing.
+        """
+        initializer = getattr(self.db, "initialize", None)
+        if initializer is not None:
+            await initializer()
+        member_dao = getattr(self.db, "member", None)
+        if member_dao is None:
+            team_logger.debug(
+                "Skipping human-agent roster refresh for team %s: member DAO unavailable",
+                self.team_name,
+            )
+            return
+        names = await member_dao.list_human_agent_names(self.team_name)
+        self._human_agent_names.clear()
+        self._human_agent_names.update(names)
+        team_logger.debug(
+            "Refreshed human-agent roster for team %s from DB: %s",
+            self.team_name,
+            sorted(self._human_agent_names),
+        )
 
     def is_human_agent(self, member_name: Optional[str]) -> bool:
         """Whether ``member_name`` is a registered human-agent member."""

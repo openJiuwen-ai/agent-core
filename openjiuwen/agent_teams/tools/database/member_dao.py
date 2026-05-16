@@ -37,13 +37,27 @@ class MemberDao:
         agent_card: str,
         status: str,
         *,
+        role: str = "teammate",
         desc: Optional[str] = None,
         execution_status: Optional[str] = None,
         mode: str = MemberMode.BUILD_MODE.value,
         prompt: Optional[str] = None,
         model_ref_json: Optional[str] = None,
     ) -> bool:
-        """Create a new team member."""
+        """Create a new team member.
+
+        Args:
+            role: ``TeamRole`` enum value (``leader`` / ``teammate`` /
+                ``human_agent``). Persisted so cold-recovery can rebuild
+                the right runtime profile (tools / rails / prompt
+                sections) without depending on the leader's in-memory
+                roster. Defaults to ``"teammate"`` (the literal value
+                of ``TeamRole.TEAMMATE``; spelled as a literal to keep
+                this module out of the ``schema.team`` import cycle)
+                because that matches the overwhelmingly common spawn
+                path. HITT callers must pass
+                ``role=TeamRole.HUMAN_AGENT.value`` explicitly.
+        """
         async with self._session_local() as session:
             try:
                 member = TeamMember(
@@ -52,6 +66,7 @@ class MemberDao:
                     display_name=display_name,
                     agent_card=agent_card,
                     status=status,
+                    role=role,
                     desc=desc,
                     execution_status=execution_status,
                     mode=mode,
@@ -67,6 +82,22 @@ class MemberDao:
                 await session.rollback()
                 team_logger.error("Member %s already exists", member_name)
                 return False
+
+    async def list_human_agent_names(self, team_name: str) -> list[str]:
+        """Return member names whose ``role`` is ``human_agent``.
+
+        Used by ``TeamBackend.refresh_human_agent_roster`` to rebuild
+        the in-memory HITT roster cache from DB after cold recovery or
+        teammate-process startup.
+        """
+        from openjiuwen.agent_teams.schema.team import TeamRole
+
+        async with self._session_local() as session:
+            stmt = select(TeamMember.member_name).where(
+                TeamMember.team_name == team_name,
+                TeamMember.role == TeamRole.HUMAN_AGENT.value,
+            )
+            return list((await session.execute(stmt)).scalars().all())
 
     async def get_member(self, member_name: str, team_name: str) -> Optional[TeamMember]:
         """Get member information by ID."""

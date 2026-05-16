@@ -52,6 +52,38 @@ def _clear_table(sync_conn, table_name: str) -> None:
     sync_conn.exec_driver_sql(f'DELETE FROM "{quoted_name}"')
 
 
+def _ensure_team_member_role_column(sync_conn) -> None:
+    """Backfill the ``team_member.role`` column on pre-existing DBs.
+
+    ``SQLModel.metadata.create_all`` only creates tables that don't
+    exist; it never alters live tables. DB files created before the
+    ``role`` column was introduced therefore lack it after upgrading,
+    and the next ``INSERT`` against ``team_member`` fails. Probe the
+    column list and run a one-shot ``ALTER TABLE ... ADD COLUMN`` with
+    a backfill default of ``teammate`` so legacy rows are interpreted
+    as ordinary teammates. SQLite / PostgreSQL / MySQL all accept the
+    same form; column defaults apply to subsequent reads of pre-existing
+    rows too, so no separate UPDATE is required.
+    """
+    inspector = inspect(sync_conn)
+    if "team_member" not in inspector.get_table_names():
+        return
+    columns = {col["name"] for col in inspector.get_columns("team_member")}
+    if "role" in columns:
+        return
+
+    # Hard-coded "teammate" to keep this module free of the
+    # ``schema.team`` import (which would close a circular dependency
+    # back through ``tools.memory_database``). Keep in sync with
+    # ``TeamRole.TEAMMATE`` if that enum value ever changes.
+    default_role = "teammate"
+    sync_conn.exec_driver_sql(f"ALTER TABLE team_member ADD COLUMN role TEXT NOT NULL DEFAULT '{default_role}'")
+    team_logger.info(
+        "Migrated legacy team_member table: added role column with default %s",
+        default_role,
+    )
+
+
 async def initialize_engine(
     config: DatabaseConfig,
 ) -> tuple[AsyncEngine, async_sessionmaker]:
@@ -163,6 +195,7 @@ async def initialize_engine(
 
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+        await conn.run_sync(_ensure_team_member_role_column)
 
     return engine, session_local
 
