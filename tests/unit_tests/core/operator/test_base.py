@@ -4,10 +4,10 @@
 """Unit tests for openjiuwen.core.operator.base module."""
 
 import inspect
-from unittest.mock import MagicMock
 
 import pytest
 
+from openjiuwen.agent_evolving.types import UpdateValue
 from openjiuwen.core.operator.base import Operator, TunableSpec
 
 
@@ -84,6 +84,43 @@ class TestOperator:
         assert inspect.isfunction(Operator.load_state)
 
     @staticmethod
+    def test_apply_update_uses_default_compatibility_path():
+        """Test apply_update delegates replace/state updates to set_parameter."""
+        operator = _ConcreteOperator()
+
+        result = operator.apply_update("system_prompt", UpdateValue(payload="new prompt"))
+
+        assert operator.set_parameter_calls == [("system_prompt", "new prompt")]
+        assert result.operator_id == "test_operator"
+        assert result.target == "system_prompt"
+        assert result.applied is True
+        assert result.value == "new prompt"
+
+    @staticmethod
+    def test_apply_update_reports_noop_when_state_does_not_change():
+        """Test compatibility path reports no-op when set_parameter changes nothing."""
+        operator = _ConcreteOperator()
+
+        result = operator.apply_update("unknown_target", UpdateValue(payload="new prompt"))
+
+        assert operator.set_parameter_calls == [("unknown_target", "new prompt")]
+        assert result.applied is False
+
+    @staticmethod
+    def test_apply_update_rejects_non_replace_update_in_default_path():
+        """Test base compatibility path does not accept non-replace updates."""
+        operator = _ConcreteOperator()
+
+        result = operator.apply_update(
+            "system_prompt",
+            UpdateValue(payload="delta", mode="append"),
+        )
+
+        assert operator.set_parameter_calls == []
+        assert result.applied is False
+        assert result.errors == ["unsupported update mode/effect for compatibility operator: append/state"]
+
+    @staticmethod
     def test_operator_is_not_executable():
         """Test that Operator no longer has invoke/stream methods.
 
@@ -97,6 +134,10 @@ class TestOperator:
 class _ConcreteOperator(Operator):
     """Concrete implementation for testing base class."""
 
+    def __init__(self):
+        self.set_parameter_calls = []
+        self._state = {}
+
     @property
     def operator_id(self) -> str:
         return "test_operator"
@@ -105,10 +146,12 @@ class _ConcreteOperator(Operator):
         return {}
 
     def set_parameter(self, target, value):
-        pass
+        self.set_parameter_calls.append((target, value))
+        if target == "system_prompt":
+            self._state[target] = value
 
     def get_state(self):
-        return {}
+        return dict(self._state)
 
     def load_state(self, state):
         pass

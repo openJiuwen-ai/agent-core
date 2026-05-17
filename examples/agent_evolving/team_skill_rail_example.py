@@ -25,7 +25,7 @@ from typing import AsyncIterator
 from dotenv import load_dotenv
 
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig, create_messager
-from openjiuwen.agent_teams.spawn.context import reset_session_id, set_session_id
+from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType, TeamDatabase
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import create_team_tools
@@ -212,9 +212,9 @@ def parse_args() -> argparse.Namespace:
         help="Improvement request used for request_user_evolution().",
     )
     parser.add_argument(
-        "--approve-patch",
+        "--approve-record",
         action="store_true",
-        help="Approve and persist the generated patch after it is proposed.",
+        help="Approve and persist the generated experience record after it is proposed.",
     )
     return parser.parse_args()
 
@@ -274,7 +274,7 @@ async def main() -> None:
                 return
 
             print("final output:", result.get("output", result))
-            print("requesting evolution patch with user intent:", args.user_intent)
+            print("requesting evolution record with user intent:", args.user_intent)
 
             request_id = await team_rail.request_user_evolution(
                 "research-team",
@@ -282,7 +282,7 @@ async def main() -> None:
                 auto_approve=False,
             )
             if not request_id:
-                print("No patch was generated from the user intent.")
+                print("No experience record was generated from the user intent.")
                 return
 
             events = await team_rail.drain_pending_approval_events(wait=True, timeout=5.0)
@@ -291,18 +291,18 @@ async def main() -> None:
                 for event in events
                 if event.type == "chat.ask_user_question" and event.payload.get("request_id") == request_id
             ]
-            print("patch request id:", request_id)
+            print("record request id:", request_id)
             if approval_events:
                 question = approval_events[0].payload["questions"][0]["question"]
-                print("patch preview:")
+                print("record preview:")
                 print(question)
             else:
-                print("Patch was generated, but no approval preview event was drained in time.")
+                print("Experience record was generated, but no approval preview event was drained in time.")
 
-            if args.approve_patch:
-                await team_rail.on_approve_patch(request_id)
+            if args.approve_record:
+                await team_rail.approve_record(request_id)
                 evo_path = skills_dir / "research-team" / "evolutions.json"
-                print("patch approved and persisted to:", evo_path)
+                print("record approved and persisted to:", evo_path)
     finally:
         await Runner.stop()
 

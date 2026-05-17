@@ -19,6 +19,7 @@ from openjiuwen.agent_teams.schema.events import (
     TaskClaimedEvent,
     TaskCompletedEvent,
     TaskCreatedEvent,
+    TaskListDrainedEvent,
     TaskUnblockedEvent,
     TaskUpdatedEvent,
     TeamTopic,
@@ -37,8 +38,9 @@ from openjiuwen.agent_teams.schema.task import (
     TaskOpResult,
     TaskSummary,
 )
-from openjiuwen.agent_teams.spawn.context import get_session_id
+from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.tools.database import (
+    TASK_TERMINAL_STATUSES,
     TeamDatabase,
     TeamTaskBase,
     TeamTaskDependencyBase,
@@ -667,6 +669,7 @@ class TeamTaskManager:
             error_label=f"Task completed event for {task_id}",
         )
         await self._publish_unblocked_events(unblocked_tasks)
+        await self._maybe_publish_task_list_drained()
         return TaskOpResult.success()
 
     async def cancel(self, task_id: str) -> Optional[TeamTaskBase]:
@@ -692,6 +695,7 @@ class TeamTaskManager:
             error_label=f"Task cancelled event for {task_id}",
         )
         await self._publish_unblocked_events(unblocked_tasks)
+        await self._maybe_publish_task_list_drained()
         return task
 
     async def cancel_all_tasks(
@@ -728,6 +732,7 @@ class TeamTaskManager:
                 error_label=f"Task cancelled event for {task.task_id}",
             )
         await self._publish_unblocked_events(unblocked_tasks)
+        await self._maybe_publish_task_list_drained()
         return cancelled_tasks
 
     async def _publish_task_event(self, event, *, error_label: str) -> None:
@@ -751,6 +756,24 @@ class TeamTaskManager:
                 error_label=f"Task unblocked event for {task.task_id}",
             )
         team_logger.info(f"Unblocked {len(unblocked_tasks)} tasks")
+
+    async def _maybe_publish_task_list_drained(self) -> None:
+        """Publish TASK_LIST_DRAINED if every task in the list is now terminal.
+
+        Re-reads the full task list; no-op when the list is empty (an empty
+        board is not "drained"). Idempotency across repeated terminal
+        transitions is the consumer's concern — the manager just reports the
+        fact each time it observes it.
+        """
+        tasks = await self.list_tasks()
+        if not tasks:
+            return
+        if any(tk.status not in TASK_TERMINAL_STATUSES for tk in tasks):
+            return
+        await self._publish_task_event(
+            TaskListDrainedEvent(team_name=self.team_name, task_count=len(tasks)),
+            error_label=f"Task list drained event for team {self.team_name}",
+        )
 
     async def list_tasks(self, status: Optional[str] = None) -> List[TeamTaskBase]:
         """List all tasks for the team

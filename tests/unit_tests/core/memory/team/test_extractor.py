@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.memory.team.extractor import extract_team_memories
+from openjiuwen.agent_teams.memory.extractor import extract_team_memories
 
 
 @pytest.fixture
@@ -34,7 +34,7 @@ async def test_extract_team_memories_skips_when_model_none(team_memory_dir):
         to_member_name=None,
         content="hi",
     )
-    mock_db.get_team_messages = AsyncMock(return_value=[mock_msg])
+    mock_db.message.get_team_messages = AsyncMock(return_value=[mock_msg])
 
     with patch("openjiuwen.harness.factory.create_deep_agent") as mock_create:
         with patch("openjiuwen.core.runner.runner.Runner.run_agent", new_callable=AsyncMock):
@@ -81,7 +81,7 @@ async def test_extract_team_memories_success_path_calls_agent_and_runner(team_me
         content="please review",
     )
     mock_db = MagicMock()
-    mock_db.get_team_messages = AsyncMock(return_value=[mock_msg])
+    mock_db.message.get_team_messages = AsyncMock(return_value=[mock_msg])
 
     mock_agent = MagicMock()
     mock_model = MagicMock()

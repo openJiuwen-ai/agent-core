@@ -76,6 +76,31 @@ class TestTrajectoryBuilder:
         assert builder.steps[2].kind == "llm"
 
     @staticmethod
+    def test_record_step_respects_max_steps_window():
+        """Builder keeps only the most recent steps when max_steps is set."""
+        builder = TrajectoryBuilder(session_id="s1", source="online", max_steps=2)
+
+        step1 = make_step(kind="llm")
+        step2 = make_step(kind="tool")
+        step3 = make_step(kind="llm")
+
+        builder.record_step(step1)
+        builder.record_step(step2)
+        builder.record_step(step3)
+
+        assert builder.steps == [step2, step3]
+
+    @staticmethod
+    def test_builder_rejects_invalid_max_steps():
+        """max_steps must keep at least one step when configured."""
+        try:
+            TrajectoryBuilder(session_id="s1", source="online", max_steps=0)
+        except ValueError as exc:
+            assert "max_steps" in str(exc)
+        else:
+            raise AssertionError("expected ValueError")
+
+    @staticmethod
     def test_build_returns_trajectory():
         """Build returns a valid Trajectory."""
         builder = TrajectoryBuilder(

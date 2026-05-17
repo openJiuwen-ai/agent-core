@@ -8,7 +8,7 @@ Houses hard-coded user-facing strings that live inside runtime code paths
 be switched between Chinese and English without source edits.
 
 Modules that already carry their own bilingual dictionaries
-(``agent/team_rail.py``, ``agent/policy.py``) or Markdown-backed
+(``prompts/sections.py``, ``prompts/policy.py``) or Markdown-backed
 descriptions (``tools/locales/``) are intentionally NOT routed through
 this module — they accept a ``language`` argument at call time and
 should continue to do so.
@@ -90,9 +90,26 @@ STRINGS: dict[str, dict[str, str]] = {
         # HITT — reserved human_agent member
         "hitt.human_agent_display_name": "人类成员",
         "hitt.human_agent_default_persona": (
-            "团队中的人类协作者。与 leader、teammate 地位平等；由真实操作者驱动，可接收任务、回复消息、参与协作。"
+            "外部用户在团队里的代理（avatar）。所有动作都由对应的真人通过 Inbox 驱动；"
+            "可使用文件、任务、工作空间等工具替用户完成事务，但不主动发声、不自主认领任务。"
         ),
         "hitt.human_agent_spawned": "[成员事件] 人类成员 human_agent 已加入团队",
+        # HITT — team events delivered to human_agent's harness. Different
+        # wording from the teammate templates so the avatar LLM frames the
+        # input as a notification for its controller (the real human who
+        # operates this avatar via the Inbox), not as a self-execution prompt.
+        "hitt.task_assigned_to_self_human": (
+            "[任务指派给控制者] 你被指派了新任务 [{task_id}] {title}。"
+            "这是给你的控制者看的通知；除非控制者在 Inbox 明确要求你处理，"
+            "否则不要自动调任何工具。"
+        ),
+        "hitt.msg_received_for_human": (
+            "[转发给控制者的{msg_type}] message_id={message_id}, "
+            "来自: {sender}\n"
+            "内容: {content}\n"
+            "提示: 这条消息会原样展示给你的控制者；"
+            "除非控制者明确要求你转告或回复，否则不要主动调 send_message。"
+        ),
     },
     "en": {
         # schema/blueprint.py
@@ -166,11 +183,31 @@ STRINGS: dict[str, dict[str, str]] = {
         # HITT — reserved human_agent member
         "hitt.human_agent_display_name": "Human Member",
         "hitt.human_agent_default_persona": (
-            "The human collaborator on the team. Equal in standing with "
-            "the leader and teammates; driven by a real operator, can "
-            "receive tasks, reply to messages, and collaborate."
+            "An external user's avatar on the team. Every action is "
+            "driven by the corresponding human via the Inbox; uses file, "
+            "task, and workspace tools to act on the user's behalf, but "
+            "does not speak up on its own and does not autonomously "
+            "claim tasks."
         ),
         "hitt.human_agent_spawned": "[Member Event] Human member 'human_agent' joined the team",
+        # HITT — team events delivered to human_agent's harness. Wording is
+        # distinct from the teammate templates so the avatar LLM frames the
+        # input as a notification for its controller (the real human driving
+        # this avatar via the Inbox), not as a self-execution prompt.
+        "hitt.task_assigned_to_self_human": (
+            "[Task Assigned For Controller] You have been assigned task "
+            '[{task_id}] "{title}". This is a notification for your '
+            "controller; do not autonomously call tools unless the controller "
+            "instructs you via the Inbox."
+        ),
+        "hitt.msg_received_for_human": (
+            "[For-Controller {msg_type}] message_id={message_id}, "
+            "from: {sender}\n"
+            "content: {content}\n"
+            "tip: This message is shown to your controller as-is; "
+            "do not call send_message unless the controller explicitly "
+            "asks you to relay or reply."
+        ),
     },
 }
 

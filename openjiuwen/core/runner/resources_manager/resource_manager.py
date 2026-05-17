@@ -152,7 +152,8 @@ class ResourceMgr:
                   card: AgentCard,
                   agent: AgentProvider | "RemoteAgent",
                   *,
-                  tag: Optional[Tag | list[Tag]] = None
+                  tag: Optional[Tag | list[Tag]] = None,
+                  interface_url: str | None = None,
                   ) -> Result[AgentCard, Exception]:
         """
         Add a single agent to the resource manager.
@@ -175,7 +176,8 @@ class ResourceMgr:
                                         resource=agent,
                                         resource_card=card,
                                         tag=tag,
-                                        resource_type="agent")
+                                        resource_type="agent",
+                                        interface_url=interface_url)
 
     def add_agents(self,
                    agents: list[Tuple[AgentCard, AgentProvider]],
@@ -358,7 +360,8 @@ class ResourceMgr:
     def add_tool(self,
                  tool: Tool | list[Tool],
                  *,
-                 tag: Optional[Tag | list[Tag]] = None
+                 tag: Optional[Tag | list[Tag]] = None,
+                 refresh: bool = False,
                  ) -> Result[ToolCard, Exception] | list[Result[ToolCard, Exception]]:
         """
         Add tool(s) to the resource manager.
@@ -366,6 +369,12 @@ class ResourceMgr:
         Args:
             tool: Single Tool instance or list of Tool instances to add.
             tag: Optional tag(s) for categorizing and filtering the tool(s).
+            refresh: When True, an existing registration sharing the same tool id
+                is dropped before the new instance is registered. Required for
+                stateful tools bound to a specific agent/session instance (e.g.
+                team-scoped tools) so a restart can rebind to the new instance
+                instead of being rejected as a duplicate. Defaults to False to
+                preserve the strict "no duplicate registration" guarantee.
 
         Returns:
             Result[ToolCard, Exception] or list[Result[ToolCard, Exception]]:
@@ -375,6 +384,7 @@ class ResourceMgr:
         if tag is not None:
             self._inner_validate_tag(tag)
         if isinstance(tool, Tool):
+            self._refresh_existing_tool_if_needed(tool, refresh=refresh)
             return self._inner_add_resource(resource_id=tool.card.id if tool.card else None,
                                             resource=tool,
                                             resource_card=tool.card,
@@ -382,12 +392,31 @@ class ResourceMgr:
                                             resource_type="tool")
         results = []
         for item in tool:
+            self._refresh_existing_tool_if_needed(item, refresh=refresh)
             results.append(self._inner_add_resource(resource_id=item.card.id,
                                                     resource=item,
                                                     resource_card=item.card,
                                                     tag=tag,
                                                     resource_type="tool"))
         return results
+
+    def _refresh_existing_tool_if_needed(self, tool: Tool, *, refresh: bool) -> None:
+        """Drop an existing tool registration so a fresh instance can replace it.
+
+        No-op when ``refresh`` is False, the tool has no card, or the id is not
+        currently registered. Otherwise reuses the standard remove path so the
+        registry, tag map and id-to-card cache stay in sync.
+        """
+        if not refresh:
+            return
+        if tool.card is None:
+            return
+        tool_id = tool.card.id
+        if not self._tag_mgr.has_resource(tool_id):
+            return
+        self._inner_remove_resources(resource_id=tool_id,
+                                     tag=None,
+                                     resource_type="tool")
 
     def get_tool(self,
                  tool_id: str | list[str] = None,
@@ -1309,7 +1338,8 @@ class ResourceMgr:
         self._id_to_card = {}
 
     def _inner_add_resource(self, *, resource_id: str, resource_type: str, resource: Any,
-                            resource_card: Optional[BaseCard] = None, tag: Optional[Tag | list[Tag]] = None):
+                            resource_card: Optional[BaseCard] = None, tag: Optional[Tag | list[Tag]] = None,
+                            interface_url: str | None = None):
         """
         Internal method to add a resource.
 
@@ -1331,7 +1361,12 @@ class ResourceMgr:
             if resource_type == "workflow":
                 self._resource_registry.workflow().add_workflow(resource_id, resource)
             elif resource_type == "agent":
-                self._resource_registry.agent().add_agent(resource_id, resource)
+                self._resource_registry.agent().add_agent(
+                    resource_id,
+                    resource,
+                    card=resource_card,
+                    interface_url=interface_url,
+                )
             elif resource_type == "team":
                 self._resource_registry.agent_team().add_agent_team(resource_id, resource)
             elif resource_type == "tool":

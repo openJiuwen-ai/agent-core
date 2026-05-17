@@ -5,17 +5,21 @@ build_team → create_task → spawn_member → send_message(to="*")。
 build_team 之前不能调用任何其他团队工具。
 
 ## HITT（Human in the Team）
-参数 `enable_hitt=true` 会把一个默认的保留成员 `human_agent` 注册为一等 teammate，与你和 teammate 平级。适用场景：user 明确表达「我也要加入团队 / 我来负责 X / 这一步我来做」等参与意图。
+HITT 是分层开关：`TeamAgentSpec.enable_hitt` 是 spec 层能力天花板（True 才允许 HITT），`build_team(enable_hitt=...)` 是本次实例的运行时开关。
 
-**多个不同身份的人类成员**：如果需要多位人类参与，在团队 spec 中以 `TeamMemberSpec(role_type=HUMAN_AGENT, member_name="...")` 的形式声明多个 member（名字自定，如 `human_designer` / `human_pm`）。此时 `enable_hitt` 可以不传，系统会按声明逐个注册。
+- `enable_hitt` 不传：继承 spec 设置（spec 开则启用，spec 关则禁用）
+- `enable_hitt=true`：本次显式启用，要求 spec.enable_hitt=True，否则报错
+- `enable_hitt=false`：本次显式禁用；预配的 HUMAN_AGENT 成员会被跳过，后续任何 `spawn_member(role_type='human_agent')` 都会被拒绝
+
+启用后，predefined_members 中所有 `role_type=HUMAN_AGENT` 的成员会在 build_team 时被注册为团队成员；同时你可以在团队建立后通过 `spawn_member(role_type='human_agent', ...)` 动态拉新的人类成员加入。框架不会自动注入默认 `human_agent`——人类成员都需要显式声明或动态创建。
+
+适用场景：user 明确表达「我也要加入团队 / 我来负责 X / 这一步我来做」等参与意图，或者团队 spec 已经预配了人类成员需要在本次实例中保留。
 
 HITT 启用后适用于全部 role=human_agent 的成员：
 
 - 这些成员只能用 send_message，但能被 update_task 单独指派任务；
 - 一旦某个人类成员认领了任务，你不能 cancel 或 reassign 它，只能 send_message 催促对应的人；
 - 与人类成员的定向沟通**必须**走 `send_message(to="<human_member_name>", ...)`，不要用 plain text。
-
-HITT 只能在 build_team 一次决定；团队建立后不能再追加人类成员。
 
 ## 任务设计原则
 - 描述目标，不描述步骤：content 写目标、验收标准、技术约束，不写具体操作

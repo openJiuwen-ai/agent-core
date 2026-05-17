@@ -16,6 +16,65 @@ from openjiuwen.extensions.a2a.a2a_remote_client import A2ARemoteClient
 
 @pytest.mark.asyncio
 class TestA2ARemoteClient:
+    async def test_a2a_remote_client_should_require_card(self):
+        with pytest.raises(ValueError, match="card is required when protocol is A2A"):
+            A2ARemoteClient(
+                RemoteClientConfig(
+                    id="a2a-agent",
+                    protocol=ProtocolEnum.A2A,
+                    url="http://127.0.0.1:41241",
+                )
+            )
+
+    async def test_a2a_remote_client_should_pass_polling_to_a2a_client(self, monkeypatch):
+        captured = {}
+
+        class FakeA2AClient:
+            def __init__(self, **kwargs):
+                captured["init_kwargs"] = kwargs
+
+        monkeypatch.setattr(
+            "openjiuwen.extensions.a2a.a2a_remote_client.A2AClient",
+            FakeA2AClient,
+        )
+
+        A2ARemoteClient(
+            RemoteClientConfig(
+                id="a2a-agent",
+                protocol=ProtocolEnum.A2A,
+                url="http://127.0.0.1:41241",
+                kwargs={"card": AgentCard(id="a2a-agent", name="a2a-agent"), "polling": True},
+            )
+        )
+
+        assert captured["init_kwargs"]["polling"] is True
+        assert captured["init_kwargs"]["card"] is not None
+
+    async def test_a2a_remote_client_should_pass_card_from_kwargs_to_a2a_client(self, monkeypatch):
+        captured = {}
+
+        class FakeA2AClient:
+            def __init__(self, **kwargs):
+                captured["init_kwargs"] = kwargs
+
+        monkeypatch.setattr(
+            "openjiuwen.extensions.a2a.a2a_remote_client.A2AClient",
+            FakeA2AClient,
+        )
+
+        card = AgentCard(id="a2a-agent", name="a2a-agent")
+        A2ARemoteClient(
+            RemoteClientConfig(
+                id="a2a-agent",
+                protocol=ProtocolEnum.A2A,
+                url="http://127.0.0.1:41241",
+                kwargs={"card": card},
+            )
+        )
+
+        assert captured["init_kwargs"]["polling"] is False
+        assert captured["init_kwargs"]["card"] is not None
+
     async def test_invoke_should_return_agent_result_from_a2a_client(self, monkeypatch):
         captured = {}
 
@@ -30,7 +89,7 @@ class TestA2ARemoteClient:
                 captured["invoke_inputs"] = inputs
                 return AgentResult(
                     task_id="task-send-1",
-                    sessionId="conv-1",
+                    sessionId="sdk-context-1",
                     status=TaskStatus.COMPLETED,
                 )
 
@@ -39,12 +98,11 @@ class TestA2ARemoteClient:
             FakeA2AClient,
         )
 
-        card = AgentCard(id="a2a-agent", name="a2a-agent")
         client = A2ARemoteClient(RemoteClientConfig(
             id="a2a-agent",
             protocol=ProtocolEnum.A2A,
             url="http://127.0.0.1:41241",
-            kwargs={"card": card},
+            kwargs={"card": AgentCard(id="a2a-agent", name="a2a-agent")},
         ))
         await client.start()
         try:
@@ -52,9 +110,52 @@ class TestA2ARemoteClient:
         finally:
             await client.stop()
 
-        assert "card" in captured["init_kwargs"]
+        assert captured["init_kwargs"]["polling"] is False
+        assert captured["init_kwargs"]["card"] is not None
         assert captured["invoke_inputs"]["query"] == "hello"
         assert response.status == TaskStatus.COMPLETED
+        assert response.sessionId == "conv-1"
+        assert captured["closed"] is True
+
+    async def test_cancel_task_should_delegate_to_a2a_client(self, monkeypatch):
+        captured = {}
+
+        class FakeA2AClient:
+            def __init__(self, **kwargs):
+                captured["init_kwargs"] = kwargs
+
+            async def stop(self):
+                captured["closed"] = True
+
+            async def cancel_task(self, task_id, tenant=None):
+                captured["cancel_task"] = {"task_id": task_id, "tenant": tenant}
+                return AgentResult(
+                    task_id=task_id,
+                    sessionId="sdk-context-cancel-1",
+                    status=TaskStatus.CANCELED,
+                )
+
+        monkeypatch.setattr(
+            "openjiuwen.extensions.a2a.a2a_remote_client.A2AClient",
+            FakeA2AClient,
+        )
+
+        client = A2ARemoteClient(RemoteClientConfig(
+            id="a2a-agent",
+            protocol=ProtocolEnum.A2A,
+            url="http://127.0.0.1:41241",
+            kwargs={"card": AgentCard(id="a2a-agent", name="a2a-agent")},
+        ))
+        await client.start()
+        try:
+            response = await client.cancel_task("task-cancel-1", tenant="tenant-1")
+        finally:
+            await client.stop()
+
+        assert captured["cancel_task"] == {"task_id": "task-cancel-1", "tenant": "tenant-1"}
+        assert response.task_id == "task-cancel-1"
+        assert response.status == TaskStatus.CANCELED
+        assert response.sessionId == "sdk-context-cancel-1"
         assert captured["closed"] is True
 
     async def test_remote_agent_invoke_should_return_agent_result(self, monkeypatch):
@@ -71,7 +172,7 @@ class TestA2ARemoteClient:
             async def invoke(self, inputs):
                 return AgentResult(
                     task_id="task-send-1",
-                    sessionId=inputs.get("conversation_id"),
+                    sessionId="sdk-context-1",
                     status=TaskStatus.COMPLETED,
                     artifacts=[
                         Artifact(
@@ -93,12 +194,128 @@ class TestA2ARemoteClient:
             protocol=ProtocolEnum.A2A,
             config={
                 "url": "http://127.0.0.1:41241",
-                "kwargs": {"card": AgentCard(id="a2a-agent", name="a2a-agent")},
+                "kwargs": {
+                    "card": AgentCard(id="a2a-agent", name="a2a-agent"),
+                    "polling": True,
+                },
             },
         )
         response = await agent.invoke({"query": "hello a2a", "conversation_id": "conv-1"})
         assert response.status == TaskStatus.COMPLETED
+        assert response.sessionId == "conv-1"
         assert response.artifacts[0].parts[0].text == "invoke ok"
+        assert agent.client.client.kwargs["polling"] is True
+
+    async def test_remote_agent_should_bootstrap_a2a_registration_without_preimport(self, monkeypatch):
+        from openjiuwen.core.runner.drunner import remote_client as remote_client_module
+
+        registry_snapshot = dict(remote_client_module._CUSTOM_REMOTE_CLIENTS)
+        remote_client_module._CUSTOM_REMOTE_CLIENTS.clear()
+
+        captured = {}
+
+        class FakeA2AClient:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            async def stop(self):
+                return None
+
+            async def invoke(self, inputs):
+                captured["invoke_inputs"] = inputs
+                return AgentResult(
+                    task_id="task-send-bootstrap-1",
+                    sessionId="sdk-context-bootstrap-1",
+                    status=TaskStatus.COMPLETED,
+                    artifacts=[
+                        Artifact(
+                            artifactId="artifact-bootstrap-1",
+                            parts=[Part(text="bootstrap invoke ok")],
+                        )
+                    ],
+                    metadata={},
+                )
+
+        monkeypatch.setattr(
+            "openjiuwen.extensions.a2a.a2a_remote_client.A2AClient",
+            FakeA2AClient,
+        )
+
+        def fake_import_module(name):
+            assert name == "openjiuwen.extensions.a2a"
+            remote_client_module.register_remote_client(
+                "A2A", lambda **kwargs: A2ARemoteClient(**kwargs)
+            )
+            return object()
+
+        monkeypatch.setattr(remote_client_module.importlib, "import_module", fake_import_module)
+        monkeypatch.setattr(
+            remote_client_module,
+            "_resolve_entry_point",
+            lambda protocol, kwargs: (_ for _ in ()).throw(AssertionError("entry point fallback should not be used")),
+        )
+
+        try:
+            agent = RemoteAgent(
+                agent_id="a2a-agent",
+                protocol=ProtocolEnum.A2A,
+                config={
+                    "url": "http://127.0.0.1:41241",
+                    "kwargs": {
+                        "card": AgentCard(id="a2a-agent", name="a2a-agent"),
+                    },
+                },
+            )
+            response = await agent.invoke({"query": "hello bootstrap", "conversation_id": "conv-bootstrap-1"})
+            assert "A2A" in remote_client_module._CUSTOM_REMOTE_CLIENTS
+        finally:
+            remote_client_module._CUSTOM_REMOTE_CLIENTS.clear()
+            remote_client_module._CUSTOM_REMOTE_CLIENTS.update(registry_snapshot)
+
+        assert captured["invoke_inputs"]["query"] == "hello bootstrap"
+        assert response.status == TaskStatus.COMPLETED
+        assert response.sessionId == "conv-bootstrap-1"
+        assert response.artifacts[0].parts[0].text == "bootstrap invoke ok"
+
+    async def test_remote_agent_cancel_task_should_delegate_for_a2a_protocol(self, monkeypatch):
+        captured = {}
+
+        class FakeA2AClient:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            async def start(self):
+                return None
+
+            async def stop(self):
+                return None
+
+            async def cancel_task(self, task_id, tenant=None):
+                captured["cancel_task"] = {"task_id": task_id, "tenant": tenant}
+                return AgentResult(
+                    task_id=task_id,
+                    sessionId="sdk-context-cancel-2",
+                    status=TaskStatus.CANCELED,
+                )
+
+        monkeypatch.setattr(
+            "openjiuwen.extensions.a2a.a2a_remote_client.A2AClient",
+            FakeA2AClient,
+        )
+
+        agent = RemoteAgent(
+            agent_id="a2a-agent",
+            protocol=ProtocolEnum.A2A,
+            config={
+                "url": "http://127.0.0.1:41241",
+                "kwargs": {"card": AgentCard(id="a2a-agent", name="a2a-agent")},
+            },
+        )
+        response = await agent.cancel_task("task-cancel-2", tenant="tenant-2")
+        assert captured["cancel_task"] == {"task_id": "task-cancel-2", "tenant": "tenant-2"}
+        assert response.task_id == "task-cancel-2"
+        assert response.status == TaskStatus.CANCELED
+        assert response.sessionId == "sdk-context-cancel-2"
 
     async def test_stream_should_propagate_cancelled_error(self, monkeypatch):
         cancelled = []
@@ -129,12 +346,11 @@ class TestA2ARemoteClient:
             FakeA2AClient,
         )
 
-        card = AgentCard(id="a2a-agent", name="a2a-agent")
         client = A2ARemoteClient(RemoteClientConfig(
             id="a2a-agent",
             protocol=ProtocolEnum.A2A,
             url="http://127.0.0.1:41241",
-            kwargs={"card": card},
+            kwargs={"card": AgentCard(id="a2a-agent", name="a2a-agent")},
         ))
         await client.start()
 
@@ -171,13 +387,12 @@ class TestA2ARemoteClient:
             FakeA2AClient,
         )
 
-        card = AgentCard(id="a2a-agent", name="a2a-agent")
         client = A2ARemoteClient(
             RemoteClientConfig(
                 id="a2a-agent",
                 protocol=ProtocolEnum.A2A,
                 url="http://127.0.0.1:41241",
-                kwargs={"card": card},
+                kwargs={"card": AgentCard(id="a2a-agent", name="a2a-agent")},
             ),
         )
         await client.start()

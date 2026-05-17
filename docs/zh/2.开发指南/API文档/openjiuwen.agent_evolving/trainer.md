@@ -13,7 +13,7 @@ class Trainer(
     *,
     updater: Updater,
     evaluator: BaseEvaluator,
-    extractor: Optional[TracerTrajectoryExtractor] = None,
+    extractor: Optional[TrajectoryExtractor] = None,
     callbacks: Optional[Callbacks] = None,
     num_parallel: int = TuneConstant.default_parallel_num,
     early_stop_score: float = TuneConstant.default_early_stop_score,
@@ -29,7 +29,7 @@ class Trainer(
 
 * **updater**(Updater)：根据轨迹与评估结果生成参数更新。
 * **evaluator**(BaseEvaluator)：对模型输出与期望答案打分。
-* **extractor**(TracerTrajectoryExtractor，可选)：从 Session 抽取轨迹；默认 `TracerTrajectoryExtractor()`。
+* **extractor**(TrajectoryExtractor，可选)：从 Session 抽取轨迹；默认 `TrajectoryExtractor()`。
 * **callbacks**(Callbacks，可选)：训练生命周期钩子。
 * **num_parallel**(int，可选)：推理与评估的并行数。默认值：`TuneConstant.default_parallel_num`。
 * **early_stop_score**(float，可选)：验证分数达到该值即停止。默认值：`TuneConstant.default_early_stop_score`。

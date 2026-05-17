@@ -4,7 +4,7 @@
 
 ---
 
-## class openjiuwen.agent_evolving.checkpointing.types.EvolveCheckpoint
+## class openjiuwen.agent_evolving.checkpointing.state.EvolveCheckpoint
 
 Single training checkpoint data structure (for restore and audit).
 

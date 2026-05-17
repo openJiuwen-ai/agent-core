@@ -16,7 +16,7 @@ from sqlalchemy import BigInteger
 from sqlmodel import SQLModel, Field
 from sqlmodel.main import SQLModelMetaclass
 
-from openjiuwen.agent_teams.spawn.context import get_session_id
+from openjiuwen.agent_teams.context import get_session_id
 
 TEAM_DYNAMIC_TABLE_PREFIXES = (
     "team_task_dependency_",
@@ -42,8 +42,9 @@ class Team(SQLModel, table=True):
     desc: Optional[str] = Field(default=None, nullable=True)
     prompt: Optional[str] = Field(default=None, nullable=True)
     created: int = Field(sa_type=BigInteger, nullable=False)
-    # Bumped on every roster-affecting write so consumers (e.g. TeamRail
-    # prompt cache) can probe a single column for change detection.
+    # Bumped on every roster-affecting write so consumers (e.g.
+    # TeamPolicyRail prompt cache) can probe a single column for change
+    # detection.
     updated_at: Optional[int] = Field(default=None, sa_type=BigInteger, nullable=True)
 
 
@@ -59,6 +60,18 @@ class TeamMember(SQLModel, table=True):
     status: str = Field(nullable=False)
     execution_status: Optional[str] = Field(default=None, nullable=True)
     mode: str = Field(nullable=False)
+    # Member role, persisted so cold-recovery can rebuild the right
+    # runtime (tools / rails / prompt sections) without inferring from
+    # leader-process memory. Stores the ``TeamRole`` enum value
+    # (``leader`` / ``teammate`` / ``human_agent``). Hard-coded to the
+    # ``teammate`` string literal rather than ``TeamRole.TEAMMATE.value``
+    # because ``schema.team`` already imports this module's parent
+    # subtree — pulling ``TeamRole`` in here closes a circular import.
+    # Keep in sync with ``TeamRole.TEAMMATE`` if that enum value ever
+    # changes. Older DB files created before this column existed get
+    # the same backfilled default via the schema-migration step in
+    # ``database/engine.py``.
+    role: str = Field(nullable=False, default="teammate")
     prompt: Optional[str] = Field(default=None, nullable=True)
     model_ref_json: Optional[str] = Field(default=None, nullable=True)
     """Lightweight reference to the assigned ``ModelPoolEntry`` as JSON.

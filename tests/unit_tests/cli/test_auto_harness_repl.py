@@ -17,6 +17,10 @@ from rich.console import Console
 from openjiuwen.core.session.stream.base import (
     OutputSchema,
 )
+from openjiuwen.auto_harness.pipelines import (
+    EXTENDED_EVOLVE_PIPELINE,
+    META_EVOLVE_PIPELINE,
+)
 
 
 def _install_prompt_toolkit_stubs() -> dict[str, types.ModuleType]:
@@ -85,7 +89,7 @@ class TestAutoHarnessRepl:
         captured_config = None
         received_tasks = "NOT_SET"
 
-        def _capture_create(config):
+        def _capture_create(config, **_kwargs):
             nonlocal captured_config
             captured_config = config
 
@@ -143,6 +147,10 @@ class TestAutoHarnessRepl:
         assert captured_config.workspace == str(
             (tmp_path / "agent-core").resolve()
         )
+        assert (
+            captured_config.pipeline_preference
+            == META_EVOLVE_PIPELINE
+        )
         assert received_tasks is None
 
     @pytest.mark.asyncio
@@ -155,7 +163,7 @@ class TestAutoHarnessRepl:
         captured_config = None
         received_tasks = "NOT_SET"
 
-        def _capture_create(config):
+        def _capture_create(config, **_kwargs):
             nonlocal captured_config
             captured_config = config
 
@@ -199,4 +207,57 @@ class TestAutoHarnessRepl:
             captured_config.optimization_goal
             == "分析差距 claude-code"
         )
+        assert (
+            captured_config.pipeline_preference
+            == META_EVOLVE_PIPELINE
+        )
         assert received_tasks is None
+
+    @pytest.mark.asyncio
+    async def test_subcmd_run_pipeline_option(self, tmp_path) -> None:
+        """REPL run supports explicit pipeline selection."""
+        repl = _import_repl_module()
+
+        captured_config = None
+
+        def _capture_create(config, **_kwargs):
+            nonlocal captured_config
+            captured_config = config
+
+            async def _fake_stream(tasks=None):
+                yield OutputSchema(
+                    type="message",
+                    index=0,
+                    payload={"content": "ok"},
+                )
+
+            mock_orch = MagicMock()
+            mock_orch.run_session_stream = _fake_stream
+            mock_orch.results = []
+            return mock_orch
+
+        with patch(
+            "openjiuwen.auto_harness.orchestrator"
+            ".create_auto_harness_orchestrator",
+            side_effect=_capture_create,
+        ):
+            console = Console(file=open(os.devnull, "w"))
+            data_dir = tmp_path / "auto_harness"
+            data_dir.mkdir(parents=True)
+
+            await repl._subcmd_run(
+                console,
+                [
+                    "--goal",
+                    "分析差距 claude-code",
+                    "--pipeline",
+                    "extended",
+                ],
+                str(tmp_path),
+            )
+
+        assert captured_config is not None
+        assert (
+            captured_config.pipeline_preference
+            == EXTENDED_EVOLVE_PIPELINE
+        )

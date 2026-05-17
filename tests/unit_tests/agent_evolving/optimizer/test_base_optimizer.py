@@ -2,11 +2,21 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Tests for BaseOptimizer - simplified optimizer base class."""
 
+import asyncio
 from unittest.mock import MagicMock
 
 import pytest
 
 from openjiuwen.agent_evolving.optimizer.base import BaseOptimizer, TextualParameter
+from openjiuwen.agent_evolving.signal.base import EvolutionSignal
+
+
+class _DummyOptimizer(BaseOptimizer):
+    async def _backward(self, signals):
+        self.backward_signals = list(signals)
+
+    def _step(self):
+        return {}
 
 
 def make_mock_operator(tunables=None, op_id="test_op"):
@@ -169,6 +179,32 @@ class TestBaseOptimizerParameters:
 
         assert "op1" in result
         assert result is not optimizer.parameters()
+
+
+class TestBaseOptimizerSignalSelection:
+    """Test signal selection semantics exposed by BaseOptimizer."""
+
+    @staticmethod
+    def test_backward_keeps_online_and_non_failure_signals_by_default():
+        optimizer = _DummyOptimizer()
+        optimizer.bind({"op1": make_mock_operator()}, targets=["system_prompt"])
+        signals = [
+            EvolutionSignal(
+                signal_type="conversation_review",
+                section="Examples",
+                excerpt="online evidence",
+            ),
+            EvolutionSignal(
+                signal_type="evaluated",
+                section="Troubleshooting",
+                excerpt="score=1.00",
+                context={"score": 1.0},
+            ),
+        ]
+
+        asyncio.run(optimizer.backward(signals))
+
+        assert optimizer._selected_signals == signals
 
 
 class TestTextualParameter:

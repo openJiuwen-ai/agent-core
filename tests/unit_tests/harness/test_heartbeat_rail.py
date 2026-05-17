@@ -35,6 +35,7 @@ from openjiuwen.harness.schema.config import (
 )
 from openjiuwen.harness.prompts.sections.heartbeat import (
     _clean_heartbeat_content,
+    build_heartbeat_section,
 )
 
 
@@ -345,3 +346,14 @@ def test_clean_heartbeat_content_mixed_content() -> None:
     result = _clean_heartbeat_content(content)
 
     assert result == "Valid line 1\nValid line 2\nValid line 3"
+
+
+def test_build_heartbeat_section_instructs_direct_return() -> None:
+    """Heartbeat prompt should prevent writing heartbeat results to memory files."""
+    section_cn = build_heartbeat_section(language="cn", heartbeat_content="检查日历")
+    section_en = build_heartbeat_section(language="en", heartbeat_content="Check calendar")
+
+    assert "心跳执行结果必须直接返回" in section_cn.render("cn")
+    assert "不要写入 daily memory 或其他记忆文件" in section_cn.render("cn")
+    assert "Return heartbeat execution results directly" in section_en.render("en")
+    assert "do not write them to daily memory or other memory files" in section_en.render("en")

@@ -4,11 +4,15 @@ from typing import Callable, Any
 
 from openjiuwen.core.foundation.store.base_vector_store import BaseVectorStore
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
+from openjiuwen.core.foundation.store.base_memory_index import BaseMemoryIndex
 from openjiuwen.core.memory.manage.mem_model.sql_db_store import SqlDbStore
-from openjiuwen.core.memory.migration.migration_plan import vector_registry, kv_registry, sql_registry
+from openjiuwen.core.memory.migration.migration_plan import vector_registry, kv_registry,\
+                                            sql_registry, message_registry, index_registry
 from openjiuwen.core.memory.migration.migrator.sql_migrator import SQLMigrator
 from openjiuwen.core.memory.migration.migrator.vector_migrator import VectorMigrator
 from openjiuwen.core.memory.migration.migrator.kv_migrator import KVMigrator
+from openjiuwen.core.memory.migration.migrator.message_migrator import MessageMigrator
+from openjiuwen.core.memory.migration.migrator.index_version_migrator import IndexVersionMigrator
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -102,3 +106,57 @@ async def run_sql_migrations(sql_db_store: SqlDbStore) -> None:
         migrator_factory=lambda: SQLMigrator(sql_db_store),
         store_name="db store"
     )
+
+
+async def run_message_migrations(message_store) -> None:
+    """
+    Apply all registered message migrations.
+
+    For every (key, operations) pair in message_registry:
+        1. key is treated as the entity identifier (e.g., 'message_global')
+        2. MessageMigrator.try_migrate() applies all pending operations via the message store API
+        3. Schema versions are tracked in the message store itself
+        4. Operations are executed in schema_version order
+    """
+    await _run_migrations_with_registry(
+        registry=message_registry,
+        migrator_factory=lambda: MessageMigrator(message_store),
+        store_name="message"
+    )
+
+
+async def run_index_version_migrations(index: BaseMemoryIndex) -> None:
+    """
+    Apply all registered index version migrations.
+
+    For every (key, operations) pair in index_registry:
+        1. key is treated as the entity identifier
+        2. IndexVersionMigrator.try_migrate() applies all pending operations to the index
+        3. Operations are executed in schema_version order
+    """
+    registry_map = index_registry.get_all_operations()
+
+    if not registry_map:
+        memory_logger.info("No index version migrations registered, skipping migration process",
+                           event_type=LogEventType.MEMORY_INIT)
+        return
+
+    for entity_key, operations in registry_map.items():
+        try:
+            migrator = IndexVersionMigrator()
+            success = await migrator.try_migrate(index, operations)
+            if not success:
+                raise Exception(f"Index version migrations failed for entity: {entity_key}")
+        except Exception as e:
+            memory_logger.error(
+                "Error during index version migration for entity %s: %s",
+                entity_key,
+                str(e),
+                event_type=LogEventType.MEMORY_INIT,
+                exception=str(e)
+            )
+            raise build_error(
+                StatusCode.MEMORY_MIGRATE_MEMORY_EXECUTION_ERROR,
+                error_msg=f"Index version migrations failed for entity: {entity_key}",
+                cause=e
+            ) from e

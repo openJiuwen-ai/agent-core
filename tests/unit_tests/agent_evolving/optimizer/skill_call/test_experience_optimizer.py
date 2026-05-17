@@ -11,41 +11,41 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.checkpointing.types import (
-    EvolutionContext,
     EvolutionPatch,
     EvolutionRecord,
 )
+from openjiuwen.agent_evolving.experience.types import EvolutionContext, OnlineEvolutionContext
+from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
     SKILL_EXPERIENCE_GENERATE_PROMPT,
     SkillExperienceOptimizer,
-    _build_conversation_snippet,
     _build_context,
+    _build_conversation_snippet,
     _extract_json,
     _fix_json_text,
     _looks_truncated,
+    _parse_llm_response,
+    _parse_single_patch,
     _preview_section,
     _split_into_sections,
     _summarize_skill_content,
-    _parse_llm_response,
-    _parse_single_patch,
 )
 from openjiuwen.agent_evolving.signal.base import (
-    EvolutionCategory,
     EvolutionSignal,
     EvolutionTarget,
+    make_evolution_signal,
 )
+from openjiuwen.core.common.exception.errors import BaseError
 
 
 def make_signal(excerpt: str = "tool timeout") -> EvolutionSignal:
     return EvolutionSignal(
         signal_type="execution_failure",
-        evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
         section="Troubleshooting",
         excerpt=excerpt,
-        tool_name="bash",
         skill_name="skill-a",
+        context={"tool_name": "bash"},
     )
 
 
@@ -235,6 +235,40 @@ class TestSkillExperienceOptimizerGenerate:
 
         assert len(records) == 1
         assert llm.invoke.await_args_list[0].kwargs["timeout"] == 12
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_generate_accepts_standard_user_intent_signal_with_explicit_request_context():
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            return_value=SimpleNamespace(
+                content='[{"action":"append","target":"body","section":"Instructions","content":"Add a clearer intent-handling note."}]'
+            )
+        )
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="en")
+        ctx = EvolutionContext(
+            skill_name="skill-a",
+            signals=[
+                make_evolution_signal(
+                    signal_type="user_intent",
+                    section="Instructions",
+                    excerpt="Please improve explicit intent handling.",
+                    skill_name="skill-a",
+                    source="explicit_request",
+                )
+            ],
+            skill_content="# skill",
+            messages=[{"role": "user", "content": "Please improve explicit intent handling."}],
+            existing_desc_records=[],
+            existing_body_records=[],
+            user_query="Please improve explicit intent handling.",
+        )
+
+        records = await optimizer.generate_records(ctx)
+
+        assert len(records) == 1
+        assert records[0].source == "user_intent"
+        assert records[0].change.section == "Instructions"
 
 
 class TestParsing:
@@ -669,6 +703,43 @@ class TestGenerateRecordsRetry:
         assert len(prompts_sent[1]) < len(prompts_sent[0])
         assert prompts_sent[2] == prompts_sent[1]
 
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_generate_patches_with_retries_returns_parsed_result_without_repair():
+        llm = MagicMock()
+        llm.invoke = AsyncMock(return_value=SimpleNamespace(content='{"action":"skip","skip_reason":"duplicate"}'))
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="en")
+
+        patches = await optimizer._generate_patches_with_retries(
+            prompt="prompt-a",
+            retry_prompt="prompt-b",
+        )
+
+        assert len(patches) == 1
+        assert patches[0].action == "skip"
+        assert llm.invoke.await_args.kwargs["messages"][0]["content"] == "prompt-a"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_generate_patches_with_retries_uses_repair_flow_when_initial_parse_fails():
+        llm = MagicMock()
+        llm.invoke = AsyncMock(return_value=SimpleNamespace(content="broken-json"))
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="en")
+        optimizer.retry_parse = AsyncMock(return_value=([MagicMock()], "fixed-json"))
+
+        patches = await optimizer._generate_patches_with_retries(
+            prompt="prompt-a",
+            retry_prompt="prompt-b",
+        )
+
+        assert len(patches) == 1
+        optimizer.retry_parse.assert_awaited_once_with(
+            broken_raw="broken-json",
+            original_prompt="prompt-a",
+            attempt_number=2,
+            parse_error="unknown",
+        )
+
 
 class TestScriptLimit:
     @staticmethod
@@ -731,3 +802,73 @@ class TestPromptRoleConstraints:
         """英文 prompt 的 section 参考列表必须包含 Collaboration。"""
         prompt = SKILL_EXPERIENCE_GENERATE_PROMPT["en"]
         assert "Collaboration" in prompt
+
+
+class TestBackwardContextBinding:
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_backward_prefers_explicit_online_context_over_operator_state():
+        optimizer = SkillExperienceOptimizer(llm=MagicMock(), model="dummy", language="en")
+        rec = SimpleNamespace(id="rec-1")
+        optimizer.generate_records = AsyncMock(return_value=[rec])
+        operator = MagicMock()
+        operator.get_tunables.return_value = {"experiences": object()}
+        operator.get_state.return_value = {
+            "skill_content": "# from state",
+            "messages": [{"role": "user", "content": "state"}],
+            "desc_records": ["state-desc"],
+            "body_records": ["state-body"],
+            "script_records": ["state-script"],
+            "user_query": "state query",
+        }
+        signal = make_evolution_signal(
+            signal_type="user_intent",
+            section="Instructions",
+            excerpt="please improve",
+            skill_name="skill-a",
+            source="explicit_request",
+        )
+        online_ctx = OnlineEvolutionContext(
+            skill_name="skill-a",
+            signals=[signal],
+            messages=[{"role": "user", "content": "context"}],
+            user_query="context query",
+            skill_content="# from context",
+            existing_desc_records=["ctx-desc"],
+            existing_body_records=["ctx-body"],
+            existing_script_records=["ctx-script"],
+        )
+
+        optimizer.bind(
+            {"skill_experience_skill-a": operator},
+            targets=["experiences"],
+            online_contexts={"skill-a": online_ctx},
+        )
+        await optimizer.backward([signal])
+
+        call_ctx = optimizer.generate_records.await_args.args[0]
+        assert call_ctx is online_ctx
+        assert call_ctx.skill_content == "# from context"
+        assert call_ctx.messages == [{"role": "user", "content": "context"}]
+        assert call_ctx.existing_desc_records == ["ctx-desc"]
+        assert call_ctx.existing_body_records == ["ctx-body"]
+        assert call_ctx.existing_script_records == ["ctx-script"]
+        assert call_ctx.user_query == "context query"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_backward_raises_clear_error_without_online_context():
+        optimizer = SkillExperienceOptimizer(llm=MagicMock(), model="dummy", language="en")
+        operator = MagicMock()
+        operator.get_tunables.return_value = {"experiences": object()}
+        signal = make_evolution_signal(
+            signal_type="execution_failure",
+            section="Troubleshooting",
+            excerpt="tool timeout",
+            skill_name="skill-a",
+            source="passive_conversation",
+        )
+
+        optimizer.bind({"skill_experience_skill-a": operator}, targets=["experiences"])
+        with pytest.raises(BaseError, match="online_contexts missing entry for skill skill-a"):
+            await optimizer.backward([signal])

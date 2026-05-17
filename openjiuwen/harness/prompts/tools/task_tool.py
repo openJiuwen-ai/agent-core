@@ -22,33 +22,72 @@ from openjiuwen.harness.prompts.tools.base import (
 # General-purpose agent description (bilingual) - used in available_agents list
 # ---------------------------------------------------------------------------
 GENERAL_PURPOSE_AGENT_DESC: Dict[str, str] = {
-    "cn": "用于研究复杂问题、搜索文件与内容、执行多步骤任务。该智能体拥有与主代理完全相同的全部工具权限。"
-          "适合用于隔离上下文与 Token 消耗，并完成特定的复杂任务，因为它拥有与主代理完全相同的全部能力。",
-    "en": "General-purpose agent for researching complex questions, searching for files and content, "
-    "and executing multi-step tasks. This agent has access to all tools as the main agent. "
-    "The general-purpose agent is suitable for isolating context and token consumption, "
-    "and completing specific complex tasks",
+    "cn": "通用型子代理，适合执行独立的复杂子任务。"
+          "子代理运行在独立的上下文窗口中，其中间工具调用结果不会污染主代理的上下文，"
+          "从而大幅节省主代理的 Token 消耗，保持主上下文窗口的清晰与高效。",
+    "en": "General-purpose subagent for executing independent complex subtasks. "
+    "The subagent runs in an isolated context window — intermediate tool call results "
+    "never enter the main agent's context, significantly reducing token consumption "
+    "and keeping the main context window clean and focused.",
 }
 
 # ---------------------------------------------------------------------------
 # Tool description (bilingual) - for tool registration ONLY
 # ---------------------------------------------------------------------------
-TASK_TOOL_DESCRIPTION_EN = (
-    "Launch an ephemeral subagent to handle complex, multi-step independent tasks "
-    "with isolated context windows.\n\n"
-    "Available agent types and the tools they have access to:\n"
-    "{available_agents}\n\n"
-    "Important: When using the Task tool, you must specify the subagent_type and "
-    "task_description parameters to select the agent type and describe the task. "
-    "Do not specify agents you do not have access to!\n"
-)
+TASK_TOOL_DESCRIPTION_EN = """\
+Launch an ephemeral subagent to handle complex, multi-step independent tasks \
+with isolated context windows.
 
-TASK_TOOL_DESCRIPTION_CN = """启动临时子代理，处理复杂、多步骤、独立的隔离上下文任务。
+## WHEN TO USE
 
-可用代理类型及对应工具：
+Proactively delegate to a subagent in these scenarios:
+- **Reasoning-heavy subtasks** — research, analysis, or synthesis tasks that require \
+many tool calls (e.g., searching the web, reading multiple files, summarising results)
+- **Context-polluting work** — any task whose intermediate tool results would flood \
+your own context window; the subagent's results never enter YOUR context, only its \
+final answer is returned to you
+- **Independent parallel workstreams** — subtasks that do not depend on each other \
+can be issued concurrently, dramatically reducing wall-clock time
+- **Large-scale data gathering** — when a task involves fetching, parsing, or \
+transforming large volumes of data that would otherwise exhaust your context
+
+## WHEN NOT TO USE
+
+- Simple, single-tool calls that finish in one step
+- Tasks that need the full conversation history as context (the subagent starts fresh)
+- Tasks where you must stream a live response directly back to the user
+
+## Available agent types
+
 {available_agents}
 
-重要：使用 Task 工具时，必须指定 subagent_type, task_description 参数选择代理类型和描述任务。请勿指定你无权访问的其他代理！！！
+Important: specify only agent types listed above. The subagent runs autonomously \
+and returns only its final summary to you.
+"""
+
+TASK_TOOL_DESCRIPTION_CN = """\
+启动临时子代理，处理复杂、多步骤、独立的隔离上下文任务。
+
+## 何时使用（应主动委派）
+
+在以下场景应主动调用 task_tool 委派子代理：
+- **推理密集型子任务** — 需要大量工具调用的研究、分析或汇总任务（如网络搜索、读取多个文件、整合结果）
+- **会污染上下文的工作** — 子任务的中间工具结果会淹没主代理上下文窗口时；\
+子代理的中间结果不会进入你的上下文，仅最终答案会返回给你，从而保持主上下文清洁高效
+- **可并行的独立子任务** — 互不依赖的子任务可并发发出，大幅缩短整体执行时间
+- **大规模数据采集** — 需要抓取、解析或转换大量数据，否则将耗尽你的上下文空间
+
+## 何时不使用
+
+- 单步、单工具调用即可完成的简单操作
+- 任务需要完整对话历史作为上下文（子代理以全新会话启动）
+- 需要实时向用户流式输出的任务
+
+## 可用代理类型及说明
+
+{available_agents}
+
+重要：只能指定上方列出的代理类型。子代理自主执行并仅将最终摘要返回给你。
 """
 
 DESCRIPTION: Dict[str, str] = {

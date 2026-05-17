@@ -99,6 +99,55 @@ async def test_rl_rail_with_tool_calls():
 
 
 @pytest.mark.asyncio
+async def test_rl_rail_keeps_one_invoke_per_trajectory():
+    """RLRail must not inherit cross-invoke accumulation from EvolutionRail."""
+    store = InMemoryTrajectoryStore()
+    rail = RLRail(trajectory_store=store)
+
+    first_invoke = InvokeInputs(query="q1", conversation_id="same-session")
+    await rail.before_invoke(_ctx(first_invoke))
+    await rail.after_model_call(_ctx(ModelCallInputs(
+        messages=[{"role": "user", "content": "q1"}],
+        response={"role": "assistant", "content": "a1"},
+    )))
+    await rail.after_invoke(_ctx(first_invoke))
+
+    second_invoke = InvokeInputs(query="q2", conversation_id="same-session")
+    await rail.before_invoke(_ctx(second_invoke))
+    await rail.after_model_call(_ctx(ModelCallInputs(
+        messages=[{"role": "user", "content": "q2"}],
+        response={"role": "assistant", "content": "a2"},
+    )))
+    await rail.after_invoke(_ctx(second_invoke))
+
+    trajectories = store.query()
+    assert len(trajectories) == 2
+    assert [len(trajectory.steps) for trajectory in trajectories] == [1, 1]
+    assert trajectories[1].steps[0].detail.messages[0]["content"] == "q2"
+
+
+@pytest.mark.asyncio
+async def test_rl_rail_keeps_full_single_invoke_trajectory():
+    """RLRail must not inherit EvolutionRail's default step window."""
+    store = InMemoryTrajectoryStore()
+    rail = RLRail(trajectory_store=store)
+
+    invoke = InvokeInputs(query="q", conversation_id="same-session")
+    await rail.before_invoke(_ctx(invoke))
+    for index in range(201):
+        await rail.after_model_call(_ctx(ModelCallInputs(
+            messages=[{"role": "user", "content": f"q{index}"}],
+            response={"role": "assistant", "content": f"a{index}"},
+        )))
+    await rail.after_invoke(_ctx(invoke))
+
+    trajectories = store.query()
+    assert len(trajectories) == 1
+    assert len(trajectories[0].steps) == 201
+    assert trajectories[0].steps[0].detail.messages[0]["content"] == "q0"
+
+
+@pytest.mark.asyncio
 async def test_trajectory_collector_basic():
     """Test TrajectoryCollector registers rail; mock invoke does not emit after_invoke."""
     mock_agent = MagicMock()

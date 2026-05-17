@@ -83,6 +83,7 @@ class WorktreeManager:
             username=config.resolve_gitcode_username(),
             token=config.resolve_gitcode_token(),
         )
+        self._git_lock = asyncio.Lock()
 
     def _base_repo(self) -> str:
         """返回基础仓库路径。
@@ -313,91 +314,92 @@ class WorktreeManager:
         Raises:
             RuntimeError: worktree 创建失败。
         """
-        base = await self._ensure_base_repo()
+        async with self._git_lock:
+            base = await self._ensure_base_repo()
 
-        slug = _slugify(topic)
-        ts = int(time.time())
-        wt_name = f"{ts}-{slug}"
-        branch_name = f"auto-harness/{slug}"
+            slug = _slugify(topic)
+            ts = int(time.time())
+            wt_name = f"{ts}-{slug}"
+            branch_name = f"auto-harness/{slug}"
 
-        wt_root = Path(
-            self._config.worktrees_dir
-        )
-        wt_root.mkdir(parents=True, exist_ok=True)
-        wt_path = str(wt_root / wt_name)
+            wt_root = Path(
+                self._config.worktrees_dir
+            )
+            wt_root.mkdir(parents=True, exist_ok=True)
+            wt_path = str(wt_root / wt_name)
 
-        base_branch = (
-            self._config.git_base_branch or "develop"
-        )
-
-        await self._drop_existing_branch(
-            base=base, branch_name=branch_name
-        )
-
-        code, out = await _run_git(
-            "worktree",
-            "add",
-            "-b",
-            branch_name,
-            wt_path,
-            f"origin/{base_branch}",
-            cwd=base,
-            env=self._git_env,
-        )
-        if code != 0:
-            raise RuntimeError(
-                f"worktree add failed: {out}"
+            base_branch = (
+                self._config.git_base_branch or "develop"
             )
 
-        logger.info(
-            "Created worktree: %s (branch: %s)",
-            wt_path,
-            branch_name,
-        )
+            await self._drop_existing_branch(
+                base=base, branch_name=branch_name
+            )
 
-        # 配置 git user（worktree 级别）
-        if self._config.git_user_name:
-            await _run_git(
-                "config",
-                "user.name",
-                self._config.git_user_name,
-                cwd=wt_path,
+            code, out = await _run_git(
+                "worktree",
+                "add",
+                "-b",
+                branch_name,
+                wt_path,
+                f"origin/{base_branch}",
+                cwd=base,
                 env=self._git_env,
             )
-        if self._config.git_user_email:
-            await _run_git(
-                "config",
-                "user.email",
-                self._config.git_user_email,
-                cwd=wt_path,
-                env=self._git_env,
-            )
-
-        # 配置 fork remote（如果指定）
-        if self._config.git_remote:
-            # 检查 remote 是否已存在
-            rc, _ = await _run_git(
-                "remote",
-                "get-url",
-                self._config.git_remote,
-                cwd=wt_path,
-                env=self._git_env,
-            )
-            if rc != 0:
-                # worktree 共享 remote，在 base 上添加
-                fork_url = (
-                    f"https://gitcode.com/"
-                    f"{self._config.fork_owner}/"
-                    f"{self._config.upstream_repo}.git"
+            if code != 0:
+                raise RuntimeError(
+                    f"worktree add failed: {out}"
                 )
+
+            logger.info(
+                "Created worktree: %s (branch: %s)",
+                wt_path,
+                branch_name,
+            )
+
+            # 配置 git user（worktree 级别）
+            if self._config.git_user_name:
                 await _run_git(
-                    "remote",
-                    "add",
-                    self._config.git_remote,
-                    fork_url,
-                    cwd=base,
+                    "config",
+                    "user.name",
+                    self._config.git_user_name,
+                    cwd=wt_path,
                     env=self._git_env,
                 )
+            if self._config.git_user_email:
+                await _run_git(
+                    "config",
+                    "user.email",
+                    self._config.git_user_email,
+                    cwd=wt_path,
+                    env=self._git_env,
+                )
+
+            # 配置 fork remote（如果指定）
+            if self._config.git_remote:
+                # 检查 remote 是否已存在
+                rc, _ = await _run_git(
+                    "remote",
+                    "get-url",
+                    self._config.git_remote,
+                    cwd=wt_path,
+                    env=self._git_env,
+                )
+                if rc != 0:
+                    # worktree 共享 remote，在 base 上添加
+                    fork_url = (
+                        f"https://gitcode.com/"
+                        f"{self._config.fork_owner}/"
+                        f"{self._config.upstream_repo}.git"
+                    )
+                    await _run_git(
+                        "remote",
+                        "add",
+                        self._config.git_remote,
+                        fork_url,
+                        cwd=base,
+                        env=self._git_env,
+                    )
 
         return wt_path
 
@@ -412,28 +414,29 @@ class WorktreeManager:
         latest fetched remote base branch instead of the user's
         mutable local checkout.
         """
-        base = await self._ensure_base_repo()
-        ts = int(time.time())
-        wt_root = Path(self._config.worktrees_dir)
-        wt_root.mkdir(parents=True, exist_ok=True)
-        wt_path = str(wt_root / f"{ts}-{label}")
-        base_branch = (
-            self._config.git_base_branch or "develop"
-        )
-
-        code, out = await _run_git(
-            "worktree",
-            "add",
-            "--detach",
-            wt_path,
-            f"origin/{base_branch}",
-            cwd=base,
-            env=self._git_env,
-        )
-        if code != 0:
-            raise RuntimeError(
-                f"readonly worktree add failed: {out}"
+        async with self._git_lock:
+            base = await self._ensure_base_repo()
+            ts = int(time.time())
+            wt_root = Path(self._config.worktrees_dir)
+            wt_root.mkdir(parents=True, exist_ok=True)
+            wt_path = str(wt_root / f"{ts}-{label}")
+            base_branch = (
+                self._config.git_base_branch or "develop"
             )
+
+            code, out = await _run_git(
+                "worktree",
+                "add",
+                "--detach",
+                wt_path,
+                f"origin/{base_branch}",
+                cwd=base,
+                env=self._git_env,
+            )
+            if code != 0:
+                raise RuntimeError(
+                    f"readonly worktree add failed: {out}"
+                )
 
         logger.info(
             "Created readonly worktree: %s",
@@ -449,20 +452,21 @@ class WorktreeManager:
         Args:
             worktree_path: 要清理的 worktree 路径。
         """
-        base = self._base_repo()
-        wt = Path(worktree_path)
+        async with self._git_lock:
+            base = self._base_repo()
+            wt = Path(worktree_path)
 
-        if not wt.exists():
-            return
+            if not wt.exists():
+                return
 
-        code, out = await _run_git(
-            "worktree",
-            "remove",
-            "--force",
-            str(wt),
-            cwd=base,
-            env=self._git_env,
-        )
+            code, out = await _run_git(
+                "worktree",
+                "remove",
+                "--force",
+                str(wt),
+                cwd=base,
+                env=self._git_env,
+            )
         if code != 0:
             logger.warning(
                 "worktree remove failed "

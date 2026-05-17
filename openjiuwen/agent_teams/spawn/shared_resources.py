@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Process-global shared resources for agent teams.
 
 Database and TeamRuntime are **process-global singletons** — they are

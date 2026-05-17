@@ -1407,6 +1407,11 @@ class ReActAgent(BaseAgent):
 
             # after_invoke rails have fired; return result (possibly adapted by rails via ctx.extra)
             return ctx.extra.get("invoke_result", invoke_inputs.result)
+        except asyncio.CancelledError:
+            # Clear context messages to prevent stale messages from accumulating
+            # when cancelled requests leave behind partial state
+            await self.clear_context_messages(session_id=session.get_session_id())
+            raise  # Re-raise to propagate cancellation signal
         finally:
             if need_cleanup:
                 await self.context_engine.save_contexts(session)
@@ -1539,6 +1544,37 @@ class ReActAgent(BaseAgent):
         from openjiuwen.core.runner import Runner
         await Runner.release(session_id=session_id)
         await self.context_engine.clear_context(session_id=session_id)
+
+    async def clear_context_messages(
+            self,
+            session_id: str = "default_session_id",
+            context_id: str = "default_context_id",
+    ) -> bool:
+        """Clear messages in context without removing the context instance.
+
+        Clears messages from the specified context while keeping the context
+        instance in the pool, allowing subsequent requests to reuse the same context.
+
+        Args:
+            session_id: Session identifier
+            context_id: Context identifier (defaults to "default_context_id")
+
+        Returns:
+            True if context exists and messages were cleared
+            False if context does not exist
+
+        Note:
+            Triggers ContextEvents.CONTEXT_CLEARED event
+        """
+        context = self.context_engine.get_context(
+            context_id=context_id,
+            session_id=session_id,
+        )
+        if context is None:
+            return False
+
+        await context.clear_messages(with_history=False)
+        return True
 
 
 __all__ = [

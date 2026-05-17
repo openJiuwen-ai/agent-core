@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from openjiuwen.agent_evolving.types import UpdateValue
 from openjiuwen.core.operator.tool_call import ToolCallOperator
 
 
@@ -119,3 +120,27 @@ class TestToolCallOperatorCallbacks:
 
         # Callback should be triggered
         callback.assert_called_once_with("tool_description", {"tool1": "loaded desc"})
+
+    @staticmethod
+    def test_apply_update_reuses_replace_state_behavior():
+        """Test apply_update preserves replace-only tool description updates."""
+        op = ToolCallOperator(operator_id="test_tool")
+
+        result = op.apply_update(
+            "tool_description",
+            UpdateValue(payload={"tool1": "Updated description"}),
+        )
+
+        assert op.get_state()["tool_description"] == {"tool1": "Updated description"}
+        assert result.applied is True
+        assert result.value == {"tool1": "Updated description"}
+
+    @staticmethod
+    def test_apply_update_reports_noop_for_invalid_tool_description_value():
+        """Test apply_update reports no-op when the underlying update is ignored."""
+        op = ToolCallOperator(operator_id="test_tool")
+
+        result = op.apply_update("tool_description", UpdateValue(payload="not a dict"))
+
+        assert op.get_state()["tool_description"] == {}
+        assert result.applied is False

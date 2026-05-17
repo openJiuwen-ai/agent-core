@@ -5,13 +5,13 @@ Memory domain optimizer base class: fixes domain=memory, default_targets=[enable
 unifies filtering and logging semantics. Subclasses implement _backward / _update.
 """
 
-from typing import Dict, List, TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, List
 
 from openjiuwen.agent_evolving.optimizer.base import BaseOptimizer
 
 if TYPE_CHECKING:
-    from openjiuwen.core.operator.base import Operator
     from openjiuwen.agent_evolving.signal.base import EvolutionSignal
+    from openjiuwen.core.operator.base import Operator
 
 
 class MemoryOptimizerBase(BaseOptimizer):

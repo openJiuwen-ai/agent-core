@@ -2,17 +2,17 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from datetime import datetime, timezone
-from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
+from typing import Any, Optional
 
-from pydantic import BaseModel, Field
 from openjiuwen.core.foundation.llm import Model
-from openjiuwen.core.memory.common.base import generate_idx_name, parse_memory_hit_infos
+from openjiuwen.core.foundation.store.base_memory_index import BaseMemoryIndex, MemoryDoc
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
-from openjiuwen.core.memory.manage.mem_model.data_id_manager import DataIdManager
-from openjiuwen.core.memory.manage.mem_model.memory_unit import BaseMemoryUnit, FragmentMemoryUnit, MemoryType
-from openjiuwen.core.memory.manage.mem_model.semantic_store import SemanticStore
-from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
+from openjiuwen.core.memory.manage.mem_model.memory_unit import (
+    BaseMemoryUnit,
+    FragmentMemoryUnit,
+    MemoryType,
+    OperationType,
+)
 from openjiuwen.core.memory.manage.update.mem_update_checker import (
     MemUpdateChecker,
     MemoryStatus,
@@ -23,38 +23,31 @@ from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
 
 
-@dataclass
-class RecallParams:
-    """Parameters for vector recall operation"""
-    query: str
-    user_id: str
-    scope_id: str
-    semantic_store: SemanticStore
-    top_k: int = 5
-    mem_type: str = MemoryType.USER_PROFILE.value
+FRAGMENT_MEMORY_TYPE = [
+    MemoryType.USER_PROFILE.value,
+    MemoryType.SEMANTIC_MEMORY.value,
+    MemoryType.EPISODIC_MEMORY.value,
+]
 
 
-@dataclass
-class AddVectorParams:
-    """Parameters for adding vector memory operation"""
-    user_id: str
-    scope_id: str
-    memory_id: str
-    mem: str
-    semantic_store: SemanticStore
-    mem_type: str = MemoryType.USER_PROFILE.value
+def _remove_update_entries_from_process_result(delete_memory_id_set: set[str],
+                                                process_result_dict: dict[str, FragmentMemoryUnit]):
+    for mem_id in delete_memory_id_set:
+        if (mem_id in process_result_dict and
+                process_result_dict[mem_id].operation_type == OperationType.UPDATE.value):
+            process_result_dict.pop(mem_id)
 
 
-class FragmentMemoryStoreParams(BaseModel):
-    mem_type: str = Field(default=MemoryType.USER_PROFILE.value)
-    user_id: Optional[str] = None
-    scope_id: Optional[str] = None
-    content: Optional[str] = None
-    source_id: Optional[str] = None
-
-
-FRAGMENT_MEMORY_TYPE = [MemoryType.USER_PROFILE.value, MemoryType.SEMANTIC_MEMORY.value,
-                        MemoryType.EPISODIC_MEMORY.value]
+def _append_mem_unit_list_to_dict(mem_unit_dict: dict[str, FragmentMemoryUnit],
+                                   mem_unit_list: list[FragmentMemoryUnit]):
+    for mem_unit in mem_unit_list:
+        if mem_unit.mem_id in mem_unit_dict:
+            memory_logger.warning(
+                "mem duplicate, old will be overwrite",
+                event_type=LogEventType.MEMORY_STORE,
+                memory_id=mem_unit.mem_id,
+            )
+        mem_unit_dict[mem_unit.mem_id] = mem_unit
 
 
 class FragmentMemoryManager(BaseMemoryManager):
@@ -62,13 +55,28 @@ class FragmentMemoryManager(BaseMemoryManager):
     UPDATE_CHECK_OLD_MEMORY_RELEVANCE_THRESHOLD = 0.75
 
     def __init__(self,
-                 user_mem_store: UserMemStore,
-                 data_id_generator: DataIdManager,
-                 crypto_key: bytes):
-        self.mem_store = user_mem_store
-        self.date_user_profile_id = data_id_generator
+                 memory_index: BaseMemoryIndex,
+                 crypto_key: bytes = None):
+        self.memory_index = memory_index
         self.crypto_key = crypto_key
         self.mem_type = "fragment"
+
+    @staticmethod
+    def _parse_timestamp(ts) -> datetime:
+        if isinstance(ts, datetime):
+            return ts
+        if not ts:
+            return datetime.now(timezone.utc).astimezone()
+        for fmt in ("%Y-%m-%d %H-%M-%S", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(ts, fmt).replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+        try:
+            return datetime.fromisoformat(ts)
+        except ValueError:
+            pass
+        return datetime.now(timezone.utc).astimezone()
 
     @staticmethod
     def _process_conflict_info(conflict_info: list[dict], input_memory_ids_map: dict[int, str]) -> list[dict]:
@@ -92,69 +100,71 @@ class FragmentMemoryManager(BaseMemoryManager):
             })
         return process_conflict_info
 
+    def _convert_to_memory_doc(self, mem_unit: FragmentMemoryUnit) -> MemoryDoc:
+        return MemoryDoc(
+            id=mem_unit.mem_id,
+            text=mem_unit.content,
+            type=mem_unit.mem_type.value,
+            timestamp=self._parse_timestamp(mem_unit.timestamp) if
+            mem_unit.timestamp else datetime.now(timezone.utc).astimezone(),
+            fields={
+                "source_id": mem_unit.message_mem_id,
+            }
+        )
+
+    def _doc_to_dict(self, doc: MemoryDoc, score: float = 0.0) -> dict[str, Any]:
+        encrypted_content = BaseMemoryManager.encrypt_memory_if_needed(
+            key=self.crypto_key,
+            plaintext=doc.text
+        ) if self.crypto_key else doc.text
+        return {
+            "id": doc.id,
+            "mem": encrypted_content,
+            "mem_type": doc.type,
+            "timestamp": doc.timestamp,
+            "score": score,
+            "source_id": doc.fields.get("source_id") if doc.fields else None,
+        }
+
     async def add_memories(self, user_id: str, scope_id: str, memories: dict[str, list[BaseMemoryUnit]],
-                      llm: Model | None = None, **kwargs):
-        semantic_store = self._get_semantic_store("add", **kwargs)
-        # Step 1: Prepare new memories dictionary for checker
-        new_mem_content: dict[str, str] = {}
-        new_mem_units: dict[str, FragmentMemoryUnit] = {}
-        for mem_type, memory in memories.items():
-            if mem_type not in FRAGMENT_MEMORY_TYPE:
-                continue
-            for mem_unit in memory:
-                if not isinstance(mem_unit, FragmentMemoryUnit):
-                    memory_logger.warning(
-                        "mem_unit is not a FragmentMemoryUnit",
-                        event_type=LogEventType.MEMORY_STORE,
-                        memory_type=mem_type,
-                        user_id=user_id,
-                        scope_id=scope_id
-                    )
-                    continue
-                mem_content = mem_unit.content
-                mem_id = mem_unit.mem_id
-                if mem_content:
-                    new_mem_content[mem_id] = mem_content
-                    new_mem_units[mem_id] = mem_unit
-        if not new_mem_units:
+                           llm: Model | None = None, **kwargs):
+        if not self.memory_index:
             memory_logger.warning(
-                "No new memory units to add",
+                "memory_index is not initialized, cannot add memories",
                 event_type=LogEventType.MEMORY_STORE,
                 user_id=user_id,
                 scope_id=scope_id
             )
             return
 
+        delete_memory_id_set = set()
+        process_result_dict: dict[str, FragmentMemoryUnit] = {}
+        add_memory_unit_list = []
+
+        # Step 1: Prepare new memories dictionary for checker
+        new_mem_units = await self._get_new_mem_units_and_update_memories(
+            user_id, scope_id, memories, delete_memory_id_set, process_result_dict)
+        new_mem_content = {mem_id: mem_unit.content for mem_id, mem_unit in new_mem_units.items()}
+
+        if not new_mem_units:
+            if delete_memory_id_set:
+                await self.memory_index.delete_memories(user_id, scope_id, [*delete_memory_id_set])
+                _remove_update_entries_from_process_result(delete_memory_id_set, process_result_dict)
+            return list(process_result_dict.values())
+
         # Step 2: Query existing memories for context using search
-        old_memories: dict[str, str] = {}
-        old_mem_ids = set()
-        for _, new_mem in new_mem_content.items():
-            # Search for similar memories
-            search_results = await self.search(
-                user_id=user_id,
-                scope_id=scope_id,
-                query=new_mem,
-                top_k=self.UPDATE_CHECK_OLD_MEMORY_NUM,
-                semantic_store=semantic_store
-            )
-
-            if search_results:
-                for result in search_results:
-                    result_id = result.get("id", "")
-                    result_score = result.get("score", 0)
-                    result_content = result.get("mem", "")
-
-                    if (result_id and result_score > self.UPDATE_CHECK_OLD_MEMORY_RELEVANCE_THRESHOLD and
-                        result_id not in old_mem_ids):
-                        old_memories[result_id] = result_content
-                        old_mem_ids.add(result_id)
+        old_memories: dict[str, str] = await self._get_related_old_memories(new_mem_content, user_id, scope_id)
 
         # If no existing memories found, and only has one new memory, skip check and write directly
-        if not old_memories and len(new_mem_units) == 1:
-            # Get the only memory unit from new_mem_units
-            mem_unit = next(iter(new_mem_units.values()))
-            await self._add_memory_to_store(user_id, scope_id, mem_unit, semantic_store)
-            return
+        if not old_memories and len(new_mem_content) == 1:
+            if delete_memory_id_set:
+                await self.memory_index.delete_memories(user_id, scope_id, [*delete_memory_id_set])
+                _remove_update_entries_from_process_result(delete_memory_id_set, process_result_dict)
+            add_memory_unit_list = list(new_mem_units.values())
+            add_docs = [self._convert_to_memory_doc(mem_unit) for mem_unit in add_memory_unit_list]
+            await self.memory_index.add_memories(user_id, scope_id, add_docs)
+            _append_mem_unit_list_to_dict(process_result_dict, add_memory_unit_list)
+            return list(process_result_dict.values())
 
         # Step 3: Use MemChecker to analyze for redundancy/conflicts
         checker = MemUpdateChecker()
@@ -164,7 +174,8 @@ class FragmentMemoryManager(BaseMemoryManager):
             base_chat_model=llm,
         )
         memory_logger.info(
-            f"Memory check completed, got {len(action_items)} action items",
+            "Memory check completed, got %s action items",
+            len(action_items),
             event_type=LogEventType.MEMORY_PROCESS,
             metadata={"action_count": len(action_items)},
         )
@@ -172,329 +183,252 @@ class FragmentMemoryManager(BaseMemoryManager):
         # Step 4: Execute add/delete operations based on action items
         for action_item in action_items:
             if action_item.status == MemoryStatus.ADD:
-                # Add new memory
-                mem_unit = new_mem_units.get(action_item.id)
-                if mem_unit:
-                    await self._add_memory_to_store(user_id, scope_id, mem_unit, semantic_store)
+                if new_mem_units.get(action_item.id):
+                    add_memory_unit_list.append(new_mem_units.get(action_item.id))
             elif action_item.status == MemoryStatus.DELETE:
-                # Delete old memory
-                await self.delete(
-                    user_id=user_id,
-                    scope_id=scope_id,
-                    mem_id=action_item.id,
-                    semantic_store=semantic_store
-                )
+                delete_memory_id_set.add(action_item.id)
+
+        if delete_memory_id_set:
+            await self.memory_index.delete_memories(user_id, scope_id, [*delete_memory_id_set])
+            _remove_update_entries_from_process_result(delete_memory_id_set, process_result_dict)
+        if add_memory_unit_list:
+            add_docs = [self._convert_to_memory_doc(mem_unit) for mem_unit in add_memory_unit_list]
+            await self.memory_index.add_memories(user_id, scope_id, add_docs)
+            _append_mem_unit_list_to_dict(process_result_dict, add_memory_unit_list)
+        return list(process_result_dict.values())
 
     async def update(self, user_id: str, scope_id: str, mem_id: str, new_memory: str, **kwargs) -> bool:
-        semantic_store = self._get_semantic_store("update", **kwargs)
-        time = datetime.now(timezone.utc).astimezone().strftime('%Y-%m-%d %H:%M:%S')
-        encrypt_new_memory = BaseMemoryManager.encrypt_memory_if_needed(key=self.crypto_key, plaintext=new_memory)
-        new_data = {'mem': encrypt_new_memory, 'time': time}
-        old_mem = await self.mem_store.get(mem_id=mem_id, user_id=user_id, scope_id=scope_id)
-        mem_type = old_mem.get("mem_type", None)
-        await self.mem_store.update(mem_id=mem_id, user_id=user_id, scope_id=scope_id, data=new_data)
-        table_name = generate_idx_name(user_id, scope_id, mem_type)
-        await semantic_store.delete_docs([mem_id], table_name)
-        # semantic memory embedding must not encrypt
-        await semantic_store.add_docs([(mem_id, new_memory)], table_name, scope_id=scope_id)
+        if not self.memory_index:
+            memory_logger.warning(
+                "memory_index is not initialized, cannot update memory",
+                event_type=LogEventType.MEMORY_STORE,
+                user_id=user_id,
+                scope_id=scope_id
+            )
+            return False
+        old_doc = await self.memory_index.get_by_id(user_id, scope_id, mem_id)
+        if not old_doc:
+            return False
+        updated_doc = MemoryDoc(
+            id=mem_id,
+            text=new_memory,
+            type=old_doc.type,
+            timestamp=datetime.now(timezone.utc).astimezone(),
+            fields=old_doc.fields
+        )
+        await self.memory_index.update_memories(user_id, scope_id, [updated_doc])
         return True
 
     async def search(self, user_id: str, scope_id: str, query: str, top_k: int, **kwargs):
-        semantic_store = self._get_semantic_store("search", **kwargs)
-        mem_type = kwargs.get("mem_type", None)
-        if not mem_type:
-            mem_types = FRAGMENT_MEMORY_TYPE
-        else:
-            mem_types = [mem_type]
-        mem_ids, scores = [], {}
-        for mem_type in mem_types:
-            mem_ids_, scores_ = await self._recall_by_vector(
-                RecallParams(
-                    query=query,
-                    user_id=user_id,
-                    scope_id=scope_id,
-                    semantic_store=semantic_store,
-                    top_k=top_k,
-                    mem_type=mem_type
-                )
+        if not self.memory_index:
+            memory_logger.warning(
+                "memory_index is not initialized, cannot search memories",
+                event_type=LogEventType.MEMORY_RETRIEVE,
+                user_id=user_id,
+                scope_id=scope_id
             )
-            mem_ids.extend(mem_ids_)
-            scores.update(scores_)
-            mem_ids_, scores_ = [], {}
-        retrieve_res = await self.mem_store.batch_get(user_id=user_id, scope_id=scope_id, mem_ids=mem_ids)
-        if retrieve_res is None:
-            return None
-        for item in retrieve_res:
-            item["score"] = scores.get(item['id'], 0)
-            item["mem"] = BaseMemoryManager.decrypt_memory_if_needed(key=self.crypto_key, ciphertext=item["mem"])
-        retrieve_res.sort(key=lambda x: scores.get(x["id"], 0), reverse=True)
-        return retrieve_res[:top_k]
+            return []
+        mem_types = kwargs.get("mem_types", None)
+        result = []
+        search_results = await self.memory_index.search(
+            user_id=user_id,
+            scope_id=scope_id,
+            query=query,
+            mem_types=mem_types if mem_types else FRAGMENT_MEMORY_TYPE,
+            top_k=top_k
+        )
+        for memory_doc, score in search_results:
+            result.append(self._doc_to_dict(memory_doc, score))
+        result.sort(key=lambda x: x["score"], reverse=True)
+        return result[:top_k]
 
     async def get(self, user_id: str, scope_id: str, mem_id: str) -> dict[str, Any] | None:
-        retrieve_res = await self.mem_store.get(user_id=user_id, scope_id=scope_id, mem_id=mem_id)
-        retrieve_res["mem"] = BaseMemoryManager.decrypt_memory_if_needed(key=self.crypto_key,
-                                                                         ciphertext=retrieve_res["mem"])
-        return retrieve_res
+        if not self.memory_index:
+            memory_logger.warning(
+                "memory_index is not initialized, cannot get memory",
+                event_type=LogEventType.MEMORY_RETRIEVE,
+                user_id=user_id,
+                scope_id=scope_id
+            )
+            return None
+        memory_doc = await self.memory_index.get_by_id(user_id, scope_id, mem_id)
+        if not memory_doc:
+            return None
+        return self._doc_to_dict(memory_doc)
 
     async def delete(self, user_id: str, scope_id: str, mem_id: str, **kwargs):
-        semantic_store = self._get_semantic_store("delete", **kwargs)
-        data = await self.mem_store.get(user_id=user_id, scope_id=scope_id, mem_id=mem_id)
-        if data is None:
-            memory_logger.error(
-                "Delete user_profile in store failed",
-                memory_type="user_profile",
-                memory_id=[mem_id],
+        if not self.memory_index:
+            memory_logger.warning(
+                "memory_index is not initialized, cannot delete memory",
                 event_type=LogEventType.MEMORY_STORE,
                 user_id=user_id,
                 scope_id=scope_id
             )
             return False
-        mem_type = kwargs.get("mem_type", data.get("mem_type", None))
-        await self.mem_store.delete(mem_id=mem_id, user_id=user_id, scope_id=scope_id)
-        if not mem_type:
-            mem_types = FRAGMENT_MEMORY_TYPE
-        else:
-            mem_types = [mem_type]
-        for mem_type in mem_types:
-            await self._delete_vector_user_profile_memory(
+        doc = await self.memory_index.get_by_id(user_id, scope_id, mem_id)
+        if doc is None:
+            memory_logger.error(
+                "Delete memory failed, memory not found",
+                event_type=LogEventType.MEMORY_STORE,
                 memory_id=[mem_id],
                 user_id=user_id,
-                scope_id=scope_id,
-                mem_type=mem_type,
-                semantic_store=semantic_store
+                scope_id=scope_id
             )
+            return False
+        await self.memory_index.delete_memories(user_id, scope_id, [mem_id])
         return True
 
     async def delete_by_user_id(self, user_id: str, scope_id: str, **kwargs):
-        semantic_store = self._get_semantic_store("delete", **kwargs)
-        datas = []
-        for mem_type in FRAGMENT_MEMORY_TYPE:
-            data = await self.mem_store.get_all(
-                user_id=user_id,
-                scope_id=scope_id,
-                mem_type=mem_type
-            )
-            if data:
-                datas.extend(data)
-        if not datas:
-            memory_logger.error(
-                "Delete user_profile in store failed, the mem of user_id is not exist.",
-                memory_type="user_profile",
+        if not self.memory_index:
+            memory_logger.warning(
+                "memory_index is not initialized, cannot delete by user_id",
                 event_type=LogEventType.MEMORY_STORE,
                 user_id=user_id,
                 scope_id=scope_id
             )
             return False
-        mem_ids = [item['id'] for item in datas]
-        await self.mem_store.batch_delete(user_id=user_id, scope_id=scope_id, mem_ids=mem_ids)
-        for mem_type in FRAGMENT_MEMORY_TYPE:
-            await self._delete_vector_store_table(user_id=user_id, scope_id=scope_id,
-                                                  mem_type=mem_type, semantic_store=semantic_store)
+        await self.memory_index.delete_by_user_and_scope(user_id, scope_id)
         return True
 
-    async def list_fragment_memories(self, user_id: str, scope_id: str,
-                                mem_type: Optional[MemoryType] = None) -> list[dict[str, Any]]:
-        if not mem_type:
-            mem_types = FRAGMENT_MEMORY_TYPE
-        else:
+    async def list_fragment_memories(self, user_id: str, scope_id: str, offset, 
+                            batch_size, mem_type: Optional[MemoryType] = None) -> list[dict[str, Any]]:
+        if not self.memory_index:
+            memory_logger.warning(
+                "memory_index is not initialized, cannot list memories",
+                event_type=LogEventType.MEMORY_RETRIEVE,
+                user_id=user_id,
+                scope_id=scope_id
+            )
+            return []
+        all_memories = []
+        if mem_type:
             if mem_type.value not in FRAGMENT_MEMORY_TYPE:
                 memory_logger.error(
-                    f"{mem_type.value} is not a valid memory type",
-                    memory_type=mem_type,
+                    "%s is not a valid memory type",
+                    mem_type.value,
                     event_type=LogEventType.MEMORY_STORE,
                     user_id=user_id,
                     scope_id=scope_id
                 )
                 return []
-            mem_types = [mem_type.value]
-        datas = []
-        for mem_type in mem_types:
-            data = await self.mem_store.get_all(user_id=user_id, scope_id=scope_id, mem_type=mem_type)
-            if data:
-                datas.extend(data)
-        if not datas:
-            memory_logger.debug(
-                "End to get user profile, result is None.",
-                memory_type=mem_type,
-                event_type=LogEventType.MEMORY_STORE,
-                user_id=user_id,
-                scope_id=scope_id
-            )
+            all_memories = await self.memory_index.list_memories(user_id, scope_id, offset,
+                                                                 batch_size, [mem_type.value])
+        else:
+            all_memories = await self.memory_index.list_memories(user_id, scope_id, offset,
+                                                                 batch_size, FRAGMENT_MEMORY_TYPE)
+
+        if not all_memories:
             return []
-        for data in datas:
-            data["mem"] = BaseMemoryManager.decrypt_memory_if_needed(key=self.crypto_key,
-                                                                     ciphertext=data["mem"])
-        datas.sort(key=lambda x: (x['mem'], x['timestamp']), reverse=True)
-        return datas
+
+        result = [self._doc_to_dict(doc) for doc in all_memories]
+        result.sort(key=lambda x: (x['mem'], str(x.get('timestamp') or '')), reverse=True)
+        return result
+
+    async def _get_new_mem_units_and_update_memories(
+            self,
+            user_id: str,
+            scope_id: str,
+            memories: dict[str, list[BaseMemoryUnit]],
+            delete_memory_id_set: set,
+            process_result_dict: dict[str, FragmentMemoryUnit],
+    ) -> dict[str, FragmentMemoryUnit]:
+        new_mem_units: dict[str, FragmentMemoryUnit] = {}
+        update_mem_units: dict[str, FragmentMemoryUnit] = {}
+        for mem_type, memory_list in memories.items():
+            if mem_type not in FRAGMENT_MEMORY_TYPE:
+                continue
+            for mem_unit in memory_list:
+                if not isinstance(mem_unit, FragmentMemoryUnit):
+                    memory_logger.warning(
+                        "mem_unit is not a FragmentMemoryUnit",
+                        event_type=LogEventType.MEMORY_STORE,
+                        memory_type=mem_type,
+                        user_id=user_id,
+                        scope_id=scope_id
+                    )
+                    continue
+
+                mem_content = mem_unit.content
+                mem_id = mem_unit.mem_id
+                operation_type = mem_unit.operation_type
+                if operation_type == OperationType.UPDATE and mem_content:
+                    if mem_id in update_mem_units:
+                        memory_logger.warning(
+                            "update memory duplicate, old will be overwrite",
+                            event_type=LogEventType.MEMORY_STORE,
+                            memory_id=mem_id,
+                        )
+                    update_mem_units[mem_id] = mem_unit
+                elif operation_type == OperationType.DELETE:
+                    delete_memory_id_set.add(mem_id)
+                    process_result_dict[mem_id] = mem_unit
+                elif mem_content:
+                    new_mem_units[mem_id] = mem_unit
+
+        if update_mem_units:
+            update_docs = [self._convert_to_memory_doc(mem_unit) for mem_unit in update_mem_units.values()]
+            await self.memory_index.update_memories(user_id, scope_id, update_docs)
+            process_result_dict.update(update_mem_units)
+
+        return new_mem_units
+
+    async def _get_related_old_memories(
+            self,
+            new_mem_content: dict[str, str],
+            user_id: str,
+            scope_id: str,
+    ) -> dict[str, str]:
+        old_memories: dict[str, str] = {}
+        old_mem_ids = set()
+        for _, new_mem in new_mem_content.items():
+            search_results = await self.search(
+                user_id=user_id,
+                scope_id=scope_id,
+                query=new_mem,
+                top_k=self.UPDATE_CHECK_OLD_MEMORY_NUM,
+            )
+            if search_results:
+                for result in search_results:
+                    result_id = result.get("id", "")
+                    result_score = result.get("score", 0)
+                    result_content = result.get("mem", "")
+                    if (result_id and result_score > self.UPDATE_CHECK_OLD_MEMORY_RELEVANCE_THRESHOLD and
+                            result_id not in old_mem_ids):
+                        old_memories[result_id] = result_content
+                        old_mem_ids.add(result_id)
+        return old_memories
 
     async def _add_memory_to_store(
-        self,
-        user_id: str,
-        scope_id: str,
-        memory: FragmentMemoryUnit,
-        semantic_store: SemanticStore
+            self,
+            user_id: str,
+            scope_id: str,
+            memory: FragmentMemoryUnit,
     ):
         if not user_id:
             raise build_error(
                 StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
-                memory_type=memory.mem_type,
-                error_msg=f"user_profile_manager add operation must pass user_id",
+                memory_type=memory.mem_type.value,
+                error_msg="user_id is required",
             )
         if not scope_id:
             raise build_error(
                 StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
-                memory_type=memory.mem_type,
-                error_msg=f"user_profile_manager add operation must pass scope_id",
+                memory_type=memory.mem_type.value,
+                error_msg="scope_id is required",
             )
         if not memory.content:
             raise build_error(
                 StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
-                memory_type=memory.mem_type,
-                error_msg=f"user_profile_manager add operation must pass profile_mem",
+                memory_type=memory.mem_type.value,
+                error_msg="content is required",
             )
 
         memory_logger.debug(
             "Add memory",
-            memory_type=memory.mem_type,
+            memory_type=memory.mem_type.value,
             event_type=LogEventType.MEMORY_STORE,
             user_id=user_id,
             scope_id=scope_id
         )
-        user_profile_search_param = FragmentMemoryStoreParams(
-            user_id=user_id,
-            scope_id=scope_id,
-            mem_type=memory.mem_type.value,
-            content=memory.content,
-            source_id=memory.message_mem_id
-        )
-        mem_id = await self._add_user_profile_memory(user_profile_search_param)
-        vector_success = await self._add_vector_user_profile_memory(
-            AddVectorParams(
-                user_id=user_id,
-                scope_id=scope_id,
-                memory_id=mem_id,
-                mem=memory.content,
-                semantic_store=semantic_store,
-                mem_type=memory.mem_type.value
-            )
-        )
-        if not vector_success:
-            await self.delete(user_id=user_id, scope_id=scope_id, mem_id=mem_id, semantic_store=semantic_store)
-            raise build_error(
-                StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
-                memory_type=memory.mem_type,
-                error_msg=f"user_profile_manager add vector store failed",
-            )
-
-    async def _recall_by_vector(
-            self,
-            params: RecallParams
-    ) -> tuple[List[str], dict[str, float]]:
-        table_name = generate_idx_name(params.user_id, params.scope_id, params.mem_type)
-        memory_hit_info = await params.semantic_store.search(
-            query=params.query,
-            table_name=table_name,
-            top_k=params.top_k
-        )
-        return parse_memory_hit_infos(memory_hit_info)
-
-    async def _add_user_profile_memory(self, req: FragmentMemoryStoreParams) -> str:
-        mem_id = str(await self.date_user_profile_id.generate_next_id(user_id=req.user_id))
-
-        time = datetime.now(timezone.utc).astimezone()
-        content = BaseMemoryManager.encrypt_memory_if_needed(
-            key=self.crypto_key,
-            plaintext=req.content
-        )
-        data = {
-            'id': mem_id,
-            'user_id': req.user_id or '',
-            'scope_id': req.scope_id or '',
-            'mem': content,
-            'source_id': req.source_id,
-            'mem_type': req.mem_type,
-            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
-        }
-        await self.mem_store.write(user_id=req.user_id, scope_id=req.scope_id, mem_id=mem_id, data=data)
-        return mem_id
-
-    async def _add_vector_user_profile_memory(
-            self, params: AddVectorParams) -> bool:
-        if params.semantic_store:
-            table_name = generate_idx_name(params.user_id, params.scope_id, params.mem_type)
-            return await params.semantic_store.add_docs(
-                [(params.memory_id, params.mem)],
-                table_name,
-                scope_id=params.scope_id
-            )
-        else:
-            raise build_error(
-                StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
-                memory_type="user profile",
-                error_msg=f"vector store must not be None",
-            )
-
-    async def _delete_vector_user_profile_memory(
-            self,
-            user_id: str,
-            scope_id: str,
-            memory_id: List[str],
-            semantic_store: SemanticStore,
-            mem_type: str = None
-    ):
-        if semantic_store:
-            table_name = generate_idx_name(user_id, scope_id, mem_type)
-            await semantic_store.delete_docs(memory_id, table_name)
-        else:
-            raise build_error(
-                StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
-                memory_type="user profile",
-                error_msg=f"vector store must not be None",
-            )
-
-    async def _delete_vector_store_table(
-            self,
-            user_id: str,
-            scope_id: str,
-            mem_type,
-            semantic_store: SemanticStore
-    ):
-        if semantic_store:
-            table_name = generate_idx_name(usr_id=user_id, scope_id=scope_id, mem_type=mem_type)
-            await semantic_store.delete_table(table_name=table_name)
-        else:
-            raise build_error(
-                StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
-                memory_type="user profile",
-                error_msg=f"vector store must not be None",
-            )
-
-    def _get_semantic_store(self, operation_type: str, **kwargs) -> SemanticStore:
-        """
-        Get semantic store from kwargs or raise appropriate error based on operation type.
-
-        Args:
-            operation_type: Type of operation being performed ("add", "update", "delete", "search")
-            **kwargs: Keyword arguments containing semantic_store
-
-        Returns:
-            SemanticStore: The semantic store instance
-
-        Raises:
-            Error: If semantic_store is not provided
-        """
-        semantic_store = kwargs.get('semantic_store')
-        if not semantic_store:
-            error_codes = {
-                "add": StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
-                "update": StatusCode.MEMORY_UPDATE_MEMORY_EXECUTION_ERROR,
-                "delete": StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
-                "search": StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
-            }
-            error_code = error_codes.get(operation_type, StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR)
-            raise build_error(
-                error_code,
-                memory_type="fragment_memory",
-                error_msg="semantic_store is required",
-            )
-        return semantic_store
+        memory_doc = self._convert_to_memory_doc(memory)
+        await self.memory_index.add_memories(user_id, scope_id, [memory_doc])

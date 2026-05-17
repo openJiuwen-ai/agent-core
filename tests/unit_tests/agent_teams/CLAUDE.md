@@ -20,6 +20,7 @@ tests/unit_tests/agent_teams/
 ├── test_team_agent_tools.py      # team agent 侧工具
 ├── test_database.py              # SQLite schema / CRUD / migration
 ├── test_paths.py                 # 可配置路径、Windows junction 兼容
+├── models/                       # 多模型部署原语（pool / allocator）
 ├── team_workspace/               # TeamWorkspace（manager/models）
 ├── worktree/                     # worktree 隔离（backend/git/slug/session 等）
 ├── docs/                         # 测试设计文档（含 test_design.md）
@@ -38,14 +39,16 @@ tests/unit_tests/agent_teams/
 | `openjiuwen/agent_teams/agent/team_agent.py` | `test_team_agent.py`、`test_team_agent_tools.py` |
 | `openjiuwen/agent_teams/agent/coordinator.py`、`dispatcher.py` | `test_coordination_lifecycle.py`、`test_coordination_loop.py`、`test_team_agent_coordination.py` |
 | `openjiuwen/agent_teams/agent/member.py` | `test_member.py` |
-| `openjiuwen/agent_teams/agent/policy.py` | `test_policy.py` |
-| `openjiuwen/agent_teams/agent/team_rail.py`、`rails.py` | `test_team_rail.py` |
-| `openjiuwen/agent_teams/agent/team_section_cache.py` | `test_team_section_cache.py` |
+| `openjiuwen/agent_teams/prompts/policy.py` | `test_policy.py` |
+| `openjiuwen/agent_teams/prompts/sections.py`、`rails/team_policy_rail.py` | `test_team_policy_rail.py` |
+| `openjiuwen/agent_teams/rails/first_iteration_gate.py`、`rails/tool_approval_rail.py` | `test_team_policy_rail.py` |
+| `openjiuwen/agent_teams/prompts/section_cache.py` | `test_team_section_cache.py` |
 | `openjiuwen/agent_teams/messager/` | `test_messager.py`、`test_message_manager.py` |
 | `openjiuwen/agent_teams/tools/task_manager.py` | `test_task_manager.py` |
 | `openjiuwen/agent_teams/tools/team_tools.py`、`team.py` | `test_team_tools.py` |
 | `openjiuwen/agent_teams/tools/database.py`、`memory_database.py` | `test_database.py` |
 | `openjiuwen/agent_teams/paths.py` | `test_paths.py` |
+| `openjiuwen/agent_teams/models/` | `models/` |
 | `openjiuwen/agent_teams/team_workspace/` | `team_workspace/` |
 | `openjiuwen/agent_teams/worktree/` | `worktree/` |
 

@@ -196,25 +196,42 @@ async def registered_a2a_remote_agent(a2a_server_app, started_runner, monkeypatc
 
 @pytest.mark.asyncio
 async def test_runner_should_return_agent_result_from_a2a_remote_agent(registered_a2a_remote_agent):
+    conversation_id = "c-a2a-1"
     response = await Runner.run_agent(
         registered_a2a_remote_agent,
-        {"query": "hello a2a", "conversation_id": "c-a2a-1"},
+        {"query": "hello a2a", "conversation_id": conversation_id},
     )
 
-    assert response.status == TaskStatus.COMPLETED
+    assert response.status == TaskStatus.SUBMITTED
     assert response.task_id
-    assert response.sessionId
+    assert response.sessionId == conversation_id
+    assert response.task_id != response.sessionId
+    assert not response.artifacts
 
 
 @pytest.mark.asyncio
 async def test_runner_should_stream_agent_result_from_a2a_remote_agent(registered_a2a_remote_agent):
+    conversation_id = "c-a2a-2"
     chunks = []
     async for chunk in Runner.run_agent_streaming(
         registered_a2a_remote_agent,
-        {"query": "stream a2a", "conversation_id": "c-a2a-2"},
+        {"query": "stream a2a", "conversation_id": conversation_id},
     ):
         chunks.append(chunk)
 
     assert chunks
-    assert any(chunk.artifacts for chunk in chunks)
     assert chunks[-1].status == TaskStatus.COMPLETED
+    if len(chunks) > 1:
+        assert chunks[0].status in {TaskStatus.SUBMITTED, TaskStatus.WORKING}
+        assert any(chunk.status in {TaskStatus.SUBMITTED, TaskStatus.WORKING} for chunk in chunks[:-1])
+    else:
+        assert chunks[0].status == TaskStatus.COMPLETED
+    assert all(chunk.sessionId == conversation_id for chunk in chunks)
+    assert all(chunk.task_id == chunks[0].task_id for chunk in chunks)
+    assert any(chunk.artifacts for chunk in chunks)
+    assert any(
+        artifact.parts
+        and artifact.parts[0].text == "echo: stream a2a"
+        for chunk in chunks
+        for artifact in chunk.artifacts
+    )

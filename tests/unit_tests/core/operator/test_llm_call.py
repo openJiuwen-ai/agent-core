@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from openjiuwen.agent_evolving.types import UpdateValue
 from openjiuwen.core.operator.llm_call import LLMCallOperator
 
 
@@ -215,3 +216,28 @@ class TestLLMCallOperator:
         )
         op.set_parameter("system_prompt", "New prompt")
         callback.assert_called_once_with("system_prompt", "New prompt")
+
+    @staticmethod
+    def test_apply_update_reuses_replace_state_behavior(operator):
+        """Test apply_update preserves replace-only prompt updates."""
+        result = operator.apply_update("system_prompt", UpdateValue(payload="New system prompt"))
+
+        assert operator.get_state()["system_prompt"] == "New system prompt"
+        assert result.applied is True
+        assert result.mode == "replace"
+        assert result.effect == "state"
+        assert result.value == "New system prompt"
+
+    @staticmethod
+    def test_apply_update_reports_noop_for_frozen_prompt():
+        """Test apply_update reports no-op when a frozen prompt ignores the update."""
+        operator = LLMCallOperator(
+            system_prompt="sys",
+            user_prompt="{{query}}",
+            freeze_system_prompt=True,
+        )
+
+        result = operator.apply_update("system_prompt", UpdateValue(payload="New system prompt"))
+
+        assert operator.get_state()["system_prompt"] == "sys"
+        assert result.applied is False

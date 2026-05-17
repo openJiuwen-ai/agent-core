@@ -37,6 +37,7 @@ class RLOnlineRail(EvolutionRail):
         session_done_on_invoke_end: bool = True,
         **kwargs: Any,
     ) -> None:
+        kwargs.setdefault("max_trajectory_steps", None)
         super().__init__(**kwargs)
         self._session_id = session_id
         self._tenant_id = tenant_id
@@ -121,6 +122,10 @@ class RLOnlineRail(EvolutionRail):
         if self._builder is not None:
             self._builder.meta["status"] = "invoke_error"
             self._builder.meta["exception"] = repr(ctx.exception)
+
+    async def _on_after_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Keep uploaded online RL trajectories scoped to one invoke."""
+        self._reset_trajectory_builder()
 
     async def run_evolution(
         self,

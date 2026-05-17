@@ -106,6 +106,7 @@ class GraphKnowledgeBase(KnowledgeBase):
         chunk_index_config = IndexConfig(
             index_name=f"kb_{self.config.kb_id}_chunks",
             index_type=self.config.index_type,
+            use_caption_for_images=self.config.use_caption_for_images,
         )
 
         database_name = getattr(getattr(self.vector_store, "config", None), "database_name", None)
@@ -135,6 +136,7 @@ class GraphKnowledgeBase(KnowledgeBase):
                 triple_index_config = IndexConfig(
                     index_name=f"kb_{self.config.kb_id}_triples",
                     index_type=self.config.index_type,
+                    use_caption_for_images=True,
                 )
 
                 # Convert triples to TextChunk format for indexing

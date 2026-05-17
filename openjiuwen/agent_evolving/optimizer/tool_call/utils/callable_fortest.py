@@ -1,13 +1,12 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-import os
-import json
 import asyncio
-from typing import Any, Dict, Optional, Callable
+import json
+import os
+from typing import Any, Callable, Dict, Optional
 
-from fastmcp.client import Client
-from fastmcp.client import SSETransport
+from fastmcp.client import Client, SSETransport
 
 
 def make_sync_mcp_caller(

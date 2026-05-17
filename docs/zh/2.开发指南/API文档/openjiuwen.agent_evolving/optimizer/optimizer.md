@@ -134,4 +134,4 @@ class InstructionOptimizer(
 
 ## 团队技能优化器
 
-详见 [team_skill_optimizer](team_skill_optimizer.md)。
+详见 [team_skill_experience_optimizer](./skill_call/team_skill_experience_optimizer.md)。

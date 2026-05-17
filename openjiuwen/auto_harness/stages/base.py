@@ -22,11 +22,34 @@ if TYPE_CHECKING:
 StageEvent: TypeAlias = OutputSchema | StageResult
 
 
+def scope_output_event_stage(
+    event: Any,
+    stage: str,
+) -> Any:
+    """Scope nested agent progress events to the outer stage."""
+    if not stage:
+        return event
+    if not isinstance(event, OutputSchema):
+        return event
+    if event.type not in {"message", "stage_result"}:
+        return event
+    if not isinstance(event.payload, dict):
+        return event
+
+    payload = dict(event.payload)
+    if payload.get("stage") == stage:
+        return event
+    payload["stage"] = stage
+    return event.model_copy(update={"payload": payload})
+
+
 class BaseStage:
     """Base interface for all stages."""
 
     name = ""
+    display_name = ""
     description = ""
+    slot: str = ""
     consumes: list[str] = []
     produces: list[str] = []
     scope = "session"
@@ -45,6 +68,7 @@ class BaseStage:
             consumes=list(cls.consumes),
             produces=list(cls.produces),
             scope=cls.scope,
+            slot=cls.slot,
         )
 
     async def stream(

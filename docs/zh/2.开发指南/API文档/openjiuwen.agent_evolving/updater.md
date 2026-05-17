@@ -13,7 +13,7 @@
 `openjiuwen.agent_evolving.updater` 模块导出以下公开接口：
 
 ```python
-from openjiuwen.agent_evolving import Updater, SingleDimUpdater, MultiDimUpdater
+from openjiuwen.agent_evolving.updater import Updater, SingleDimUpdater, MultiDimUpdater
 ```
 
 ---

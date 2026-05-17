@@ -16,6 +16,7 @@ from typing import Any, List
 
 import pytest
 
+from openjiuwen.agent_teams import harness as harness_module
 from openjiuwen.agent_teams.agent import stream_controller as stream_controller_module
 from openjiuwen.agent_teams.agent.stream_controller import StreamController
 from openjiuwen.agent_teams.schema.status import ExecutionStatus
@@ -58,9 +59,17 @@ def _make_stream_controller_stub() -> StreamController:
     """Return a minimal StreamController wired to record execution events.
 
     Uses real status/execution callbacks (no-op or recorder) and synthetic
-    deep_agent / member_name so that ``_execute_round`` can drive the retry
-    loop end to end without requiring a fully bootstrapped TeamAgent.
+    blueprint / state / resources so that ``_execute_round`` can drive
+    the retry loop end to end without requiring a fully bootstrapped
+    TeamAgent.
     """
+    from unittest.mock import MagicMock
+
+    from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
+    from openjiuwen.agent_teams.agent.state import TeamAgentState
+    from openjiuwen.agent_teams.harness import TeamHarness, _MountedRails
+    from openjiuwen.agent_teams.schema.team import TeamRole
+
     execution_log: list[ExecutionStatus] = []
 
     async def _record_execution(status: ExecutionStatus) -> None:
@@ -69,13 +78,23 @@ def _make_stream_controller_stub() -> StreamController:
     async def _noop_status(_: Any) -> None:
         return None
 
+    state = TeamAgentState()
+    fake_rails = _MountedRails(team_tool=MagicMock(), team_policy=MagicMock())
+    fake_harness = TeamHarness(
+        SimpleNamespace(deep_config=None),
+        fake_rails,
+        role=TeamRole.LEADER,
+        member_name="stub",
+    )
+    resources = PrivateAgentResources(harness=fake_harness)
+    fake_blueprint = SimpleNamespace(member_name="stub", role=TeamRole.LEADER)
+
     sc = StreamController(
-        deep_agent_getter=lambda: object(),
-        member_name_getter=lambda: "stub",
+        blueprint_getter=lambda: fake_blueprint,
+        state=state,
+        resources=resources,
         status_updater=_noop_status,
         execution_updater=_record_execution,
-        team_member_getter=lambda: None,
-        session_id_getter=lambda: "sess-1",
     )
     sc.stream_queue = asyncio.Queue()
     sc._execution_log = execution_log  # type: ignore[attr-defined]
@@ -100,7 +119,7 @@ def _install_fake_runner(
             yield chunk
 
     monkeypatch.setattr(
-        stream_controller_module.Runner,
+        harness_module.Runner,
         "run_agent_streaming",
         fake_run_agent_streaming,
     )

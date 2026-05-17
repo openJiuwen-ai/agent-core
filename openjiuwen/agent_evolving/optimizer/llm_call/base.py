@@ -5,10 +5,10 @@ LLMCall domain optimizer base class: fixes domain=llm, default_targets=[system_p
 unifies filtering and logging semantics. Subclasses implement _backward / _update for prompt optimization.
 """
 
-from typing import Dict, List, TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, List
 
-from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.agent_evolving.optimizer.base import BaseOptimizer
+from openjiuwen.core.foundation.prompt import PromptTemplate
 
 if TYPE_CHECKING:
     from openjiuwen.core.operator.base import Operator

@@ -14,7 +14,7 @@ import pytest_asyncio
 
 from openjiuwen.core.memory.lite.coding_memory_tool_context import CodingMemoryToolContext
 from openjiuwen.core.memory.lite.memory_tool_context import MemoryToolContext
-from openjiuwen.core.memory.team.member_memory_toolkit import (
+from openjiuwen.agent_teams.memory.member_memory_toolkit import (
     MemberMemoryToolkit,
     _create_coding_tools,
     _create_general_tools,

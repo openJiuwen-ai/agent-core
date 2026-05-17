@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
 
@@ -369,3 +370,47 @@ class TestCIGateRunnerInvoke(IsolatedAsyncioTestCase):
         assert "AssertionError: expected value" in result["errors"]
         assert "FAILED tests/unit_tests/core/foundation/tool/test_api_param_mapper.py::test_x" in result["errors"]
         assert "PydanticDeprecatedSince20" not in result["errors"]
+
+
+class TestCIGateRunnerCommandEnv(IsolatedAsyncioTestCase):
+    def test_command_env_removes_virtual_env(self):
+        """Verify _command_env() removes VIRTUAL_ENV from inherited env.
+
+        This prevents uv sync --active from being misled into modifying
+        the host tool's environment instead of the workspace's .venv.
+        """
+        # Simulate a host environment where VIRTUAL_ENV is set
+        with patch.dict(
+            os.environ,
+            {"VIRTUAL_ENV": "/host/.venv"},
+            clear=False,
+        ):
+            tool = CIGateRunner(
+                "/workspace",
+                python_executable="/host/.venv/bin/python3",
+            )
+            with patch("pathlib.Path.is_file", return_value=True):
+                env = tool._command_env()
+        assert "VIRTUAL_ENV" not in env
+        assert env["AUTO_HARNESS_PYTHON"] == "/host/.venv/bin/python3"
+        # On Windows, paths may be converted, use pathlib for comparison
+        bin_dir = str(Path("/host/.venv/bin"))
+        assert bin_dir in env["PATH"] or env["PATH"].startswith(str(Path(bin_dir)))
+
+    def test_command_env_includes_ci_flag(self):
+        tool = CIGateRunner("/tmp")
+        env = tool._command_env()
+        assert env["CI"] == "1"
+
+    def test_command_env_preserves_existing_path(self):
+        tool = CIGateRunner(
+            "/workspace",
+            python_executable="/custom/bin/python",
+        )
+        with patch("pathlib.Path.is_file", return_value=True):
+            env = tool._command_env()
+        # On Windows, paths may be converted, use pathlib for comparison
+        bin_dir = str(Path("/custom/bin"))
+        assert bin_dir in env["PATH"] or env["PATH"].startswith(str(Path(bin_dir)))
+        # Original PATH components should still be present
+        assert ";" in env["PATH"] or ":" in env["PATH"]  # PATH has multiple entries

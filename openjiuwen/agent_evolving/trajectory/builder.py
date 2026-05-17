@@ -51,6 +51,7 @@ class TrajectoryBuilder:
         case_id: Optional[str] = None,
         member_id: Optional[str] = None,
         meta: Optional[Dict[str, Any]] = None,
+        max_steps: Optional[int] = None,
     ) -> None:
         """Initialize builder.
 
@@ -61,11 +62,15 @@ class TrajectoryBuilder:
             case_id: Optional case ID (for offline scenarios)
             member_id: Optional team member identifier for trajectory aggregation.
             meta: Optional extension metadata.
+            max_steps: Optional maximum number of recent steps to retain.
         """
+        if max_steps is not None and max_steps < 1:
+            raise ValueError("max_steps must be >= 1")
         self.session_id = session_id
         self.source = source
         self.case_id = case_id
         self.member_id = member_id
+        self.max_steps = max_steps
         self.meta: Dict[str, Any] = dict(meta or {})
         if member_id:
             self.meta.setdefault("member_id", member_id)
@@ -80,6 +85,8 @@ class TrajectoryBuilder:
             step: Step to record
         """
         self.steps.append(step)
+        if self.max_steps is not None and len(self.steps) > self.max_steps:
+            self.steps = self.steps[-self.max_steps:]
 
         # Accumulate token usage from LLM steps
         if step.kind == "llm" and step.detail:

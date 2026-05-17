@@ -1,125 +1,168 @@
 # openjiuwen.agent_evolving.trajectory
 
-`openjiuwen.agent_evolving.trajectory` defines execution trajectory types (Trajectory, TrajectoryStep, ExecutionSpec, UpdateKey, Updates), and interfaces for extracting trajectories from Session and filtering steps by conditions.
+`openjiuwen.agent_evolving.trajectory` defines the public trajectory data model, extraction interface, persistence interface, and team aggregation utilities used by the agent-evolving pipeline.
 
 ---
 
 ## Type Aliases
 
-* **UpdateKey**: `Tuple[str, str]`, represents (operator_id, target).
-* **Updates**: `Dict[UpdateKey, Any]`, operator parameter update collection.
-* **StepKind**: `Literal["llm", "tool", "memory", "workflow", "agent"]`, single step type.
+* **StepKind**: `Literal["llm", "tool"]`, step kind in the extracted trajectory.
+* **CostInfo**: `Dict[str, int]`, aggregated token cost such as `{"input_tokens": N, "output_tokens": M}`.
 
 ---
 
-## class openjiuwen.agent_evolving.trajectory.types.ExecutionSpec
+## class openjiuwen.agent_evolving.trajectory.types.LLMCallDetail
 
-Metadata for a single execution (read-only dataclass).
+Structured detail for one LLM step.
 
-* **case_id**(str): Sample ID.
-* **execution_id**(str): Execution ID.
-* **seed**(int, optional): Random seed. Default: `None`.
-* **tags**(Dict[str, Any], optional): Tags. Default: `None`.
+* **model**(str): Model name.
+* **messages**(List[Dict[str, Any]]): Input messages.
+* **response**(Dict[str, Any], optional): Parsed response payload.
+* **tools**(List[Dict[str, Any]], optional): Tool schema passed to the model.
+* **usage**(Dict[str, Any], optional): Usage metadata.
+* **meta**(Dict[str, Any]): Extension metadata.
+
+---
+
+## class openjiuwen.agent_evolving.trajectory.types.ToolCallDetail
+
+Structured detail for one tool step.
+
+* **tool_name**(str): Tool name.
+* **call_args**(Any): Tool input arguments.
+* **call_result**(Any): Tool execution result.
+* **tool_description**(str, optional): Tool description from resource metadata.
+* **tool_schema**(Dict[str, Any], optional): Tool parameter schema.
+* **tool_call_id**(str, optional): Tool call ID for artifact tracking.
 
 ---
 
 ## class openjiuwen.agent_evolving.trajectory.types.TrajectoryStep
 
-Single step in a trajectory.
+Single extracted trajectory step.
 
-* **kind**(StepKind): Step type (llm/tool/memory/workflow/agent).
-* **operator_id**(str, optional): Operator ID.
-* **agent_id**(str, optional): Agent ID.
-* **role**(str, optional): Role.
-* **node_id**(str, optional): Node ID.
-* **inputs**(Any): Inputs.
-* **outputs**(Any): Outputs.
-* **error**(Dict[str, Any], optional): Error information.
-* **start_time_ms**(int, optional): Start time (milliseconds).
-* **end_time_ms**(int, optional): End time (milliseconds).
-* **meta**(Dict[str, Any]): Metadata (e.g., invoke_id, parent_invoke_id, child_invokes, etc.).
+* **kind**(StepKind): Step kind.
+* **error**(Dict[str, Any], optional): Error payload.
+* **start_time_ms**(int, optional): Step start time in milliseconds.
+* **end_time_ms**(int, optional): Step end time in milliseconds.
+* **detail**(LLMCallDetail | ToolCallDetail, optional): Structured step detail.
+* **reward**(float, optional): Post-injected scalar reward.
+* **prompt_token_ids**(List[int], optional): Prompt token IDs lifted from LLM response.
+* **completion_token_ids**(List[int], optional): Completion token IDs lifted from LLM response.
+* **logprobs**(Any, optional): Token log probabilities.
+* **meta**(Dict[str, Any]): Extension metadata such as `operator_id`, `agent_id`, and invoke relationships.
 
 ---
 
 ## class openjiuwen.agent_evolving.trajectory.types.Trajectory
 
-Complete execution trajectory.
+Complete extracted trajectory.
 
-* **case_id**(str): Sample ID.
-* **execution_id**(str): Execution ID.
-* **trace_id**(str, optional): Trace ID.
-* **steps**(List[TrajectoryStep]): Step list.
-* **edges**(List[Tuple[int, int]], optional): Dependency edges between steps (index pairs). Default: `None`.
+* **execution_id**(str): Unique execution ID.
+* **steps**(List[TrajectoryStep]): Ordered steps.
+* **source**(str): Execution source, default `"offline"`.
+* **case_id**(str, optional): Offline dataset case identifier.
+* **session_id**(str, optional): Session ID.
+* **cost**(CostInfo, optional): Aggregated token cost.
+* **meta**(Dict[str, Any]): Trajectory-level metadata.
 
 ---
 
-## class openjiuwen.agent_evolving.trajectory.operation.TracerTrajectoryExtractor
+## class openjiuwen.agent_evolving.trajectory.extractor.TrajectoryExtractor
 
-Extracts Trajectory from Session's tracer. Parses agent and workflow spans, builds steps and edges, doesn't depend on core internal implementation details (only depends on invoke_type, name, inputs, outputs, error, meta_data, llm_call_id, etc. fields).
+Extracts `Trajectory` from `Session.tracer()` spans and normalizes span data into trajectory steps.
 
-### extract(session, execution: ExecutionSpec) -> Trajectory
+```text
+class TrajectoryExtractor(resource_manager: Any = None)
+```
 
-Extracts one trajectory from session's tracer.
+### extract(session, case_id=None) -> Trajectory
+
+Extract one trajectory from a session tracer.
 
 **Parameters**:
 
-* **session**: Session object with tracer attribute.
-* **execution**(ExecutionSpec): Metadata for this execution.
+* **session**: Session object exposing `tracer`.
+* **case_id**(str, optional): Case identifier used for offline training.
 
 **Returns**:
 
-**Trajectory**, containing all steps and dependencies.
+* **Trajectory**: Assembled trajectory with normalized steps.
 
 ---
 
-## func openjiuwen.agent_evolving.trajectory.operation.iter_steps(trajectories, *, case_id=None, operator_id=None, kind=None)
+## class openjiuwen.agent_evolving.trajectory.builder.TrajectoryBuilder
 
-Iterates TrajectoryStep by optional conditions.
+Incrementally records `TrajectoryStep` values and builds a final `Trajectory`.
 
-**Parameters**:
+```text
+class TrajectoryBuilder(
+    execution_id: str | None = None,
+    *,
+    session_id: str | None = None,
+    source: str = "offline",
+    case_id: str | None = None,
+)
+```
 
-* **trajectories**(List[Trajectory]): Trajectory list.
-* **case_id**(str, optional): Filter by case_id.
-* **operator_id**(str, optional): Filter by operator_id.
-* **kind**(StepKind, optional): Filter by step type (e.g., `"llm"`, `"tool"`).
+### record_step(step) -> None
 
-**Returns**:
+Append one step to the builder.
 
-**Iterator[TrajectoryStep]**, steps satisfying all given conditions.
+### build() -> Trajectory
 
----
-
-## func openjiuwen.agent_evolving.trajectory.operation.get_steps_for_case_operator(trajectories, case_id, operator_id, kind='llm')
-
-Gets all matching steps for specified case and operator.
-
-**Parameters**:
-
-* **trajectories**(List[Trajectory]): Trajectory list.
-* **case_id**(str): Sample ID.
-* **operator_id**(str): Operator ID.
-* **kind**(StepKind, optional): Step type, default `"llm"`.
-
-**Returns**:
-
-**List[TrajectoryStep]**, matching step list.
+Build the final trajectory object.
 
 ---
 
-## class TeamTrajectory
+## class openjiuwen.agent_evolving.trajectory.store.TrajectoryStore
 
-Aggregated team trajectory dataclass for team-level view of a single session.
+Persistence protocol for saving, loading, and querying trajectories.
 
-* **team_id** (str): Team ID.
-* **session_id** (str): Session ID.
-* **combined** (Trajectory): Merged view of all member trajectories, sorted by `start_time_ms`.
-* **members** (Dict[str, Trajectory]): Mapping from member ID to its individual trajectory.
+### save(trajectory, version=None) -> None
+
+Save one trajectory.
+
+### load(execution_id, version=None) -> Optional[Trajectory]
+
+Load one trajectory by execution ID.
+
+### query(version=None, **filters) -> List[Trajectory]
+
+Query trajectories by metadata filters such as `session_id`, `case_id`, or `source`.
 
 ---
 
-## class TeamTrajectoryAggregator
+## class openjiuwen.agent_evolving.trajectory.store.InMemoryTrajectoryStore
 
-Aggregates team member trajectories into a team-level view.
+In-memory trajectory store for tests and development.
+
+---
+
+## class openjiuwen.agent_evolving.trajectory.store.FileTrajectoryStore
+
+JSONL-backed trajectory store.
+
+```text
+class FileTrajectoryStore(base_dir: Path)
+```
+
+---
+
+## class openjiuwen.agent_evolving.trajectory.aggregator.TeamTrajectory
+
+Aggregated team trajectory for a single session.
+
+* **team_id**(str): Team ID.
+* **session_id**(str): Session ID.
+* **combined**(Trajectory): Merged team trajectory.
+* **members**(Dict[str, Trajectory]): Member ID to individual trajectory mapping.
+
+---
+
+## class openjiuwen.agent_evolving.trajectory.aggregator.TeamTrajectoryAggregator
+
+Aggregates member trajectories into one team-level view.
 
 ```text
 class TeamTrajectoryAggregator(
@@ -130,74 +173,21 @@ class TeamTrajectoryAggregator(
 )
 ```
 
-**Parameters**:
+### aggregate(session_id, filter_collaborative=True) -> TeamTrajectory
 
-* **store** (TrajectoryStore, optional): Trajectory store instance.
-* **trajectories_dir** (Path, optional): Trajectory directory path (backward-compatible).
-* **team_id** (str): Team ID.
-
-**Either `store` or `trajectories_dir` must be provided**.
-
-### aggregate(session_id, filter_collaborative) -> TeamTrajectory
-
-Aggregate all member trajectories for the given session.
+Aggregate all member trajectories for one session.
 
 **Parameters**:
 
-* **session_id** (str): Session ID.
-* **filter_collaborative** (bool): Whether to filter collaboration-relevant steps, defaults to `True`.
+* **session_id**(str): Session to aggregate.
+* **filter_collaborative**(bool): Whether to keep only collaboration-relevant member steps.
 
 **Returns**:
 
-* **TeamTrajectory**: Contains `members` dict and `combined` merged view.
+* **TeamTrajectory**: Aggregated team view.
 
 ---
 
-## func filter_member_trajectory(trajectory: Trajectory) -> Trajectory
+## func openjiuwen.agent_evolving.trajectory.aggregator.filter_member_trajectory(trajectory: Trajectory) -> Trajectory
 
-Filter member trajectory to keep only collaboration-relevant steps.
-
-Retains step types:
-
-* Steps with cross-member meta markers (`invoke_id`, `parent_invoke_id`, `child_invokes`)
-* Collaborative tool calls (`view_task`, `claim_task`, `send_message`, etc.)
-* Skill file reads (`read_file` calls containing "skill")
-
-**Parameters**:
-
-* **trajectory** (Trajectory): Member trajectory.
-
-**Returns**:
-
-* **Trajectory**: Filtered trajectory, preserving other fields.
-
----
-
-## Constants
-
-### COLLABORATIVE_TOOLS
-
-Collaborative tool name set:
-
-```python
-COLLABORATIVE_TOOLS = frozenset({
-    "view_task",
-    "claim_task",
-    "send_message",
-    "workspace_meta",
-    "read_file",
-    "write_file",
-})
-```
-
-### CROSS_MEMBER_META_KEYS
-
-Cross-member interaction meta key set:
-
-```python
-CROSS_MEMBER_META_KEYS = frozenset({
-    "invoke_id",
-    "parent_invoke_id",
-    "child_invokes",
-})
-```
+Filter one member trajectory to collaboration-relevant steps only.

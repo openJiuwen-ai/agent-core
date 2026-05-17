@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """AgentTeam public interfaces."""
 
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
@@ -8,7 +10,6 @@ from openjiuwen.agent_teams.constants import (
     RESERVED_MEMBER_NAMES,
     USER_PSEUDO_MEMBER_NAME,
 )
-from openjiuwen.agent_teams.factory import create_agent_team, resume_persistent_team
 from openjiuwen.agent_teams.interaction import (
     HumanAgentInbox,
     HumanAgentNotEnabledError,
@@ -33,8 +34,15 @@ from openjiuwen.agent_teams.schema.blueprint import (
     TransportSpec,
 )
 from openjiuwen.agent_teams.schema.events import TeamEvent
+from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
+from openjiuwen.agent_teams.models import ModelPoolEntry
+from openjiuwen.agent_teams.runtime import (
+    RunAction,
+    RunActionKind,
+    TeamRuntimeActivation,
+    TeamRuntimeManager,
+)
 from openjiuwen.agent_teams.schema.team import (
-    ModelPoolEntry,
     TeamLifecycle,
     TeamMemberSpec,
     TeamRole,
@@ -64,18 +72,21 @@ __all__ = [
     "Messager",
     "MessagerPeerConfig",
     "MessagerTransportConfig",
+    "RunAction",
+    "RunActionKind",
     "TeamAgent",
     "TeamEvent",
     "TeamLifecycle",
     "TeamMemberSpec",
+    "TeamOutputSchema",
     "TeamRole",
+    "TeamRuntimeActivation",
     "TeamRuntimeContext",
+    "TeamRuntimeManager",
     "TeamSpec",
-    "TeamRuntimeMessager",
+    "InProcessMessager",
     "PyZmqMessager",
     "create_messager",
     "InProcessSpawnHandle",
     "MemoryDatabaseConfig",
-    "create_agent_team",
-    "resume_persistent_team",
 ]

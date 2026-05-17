@@ -65,6 +65,12 @@ from openjiuwen.harness.tools.agent_mode_tools import (
 )
 from openjiuwen.harness.tools.lsp_tool import LspTool
 from openjiuwen.harness.tools.ask_user import AskUserTool
+from openjiuwen.harness.tools.worktree import (
+    EnterWorktreeTool,
+    ExitWorktreeTool,
+    WorktreeConfig,
+    WorktreeManager,
+)
 from openjiuwen.harness.prompts.tools.lsp_tool import LspToolMetadataProvider
 
 __all__ = [
@@ -126,4 +132,8 @@ __all__ = [
     "TaskTool",
     "create_task_tool",
     "AskUserTool",
+    "EnterWorktreeTool",
+    "ExitWorktreeTool",
+    "WorktreeConfig",
+    "WorktreeManager",
 ]

@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Fault tolerance and team recovery for TeamAgent."""
 
 from __future__ import annotations
@@ -11,11 +13,9 @@ from typing import (
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.core.session.agent_team import Session as AgentTeamSession
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.agent_configurator import AgentConfigurator
-    from openjiuwen.agent_teams.agent.session_manager import SessionManager
     from openjiuwen.agent_teams.agent.spawn_manager import SpawnManager
 
 
@@ -44,6 +44,13 @@ class RecoveryManager:
 
         member_name = self._configurator.member_name
         team_logger.info("[{}] recovering team", member_name or "?")
+        # Rebuild the in-memory HITT roster from DB before any
+        # restart_teammate fan-out. ``build_context_from_db`` already
+        # reads ``role`` straight off the row, but other sync HITT
+        # consumers (rails, coordination handlers, prompt sections)
+        # still read this cache and would otherwise see an empty
+        # roster after a cold leader restart.
+        await team_backend.refresh_human_agent_roster()
         all_members = await team_backend.list_members()
         restarted: list[str] = []
 
@@ -63,20 +70,22 @@ class RecoveryManager:
         return restarted
 
     def persist_leader_config(self, session) -> None:
+        from openjiuwen.agent_teams.runtime.metadata import write_team_namespace
+
         spec = self._configurator.spec
         ctx = self._configurator.ctx
-        if spec is None or ctx is None:
+        team_name = self._configurator.team_name
+        if spec is None or ctx is None or team_name is None:
             return
 
         payload: dict[str, Any] = {
             "spec": spec.model_dump(mode="json"),
             "context": ctx.model_dump(mode="json"),
-            "team_name": self._configurator.team_name,
         }
         allocator = self._configurator.model_allocator
         if allocator is not None:
             payload["model_allocator_state"] = allocator.state_dict()
-        session.update_state(payload)
+        write_team_namespace(session, team_name, payload)
 
     async def _mark_teammate_restarting_for_session_switch(
         self,
@@ -103,7 +112,17 @@ class RecoveryManager:
         if current_status == MemberStatus.RESTARTING:
             return True
 
-        if current_status not in {MemberStatus.ERROR, MemberStatus.SHUTDOWN}:
+        # PAUSED / STOPPED / ERROR / SHUTDOWN are all directly transitionable
+        # to RESTARTING per ``MEMBER_TRANSITIONS``. Only the "active" states
+        # (READY / BUSY / SHUTDOWN_REQUESTED / UNSTARTED) need the ERROR
+        # normalization step to clear an invalid direct hop.
+        directly_restartable = {
+            MemberStatus.PAUSED,
+            MemberStatus.STOPPED,
+            MemberStatus.ERROR,
+            MemberStatus.SHUTDOWN,
+        }
+        if current_status not in directly_restartable:
             updated = await db.member.update_member_status(
                 member_name,
                 team_name,
@@ -158,7 +177,15 @@ class RecoveryManager:
             if member.member_name not in live_teammates:
                 continue
             member_status = MemberStatus(member.status)
-            if member_status in {MemberStatus.UNSTARTED, MemberStatus.SHUTDOWN}:
+            # UNSTARTED never ran; SHUTDOWN/STOPPED are not "live" by
+            # definition (runtime gone). Spawned-handles filtering above
+            # already excludes most of these, but the status guard keeps
+            # the snapshot honest when a stale handle is still registered.
+            if member_status in {
+                MemberStatus.UNSTARTED,
+                MemberStatus.SHUTDOWN,
+                MemberStatus.STOPPED,
+            }:
                 continue
             result.append((member.member_name, member_status))
         return result
@@ -185,11 +212,16 @@ class RecoveryManager:
             await self._spawn_manager.restart_teammate(member_name)
 
     def persist_allocator_state(self, team_session) -> None:
+        from openjiuwen.agent_teams.runtime.metadata import merge_team_namespace
+
         allocator = self._configurator.model_allocator
-        if team_session is None or allocator is None:
+        team_name = self._configurator.team_name
+        if team_session is None or allocator is None or team_name is None:
             return
         try:
-            team_session.update_state(
+            merge_team_namespace(
+                team_session,
+                team_name,
                 {"model_allocator_state": allocator.state_dict()},
             )
         except Exception as e:

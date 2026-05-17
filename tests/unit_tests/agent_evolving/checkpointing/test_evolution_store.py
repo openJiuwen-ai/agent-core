@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
+from openjiuwen.agent_evolving.checkpointing.store_records import StoreRecordsHelper
 from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionPatch,
     EvolutionRecord,
@@ -236,7 +237,7 @@ class TestEvolutionStorePersistScript:
         record.change.script_language = "python"
         record.change.script_purpose = "chart generation"
 
-        await store._persist_script(skill_dir, record)
+        await StoreRecordsHelper(store).persist_script(skill_dir, record)
 
         scripts_dir = skill_dir / "evolution" / "scripts"
         assert scripts_dir.exists()
@@ -265,7 +266,7 @@ class TestEvolutionStorePersistScript:
         record.change.script_filename = "hello.js"
         record.change.script_language = "javascript"
 
-        await store._persist_script(skill_dir, record)
+        await StoreRecordsHelper(store).persist_script(skill_dir, record)
 
         script_path = skill_dir / "evolution" / "scripts" / "hello.js"
         assert script_path.exists()
@@ -416,6 +417,40 @@ class TestEvolutionStoreRenderMarkdown:
         assert "<!-- evolution-index-end -->" in skill_md
         assert "Evolution Experiences" in skill_md
         assert "**1**" in skill_md
+        assert "Use this section as an index of lessons learned from previous executions." in skill_md
+        assert "For narrative guidance, read the relevant `evolution/*.md` detail file." in skill_md
+        assert "### Highlighted Evolution Records" in skill_md
+        assert "### Top Experiences" not in skill_md
+        assert "### Narrative Guidance" in skill_md
+        assert "evolution/troubleshooting.md" in skill_md
+        assert "Read: `evolution/troubleshooting.md`" in skill_md
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_render_updates_skill_md_index_with_script_assets(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(root, "skill-a", "# Skill A\n\nSome content\n")
+        store = EvolutionStore(str(root))
+
+        record = make_record(
+            "ev_script",
+            target=EvolutionTarget.SCRIPT,
+            section="Scripts",
+            content="print('validate csv')",
+        )
+        record.change.script_language = "python"
+        record.change.script_purpose = "CSV validation helper"
+        record.change.script_filename = "validate_csv.py"
+
+        await store.append_record("skill-a", record)
+
+        skill_md = (root / "skill-a" / "SKILL.md").read_text(encoding="utf-8")
+        assert "Scripts are implementation aids, not mandatory steps." in skill_md
+        assert "### Script Assets" in skill_md
+        assert "### Narrative Guidance" not in skill_md
+        assert "evolution/scripts/_index.md" in skill_md
+        assert "source: `evolution/scripts/validate_csv.py`" in skill_md
+        assert "Review: `evolution/scripts/_index.md`" in skill_md
 
     @staticmethod
     @pytest.mark.asyncio
@@ -436,3 +471,127 @@ class TestEvolutionStoreRenderMarkdown:
         assert "old index" not in skill_md
         assert "Evolution Experiences" in skill_md
         assert skill_md.count("evolution-index-start") == 1
+
+
+class TestEvolutionStoreRecordMaintenance:
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_delete_mark_merge_and_update_preserve_facade_behavior(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(root, "skill-a")
+        store = EvolutionStore(str(root))
+
+        await store.append_record("skill-a", make_record("ev_1", content="one"))
+        await store.append_record("skill-a", make_record("ev_2", content="two"))
+        await store.append_record("skill-a", make_record("ev_3", content="three"))
+
+        marked = await store.mark_records_applied("skill-a", ["ev_1"])
+        merged = await store.merge_records("skill-a", "ev_2", ["ev_3"], "two+three", new_score=0.9)
+        updated = await store.update_record_content("skill-a", "ev_2", "two+three+updated", new_score=0.8)
+        deleted = await store.delete_records("skill-a", ["ev_1"])
+
+        evo_log = await store.load_full_evolution_log("skill-a")
+        assert marked == 1
+        assert merged is not None
+        assert merged.change.content == "two+three"
+        assert updated is not None
+        assert updated.change.content == "two+three+updated"
+        assert updated.score == 0.8
+        assert deleted == 1
+        assert [record.id for record in evo_log.entries] == ["ev_2"]
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_update_record_scores_and_get_records_by_score(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(root, "skill-a")
+        store = EvolutionStore(str(root))
+
+        low = make_record("ev_low", content="low")
+        high = make_record("ev_high", content="high")
+        low.score = 0.2
+        high.score = 0.7
+        await store.append_record("skill-a", low)
+        await store.append_record("skill-a", high)
+
+        updated = await store.update_record_scores(
+            "skill-a",
+            {
+                "ev_low": {
+                    "score": 0.9,
+                    "usage_stats": {"times_presented": 3, "times_used": 2, "times_positive": 1},
+                }
+            },
+        )
+        ranked = await store.get_records_by_score("skill-a", min_score=0.5)
+
+        assert updated == 1
+        assert [record.id for record in ranked] == ["ev_low", "ev_high"]
+        assert ranked[0].usage_stats.times_presented == 3
+        assert ranked[0].usage_stats.times_used == 2
+
+
+class TestEvolutionStoreArchiveAndCreate:
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_create_skill_archive_and_clear_keep_facade_stable(tmp_path: Path):
+        root = tmp_path / "skills"
+        root.mkdir()
+        store = EvolutionStore(str(root))
+
+        created = await store.create_skill("skill-a", "desc", "body text")
+        assert created == root / "skill-a"
+
+        await store.append_record("skill-a", make_record("ev_1", content="body fix"))
+        body_archive = await store.archive_skill_body("skill-a")
+        evo_archive = await store.archive_evolutions("skill-a")
+
+        assert body_archive is not None
+        assert evo_archive is not None
+        assert (root / "skill-a" / "archive" / body_archive).exists()
+        assert (root / "skill-a" / "archive" / evo_archive).exists()
+        assert store.list_archives("skill-a") == sorted(store.list_archives("skill-a"), reverse=True)
+
+        await store.clear_evolutions("skill-a")
+        cleared = await store.load_full_evolution_log("skill-a")
+        assert cleared.entries == []
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_delete_or_clear_last_record_removes_stale_projection_outputs(tmp_path: Path):
+        root = tmp_path / "skills"
+        root.mkdir()
+        store = EvolutionStore(str(root))
+        await store.create_skill("skill-a", "desc", "body text")
+
+        record = make_record("ev_1", content="body fix")
+        await store.append_record("skill-a", record)
+
+        skill_md_path = root / "skill-a" / "SKILL.md"
+        section_path = root / "skill-a" / "evolution" / "troubleshooting.md"
+        assert section_path.exists()
+        assert "evolution-index-start" in skill_md_path.read_text(encoding="utf-8")
+
+        await store.delete_records("skill-a", [record.id])
+
+        assert not section_path.exists()
+        assert "evolution-index-start" not in skill_md_path.read_text(encoding="utf-8")
+
+        await store.append_record("skill-a", make_record("ev_2", content="body fix 2"))
+        assert section_path.exists()
+
+        await store.clear_evolutions("skill-a")
+
+        assert not section_path.exists()
+        assert "evolution-index-start" not in skill_md_path.read_text(encoding="utf-8")
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_create_skill_rejects_existing_or_invalid_names(tmp_path: Path):
+        root = tmp_path / "skills"
+        root.mkdir()
+        prepare_skill(root, "skill-a")
+        store = EvolutionStore(str(root))
+
+        assert await store.create_skill("skill-a", "desc", "body") is None
+        assert await store.create_skill("../escape", "desc", "body") is None

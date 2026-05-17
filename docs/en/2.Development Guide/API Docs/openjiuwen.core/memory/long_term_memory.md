@@ -19,8 +19,9 @@ class openjiuwen.core.memory.long_term_memory.LongTermMemory(metaclass=Singleton
 
 > **Note**: Unlike the legacy `MemoryEngine(config: SysMemConfig, ...)`, `LongTermMemory` uses a **parameterless constructor + step-by-step initialization** approach:
 > 1. First call `await register_store(...)` to register underlying storage;
-> 2. Then call `set_config(MemoryEngineConfig(...))` to set global configuration;
-> 3. Optionally configure independent model/vector parameters for different business scenarios through `set_scope_config(scope_id, MemoryScopeConfig(...))`.
+> 2. Optionally call `register_message_store(...)` to register a custom message store (if not called, a default `SqlMessageStore` will be created from the registered `db_store`);
+> 3. Then call `set_config(MemoryEngineConfig(...))` to set global configuration;
+> 4. Optionally configure independent model/vector parameters for different business scenarios through `set_scope_config(scope_id, MemoryScopeConfig(...))`.
 
 ```
 LongTermMemory()
@@ -31,9 +32,10 @@ Initialize `LongTermMemory` instance (singleton pattern, multiple calls return t
 **Internal State Initialization**:
 
 - Configuration related: `_sys_mem_config: MemoryEngineConfig | None = None`, `_scope_config: dict[str, MemoryScopeConfig] = {}`;
-- Storage related: `kv_store / semantic_store / db_store` are all `None`, need to register through `register_store`;
-- Manager related: `scope_user_mapping_manager / message_manager / user_profile_manager / variable_manager / write_manager / search_manager / generator` are all `None`, initialized during `set_config`;
-- LLM related: `_base_llm: Tuple[str, Model] | None = None` (set during `set_config`);
+- Storage related: `kv_store / vector_store / db_store / message_store` are all `None`, need to register through `register_store` (and optionally `register_message_store`);
+- Memory index: `memory_index: BaseMemoryIndex | None = None`, can be registered via `register_plugin` with a custom index implementation, or automatically registered as `SimpleMemoryIndex` during `register_store`;
+- Manager related: `scope_user_mapping_manager / message_manager / fragment_memory_manager / variable_manager / write_manager / search_manager / generator` are all `None`, initialized during `set_config`;
+- LLM related: `_base_llm: Model | None = None` (set during `set_config`);
 - Embedding model cache: `_scope_embedding: dict[str, Embedding] = {}`.
 
 
@@ -56,7 +58,11 @@ Register underlying storage instances, must be completed before calling `set_con
 * **kv_store** (BaseKVStore): **Required**, key-value storage instance for fast access to structured data (such as scope configuration, user variables, etc.). If `None`, will raise `build_error` (`MEMORY_REGISTER_STORE_EXECUTION_ERROR`).
 * **vector_store** (BaseVectorStore | None, optional): Vector storage instance for semantic similarity retrieval. If `None`, semantic retrieval functionality is unavailable. Default value: `None`.
 * **db_store** (BaseDbStore | None, optional): Relational database storage instance for persisting messages, scope-user mappings, etc. If `None`, message persistence functionality is unavailable. Default value: `None`.
-* **embedding_model** (Embedding | None, optional): Global embedding model instance for initializing `semantic_store` embedding capability during registration. If `None`, independent embedding models can be configured for different scopes later through `set_scope_config`. Default value: `None`.
+* **embedding_model** (Embedding | None, optional): Global embedding model instance for initializing the vector index embedding capability during registration. If `None`, independent embedding models can be configured for different scopes later through `set_scope_config`. Default value: `None`.
+
+**Behavior**:
+
+When both `vector_store` and `embedding_model` are provided, `register_store` automatically calls `register_plugin` to register the default `SimpleMemoryIndex` as `memory_index`. To use a custom `BaseMemoryIndex` implementation, call `register_plugin` manually after `register_store`.
 
 **Exceptions**:
 
@@ -117,6 +123,106 @@ Register underlying storage instances, must be completed before calling `set_con
 ```
 
 
+### async register_plugin
+
+```
+async def register_plugin(
+    self,
+    name: str,
+    cls: type,
+    params: dict[str, Any],
+) -> None
+```
+
+Register a custom `BaseMemoryIndex` plugin instance, used to replace or extend the default vector index implementation.
+
+**Parameters**:
+
+* **name** (str): Plugin name, describing the plugin type (e.g., `'vector'`, `'inverted'`, `'hybrid'`).
+* **cls** (type): Plugin class, must inherit from `BaseMemoryIndex`.
+* **params** (dict[str, Any]): Initialization parameters passed to the plugin class constructor.
+
+**Behavior**:
+
+- This method instantiates the plugin via `cls(**params)`;
+- The **first registered** plugin becomes the default `memory_index` (`self.memory_index`); subsequent registrations do not overwrite the default;
+- If `register_store` has already auto-registered `SimpleMemoryIndex`, subsequent manual calls to `register_plugin` will not override the existing default index.
+
+**Prerequisites**:
+
+- No strict prerequisites, but recommended to call after `register_store` and before `set_config`.
+
+**Example**:
+
+```python
+>>> from openjiuwen.core.memory.long_term_memory import LongTermMemory
+>>> from openjiuwen.core.foundation.store.index.vector_memory_index import VectorMemoryIndex
+>>> from openjiuwen.core.foundation.store.base_vector_store import BaseVectorStore
+>>> from openjiuwen.core.foundation.store.base_embedding import Embedding
+>>>
+>>> # Use default VectorMemoryIndex
+>>> memory = LongTermMemory()
+>>> await memory.register_plugin(
+>>>     name="vector",
+>>>     cls=VectorMemoryIndex,
+>>>     params={
+>>>         "vector_store": my_vector_store,
+>>>         "embedding_model": my_embedding_model,
+>>>     }
+>>> )
+>>>
+>>> # Or use a custom BaseMemoryIndex implementation
+>>> class MyCustomIndex(BaseMemoryIndex):
+>>>     ...
+>>>
+>>> await memory.register_plugin(
+>>>     name="custom",
+>>>     cls=MyCustomIndex,
+>>>     params={"custom_param": "value"}
+>>> )
+```
+
+
+### register_message_store
+
+```
+def register_message_store(self, message_store: BaseMessageStore) -> None
+```
+
+Register a custom `BaseMessageStore` implementation. This allows external code to provide a custom message store (e.g., using a different database backend) instead of the default `SqlMessageStore`.
+
+Must be called before `set_config()`. If not called, `LongTermMemory` will create a default `SqlMessageStore` from the registered `db_store`.
+
+**Parameters**:
+
+* **message_store** (BaseMessageStore): A `BaseMessageStore` implementation instance.
+
+**Exceptions**:
+
+* **build_error**: Raised when `message_store` is not a `BaseMessageStore` instance (`MEMORY_REGISTER_STORE_EXECUTION_ERROR`).
+
+**Example**:
+
+```python
+>>> from openjiuwen.core.memory.long_term_memory import LongTermMemory
+>>> from openjiuwen.core.foundation.store.base_message_store import BaseMessageStore
+>>> from openjiuwen.core.memory.manage.mem_model.sql_message_store import SqlMessageStore
+>>> from openjiuwen.core.memory.manage.mem_model.sql_db_store import SqlDbStore
+>>>
+>>> # Create a custom message store
+>>> sql_db_store = SqlDbStore(db_store)
+>>> custom_message_store = SqlMessageStore(
+>>>     crypto_key=b"your-32-byte-aes-key-here!!",
+>>>     sql_db_store=sql_db_store,
+>>>     table_name="custom_messages"
+>>> )
+>>>
+>>> # Register the custom message store
+>>> memory = LongTermMemory()
+>>> memory.register_message_store(custom_message_store)
+```
+
+
 ### set_config
 
 ```
@@ -136,11 +242,32 @@ Set global memory engine configuration and initialize internal managers.
 
 **Prerequisites**:
 
-- Must have called `register_store` to register `kv_store`, `semantic_store`, `db_store`, otherwise will raise `build_error` (`MEMORY_SET_CONFIG_EXECUTION_ERROR`).
+- Must have called `register_store` to register `kv_store` and `db_store`, otherwise will raise `build_error` (`MEMORY_SET_CONFIG_EXECUTION_ERROR`).
+- Must have registered `memory_index` (via `register_plugin` or auto-registered by `register_store`), otherwise will raise `build_error`.
+
+**Behavior**:
+
+- Managers (`FragmentMemoryManager`, `SummaryManager`, `WriteManager`) uniformly use `memory_index` (`BaseMemoryIndex`) as the backend. The `UserMemStore` fallback path is no longer supported.
 
 **Exceptions**:
 
 * **build_error**: Raised when `register_store` has not been called or configuration is invalid.
+
+**Internal Managers Initialized**:
+
+This method initializes the following internal managers:
+
+* `scope_user_mapping_manager`: Manages the mapping between scopes and users;
+* `message_manager`: Handles message storage and retrieval operations. Initialized in two ways:
+  - If a custom `message_store` was registered via `register_message_store()` before calling `set_config()`, it uses the registered `message_store`;
+  - Otherwise, creates a default `SqlMessageStore` using the registered `db_store`, with `crypto_key` from config and table name `"user_message"`;
+* `fragment_memory_manager`: Manages user profile, episodic memory, and semantic memory;
+* `variable_manager`: Manages user variable storage and retrieval;
+* `summary_manager`: Manages user summary memory;
+* `write_manager`: Coordinates write operations across all memory types;
+* `search_manager`: Handles search queries across all memory types;
+* `generator`: Generates memory content from messages using LLM;
+* `_base_llm`: Base large language model instance (initialized if `default_model_cfg` and `default_model_client_cfg` are provided).
 
 **Example**:
 
@@ -169,6 +296,43 @@ Set global memory engine configuration and initialize internal managers.
 >>> # Set configuration
 >>> memory = LongTermMemory()
 >>> memory.set_config(config)
+```
+
+
+### async migrate_between_indices
+
+```
+async def migrate_between_indices(
+    source_index: BaseMemoryIndex,
+    target_index: BaseMemoryIndex,
+) -> None
+```
+
+Copy data from one `BaseMemoryIndex` to another. Suitable for data migration between different index implementations (e.g., from `SimpleMemoryIndex` to `VectorMemoryIndex`). Source data is preserved after migration.
+
+**Parameters**:
+
+* **source_index** (BaseMemoryIndex): Source `BaseMemoryIndex` instance to read data from.
+* **target_index** (BaseMemoryIndex): Target `BaseMemoryIndex` instance to write data into.
+
+**Behavior**:
+
+- This method iterates through all `(user_id, scope_id)` combinations in `source_index`, reads documents in batches (100 per batch), and writes them to `target_index`;
+- Source data remains unchanged after migration;
+- Migration is idempotent — if a document with the same ID already exists in the target index, it will be overwritten (upsert semantics).
+
+**Example**:
+
+```python
+>>> from openjiuwen.core.memory.long_term_memory import LongTermMemory
+>>> from openjiuwen.core.foundation.store.index.simple_memory_index import SimpleMemoryIndex
+>>>
+>>> # Assume an existing SimpleMemoryIndex instance
+>>> old_index = SimpleMemoryIndex(kv_store=kv_store, vector_store=vector_store, embedding_model=embed)
+>>> new_index = VectorMemoryIndex(...)
+>>>
+>>> # Migrate data from old index to new index
+>>> await LongTermMemory.migrate_between_indices(source_index=old_index, target_index=new_index)
 ```
 
 
@@ -333,10 +497,10 @@ async def add_messages(
     timestamp: datetime | None = None,
     gen_mem: bool = True,
     gen_mem_with_history_msg_num: int = 5,
-) -> None
+) -> AddMemResult
 ```
 
-Add conversation messages to the memory engine and generate memories (user profiles, variables, etc.) according to `agent_config`.
+Add conversation messages to the memory engine and generate memories (user profiles, variables, etc.) according to `agent_config`. Also supports **instructive memory** functionality: when users include explicit memory instructions in the conversation (e.g., "remember...", "change... to...", "delete..."), the engine automatically recognizes and performs the corresponding add, update, or delete operations.
 
 **Parameters**:
 
@@ -354,6 +518,17 @@ Add conversation messages to the memory engine and generate memories (user profi
 * **timestamp** (datetime | None, optional): Message timestamp, if `None` uses current UTC time. Default value: `None`.
 * **gen_mem** (bool, optional): Whether to generate memories; when `False`, only saves messages without triggering memory extraction. Default value: `True`.
 * **gen_mem_with_history_msg_num** (int, optional): Number of historical messages to reference when generating memories. Default value: 5.
+
+**Returns**:
+
+* **AddMemResult**: The memory extraction result for this call, containing the following fields:
+  * `variables: list[VariableUnit]`: List of extracted variable memories;
+  * `user_profile: list[FragmentMemoryUnit]`: List of extracted user profile memories;
+  * `semantic_memory: list[FragmentMemoryUnit]`: List of extracted semantic memories;
+  * `episodic_memory: list[FragmentMemoryUnit]`: List of extracted episodic memories;
+  * `summary: list[SummaryUnit]`: List of extracted summary memories.
+
+When `gen_mem=False`, `scope_id` format is invalid, LLM is not initialized, or no user messages are present, returns an empty `AddMemResult()` (all fields are empty lists).
 
 **Exceptions**:
 
@@ -406,6 +581,61 @@ Add conversation messages to the memory engine and generate memories (user profi
 >>>     session_id="session456"
 >>> )
 ```
+
+**Instructive Memory Example**:
+
+```python
+>>> # User modifies existing memory through explicit instruction
+>>> update_messages = [
+>>>     UserMessage(content="Change my age to 30"),
+>>>     AssistantMessage(content="Okay, I've updated your age information.")
+>>> ]
+>>> result = await memory.add_messages(
+>>>     messages=update_messages,
+>>>     agent_config=agent_config,
+>>>     user_id="user123",
+>>>     scope_id="my_scope",
+>>> )
+>>> # result.user_profile will contain FragmentMemoryUnit with operation_type=UPDATE
+>>> 
+>>> # User deletes existing memory through explicit instruction
+>>> delete_messages = [
+>>>     UserMessage(content="Delete my age information"),
+>>>     AssistantMessage(content="Okay, I've deleted your age information.")
+>>> ]
+>>> result = await memory.add_messages(
+>>>     messages=delete_messages,
+>>>     agent_config=agent_config,
+>>>     user_id="user123",
+>>>     scope_id="my_scope",
+>>> )
+>>> # result.user_profile will contain FragmentMemoryUnit with operation_type=DELETE
+```
+
+
+## class openjiuwen.core.memory.long_term_memory.AddMemResult
+
+```
+class openjiuwen.core.memory.long_term_memory.AddMemResult(BaseModel)
+```
+
+Return value model for the `add_messages` method, encapsulating all memory extraction results for this call.
+
+**Fields**:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `variables` | `list[VariableUnit]` | `[]` | List of extracted variable memories |
+| `user_profile` | `list[FragmentMemoryUnit]` | `[]` | List of extracted user profile memories |
+| `semantic_memory` | `list[FragmentMemoryUnit]` | `[]` | List of extracted semantic memories |
+| `episodic_memory` | `list[FragmentMemoryUnit]` | `[]` | List of extracted episodic memories |
+| `summary` | `list[SummaryUnit]` | `[]` | List of extracted summary memories |
+
+**Notes**:
+
+- Each `FragmentMemoryUnit` contains an `operation_type` field (`ADD` / `UPDATE` / `DELETE`) to distinguish the operation type.
+- Instructive memory UPDATE and DELETE operations are represented as `FragmentMemoryUnit` with the corresponding `operation_type` in the return result.
+- When `add_messages` does not perform memory extraction for any reason (`gen_mem=False`, invalid `scope_id`, LLM not initialized, etc.), returns an empty `AddMemResult()`.
 
 
 ### async get_recent_messages
@@ -688,7 +918,7 @@ Search user memories (user profiles, variables, etc.) based on semantic similari
 **Returns**:
 
 * **list[MemResult]**: Memory result list, each `MemResult` contains:
-  * `mem_info: MemInfo` (`mem_id / content / type`);
+  * `mem_info: MemInfo` (`mem_id / content / type / timestamp`);
   * `score: float` (similarity score).
 
 **Exceptions**:
@@ -779,7 +1009,7 @@ Search user summary memories based on semantic similarity, returning the N most 
 **Returns**:
 
 * **list[MemResult]**: List of memory results, each `MemResult` contains:
-  * `mem_info: MemInfo` (`mem_id / content / type`);
+  * `mem_info: MemInfo` (`mem_id / content / type / timestamp`);
   * `score: float` (similarity score).
 
 **Exceptions**:

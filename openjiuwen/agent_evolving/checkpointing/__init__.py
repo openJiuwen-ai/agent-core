@@ -1,37 +1,16 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Checkpointing module for training state and evolution records."""
+"""Public checkpoint and evolution-store facade."""
 
-from openjiuwen.agent_evolving.checkpointing.types import (
-    VALID_SECTIONS,
-    UsageStats,
-    EvolutionPatch,
-    EvolutionRecord,
-    EvolutionLog,
-    EvolveCheckpoint,
-    PendingChange,
-    PendingSkillCreation,
-    PendingTeamSkillCreation,
-    EvolutionContext,
-)
-from openjiuwen.agent_evolving.checkpointing.store_file import FileCheckpointStore
 from openjiuwen.agent_evolving.checkpointing.evolution_store import EvolutionStore
-from openjiuwen.agent_evolving.checkpointing.manager import DefaultCheckpointManager, CheckpointManager
+from openjiuwen.agent_evolving.checkpointing.manager import CheckpointManager, DefaultCheckpointManager
+from openjiuwen.agent_evolving.checkpointing.state import EvolveCheckpoint
+from openjiuwen.agent_evolving.checkpointing.store_file import FileCheckpointStore
 
 __all__ = [
-    "VALID_SECTIONS",
-    "UsageStats",
-    "EvolutionPatch",
-    "EvolutionRecord",
-    "EvolutionLog",
     "EvolveCheckpoint",
-    "PendingChange",
-    "PendingSkillCreation",
-    "PendingTeamSkillCreation",
-    "EvolutionContext",
     "FileCheckpointStore",
     "EvolutionStore",
     "CheckpointManager",
     "DefaultCheckpointManager",
 ]
-

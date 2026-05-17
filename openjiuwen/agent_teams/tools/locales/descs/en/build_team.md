@@ -5,17 +5,21 @@ build_team → create_task → spawn_member → send_message(to="*").
 No other team tool may be called before build_team.
 
 ## HITT (Human in the Team)
-Passing `enable_hitt=true` registers a single default `human_agent` member as a first-class teammate, equal in standing with you and the teammates. Use it when the user signals participation intent ("I'll join", "count me in", "I'll take that one").
+HITT is a layered switch: `TeamAgentSpec.enable_hitt` is the spec-level capability ceiling (must be True for HITT to be available); `build_team(enable_hitt=...)` is the per-instance runtime flag.
 
-**Multiple distinct human members**: declare multiple `TeamMemberSpec(role_type=HUMAN_AGENT, member_name="...")` entries in the team spec (e.g. `human_designer`, `human_pm`). In that case `enable_hitt` is optional — every declared human-agent spec is registered.
+- `enable_hitt` omitted: inherit the spec setting (on if spec is on, off if spec is off)
+- `enable_hitt=true`: explicitly enable for this build — requires spec.enable_hitt=True or it errors
+- `enable_hitt=false`: explicitly disable — predefined HUMAN_AGENT members are skipped, and any subsequent `spawn_member(role_type='human_agent')` is rejected
 
-Once HITT is on (one or many human members), the following rules apply to every `role=human_agent` member:
+When enabled, every `role_type=HUMAN_AGENT` entry in `predefined_members` is registered during build_team; you can also bring up new human members at runtime via `spawn_member(role_type='human_agent', ...)`. The framework does **not** auto-inject a default `human_agent` — every human must be declared or spawned explicitly.
+
+Use HITT when the user signals participation intent ("I'll join", "count me in", "I'll take that one") or when the team spec already pre-declared human members you want to keep for this run.
+
+Once HITT is on, the following rules apply to every `role=human_agent` member:
 
 - They only have `send_message`, but can be assigned tasks via `update_task`;
 - Once one of them has claimed a task, you cannot cancel or reassign it — only `send_message` nudges addressed to that specific human are allowed;
 - Direct conversation with a human member **must** go through `send_message(to="<human_member_name>", ...)`; plain text is invisible.
-
-HITT is decided once at build_team; you cannot add a human member after the team is built.
 
 ## Task Design Principles
 - Describe goals, not steps: content should contain goals, acceptance criteria, and constraints — not specific operations

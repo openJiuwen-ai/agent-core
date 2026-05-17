@@ -21,7 +21,7 @@ from openjiuwen.agent_teams.schema.events import (
     MemberStatusChangedEvent,
     TeamTopic,
 )
-from openjiuwen.agent_teams.spawn.context import get_session_id
+from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.core.single_agent import AgentCard
 
 
@@ -91,6 +91,12 @@ class TeamMember:
         always pulling back to READY at round entry) without polluting
         the event stream.
 
+        When the member row is not registered in the database yet,
+        return ``False`` silently. The handle is constructed eagerly for
+        every role during ``configure()``; a leader's own row only
+        materializes after ``BuildTeamTool`` runs, so status writes
+        before that point are an expected no-op, not an error.
+
         Args:
             new_status: New status
 
@@ -99,6 +105,11 @@ class TeamMember:
         """
 
         old_status = await self.status()
+        if old_status is None:
+            team_logger.debug(
+                f"Member {self.member_name} not registered yet; skipping status update to {new_status.value}"
+            )
+            return False
         if old_status == new_status:
             return True
         success = await self.db.member.update_member_status(self.member_name, self.team_name, new_status.value)
@@ -132,6 +143,10 @@ class TeamMember:
     async def update_execution_status(self, new_status: ExecutionStatus) -> bool:
         """Update execution status with validation
 
+        When the member row is not registered in the database yet,
+        return ``False`` silently -- same expected no-op as
+        ``update_status`` before the team row materializes.
+
         Args:
             new_status: New execution status
 
@@ -140,6 +155,11 @@ class TeamMember:
         """
 
         old_status = await self.execution_status()
+        if old_status is None:
+            team_logger.debug(
+                f"Member {self.member_name} not registered yet; skipping execution status update to {new_status.value}"
+            )
+            return False
         success = await self.db.member.update_member_execution_status(
             self.member_name,
             self.team_name,

@@ -13,17 +13,16 @@ Built-in guardrails that hook into the `DeepAgent` lifecycle. Rails are register
 | `MemoryRail` | Integrates long-term memory read/write into the agent loop. |
 | `ProgressiveToolRail` | Dynamically loads and unloads tools based on relevance to the current task. |
 | `SecurityRail` | Applies security policies such as command allowlists and path validation. |
-| `SessionRail` | Manages session lifecycle events (create, resume, persist). |
-| `SkillEvolutionRail` | Tracks and evolves agent skills based on usage patterns. |
-| `SkillUseRail` | Enables the agent to discover and invoke learned skills. |
-| `SubagentRail` | Manages sub-agent spawning, delegation, and result collection. |
+| `SkillUseRail` | Enables the agent to discover and invoke learned skills; it does not generate, approve, or persist evolution records. |
+| `SkillEvolutionRail` | Evolves existing regular skills from trajectories or user requests, with optional approval before `EvolutionStore` persistence. |
+| `SubagentRail` | Manages sub-agent spawning via `enable_async_subagent` flag — sync mode registers `TaskTool`, async mode registers `session` tools. |
 | `TaskCompletionRail` | Evaluates whether the current task is complete and triggers the stop condition. |
 | `ContextEvolutionRail` | Persists and retrieves task-specific memory across iterations. |
 | `TaskPlanningRail` | Generates and maintains a structured task plan during the loop. |
 | `AskUserRail` | Pauses the loop to ask the user a clarifying question (interrupt). |
 | `ConfirmInterruptRail` | Requires user confirmation before executing sensitive operations. |
 | `TeamSkillCreateRail` | Auto-detects multi-agent collaboration patterns and suggests team skill creation. |
-| `TeamSkillRail` | Team skill evolution rail supporting trajectory analysis, user-requested evolution, and PATCH generation/approval. |
+| `TeamSkillRail` | Compatibility alias for `TeamSkillEvolutionRail`; evolves existing team skills using aggregated team trajectories and approval-governed experience records. |
 
 ## Rail Lifecycle
 
@@ -37,3 +36,15 @@ Each rail can implement one or more of the following hooks:
 - **on_complete**: Called when the task loop finishes.
 
 Rails are executed in registration order. A rail may short-circuit by returning a signal (e.g. force-finish, interrupt) that prevents subsequent rails and the round itself from running.
+
+## Online Skill Evolution
+
+Regular skill and team skill evolution share the downstream lifecycle:
+
+```text
+signals -> local apply preview -> pending approval or auto-approved -> EvolutionStore persistence -> projection
+```
+
+- See [`skill_evolution_rail`](./evolution/skill_evolution_rail.md) for regular `SkillEvolutionRail`.
+- See [`team_skill_evolution_rail`](./evolution/team_skill_evolution_rail.md) for `TeamSkillCreateRail`, `TeamSkillEvolutionRail`, and the `TeamSkillRail` compatibility alias.
+- Evolution host events are buffered as `OutputSchema` objects. The canonical drain API is `drain_pending_host_events()`; `drain_pending_approval_events()` is a compatibility wrapper.

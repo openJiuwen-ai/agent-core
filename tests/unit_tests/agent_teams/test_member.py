@@ -3,9 +3,18 @@
 
 """Unit tests for TeamMember module"""
 
+from unittest.mock import (
+    AsyncMock,
+    patch,
+)
+
 import pytest
 import pytest_asyncio
 
+from openjiuwen.agent_teams.context import (
+    reset_session_id,
+    set_session_id,
+)
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
@@ -16,6 +25,7 @@ from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberStatus,
 )
+from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.multi_agent.team_runtime.message_bus import MessageBus
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
@@ -414,3 +424,82 @@ class TestStatusTransitionsComplex:
         assert await team_member.update_execution_status(ExecutionStatus.IDLE)
 
         assert await team_member.execution_status() == ExecutionStatus.IDLE
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_update_status_silent_false_when_row_absent(db, agent_card, message_bus):
+    """A handle whose member row is not registered yet tolerates writes.
+
+    The leader holds its handle from configure() before BuildTeamTool
+    materializes its own DB row. update_status / update_execution_status
+    must short-circuit to False without reaching the DAO (which would
+    log an ERROR for the missing row).
+    """
+    handle = TeamMember(
+        member_name="ghost",
+        team_name="no_such_team",
+        agent_card=agent_card,
+        db=db,
+        messager=message_bus,
+    )
+    assert await handle.status() is None
+    assert await handle.execution_status() is None
+
+    with patch.object(db.member, "update_member_status", new_callable=AsyncMock) as status_dao:
+        assert await handle.update_status(MemberStatus.READY) is False
+        status_dao.assert_not_called()
+
+    with patch.object(
+        db.member,
+        "update_member_execution_status",
+        new_callable=AsyncMock,
+    ) as exec_dao:
+        assert await handle.update_execution_status(ExecutionStatus.RUNNING) is False
+        exec_dao.assert_not_called()
+
+    assert await handle.status() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_leader_member_status_persists_after_build_team(db, agent_card, message_bus):
+    """Once build_team materializes the leader row, handle writes land in DB.
+
+    Pairs with the eager-handle construction in TeamAgent._setup_agent:
+    the leader's status transitions reach the database the same way a
+    teammate's do.
+    """
+    token = set_session_id("leader_status_session")
+    try:
+        backend = TeamBackend(
+            team_name="lt",
+            member_name="leader1",
+            db=db,
+            messager=message_bus,
+            is_leader=True,
+        )
+        await backend.build_team(
+            display_name="LT",
+            desc="leader status tracking",
+            leader_display_name="Leader",
+            leader_desc="PM",
+        )
+
+        handle = TeamMember(
+            member_name="leader1",
+            team_name="lt",
+            agent_card=agent_card,
+            db=db,
+            messager=message_bus,
+        )
+        # build_team registers the leader as BUSY / RUNNING.
+        assert await handle.status() == MemberStatus.BUSY
+
+        assert await handle.update_status(MemberStatus.READY) is True
+        assert await handle.status() == MemberStatus.READY
+
+        assert await handle.update_status(MemberStatus.BUSY) is True
+        assert await handle.status() == MemberStatus.BUSY
+    finally:
+        reset_session_id(token)

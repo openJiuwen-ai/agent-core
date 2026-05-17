@@ -22,25 +22,29 @@ from openjiuwen.auto_harness.schema import (
     AutoHarnessConfig,
 )
 from openjiuwen.auto_harness.stages.assess import (
-    AssessStage,
+    ExtendAssessStage,
+    MetaAssessStage,
 )
 from openjiuwen.auto_harness.stages.commit import (
     CommitStage,
 )
 from openjiuwen.auto_harness.stages.implement import (
-    ImplementStage,
+    ExtendImplementStage,
+    MetaImplementStage,
 )
 from openjiuwen.auto_harness.stages.learnings import (
     LearningsStage,
 )
 from openjiuwen.auto_harness.stages.plan import (
-    PlanStage,
+    ExtendPlanStage,
+    MetaPlanStage,
 )
 from openjiuwen.auto_harness.stages.publish_pr import (
     PublishPRStage,
 )
 from openjiuwen.auto_harness.stages.verify import (
-    VerifyStage,
+    ExtendVerifyStage,
+    MetaVerifyStage,
 )
 
 
@@ -86,10 +90,14 @@ def register_builtin_stages(
 ) -> StageRegistry:
     """Register built-in stage metadata."""
     for stage_cls in [
-        AssessStage,
-        PlanStage,
-        ImplementStage,
-        VerifyStage,
+        MetaAssessStage,
+        ExtendAssessStage,
+        MetaPlanStage,
+        ExtendPlanStage,
+        MetaImplementStage,
+        ExtendImplementStage,
+        MetaVerifyStage,
+        ExtendVerifyStage,
         CommitStage,
         PublishPRStage,
         LearningsStage,

@@ -7,6 +7,7 @@
 - ``parse_learnings``: 解析 JSON 经验列表
 - ``parse_pr_draft``: 解析 PR draft JSON
 - ``parse_gaps``: 解析 markdown 表格中的竞品差距
+- ``parse_extension_designs``: 解析 JSON 扩展设计方案
 - ``extract_text``: 从 OutputSchema chunk 提取文本
 """
 
@@ -22,6 +23,7 @@ from openjiuwen.auto_harness.pipelines import (
     normalize_pipeline_name,
 )
 from openjiuwen.auto_harness.schema import (
+    ExtensionDesign,
     Gap,
     OptimizationTask,
     PipelineSelectionArtifact,
@@ -251,7 +253,12 @@ def extract_text(chunk: Any) -> str:
     if hasattr(chunk, "payload"):
         payload = chunk.payload
         if isinstance(payload, dict):
-            return str(payload.get("content", ""))
+            return str(
+                payload.get("content", "")
+                or payload.get("output", "")
+            )
+        if isinstance(payload, str):
+            return payload
     return ""
 
 
@@ -327,3 +334,76 @@ def _row_to_gap(cells: list[str]) -> Gap | None:
             " | ".join(cells[:4]),
         )
         return None
+
+
+def parse_extension_designs(
+    raw: str,
+) -> List[ExtensionDesign]:
+    """从 agent 输出中解析 ExtensionDesign JSON 列表。
+
+    支持 ```json ... ``` 包裹和裸 JSON 数组。
+
+    Args:
+        raw: agent 输出的原始文本。
+
+    Returns:
+        解析后的 ExtensionDesign 列表。
+    """
+    match = re.search(
+        r"```json\s*(.*?)\s*```", raw, re.DOTALL,
+    )
+    json_str: str
+    if match:
+        json_str = match.group(1)
+    else:
+        arr_match = re.search(r"\[.*]", raw, re.DOTALL)
+        if not arr_match:
+            return []
+        json_str = arr_match.group(0)
+
+    try:
+        items = json.loads(json_str)
+    except json.JSONDecodeError:
+        logger.warning(
+            "Failed to parse extension designs JSON"
+        )
+        return []
+
+    if not isinstance(items, list):
+        items = [items]
+
+    designs: List[ExtensionDesign] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        extension_name = str(
+            item.get("extension_name", "")
+        ).strip()
+        if not extension_name:
+            continue
+        kind = str(
+            item.get("kind", "capability")
+        ).strip() or "capability"
+        if kind not in {"capability", "constraint"}:
+            kind = "capability"
+        depends_on = item.get("depends_on", []) or []
+        if not isinstance(depends_on, list):
+            depends_on = []
+        applies_to = item.get("applies_to", []) or []
+        if not isinstance(applies_to, list):
+            applies_to = []
+        designs.append(
+            ExtensionDesign(
+                gap_id=str(item.get("gap_id", "")),
+                extension_name=extension_name,
+                kind=kind,
+                depends_on=list(depends_on),
+                applies_to=list(applies_to),
+                components=item.get("components", []),
+                file_plan=item.get("file_plan", {}),
+                harness_config_patch=item.get(
+                    "harness_config_patch", {}
+                ),
+            )
+        )
+    return designs

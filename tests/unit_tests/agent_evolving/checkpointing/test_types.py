@@ -4,13 +4,17 @@
 
 from __future__ import annotations
 
+import pytest
+
+from openjiuwen.agent_evolving.checkpointing.state import EvolveCheckpoint
 from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionLog,
     EvolutionPatch,
     EvolutionRecord,
+    EvolveCheckpoint as CompatEvolveCheckpoint,
 )
+from openjiuwen.agent_evolving.experience.types import EvolutionContext, PendingChange
 from openjiuwen.agent_evolving.signal.base import (
-    EvolutionCategory,
     EvolutionSignal,
     EvolutionTarget,
 )
@@ -90,16 +94,50 @@ class TestEvolutionPatch:
         assert patch.script_purpose == "demo"
 
     @staticmethod
-    def test_from_dict_fallback_target():
+    def test_from_dict_rejects_invalid_target():
+        with pytest.raises(ValueError, match="invalid-target"):
+            EvolutionPatch.from_dict(
+                {
+                    "section": "Instructions",
+                    "action": "append",
+                    "content": "x",
+                    "target": "invalid-target",
+                }
+            )
+
+    @staticmethod
+    def test_rejects_invalid_section():
+        with pytest.raises(ValueError, match="section"):
+            make_patch(section="Unknown")
+
+    @staticmethod
+    def test_rejects_invalid_action():
+        with pytest.raises(ValueError, match="action"):
+            make_patch(action="unknown")
+
+    @staticmethod
+    def test_skip_patch_does_not_require_section():
+        patch = EvolutionPatch(section="", action="skip", content="", skip_reason="duplicate")
+
+        assert patch.skip_reason == "duplicate"
+        assert patch.target == EvolutionTarget.BODY
+
+    @staticmethod
+    def test_compat_imports_point_to_new_type_owners():
+        assert CompatEvolveCheckpoint is EvolveCheckpoint
+        assert PendingChange.__module__ == "openjiuwen.agent_evolving.experience.types"
+        assert EvolutionContext.__module__ == "openjiuwen.agent_evolving.experience.types"
+
+    @staticmethod
+    def test_from_dict_uses_defaults_when_fields_missing():
         patch = EvolutionPatch.from_dict(
             {
-                "section": "Instructions",
-                "action": "append",
                 "content": "x",
-                "target": "invalid-target",
             }
         )
         assert patch.target == EvolutionTarget.BODY
+        assert patch.section == "Troubleshooting"
+        assert patch.action == "append"
 
 
 class TestEvolutionRecord:
@@ -151,25 +189,28 @@ class TestEvolutionLog:
 
 class TestEvolutionSignal:
     @staticmethod
-    def test_to_dict_contains_enum_value():
+    def test_to_dict_contains_stable_top_level_fields_only():
         signal = EvolutionSignal(
             signal_type="execution_failure",
-            evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
             section="Troubleshooting",
             excerpt="timeout",
-            tool_name="bash",
             skill_name="skill-a",
+            context={"tool_name": "bash", "source": "passive_conversation"},
         )
         data = signal.to_dict()
-        assert data["evolution_type"] == "skill_experience"
-        assert data["tool_name"] == "bash"
+        assert data == {
+            "type": "execution_failure",
+            "section": "Troubleshooting",
+            "excerpt": "timeout",
+            "skill_name": "skill-a",
+            "context": {"tool_name": "bash", "source": "passive_conversation"},
+        }
 
     @staticmethod
     def test_to_dict_omits_context_when_none():
         """Online signals have no context; key must be absent from serialized dict."""
         signal = EvolutionSignal(
             signal_type="execution_failure",
-            evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
             section="Troubleshooting",
             excerpt="timeout",
         )
@@ -187,7 +228,6 @@ class TestEvolutionSignal:
         }
         signal = EvolutionSignal(
             signal_type="low_score",
-            evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
             section="Troubleshooting",
             excerpt="score=0.00",
             skill_name="skill-a",

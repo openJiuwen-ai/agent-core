@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from openjiuwen.agent_evolving.types import UpdateValue
 from openjiuwen.core.operator.memory_call import MemoryCallOperator
 
 
@@ -147,3 +148,23 @@ class TestMemoryCallOperatorCallbacks:
         op = MemoryCallOperator()
         # Should not raise
         op.set_parameter("unknown", "value")
+
+    @staticmethod
+    def test_apply_update_reuses_replace_state_behavior():
+        """Test apply_update preserves replace-only memory updates."""
+        operator = MemoryCallOperator()
+
+        result = operator.apply_update("max_retries", UpdateValue(payload=3))
+
+        assert operator.get_state()["max_retries"] == 3
+        assert result.applied is True
+        assert result.value == 3
+
+    @staticmethod
+    def test_apply_update_reports_noop_for_unknown_target():
+        """Test apply_update reports no-op when the target is ignored."""
+        operator = MemoryCallOperator()
+
+        result = operator.apply_update("unknown", UpdateValue(payload="value"))
+
+        assert result.applied is False

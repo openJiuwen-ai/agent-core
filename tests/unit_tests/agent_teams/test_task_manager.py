@@ -10,11 +10,12 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.messager import Messager
+from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.agent_teams.schema.status import (
     MemberMode,
     TaskStatus,
 )
-from openjiuwen.agent_teams.spawn.context import (
+from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
 )
@@ -1108,3 +1109,77 @@ class TestAssign:
         refreshed = await task_manager.get(task.task_id)
         assert refreshed.status == TaskStatus.PENDING.value
         assert refreshed.assignee is None
+
+
+def _published_events(message_bus, event_type: str) -> list:
+    """Collect published EventMessage instances of a given event_type."""
+    events = []
+    for call in message_bus.publish.call_args_list:
+        message = call.kwargs.get("message")
+        if message is not None and message.event_type == event_type:
+            events.append(message)
+    return events
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_complete_last_task_emits_task_list_drained(task_manager, message_bus):
+    """Completing the only task drains the board and emits TASK_LIST_DRAINED."""
+    task = await task_manager.add(title="T", content="c")
+    assert await task_manager.claim(task.task_id)
+
+    await task_manager.complete(task.task_id)
+
+    drained = _published_events(message_bus, TeamEvent.TASK_LIST_DRAINED)
+    assert len(drained) == 1
+    assert drained[0].payload["task_count"] == 1
+    assert drained[0].payload["team_name"] == "test_team"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_complete_non_last_task_does_not_drain(task_manager, message_bus):
+    """Completing one of several tasks leaves the board non-terminal."""
+    task1 = await task_manager.add(title="T1", content="c")
+    await task_manager.add(title="T2", content="c")
+    assert await task_manager.claim(task1.task_id)
+
+    await task_manager.complete(task1.task_id)
+
+    assert _published_events(message_bus, TeamEvent.TASK_LIST_DRAINED) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_cancel_last_task_emits_task_list_drained(task_manager, message_bus):
+    """Cancelling the only task drains the board and emits TASK_LIST_DRAINED."""
+    task = await task_manager.add(title="T", content="c")
+
+    await task_manager.cancel(task.task_id)
+
+    drained = _published_events(message_bus, TeamEvent.TASK_LIST_DRAINED)
+    assert len(drained) == 1
+    assert drained[0].payload["task_count"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_cancel_all_tasks_emits_task_list_drained(task_manager, message_bus):
+    """cancel_all_tasks drives every task terminal and drains the board once."""
+    await task_manager.add(title="T1", content="c")
+    await task_manager.add(title="T2", content="c")
+
+    await task_manager.cancel_all_tasks()
+
+    drained = _published_events(message_bus, TeamEvent.TASK_LIST_DRAINED)
+    assert len(drained) == 1
+    assert drained[0].payload["task_count"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_empty_task_list_never_drains(task_manager, message_bus):
+    """An empty board is not 'drained' — cancel_all_tasks on it emits nothing."""
+    await task_manager.cancel_all_tasks()
+
+    assert _published_events(message_bus, TeamEvent.TASK_LIST_DRAINED) == []

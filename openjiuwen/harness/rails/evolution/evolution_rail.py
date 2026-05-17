@@ -16,29 +16,30 @@ Core design:
 from __future__ import annotations
 
 import asyncio
-from collections import deque
 from enum import Enum
 from typing import Any, List, Optional
 
 from openjiuwen.agent_evolving.trajectory import (
+    InMemoryTrajectoryStore,
+    LLMCallDetail,
+    ToolCallDetail,
     Trajectory,
     TrajectoryBuilder,
     TrajectoryStep,
     TrajectoryStore,
-    InMemoryTrajectoryStore,
-    LLMCallDetail,
-    ToolCallDetail,
 )
 from openjiuwen.core.common.background_tasks import BackgroundTask
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
+    InvokeInputs,
     ModelCallInputs,
     ToolCallInputs,
-    InvokeInputs,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.rails.evolution.contracts import EvolutionHostEventMeta, EvolutionSnapshot
 
 
 def _split_response_token_fields(
@@ -99,13 +100,12 @@ class EvolutionRail(DeepAgentRail):
     """
 
     priority = 60  # Lower than security rails, higher than user rails
-    _MAX_PENDING_EVOLUTION_OUTCOMES = 32
 
     def __init__(
         self,
         trajectory_store: Optional[TrajectoryStore] = None,
         team_trajectory_store: Optional[TrajectoryStore] = None,
-        accumulate_trajectory: bool = False,
+        max_trajectory_steps: Optional[int] = 200,
         evolution_trigger: EvolutionTriggerPoint = EvolutionTriggerPoint.AFTER_INVOKE,
         async_evolution: bool = True,
         max_concurrent_evolution: int = 1,
@@ -116,7 +116,8 @@ class EvolutionRail(DeepAgentRail):
             trajectory_store: Optional trajectory store. If None, uses InMemoryTrajectoryStore.
             team_trajectory_store: Optional shared team trajectory store. When set,
                 each member's trajectory is also saved here for team-level aggregation.
-            accumulate_trajectory: Whether to keep the trajectory builder across invoke rounds.
+            max_trajectory_steps: Optional maximum number of recent trajectory steps
+                retained in the cross-invoke builder window.
             evolution_trigger: When to automatically trigger run_evolution.
                 AFTER_INVOKE (default): after invoke completes
                 AFTER_TASK_ITERATION: after each task-loop iteration, before next round
@@ -132,16 +133,13 @@ class EvolutionRail(DeepAgentRail):
         super().__init__()
         self._trajectory_store = trajectory_store or InMemoryTrajectoryStore()
         self._builder: Optional[TrajectoryBuilder] = None
-        self._accumulate_trajectory = accumulate_trajectory
+        self._max_trajectory_steps = max_trajectory_steps
         self._evolution_trigger = evolution_trigger
         self._team_trajectory_store = team_trajectory_store
 
         self._async_evolution = async_evolution
         self._bg_tasks: set[BackgroundTask] = set()
-        self._pending_approval_events: list[OutputSchema] = []
-        self._pending_evolution_outcomes: deque[dict[str, str]] = deque(
-            maxlen=self._MAX_PENDING_EVOLUTION_OUTCOMES
-        )
+        self._pending_host_events: list[OutputSchema] = []
         self._evolution_sem = asyncio.Semaphore(max_concurrent_evolution)
 
     @property
@@ -166,12 +164,17 @@ class EvolutionRail(DeepAgentRail):
         if not isinstance(inputs, InvokeInputs):
             return
 
-        # If accumulating across rounds and builder already exists, keep it
-        if self._builder is not None and self._should_accumulate_trajectory():
+        session_id = self._resolve_trajectory_session_id(ctx, inputs)
+
+        # Reuse the builder across invoke rounds in the same session.
+        if self._builder is not None and self._builder.session_id == session_id:
+            logger.debug(
+                "[EvolutionRail] reusing trajectory builder session_id=%s",
+                session_id,
+            )
             await self._on_before_invoke(ctx)
             return
 
-        session_id = inputs.conversation_id or ""
         # Capture member_id for team trajectory aggregation
         agent_id = getattr(ctx.agent, "card", None)
         member_id = agent_id.id if agent_id else None
@@ -179,6 +182,12 @@ class EvolutionRail(DeepAgentRail):
             session_id=session_id,
             source="online",
             member_id=member_id,
+            max_steps=self._max_trajectory_steps,
+        )
+        logger.debug(
+            "[EvolutionRail] created trajectory builder session_id=%s, member_id=%s",
+            session_id,
+            member_id,
         )
 
         # Trigger extension point for subclasses
@@ -237,7 +246,10 @@ class EvolutionRail(DeepAgentRail):
         await self._on_after_model_call(ctx)
 
         # Trigger evolution if configured
-        if self._evolution_trigger == EvolutionTriggerPoint.AFTER_MODEL_CALL:
+        if (
+            self._evolution_trigger == EvolutionTriggerPoint.AFTER_MODEL_CALL
+            and self._allow_evolution_trigger(EvolutionTriggerPoint.AFTER_MODEL_CALL, ctx)
+        ):
             trajectory = self._build_trajectory()
             if trajectory is not None:
                 await self._trigger_evolution(trajectory, ctx)
@@ -245,6 +257,7 @@ class EvolutionRail(DeepAgentRail):
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Record tool step and trigger evolution extension point."""
         if self._builder is None:
+            logger.debug("[EvolutionRail] after_tool_call skipped because trajectory builder is empty")
             return
 
         inputs = ctx.inputs
@@ -274,7 +287,10 @@ class EvolutionRail(DeepAgentRail):
         await self._on_after_tool_call(ctx)
 
         # Trigger evolution if configured
-        if self._evolution_trigger == EvolutionTriggerPoint.AFTER_TOOL_CALL:
+        if (
+            self._evolution_trigger == EvolutionTriggerPoint.AFTER_TOOL_CALL
+            and self._allow_evolution_trigger(EvolutionTriggerPoint.AFTER_TOOL_CALL, ctx)
+        ):
             trajectory = self._build_trajectory()
             if trajectory is not None:
                 await self._trigger_evolution(trajectory, ctx)
@@ -283,7 +299,10 @@ class EvolutionRail(DeepAgentRail):
         """Called after each task-loop iteration."""
         await self._on_after_task_iteration(ctx)
 
-        if self._evolution_trigger == EvolutionTriggerPoint.AFTER_TASK_ITERATION:
+        if (
+            self._evolution_trigger == EvolutionTriggerPoint.AFTER_TASK_ITERATION
+            and self._allow_evolution_trigger(EvolutionTriggerPoint.AFTER_TASK_ITERATION, ctx)
+        ):
             trajectory = self._build_trajectory()
             if trajectory is not None:
                 await self._trigger_evolution(trajectory, ctx)
@@ -306,27 +325,34 @@ class EvolutionRail(DeepAgentRail):
         await self._on_after_invoke(ctx)
 
         # Trigger evolution if configured for after_invoke
-        if self._evolution_trigger == EvolutionTriggerPoint.AFTER_INVOKE:
+        if (
+            self._evolution_trigger == EvolutionTriggerPoint.AFTER_INVOKE
+            and self._allow_evolution_trigger(EvolutionTriggerPoint.AFTER_INVOKE, ctx)
+        ):
             await self._trigger_evolution(trajectory, ctx)
-
-        if not self._should_accumulate_trajectory():
-            self._builder = None
-
-    # ---- Trajectory strategy hooks ----
-
-    def _should_accumulate_trajectory(self) -> bool:
-        """Whether to keep the existing trajectory builder across invoke rounds.
-
-        Returns False (default): each invoke round gets a fresh builder.
-        Returns True: builder survives across rounds; subclass triggers
-                      evolution at custom timing.
-
-        Subclasses can either set _accumulate_trajectory = True or override
-        this method for dynamic logic.
-        """
-        return self._accumulate_trajectory
+            await self._on_after_evolution_triggered(trajectory, ctx)
 
     # ---- Trajectory helper methods ----
+
+    @staticmethod
+    def _resolve_trajectory_session_id(
+        ctx: AgentCallbackContext,
+        inputs: InvokeInputs,
+    ) -> str:
+        """Resolve the runtime session id used for trajectory accumulation."""
+        session = getattr(ctx, "session", None)
+        if session is not None and isinstance(session, Session):
+            return session.get_session_id()
+        return inputs.conversation_id or ""
+
+    def _reset_trajectory_builder(self) -> None:
+        """Reset the current trajectory builder.
+
+        Subclasses use this at their own lifecycle boundary, for example
+        after uploading an RL episode. The base rail does not expose public
+        reset because generic evolution rails should keep a session window.
+        """
+        self._builder = None
 
     def _build_trajectory(self) -> Optional[Trajectory]:
         """Build trajectory from current builder with snapshot.
@@ -353,11 +379,12 @@ class EvolutionRail(DeepAgentRail):
         if self._async_evolution:
             snapshot = await self._snapshot_for_evolution(trajectory, ctx)
             if snapshot is not None:
+                snapshot_contract = EvolutionSnapshot.from_legacy_dict(snapshot)
                 from openjiuwen.core.common.background_tasks import create_background_task
 
                 bg_task = await create_background_task(
                     self._safe_run_evolution(snapshot),
-                    name=f"evolution-{snapshot.get('skill_name', 'unknown')}",
+                    name=f"evolution-{snapshot_contract.skill_name or 'unknown'}",
                     group="evolution",
                 )
                 self._bg_tasks.add(bg_task)
@@ -401,6 +428,18 @@ class EvolutionRail(DeepAgentRail):
         """
         pass
 
+    async def _on_after_evolution_triggered(
+        self,
+        trajectory: Trajectory,
+        ctx: AgentCallbackContext,
+    ) -> None:
+        """Called after an after-invoke evolution trigger is scheduled or run.
+
+        Subclasses override this to consume state that must remain visible to
+        ``_allow_evolution_trigger`` and snapshotting during the trigger.
+        """
+        pass
+
     async def _on_after_task_iteration(self, ctx: AgentCallbackContext) -> None:
         """Extension point for after_task_iteration hook.
 
@@ -409,6 +448,14 @@ class EvolutionRail(DeepAgentRail):
         """
         pass
 
+    def _allow_evolution_trigger(
+        self,
+        trigger_point: EvolutionTriggerPoint,
+        ctx: AgentCallbackContext,
+    ) -> bool:
+        """Return whether the current trigger point is allowed to launch evolution."""
+        return True
+
     async def _snapshot_for_evolution(
         self,
         trajectory: Trajectory,
@@ -416,35 +463,11 @@ class EvolutionRail(DeepAgentRail):
     ) -> Optional[dict]:
         """Phase 1: Synchronously capture snapshot while ctx is alive.
 
-        Subclasses override to capture additional data (e.g. parsed_messages,
+        Subclasses override to capture additional data (e.g. messages,
         session state). Called in after_invoke before spawning background task.
         """
-        return {
-            "trajectory": trajectory,
-            "parsed_messages": await self._collect_parsed_messages_from_ctx(ctx),
-        }
-
-    async def _collect_callback_messages(self, ctx: AgentCallbackContext) -> List[Any]:
-        """Collect callback-visible messages while ctx/session are still alive."""
-        messages: List[Any] = []
-
-        if ctx.context is not None:
-            try:
-                messages = list(ctx.context.get_messages())
-            except Exception as exc:
-                logger.debug("[EvolutionRail] read ctx.context messages failed: %s", exc)
-
-        if not messages and ctx.session is not None:
-            agent_obj = ctx.agent
-            inner_agent = getattr(agent_obj, "_react_agent", None)
-            if inner_agent is not None and hasattr(inner_agent, "context_engine"):
-                try:
-                    context = await inner_agent.context_engine.create_context(session=ctx.session)
-                    messages = list(context.get_messages())
-                except Exception as exc:
-                    logger.debug("[EvolutionRail] load messages from inner context_engine failed: %s", exc)
-
-        return messages
+        messages = self._collect_messages_from_trajectory(trajectory)
+        return EvolutionSnapshot(trajectory=trajectory, messages=messages).to_legacy_dict()
 
     @classmethod
     def _normalize_callback_messages(cls, messages: List[Any]) -> List[dict]:
@@ -478,9 +501,17 @@ class EvolutionRail(DeepAgentRail):
             result.append(item)
         return result
 
-    async def _collect_parsed_messages_from_ctx(self, ctx: AgentCallbackContext) -> List[dict]:
-        """Collect and normalize callback-visible messages for async snapshots."""
-        return self._normalize_callback_messages(await self._collect_callback_messages(ctx))
+    @classmethod
+    def _collect_messages_from_trajectory(cls, trajectory: Optional[Trajectory]) -> List[dict]:
+        """Derive message-like dicts from recorded LLM trajectory steps."""
+        if trajectory is None:
+            return []
+        normalized = cls._normalize_callback_messages(trajectory.to_messages())
+        deduped: List[dict] = []
+        for message in normalized:
+            if message not in deduped:
+                deduped.append(message)
+        return deduped
 
     async def _safe_run_evolution(self, snapshot: dict) -> None:
         """Phase 2: Safely execute evolution in background.
@@ -512,7 +543,7 @@ class EvolutionRail(DeepAgentRail):
             logger.warning("[EvolutionRail] background evolution failed: %s", exc)
         finally:
             if outcome is not None:
-                self._pending_evolution_outcomes.append(outcome)
+                self._emit_background_outcome_event(outcome)
 
     def _get_evolution_total_timeout_secs(self) -> Optional[float]:
         """Optional total timeout for one background evolution task."""
@@ -542,16 +573,26 @@ class EvolutionRail(DeepAgentRail):
         wait: bool = False,
         timeout: Optional[float] = None,
     ) -> list[OutputSchema]:
-        """Return and clear buffered approval events.
+        """Compatibility wrapper for draining buffered host events."""
+        return await self.drain_pending_host_events(wait=wait, timeout=timeout)
+
+    async def drain_pending_host_events(
+        self,
+        wait: bool = False,
+        timeout: Optional[float] = None,
+    ) -> list[OutputSchema]:
+        """Return and clear buffered host events.
 
         Waits for background tasks if requested, then collects events from
-        the subclass-specific buffer.
+        the shared host-event buffer.
 
         Args:
             wait: If True, wait for all pending background tasks to complete
                   before draining. Ensures no events are missed.
             timeout: Maximum seconds to wait (None = no limit).
         """
+        if wait and timeout is None:
+            timeout = self._get_evolution_total_timeout_secs()
         if wait and self._bg_tasks:
             pending = [t for t in self._bg_tasks if not t.done()]
             if pending:
@@ -566,24 +607,42 @@ class EvolutionRail(DeepAgentRail):
                         await task.wait()
                 self._bg_tasks = {t for t in self._bg_tasks if not t.done()}
 
-        events = self._collect_pending_approval_events()
+        events = self._collect_pending_host_events()
         if events:
             logger.debug("[EvolutionRail] drained %d pending events", len(events))
         return events
 
     def _collect_pending_approval_events(self) -> list[OutputSchema]:
-        """Hook: return and clear subclass-specific event buffer.
+        """Compatibility wrapper for draining the shared host-event buffer."""
+        return self._collect_pending_host_events()
 
-        Subclasses override to drain their own pending approval events.
-        Default returns empty list for direct EvolutionRail usage.
-        """
-        return []
+    def emit_host_event(self, event: OutputSchema) -> None:
+        """Buffer one host-visible event for post-invoke draining."""
+        self._pending_host_events.append(event)
 
-    def drain_evolution_outcomes(self) -> list[dict[str, str]]:
-        """Return and clear buffered non-success background evolution outcomes."""
-        outcomes = list(self._pending_evolution_outcomes)
-        self._pending_evolution_outcomes.clear()
-        return outcomes
+    def _collect_pending_host_events(self) -> list[OutputSchema]:
+        """Return and clear the shared host-event buffer."""
+        events = list(self._pending_host_events)
+        self._pending_host_events.clear()
+        return events
+
+    def _emit_background_outcome_event(self, outcome: dict[str, str]) -> None:
+        """Expose background evolution failures through the host-event buffer."""
+        meta = EvolutionHostEventMeta(
+            event_kind="outcome",
+            rail_kind="base",
+            status=outcome["status"],
+        )
+        self.emit_host_event(
+            OutputSchema(
+                type="llm_reasoning",
+                index=0,
+                payload={
+                    "content": f"[Evolution] {outcome['message']}\n",
+                    "_evolution_meta": meta.to_payload(),
+                },
+            )
+        )
 
     async def cleanup_background_tasks(self) -> None:
         """Cancel and clear all background tasks. Called by host on shutdown."""

@@ -48,6 +48,7 @@ class RLRail(EvolutionRail):
             case_id: Optional case ID for grouping related trajectories
             **kwargs: Passed to EvolutionRail base class
         """
+        kwargs.setdefault("max_trajectory_steps", None)
         super().__init__(**kwargs)
         self._session_id = session_id
         self._source = source
@@ -63,6 +64,10 @@ class RLRail(EvolutionRail):
     async def _on_before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Initialize RL-specific state at the start of invoke."""
         self._llm_step_count = 0
+
+    async def _on_after_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Keep RL trajectories scoped to one invoke, matching legacy behavior."""
+        self._reset_trajectory_builder()
 
     async def _on_after_model_call(self, ctx: AgentCallbackContext) -> None:
         """Called after each model call - increment step and enhance metadata."""

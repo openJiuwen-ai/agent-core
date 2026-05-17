@@ -5,7 +5,10 @@
 请分别完成以下任务：
 
 ### 任务：关键信息识别
-请分析用户提供的【当前信息】中，是否含有关键信息（如个人偏好、个人经历、事实信息、概念定义、长期规则等）
+请分析用户提供的【当前信息】中，是否含有关键信息。关键信息的范围包括：
+- 用户画像信息：{{user_profile_definition}}
+- 语义记忆信息：{{semantic_memory_definition}}
+- 情景记忆信息：{{episodic_memory_definition}}
 - 如果【当前信息】中非常确定不含有任何关键信息，输出`has_key_information`字段为false
 - 如果【当前信息】中含有任何关键信息，或者不确定，请保持`has_key_information`字段为true
 

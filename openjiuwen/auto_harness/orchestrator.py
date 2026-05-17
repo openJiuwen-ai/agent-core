@@ -4,7 +4,8 @@
 
 from __future__ import annotations
 
-import logging
+import asyncio
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, List, Optional
 
@@ -23,6 +24,9 @@ from openjiuwen.auto_harness.infra.ci_gate_runner import (
 from openjiuwen.auto_harness.infra.fix_loop import (
     FixLoopController,
 )
+from openjiuwen.auto_harness.infra.pipeline_selector import (
+    choose_session_pipeline,
+)
 from openjiuwen.auto_harness.infra.git_operations import (
     GitOperations,
 )
@@ -31,10 +35,6 @@ from openjiuwen.auto_harness.infra.session_budget import (
 )
 from openjiuwen.auto_harness.infra.worktree_manager import (
     WorktreeManager,
-)
-from openjiuwen.auto_harness.pipelines import (
-    META_EVOLVE_PIPELINE,
-    normalize_pipeline_name,
 )
 from openjiuwen.auto_harness.registry import (
     build_pipeline_registry,
@@ -51,11 +51,21 @@ from openjiuwen.auto_harness.schema import (
 from openjiuwen.core.session.stream.base import (
     OutputSchema,
 )
+from openjiuwen.core.common.logging import (
+    logger,
+)
 
 if TYPE_CHECKING:
+    from openjiuwen.core.single_agent.rail.base import (
+        AgentRail,
+    )
     from openjiuwen.harness.deep_agent import DeepAgent
 
-logger = logging.getLogger(__name__)
+
+async def _empty_aiter() -> AsyncIterator[Any]:
+    """Return an async iterator that yields nothing."""
+    for _ in ():
+        yield
 
 
 def _write_debug_artifact(
@@ -70,6 +80,26 @@ def _write_debug_artifact(
     return str(path)
 
 
+def _infer_agent_from_rails(
+    stream_rails: Optional[List["AgentRail"]],
+) -> Optional["DeepAgent"]:
+    """Best-effort DeepAgent inference for integration layers.
+
+    Some callers, including JiuwenClaw, already pass a stream rail that has
+    been initialized with the live DeepAgent but do not thread the ``agent=``
+    argument through separately. Accept that integration style here so the
+    activate stage can still hot-load runtime extensions and emit testing
+    guidance after user confirmation.
+    """
+    for rail in stream_rails or []:
+        candidate = getattr(rail, "_deep_agent", None)
+        if candidate is None:
+            candidate = getattr(rail, "deep_agent", None)
+        if candidate is not None:
+            return candidate
+    return None
+
+
 class AutoHarnessOrchestrator:
     """Session controller and top-level pipeline dispatcher."""
 
@@ -77,11 +107,26 @@ class AutoHarnessOrchestrator:
         self,
         config: AutoHarnessConfig,
         agent: Optional["DeepAgent"] = None,
+        *,
+        stream_rails: Optional[List["AgentRail"]] = None,
     ) -> None:
         self.config = config
-        self.agent = agent
+        self.stream_rails: List["AgentRail"] = (
+            list(stream_rails) if stream_rails else []
+        )
+        self.agent = (
+            agent
+            if agent is not None
+            else _infer_agent_from_rails(
+                self.stream_rails
+            )
+        )
         self._results: List[CycleResult] = []
         self.paths = config.build_paths()
+        Path(self.paths.runtime_extensions_dir).mkdir(
+            parents=True,
+            exist_ok=True,
+        )
         self.runtime = AutoHarnessRuntimeState(
             current_workspace=config.workspace,
             config_bootstrapped=config.config_bootstrapped,
@@ -141,6 +186,9 @@ class AutoHarnessOrchestrator:
         )
         self._last_cycle_result = CycleResult()
         self.task_contexts: dict[str, SessionContext] = {}
+        self._pending_interactions: dict[
+            str, asyncio.Future[Any]
+        ] = {}
 
     @staticmethod
     def _msg(text: str) -> OutputSchema:
@@ -172,17 +220,90 @@ class AutoHarnessOrchestrator:
         """Construct a message OutputSchema."""
         return self._msg(text)
 
-    async def run_session_stream(
+    def create_interaction(
+        self,
+        interaction_id: str,
+    ) -> "asyncio.Future[Any]":
+        """Create a pending interaction future for a stage."""
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[Any] = loop.create_future()
+        self._pending_interactions[interaction_id] = fut
+        return fut
+
+    def _dispatch_message(
+        self,
+        message: dict[str, Any],
+    ) -> bool:
+        """Internal message dispatcher.
+
+        Routes based on message content:
+        - Has ``interaction_id`` → resolve pending interaction
+        - Otherwise → reserved for future input types
+        """
+        interaction_id = message.get("interaction_id")
+        if interaction_id:
+            return self._resolve_interaction(
+                interaction_id, message
+            )
+        return False
+
+    def _resolve_interaction(
+        self,
+        interaction_id: str,
+        response: Any,
+    ) -> bool:
+        """Resolve a pending interaction with user response."""
+        fut = self._pending_interactions.pop(
+            interaction_id, None
+        )
+        if fut is None or fut.done():
+            return False
+        fut.set_result(response)
+        return True
+
+    def run_session_stream(
+        self,
+        tasks: Optional[List[OptimizationTask]] = None,
+        *,
+        message: Optional[dict[str, Any]] = None,
+    ) -> AsyncIterator[Any]:
+        """Unified external API for session execution and interaction.
+
+        When *message* is provided, dispatches it internally
+        (e.g. resolves a pending interaction) and returns an
+        empty async iterator.
+
+        Otherwise runs the full session pipeline and returns
+        an async iterator of OutputSchema chunks.
+        """
+        if message is not None:
+            self._dispatch_message(message)
+            return _empty_aiter()
+        return self._stream_session_pipeline(tasks)
+
+    async def _stream_session_pipeline(
         self,
         tasks: Optional[List[OptimizationTask]] = None,
     ) -> AsyncIterator[Any]:
-        """Stream session execution as OutputSchema chunks."""
+        """Run the session pipeline, yielding OutputSchema chunks."""
+        started_at = time.monotonic()
         self._results = []
         self._last_cycle_result = CycleResult()
         self.artifacts = ArtifactStore()
         self.budget.start()
         yield self._msg("会话启动")
-        logger.info("Session started")
+        logger.info(
+            "[AutoHarnessOrchestrator] session started: local_repo=%s "
+            "repo_url=%s pipeline_preference=%s task_timeout=%.1fs "
+            "model_timeout=%.1fs session_budget=%.1fs tasks=%s",
+            self.config.local_repo,
+            self.config.repo_url,
+            self.config.pipeline_preference,
+            self.config.task_timeout_secs,
+            self.config.model_timeout_secs,
+            self.config.session_budget_secs,
+            [task.topic for task in tasks or []],
+        )
 
         if tasks is not None:
             self.artifacts.put(
@@ -195,22 +316,64 @@ class AutoHarnessOrchestrator:
         self.runtime.selected_pipeline = (
             selected_pipeline.pipeline_name
         )
+        logger.info(
+            "[AutoHarnessOrchestrator] pipeline selected: pipeline=%s reason=%s confidence=%s",
+            selected_pipeline.pipeline_name,
+            getattr(selected_pipeline, "reason", ""),
+            getattr(selected_pipeline, "confidence", ""),
+        )
         self.artifacts.put(
             "pipeline_selection",
             selected_pipeline,
         )
-        yield self._msg(
-            "Session pipeline: "
-            f"{selected_pipeline.pipeline_name}"
+        pipeline_name = selected_pipeline.pipeline_name
+        spec = self.pipeline_registry.require(
+            pipeline_name
         )
-        async for chunk in self._run_pipeline_stream(
-            selected_pipeline.pipeline_name,
-        ):
-            yield chunk
+        stages_payload = [
+            {"slot": slot, "display_name": dn}
+            for slot, dn in spec.pipeline_cls.stage_order
+        ]
+        yield OutputSchema(
+            type="message",
+            index=0,
+            payload={
+                "content": (
+                    f"Session pipeline: {pipeline_name}"
+                ),
+                "pipeline": pipeline_name,
+                "stages": stages_payload,
+            },
+        )
+        try:
+            async for chunk in self._run_pipeline_stream(
+                pipeline_name,
+            ):
+                yield chunk
+        except Exception:
+            logger.exception(
+                "[AutoHarnessOrchestrator] pipeline exception: pipeline=%s elapsed=%.1fs results=%d",
+                pipeline_name,
+                time.monotonic() - started_at,
+                len(self._results),
+            )
+            raise
 
         logger.info(
-            "Session finished: %d tasks executed",
+            "[AutoHarnessOrchestrator] session finished: results=%d elapsed=%.1fs budget_remaining=%.1fs",
             len(self._results),
+            time.monotonic() - started_at,
+            self.budget.remaining_secs,
+        )
+        yield OutputSchema(
+            type="harness_session_finished",
+            index=0,
+            payload={
+                "pipeline": pipeline_name,
+                "status": "success",
+                "results_count": len(self._results),
+                "is_terminal": True,
+            },
         )
 
     def _select_session_pipeline(
@@ -218,63 +381,20 @@ class AutoHarnessOrchestrator:
         tasks: Optional[List[OptimizationTask]] = None,
     ) -> PipelineSelectionArtifact:
         """Choose the session pipeline before any concrete pipeline runs."""
-        available = self.pipeline_registry.names()
-        if not available:
-            raise ValueError(
-                "No pipelines registered for auto-harness session"
-            )
-
-        explicit = sorted(
-            {
-                normalize_pipeline_name(task.pipeline_name)
-                for task in (tasks or [])
-                if task.pipeline_name
-            }
+        return choose_session_pipeline(
+            tasks=list(tasks or []),
+            config=self.config,
+            available_pipelines=self.pipeline_registry.names(),
         )
-        if len(explicit) > 1:
-            raise ValueError(
-                "Conflicting task pipeline_name values in one session: "
-                + ", ".join(explicit)
-            )
-        if explicit:
-            selected = explicit[0]
-            reason = "tasks requested explicit pipeline"
-        elif len(available) == 1:
-            selected = available[0]
-            reason = "single registered pipeline"
-        elif META_EVOLVE_PIPELINE in available:
-            selected = META_EVOLVE_PIPELINE
-            reason = "default session pipeline"
-        else:
-            selected = available[0]
-            reason = "fallback to first registered pipeline"
 
-        if selected not in available:
-            fallback = (
-                META_EVOLVE_PIPELINE
-                if META_EVOLVE_PIPELINE in available
-                else available[0]
-            )
-            return PipelineSelectionArtifact(
-                pipeline_name=fallback,
-                reason=(
-                    "requested session pipeline unsupported, "
-                    f"fallback to {fallback}"
-                ),
-                confidence=0.0,
-                fallback_pipeline=fallback,
-            )
-
-        alternatives = [
-            name for name in available if name != selected
-        ]
-        return PipelineSelectionArtifact(
-            pipeline_name=selected,
-            reason=reason,
-            alternatives=alternatives,
-            confidence=1.0,
-            fallback_pipeline=selected,
+    def ensure_session_runtime_dir(self) -> Path:
+        """Return the runtime extension directory for the current session."""
+        path = (
+            Path(self.paths.runtime_extensions_dir)
+            / self.runtime.session_id
         )
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     async def _run_pipeline_stream(
         self,
@@ -286,15 +406,40 @@ class AutoHarnessOrchestrator:
         )
         pipeline = spec.pipeline_cls()
         ctx = SessionContext(orchestrator=self)
-        async for chunk in pipeline.stream(ctx):
-            yield chunk
+        started_at = time.monotonic()
+        logger.info(
+            "[AutoHarnessOrchestrator] pipeline start: pipeline=%s class=%s",
+            pipeline_name,
+            type(pipeline).__name__,
+        )
+        try:
+            async for chunk in pipeline.stream(ctx):
+                yield chunk
+        except Exception:
+            logger.exception(
+                "[AutoHarnessOrchestrator] pipeline failed: pipeline=%s elapsed=%.1fs",
+                pipeline_name,
+                time.monotonic() - started_at,
+            )
+            raise
+        else:
+            logger.info(
+                "[AutoHarnessOrchestrator] pipeline end: pipeline=%s elapsed=%.1fs results=%d",
+                pipeline_name,
+                time.monotonic() - started_at,
+                len(self._results),
+            )
 
 
 def create_auto_harness_orchestrator(
     config: AutoHarnessConfig,
+    *,
+    agent: Optional["DeepAgent"] = None,
+    stream_rails: Optional[List["AgentRail"]] = None,
 ) -> AutoHarnessOrchestrator:
     """Create an orchestrator instance."""
     return AutoHarnessOrchestrator(
         config,
-        agent=None,
+        agent=agent,
+        stream_rails=stream_rails,
     )

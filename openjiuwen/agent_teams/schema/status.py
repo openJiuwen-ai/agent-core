@@ -17,6 +17,16 @@ class MemberStatus(str, Enum):
         UNSTARTED: Member has been created but not yet started
         READY: Member is ready to receive tasks
         BUSY: Member is currently processing a task
+        PAUSED: Member coroutine has exited at the end of a round
+            (lifecycle-driven, persistent team idle); state preserved and
+            recoverable via resume (returns to READY).
+        STOPPED: Member runtime has been torn down by an external
+            ``stop_coordination`` (team-not-disbanded teardown). State is
+            preserved on the persistence layer and the member is
+            expected to be re-spawned by ``recover_team``. Distinct from
+            PAUSED in *why* it stopped (external stop_team vs natural
+            round end) and distinct from SHUTDOWN in that the team is
+            still considered live.
         RESTARTING: Member process is being restarted after failure
         SHUTDOWN_REQUESTED: Member has received shutdown request
         SHUTDOWN: Member has been shut down
@@ -25,6 +35,8 @@ class MemberStatus(str, Enum):
     UNSTARTED = "unstarted"
     READY = "ready"
     BUSY = "busy"
+    PAUSED = "paused"
+    STOPPED = "stopped"
     RESTARTING = "restarting"
     SHUTDOWN_REQUESTED = "shutdown_requested"
     SHUTDOWN = "shut_down"
@@ -41,17 +53,37 @@ MEMBER_TRANSITIONS: Dict[MemberStatus, List[MemberStatus]] = {
     MemberStatus.READY: [
         MemberStatus.READY,
         MemberStatus.BUSY,
+        MemberStatus.PAUSED,
+        MemberStatus.STOPPED,
         MemberStatus.SHUTDOWN_REQUESTED,
         MemberStatus.SHUTDOWN,
         MemberStatus.ERROR,
     ],
     MemberStatus.BUSY: [
         MemberStatus.READY,
+        MemberStatus.PAUSED,
+        MemberStatus.STOPPED,
         MemberStatus.SHUTDOWN_REQUESTED,
+        MemberStatus.ERROR,
+    ],
+    MemberStatus.PAUSED: [
+        MemberStatus.READY,
+        MemberStatus.RESTARTING,
+        MemberStatus.STOPPED,
+        MemberStatus.SHUTDOWN_REQUESTED,
+        MemberStatus.SHUTDOWN,
+        MemberStatus.ERROR,
+    ],
+    MemberStatus.STOPPED: [
+        MemberStatus.READY,
+        MemberStatus.RESTARTING,
+        MemberStatus.SHUTDOWN_REQUESTED,
+        MemberStatus.SHUTDOWN,
         MemberStatus.ERROR,
     ],
     MemberStatus.RESTARTING: [
         MemberStatus.READY,
+        MemberStatus.STOPPED,
         MemberStatus.ERROR,
         MemberStatus.SHUTDOWN,
     ],
@@ -65,10 +97,26 @@ MEMBER_TRANSITIONS: Dict[MemberStatus, List[MemberStatus]] = {
     MemberStatus.ERROR: [
         MemberStatus.RESTARTING,
         MemberStatus.READY,
+        MemberStatus.STOPPED,
         MemberStatus.SHUTDOWN_REQUESTED,
         MemberStatus.SHUTDOWN,
     ],
 }
+
+
+# Statuses a member can rest in when it has no active work. Consumed by the
+# team-completion check. Co-located with MemberStatus as its single source of
+# truth: status.py has no dependencies, whereas TASK_TERMINAL_STATUSES lives in
+# tools/database/graph.py only to avoid an import edge from the SQL layer back
+# into status.py.
+MEMBER_SETTLED_STATUSES = frozenset(
+    {
+        MemberStatus.READY.value,
+        MemberStatus.PAUSED.value,
+        MemberStatus.STOPPED.value,
+        MemberStatus.SHUTDOWN.value,
+    }
+)
 
 
 class ExecutionStatus(str, Enum):

@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
-from typing import Any, AsyncGenerator, Dict, Optional
+from typing import Any, AsyncGenerator, Dict
 
 from a2a.types import AgentCard as A2AAgentCard
 
@@ -20,22 +20,28 @@ class A2ARemoteClient(RemoteClient):
 
     def __init__(self, config: RemoteClientConfig):
         self.config = config
-        self.card = config.kwargs.get("card")
         self._started = False
 
         try:
-            if not isinstance(self.card, AgentCard):
-                raise ValueError("card is not openjiuwen agent card")
-            a2a_card = self._convert_to_a2a_card(self.card)
-            if a2a_card is None:
-                raise ValueError("failed to convert openjiuwen agent card to a2a agent card")
-            self.client = A2AClient(card=a2a_card)
+            card = self._resolve_a2a_card()
+            if card is None:
+                raise ValueError("card is required when protocol is A2A")
+            polling = bool(self.config.kwargs.get("polling", False))
+            self.client = A2AClient(card=card, polling=polling)
             logger.info(f"[A2ARemoteClient] Initialized client for {config.id}, url={config.url}")
         except Exception as exc:
             logger.error(f"[A2ARemoteClient] Failed to initialize client for {config.id}: {exc}")
             raise
 
-    def _convert_to_a2a_card(self, card: AgentCard) -> Optional[A2AAgentCard]:
+    def _resolve_a2a_card(self) -> A2AAgentCard | None:
+        card = self.config.kwargs.get("card")
+        if card is None:
+            return None
+        if not isinstance(card, AgentCard):
+            raise ValueError("card in config.kwargs must be an openjiuwen AgentCard")
+        return self._convert_to_a2a_card(card)
+
+    def _convert_to_a2a_card(self, card: AgentCard) -> A2AAgentCard:
         """Convert an openjiuwen AgentCard to an A2A AgentCard."""
         interface_url = None
         if self.config.url:
@@ -52,10 +58,24 @@ class A2ARemoteClient(RemoteClient):
             protocol_version="1.0",
         )
 
+    @staticmethod
+    def _resolve_session_id(inputs: Dict[str, Any]) -> str | None:
+        session_id = inputs.get("conversation_id") or inputs.get("sessionId")
+        return str(session_id) if session_id is not None else None
+
+    @staticmethod
+    def _with_session_id(result: AgentResult, session_id: str | None) -> AgentResult:
+        if session_id is None:
+            return result
+        return result.model_copy(update={"sessionId": session_id})
+
     async def start(self):
         """Mark the remote client as started."""
         self._started = True
         logger.debug(f"[A2ARemoteClient] Started client for {self.config.id}")
+
+    def is_started(self) -> bool:
+        return self._started
 
     async def stop(self):
         """Stop the underlying client if it has been started."""
@@ -67,12 +87,13 @@ class A2ARemoteClient(RemoteClient):
     async def invoke(self, inputs: Dict[str, Any], timeout: float = None) -> AgentResult:
         """Invoke the remote A2A agent and return an AgentResult."""
         logger.debug(f"[A2ARemoteClient] Invoke {self.config.id}")
+        session_id = self._resolve_session_id(inputs)
 
         try:
             invoke_coro = self.client.invoke(inputs=inputs)
             if timeout:
-                return await asyncio.wait_for(invoke_coro, timeout=timeout)
-            return await invoke_coro
+                return self._with_session_id(await asyncio.wait_for(invoke_coro, timeout=timeout), session_id)
+            return self._with_session_id(await invoke_coro, session_id)
         except asyncio.TimeoutError:
             logger.error(f"[A2ARemoteClient] Invoke timeout for {self.config.id}")
             await self.stop()
@@ -86,20 +107,32 @@ class A2ARemoteClient(RemoteClient):
                      timeout: float = None) -> AsyncGenerator[AgentResult, None]:
         """Stream AgentResult chunks from the remote A2A agent."""
         logger.debug(f"[A2ARemoteClient] Stream {self.config.id}")
+        session_id = self._resolve_session_id(inputs)
 
         try:
             if timeout:
                 async with asyncio.timeout(timeout):
                     async for chunk in self.client.stream(inputs=inputs):
-                        yield chunk
+                        yield self._with_session_id(chunk, session_id)
             else:
                 async for chunk in self.client.stream(inputs=inputs):
-                    yield chunk
+                    yield self._with_session_id(chunk, session_id)
         except asyncio.TimeoutError:
             logger.error(f"[A2ARemoteClient] Stream timeout for {self.config.id}")
             await self.stop()
             raise
         except Exception as exc:
             logger.error(f"[A2ARemoteClient] Stream failed for {self.config.id}: {exc}")
+            await self.stop()
+            raise
+
+    async def cancel_task(self, task_id: str, tenant: str | None = None) -> AgentResult:
+        """Request cancellation of a remote A2A task."""
+        logger.debug(f"[A2ARemoteClient] Cancel task {task_id} for {self.config.id}")
+
+        try:
+            return await self.client.cancel_task(task_id, tenant=tenant)
+        except Exception as exc:
+            logger.error(f"[A2ARemoteClient] Cancel task failed for {self.config.id}: {exc}")
             await self.stop()
             raise

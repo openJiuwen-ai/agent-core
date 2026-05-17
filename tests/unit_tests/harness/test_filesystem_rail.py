@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import (
@@ -59,6 +60,10 @@ def test_sys_operation_rail_registers_base_tools(tmp_path):
                 "bash",
             }
             assert expected_cards.issubset(set(agent.ability_manager.cards))
+            if os.name == "nt":
+                assert "powershell" in agent.ability_manager.cards
+            else:
+                assert "powershell" not in agent.ability_manager.cards
             assert "code" not in agent.ability_manager.cards
             assert "audio_transcription" not in agent.ability_manager.cards
             assert "audio_question_answering" not in agent.ability_manager.cards

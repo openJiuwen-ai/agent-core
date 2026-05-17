@@ -9,15 +9,15 @@ from unittest.mock import (
 import pytest
 import pytest_asyncio
 
-from openjiuwen.agent_teams.agent.coordinator import (
-    CoordinatorLoop,
+from openjiuwen.agent_teams.agent.coordination.event_bus import (
+    EventBus,
 )
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.team import (
     TeamMemberSpec,
     TeamRole,
 )
-from openjiuwen.agent_teams.spawn.context import (
+from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
 )
@@ -42,6 +42,7 @@ from tests.test_logger import logger
 
 # ========== Fixtures ==========
 
+
 @pytest.fixture
 def db_config():
     return DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:")
@@ -65,14 +66,14 @@ async def message_bus():
     yield bus
 
 
-# ========== CoordinatorLoop pause/resume ==========
+# ========== EventBus pause/resume ==========
 
-class TestCoordinatorLoopPauseResume:
 
+class TestEventBusPauseResume:
     @pytest.mark.asyncio
     @pytest.mark.level0
     async def test_pause_polls_stops_polling(self):
-        loop = CoordinatorLoop(role=TeamRole.LEADER)
+        loop = EventBus(role=TeamRole.LEADER)
         await loop.start()
         assert loop.is_running
         assert not loop.polls_paused
@@ -88,7 +89,7 @@ class TestCoordinatorLoopPauseResume:
     @pytest.mark.asyncio
     @pytest.mark.level0
     async def test_resume_polls_restarts_polling(self):
-        loop = CoordinatorLoop(role=TeamRole.LEADER)
+        loop = EventBus(role=TeamRole.LEADER)
         await loop.start()
 
         await loop.pause_polls()
@@ -104,7 +105,7 @@ class TestCoordinatorLoopPauseResume:
     @pytest.mark.asyncio
     @pytest.mark.level0
     async def test_pause_polls_idempotent(self):
-        loop = CoordinatorLoop(role=TeamRole.LEADER)
+        loop = EventBus(role=TeamRole.LEADER)
         await loop.start()
         await loop.pause_polls()
         await loop.pause_polls()  # should not raise
@@ -114,7 +115,7 @@ class TestCoordinatorLoopPauseResume:
     @pytest.mark.asyncio
     @pytest.mark.level0
     async def test_resume_polls_noop_when_not_paused(self):
-        loop = CoordinatorLoop(role=TeamRole.LEADER)
+        loop = EventBus(role=TeamRole.LEADER)
         await loop.start()
         original_mailbox = loop._mailbox_poll_task
         await loop.resume_polls()  # should be noop
@@ -124,8 +125,8 @@ class TestCoordinatorLoopPauseResume:
 
 # ========== TeamStandbyEvent ==========
 
-class TestTeamStandbyEvent:
 
+class TestTeamStandbyEvent:
     @pytest.mark.level1
     def test_standby_event_serialization(self):
         event = TeamStandbyEvent(team_name="test_team")
@@ -144,8 +145,8 @@ class TestTeamStandbyEvent:
 
 # ========== MemberStatus READY self-transition ==========
 
-class TestReadySelfTransition:
 
+class TestReadySelfTransition:
     @pytest.mark.level1
     def test_ready_to_ready_is_valid(self):
         assert is_valid_transition(MemberStatus.READY, MemberStatus.READY, MEMBER_TRANSITIONS)
@@ -157,15 +158,15 @@ class TestReadySelfTransition:
 
 # ========== Persistent team build_team + member status ==========
 
-class TestPersistentTeamBuildTeam:
 
+class TestPersistentTeamBuildTeam:
     @pytest_asyncio.fixture
     async def persistent_team(self, db, message_bus):
         predefined = [
             TeamMemberSpec(
-            member_name="dev-1",
-            display_name="Developer",
-            persona="Backend dev",
+                member_name="dev-1",
+                display_name="Developer",
+                persona="Backend dev",
             ),
         ]
         return TeamBackend(
@@ -215,8 +216,8 @@ class TestPersistentTeamBuildTeam:
 
 # ========== resume_for_new_session ==========
 
-class TestResumeForNewSession:
 
+class TestResumeForNewSession:
     @pytest_asyncio.fixture
     async def db_file(self, tmp_path):
         """Use file-based SQLite so state persists across session switches."""

@@ -10,18 +10,20 @@ Includes:
 - MemoryCallOperator: Memory read/write with enabled/retries tunables
 """
 
-from openjiuwen.core.operator.base import Operator, TunableSpec
-from openjiuwen.core.operator.llm_call import LLMCallOperator, LLMCall
-from openjiuwen.core.operator.tool_call import ToolCallOperator
+from openjiuwen.core.operator.base import Operator, PreviewableOperator, TunableSpec
+from openjiuwen.core.operator.llm_call import LLMCall, LLMCallOperator
 from openjiuwen.core.operator.memory_call import MemoryCallOperator
-from openjiuwen.core.operator.skill_call import SkillCallOperator
+from openjiuwen.core.operator.skill_call import SkillCallOperator, SkillExperienceOperator
+from openjiuwen.core.operator.tool_call import ToolCallOperator
 
 __all__ = [
     "Operator",
+    "PreviewableOperator",
     "TunableSpec",
     "LLMCallOperator",
     "LLMCall",
     "ToolCallOperator",
     "MemoryCallOperator",
+    "SkillExperienceOperator",
     "SkillCallOperator",
 ]

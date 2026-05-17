@@ -9,7 +9,7 @@ import pytest
 
 from openjiuwen.agent_evolving.dataset import Case, EvaluatedCase
 from openjiuwen.agent_evolving.signal.from_eval import from_evaluated_case
-from openjiuwen.agent_evolving.signal.base import EvolutionCategory, EvolutionSignal
+from openjiuwen.agent_evolving.signal.base import EvolutionSignal
 from openjiuwen.agent_evolving.optimizer.llm_call.instruction_optimizer import InstructionOptimizer
 from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
 
@@ -40,7 +40,6 @@ def make_signal(signal_type="evaluated", score=0.0) -> EvolutionSignal:
     """Factory for creating EvolutionSignal."""
     return EvolutionSignal(
         signal_type=signal_type,
-        evolution_type=EvolutionCategory.SKILL_EXPERIENCE,
         section="Troubleshooting",
         excerpt=f"score={score:.2f}",
         context={
@@ -138,7 +137,7 @@ class TestInstructionOptimizerStep:
 
 
 class TestInstructionOptimizerBadCasesBehavior:
-    """Test bad cases filtering behavior through backward()."""
+    """Test failure-driven signal selection behavior through backward()."""
 
     @staticmethod
     def test_backward_with_mixed_scores():
@@ -157,6 +156,26 @@ class TestInstructionOptimizerBadCasesBehavior:
 
         # backward should complete without error for mixed scores
         asyncio.run(optimizer.backward(signals))
+
+    @staticmethod
+    def test_backward_ignores_non_failure_signals_explicitly():
+        """Prompt optimization should not treat all online signals as failure cases."""
+        optimizer, mock_model = make_instruction_optimizer()
+        optimizer.bind({"op1": make_mock_operator("op1")})
+
+        signals = [
+            EvolutionSignal(
+                signal_type="conversation_review",
+                section="Examples",
+                excerpt="useful but not failure-driven",
+            ),
+            make_signal(score=1.0),
+        ]
+
+        asyncio.run(optimizer.backward(signals))
+
+        assert optimizer._selected_signals == []
+        mock_model.invoke.assert_not_called()
 
 
 class TestInstructionOptimizerFullPipeline:

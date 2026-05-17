@@ -20,9 +20,9 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint
 
 _FOLLOW_UP_PROMPT_CN = (
-    "**重要：你必须先调用 ask_user 工具向用户确认，不可跳过此步骤。**\n"
+    "**重要：你必须先向用户确认，不可跳过此步骤。**\n"
     "系统检测到对话中 spawn 了多个团队成员，可能值得创建团队技能。请按以下步骤执行：\n"
-    "1. 调用 ask_user 工具向用户确认：\n"
+    "1. 直接询问或调用 ask_user 工具向用户确认：\n"
     "   - 问题：\"我检测到多 Agent 协作模式可能值得创建为团队技能。是否创建？\"\n"
     "   - 选项：[\"创建\"，\"跳过\"，\"自定义指令：（请描述需求）\"]\n"
     "2. 如果用户选择\"创建\"或提供了自定义指令，请调用 **team-skill-creator** 技能，"
@@ -30,10 +30,10 @@ _FOLLOW_UP_PROMPT_CN = (
     "   新技能应保存到技能目录：{skills_dir}"
 )
 _FOLLOW_UP_PROMPT_EN = (
-    "**Important: You MUST call the ask_user tool to confirm with the user first. Do not skip this step.**\n"
+    "**Important: You MUST confirm with the user first. Do not skip this step.**\n"
     "The system detected multiple team member spawns that may be worth creating as a Team Skill. "
     "Please follow these steps:\n"
-    "1. Use ask_user tool to confirm with the user:\n"
+    "1. Directly inquire or invoke the `ask_user` tool to confirm with the user:\n"
     "   - Question: \"I detected a multi-agent collaboration pattern that may be worth creating "
     "as a Team Skill. Create it?\"\n"
     "   - Options: [\"Create\", \"Skip\", \"Custom instruction: (describe your needs)\"]\n"

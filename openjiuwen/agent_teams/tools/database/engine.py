@@ -16,12 +16,11 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import AsyncAdaptedQueuePool, StaticPool
 from sqlmodel import SQLModel
 
-from openjiuwen.agent_teams.spawn.context import get_session_id
+from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.tools.database.config import DatabaseConfig, DatabaseType
 from openjiuwen.agent_teams.tools.models import (
     TEAM_DYNAMIC_TABLE_PREFIXES,
     TEAM_STATIC_TABLES_TO_CLEAR,
-    _clear_session_model_cache,
     _get_message_model,
     _get_message_read_status_model,
     _get_task_dependency_model,
@@ -51,6 +50,38 @@ def _clear_table(sync_conn, table_name: str) -> None:
     """Delete all rows from one reflected table."""
     quoted_name = table_name.replace('"', '""')
     sync_conn.exec_driver_sql(f'DELETE FROM "{quoted_name}"')
+
+
+def _ensure_team_member_role_column(sync_conn) -> None:
+    """Backfill the ``team_member.role`` column on pre-existing DBs.
+
+    ``SQLModel.metadata.create_all`` only creates tables that don't
+    exist; it never alters live tables. DB files created before the
+    ``role`` column was introduced therefore lack it after upgrading,
+    and the next ``INSERT`` against ``team_member`` fails. Probe the
+    column list and run a one-shot ``ALTER TABLE ... ADD COLUMN`` with
+    a backfill default of ``teammate`` so legacy rows are interpreted
+    as ordinary teammates. SQLite / PostgreSQL / MySQL all accept the
+    same form; column defaults apply to subsequent reads of pre-existing
+    rows too, so no separate UPDATE is required.
+    """
+    inspector = inspect(sync_conn)
+    if "team_member" not in inspector.get_table_names():
+        return
+    columns = {col["name"] for col in inspector.get_columns("team_member")}
+    if "role" in columns:
+        return
+
+    # Hard-coded "teammate" to keep this module free of the
+    # ``schema.team`` import (which would close a circular dependency
+    # back through ``tools.memory_database``). Keep in sync with
+    # ``TeamRole.TEAMMATE`` if that enum value ever changes.
+    default_role = "teammate"
+    sync_conn.exec_driver_sql(f"ALTER TABLE team_member ADD COLUMN role TEXT NOT NULL DEFAULT '{default_role}'")
+    team_logger.info(
+        "Migrated legacy team_member table: added role column with default %s",
+        default_role,
+    )
 
 
 async def initialize_engine(
@@ -164,6 +195,7 @@ async def initialize_engine(
 
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+        await conn.run_sync(_ensure_team_member_role_column)
 
     return engine, session_local
 
@@ -214,11 +246,6 @@ async def drop_cur_session_tables(engine: AsyncEngine) -> None:
     async with engine.begin() as conn:
         for model in (task_model, dep_model, message_model, read_status_model):
             await conn.run_sync(model.__table__.drop, checkfirst=True)
-
-    for model in (task_model, dep_model, message_model, read_status_model):
-        SQLModel.metadata.remove(model.__table__)
-
-    _clear_session_model_cache(session_id)
 
     team_logger.info("Dropped dynamic tables for session %s", session_id)
 
@@ -285,8 +312,6 @@ async def drop_session_tables_by_id(engine: AsyncEngine, session_id: str) -> lis
             if expected_table in table_names:
                 await conn.run_sync(_drop_table, expected_table)
                 dropped.append(expected_table)
-
-    _clear_session_model_cache(session_id)
 
     if dropped:
         team_logger.info("Dropped session tables for session %s: %s", session_id, dropped)

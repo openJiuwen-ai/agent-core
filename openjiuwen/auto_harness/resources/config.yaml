@@ -11,6 +11,9 @@
 # 可选：远端仓库 URL。默认保持 Phase 1 兼容。
 # repo_url: "https://gitcode.com/openJiuwen/agent-core.git"
 
+# 可选：session pipeline。auto 按目标信号选择，meta/extended 强制指定。
+# pipeline: "auto"
+
 # 可选：自定义 skills 目录，会与框架内置 skills 合并。
 # skills_dirs:
 #   - "/path/to/my-skills"
@@ -36,11 +39,11 @@ gitcode:
   access_token_env: "GITCODE_ACCESS_TOKEN"  # 从此环境变量读取 token
 
 budget:
-  session_secs: 3600            # 会话总预算（秒）
+  session_secs: 900000           # 会话总预算（秒），默认是 task_timeout_secs 的 3 倍
   cost_limit_usd: 10.0          # 费用上限（美元）
-  task_timeout_secs: 1200       # 单任务超时（秒）
-  model_timeout_secs: 300       # 单次 LLM 请求超时（秒），用于实现/修复等长耗时流式调用
-  max_tasks_per_session: 3      # 每会话最大任务数
+  task_timeout_secs: 300000      # 单任务超时（秒）
+  model_timeout_secs: 300000     # 单次 LLM 请求超时（秒），用于实现/修复等长耗时流式调用
+  max_tasks_per_session: 10     # 每会话最大任务数
 
 ci_gate:
   config_path: ""               # CI 门控配置路径，空则用仓库内默认
@@ -52,13 +55,13 @@ fix_loop:
   phase2_max_retries: 9         # Phase 2 最大重试次数
 
 agent:
-  implement: 30                 # implement agent max_iterations
-  assess: 30                    # assess agent max_iterations
-  plan: 15                      # plan agent max_iterations
-  select_pipeline: 10           # pipeline selector max_iterations
-  eval: 10                      # evaluator max_iterations
-  pr_draft: 5                   # PR draft agent max_iterations
-  learnings: 5                  # learnings agent max_iterations
+  implement: 60                 # implement agent max_iterations
+  assess: 60                    # assess agent max_iterations
+  plan: 30                      # plan agent max_iterations
+  select_pipeline: 20           # pipeline selector max_iterations
+  eval: 20                      # evaluator max_iterations
+  pr_draft: 10                   # PR draft agent max_iterations
+  learnings: 10                  # learnings agent max_iterations
 
 extensions:
   stage_registrars: []          # module:callable，签名 (StageRegistry) -> None

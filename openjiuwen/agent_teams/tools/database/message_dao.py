@@ -179,6 +179,63 @@ class MessageDao:
             rows = result.scalars().all()
             return rows
 
+    async def has_unread_messages(self, team_name: str) -> bool:
+        """Return True if any team message is still unread by its intended reader.
+
+        Direct messages: unread when ``is_read`` is False. Broadcast messages:
+        read state is a per-member high-water mark in MessageReadStatus, so a
+        broadcast is unread by member M when M is not its sender and M's
+        watermark does not yet cover the broadcast timestamp. This honors
+        ``is_read`` as-is — messages addressed to consumer-less members (the
+        ``user`` pseudo-member, human_agent) are marked read on write or
+        auto-acked by the leader, so they do not block completion.
+        """
+        message_model = _get_message_model()
+        read_status_model = _get_message_read_status_model()
+        async with self._session_local() as session:
+            # Direct messages: a single unread row is enough.
+            direct_unread = await session.execute(
+                select(message_model.message_id)
+                .where(
+                    message_model.team_name == team_name,
+                    message_model.broadcast.is_(False),
+                    message_model.is_read.is_(False),
+                )
+                .limit(1)
+            )
+            if direct_unread.first() is not None:
+                return True
+
+            # Broadcast messages: per-member watermark comparison.
+            broadcast_result = await session.execute(
+                select(message_model).where(
+                    message_model.team_name == team_name,
+                    message_model.broadcast.is_(True),
+                )
+            )
+            broadcasts = broadcast_result.scalars().all()
+            if not broadcasts:
+                return False
+
+            member_result = await session.execute(
+                select(TeamMember.member_name).where(TeamMember.team_name == team_name)
+            )
+            members = member_result.scalars().all()
+
+            read_result = await session.execute(
+                select(read_status_model).where(read_status_model.team_name == team_name)
+            )
+            read_at_by_member = {row.member_name: row.read_at for row in read_result.scalars().all()}
+
+            for member_name in members:
+                watermark = read_at_by_member.get(member_name)
+                for msg in broadcasts:
+                    if msg.from_member_name == member_name:
+                        continue
+                    if watermark is None or msg.timestamp > watermark:
+                        return True
+            return False
+
     async def mark_message_read(self, message_id: str, member_name: str) -> bool:
         """Mark a message as read by a member (works for both direct and broadcast messages)."""
         message_model = _get_message_model()

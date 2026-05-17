@@ -16,6 +16,7 @@ DESCRIPTION: Dict[str, str] = {
         "除非用户明确要求，否则不要改写成 Z 或 UTC。"
         "给当前聊天创建提醒时，优先使用 payload.kind=systemEvent 和 sessionTarget=current。"
         "向用户确认创建结果时，优先按 schedule.at 里的原始时区/偏移表述，不要自行改写成 UTC。"
+        "\n\n【投递频道】delivery.channel / targets：用户未明确指定时不填，系统自动使用当前对话渠道；**禁止从历史记录推断。**"
         "\n\n【重要：cron 表达式格式】只支持7段式(Quartz格式)：秒 分 时 日 月 周 年。"
         "字段取值范围：秒(0-59)，分(0-59)，时(0-23)，日(1-31)，月(1-12)，周(1-7或?)，年(1970-2099或*)。"
         "日和周字段：不能同时指定具体值，其中一个必须用?表示'不指定'。"
@@ -55,6 +56,8 @@ DESCRIPTION: Dict[str, str] = {
         "For reminders targeting the current chat, prefer payload.kind=systemEvent with sessionTarget=current. "
         "When confirming a created reminder to the user, prefer the original timezone/offset from schedule.at "
         "instead of rewriting it into UTC."
+        "\n\n[Delivery Channel] delivery.channel / targets: leave empty unless user explicitly specifies; "
+        "system uses current channel. **Never infer from history.**"
         "\n\n[CRITICAL: Cron Expression Format] Only supports 7-field Quartz format: "
         "second minute hour day month dow year. "
         "Field ranges: "
@@ -242,8 +245,11 @@ FIELD_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
         "en": "Delivery mode: none, announce, or webhook",
     },
     "delivery.channel": {
-        "cn": "announce 模式使用的频道",
-        "en": "Channel used by announce mode",
+        "cn": "announce 模式投递频道。用户未明确指定时不填，系统自动使用当前对话渠道；**禁止从历史记录推断。**",
+        "en": (
+            "Delivery channel for announce mode. Leave empty unless user explicitly specifies; "
+            "system uses current channel. **Never infer from history.**"
+        ),
     },
     "delivery.to": {
         "cn": "目标收件人或会话标识",
@@ -304,8 +310,11 @@ FIELD_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
         "en": "Task content sent to assistant at scheduled time. Do NOT include time/frequency info",
     },
     "targets": {
-        "cn": "兼容层目标频道字段",
-        "en": "Compatibility target channel field",
+        "cn": "目标频道。用户未明确指定时不填，系统自动使用当前对话渠道；**禁止从历史记录推断。**",
+        "en": (
+            "Target channel. Leave empty unless user explicitly specifies; "
+            "system uses current channel. **Never infer from history.**"
+        ),
     },
 }
 
@@ -571,6 +580,8 @@ CRON_GET_JOB_DESCRIPTION: Dict[str, str] = {
 CRON_CREATE_JOB_DESCRIPTION_CN = """
 创建新的 cron 定时任务，使用扁平字段（name, cron_expr, timezone, targets, description, wake_offset_seconds）。
 
+【targets】用户未明确指定投递渠道时不填，系统自动使用当前对话渠道；**禁止从历史记录推断。**
+
 【重要：cron 表达式格式】只支持7段式(Quartz格式)：秒 分 时 日 月 周 年。
 日和周字段：不能同时指定具体值，其中一个必须用?表示'不指定'。
 年份字段：*表示跨年周期执行，固定年份只在该年执行。
@@ -595,6 +606,8 @@ CRON_CREATE_JOB_DESCRIPTION_CN = """
 
 CRON_CREATE_JOB_DESCRIPTION_EN = """
 Create a new cron job using flat fields (name, cron_expr, timezone, targets, description, wake_offset_seconds).
+
+[targets] Leave empty unless user explicitly specifies a channel; system uses current channel. **Never infer from history.**
 
 [CRITICAL: Cron Expression Format] Only supports 7-field Quartz format: second minute hour day month dow year.
 Day and dow fields: cannot both have specific values; one must be '?' (no specific value).
@@ -708,8 +721,11 @@ LEGACY_FIELD_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
         "en": "Timezone, e.g. Asia/Shanghai",
     },
     "targets": {
-        "cn": "兼容层目标频道字段",
-        "en": "Legacy compatibility target channel",
+        "cn": "目标频道。用户未明确指定时不填，系统自动使用当前对话渠道；**禁止从历史记录推断。**",
+        "en": (
+            "Target channel. Leave empty unless user explicitly specifies; "
+            "system uses current channel. **Never infer from history.**"
+        ),
     },
     "legacy_enabled": {
         "cn": "是否启用",

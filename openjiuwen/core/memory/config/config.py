@@ -3,7 +3,7 @@
 
 from pydantic import BaseModel, Field, field_validator
 from openjiuwen.core.common.schema.param import Param
-from openjiuwen.core.memory.common.crypto import AES_KEY_LENGTH
+from openjiuwen.core.common.security.crypt_utils import AES_KEY_LENGTH
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.retrieval.common.config import EmbeddingConfig
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -38,6 +38,12 @@ class MemoryScopeConfig(BaseModel):
     model_cfg: ModelRequestConfig = Field(default=None)
     model_client_cfg: ModelClientConfig = Field(default=None)
     embedding_cfg: EmbeddingConfig = Field(default=None)
+    # user-defined rules for user profile extraction
+    user_profile_definition: str = Field(default="用户本人的肯定或否定表述（包含不限于基本身份、兴趣偏好、人际关系、资产状况）")
+    # user-defined rules for semantic memory extraction
+    semantic_memory_definition: str = Field(default="用户对话中涉及的和时间无明确关系的事实性内容或概念")
+    # user-defined rules for episodic memory extraction
+    episodic_memory_definition: str = Field(default="用户对话中涉及的和时间有明确关系的事实性内容或概念")
 
 
 class AgentMemoryConfig(BaseModel):

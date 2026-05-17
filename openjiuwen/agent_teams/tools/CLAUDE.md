@@ -17,13 +17,13 @@ Tools never reach into `TeamDatabase` directly — they go through `TeamBackend`
 
 ## Tool Catalogue & Role Filters
 
-`create_team_tools(role=..., teammate_mode=..., exclude_tools=..., lang=...)` is the single entry point. It builds every tool once and filters by role.
+`create_team_tools(role=..., teammate_mode=..., lifecycle=..., exclude_tools=..., lang=...)` is the single entry point. It builds every tool once and filters by role.
 
 | Tool | Leader | Teammate | Notes |
 |---|---|---|---|
 | `build_team` | ✓ | | entry point — description carries the full workflow |
-| `clean_team` | ✓ | | requires every teammate shutdown first |
-| `spawn_member` | ✓ | | takes optional `model_config_allocator` callback |
+| `clean_team` | ✓ (temporary only) | | requires every teammate shutdown first; not wired for `lifecycle="persistent"` (operator tears those down via SDK facades) |
+| `spawn_member` | ✓ | | takes optional `model_config_allocator` callback; `role_type ∈ {teammate (default), human_agent}`; `human_agent` rejects `model_name`/`prompt` and requires HITT to be engaged on the backend |
 | `shutdown_member` | ✓ | | `force=True` skips the normal shutdown sequence |
 | `approve_plan` | ✓ (plan_mode only) | | wired only when `teammate_mode == "plan_mode"` |
 | `approve_tool` | ✓ (plan_mode only) | | same gating as `approve_plan` |
@@ -32,7 +32,8 @@ Tools never reach into `TeamDatabase` directly — they go through `TeamBackend`
 | `update_task` | ✓ | | one tool handles title/content edit, cancel, assign (with reassignment reset), and `add_blocked_by` |
 | `view_task` | ✓ | ✓ | `action ∈ {list, get, claimable}`; default `list` |
 | `claim_task` | | ✓ | `status ∈ {claimed, completed}`; completion path appends a next-step nudge |
-| `send_message` | ✓ | ✓ | `to == "*"` → broadcast; leader call auto-starts UNSTARTED members |
+| `send_message` | ✓ | ✓ | `to == "*"` → broadcast; leader call auto-starts UNSTARTED members. Also attached to `human_agent` as a user-driven relay channel — the HITT prompt section forbids autonomous use; only user-issued "tell `<member>` …" instructions may trigger it. |
+| `member_complete_task` | | | `human_agent` only — self-only task completion |
 | `workspace_meta` | ✓ | ✓ | workspace lock + version history |
 
 Plan-mode gating is enforced in the factory:
@@ -42,7 +43,29 @@ if role == "leader" and teammate_mode != "plan_mode":
     allowed = allowed - {"approve_plan", "approve_tool"}
 ```
 
-Worktree tools (`enter_worktree`, `exit_worktree`) have locale files under `descs/` but are currently commented out in the permission set — keep the Markdown descriptions in sync if they are re-enabled.
+Persistent-team gating is enforced in the same factory, right after:
+
+```python
+if lifecycle == "persistent":
+    allowed = allowed - {"clean_team"}
+```
+
+Rationale: persistent teams live across rounds and are torn down by the
+operator through SDK facades (`delete_agent_team` etc.). Exposing a
+leader-callable `clean_team` mid-round would race the runtime pool
+invariants and silently de-register a team the operator still considers
+live. Temporary teams keep the tool — they have no external operator;
+the leader is the only one who can wind them down.
+
+`TeamBackend.__init__` takes a keyword-only `on_team_cleaned` async
+callback fired **only** on the `clean_team` success path (best-effort —
+a raising callback is logged, not propagated). The hosting `TeamAgent`
+wires it to latch `TeamAgentState.team_cleaned` synchronously inside the
+leader's round, which is how a temporary-team leader ends its own stream
+after `clean_team` (the leader ignores its own `TeamCleanedEvent`). See
+`docs/specs/S_08` + `docs/features/F_10`.
+
+Worktree tools (`enter_worktree`, `exit_worktree`) have moved to `openjiuwen.harness.tools.worktree`. Their description and parameter schema live in `harness/prompts/tools/{enter,exit}_worktree.py`, and they are mounted by `TeamToolRail` whenever `agent_configurator.create_worktree_manager()` returns a `WorktreeManager` for the agent. There is nothing left to maintain in `tools/locales/descs/` for these two tools.
 
 ## Tool Design Principles
 
@@ -159,7 +182,7 @@ Locale files live in `locales/` — flat `STRINGS` dict per language (`cn.py`, `
 Long `_desc` entries can live in Markdown files under `locales/descs/<lang>/<tool_name>.md` instead of the `STRINGS` dict. Markdown files take precedence over dict entries when both exist. This is optional — short descriptions and parameter strings stay in `cn.py`/`en.py`.
 
 - File naming: `descs/cn/build_team.md` → resolves as `build_team._desc` for lang `"cn"`.
-- Files are loaded via `PromptTemplate` (same as `agent/prompts/`) and cached with `@cache`.
+- Files are loaded via `PromptTemplate` (same as `agent_teams/prompts/`) and cached with `@cache`.
 - Supports `{{placeholder}}` interpolation — pass keyword arguments through `t("tool", param="value")`.
 - When migrating a `_desc` from `STRINGS` to a `.md` file, delete the dict entry and leave a comment.
 
@@ -170,7 +193,7 @@ Current `descs/` population: `approve_plan`, `approve_tool`, `build_team`, `clai
 | Layer | Owns | Example file |
 |---|---|---|
 | Tool description (`locales/descs/`) | Operational procedure, call order, workflow steps, anti-patterns, usage scenarios | `build_team.md` |
-| System prompt (`agent/prompts/`) | Role identity, decision principles, state transitions | `leader_policy.md` |
+| System prompt (`agent_teams/prompts/`) | Role identity, decision principles, state transitions | `leader_policy.md` |
 
 Rule: **don't duplicate content across layers**. If the workflow lives in the tool description, the system prompt should not repeat it.
 

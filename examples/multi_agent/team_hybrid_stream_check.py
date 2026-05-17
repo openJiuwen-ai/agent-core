@@ -35,6 +35,7 @@ async def main() -> None:
         async for chunk in Runner.run_agent_team_streaming(
             agent_team=team.card.id,
             inputs={"task": "开发新功能模块"},
+            base=True,
         ):
             payloads.append(_payload(chunk))
 

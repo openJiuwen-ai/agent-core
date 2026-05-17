@@ -208,6 +208,23 @@ async def test_workdir_from_contextvar(sys_op, tmp_workspace):
 # ────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
+async def test_default_workdir_prefers_current_cwd_over_workspace(sys_op, tmp_workspace):
+    """Workspace is an artifact root and must not override the active CWD."""
+    from openjiuwen.core.sys_operation.cwd import init_cwd
+
+    current_dir = os.path.join(tmp_workspace, "current")
+    os.makedirs(current_dir)
+    init_cwd(current_dir, workspace=tmp_workspace)
+    bash_tool = BashTool(sys_op)
+
+    cmd = "cd" if os.name == "nt" else "pwd"
+    res = await bash_tool.invoke({"command": cmd})
+
+    assert res.success is True
+    assert os.path.realpath(current_dir) in os.path.realpath(res.data["stdout"].strip())
+
+
+@pytest.mark.asyncio
 async def test_background_returns_pid(sys_op):
     bash_tool = BashTool(sys_op)
     cmd = "ping -n 5 127.0.0.1 > nul" if os.name == "nt" else "sleep 5"

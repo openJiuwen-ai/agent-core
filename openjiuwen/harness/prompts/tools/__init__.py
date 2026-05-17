@@ -111,6 +111,17 @@ from openjiuwen.harness.prompts.tools.memory import (
     ReadMemoryMetadataProvider,
     WriteMemoryMetadataProvider,
 )
+from openjiuwen.harness.prompts.tools.coding_memory import (
+    CodingMemoryEditMetadataProvider,
+    CodingMemoryReadMetadataProvider,
+    CodingMemoryWriteMetadataProvider,
+)
+from openjiuwen.harness.prompts.tools.enter_worktree import (
+    EnterWorktreeMetadataProvider,
+)
+from openjiuwen.harness.prompts.tools.exit_worktree import (
+    ExitWorktreeMetadataProvider,
+)
 
 # ---------------------------------------------------------------------------
 # Provider registry
@@ -166,11 +177,14 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     WriteMemoryMetadataProvider(),
     EditMemoryMetadataProvider(),
     ReadMemoryMetadataProvider(),
+    CodingMemoryReadMetadataProvider(),
+    CodingMemoryWriteMetadataProvider(),
+    CodingMemoryEditMetadataProvider(),
+    EnterWorktreeMetadataProvider(),
+    ExitWorktreeMetadataProvider(),
 ]
 
-_REGISTRY: Dict[str, ToolMetadataProvider] = {
-    p.get_name(): p for p in _PROVIDERS
-}
+_REGISTRY: Dict[str, ToolMetadataProvider] = {p.get_name(): p for p in _PROVIDERS}
 
 
 # ---------------------------------------------------------------------------
@@ -180,23 +194,15 @@ def get_tool_description(name: str, language: str = "cn") -> str:
     """查找工具描述。内置工具找不到时抛 KeyError（fail-fast）。"""
     provider = _REGISTRY.get(name)
     if provider is None:
-        raise KeyError(
-            f"Tool '{name}' not registered. "
-            f"Available: {sorted(_REGISTRY.keys())}"
-        )
+        raise KeyError(f"Tool '{name}' not registered. Available: {sorted(_REGISTRY.keys())}")
     return provider.get_description(language)
 
 
-def get_tool_input_params(
-    name: str, language: str = "cn"
-) -> Dict[str, Any]:
+def get_tool_input_params(name: str, language: str = "cn") -> Dict[str, Any]:
     """查找工具参数 schema。内置工具找不到时抛 KeyError。"""
     provider = _REGISTRY.get(name)
     if provider is None:
-        raise KeyError(
-            f"Tool '{name}' not registered. "
-            f"Available: {sorted(_REGISTRY.keys())}"
-        )
+        raise KeyError(f"Tool '{name}' not registered. Available: {sorted(_REGISTRY.keys())}")
     return provider.get_input_params(language)
 
 

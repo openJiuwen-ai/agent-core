@@ -363,6 +363,23 @@ def _build_approval_override_id(tool_name: str, match_type: str, pattern: str) -
     return collapsed[:120]
 
 
+def _persist_tiered_tool_allow(
+    permissions: PermissionsSection,
+    tool_name: str,
+) -> bool:
+    """Persist whole-tool allow for tools without safe parameter suggestions."""
+    if not tool_name:
+        return False
+    tools = permissions.get("tools")
+    if not isinstance(tools, dict):
+        tools = {}
+        permissions["tools"] = tools
+    if tools.get(tool_name) == "allow":
+        return False
+    tools[tool_name] = "allow"
+    return True
+
+
 def write_permissions_section_to_agent_config_yaml(
     config_yaml_path: Path | None,
     permissions: PermissionsSection | dict[str, Any],
@@ -457,6 +474,13 @@ def merge_permission_allow_rule_into_permissions(
         shell_ast_result=shell_ast_result,
     )
     if not _persist_tiered_approval_override_suggestions(perms, suggestions):
+        if tool_name not in _SHELL_APPROVAL_TOOLS and tool_name not in _PATH_APPROVAL_TOOLS:
+            if _persist_tiered_tool_allow(perms, tool_name):
+                logger.info(
+                    "[PermissionEngine] permission.merge.ok tool=%s target=tools",
+                    tool_name,
+                )
+                return cast(PermissionsSection, perms), True
         logger.warning(
             "[PermissionEngine] permission.merge.skip tool=%s reason=no_safe_suggestion",
             tool_name,

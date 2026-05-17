@@ -17,7 +17,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamSpec,
     TeamRole,
 )
-from openjiuwen.agent_teams.spawn.context import (
+from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
 )
@@ -31,6 +31,7 @@ from openjiuwen.agent_teams.tools.database import (
 from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
+    MemberMode,
     MemberStatus,
     TaskStatus,
 )
@@ -979,3 +980,204 @@ class TestTeamRuntimeContextDbConfig:
         )
         assert isinstance(context.db_config, DatabaseConfig)
         assert context.db_config.db_type == DatabaseType.SQLITE
+
+
+async def _seed_member(db: TeamDatabase, member_name: str, status: str) -> None:
+    """Insert a team_member row for the 'test_team' fixture team."""
+    await db.member.create_member(
+        member_name=member_name,
+        team_name="test_team",
+        display_name=member_name,
+        agent_card=AgentCard().model_dump_json(),
+        status=status,
+        mode=MemberMode.BUILD_MODE.value,
+    )
+
+
+async def _drain_one_task(agent_team: TeamBackend) -> None:
+    """Add a single task and drive it to a terminal (completed) status."""
+    task = await agent_team.task_manager.add(title="T", content="c")
+    assert await agent_team.task_manager.claim(task.task_id)
+    await agent_team.task_manager.complete(task.task_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_is_team_completed_all_conditions_met(agent_team, db):
+    """All members settled + all tasks terminal + no unread → snapshot returned."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.READY.value)
+    await _drain_one_task(agent_team)
+
+    snapshot = await agent_team.is_team_completed()
+
+    assert snapshot is not None
+    assert snapshot.member_count == 2
+    assert snapshot.task_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_is_team_completed_member_busy_returns_none(agent_team, db):
+    """A non-leader member still BUSY blocks completion."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.BUSY.value)
+    await _drain_one_task(agent_team)
+
+    assert await agent_team.is_team_completed() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_is_team_completed_leader_busy_returns_none(agent_team, db):
+    """The leader counts as a member — a busy leader blocks completion."""
+    await _seed_member(db, "leader1", MemberStatus.BUSY.value)
+    await _seed_member(db, "member1", MemberStatus.READY.value)
+    await _drain_one_task(agent_team)
+
+    assert await agent_team.is_team_completed() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_is_team_completed_pending_task_returns_none(agent_team, db):
+    """A non-terminal task blocks completion."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.READY.value)
+    await agent_team.task_manager.add(title="T", content="c")
+
+    assert await agent_team.is_team_completed() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_is_team_completed_empty_task_list_returns_none(agent_team, db):
+    """An empty task board is not a completed team."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.READY.value)
+
+    assert await agent_team.is_team_completed() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_is_team_completed_unread_message_returns_none(agent_team, db):
+    """An unread message blocks completion even when members and tasks are settled."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.READY.value)
+    await _drain_one_task(agent_team)
+    await agent_team.message_manager.send_message(content="ping", to_member_name="member1")
+
+    assert await agent_team.is_team_completed() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_clean_team_fires_callback_on_success(db, message_bus):
+    """clean_team runs on_team_cleaned exactly once on the success path."""
+    await db.team.create_team(
+        team_name="cb_team",
+        display_name="Callback Team",
+        leader_member_name="leader1",
+    )
+    calls: list[int] = []
+
+    async def _on_cleaned() -> None:
+        calls.append(1)
+
+    backend = TeamBackend(
+        team_name="cb_team",
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        on_team_cleaned=_on_cleaned,
+    )
+
+    result = await backend.clean_team()
+
+    assert result is True
+    assert calls == [1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_clean_team_skips_callback_on_failure(db, message_bus, sample_agent_card):
+    """clean_team must NOT fire on_team_cleaned when members are still active."""
+    await db.team.create_team(
+        team_name="cb_fail_team",
+        display_name="Callback Fail Team",
+        leader_member_name="leader1",
+    )
+    calls: list[int] = []
+
+    async def _on_cleaned() -> None:
+        calls.append(1)
+
+    backend = TeamBackend(
+        team_name="cb_fail_team",
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        on_team_cleaned=_on_cleaned,
+    )
+    # Spawn a member left in a non-SHUTDOWN status so clean_team bails out.
+    await backend.spawn_member(
+        member_name="member1",
+        display_name="Member One",
+        agent_card=sample_agent_card,
+    )
+
+    result = await backend.clean_team()
+
+    assert result is False
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_clean_team_callback_failure_does_not_break_clean(db, message_bus):
+    """A raising on_team_cleaned is swallowed; clean_team still succeeds."""
+    await db.team.create_team(
+        team_name="cb_raise_team",
+        display_name="Callback Raise Team",
+        leader_member_name="leader1",
+    )
+
+    async def _on_cleaned() -> None:
+        raise RuntimeError("boom")
+
+    backend = TeamBackend(
+        team_name="cb_raise_team",
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        on_team_cleaned=_on_cleaned,
+    )
+
+    result = await backend.clean_team()
+
+    assert result is True
+    assert await backend.get_team_info() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_clean_team_no_callback_is_noop(db, message_bus):
+    """clean_team success path works when on_team_cleaned is not wired."""
+    await db.team.create_team(
+        team_name="no_cb_team",
+        display_name="No Callback Team",
+        leader_member_name="leader1",
+    )
+    backend = TeamBackend(
+        team_name="no_cb_team",
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+    )
+
+    assert await backend.clean_team() is True

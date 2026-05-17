@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os.path
+import uuid as _uuid
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, List, Optional, Dict
 
@@ -272,6 +273,7 @@ class TodoCreateTool(TodoTool):
                 reason="Task list cannot be empty"
             )
         new_todos = []
+        seen_ids: set = set()
         for i, task_data in enumerate(tasks_data):
             content = task_data.get("content", "")
             if not content:
@@ -291,14 +293,27 @@ class TodoCreateTool(TodoTool):
                     StatusCode.TOOL_TODOS_VALIDATION_INVALID,
                     reason=f"Task at index {i} is missing a 'description' field"
                 )
+            # Prefer model-provided id; fall back to uuid only when absent
+            task_id = str(task_data.get("id") or "").strip()
+            if not task_id:
+                task_id = str(_uuid.uuid4())
+            if task_id in seen_ids:
+                raise build_error(
+                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                    reason=f"Duplicate task id '{task_id}' at index {i}"
+                )
+            seen_ids.add(task_id)
             status = TodoStatus.IN_PROGRESS if i == 0 else TodoStatus.PENDING
-            new_todos.append(TodoItem.create(
-                content=content,
-                active_form=active_form,
-                description=description,
-                status=status,
-                selected_model_id=task_data.get("selected_model_id"),
-            ))
+            new_todos.append(
+                TodoItem(
+                    id=task_id,
+                    content=content,
+                    activeForm=active_form,
+                    description=description,
+                    status=status,
+                    selected_model_id=task_data.get("selected_model_id"),
+                )
+            )
 
         await self.save_todos(session_id, new_todos)
         tool_logger.info("Created todo items from JSON array", event_type=LogEventType.TOOL_CALL_END)
@@ -608,16 +623,14 @@ class TodoModifyTool(TodoTool):
             )
 
     def _convert_to_todo_item(self, todo_data: Dict) -> TodoItem:
-        item = TodoItem.create(
+        return TodoItem(
+            id=str(todo_data.get("id") or "").strip() or str(_uuid.uuid4()),
             content=todo_data["content"],
-            active_form=todo_data.get("activeForm", ""),
+            activeForm=todo_data.get("activeForm", ""),
             description=todo_data.get("description", ""),
             status=TodoStatus(todo_data["status"]),
             selected_model_id=todo_data.get("selected_model_id"),
         )
-        if "id" in todo_data:
-            item.id = todo_data["id"]
-        return item
 
     async def _delete_todos(self, session_id: str, ids: List[str], current_todos: List[TodoItem]) -> str:
         deleted_count = 0

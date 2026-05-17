@@ -60,6 +60,7 @@ def test_set_scope_config_llm_init_failed():
     mem.kv_store = MagicMock()
     mem.db_store = MagicMock()
     mem.vector_store = MagicMock()
+    mem.memory_index = MagicMock()
 
     fake_scope_cfg = MagicMock()
     fake_scope_cfg.default_model_cfg = MagicMock()

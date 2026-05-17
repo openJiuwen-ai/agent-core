@@ -10,9 +10,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from openjiuwen.auto_harness.agents import (
+    create_activate_guide_agent,
     create_assess_agent,
     create_auto_harness_agent,
     create_commit_agent,
+    create_design_ext_agent,
+    create_eval_agent,
     create_learnings_agent,
     create_plan_agent,
     create_pr_draft_agent,
@@ -68,7 +71,7 @@ def _create_dummy_model() -> Model:
 
 
 def test_create_auto_harness_agent_includes_tool_tracker():
-    """主 agent 应挂载 ToolTrackingRail。"""
+    """主 agent 通过 extra_rails 注入 ToolTrackingRail。"""
     captured = {}
 
     def _fake_create_deep_agent(**kwargs):
@@ -81,6 +84,7 @@ def test_create_auto_harness_agent_includes_tool_tracker():
     ):
         create_auto_harness_agent(
             AutoHarnessConfig(model=MagicMock()),
+            extra_rails=[ToolTrackingRail()],
         )
 
     rails = captured["rails"]
@@ -248,7 +252,7 @@ async def test_create_commit_agent_loads_commit_skill(tmp_path: Path):
 
 
 def test_create_assess_agent_includes_tool_tracker():
-    """只读阶段 agent 也应挂载 ToolTrackingRail。"""
+    """只读阶段 agent 通过 extra_rails 注入 ToolTrackingRail。"""
     captured = {}
 
     def _fake_create_deep_agent(**kwargs):
@@ -261,6 +265,7 @@ def test_create_assess_agent_includes_tool_tracker():
     ):
         create_assess_agent(
             AutoHarnessConfig(model=MagicMock()),
+            extra_rails=[ToolTrackingRail()],
         )
 
     rails = captured["rails"]
@@ -431,3 +436,84 @@ def test_create_pr_draft_agent_uses_communicate_skill_only():
         "communicate",
     }
     assert captured.get("tools") is None
+
+
+def test_create_auto_harness_agent_no_tool_tracker_without_injection():
+    """不传 extra_rails 时 factory 不应包含 ToolTrackingRail。"""
+    captured = {}
+
+    def _fake_create_deep_agent(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    with patch(
+        "openjiuwen.auto_harness.agents.factory.create_deep_agent",
+        side_effect=_fake_create_deep_agent,
+    ):
+        create_auto_harness_agent(
+            AutoHarnessConfig(model=MagicMock()),
+        )
+
+    rails = captured["rails"]
+    assert not any(
+        isinstance(rail, ToolTrackingRail)
+        for rail in rails
+    )
+
+
+def test_auto_harness_agents_use_configured_completion_timeout():
+    """Auto-harness agent factories should use model timeout for completion."""
+    calls = []
+
+    def _fake_create_deep_agent(**kwargs):
+        calls.append(kwargs)
+        return object()
+
+    config = AutoHarnessConfig(
+        model=MagicMock(),
+        model_timeout_secs=6000.0,
+    )
+
+    with patch(
+        "openjiuwen.auto_harness.agents.factory.create_deep_agent",
+        side_effect=_fake_create_deep_agent,
+    ):
+        create_auto_harness_agent(config)
+        create_commit_agent(config)
+        create_assess_agent(config)
+        create_plan_agent(config)
+        create_eval_agent(config)
+        create_select_pipeline_agent(config)
+        create_design_ext_agent(config)
+        create_pr_draft_agent(config)
+        create_learnings_agent(config)
+        create_activate_guide_agent(config)
+
+    assert calls
+    assert all(
+        call["completion_timeout"] == 6000.0
+        for call in calls
+    )
+
+
+def test_create_assess_agent_no_tool_tracker_without_injection():
+    """不传 extra_rails 时只读 agent 不应包含 ToolTrackingRail。"""
+    captured = {}
+
+    def _fake_create_deep_agent(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    with patch(
+        "openjiuwen.auto_harness.agents.factory.create_deep_agent",
+        side_effect=_fake_create_deep_agent,
+    ):
+        create_assess_agent(
+            AutoHarnessConfig(model=MagicMock()),
+        )
+
+    rails = captured["rails"]
+    assert not any(
+        isinstance(rail, ToolTrackingRail)
+        for rail in rails
+    )

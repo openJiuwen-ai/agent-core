@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Teammate process lifecycle management for TeamAgent."""
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from typing import (
     Optional,
 )
 
+from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import (
     TeamRole,
@@ -23,7 +26,10 @@ from openjiuwen.core.runner.spawn.process_manager import SpawnConfig
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.agent_configurator import AgentConfigurator
+    from openjiuwen.agent_teams.agent.state import TeamAgentState
+    from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
     from openjiuwen.core.runner.spawn.process_manager import SpawnedProcessHandle
+    from openjiuwen.core.session.stream.base import OutputSchema
 
 
 class SpawnManager:
@@ -38,12 +44,13 @@ class SpawnManager:
 
     def __init__(
         self,
+        *,
+        state: "TeamAgentState",
         configurator: AgentConfigurator,
-        session_id_getter: Callable[[], Optional[str]],
         team_agent_getter: Callable[[], Any],
     ):
+        self._state = state
         self._configurator = configurator
-        self._get_session_id = session_id_getter
         self._get_team_agent = team_agent_getter
 
         self.spawned_handles: dict[str, SpawnedProcessHandle] = {}
@@ -68,8 +75,13 @@ class SpawnManager:
                 team_agent=self._get_team_agent(),
                 ctx=ctx,
                 initial_message=initial_message,
-                session_id=self._get_session_id() or session,
+                session_id=get_session_id() or session,
             )
+            # Wire chunk fan-out so the teammate's stream chunks reach
+            # the leader's stream_queue. Subprocess teammates skip this
+            # because they live in a different process; their chunks
+            # would need a messager-bus equivalent (future work).
+            self._wire_inprocess_chunk_forward(handle)
         else:
             handle = await Runner.spawn_agent(
                 self._configurator.build_spawn_config(ctx),
@@ -92,10 +104,58 @@ class SpawnManager:
         handle.on_unhealthy = _trigger_unhealthy_recovery
         return handle
 
+    def _wire_inprocess_chunk_forward(self, handle: "InProcessSpawnHandle") -> None:
+        """Forward an in-process teammate's stream chunks into leader's queue.
+
+        Same event loop, same process — leader holds a direct reference
+        to the teammate ``TeamAgent`` and can plug an observer onto its
+        ``StreamController`` that re-publishes each tagged chunk into
+        the leader's own ``stream_queue``. The forwarder reference is
+        stashed on the handle so :meth:`cleanup_teammate` can detach it.
+        """
+        leader = self._get_team_agent()
+        if leader is None or handle.agent_ref is None:
+            return
+        leader_sc = leader.stream_controller
+        teammate_sc = handle.agent_ref.stream_controller
+
+        async def _forward(chunk: "OutputSchema") -> None:
+            # Drop silently if the leader's queue is not set up yet or
+            # has already been torn down — buffering would invert the
+            # data-flow ownership and leak chunks across rounds.
+            queue = leader_sc.stream_queue
+            if queue is None:
+                return
+            await queue.put(chunk)
+
+        teammate_sc.add_chunk_observer(_forward)
+        handle.chunk_forward = _forward
+
+    def lookup_inprocess_agent(self, member_name: str) -> Optional[Any]:
+        """Return the live ``TeamAgent`` for an inprocess-spawned member.
+
+        Returns ``None`` for subprocess-spawned members (they live in a
+        different process and cannot be addressed by direct method call)
+        or when no handle is registered for ``member_name``.
+        """
+        handle = self.spawned_handles.get(member_name)
+        if handle is None:
+            return None
+        return getattr(handle, "agent_ref", None)
+
     async def cleanup_teammate(self, member_name: str) -> None:
         handle = self.spawned_handles.pop(member_name, None)
         if handle is None:
             return
+        # Detach chunk forwarder before tearing the task down so a
+        # late-arriving chunk cannot land in the leader queue after we
+        # have considered the teammate gone.
+        forward = getattr(handle, "chunk_forward", None)
+        agent_ref = getattr(handle, "agent_ref", None)
+        if forward is not None and agent_ref is not None:
+            with contextlib.suppress(Exception):
+                agent_ref.stream_controller.remove_chunk_observer(forward)
+            handle.chunk_forward = None
         try:
             await handle.stop_health_check()
             if handle.is_alive:
@@ -125,7 +185,7 @@ class SpawnManager:
                 await self.spawn_teammate(
                     ctx,
                     initial_message=initial_message,
-                    session=self._get_session_id(),
+                    session=get_session_id() or None,
                     spawn_config=spawn_config,
                 )
                 await self.publish_restart_event(member_name, attempt)
@@ -158,7 +218,7 @@ class SpawnManager:
     async def build_context_from_db(self, member_name: str) -> Optional[TeamRuntimeContext]:
         import json
 
-        from openjiuwen.agent_teams.agent.model_allocator import resolve_member_model
+        from openjiuwen.agent_teams.models.allocator import resolve_member_model
 
         team_backend = self._configurator.team_backend
         if team_backend is None:
@@ -192,8 +252,13 @@ class SpawnManager:
                     )
 
         ctx = self._configurator.ctx
+        # Role is persisted on the member row (``TeamMember.role``) so
+        # cold recovery picks up dynamically-spawned humans too. Legacy
+        # DB files without the column get a backfilled ``teammate``
+        # default via ``database.engine._ensure_team_member_role_column``.
+        role = TeamRole(teammate.role)
         return TeamRuntimeContext(
-            role=TeamRole.TEAMMATE,
+            role=role,
             member_name=teammate.member_name,
             persona=teammate.desc or "",
             team_spec=ctx.team_spec if ctx else None,
@@ -212,7 +277,6 @@ class SpawnManager:
             MemberRestartedEvent,
             TeamTopic,
         )
-        from openjiuwen.agent_teams.spawn.context import get_session_id
 
         try:
             await messager.publish(
@@ -229,11 +293,14 @@ class SpawnManager:
             team_logger.error("Failed to publish restart event for {}: {}", member_name, e)
 
     async def shutdown_all_handles(self) -> None:
-        for mid, handle in list(self.spawned_handles.items()):
+        # Route through cleanup_teammate so chunk forwarders are
+        # detached the same way as the single-member teardown path —
+        # otherwise inprocess observers would leak across team shutdowns.
+        for member_name in list(self.spawned_handles.keys()):
             try:
-                await handle.shutdown()
+                await self.cleanup_teammate(member_name)
             except Exception as e:
-                team_logger.error("Error shutting down teammate {}: {}", mid, e)
+                team_logger.error("Error shutting down teammate {}: {}", member_name, e)
         self.spawned_handles.clear()
 
     async def cancel_recovery_tasks(self) -> None:

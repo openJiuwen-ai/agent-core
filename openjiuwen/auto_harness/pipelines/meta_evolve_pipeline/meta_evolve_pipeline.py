@@ -15,22 +15,24 @@ from openjiuwen.auto_harness.pipelines import (
 )
 from openjiuwen.auto_harness.pipelines.base import (
     BasePipeline,
+    PipelineStageMap,
 )
 from openjiuwen.auto_harness.pipelines.meta_evolve_pipeline.meta_evolve_task_pipeline import (
     PRTaskPipeline,
 )
 from openjiuwen.auto_harness.schema import (
     SessionResultsArtifact,
+    StageSlot,
     TaskPlanArtifact,
 )
 from openjiuwen.auto_harness.stages.assess import (
-    AssessStage,
+    MetaAssessStage,
 )
 from openjiuwen.auto_harness.stages.learnings import (
     LearningsStage,
 )
 from openjiuwen.auto_harness.stages.plan import (
-    PlanStage,
+    MetaPlanStage,
 )
 
 
@@ -44,24 +46,32 @@ class MetaEvolvePipeline(BasePipeline):
     name = META_EVOLVE_PIPELINE
     description = "Default meta evolve pipeline."
     expected_outputs = ["session_results"]
+    stage_order = [
+        ("assess", "评估当前状态"),
+        ("plan", "制定优化计划"),
+        ("implement", "执行代码修改"),
+        ("verify", "CI 门禁检查"),
+        ("commit", "提交变更"),
+        ("publish", "发布 PR"),
+        ("learnings", "总结经验"),
+    ]
+    stage_map = PipelineStageMap(mapping={
+        StageSlot.ASSESS: MetaAssessStage,
+        StageSlot.PLAN: MetaPlanStage,
+        StageSlot.LEARNINGS: LearningsStage,
+    })
 
     async def stream(
         self,
         ctx: SessionContext,
     ) -> AsyncIterator[Any]:
-        tasks = ctx.get_artifact("input_tasks")
-        if isinstance(tasks, list):
-            self._populate_task_plan_from_input_tasks(
-                ctx, list(tasks)
-            )
-        else:
-            try:
-                async for chunk in self.run_assess_and_plan_stream(
-                    ctx
-                ):
-                    yield chunk
-            except _StopMetaEvolvePipeline:
-                return
+        try:
+            async for chunk in self.run_assess_and_plan_stream(
+                ctx
+            ):
+                yield chunk
+        except _StopMetaEvolvePipeline:
+            return
 
         async for chunk in self.run_task_pipeline_stream(ctx):
             yield chunk
@@ -99,7 +109,7 @@ class MetaEvolvePipeline(BasePipeline):
         ctx: SessionContext,
     ) -> AsyncIterator[Any]:
         async with self._readonly_assess_workspace(ctx):
-            assess_stage = AssessStage()
+            assess_stage = MetaAssessStage()
             assess_result_holder = []
             async for chunk in self.run_assess_stage_stream(
                 ctx,
@@ -111,7 +121,7 @@ class MetaEvolvePipeline(BasePipeline):
             ):
                 raise _StopMetaEvolvePipeline
 
-            plan_stage = PlanStage()
+            plan_stage = MetaPlanStage()
             plan_result_holder = []
             async for chunk in self.run_plan_stage_stream(
                 ctx,
@@ -164,7 +174,7 @@ class MetaEvolvePipeline(BasePipeline):
         result_holder: list,
     ) -> AsyncIterator[Any]:
         async for chunk in self._stream_stage(
-            AssessStage(),
+            MetaAssessStage(),
             ctx,
             result_holder=result_holder,
         ):
@@ -177,7 +187,7 @@ class MetaEvolvePipeline(BasePipeline):
         result_holder: list,
     ) -> AsyncIterator[Any]:
         async for chunk in self._stream_stage(
-            PlanStage(),
+            MetaPlanStage(),
             ctx,
             result_holder=result_holder,
         ):

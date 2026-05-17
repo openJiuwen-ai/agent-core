@@ -52,7 +52,12 @@ Build index.
 
 **Returns**:
 
-**bool**, returns True if building is successful, otherwise returns False.
+**bool**, returns True if building is successful.
+
+**Raises**:
+
+* **BaseError** (code 155105, `RETRIEVAL_INDEXING_EMBED_MODEL_NOT_FOUND`): When `config.index_type` is `"vector"` or `"hybrid"` and `embed_model` is not provided. The indexer raises this instead of returning False so callers get a clear validation error.
+* **BaseError** (code 155108, `RETRIEVAL_INDEXING_ADD_DOC_RUNTIME_ERROR`): When documents with the same `doc_id` already exist in the collection, or when another runtime error occurs during the build.
 
 ### async update_index
 

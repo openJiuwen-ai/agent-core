@@ -13,7 +13,7 @@
   状态机行为正确；
 - 保障跨进程 messager、worktree/git 隔离、TeamWorkspace 文件同步层在正向与
   异常路径下的契约一致；
-- 保障 rails（team_rail、worktree rails、workspace rails）工具暴露与权限门
+- 保障 rails（team_policy_rail、worktree rails、workspace rails）工具暴露与权限门
   控符合设计；
 - 覆盖数据库 schema 演进（session/task/message/member 表），避免 schema
   回归引发静默错误。
@@ -35,7 +35,7 @@
 | 团队工具（team tools / team_tools） | `test_team_tools.py` |
 | 团队 SQLite 存储 | `test_database.py` |
 | 路径配置 | `test_paths.py` |
-| Team Rail（rails 工具注入） | `test_team_rail.py`、`test_team_section_cache.py` |
+| Team Rail（rails 工具注入） | `test_team_policy_rail.py`、`test_team_section_cache.py` |
 | TeamWorkspace | `team_workspace/test_manager.py`、`team_workspace/test_models.py` |
 | Worktree 隔离子系统 | `worktree/test_backend.py`、`worktree/test_cleanup.py`、`worktree/test_git.py`、`worktree/test_manager.py`、`worktree/test_models.py`、`worktree/test_session.py`、`worktree/test_slug.py` |
 
@@ -64,7 +64,7 @@
 | `test_team_agent.py` | 4 | 2 | 2 |
 | `test_team_agent_coordination.py` | 29 | 10 | 19 |
 | `test_team_agent_tools.py` | 4 | 2 | 2 |
-| `test_team_rail.py` | 29 | 10 | 19 |
+| `test_team_policy_rail.py` | 29 | 10 | 19 |
 | `test_team_section_cache.py` | 9 | 3 | 6 |
 | `test_member.py` | 28 | 10 | 18 |
 | `test_policy.py` | 3 | 1 | 2 |
@@ -98,7 +98,7 @@
   关闭与异常收敛（对应 commit `42aefa07`、`560f2404` 的修复）；
 - **版本控制 flag**：`team_workspace/test_manager.py` 覆盖 `version_control`
   flag 的 honor 语义（对应 commit `3215a3c4`）；
-- **Rails 注入**：`test_team_rail.py` 覆盖 `plan_mode` 下 approve_plan /
+- **Rails 注入**：`test_team_policy_rail.py` 覆盖 `plan_mode` 下 approve_plan /
   approve_tool 的门控，以及 skills 透出到 `SkillUseRail`（对应 commit
   `4d9c8066`、`4dcd9598`）；
 - **跨平台路径**：`test_paths.py` 覆盖可配置路径与 Windows junction 兼容

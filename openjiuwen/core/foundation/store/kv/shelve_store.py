@@ -10,16 +10,21 @@ module for local file-based persistent storage.
 
 import asyncio
 import shelve
+import time
 from pathlib import Path
 from typing import (
     List,
     Optional,
 )
 
+from openjiuwen.core.common.logging import store_logger, LogEventType
 from openjiuwen.core.foundation.store.base_kv_store import (
     BaseKVStore,
     BasedKVStorePipeline,
 )
+
+EXCLUSIVE_EXPIRY_KEY = "exclusive_expiry"
+EXCLUSIVE_VALUE_KEY = "exclusive_value"
 
 
 class ShelveStore(BaseKVStore):
@@ -67,10 +72,18 @@ class ShelveStore(BaseKVStore):
         """Atomically set a key-value pair only if the key does not already exist."""
 
         def _exclusive_set():
+            now = time.time()
             with self._get_db() as db:
                 if key in db:
-                    return False
-                db[key] = value
+                    existing = db[key]
+                    if isinstance(existing, dict) and EXCLUSIVE_EXPIRY_KEY in existing:
+                        old_expire = existing.get(EXCLUSIVE_EXPIRY_KEY)
+                        if old_expire is None or old_expire > now:
+                            return False
+                    else:
+                        return False
+                expire_at = now + expiry if expiry else None
+                db[key] = {EXCLUSIVE_VALUE_KEY: value, EXCLUSIVE_EXPIRY_KEY: expire_at}
                 db.sync()
                 return True
 
@@ -81,7 +94,12 @@ class ShelveStore(BaseKVStore):
 
         def _get():
             with self._get_db() as db:
-                return db.get(key)
+                val = db.get(key)
+                if val is None:
+                    return None
+                if isinstance(val, dict) and EXCLUSIVE_VALUE_KEY in val:
+                    return val.get(EXCLUSIVE_VALUE_KEY, "")
+                return val
 
         return await self._run_in_thread(_get)
 

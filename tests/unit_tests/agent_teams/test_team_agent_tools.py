@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import pytest
 
-from openjiuwen.agent_teams import create_agent_team
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
+    TeamAgentSpec,
     TransportSpec,
 )
 from openjiuwen.agent_teams.schema.team import (
@@ -20,7 +20,7 @@ from openjiuwen.agent_teams.schema.team import (
 def _tool_names(agent) -> set[str]:
     """Extract registered tool names from the agent's
     ability manager."""
-    return set(agent.deep_agent.ability_manager._tools.keys())
+    return set(agent.harness.inner_agent.ability_manager._tools.keys())
 
 
 def _dummy_agents() -> dict[str, DeepAgentSpec]:
@@ -44,11 +44,11 @@ _PYZMQ_TRANSPORT = TransportSpec(
 def test_leader_gets_management_tools():
     """Leader should have team management and
     messaging tools."""
-    leader = create_agent_team(
-        _dummy_agents(),
+    leader = TeamAgentSpec(
+        agents=_dummy_agents(),
         team_name="test",
         transport=_PYZMQ_TRANSPORT,
-    )
+    ).build()
     names = _tool_names(leader)
     assert "create_task" in names
     assert "build_team" in names
@@ -64,11 +64,11 @@ def test_leader_gets_management_tools():
 def test_teammate_gets_execution_tools():
     """Teammate should have task execution and
     messaging tools but not management-only tools."""
-    leader = create_agent_team(
-        _dummy_agents(),
+    leader = TeamAgentSpec(
+        agents=_dummy_agents(),
         team_name="test",
         transport=_PYZMQ_TRANSPORT,
-    )
+    ).build()
     ctx = TeamRuntimeContext(
         role=TeamRole.TEAMMATE,
         member_id="dev-1",
@@ -108,11 +108,11 @@ def test_task_and_message_managers_are_stored():
     """After configuration, _task_manager and
     _message_manager should be set on the
     TeamAgent."""
-    leader = create_agent_team(
-        _dummy_agents(),
+    leader = TeamAgentSpec(
+        agents=_dummy_agents(),
         team_name="test",
         transport=_PYZMQ_TRANSPORT,
-    )
+    ).build()
     assert leader._configurator.task_manager is not None
     assert leader._configurator.message_manager is not None
 
@@ -120,14 +120,14 @@ def test_task_and_message_managers_are_stored():
 @pytest.mark.level1
 def test_teammate_registers_tool_approval_rail_from_deep_agent_spec():
     """Configured teammate approval tools should attach TeamToolApprovalRail."""
-    leader = create_agent_team(
-        {
+    leader = TeamAgentSpec(
+        agents={
             "leader": DeepAgentSpec(),
             "teammate": DeepAgentSpec(approval_required_tools=["send_message"]),
         },
         team_name="test",
         transport=_PYZMQ_TRANSPORT,
-    )
+    ).build()
     ctx = TeamRuntimeContext(
         role=TeamRole.TEAMMATE,
         member_id="dev-1",
@@ -147,5 +147,5 @@ def test_teammate_registers_tool_approval_rail_from_deep_agent_spec():
     teammate = TeamAgent(card)
     teammate.configure(leader._configurator.spec, ctx)
 
-    rail_names = {type(r).__name__ for r in teammate.deep_agent._pending_rails}
+    rail_names = {type(r).__name__ for r in teammate.harness.inner_agent._pending_rails}
     assert "TeamToolApprovalRail" in rail_names

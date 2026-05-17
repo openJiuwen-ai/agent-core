@@ -340,6 +340,9 @@ class InMemoryTeamDatabase:
         agent_card: str,
         status: str,
         *,
+        # Literal "teammate" instead of ``TeamRole.TEAMMATE.value`` to
+        # keep this module out of the ``schema.team`` import cycle.
+        role: str = "teammate",
         desc: Optional[str] = None,
         execution_status: Optional[str] = None,
         mode: str = MemberMode.BUILD_MODE.value,
@@ -356,6 +359,7 @@ class InMemoryTeamDatabase:
                 display_name=display_name,
                 agent_card=agent_card,
                 status=status,
+                role=role,
                 desc=desc,
                 execution_status=execution_status,
                 mode=mode,
@@ -365,6 +369,20 @@ class InMemoryTeamDatabase:
             )
             team_logger.info("Member %s created", member_name)
             return True
+
+    async def list_human_agent_names(self, team_name: str) -> list[str]:
+        """Return member names whose ``role`` is ``human_agent``.
+
+        Mirror of ``MemberDao.list_human_agent_names`` for the in-memory
+        backend; used by ``TeamBackend.refresh_human_agent_roster``.
+        """
+        from openjiuwen.agent_teams.schema.team import TeamRole
+
+        return [
+            m.member_name
+            for m in self._members.values()
+            if m.team_name == team_name and m.role == TeamRole.HUMAN_AGENT.value
+        ]
 
     async def get_member(self, member_name: str, team_name: str) -> Optional[TeamMember]:
         member = self._members.get(member_name)

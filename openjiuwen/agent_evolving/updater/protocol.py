@@ -6,11 +6,12 @@ Updater protocol definition.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Protocol, Union, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, Union
 
-from openjiuwen.agent_evolving.trajectory.types import Trajectory, Updates
+from openjiuwen.agent_evolving.trajectory.types import Trajectory
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_evolving.signal.base import EvolutionSignal
     from openjiuwen.core.operator.base import Operator
 
 
@@ -20,7 +21,7 @@ class Updater(Protocol):
     "multi-dimensional attribution + allocation" into one interface.
 
     Trainer doesn't care about implementation details, only:
-    (trajectories, evaluated_cases) -> Updates or candidate set List[Updates]
+    (trajectories, evaluated_cases) -> update mapping or candidate set of update mappings
     """
 
     def bind(self, operators: Dict[str, "Operator"], targets: Optional[List[str]] = None, **config: Any) -> int:
@@ -44,7 +45,15 @@ class Updater(Protocol):
         trajectories: List[Trajectory],
         evaluated_cases: List[Any],
         config: Dict[str, Any],
-    ) -> Union[Updates, List[Updates]]:
+    ) -> Union[Dict[tuple[str, str], Any], List[Dict[tuple[str, str], Any]]]:
+        ...
+
+    async def process(
+        self,
+        trajectories: List[Trajectory],
+        signals: List["EvolutionSignal"],
+        config: Dict[str, Any],
+    ) -> Union[Dict[tuple[str, str], Any], List[Dict[tuple[str, str], Any]]]:
         ...
 
     def get_state(self) -> Dict[str, Any]:

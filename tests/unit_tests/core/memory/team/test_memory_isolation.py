@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.memory.team.member_memory_toolkit import MemberMemoryToolkit
+from openjiuwen.agent_teams.memory.member_memory_toolkit import MemberMemoryToolkit
 
 
 class MockWorkspace:

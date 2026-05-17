@@ -3,13 +3,14 @@
 
 """Unit tests for TeamMessageManager module"""
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.spawn.context import (
+from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
 )
@@ -302,8 +303,12 @@ class TestGetBroadcastMessages:
     @pytest.mark.level1
     async def test_get_broadcast_messages_unread_only(self, team_messaging):
         """Test getting unread broadcast messages only"""
-        # Create broadcast messages and mark one as read
+        # Create broadcast messages and mark one as read. The broadcast read
+        # model is a per-member timestamp watermark, so the two broadcasts
+        # must land in distinct milliseconds — otherwise reading the old one
+        # also covers the new one. A short sleep guarantees that ordering.
         msg_id2 = await team_messaging.broadcast_message("Old announcement")
+        await asyncio.sleep(0.002)
         msg_id1 = await team_messaging.broadcast_message("New announcement")
         await team_messaging.mark_message_read(msg_id2, "member2")
 
@@ -537,3 +542,55 @@ class TestIntegrationScenarios:
         assert len(team2_messages) == 1
         assert team1_messages[0].content == "Team 1 message"
         assert team2_messages[0].content == "Team 2 message"
+
+
+# ==================== Test has_unread_messages ====================
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_has_unread_messages_direct_unread(team_messaging):
+    """An unread direct message makes the team report unread."""
+    await team_messaging.send_message(content="ping", to_member_name="member2")
+
+    assert await team_messaging.has_unread_messages() is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_direct_all_read(team_messaging):
+    """Once every direct message is read the team reports no unread."""
+    message_id = await team_messaging.send_message(content="ping", to_member_name="member2")
+    await team_messaging.mark_message_read(message_id, "member2")
+
+    assert await team_messaging.has_unread_messages() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_broadcast_unread_by_non_sender(team_messaging):
+    """A broadcast not yet read by a non-sender member counts as unread."""
+    await team_messaging.broadcast_message(content="all hands")
+
+    assert await team_messaging.has_unread_messages() is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_broadcast_read_by_all_non_senders(team_messaging):
+    """A broadcast read by every non-sender member is no longer unread.
+
+    The sender (member1) is never counted against its own broadcast, so
+    once member2's watermark covers it the team reports no unread.
+    """
+    message_id = await team_messaging.broadcast_message(content="all hands")
+    await team_messaging.mark_message_read(message_id, "member2")
+
+    assert await team_messaging.has_unread_messages() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_empty(team_messaging):
+    """A team with no messages reports no unread."""
+    assert await team_messaging.has_unread_messages() is False

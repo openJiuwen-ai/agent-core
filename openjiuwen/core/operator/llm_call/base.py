@@ -9,7 +9,7 @@ for the evolution framework. It does NOT execute LLM calls.
 
 from __future__ import annotations
 
-from typing import Dict, Any, Optional, List, Callable
+from typing import Any, Callable, Dict, List, Optional
 
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.operator.base import Operator, TunableSpec

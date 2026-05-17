@@ -19,7 +19,6 @@ from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.rails import (
     SecurityRail,
     SkillUseRail,
-    SessionRail,
     SubagentRail,
     TaskPlanningRail,
 )
@@ -118,10 +117,7 @@ def _inject_general_purpose_subagent(
         return effective_subagents
 
     desc = GENERAL_PURPOSE_AGENT_DESC.get(resolved_language, GENERAL_PURPOSE_AGENT_DESC["cn"])
-    gp_rails = [
-        r for r in (rails or [])
-        if not isinstance(r, (SubagentRail, SessionRail))
-    ]
+    gp_rails = [r for r in (rails or []) if not isinstance(r, SubagentRail)]
     if not any(isinstance(r, SysOperationRail) for r in gp_rails):
         gp_rails = [SysOperationRail(), *gp_rails]
     gp_rails = gp_rails or None
@@ -183,8 +179,9 @@ def create_deep_agent(
             supports subagent using different model, tools and prompt.
         rails: AgentRail instances to register.
         enable_task_loop: Enable outer task loop (P1).
-        enable_async_subagent: Enable async subagent via SessionRail (default False).
-            When True and subagents are configured, SessionRail is mounted instead of SubagentRail.
+        enable_async_subagent: Enable async subagent mode (default False).
+            When True and subagents are configured, SubagentRail registers session tools for async subagent spawning;
+            When False, it registers synchronous task tools.
         add_general_purpose_agent: Add general-purpose agent.
              When True, a general-purpose agent is added as sub-agents.
         max_iterations: Max ReAct iterations per
@@ -248,6 +245,7 @@ def create_deep_agent(
                 id=f"{card.name}_{card.id}",
                 mode=OperationMode.LOCAL,
                 work_config=LocalWorkConfig(
+                    shell_allowlist=None,
                     restrict_to_sandbox=restrict_to_work_dir,
                 ),
             )
@@ -334,8 +332,8 @@ def create_deep_agent(
         (SecurityRail, True, lambda: SecurityRail()),
         (TaskPlanningRail, enable_task_planning, _make_task_planning_rail),
         (SkillUseRail, bool(skills) or config.enable_skill_discovery, _make_skill_rail),
-        (SessionRail, bool(effective_subagents) and enable_async_subagent, lambda: SessionRail()),
-        (SubagentRail, bool(effective_subagents) and not enable_async_subagent, lambda: SubagentRail()),
+        (SubagentRail, bool(effective_subagents),
+         lambda: SubagentRail(enable_async_subagent=enable_async_subagent)),
     ]
     for rail_cls, should_add, make_rail in default_rails:
         if should_add and not _already_provided(rail_cls):

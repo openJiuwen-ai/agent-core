@@ -12,7 +12,7 @@ Future extensions:
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Callable
+from typing import Any, Callable, Dict, Optional
 
 from openjiuwen.core.operator.base import Operator, TunableSpec
 

@@ -24,6 +24,10 @@ DESCRIPTION: Dict[str, str] = {
         "工作目录在命令之间保持不变，但 Shell 状态（变量、函数、alias）不保留。"
         "Shell 环境从用户的 profile（bash 或 zsh）初始化。\n"
         "\n"
+        "Windows 注意：`cmd` 自带 `mkdir` **不支持 `-p`**，不要在 cmd/PowerShell 中使用 `mkdir -p`。"
+        "本工具按 Bash 语义执行时（默认/`shell_type=bash`，Windows 上常为 Git Bash），POSIX `mkdir` **支持 `-p`**。"
+        "只有 `shell_type=cmd` 或 `shell_type=powershell` 时，才改用 `New-Item ... -Force` 或逐级 `mkdir`。\n"
+        "\n"
         "重要：避免使用本工具执行 `find`、`grep`、`cat`、`head`、`tail`、"
         "`sed`、`awk` 或 `echo` 命令，除非明确指示或确认专用工具无法完成任务。"
         "请使用对应的专用工具，以获得更好的体验：\n"
@@ -77,6 +81,12 @@ DESCRIPTION: Dict[str, str] = {
         "The working directory persists between commands, but shell state "
         "(variables, functions, aliases) does not. The shell environment "
         "is initialized from the user's profile (bash or zsh).\n"
+        "\n"
+        "Windows note: `cmd`'s `mkdir` **does not support `-p`**; do not use "
+        "`mkdir -p` in cmd/PowerShell. When this tool runs with Bash semantics "
+        "(default/`shell_type=bash`, often Git Bash on Windows), POSIX `mkdir` "
+        "**supports `-p`**. Only with `shell_type=cmd` or `shell_type=powershell`, "
+        "use `New-Item ... -Force` or create each level with `mkdir`.\n"
         "\n"
         "IMPORTANT: Avoid using this tool to run `find`, `grep`, `cat`, "
         "`head`, `tail`, `sed`, `awk`, or `echo` commands, unless "
@@ -235,8 +245,14 @@ BASH_PARAMS: Dict[str, Dict[str, str]] = {
         ),
     },
     "shell_type": {
-        "cn": "指定 Shell 类型，可选值：auto/cmd/powershell/bash/sh，默认 auto（自动检测）",
-        "en": "Shell to use: auto/cmd/powershell/bash/sh, default auto (auto-detect)",
+        "cn": (
+            "指定 Shell 类型，可选值：auto/cmd/powershell/bash/sh，默认 auto。cmd/PowerShell 不支持 `mkdir -p`；"
+            "需要该语法时保持 auto/bash/sh。"
+        ),
+        "en": (
+            "Shell to use: auto/cmd/powershell/bash/sh, default auto. cmd/PowerShell do not support `mkdir -p`; "
+            "keep auto/bash/sh when you need that syntax."
+        ),
     },
 }
 

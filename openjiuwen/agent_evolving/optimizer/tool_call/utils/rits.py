@@ -2,13 +2,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import asyncio
+
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 
-from openjiuwen.core.foundation.llm import (
-    ModelClientConfig,
-    ModelRequestConfig
-)
-from openjiuwen.core.foundation.llm import OpenAIModelClient
+from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig, OpenAIModelClient
 
 
 def get_rits_response(*args, **kwargs):

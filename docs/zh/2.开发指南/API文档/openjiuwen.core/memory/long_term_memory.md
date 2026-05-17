@@ -19,8 +19,9 @@ class openjiuwen.core.memory.long_term_memory.LongTermMemory(metaclass=Singleton
 
 > **说明**：与旧版 `MemoryEngine(config: SysMemConfig, ...)` 不同，`LongTermMemory` 采用**无参构造 + 分步初始化**的方式：
 > 1. 先调用 `await register_store(...)` 注册底层存储；
-> 2. 再调用 `set_config(MemoryEngineConfig(...))` 设置全局配置；
-> 3. 可选地通过 `set_scope_config(scope_id, MemoryScopeConfig(...))` 为不同业务场景配置独立的模型/向量参数。
+> 2. 可选地调用 `register_message_store(...)` 注册自定义消息存储（如未调用，将根据已注册的 `db_store` 创建默认的 `SqlMessageStore`）；
+> 3. 再调用 `set_config(MemoryEngineConfig(...))` 设置全局配置；
+> 4. 可选地通过 `set_scope_config(scope_id, MemoryScopeConfig(...))` 为不同业务场景配置独立的模型/向量参数。
 
 ```
 LongTermMemory()
@@ -31,9 +32,10 @@ LongTermMemory()
 **内部状态初始化**：
 
 - 配置相关：`_sys_mem_config: MemoryEngineConfig | None = None`、`_scope_config: dict[str, MemoryScopeConfig] = {}`；
-- 存储相关：`kv_store / semantic_store / db_store` 均为 `None`，需通过 `register_store` 注册；
-- 管理器相关：`scope_user_mapping_manager / message_manager / user_profile_manager / variable_manager / write_manager / search_manager / generator` 均为 `None`，在 `set_config` 时初始化；
-- LLM 相关：`_base_llm: Tuple[str, Model] | None = None`（在 `set_config` 时设置）；
+- 存储相关：`kv_store / vector_store / db_store / message_store` 均为 `None`，需通过 `register_store`（以及可选的 `register_message_store`）注册；
+- 记忆索引：`memory_index: BaseMemoryIndex | None = None`，可通过 `register_plugin` 注册自定义索引实现，或在 `register_store` 时自动注册 `SimpleMemoryIndex`；
+- 管理器相关：`scope_user_mapping_manager / message_manager / fragment_memory_manager / variable_manager / write_manager / search_manager / generator` 均为 `None`，在 `set_config` 时初始化；
+- LLM 相关：`_base_llm: Model | None = None`（在 `set_config` 时设置）；
 - 嵌入模型缓存：`_scope_embedding: dict[str, Embedding] = {}`。
 
 
@@ -56,7 +58,11 @@ async def register_store(
 * **kv_store**(BaseKVStore)：**必填**，键值存储实例，用于快速访问结构化数据（如 scope 配置、用户变量等）。若为 `None`，会抛出 `build_error`（`MEMORY_REGISTER_STORE_EXECUTION_ERROR`）。
 * **vector_store**(BaseVectorStore | None, 可选)：向量存储实例，用于语义相似度检索。若为 `None`，则语义检索功能不可用。默认值：`None`。
 * **db_store**(BaseDbStore | None, 可选)：关系型数据库存储实例，用于持久化消息、scope-user 映射等。若为 `None`，则消息持久化功能不可用。默认值：`None`。
-* **embedding_model**(Embedding | None, 可选)：全局嵌入模型实例，用于在注册时初始化 `semantic_store` 的嵌入能力。若为 `None`，后续可通过 `set_scope_config` 为不同 scope 配置独立的嵌入模型。默认值：`None`。
+* **embedding_model**(Embedding | None, 可选)：全局嵌入模型实例，用于在注册时初始化向量索引的嵌入能力。若为 `None`，后续可通过 `set_scope_config` 为不同 scope 配置独立的嵌入模型。默认值：`None`。
+
+**行为说明**：
+
+当同时提供 `vector_store` 和 `embedding_model` 时，`register_store` 会自动调用 `register_plugin` 注册默认的 `SimpleMemoryIndex` 作为 `memory_index`。若需要使用自定义的 `BaseMemoryIndex` 实现，可在 `register_store` 之后手动调用 `register_plugin` 进行覆盖。
 
 **异常**：
 
@@ -117,6 +123,106 @@ async def register_store(
 ```
 
 
+### async register_plugin
+
+```
+async def register_plugin(
+    self,
+    name: str,
+    cls: type,
+    params: dict[str, Any],
+) -> None
+```
+
+注册自定义 `BaseMemoryIndex` 插件实例，用于替换或扩展默认的向量索引实现。
+
+**参数**：
+
+* **name**(str)：插件名称，描述插件类型（如 `'vector'`、`'inverted'`、`'hybrid'`）。
+* **cls**(type)：插件类，必须继承自 `BaseMemoryIndex`。
+* **params**(dict[str, Any])：传递给插件类构造函数的初始化参数。
+
+**行为说明**：
+
+- 该方法会将 `cls(**params)` 实例化为插件实例；
+- **首次注册**的插件会成为默认的 `memory_index`（即 `self.memory_index`），后续注册的插件不会覆盖默认值；
+- 若 `register_store` 已自动注册了 `SimpleMemoryIndex`，则后续手动调用 `register_plugin` 不会覆盖已有的默认索引。
+
+**前置条件**：
+
+- 无严格前置条件，但建议在 `register_store` 之后、`set_config` 之前调用。
+
+**样例**：
+
+```python
+>>> from openjiuwen.core.memory.long_term_memory import LongTermMemory
+>>> from openjiuwen.core.foundation.store.index.vector_memory_index import VectorMemoryIndex
+>>> from openjiuwen.core.foundation.store.base_vector_store import BaseVectorStore
+>>> from openjiuwen.core.foundation.store.base_embedding import Embedding
+>>>
+>>> # 使用默认 VectorMemoryIndex
+>>> memory = LongTermMemory()
+>>> await memory.register_plugin(
+>>>     name="vector",
+>>>     cls=VectorMemoryIndex,
+>>>     params={
+>>>         "vector_store": my_vector_store,
+>>>         "embedding_model": my_embedding_model,
+>>>     }
+>>> )
+>>>
+>>> # 或使用自定义 BaseMemoryIndex 实现
+>>> class MyCustomIndex(BaseMemoryIndex):
+>>>     ...
+>>>
+>>> await memory.register_plugin(
+>>>     name="custom",
+>>>     cls=MyCustomIndex,
+>>>     params={"custom_param": "value"}
+>>> )
+```
+
+
+### register_message_store
+
+```
+def register_message_store(self, message_store: BaseMessageStore) -> None
+```
+
+注册自定义 `BaseMessageStore` 实现。允许外部代码提供自定义消息存储（例如使用不同的数据库后端），而不是默认的 `SqlMessageStore`。
+
+必须在 `set_config()` 之前调用。如未调用，`LongTermMemory` 将根据已注册的 `db_store` 创建默认的 `SqlMessageStore`。
+
+**参数**：
+
+* **message_store**(BaseMessageStore)：`BaseMessageStore` 实现实例。
+
+**异常**：
+
+* **build_error**：当 `message_store` 不是 `BaseMessageStore` 实例时抛出（`MEMORY_REGISTER_STORE_EXECUTION_ERROR`）。
+
+**样例**：
+
+```python
+>>> from openjiuwen.core.memory.long_term_memory import LongTermMemory
+>>> from openjiuwen.core.foundation.store.base_message_store import BaseMessageStore
+>>> from openjiuwen.core.memory.manage.mem_model.sql_message_store import SqlMessageStore
+>>> from openjiuwen.core.memory.manage.mem_model.sql_db_store import SqlDbStore
+>>>
+>>> # 创建自定义消息存储
+>>> sql_db_store = SqlDbStore(db_store)
+>>> custom_message_store = SqlMessageStore(
+>>>     crypto_key=b"your-32-byte-aes-key-here!!",
+>>>     sql_db_store=sql_db_store,
+>>>     table_name="custom_messages"
+>>> )
+>>>
+>>> # 注册自定义消息存储
+>>> memory = LongTermMemory()
+>>> memory.register_message_store(custom_message_store)
+```
+
+
 ### set_config
 
 ```
@@ -136,11 +242,32 @@ def set_config(self, config: MemoryEngineConfig) -> None
 
 **前置条件**：
 
-- 必须已调用 `register_store` 注册 `kv_store`、`semantic_store`、`db_store`，否则会抛出 `build_error`（`MEMORY_SET_CONFIG_EXECUTION_ERROR`）。
+- 必须已调用 `register_store` 注册 `kv_store` 和 `db_store`，否则会抛出 `build_error`（`MEMORY_SET_CONFIG_EXECUTION_ERROR`）。
+- 必须已注册 `memory_index`（通过 `register_plugin` 或 `register_store` 自动注册），否则会抛出 `build_error`。
+
+**行为说明**：
+
+- 管理器（`FragmentMemoryManager`、`SummaryManager`、`WriteManager`）统一使用 `memory_index`（`BaseMemoryIndex`）作为后端，不再支持 `UserMemStore` 回退路径。
 
 **异常**：
 
 * **build_error**：当未调用 `register_store` 或配置无效时抛出。
+
+**初始化的内部管理器**：
+
+此方法初始化以下内部管理器：
+
+* `scope_user_mapping_manager`：管理作用域与用户的映射关系；
+* `message_manager`：处理消息的存储和检索操作。有两种初始化方式：
+  - 如果在调用 `set_config()` 之前通过 `register_message_store()` 注册了自定义的 `message_store`，则使用已注册的存储；
+  - 否则，使用注册的 `db_store` 创建默认的 `SqlMessageStore`，使用配置中的 `crypto_key` 和表名 `"user_message"`；
+* `fragment_memory_manager`：管理用户画像、情景记忆和语义记忆；
+* `variable_manager`：管理用户变量的存储和检索；
+* `summary_manager`：管理用户摘要记忆；
+* `write_manager`：协调所有记忆类型的写入操作；
+* `search_manager`：处理所有记忆类型的搜索查询；
+* `generator`：使用 LLM 从消息生成记忆内容；
+* `_base_llm`：基础大语言模型实例（仅当提供了 `default_model_cfg` 和 `default_model_client_cfg` 时初始化）。
 
 **样例**：
 
@@ -169,6 +296,43 @@ def set_config(self, config: MemoryEngineConfig) -> None
 >>> # 设置配置
 >>> memory = LongTermMemory()
 >>> memory.set_config(config)
+```
+
+
+### async migrate_between_indices
+
+```
+async def migrate_between_indices(
+    source_index: BaseMemoryIndex,
+    target_index: BaseMemoryIndex,
+) -> None
+```
+
+将数据从一个 `BaseMemoryIndex` 复制到另一个 `BaseMemoryIndex`。适用于不同索引实现之间的数据迁移（如从 `SimpleMemoryIndex` 迁移到 `VectorMemoryIndex`）。源数据在迁移后保留。
+
+**参数**：
+
+* **source_index**(BaseMemoryIndex)：源 `BaseMemoryIndex` 实例，从中读取待迁移的数据。
+* **target_index**(BaseMemoryIndex)：目标 `BaseMemoryIndex` 实例，数据将写入此索引。
+
+**行为说明**：
+
+- 该方法会遍历 `source_index` 中的所有 `(user_id, scope_id)` 组合，分批（每批 100 条）读取文档并写入 `target_index`；
+- 源数据在迁移后保持不变；
+- 迁移是幂等的——若目标索引中已存在相同 ID 的文档，会被覆盖（upsert 语义）。
+
+**样例**：
+
+```python
+>>> from openjiuwen.core.memory.long_term_memory import LongTermMemory
+>>> from openjiuwen.core.foundation.store.index.simple_memory_index import SimpleMemoryIndex
+>>>
+>>> # 假设已有旧的 SimpleMemoryIndex 实例
+>>> old_index = SimpleMemoryIndex(kv_store=kv_store, vector_store=vector_store, embedding_model=embed)
+>>> new_index = VectorMemoryIndex(...)
+>>>
+>>> # 从旧索引迁移数据到新索引
+>>> await LongTermMemory.migrate_between_indices(source_index=old_index, target_index=new_index)
 ```
 
 
@@ -333,10 +497,10 @@ async def add_messages(
     timestamp: datetime | None = None,
     gen_mem: bool = True,
     gen_mem_with_history_msg_num: int = 5,
-) -> None
+) -> AddMemResult
 ```
 
-添加对话消息到记忆引擎，并根据 `agent_config` 生成记忆（用户画像、变量等）。
+添加对话消息到记忆引擎，并根据 `agent_config` 生成记忆（用户画像、变量等）。同时支持**指令性记忆**功能：当用户在对话中包含显式记忆指令（如"把...改为..."、"删除..."）时，引擎会自动识别并执行对应的增删改操作。
 
 **参数**：
 
@@ -354,6 +518,17 @@ async def add_messages(
 * **timestamp**(datetime | None, 可选)：消息时间戳，若为 `None` 则使用当前 UTC 时间。默认值：`None`。
 * **gen_mem**(bool, 可选)：是否生成记忆；为 `False` 时仅保存消息，不触发记忆提取。默认值：`True`。
 * **gen_mem_with_history_msg_num**(int, 可选)：生成记忆时参考的历史消息数量。默认值：5。
+
+**返回**：
+
+* **AddMemResult**：本次记忆提取的结果，包含以下字段：
+  * `variables: list[VariableUnit]`：提取的变量记忆列表；
+  * `user_profile: list[FragmentMemoryUnit]`：提取的用户画像记忆列表；
+  * `semantic_memory: list[FragmentMemoryUnit]`：提取的语义记忆列表；
+  * `episodic_memory: list[FragmentMemoryUnit]`：提取的情景记忆列表；
+  * `summary: list[SummaryUnit]`：提取的摘要记忆列表。
+
+当 `gen_mem=False`、`scope_id` 格式无效、LLM 未初始化或消息中不包含用户消息时，返回空 `AddMemResult()`（所有字段为空列表）。
 
 **异常**：
 
@@ -406,6 +581,58 @@ async def add_messages(
 >>>     session_id="session456"
 >>> )
 ```
+**指令性记忆样例**：
+
+```python
+>>> # 用户通过显式指令修改已有记忆
+>>> update_messages = [
+>>>     UserMessage(content="把我的年龄改为30岁"),
+>>>     AssistantMessage(content="好的，已更新您的年龄信息。")
+>>> ]
+>>> result = await memory.add_messages(
+>>>     messages=update_messages,
+>>>     agent_config=agent_config,
+>>>     user_id="user123",
+>>>     scope_id="my_scope",
+>>> )
+>>> 
+>>> # 用户通过显式指令删除已有记忆
+>>> delete_messages = [
+>>>     UserMessage(content="删除我的年龄信息"),
+>>>     AssistantMessage(content="好的，已删除您的年龄信息。")
+>>> ]
+>>> result = await memory.add_messages(
+>>>     messages=delete_messages,
+>>>     agent_config=agent_config,
+>>>     user_id="user123",
+>>>     scope_id="my_scope",
+>>> )
+```
+
+
+## class openjiuwen.core.memory.long_term_memory.AddMemResult
+
+```
+class openjiuwen.core.memory.long_term_memory.AddMemResult(BaseModel)
+```
+
+`add_messages` 方法的返回值模型，封装了本次记忆提取的所有结果。
+
+**字段**：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `variables` | `list[VariableUnit]` | `[]` | 提取的变量记忆列表 |
+| `user_profile` | `list[FragmentMemoryUnit]` | `[]` | 提取的用户画像记忆列表 |
+| `semantic_memory` | `list[FragmentMemoryUnit]` | `[]` | 提取的语义记忆列表 |
+| `episodic_memory` | `list[FragmentMemoryUnit]` | `[]` | 提取的情景记忆列表 |
+| `summary` | `list[SummaryUnit]` | `[]` | 提取的摘要记忆列表 |
+
+**说明**：
+
+- 每个 `FragmentMemoryUnit` 包含 `operation_type` 字段（`ADD` / `UPDATE` / `DELETE`），用于区分本次操作类型。
+- 指令性记忆的 UPDATE 和 DELETE 操作在返回结果中体现为对应 `operation_type` 的 `FragmentMemoryUnit`。
+- 当 `add_messages` 因各种原因（`gen_mem=False`、`scope_id` 无效、LLM 未初始化等）未执行记忆提取时，返回空 `AddMemResult()`。
 
 
 ### async get_recent_messages
@@ -688,7 +915,7 @@ async def search_user_mem(
 **返回**：
 
 * **list[MemResult]**：记忆结果列表，每个 `MemResult` 包含：
-  * `mem_info: MemInfo`（`mem_id / content / type`）；
+  * `mem_info: MemInfo`（`mem_id / content / type / timestamp`）；
   * `score: float`（相似度分数）。
 
 **异常**：
@@ -779,7 +1006,7 @@ async def search_user_history_summary(
 **返回**：
 
 * **list[MemResult]**：记忆结果列表，每个 `MemResult` 包含：
-  * `mem_info: MemInfo`（`mem_id / content / type`）；
+  * `mem_info: MemInfo`（`mem_id / content / type / timestamp`）；
   * `score: float`（相似度分数）。
 
 **异常**：

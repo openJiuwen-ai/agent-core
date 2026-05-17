@@ -20,7 +20,7 @@ from openjiuwen.agent_teams.schema.events import (
     MessageEvent,
     TeamTopic,
 )
-from openjiuwen.agent_teams.spawn.context import get_session_id
+from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.tools.database import TeamDatabase, TeamMessageBase
 from openjiuwen.core.common.logging import team_logger
 
@@ -260,6 +260,15 @@ class TeamMessageManager:
             List of TeamMessage objects
         """
         return await self.db.message.get_team_messages(team_name=team_name)
+
+    async def has_unread_messages(self) -> bool:
+        """Whether any team message (direct or broadcast) is still unread.
+
+        Returns:
+            True if at least one direct or broadcast message has not been
+            read by its intended reader.
+        """
+        return await self.db.message.has_unread_messages(self.team_name)
 
     async def mark_message_read(self, message_id: str, member_name: str) -> bool:
         """Mark a message as read by a member

@@ -35,6 +35,7 @@ def _get_exception_class_registry() -> Dict[str, Type]:
         "ToolchainError": _errors.ToolchainError,
         "ContextError": _errors.ContextError,
         "RunnerError": _errors.RunnerError,
+        "CryptError": _errors.CryptError,
     }
 
 
@@ -72,6 +73,8 @@ _MANUAL_OVERRIDES_RAW = {
     "AGENT_RL_PROXY_SERVER_START_FAILED": "FrameworkError",
     "AGENT_RL_PROCESSOR_NOT_FOUND": "ValidationError",
     "AGENT_RL_REWARD_NOT_FOUND": "ValidationError",
+    "COMMON_ENCRYPTION_ERROR": "CryptError",
+    "COMMON_DECRYPTION_ERROR": "CryptError",
 }
 
 # Build the actual mapping only for StatusCode members that exist in the current enum.

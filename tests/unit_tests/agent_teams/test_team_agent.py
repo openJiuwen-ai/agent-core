@@ -6,11 +6,12 @@ import json
 
 import pytest
 
-from openjiuwen.agent_teams import create_agent_team
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
-from openjiuwen.agent_teams.agent.team_rail import TeamRail, TeamSectionName
+from openjiuwen.agent_teams.prompts import TeamSectionName
+from openjiuwen.agent_teams.rails import TeamPolicyRail
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
+    TeamAgentSpec,
     TransportSpec,
 )
 from openjiuwen.agent_teams.schema.team import (
@@ -30,27 +31,28 @@ def _dummy_agents(**overrides) -> dict[str, DeepAgentSpec]:
 
 @pytest.mark.level0
 def test_team_agent_leader_policy() -> None:
-    leader = create_agent_team(
-        _dummy_agents(),
+    leader = TeamAgentSpec(
+        agents=_dummy_agents(),
         team_name="delivery",
-    )
+    ).build()
 
     assert leader.role == TeamRole.LEADER
-    # TeamLeader policy is injected by TeamRail as a PromptSection before each
-    # model call, not stored in deep_config.system_prompt (which stays None).
-    team_rail = next(
-        r for r in leader.deep_agent._pending_rails if isinstance(r, TeamRail)
+    # TeamLeader policy is injected by TeamPolicyRail as a PromptSection
+    # before each model call, not stored in deep_config.system_prompt
+    # (which stays None).
+    policy_rail = next(
+        r for r in leader.harness.inner_agent._pending_rails if isinstance(r, TeamPolicyRail)
     )
     role_section = next(
-        s for s in team_rail._static_sections if s.name == TeamSectionName.ROLE
+        s for s in policy_rail._static_sections if s.name == TeamSectionName.ROLE
     )
     assert "TeamLeader" in role_section.render("cn")
 
 
 @pytest.mark.level0
 def test_spawn_payload_contains_member_identity() -> None:
-    leader = create_agent_team(
-        _dummy_agents(),
+    leader = TeamAgentSpec(
+        agents=_dummy_agents(),
         team_name="delivery",
         transport=TransportSpec(type="pyzmq", params={
             "team_id": "delivery-team",
@@ -59,7 +61,7 @@ def test_spawn_payload_contains_member_identity() -> None:
             "pubsub_publish_addr": "tcp://127.0.0.1:19100",
             "pubsub_subscribe_addr": "tcp://127.0.0.1:19101",
         }),
-    )
+    ).build()
     ctx = leader.build_member_context(TeamMemberSpec(
         member_name="fe-1",
         display_name="Frontend Expert",
@@ -81,8 +83,8 @@ def test_spawn_payload_contains_member_identity() -> None:
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_spawn_config_contains_serializable_team_agent_payload() -> None:
-    leader = create_agent_team(
-        _dummy_agents(workspace=None),
+    leader = TeamAgentSpec(
+        agents=_dummy_agents(workspace=None),
         team_name="delivery",
         transport=TransportSpec(type="pyzmq", params={
             "team_id": "delivery-team",
@@ -91,7 +93,7 @@ async def test_spawn_config_contains_serializable_team_agent_payload() -> None:
             "pubsub_publish_addr": "tcp://127.0.0.1:19100",
             "pubsub_subscribe_addr": "tcp://127.0.0.1:19101",
         }),
-    )
+    ).build()
     ctx = leader.build_member_context(TeamMemberSpec(
         member_name="be-1",
         display_name="Backend Expert",
@@ -133,3 +135,59 @@ def test_runtime_context_roundtrips_with_pydantic_serialization() -> None:
     assert restored.role == TeamRole.LEADER
     assert restored.member_name == "leader-1"
     assert restored.persona == "pm"
+
+
+@pytest.mark.level0
+def test_setup_agent_builds_leader_member_handle() -> None:
+    """Leader gets a TeamMember handle eagerly during configure().
+
+    Regression guard: the leader's status / execution transitions are
+    silent no-ops unless ``_state.team_member`` is populated. The handle
+    must be built for the leader just like for teammates, not deferred
+    to a callback path that never fires for a BUSY-registered leader.
+    """
+    leader = TeamAgentSpec(
+        agents=_dummy_agents(),
+        team_name="delivery",
+    ).build()
+
+    assert leader.role == TeamRole.LEADER
+    handle = leader._state.team_member
+    assert handle is not None
+    assert handle.member_name == leader.member_name
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_setup_agent_builds_teammate_member_handle() -> None:
+    """Teammate still gets its TeamMember handle from configure() (no regression)."""
+    leader = TeamAgentSpec(
+        agents=_dummy_agents(workspace=None),
+        team_name="delivery",
+        transport=TransportSpec(
+            type="pyzmq",
+            params={
+                "team_id": "delivery-team",
+                "node_id": "leader",
+                "direct_addr": "tcp://127.0.0.1:19002",
+                "pubsub_publish_addr": "tcp://127.0.0.1:19102",
+                "pubsub_subscribe_addr": "tcp://127.0.0.1:19103",
+            },
+        ),
+    ).build()
+    ctx = leader.build_member_context(
+        TeamMemberSpec(
+            member_name="be-1",
+            display_name="Backend Expert",
+            role_type=TeamRole.TEAMMATE,
+            persona="严谨的后端架构师",
+        )
+    )
+    spawn_config = leader.build_spawn_config(ctx)
+
+    teammate = await TeamAgent.from_spawn_payload(spawn_config.payload)
+
+    assert teammate.role == TeamRole.TEAMMATE
+    handle = teammate._state.team_member
+    assert handle is not None
+    assert handle.member_name == "be-1"

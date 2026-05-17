@@ -28,7 +28,8 @@ from openjiuwen.auto_harness.schema import (
     StageSpec,
 )
 from openjiuwen.auto_harness.stages.assess import (
-    AssessStage,
+    ExtendAssessStage,
+    MetaAssessStage,
 )
 from openjiuwen.auto_harness.stages.base import (
     SessionStage,
@@ -37,19 +38,22 @@ from openjiuwen.auto_harness.stages.commit import (
     CommitStage,
 )
 from openjiuwen.auto_harness.stages.implement import (
-    ImplementStage,
+    ExtendImplementStage,
+    MetaImplementStage,
 )
 from openjiuwen.auto_harness.stages.learnings import (
     LearningsStage,
 )
 from openjiuwen.auto_harness.stages.plan import (
-    PlanStage,
+    ExtendPlanStage,
+    MetaPlanStage,
 )
 from openjiuwen.auto_harness.stages.publish_pr import (
     PublishPRStage,
 )
 from openjiuwen.auto_harness.stages.verify import (
-    VerifyStage,
+    ExtendVerifyStage,
+    MetaVerifyStage,
 )
 
 
@@ -118,10 +122,26 @@ class TestPipelineBuilders:
     def test_builtin_stage_registry_uses_stage_classes(self):
         cfg = AutoHarnessConfig()
         registry = build_stage_registry(cfg)
-        assert registry.require("assess").stage_cls is AssessStage
-        assert registry.require("plan").stage_cls is PlanStage
-        assert registry.require("implement").stage_cls is ImplementStage
-        assert registry.require("verify").stage_cls is VerifyStage
+        assert registry.require("assess").stage_cls is MetaAssessStage
+        assert registry.require("plan").stage_cls is MetaPlanStage
+        assert registry.require("implement").stage_cls is MetaImplementStage
+        assert registry.require("verify").stage_cls is MetaVerifyStage
+        assert (
+            registry.require("assess_ext").stage_cls
+            is ExtendAssessStage
+        )
+        assert (
+            registry.require("plan_ext").stage_cls
+            is ExtendPlanStage
+        )
+        assert (
+            registry.require("implement_ext").stage_cls
+            is ExtendImplementStage
+        )
+        assert (
+            registry.require("verify_ext").stage_cls
+            is ExtendVerifyStage
+        )
         assert registry.require("commit").stage_cls is CommitStage
         assert registry.require("publish_pr").stage_cls is PublishPRStage
         assert registry.require("learnings").stage_cls is LearningsStage

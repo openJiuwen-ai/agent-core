@@ -98,6 +98,18 @@ class SkillUseRail(DeepAgentRail):
         """Return all managed skills."""
         return list(self.skills)
 
+    async def reload_skills(self) -> None:
+        """Refresh managed skills immediately after skills_dir changes."""
+        await self._prepare_skills()
+        await self._fetch_evolution_texts()
+
+    def clear_skills(self) -> None:
+        """Clear loaded skills and the public rail-managed cache."""
+        self._skill_cache.clear()
+        self._skill_update_at.clear()
+        self._skill_order.clear()
+        self.skills = []
+
     async def _prepare_skills(self) -> None:
         """Refresh skills incrementally from skills_dir and apply filters."""
         if not self.enable_cache:
@@ -262,9 +274,10 @@ class SkillUseRail(DeepAgentRail):
         for tool in tools:
             try:
                 existing_tool = Runner.resource_mgr.get_tool(tool.card.id)
-                if existing_tool is None:
-                    Runner.resource_mgr.add_tool(tool)
-                    self._owned_tool_ids.add(tool.card.id)
+                if existing_tool is not None:
+                    Runner.resource_mgr.remove_tool(tool.card.id)
+                Runner.resource_mgr.add_tool(tool)
+                self._owned_tool_ids.add(tool.card.id)
             except Exception as exc:
                 logger.warning(
                     f"[SkillUseRail] failed to add tool resource '{tool.card.id}' "

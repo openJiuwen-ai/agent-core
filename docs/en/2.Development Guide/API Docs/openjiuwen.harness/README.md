@@ -12,7 +12,9 @@ API documentation for the agent harness framework — built-in planning, context
 | [`schema/task`](./schema/task.md) | Task planning models (`TaskStatus`, `TaskItem`, `TaskPlan`) |
 | [`task_loop`](./task_loop/task_loop.md) | Task-loop runtime (`LoopCoordinator`, `TaskLoopController`, event handler and executor) |
 | [`workspace`](./workspace/workspace.md) | Workspace directory management (`Workspace`, `WorkspaceNode`) |
-| [`rails`](./rails/rails.md) | Built-in guardrails overview (16 rails) |
+| [`rails`](./rails/rails.md) | Built-in guardrails overview, including regular and team skill evolution rails |
+| [`rails/evolution/skill_evolution_rail`](./rails/evolution/skill_evolution_rail.md) | Regular skill online evolution (`SkillEvolutionRail`) |
+| [`rails/evolution/team_skill_evolution_rail`](./rails/evolution/team_skill_evolution_rail.md) | Team skill creation and online evolution (`TeamSkillCreateRail`, `TeamSkillEvolutionRail`, `TeamSkillRail`) |
 | [`tools`](./tools/tools.md) | Built-in tools overview (27 tools) |
 | [`subagents`](./subagents/subagents.md) | Sub-agent factory functions (`create_browser_agent`, `create_code_agent`, `create_research_agent`) |
 | [`prompts`](./prompts/prompts.md) | Prompt assembly (`PromptMode`, `SystemPromptBuilder`, `PromptReport`, sanitizers) |

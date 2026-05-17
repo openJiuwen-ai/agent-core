@@ -9,6 +9,7 @@ from openjiuwen.harness.rails.evolution import (
     EvolutionTriggerPoint,
     SkillEvolutionRail,
     SummarizeTrajectoriesInput,
+    TeamSkillEvolutionRail,
     TrajectoryRail,
 )
 from openjiuwen.harness.rails.heartbeat_rail import HeartbeatRail
@@ -68,6 +69,7 @@ __all__ = [
     "SysOperationRail",
     "TaskCompletionRail",
     "TaskPlanningRail",
+    "TeamSkillEvolutionRail",
     "TeamSkillCreateRail",
     "TeamSkillRail",
     "TrajectoryRail",

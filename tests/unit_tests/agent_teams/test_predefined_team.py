@@ -16,7 +16,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamMemberSpec,
     TeamRole,
 )
-from openjiuwen.agent_teams.spawn.context import (
+from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
 )
@@ -290,7 +290,7 @@ class TestPredefinedTeamPrompt:
 
     @pytest.mark.level1
     def test_predefined_prompt_includes_override(self):
-        from openjiuwen.agent_teams.agent.policy import build_system_prompt
+        from openjiuwen.agent_teams.prompts import build_system_prompt
 
         prompt = build_system_prompt(
             role=TeamRole.LEADER,
@@ -304,7 +304,7 @@ class TestPredefinedTeamPrompt:
 
     @pytest.mark.level1
     def test_auto_team_prompt_no_override(self):
-        from openjiuwen.agent_teams.agent.policy import build_system_prompt
+        from openjiuwen.agent_teams.prompts import build_system_prompt
 
         prompt = build_system_prompt(
             role=TeamRole.LEADER,
@@ -316,7 +316,7 @@ class TestPredefinedTeamPrompt:
 
     @pytest.mark.level1
     def test_hybrid_prompt_includes_hybrid_mode(self):
-        from openjiuwen.agent_teams.agent.policy import build_system_prompt
+        from openjiuwen.agent_teams.prompts import build_system_prompt
 
         prompt = build_system_prompt(
             role=TeamRole.LEADER,
@@ -329,7 +329,7 @@ class TestPredefinedTeamPrompt:
 
     @pytest.mark.level1
     def test_predefined_workflow_not_applied_to_teammate(self):
-        from openjiuwen.agent_teams.agent.policy import build_system_prompt
+        from openjiuwen.agent_teams.prompts import build_system_prompt
 
         prompt = build_system_prompt(
             role=TeamRole.TEAMMATE,
@@ -372,7 +372,6 @@ class TestResolveAgentSpecByMemberName:
 
         card = AgentCard(id="test", name="test")
         agent = TeamAgent(card)
-        agent._configurator.spec = spec
 
         # Resolve by member_name should return custom_spec
         result = agent._resolve_agent_spec(spec, TeamRole.TEAMMATE, "custom-member")
@@ -403,7 +402,6 @@ class TestResolveAgentSpecByMemberName:
 
         card = AgentCard(id="test", name="test")
         agent = TeamAgent(card)
-        agent._configurator.spec = spec
 
         # Fallback to teammate spec
         result = agent._resolve_agent_spec(spec, TeamRole.TEAMMATE, "unknown-member")
@@ -432,7 +430,6 @@ class TestResolveAgentSpecByMemberName:
 
         card = AgentCard(id="test", name="test")
         agent = TeamAgent(card)
-        agent._configurator.spec = spec
 
         # Fallback chain: member_name -> role.value -> "teammate" -> "leader"
         result = agent._resolve_agent_spec(spec, TeamRole.TEAMMATE, "unknown-member")
@@ -462,7 +459,6 @@ class TestResolveAgentSpecByMemberName:
 
         card = AgentCard(id="test", name="test")
         agent = TeamAgent(card)
-        agent._configurator.spec = spec
 
         # Leader role with no member_name uses leader spec
         result = agent._resolve_agent_spec(spec, TeamRole.LEADER, None)

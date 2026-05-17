@@ -33,6 +33,11 @@ class KnowledgeBaseConfig(BaseModel):
     use_graph: bool = Field(default=False, description="Whether to use graph index")
     chunk_size: int = Field(default=512, description="Chunk size")
     chunk_overlap: int = Field(default=50, description="Chunk overlap")
+    use_caption_for_images: bool = Field(
+        default=False,
+        description="If True, embed image chunks using their text/caption only (text-only path). "
+        "If False and embed_model supports multimodal, use image+text for chunks with image_path.",
+    )
 
 
 class RetrievalConfig(BaseModel):
@@ -53,6 +58,10 @@ class IndexConfig(BaseModel):
 
     index_name: str = Field(..., description="Index name")
     index_type: Literal["hybrid", "bm25", "vector"] = Field(default="hybrid", description="Index type")
+    use_caption_for_images: bool = Field(
+        default=False,
+        description="If True, embed image chunks using their text/caption only (text-only path).",
+    )
 
 
 class StoreType(str, Enum):

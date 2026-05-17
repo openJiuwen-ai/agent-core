@@ -44,7 +44,7 @@ AgentTeams is a Leader-Teammate collaboration framework that completes complex t
 
 - **Health Check and Auto Recovery**: The Leader periodically checks teammate process status and automatically restarts unhealthy members
 - **Persistent Standby**: Persistent teams enter standby after each round; teammate processes stay alive and resume automatically on the next `invoke()`
-- **Resume Support**: Supports recovering team state via `resume_persistent_team()` (same process) or `recover_agent_team()` (crash recovery)
+- **Resume Support**: A single entry point — `Runner.run_agent_team_streaming(agent_team=spec, session=...)` — covers cold start, warm recovery, and session switches; the runtime picks the right branch automatically.
 - **User @mention**: Users can send direct messages to specific teammates via `@member_name message` syntax, bypassing the leader
 - **Predefined Members**: Pre-configure team members to skip dynamic spawning, with automatic DB registration
 - **Cross-Process Communication**: Uses `pyzmq` to support collaboration across processes and hosts
@@ -68,7 +68,7 @@ AgentTeams is a Leader-Teammate collaboration framework that completes complex t
 Team Skill Evolution is an extension of AgentTeams that extracts reusable collaboration patterns from multi-agent execution trajectories:
 
 - **Auto Creation**: `TeamSkillCreateRail` detects collaboration patterns and suggests team skill creation
-- **Online Evolution**: `TeamSkillRail` supports trajectory analysis, user-requested evolution, PATCH generation and approval
+- **Online Evolution**: `TeamSkillRail` supports trajectory analysis, user-requested evolution, and experience record generation/approval
 - **Experience Management**: Experience scoring, simplify, and rebuild mechanisms ensure continuous optimization
 
 See [Team Skill Evolution](./Team Skill Evolution.md) for details.
