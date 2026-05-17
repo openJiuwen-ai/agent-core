@@ -426,12 +426,17 @@ class TeamRuntimeManager:
         *,
         team_name: str,
         session_id: str,
+        hide_dm: bool = False,
     ) -> Optional[TeamMonitor]:
-        """Return a TeamMonitor for the active runtime bound to ``(team_name, session_id)``."""
+        """Return a TeamMonitor for the active runtime bound to ``(team_name, session_id)``.
+
+        ``hide_dm`` forwards to :func:`create_monitor`; see ``TeamMonitor``
+        for filtering semantics.
+        """
         entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
         if entry is None:
             return None
-        return create_monitor(entry.agent)
+        return create_monitor(entry.agent, hide_dm=hide_dm)
 
     async def list_active_teams(self) -> list["ActiveTeamInfo"]:
         """Return read-only snapshots of every team currently in the pool.

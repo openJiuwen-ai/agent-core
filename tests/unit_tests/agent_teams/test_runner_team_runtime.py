@@ -1317,7 +1317,13 @@ class TestTeamRuntimeManagerStopTeam:
 
         with patch("openjiuwen.agent_teams.runtime.manager.create_monitor", return_value="monitor") as mocked:
             assert await manager.get_monitor(team_name=team_name, session_id=session_id) == "monitor"
-            mocked.assert_called_once_with(fake_agent)
+            mocked.assert_called_once_with(fake_agent, hide_dm=False)
+
+        with patch("openjiuwen.agent_teams.runtime.manager.create_monitor", return_value="dm_hidden") as mocked:
+            assert (
+                await manager.get_monitor(team_name=team_name, session_id=session_id, hide_dm=True) == "dm_hidden"
+            )
+            mocked.assert_called_once_with(fake_agent, hide_dm=True)
 
         assert await manager.get_monitor(team_name=team_name, session_id="other") is None
         assert await manager.get_monitor(team_name="missing", session_id=session_id) is None

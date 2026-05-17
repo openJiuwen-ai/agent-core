@@ -473,11 +473,18 @@ class _TeamRunnerMixin:
         *,
         team_name: str,
         session_id: str,
+        hide_dm: bool = False,
     ) -> Optional["TeamMonitor"]:
-        """Return a TeamMonitor for the active TeamAgent runtime, if present."""
+        """Return a TeamMonitor for the active TeamAgent runtime, if present.
+
+        ``hide_dm`` forwards to ``TeamMonitor``; when True the monitor
+        drops every non-broadcast message from both query results and
+        the live event stream.
+        """
         return await self._get_team_runtime_manager().get_monitor(
             team_name=team_name,
             session_id=session_id,
+            hide_dm=hide_dm,
         )
 
     async def list_active_teams(self) -> list["ActiveTeamInfo"]:
@@ -883,11 +890,18 @@ class _TeamRunnerClassMixin:
         *,
         team_name: str,
         session_id: str,
+        hide_dm: bool = False,
     ):
-        """Return a TeamMonitor for the active TeamAgent runtime, if present."""
+        """Return a TeamMonitor for the active TeamAgent runtime, if present.
+
+        ``hide_dm`` forwards to ``TeamMonitor``; when True the monitor
+        drops every non-broadcast message from both query results and
+        the live event stream.
+        """
         return await _global_runner().get_agent_team_monitor(
             team_name=team_name,
             session_id=session_id,
+            hide_dm=hide_dm,
         )
 
     @classmethod

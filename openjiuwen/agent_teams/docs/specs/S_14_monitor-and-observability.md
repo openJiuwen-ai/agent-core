@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/monitor/`、`openjiuwen/agent_teams/observability/`（预留） |
-| 最近一次修订日期 | 2026-05-15 |
+| 最近一次修订日期 | 2026-05-17 |
 | 关联 feature | F_09_team-stream-logging.md |
 
 ## 范围 / 边界
@@ -44,6 +44,7 @@
 12. **`TeamStreamLogger` 永不向流式路径抛异常**。`feed` / `flush` 整体被 `try / except Exception` 包住，失败时尽力把错误标记行写回自己的输出文件（写不进去就静默吞）——诊断 logger 挂掉绝不能搞挂它观察的 stream。`__init__` 不在此豁免范围：路径不可用直接抛，让调用方在构造时立刻发现。与不变量 2「监控失败不阻断 team 运行」同源。
 13. **`TeamStreamLogger` 是一次性的、与单次 run 绑定**。每次 `run_agent_team_streaming` 调用配一个新实例：`__init__` 用调用方给的 `file_path` 以 append 模式打开文件，`flush()` 在 stream 结束时把所有 source 的尾段写完并 close 文件。`_llm_output_seen` 等去重门控、`_runs` 累积缓冲贯穿整个 run。runner 不构造、不复用——构造责任在调用方（CLI / SDK），runner 只 `feed` / `flush`，类型在 `TYPE_CHECKING` 下引用。
 14. **聚合按 source 独立维护**。`_runs: dict[(member, role), _Run]`——每个 source 有自己的待定累积段；同一 source 切换 category 或遇到该 source 的离散 chunk 时 flush **该 source 的段**，**不同 source 的 chunk 交错不互相打断**。leader 与 teammate 在 inprocess fan-out 下 chunk 必然交错，单一游标模型会把每个 token 切成独立记录、彻底破坏聚合，故须按 source 分桶。
+15. **`hide_dm` 是 monitor 实例级别的对称过滤**。`TeamMonitor(hide_dm=True)` 同时作用于 pull 与 push 两条路径：`get_messages` 把非广播消息（`MessageInfo.broadcast=False`）从结果中剔除——单收件人 DM 视图（带 `to_member_name`）直接返 `[]`，全 team 视图走 `get_team_messages(broadcast=True)` 下推到 DAO；`_on_event` 丢弃 `MonitorEventType.MESSAGE` 事件，`BROADCAST` 不动。两路必须一致：单边过滤会让"流里看不到 DM 但 query 仍能查到"或反之，破坏调用方对"hide_dm = DM 不可见"的语义预期。`hide_dm` 只屏蔽消息维度，team / member / task 事件不受影响。
 
 ## 接口契约
 
@@ -68,8 +69,14 @@ __all__ = [
 #### 工厂
 
 ```python
-def create_monitor(team_agent: TeamAgent) -> TeamMonitor:
+def create_monitor(team_agent: TeamAgent, *, hide_dm: bool = False) -> TeamMonitor:
     """Create a TeamMonitor bound to a leader TeamAgent.
+
+    Args:
+        team_agent: A fully configured leader TeamAgent instance.
+        hide_dm: When True, instructs the returned ``TeamMonitor`` to
+            drop every non-broadcast message from both query results
+            and the live event stream. Defaults to False.
 
     Raises:
         ValueError: team_agent.role != LEADER, or team_backend is None.
@@ -102,7 +109,7 @@ class TeamMonitor:
 | `get_members(status=None)` | 可选 `MemberStatus` 字符串 | `list[MemberInfo]` | 全成员 / 按状态过滤 |
 | `get_member(member_name)` | `str` | `MemberInfo \| None` | 单成员；不存在返回 None |
 | `get_tasks(status=None)` | 可选 `TaskStatus` 字符串 | `list[TaskInfo]` | 全任务 / 按状态过滤 |
-| `get_messages(*, to_member_name=None, from_member_name=None)` | keyword-only | `list[MessageInfo]` | 邮箱消息；`to_member_name` 走单成员收件箱视图，否则全 team |
+| `get_messages(*, to_member_name=None, from_member_name=None)` | keyword-only | `list[MessageInfo]` | 邮箱消息；`to_member_name` 走单成员收件箱视图，否则全 team。`hide_dm=True` 时单成员视图直接返 `[]`，全 team 视图退化为广播仅留 |
 
 所有查询 API 都在 `_bound_session()` 上下文管理器中执行——调用方协程不需要预先 `set_session_id`。
 
@@ -135,8 +142,14 @@ async def Runner.get_agent_team_monitor(
     *,
     team_name: str,
     session_id: str,
+    hide_dm: bool = False,
 ) -> TeamMonitor | None:
-    """Return a TeamMonitor for the active TeamAgent runtime, if present."""
+    """Return a TeamMonitor for the active TeamAgent runtime, if present.
+
+    ``hide_dm`` forwards to ``TeamMonitor``; when True the monitor drops
+    every non-broadcast message from both query results and the live
+    event stream.
+    """
 ```
 
 行为（实现链：`Runner.get_agent_team_monitor` → `_RunnerImpl.get_agent_team_monitor` → `TeamRuntimeManager.get_monitor` → `_pool._resolve_entry` → `create_monitor(entry.agent)`）：

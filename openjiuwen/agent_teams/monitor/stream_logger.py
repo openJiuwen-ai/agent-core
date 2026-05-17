@@ -29,7 +29,7 @@ controller-output extraction.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -418,7 +418,7 @@ class TeamStreamLogger:
         """Write one timestamped record to the file; swallow any I/O error."""
         if self._file is None:
             return
-        timestamp = datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         try:
             self._file.write(f"{timestamp} {body}\n")
             self._file.flush()
