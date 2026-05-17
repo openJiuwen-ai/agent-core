@@ -250,11 +250,18 @@ class AbilityManager:
 
     @classmethod
     def _parse_tool_arguments(cls, arguments: Any) -> Any:
+        """Parse tool-call arguments into a dict.
+
+        Raises ValueError with the JSON diagnostic and raw text when the
+        model emits invalid JSON (e.g. unquoted bareword values). The caller
+        surfaces this message back to the LLM so it can self-correct instead
+        of silently receiving an empty argument dict.
+        """
         if not isinstance(arguments, str):
             return arguments
         try:
             return json.loads(arguments)
-        except (json.JSONDecodeError, AttributeError, TypeError):
+        except (json.JSONDecodeError, AttributeError, TypeError) as exc:
             repaired = cls._repair_tool_arguments_json(arguments)
             if repaired and repaired != arguments:
                 try:
@@ -262,7 +269,9 @@ class AbilityManager:
                     return json.loads(repaired)
                 except (json.JSONDecodeError, TypeError):
                     pass
-            return {}
+            raise ValueError(
+                f"Invalid tool arguments JSON: {exc}. Raw arguments: {arguments!r}"
+            ) from exc
 
     @staticmethod
     def _build_execution_error(
@@ -807,7 +816,11 @@ class AbilityManager:
         tool_name = tool_call.name
 
         # Parse arguments
-        tool_args = self._parse_tool_arguments(tool_call.arguments)
+        try:
+            tool_args = self._parse_tool_arguments(tool_call.arguments)
+        except ValueError as exc:
+            logger.error(f"Tool '{tool_name}' got malformed arguments: {exc}")
+            raise self._build_execution_error(tool_call, str(exc)) from exc
 
         # Check ability type and execute accordingly
         if tool_name in self._tools:
