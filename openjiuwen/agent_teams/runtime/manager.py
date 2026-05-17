@@ -774,9 +774,11 @@ class TeamRuntimeManager:
             # on never-built teams: recover_team iterates DB members and
             # is a no-op when none exist.
             await agent.recover_team()
+            await self._flush_team_manifest(agent, team_session)
         elif kind is RunActionKind.CREATE:
             await self._pre_run_with_inputs(team_session, inputs)
             agent = spec.build()
+            await self._flush_team_manifest(agent, team_session)
         else:
             raise RuntimeError(f"Unhandled RunActionKind: {kind!r}")
 
@@ -805,6 +807,12 @@ class TeamRuntimeManager:
     async def _pre_run_with_inputs(session: AgentTeamSession, inputs: object) -> None:
         """Run ``session.pre_run`` only forwarding ``inputs`` when it's a dict."""
         await session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
+
+    @staticmethod
+    async def _flush_team_manifest(agent: "TeamAgent", session: AgentTeamSession) -> None:
+        """Persist the minimum team manifest before exposing runtime_ready."""
+        agent.persist_session_manifest(session)
+        await session.flush_checkpoint()
 
 
 _REJECT_KINDS = frozenset(

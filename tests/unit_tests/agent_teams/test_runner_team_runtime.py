@@ -111,10 +111,9 @@ class FakeTeamAgent:
         self.invoke_calls = 0
         self.stream_calls = 0
 
-    async def invoke(self, inputs: Any, session=None) -> Any:
+    def persist_session_manifest(self, session) -> None:
         from openjiuwen.agent_teams.runtime.metadata import write_team_namespace
 
-        self.invoke_calls += 1
         write_team_namespace(
             session,
             self.team_name,
@@ -137,6 +136,10 @@ class FakeTeamAgent:
                 },
             },
         )
+
+    async def invoke(self, inputs: Any, session=None) -> Any:
+        self.invoke_calls += 1
+        self.persist_session_manifest(session)
         return {"team_name": self.team_name, "session_id": session.get_session_id()}
 
     async def stream(self, inputs: Any, session=None) -> AsyncIterator[Any]:
@@ -204,6 +207,41 @@ async def test_runner_run_agent_team_streaming_accepts_spec_and_emits_runtime_re
 
     await Runner.stop()
     await isolated_checkpointer.release(session_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_runner_run_agent_team_streaming_flushes_team_manifest_before_runtime_ready(isolated_checkpointer):
+    from openjiuwen.agent_teams.runtime.metadata import read_team_namespace
+
+    await Runner.start()
+    session_id = f"team_manifest_{uuid.uuid4().hex}"
+    team_name = "manifest_team"
+    spec = TeamAgentSpec.model_construct(team_name=team_name, agents={})
+    agent = FakeTeamAgent(team_name, stream_label="team.chunk")
+
+    stream = Runner.run_agent_team_streaming(
+        agent_team=spec,
+        inputs={"query": "hello"},
+        session=session_id,
+    )
+    try:
+        with patch.object(TeamAgentSpec, "build", return_value=agent):
+            ready_chunk = await stream.__anext__()
+
+        assert ready_chunk.payload["event_type"] == "team.runtime_ready"
+
+        restored = create_agent_team_session(session_id=session_id)
+        await restored.pre_run()
+        bucket = read_team_namespace(restored, team_name)
+
+        assert bucket is not None
+        assert bucket["spec"]["team_name"] == team_name
+        assert bucket["context"]["db_config"]["connection_string"] == ":memory:"
+    finally:
+        await stream.aclose()
+        await Runner.stop()
+        await isolated_checkpointer.release(session_id)
 
 
 @pytest.mark.asyncio

@@ -771,6 +771,10 @@ class TeamAgent(BaseAgent):
     def _persist_leader_config(self, session) -> None:
         self._recovery_manager.persist_leader_config(session)
 
+    def persist_session_manifest(self, session) -> None:
+        """Persist the minimum session manifest needed for recovery and cleanup."""
+        self._recovery_manager.persist_leader_config(session)
+
     def _persist_allocator_state(self) -> None:
         self._recovery_manager.persist_allocator_state(self._session_manager.team_session)
 
