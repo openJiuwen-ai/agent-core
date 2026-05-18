@@ -9,7 +9,6 @@ import re
 from typing import Any, Dict, List, Optional
 
 from openjiuwen.agent_evolving.checkpointing.types import (
-    VALID_SECTIONS,
     EvolutionPatch,
     EvolutionRecord,
     EvolutionTarget,
@@ -19,6 +18,10 @@ from openjiuwen.agent_evolving.optimizer.base import BaseOptimizer
 from openjiuwen.agent_evolving.optimizer.llm_resilience import (
     LLMInvokePolicy,
     invoke_text_with_retry_and_prompt,
+)
+from openjiuwen.agent_evolving.optimizer.skill_call.experience_draft_parser import (
+    ParsedExperienceDraft,
+    parse_experience_drafts_with_error,
 )
 from openjiuwen.agent_evolving.optimizer.skill_call.templates import (
     SKILL_EXPERIENCE_GENERATE_PROMPT,
@@ -269,59 +272,6 @@ def _limit_summary_lines(summary: str, max_lines: int) -> str:
     return "\n".join(summary.splitlines()[:max_lines])
 
 
-def _parse_single_patch(data: dict) -> Optional[EvolutionPatch]:
-    action = data.get("action", "append")
-    if action == "skip":
-        return EvolutionPatch(
-            section="",
-            action="skip",
-            content="",
-            skip_reason=data.get("skip_reason", "unknown"),
-        )
-
-    section = data.get("section", "Troubleshooting")
-    if section not in VALID_SECTIONS:
-        section = "Troubleshooting"
-
-    raw_target = data.get("target", "body")
-    try:
-        target = EvolutionTarget(raw_target)
-    except ValueError:
-        target = EvolutionTarget.BODY
-
-    merge_target = data.get("merge_target")
-    if merge_target in ("null", None):
-        merge_target = None
-
-    return EvolutionPatch(
-        section=section,
-        action="append",
-        content=data.get("content", ""),
-        target=target,
-        merge_target=merge_target,
-        script_filename=data.get("script_filename"),
-        script_language=data.get("script_language"),
-        script_purpose=data.get("script_purpose"),
-    )
-
-
-def _parse_llm_response(raw: str) -> Optional[List[EvolutionPatch]]:
-    """Parse response JSON into EvolutionPatch list. Returns None on parse failure."""
-    data = _extract_json(raw)
-    if data is None:
-        return None
-
-    items = data if isinstance(data, list) else [data]
-    patches: List[EvolutionPatch] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        patch = _parse_single_patch(item)
-        if patch is not None:
-            patches.append(patch)
-    return patches
-
-
 class SkillExperienceOptimizer(BaseOptimizer):
     """Online Skill experience optimizer.
 
@@ -461,7 +411,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
 
         logger.info("[SkillExperienceOptimizer] calling LLM (skill=%s)", ctx.skill_name)
         try:
-            patches = await self._generate_patches_with_retries(
+            drafts = await self._generate_drafts_with_retries(
                 prompt=prompt,
                 retry_prompt=retry_prompt,
             )
@@ -476,7 +426,8 @@ class SkillExperienceOptimizer(BaseOptimizer):
         text_records: List[EvolutionRecord] = []
         script_records: List[EvolutionRecord] = []
 
-        for patch in patches:
+        for draft in drafts:
+            patch = draft.patch
             if patch.action == "skip":
                 logger.info(
                     "[SkillExperienceOptimizer] LLM decided to skip (reason=%s)",
@@ -497,6 +448,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
                 context=merged_context,
                 change=patch,
                 score=initial_score,
+                summary=draft.summary,
             )
             if is_script:
                 script_records.append(record)
@@ -531,6 +483,24 @@ class SkillExperienceOptimizer(BaseOptimizer):
             [] on successful empty parse, or a non-empty list.
             retry_raw is the raw LLM output for progressive retries.
         """
+        drafts, retry_raw = await self.retry_parse_drafts(
+            broken_raw=broken_raw,
+            original_prompt=original_prompt,
+            attempt_number=attempt_number,
+            parse_error=parse_error,
+        )
+        if drafts is None:
+            return None, retry_raw
+        return [draft.patch for draft in drafts], retry_raw
+
+    async def retry_parse_drafts(
+        self,
+        broken_raw: str,
+        original_prompt: str,
+        attempt_number: int = 1,
+        parse_error: str = "",
+    ) -> tuple[List[ParsedExperienceDraft] | None, str]:
+        """Retry parsing while preserving per-record summaries."""
         truncated = _looks_truncated(broken_raw)
 
         if truncated:
@@ -569,35 +539,20 @@ class SkillExperienceOptimizer(BaseOptimizer):
             logger.error("[SkillExperienceOptimizer] retry LLM call failed: %s", exc)
             return None, ""
 
-        patches = _parse_llm_response(retry_raw)
-        if patches is None:
+        drafts, _ = parse_experience_drafts_with_error(retry_raw, _extract_json_with_error)
+        if drafts is None:
             strategy = "regeneration" if truncated else ("strict_fix" if attempt_number >= 3 else "fix")
             logger.warning("[SkillExperienceOptimizer] retry (%s) also failed, giving up", strategy)
             return None, retry_raw
-        logger.info("[SkillExperienceOptimizer] retry succeeded, got %d patches", len(patches))
-        return patches, retry_raw
+        logger.info("[SkillExperienceOptimizer] retry succeeded, got %d patches", len(drafts))
+        return drafts, retry_raw
 
-    @staticmethod
-    def _parse_patches_with_error(raw: str) -> tuple[List[EvolutionPatch] | None, str]:
-        data, last_error = _extract_json_with_error(raw)
-        if data is None:
-            return None, last_error
-
-        items = data if isinstance(data, list) else [data]
-        patches: List[EvolutionPatch] = []
-        for item in items:
-            if isinstance(item, dict):
-                patch = _parse_single_patch(item)
-                if patch is not None:
-                    patches.append(patch)
-        return patches, ""
-
-    async def _generate_patches_with_retries(
+    async def _generate_drafts_with_retries(
         self,
         *,
         prompt: str,
         retry_prompt: str,
-    ) -> List[EvolutionPatch]:
+    ) -> List[ParsedExperienceDraft]:
         raw, prompt_used = await invoke_text_with_retry_and_prompt(
             llm=self._llm,
             model=self._model,
@@ -606,14 +561,14 @@ class SkillExperienceOptimizer(BaseOptimizer):
             policy=self._generate_records_llm_policy,
         )
 
-        patches, last_error = self._parse_patches_with_error(raw)
-        if patches is not None:
-            return patches
+        drafts, last_error = parse_experience_drafts_with_error(raw, _extract_json_with_error)
+        if drafts is not None:
+            return drafts
 
         last_raw = raw
         for attempt in range(2, 4):
             logger.warning("[SkillExperienceOptimizer] parse failed, repair attempt %d/3", attempt)
-            repaired, retry_raw = await self.retry_parse(
+            repaired, retry_raw = await self.retry_parse_drafts(
                 broken_raw=last_raw,
                 original_prompt=prompt_used,
                 attempt_number=attempt,
@@ -623,7 +578,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
                 return repaired
             if retry_raw:
                 last_raw = retry_raw
-                _, last_error = self._parse_patches_with_error(retry_raw)
+                _, last_error = parse_experience_drafts_with_error(retry_raw, _extract_json_with_error)
 
         raise ValueError("SkillExperienceOptimizer response could not be parsed")
 

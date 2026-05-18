@@ -106,6 +106,7 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
 7. 多个发现指向同一问题时合并为一条；不同问题分别生成
 8. 文本经验（action 为 append，target 为 description/body）最多 2 条；脚本经验（target 为 script）最多 1 条
 9. 脚本经验的 content 字段直接放完整脚本源码，同时填写 script_filename、script_language、script_purpose
+10. 每条 append 经验必须填写 summary：一句话说明“何时适用 + 应做什么/避免什么”，不要换行、表格或代码块
 
 ## 输出格式
 只输出以下 JSON 数组，不要其他内容（即使只有一条，也必须用数组包裹）：
@@ -115,6 +116,7 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
     "skip_reason": "irrelevant | duplicate | low_priority（仅 action 为 skip 时填写，否则为 null）",
     "target": "description | body | script",
     "section": "Instructions | Examples | Troubleshooting | Scripts | Collaboration",
+    "summary": "一句话经验摘要（仅 action 为 append 时填写，否则为 null）",
     "content": "Markdown 内容或脚本源码（仅 action 为 append 时填写）",
     "merge_target": "ev_xxxxxxxx 或 null",
     "script_filename": "文件名（仅 target 为 script 时填写，如 generate_chart.py）",
@@ -227,6 +229,7 @@ Determine the experience's target layer (target) and section (section), then gen
 7. When multiple findings point to the same issue, merge into one entry; generate separately for different issues
 8. Text experiences (action "append", target description/body): at most 2; script experiences (target script): at most 1
 9. For script experiences, put the full script source code in the content field, and fill in script_filename, script_language, script_purpose
+10. Every append experience must include summary: one sentence describing when it applies and what to do or avoid; no newlines, tables, or code blocks
 
 ## Output Format
 Output only the following JSON array, nothing else (even if there is only one entry, it must be wrapped in an array):
@@ -236,6 +239,7 @@ Output only the following JSON array, nothing else (even if there is only one en
     "skip_reason": "irrelevant | duplicate | low_priority (fill only when action is skip, otherwise null)",
     "target": "description | body | script",
     "section": "Instructions | Examples | Troubleshooting | Scripts | Collaboration",
+    "summary": "one-sentence experience summary (only when action is append, otherwise null)",
     "content": "Markdown content or script source code (fill only when action is append)",
     "merge_target": "ev_xxxxxxxx or null",
     "script_filename": "filename (only when target is script, e.g. generate_chart.py)",
@@ -264,6 +268,7 @@ JSON_FIX_PROMPT = """\
     "skip_reason": "irrelevant | duplicate | low_priority（仅 skip 时填写，否则为 null）",
     "target": "description | body | script",
     "section": "Instructions | Examples | Troubleshooting | Scripts",
+    "summary": "一句话经验摘要或 null",
     "content": "Markdown 内容（注意 JSON 转义：换行用 \\\\n，引号用 \\\\"）",
     "merge_target": "ev_xxxxxxxx 或 null",
     "script_filename": "文件名或 null",
@@ -293,8 +298,8 @@ JSON_FIX_PROMPT_STRICT = """\
 
 ## 正确格式示例
 [
-  {{"action":"append","target":"body","section":"Troubleshooting","content":"## 标题\\n- 要点1\\n- 要点2","merge_target":null}},
-  {{"action":"skip","skip_reason":"irrelevant","target":null,"section":null,"content":null,"merge_target":null}}
+  {{"action":"append","target":"body","section":"Troubleshooting","summary":"遇到 X 错误时先检查 Y 再执行 Z","content":"## 标题\\n- 要点1\\n- 要点2","merge_target":null}},
+  {{"action":"skip","skip_reason":"irrelevant","target":null,"section":null,"summary":null,"content":null,"merge_target":null}}
 ]
 """
 
@@ -365,6 +370,7 @@ USER_PATCH_PROMPT_CN = """\
 生成 patch，包含：
 - section: 上述之一
 - action: append
+- summary: 一句话摘要，说明协作场景和推荐做法
 - content: 具体的演进内容
 
 输出格式：
@@ -373,6 +379,7 @@ USER_PATCH_PROMPT_CN = """\
   "need_patch": true/false,
   "section": "章节名；need_patch=false 时可为 null 或空字符串",
   "action": "append | skip",
+  "summary": "一句话经验摘要；need_patch=false 时为空字符串",
   "content": "Markdown 格式的经验内容；need_patch=false 时为空字符串",
   "reason": "new_learning | duplicate | irrelevant | low_value"
 }}
@@ -448,6 +455,7 @@ The patch must satisfy all of the following:
 Generate a patch with:
 - section: one of the above
 - action: append
+- summary: one sentence describing the collaboration scenario and recommended practice
 - content: specific evolution content in Markdown
 
 Output format:
@@ -456,6 +464,7 @@ Output format:
   "need_patch": true/false,
   "section": "section name; null or empty string when need_patch=false",
   "action": "append | skip",
+  "summary": "one-sentence experience summary; empty string when need_patch=false",
   "content": "Markdown formatted experience content; empty string when need_patch=false",
   "reason": "new_learning | duplicate | irrelevant | low_value"
 }}
@@ -504,6 +513,7 @@ TRAJECTORY_PATCH_PROMPT_CN = """\
 
 ## 内容要求
 - 如果 need_patch=true，content 必须是具体、可执行、可复用的 team-skill 规则
+- 如果 need_patch=true，summary 必须用一句话说明协作场景和推荐做法
 - 不要写泛化空话，如“加强沟通”“优化协作”
 - 只输出一条 patch，只落一个 section
 - 使用 Markdown，推荐为“一个小标题 + 2-3 个 bullet”
@@ -513,6 +523,7 @@ TRAJECTORY_PATCH_PROMPT_CN = """\
 {{
   "need_patch": true/false,
   "section": "章节名（如 Workflow、Collaboration、Constraints 等）",
+  "summary": "一句话经验摘要",
   "content": "Markdown 格式的经验内容",
   "reason": "为什么值得沉淀（仅 need_patch=true 时填写）"
 }}
@@ -558,6 +569,7 @@ Prioritize these checks:
 
 ## Content requirements
 - If need_patch=true, content must be a specific, actionable, reusable team-skill rule
+- If need_patch=true, summary must describe the collaboration scenario and recommended practice in one sentence
 - Avoid vague statements such as "improve communication" or "optimize collaboration"
 - Output exactly one patch in exactly one section
 - Use Markdown, ideally one short heading plus 2-3 flat bullet points
@@ -567,6 +579,7 @@ Output format:
 {{
   "need_patch": true/false,
   "section": "section name (e.g. Workflow, Collaboration, Constraints)",
+  "summary": "one-sentence experience summary",
   "content": "Markdown formatted experience content",
   "reason": "Why worth capturing (only when need_patch=true)"
 }}
@@ -612,6 +625,7 @@ TEAM_EXPERIENCE_GENERATE_PROMPT_CN = """\
 - 环境、权限、网络、模型偶发现象通常应 skip 为 irrelevant
 - 不要重复已有经验；若有增量，可输出 merge_target
 - 文本经验（description/body）最多 2 条，script 经验最多 1 条
+- 每条 append 经验必须填写 summary，用一句话说明协作场景和推荐做法
 
 ## target 选择
 - description：团队技能描述、适用范围、角色概览、触发关键词需要修正
@@ -635,6 +649,7 @@ TEAM_EXPERIENCE_GENERATE_PROMPT_CN = """\
     "skip_reason": "irrelevant | duplicate | low_priority（仅 skip 时填写）",
     "target": "description | body | script",
     "section": "Roles | Collaboration | Workflow | Constraints | Instructions | Examples | Troubleshooting | Scripts",
+    "summary": "一句话经验摘要（仅 append 时填写，否则为 null）",
     "content": "Markdown 内容或脚本源码",
     "merge_target": "ev_xxxxxxxx 或 null",
     "script_filename": "脚本文件名或 null",
@@ -680,6 +695,7 @@ Your response must be a valid JSON array and nothing else.
 - Environment, permission, network, and random model issues should usually be skipped as irrelevant
 - Do not duplicate existing records; use merge_target when there is clear incremental value
 - Text experiences (description/body) must not exceed 2 items, script experiences must not exceed 1
+- Every append experience must include summary, one sentence describing the collaboration scenario and recommended practice
 
 ## Target Selection
 - description: the team skill description, applicability, role overview, or selection keywords need correction
@@ -703,6 +719,7 @@ Your response must be a valid JSON array and nothing else.
     "skip_reason": "irrelevant | duplicate | low_priority (only for skip)",
     "target": "description | body | script",
     "section": "Roles | Collaboration | Workflow | Constraints | Instructions | Examples | Troubleshooting | Scripts",
+    "summary": "one-sentence experience summary (only for append, otherwise null)",
     "content": "Markdown content or script source code",
     "merge_target": "ev_xxxxxxxx or null",
     "script_filename": "script filename or null",
@@ -731,6 +748,7 @@ TEAM_JSON_FIX_PROMPT = """\
     "skip_reason": "irrelevant | duplicate | low_priority（仅 skip 时填写，否则为 null）",
     "target": "description | body | script",
     "section": "Roles | Collaboration | Workflow | Constraints | Instructions | Examples | Troubleshooting | Scripts",
+    "summary": "一句话经验摘要或 null",
     "content": "Markdown 内容或脚本源码",
     "merge_target": "ev_xxxxxxxx 或 null",
     "script_filename": "文件名或 null",

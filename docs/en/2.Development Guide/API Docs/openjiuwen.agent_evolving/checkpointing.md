@@ -20,6 +20,56 @@ Single training checkpoint data structure (for restore and audit).
 
 ---
 
+## class openjiuwen.agent_evolving.checkpointing.types.EvolutionRecord
+
+Persisted skill evolution experience record.
+
+```text
+class EvolutionRecord(
+    id: str,
+    source: str,
+    timestamp: str,
+    context: str,
+    change: EvolutionPatch,
+    applied: bool = False,
+    score: float = 0.6,
+    usage_stats: Optional[UsageStats] = None,
+    skill_version: Optional[str] = None,
+    summary: Optional[str] = None,
+)
+```
+
+**Fields**:
+
+* **id**(str): Stable evolution record ID, usually generated with the `ev_` prefix.
+* **source**(str): Source signal or flow that produced the record.
+* **timestamp**(str): ISO timestamp when the record was created or last updated.
+* **context**(str): Compact context used to explain why the record was generated.
+* **change**(EvolutionPatch): The concrete evolution change to persist or render.
+* **applied**(bool, optional): Whether the record has already been applied. Default: `False`.
+* **score**(float, optional): Ranking score used when selecting or rendering experiences. Default: `0.6`.
+* **usage_stats**(UsageStats, optional): Presentation and feedback counters.
+* **skill_version**(str, optional): Skill version associated with the record.
+* **summary**(str, optional): One-sentence index summary used when rendering `SKILL.md`; old records without this field remain valid and fall back to content/script metadata during projection.
+
+### make(source, context, change, *, score=0.6, skill_version=None, summary=None) -> EvolutionRecord
+
+Creates a record with a generated ID, current UTC timestamp, default `UsageStats`, and the provided change metadata.
+
+### to_dict() -> dict
+
+Serializes the record for storage in `evolutions.json`. Optional fields are emitted only when present.
+
+### from_dict(data: dict) -> EvolutionRecord
+
+Restores a record from persisted JSON. Missing legacy fields are filled with compatible defaults.
+
+### is_pending -> bool
+
+Returns True when the record has not been applied.
+
+---
+
 ## class openjiuwen.agent_evolving.checkpointing.store_file.FileCheckpointStore
 
 Local JSON file-based checkpoint storage, not dependent on core's checkpointer, convenient for debugging and audit.

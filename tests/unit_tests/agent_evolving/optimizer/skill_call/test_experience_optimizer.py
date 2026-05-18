@@ -23,13 +23,17 @@ from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import 
     _build_context,
     _build_conversation_snippet,
     _extract_json,
+    _extract_json_with_error,
     _fix_json_text,
     _looks_truncated,
-    _parse_llm_response,
-    _parse_single_patch,
     _preview_section,
     _split_into_sections,
     _summarize_skill_content,
+)
+from openjiuwen.agent_evolving.optimizer.skill_call.experience_draft_parser import (
+    normalize_summary,
+    parse_experience_draft,
+    parse_experience_drafts_with_error,
 )
 from openjiuwen.agent_evolving.signal.base import (
     EvolutionSignal,
@@ -143,8 +147,8 @@ class TestSkillExperienceOptimizerGenerate:
                 content="""
 [
   {"action":"skip","skip_reason":"duplicate"},
-  {"action":"append","target":"body","section":"Troubleshooting","content":"A","merge_target":null},
-  {"action":"append","target":"description","section":"Instructions","content":"B","merge_target":null},
+  {"action":"append","target":"body","section":"Troubleshooting","summary":"When tool calls time out, retry with a shorter prompt.","content":"A","merge_target":null},
+  {"action":"append","target":"description","section":"Instructions","summary":"Clarify selection wording when users ask for audits.","content":"B","merge_target":null},
   {"action":"append","target":"body","section":"Examples","content":"C","merge_target":null},
   {"action":"append","target":"body","section":"Examples","content":"   ","merge_target":null}
 ]
@@ -163,7 +167,9 @@ class TestSkillExperienceOptimizerGenerate:
         records = await optimizer.generate_records(ctx)
         assert len(records) == 2
         assert records[0].change.content == "A"
+        assert records[0].summary == "When tool calls time out, retry with a shorter prompt."
         assert records[1].change.content == "B"
+        assert records[1].summary == "Clarify selection wording when users ask for audits."
         assert llm.invoke.await_args_list[0].kwargs["timeout"] == 60
 
     @staticmethod
@@ -273,35 +279,74 @@ class TestSkillExperienceOptimizerGenerate:
 
 class TestParsing:
     @staticmethod
-    def test_parse_llm_response_supports_json_codeblock_and_fallback():
+    def test_normalize_summary_accepts_only_meaningful_strings():
+        assert normalize_summary("  Use CSV sniffing before parsing.  ") == "Use CSV sniffing before parsing."
+        assert normalize_summary("") is None
+        assert normalize_summary("null") is None
+        assert normalize_summary(None) is None
+        assert normalize_summary(["not", "a", "summary"]) is None
+
+    @staticmethod
+    def test_parse_experience_draft_carries_patch_and_summary():
+        draft = parse_experience_draft(
+            {
+                "action": "append",
+                "target": "body",
+                "section": "Troubleshooting",
+                "summary": "Check encoding before reading CSV files.",
+                "content": "### CSV input checks\n- Validate encoding first.",
+            }
+        )
+
+        assert draft is not None
+        assert draft.patch.section == "Troubleshooting"
+        assert draft.patch.content.startswith("### CSV input checks")
+        assert draft.summary == "Check encoding before reading CSV files."
+
+    @staticmethod
+    def test_parse_experience_draft_ignores_summary_for_skip():
+        draft = parse_experience_draft({"action": "skip", "skip_reason": "duplicate", "summary": "unused"})
+
+        assert draft is not None
+        assert draft.patch.action == "skip"
+        assert draft.summary is None
+
+    @staticmethod
+    def test_parse_experience_drafts_supports_json_codeblock_and_fallback():
         codeblock = """```json
 [
   {"action":"append","target":"body","section":"Troubleshooting","content":"A","merge_target":"null"}
 ]
 ```"""
-        patches = _parse_llm_response(codeblock)
-        assert len(patches) == 1
-        assert patches[0].merge_target is None
+        drafts, error = parse_experience_drafts_with_error(codeblock, _extract_json_with_error)
+        assert error == ""
+        assert drafts is not None
+        assert len(drafts) == 1
+        assert drafts[0].patch.merge_target is None
 
         mixed = 'prefix text {"action":"append","target":"invalid","section":"NotExist","content":"X"} suffix'
-        patches2 = _parse_llm_response(mixed)
-        assert len(patches2) == 1
-        assert patches2[0].section == "Troubleshooting"
-        assert patches2[0].target == EvolutionTarget.BODY
+        drafts2, error = parse_experience_drafts_with_error(mixed, _extract_json_with_error)
+        assert error == ""
+        assert drafts2 is not None
+        assert len(drafts2) == 1
+        assert drafts2[0].patch.section == "Troubleshooting"
+        assert drafts2[0].patch.target == EvolutionTarget.BODY
 
     @staticmethod
-    def test_parse_llm_response_invalid_returns_none():
-        assert _parse_llm_response("not json at all") is None
+    def test_parse_experience_drafts_invalid_returns_none():
+        drafts, _error = parse_experience_drafts_with_error("not json at all", _extract_json_with_error)
+        assert drafts is None
 
     @staticmethod
-    def test_parse_single_patch_skip():
-        patch = _parse_single_patch({"action": "skip", "skip_reason": "irrelevant"})
-        assert patch.action == "skip"
-        assert patch.skip_reason == "irrelevant"
+    def test_parse_experience_draft_skip():
+        draft = parse_experience_draft({"action": "skip", "skip_reason": "irrelevant"})
+        assert draft is not None
+        assert draft.patch.action == "skip"
+        assert draft.patch.skip_reason == "irrelevant"
 
     @staticmethod
-    def test_parse_single_patch_with_script_fields():
-        patch = _parse_single_patch(
+    def test_parse_experience_draft_with_script_fields():
+        draft = parse_experience_draft(
             {
                 "action": "append",
                 "target": "script",
@@ -312,27 +357,28 @@ class TestParsing:
                 "script_purpose": "environment setup",
             }
         )
-        assert patch.target == EvolutionTarget.SCRIPT
-        assert patch.script_filename == "setup.py"
-        assert patch.script_language == "python"
-        assert patch.script_purpose == "environment setup"
+        assert draft is not None
+        assert draft.patch.target == EvolutionTarget.SCRIPT
+        assert draft.patch.script_filename == "setup.py"
+        assert draft.patch.script_language == "python"
+        assert draft.patch.script_purpose == "environment setup"
 
     @staticmethod
-    def test_parse_llm_response_with_trailing_comma():
+    def test_parse_experience_drafts_with_trailing_comma():
         raw = '[{"action":"append","target":"body","section":"Troubleshooting","content":"fix",},]'
-        patches = _parse_llm_response(raw)
-        assert patches is not None
-        assert len(patches) == 1
+        drafts, _error = parse_experience_drafts_with_error(raw, _extract_json_with_error)
+        assert drafts is not None
+        assert len(drafts) == 1
 
     @staticmethod
-    def test_parse_llm_response_with_comments():
+    def test_parse_experience_drafts_with_comments():
         raw = """[
   // this is a comment
   {"action":"append","target":"body","section":"Troubleshooting","content":"fix"}
 ]"""
-        patches = _parse_llm_response(raw)
-        assert patches is not None
-        assert len(patches) == 1
+        drafts, _error = parse_experience_drafts_with_error(raw, _extract_json_with_error)
+        assert drafts is not None
+        assert len(drafts) == 1
 
 
 class TestSummarizeSkillContent:
@@ -705,35 +751,35 @@ class TestGenerateRecordsRetry:
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_generate_patches_with_retries_returns_parsed_result_without_repair():
+    async def test_generate_drafts_with_retries_returns_parsed_result_without_repair():
         llm = MagicMock()
         llm.invoke = AsyncMock(return_value=SimpleNamespace(content='{"action":"skip","skip_reason":"duplicate"}'))
         optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="en")
 
-        patches = await optimizer._generate_patches_with_retries(
+        drafts = await optimizer._generate_drafts_with_retries(
             prompt="prompt-a",
             retry_prompt="prompt-b",
         )
 
-        assert len(patches) == 1
-        assert patches[0].action == "skip"
+        assert len(drafts) == 1
+        assert drafts[0].patch.action == "skip"
         assert llm.invoke.await_args.kwargs["messages"][0]["content"] == "prompt-a"
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_generate_patches_with_retries_uses_repair_flow_when_initial_parse_fails():
+    async def test_generate_drafts_with_retries_uses_repair_flow_when_initial_parse_fails():
         llm = MagicMock()
         llm.invoke = AsyncMock(return_value=SimpleNamespace(content="broken-json"))
         optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="en")
-        optimizer.retry_parse = AsyncMock(return_value=([MagicMock()], "fixed-json"))
+        optimizer.retry_parse_drafts = AsyncMock(return_value=([MagicMock()], "fixed-json"))
 
-        patches = await optimizer._generate_patches_with_retries(
+        drafts = await optimizer._generate_drafts_with_retries(
             prompt="prompt-a",
             retry_prompt="prompt-b",
         )
 
-        assert len(patches) == 1
-        optimizer.retry_parse.assert_awaited_once_with(
+        assert len(drafts) == 1
+        optimizer.retry_parse_drafts.assert_awaited_once_with(
             broken_raw="broken-json",
             original_prompt="prompt-a",
             attempt_number=2,
@@ -802,6 +848,12 @@ class TestPromptRoleConstraints:
         """英文 prompt 的 section 参考列表必须包含 Collaboration。"""
         prompt = SKILL_EXPERIENCE_GENERATE_PROMPT["en"]
         assert "Collaboration" in prompt
+
+    @staticmethod
+    def test_prompts_request_summary_field():
+        for prompt in SKILL_EXPERIENCE_GENERATE_PROMPT.values():
+            assert '"summary"' in prompt
+            assert "summary" in prompt.lower()
 
 
 class TestBackwardContextBinding:

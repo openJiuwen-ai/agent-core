@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -28,6 +29,7 @@ def make_record(
     content: str = "fix issue",
     merge_target: str | None = None,
     applied: bool = False,
+    summary: str | None = None,
 ) -> EvolutionRecord:
     return EvolutionRecord(
         id=record_id,
@@ -42,6 +44,7 @@ def make_record(
             merge_target=merge_target,
         ),
         applied=applied,
+        summary=summary,
     )
 
 
@@ -86,6 +89,31 @@ class TestEvolutionStoreBasics:
 
 
 class TestEvolutionStoreLogCRUD:
+    @staticmethod
+    def test_record_summary_serializes_and_old_json_remains_compatible():
+        patch = EvolutionPatch(
+            section="Troubleshooting",
+            action="append",
+            content="Check CSV inputs",
+            target=EvolutionTarget.BODY,
+        )
+        record = EvolutionRecord.make(
+            source="execution_failure",
+            context="ctx",
+            change=patch,
+            summary="Check CSV encoding and delimiters before parsing.",
+        )
+
+        payload = record.to_dict()
+        restored = EvolutionRecord.from_dict(payload)
+        legacy_payload = dict(payload)
+        legacy_payload.pop("summary")
+        legacy = EvolutionRecord.from_dict(legacy_payload)
+
+        assert payload["summary"] == "Check CSV encoding and delimiters before parsing."
+        assert restored.summary == "Check CSV encoding and delimiters before parsing."
+        assert legacy.summary is None
+
     @staticmethod
     @pytest.mark.asyncio
     async def test_load_full_log_handles_invalid_json(tmp_path: Path):
@@ -317,7 +345,6 @@ class TestEvolutionStoreConcurrentSafety:
         records = [make_record(f"ev_{i}", content=f"record {i}") for i in range(10)]
 
         # Run 10 concurrent appends
-        import asyncio
         await asyncio.gather(*[store.append_record("skill-a", r) for r in records])
 
         evo_log = await store.load_full_evolution_log("skill-a")
@@ -338,7 +365,6 @@ class TestEvolutionStoreConcurrentSafety:
         rec_b = make_record("ev_b", content="record b")
 
         # Both should complete without deadlock
-        import asyncio
         await asyncio.gather(
             store.append_record("skill-a", rec_a),
             store.append_record("skill-b", rec_b),
@@ -418,12 +444,14 @@ class TestEvolutionStoreRenderMarkdown:
         assert "Evolution Experiences" in skill_md
         assert "**1**" in skill_md
         assert "Use this section as an index of lessons learned from previous executions." in skill_md
-        assert "For narrative guidance, read the relevant `evolution/*.md` detail file." in skill_md
-        assert "### Highlighted Evolution Records" in skill_md
+        assert "For narrative guidance, read the relevant `evolution/*.md#...` detail section." in skill_md
+        assert "### Experience Index" in skill_md
+        assert "| Summary | Type | Score | Detail |" in skill_md
+        assert "body fix" in skill_md
+        assert "[evolution/troubleshooting.md#ev_1](evolution/troubleshooting.md#ev_1)" in skill_md
+        assert "### Highlighted Evolution Records" not in skill_md
         assert "### Top Experiences" not in skill_md
-        assert "### Narrative Guidance" in skill_md
-        assert "evolution/troubleshooting.md" in skill_md
-        assert "Read: `evolution/troubleshooting.md`" in skill_md
+        assert "### Narrative Guidance" not in skill_md
 
     @staticmethod
     @pytest.mark.asyncio
@@ -447,10 +475,51 @@ class TestEvolutionStoreRenderMarkdown:
         skill_md = (root / "skill-a" / "SKILL.md").read_text(encoding="utf-8")
         assert "Scripts are implementation aids, not mandatory steps." in skill_md
         assert "### Script Assets" in skill_md
+        assert "### Experience Index" not in skill_md
         assert "### Narrative Guidance" not in skill_md
         assert "evolution/scripts/_index.md" in skill_md
-        assert "source: `evolution/scripts/validate_csv.py`" in skill_md
-        assert "Review: `evolution/scripts/_index.md`" in skill_md
+        assert "[evolution/scripts/validate_csv.py](evolution/scripts/validate_csv.py)" in skill_md
+        assert "CSV validation helper" in skill_md
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_full_experience_index_includes_low_score_records_and_anchors(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(root, "skill-a", "# Skill A\n\nSome content\n")
+        store = EvolutionStore(str(root))
+
+        low = make_record(
+            "ev_low",
+            target=EvolutionTarget.BODY,
+            section="Troubleshooting",
+            content="### Legacy title\n- details",
+            summary="Use explicit retry budget before rerunning flaky tools.",
+        )
+        low.score = 0.2
+        high = make_record(
+            "ev_high",
+            target=EvolutionTarget.DESCRIPTION,
+            section="Instructions",
+            content="# Match this skill when users mention audits\n- details",
+        )
+        high.score = 0.9
+        await store.append_record("skill-a", low)
+        await store.append_record("skill-a", high)
+
+        skill_md = (root / "skill-a" / "SKILL.md").read_text(encoding="utf-8")
+        troubleshooting = (root / "skill-a" / "evolution" / "troubleshooting.md").read_text(encoding="utf-8")
+        instructions = (root / "skill-a" / "evolution" / "instructions.md").read_text(encoding="utf-8")
+
+        assert "Use explicit retry budget before rerunning flaky tools." in skill_md
+        assert "| 0.20 | [evolution/troubleshooting.md#ev_low](evolution/troubleshooting.md#ev_low) |" in skill_md
+        assert "Match this skill when users mention audits" in skill_md
+        assert "[evolution/instructions.md#ev_high](evolution/instructions.md#ev_high)" in skill_md
+        assert '<a id="ev_low"></a>' in troubleshooting
+        assert "### [ev_low] Use explicit retry budget before rerunning flaky tools." in troubleshooting
+        assert "### Legacy title" in troubleshooting
+        assert "- details" in troubleshooting
+        assert '<a id="ev_high"></a>' in instructions
+        assert "### [ev_high] Match this skill when users mention audits" in instructions
 
     @staticmethod
     @pytest.mark.asyncio
@@ -499,6 +568,24 @@ class TestEvolutionStoreRecordMaintenance:
         assert updated.score == 0.8
         assert deleted == 1
         assert [record.id for record in evo_log.entries] == ["ev_2"]
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_merge_and_update_clear_stale_summary(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(root, "skill-a")
+        store = EvolutionStore(str(root))
+
+        await store.append_record("skill-a", make_record("ev_1", content="one", summary="old one summary"))
+        await store.append_record("skill-a", make_record("ev_2", content="two", summary="old two summary"))
+
+        merged = await store.merge_records("skill-a", "ev_1", ["ev_2"], "merged content")
+        updated = await store.update_record_content("skill-a", "ev_1", "updated content")
+
+        assert merged is not None
+        assert merged.summary is None
+        assert updated is not None
+        assert updated.summary is None
 
     @staticmethod
     @pytest.mark.asyncio

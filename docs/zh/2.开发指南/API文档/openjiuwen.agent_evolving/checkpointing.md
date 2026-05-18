@@ -20,6 +20,56 @@
 
 ---
 
+## class openjiuwen.agent_evolving.checkpointing.types.EvolutionRecord
+
+持久化的 Skill 演进经验记录。
+
+```text
+class EvolutionRecord(
+    id: str,
+    source: str,
+    timestamp: str,
+    context: str,
+    change: EvolutionPatch,
+    applied: bool = False,
+    score: float = 0.6,
+    usage_stats: Optional[UsageStats] = None,
+    skill_version: Optional[str] = None,
+    summary: Optional[str] = None,
+)
+```
+
+**字段**：
+
+* **id**(str)：稳定的演进记录 ID，通常使用 `ev_` 前缀生成。
+* **source**(str)：产生该记录的信号或流程来源。
+* **timestamp**(str)：记录创建或最后更新时的 ISO 时间戳。
+* **context**(str)：说明记录生成原因的压缩上下文。
+* **change**(EvolutionPatch)：需要持久化或渲染的具体演进变更。
+* **applied**(bool，可选)：记录是否已应用。默认值：`False`。
+* **score**(float，可选)：选择或渲染经验时使用的排序分。默认值：`0.6`。
+* **usage_stats**(UsageStats，可选)：展示与反馈计数。
+* **skill_version**(str，可选)：记录关联的 Skill 版本。
+* **summary**(str，可选)：渲染 `SKILL.md` 索引时使用的一句话摘要；旧记录缺失该字段仍然有效，投影时会回退到正文或脚本元数据。
+
+### make(source, context, change, *, score=0.6, skill_version=None, summary=None) -> EvolutionRecord
+
+创建带自动生成 ID、当前 UTC 时间戳、默认 `UsageStats` 和给定变更元数据的记录。
+
+### to_dict() -> dict
+
+将记录序列化为可写入 `evolutions.json` 的字典。可选字段仅在存在时输出。
+
+### from_dict(data: dict) -> EvolutionRecord
+
+从持久化 JSON 恢复记录。缺失的旧版字段会使用兼容默认值。
+
+### is_pending -> bool
+
+记录尚未应用时返回 True。
+
+---
+
 ## class openjiuwen.agent_evolving.checkpointing.store_file.FileCheckpointStore
 
 基于本地 JSON 文件的检查点存储，不依赖 core 的 checkpointer，便于调试与审计。

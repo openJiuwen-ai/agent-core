@@ -21,6 +21,7 @@ from openjiuwen.core.common.exception.errors import BaseError
 
 _TEAM_MODULE = import_module("openjiuwen.agent_evolving.optimizer.skill_call.team_skill_experience_optimizer")
 TeamSkillOptimizer = _TEAM_MODULE.TeamSkillOptimizer
+TEAM_EXPERIENCE_GENERATE_PROMPT = _TEAM_MODULE.TEAM_EXPERIENCE_GENERATE_PROMPT
 TRAJECTORY_PATCH_PROMPT = _TEAM_MODULE.TRAJECTORY_PATCH_PROMPT
 USER_PATCH_PROMPT = _TEAM_MODULE.USER_PATCH_PROMPT
 
@@ -41,6 +42,7 @@ def test_user_patch_prompt_cn_exists():
     assert "只生成一条 patch" in USER_PATCH_PROMPT["cn"]
     assert "避免“加强协作”“优化流程”这类空话" in USER_PATCH_PROMPT["cn"]
     assert "need_patch" in USER_PATCH_PROMPT["cn"]
+    assert '"summary"' in USER_PATCH_PROMPT["cn"]
     assert "duplicate | irrelevant | low_value" in USER_PATCH_PROMPT["cn"]
 
 
@@ -54,6 +56,7 @@ def test_user_patch_prompt_en_exists():
     assert "Generate exactly one patch" in USER_PATCH_PROMPT["en"]
     assert 'avoid vague statements like "improve collaboration"' in USER_PATCH_PROMPT["en"]
     assert "need_patch=false" in USER_PATCH_PROMPT["en"]
+    assert '"summary"' in USER_PATCH_PROMPT["en"]
 
 
 def test_trajectory_patch_prompt_cn_exists():
@@ -66,6 +69,7 @@ def test_trajectory_patch_prompt_cn_exists():
     assert "优先级" in TRAJECTORY_PATCH_PROMPT["cn"]
     assert "section 选择参考" in TRAJECTORY_PATCH_PROMPT["cn"]
     assert "只输出一条 patch" in TRAJECTORY_PATCH_PROMPT["cn"]
+    assert '"summary"' in TRAJECTORY_PATCH_PROMPT["cn"]
     assert "失败恢复" in TRAJECTORY_PATCH_PROMPT["cn"]
 
 
@@ -78,7 +82,14 @@ def test_trajectory_patch_prompt_en_exists():
     assert "Priority" in TRAJECTORY_PATCH_PROMPT["en"]
     assert "Section mapping guide" in TRAJECTORY_PATCH_PROMPT["en"]
     assert "Output exactly one patch" in TRAJECTORY_PATCH_PROMPT["en"]
+    assert '"summary"' in TRAJECTORY_PATCH_PROMPT["en"]
     assert "Missing recovery paths" in TRAJECTORY_PATCH_PROMPT["en"]
+
+
+def test_team_aggregated_prompts_request_summary_field():
+    for prompt in TEAM_EXPERIENCE_GENERATE_PROMPT.values():
+        assert '"summary"' in prompt
+        assert "summary" in prompt.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +152,7 @@ class TestGenerateUserPatch:
             {
                 "section": "Collaboration",
                 "action": "append",
+                "summary": "Require role A to notify role B before handoff.",
                 "content": "角色 A 完成后通知角色 B",
             }
         )
@@ -151,6 +163,7 @@ class TestGenerateUserPatch:
 
         assert record is not None
         assert record.change.section == "Collaboration"
+        assert record.summary == "Require role A to notify role B before handoff."
         assert "角色 A 完成后通知角色 B" in record.change.content
         assert record.source == "team_skill_user_patch"
         assert llm.invoke.await_args_list[0].kwargs["timeout"] == 120
@@ -356,6 +369,7 @@ class TestGenerateTrajectoryPatch:
             {
                 "need_patch": True,
                 "section": "Constraints",
+                "summary": "Cap execution timeout to avoid repeated stalls.",
                 "content": "执行超时不得超过 30 秒",
                 "reason": "轨迹显示多次超时",
             }
@@ -373,6 +387,7 @@ class TestGenerateTrajectoryPatch:
 
         assert record is not None
         assert record.change.section == "Constraints"
+        assert record.summary == "Cap execution timeout to avoid repeated stalls."
         assert "执行超时不得超过 30 秒" in record.change.content
         assert record.source == "team_skill_trajectory_patch"
         assert llm.invoke.await_args_list[0].kwargs["timeout"] == 120
@@ -893,6 +908,7 @@ class TestGenerateRecords:
                             "action": "append",
                             "target": "body",
                             "section": "Workflow",
+                            "summary": "Add a handoff gate before review starts.",
                             "content": "### Workflow\n- Rule A",
                         },
                         {
@@ -911,6 +927,7 @@ class TestGenerateRecords:
                             "action": "append",
                             "target": "script",
                             "section": "Scripts",
+                            "summary": "Audit team handoff completeness with a helper script.",
                             "content": "print('hello')",
                             "script_filename": "handoff_audit.py",
                             "script_language": "python",
@@ -946,4 +963,6 @@ class TestGenerateRecords:
         script_records = [record for record in records if record.change.target == EvolutionTarget.SCRIPT]
         assert len(text_records) == 2
         assert len(script_records) == 1
+        assert text_records[0].summary == "Add a handoff gate before review starts."
+        assert script_records[0].summary == "Audit team handoff completeness with a helper script."
         assert script_records[0].change.script_filename == "handoff_audit.py"
