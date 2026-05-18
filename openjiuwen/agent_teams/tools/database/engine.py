@@ -116,14 +116,23 @@ async def initialize_engine(
                 connect_args={"check_same_thread": False},
             )
         else:
+            # SQLite WAL allows N concurrent readers + 1 writer, but that
+            # concurrency is per-connection. A single-connection pool
+            # serialises every reader and writer onto one connection and
+            # negates WAL entirely; under multi-member team workloads the
+            # backlog quickly exceeds the 30s checkout timeout. Pool 5
+            # connections so reads can proceed in parallel with the
+            # singleton writer slot; keep max_overflow=0 so checkout
+            # timeouts still surface real session leaks instead of being
+            # masked by unlimited growth.
             engine = create_async_engine(
                 f"sqlite+aiosqlite:///{conn_str}",
                 echo=False,
                 future=True,
                 poolclass=AsyncAdaptedQueuePool,
-                pool_size=1,
+                pool_size=5,
                 max_overflow=0,
-                pool_pre_ping=False,
+                pool_pre_ping=True,
                 connect_args={
                     "timeout": config.db_timeout,
                     "check_same_thread": False,
