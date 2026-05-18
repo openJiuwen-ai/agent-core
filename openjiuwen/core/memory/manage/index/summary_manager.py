@@ -176,7 +176,7 @@ class SummaryManager(BaseMemoryManager):
             user_id=user_id,
             scope_id=scope_id,
             query=query,
-            mem_type=self.mem_type,
+            mem_types=[self.mem_type],
             top_k=top_k
         )
 

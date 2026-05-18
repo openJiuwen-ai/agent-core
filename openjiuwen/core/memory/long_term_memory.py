@@ -1070,7 +1070,7 @@ class LongTermMemory(metaclass=Singleton):
             top_k=num,
             user_id=user_id,
             threshold=threshold,
-            search_type=MemoryType.SUMMARY.value
+            search_type=[MemoryType.SUMMARY.value]
         )
         try:
             search_data = await self.search_manager.search(params)
@@ -1362,6 +1362,9 @@ class LongTermMemory(metaclass=Singleton):
         if scope_embed is not None:
             if hasattr(self.memory_index, 'set_embedding_model'):
                 self.memory_index.set_embedding_model(scope_embed)
+        else:
+            if hasattr(self.memory_index, 'set_embedding_model'):
+                self.memory_index.set_embedding_model(self._base_embed)
 
     async def _get_scope_embedding_model(self, scope_id: str) -> Embedding | None:
         """
