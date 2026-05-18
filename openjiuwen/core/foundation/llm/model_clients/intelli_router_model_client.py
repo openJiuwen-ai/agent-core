@@ -215,7 +215,7 @@ class IntelliRouterModelClient(BaseModelClient):
             **request_params
         )
 
-        return self._convert_response(response, output_parser)
+        return await self._convert_response(response, output_parser)
 
     async def stream(
         self,
@@ -342,7 +342,7 @@ class IntelliRouterModelClient(BaseModelClient):
 
         return params
 
-    def _convert_response(
+    async def _convert_response(
         self,
         response: Dict[str, Any],
         output_parser: Optional[BaseOutputParser] = None
@@ -365,7 +365,7 @@ class IntelliRouterModelClient(BaseModelClient):
 
         if output_parser and content:
             try:
-                parsed = output_parser.parse(content)
+                parsed = await output_parser.parse(content)
                 if isinstance(parsed, str):
                     content = parsed
                 else:
@@ -415,7 +415,7 @@ class IntelliRouterModelClient(BaseModelClient):
     ):
         """IntelliRouter does not support image generation"""
         raise build_error(
-            StatusCode.MODEL_INVOKE_CALL_FAILED,
+            StatusCode.MODEL_CALL_FAILED,
             error_msg="IntelliRouter does not support image generation"
         )
 
@@ -430,7 +430,7 @@ class IntelliRouterModelClient(BaseModelClient):
     ):
         """IntelliRouter does not support speech generation"""
         raise build_error(
-            StatusCode.MODEL_INVOKE_CALL_FAILED,
+            StatusCode.MODEL_CALL_FAILED,
             error_msg="IntelliRouter does not support speech generation"
         )
 
@@ -452,6 +452,6 @@ class IntelliRouterModelClient(BaseModelClient):
     ):
         """IntelliRouter does not support video generation"""
         raise build_error(
-            StatusCode.MODEL_INVOKE_CALL_FAILED,
+            StatusCode.MODEL_CALL_FAILED,
             error_msg="IntelliRouter does not support video generation"
         )
