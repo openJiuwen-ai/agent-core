@@ -5,8 +5,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-import shutil
-import uuid
 from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 import pytest
@@ -33,17 +31,6 @@ from openjiuwen.harness.rails.context_engineering_rail import ContextEngineering
 from openjiuwen.harness.prompts.sections.workspace import build_workspace_section
 from openjiuwen.harness.prompts.sections.context import build_context_section, build_tools_content
 from openjiuwen.core.foundation.llm.model import init_model
-
-
-@pytest.fixture
-def tmp_path() -> Path:
-    base = Path("D:/work/code/agent-core/.tmp_test_context_engineering_rail")
-    path = base / uuid.uuid4().hex
-    path.mkdir(parents=True, exist_ok=False)
-    try:
-        yield path
-    finally:
-        shutil.rmtree(path, ignore_errors=True)
 
 
 class _DummyResponse:
@@ -371,12 +358,12 @@ def test_build_tools_content():
 #     """build_context_section should include language-specific tools content."""
 #     sys_operation = _make_sys_operation(tmp_path)
 #     workspace = Workspace(root_path=str(tmp_path))
-
+#
 #     mock_manager = Mock()
-#     mock_manager.list.return_value = [ToolCard(name="MyTool", description="My desc.")]
+#     mock_manager.list.return_value = [ToolCard(name="bash", description="执行 Shell 命令。")]
 #     tools_cn = build_tools_content(mock_manager, "cn")
 #     tools_en = build_tools_content(mock_manager, "en")
-
+#
 #     section_cn = await build_context_section(
 #         sys_operation,
 #         workspace,
@@ -385,8 +372,8 @@ def test_build_tools_content():
 #         timezone="Asia/Shanghai",
 #     )
 #     assert "# 可用工具" in section_cn.render("cn")
-#     assert "MyTool" in section_cn.render("cn")
-
+#     assert "bash" in section_cn.render("cn")
+#
 #     section_en = await build_context_section(
 #         sys_operation,
 #         workspace,
@@ -395,7 +382,7 @@ def test_build_tools_content():
 #         timezone="Asia/Shanghai",
 #     )
 #     assert "# Available Tools" in section_en.render("en")
-#     assert "MyTool" in section_en.render("en")
+#     assert "bash" in section_en.render("en")
 
 
 @pytest.mark.asyncio

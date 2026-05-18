@@ -743,13 +743,13 @@ class TestModelContext:
 
     # ---------- token_counter ----------
     @pytest.mark.asyncio
-    async def test_token_counter_none_returns_zero_tokens(self):
+    async def test_token_counter_returns_tokens(self):
         context = await self.create_context()
         await context.add_messages([UserMessage(content="hi")])
         stat = context.statistic()
         assert stat.total_messages == 1
-        assert stat.total_tokens == 0
-        assert stat.user_message_tokens == 0
+        assert stat.total_tokens == 16
+        assert stat.user_message_tokens == 16
 
     @pytest.mark.asyncio
     async def test_token_counter_mock_returns_tokens(self):

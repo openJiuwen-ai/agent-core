@@ -4,7 +4,10 @@
 import uuid
 from typing import Any, Dict, List, Optional
 
-import tiktoken
+try:
+    import tiktoken
+except ModuleNotFoundError:
+    tiktoken = None  # type: ignore
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
