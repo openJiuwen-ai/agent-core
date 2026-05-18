@@ -426,12 +426,17 @@ class TeamRuntimeManager:
         *,
         team_name: str,
         session_id: str,
+        hide_dm: bool = False,
     ) -> Optional[TeamMonitor]:
-        """Return a TeamMonitor for the active runtime bound to ``(team_name, session_id)``."""
+        """Return a TeamMonitor for the active runtime bound to ``(team_name, session_id)``.
+
+        ``hide_dm`` forwards to :func:`create_monitor`; see ``TeamMonitor``
+        for filtering semantics.
+        """
         entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
         if entry is None:
             return None
-        return create_monitor(entry.agent)
+        return create_monitor(entry.agent, hide_dm=hide_dm)
 
     async def list_active_teams(self) -> list["ActiveTeamInfo"]:
         """Return read-only snapshots of every team currently in the pool.
@@ -774,9 +779,11 @@ class TeamRuntimeManager:
             # on never-built teams: recover_team iterates DB members and
             # is a no-op when none exist.
             await agent.recover_team()
+            await self._flush_team_manifest(agent, team_session)
         elif kind is RunActionKind.CREATE:
             await self._pre_run_with_inputs(team_session, inputs)
             agent = spec.build()
+            await self._flush_team_manifest(agent, team_session)
         else:
             raise RuntimeError(f"Unhandled RunActionKind: {kind!r}")
 
@@ -805,6 +812,12 @@ class TeamRuntimeManager:
     async def _pre_run_with_inputs(session: AgentTeamSession, inputs: object) -> None:
         """Run ``session.pre_run`` only forwarding ``inputs`` when it's a dict."""
         await session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
+
+    @staticmethod
+    async def _flush_team_manifest(agent: "TeamAgent", session: AgentTeamSession) -> None:
+        """Persist the minimum team manifest before exposing runtime_ready."""
+        agent.persist_session_manifest(session)
+        await session.flush_checkpoint()
 
 
 _REJECT_KINDS = frozenset(

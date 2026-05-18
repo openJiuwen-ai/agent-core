@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """Task-board coordination events.
 
 Owns ``TASK_CLAIMED`` (targeted assignment to one member) and the
@@ -47,6 +47,15 @@ class TaskBoardHandler(BaseCoordinationHandler):
         Without this fallback an idle leader would miss the board
         change until the next stale-pending poll, which can be up to
         ``_STALE_PENDING_SECONDS`` away.
+
+        Self-assignment rendering is role-aware: a teammate / leader
+        sees the teammate-oriented ``dispatcher.task_assigned_to_self``
+        prompt ("call view_task and start working"). A human_agent
+        avatar sees the HITT-specific ``hitt.task_assigned_to_self_human``
+        prompt, which frames the event as a notification for the
+        controlling human and tells the avatar LLM not to autonomously
+        call tools — the avatar's actions are driven only by Inbox
+        instructions from its controller.
         """
         member_name = self._blueprint.member_name
         if not member_name or self._infra.task_manager is None:
@@ -56,11 +65,37 @@ class TaskBoardHandler(BaseCoordinationHandler):
             await self.on_task_board_event(event)
             return
         await self._poll.resume_polls()
-        content = t("dispatcher.task_assigned_to_self", task_id=payload.task_id)
+
+        backend = self._infra.team_backend
+        is_self_human = backend is not None and backend.is_human_agent(member_name)
+        if is_self_human:
+            # Title lookup is best-effort: a glitch must not break the
+            # dispatch loop. Same exception discipline as
+            # ``MessageHandler._notify_human_agent_inbound``.
+            title = ""
+            try:
+                task = await self._infra.task_manager.get(payload.task_id)
+                if task is not None:
+                    title = task.title or ""
+            except Exception as exc:
+                team_logger.warning(
+                    "task_assigned_to_human_agent: title lookup failed for {}: {}",
+                    payload.task_id,
+                    exc,
+                )
+            content = t(
+                "hitt.task_assigned_to_self_human",
+                task_id=payload.task_id,
+                title=title,
+            )
+        else:
+            content = t("dispatcher.task_assigned_to_self", task_id=payload.task_id)
+
         team_logger.info(
-            "[{}] received TASK_CLAIMED for self, task_id={}",
+            "[{}] received TASK_CLAIMED for self, task_id={}, human_agent={}",
             member_name,
             payload.task_id,
+            is_self_human,
         )
         await self._round.deliver_input(content)
 

@@ -691,6 +691,13 @@ class TeamAgent(BaseAgent):
         )
         agent = cls(card)
         agent.configure(spec, context)
+        # Each teammate process holds its own TeamBackend instance with
+        # an empty HITT roster cache; pull the current roster from DB so
+        # sync ``is_human_agent`` checks in coordination handlers /
+        # rails reflect dynamically-spawned humans created on the leader.
+        backend = agent.team_backend
+        if backend is not None:
+            await backend.refresh_human_agent_roster()
         return agent
 
     async def _on_teammate_created(self, teammate_id: str):
@@ -762,6 +769,10 @@ class TeamAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _persist_leader_config(self, session) -> None:
+        self._recovery_manager.persist_leader_config(session)
+
+    def persist_session_manifest(self, session) -> None:
+        """Persist the minimum session manifest needed for recovery and cleanup."""
         self._recovery_manager.persist_leader_config(session)
 
     def _persist_allocator_state(self) -> None:

@@ -160,7 +160,7 @@ class SqlMessageStore(BaseMessageStore):
             filters['user_id'] = message_filter['user_id']
         if message_filter.get('scope_id'):
             filters['scope_id'] = message_filter['scope_id']
-        if message_filter.get('session_id'):
+        if message_filter.get('session_id') is not None:
             filters['session_id'] = message_filter['session_id']
 
         messages = await self.sql_db_store.get_with_sort(

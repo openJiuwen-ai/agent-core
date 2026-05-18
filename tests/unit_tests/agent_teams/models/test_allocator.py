@@ -466,11 +466,58 @@ def test_by_model_name_load_state_dict_tolerates_malformed_input():
     ]
     a = ByModelNameAllocator(pool)
     digest = a.state_dict()["pool_digest"]
-    a.load_state_dict({"inner_indexes": "not-a-dict", "pool_digest": digest})
+    a.load_state_dict({"counters": "not-a-list", "pool_digest": digest})
     assert a.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base == "http://a1"
 
-    a.load_state_dict({"inner_indexes": {"gpt-4": "bogus"}, "pool_digest": digest})
+    a.load_state_dict({"counters": [{"model_name": "gpt-4", "index": "bogus"}], "pool_digest": digest})
     assert a.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base == "http://a1"
+
+
+def test_by_model_name_load_state_dict_accepts_legacy_dict_format():
+    # Sessions persisted before counters were serialised as a list still
+    # carry ``inner_indexes`` as a ``dict[model_name, int]``. ``load_state_dict``
+    # must read them so an upgrade does not silently reset rotation counters.
+    pool = [
+        _make_named_entry("gpt-4", "a1"),
+        _make_named_entry("gpt-4", "a2"),
+        _make_named_entry("claude", "c1"),
+        _make_named_entry("claude", "c2"),
+    ]
+    a = ByModelNameAllocator(pool)
+    digest = a.state_dict()["pool_digest"]
+    legacy_state = {"inner_indexes": {"gpt-4": 1, "claude": 1}, "pool_digest": digest}
+    a.load_state_dict(legacy_state)
+    assert a.allocate(model_name="gpt-4").to_team_model_config().model_client_config.api_base == "http://a2"
+    assert a.allocate(model_name="claude").to_team_model_config().model_client_config.api_base == "http://c2"
+
+
+def test_by_model_name_state_dict_round_trips_dotted_model_names():
+    # Regression: model names like ``"glm-5.1"`` / ``"claude-3.5-sonnet"`` are
+    # legitimate. When state was serialised as ``dict[model_name, int]`` the
+    # session persistence layer (``expand_nested_structure``) interpreted the
+    # '.' as a nested-path separator, silently rewrote ``"glm-5.1"`` into
+    # ``{"glm-5": {"1": ...}}`` and crashed with NoneType assignment when a
+    # sibling key like ``"glm-5"`` already pinned the prefix to a scalar.
+    pool = [
+        _make_named_entry("glm-5", "g5a"),
+        _make_named_entry("glm-5", "g5b"),
+        _make_named_entry("glm-5.1", "g51a"),
+        _make_named_entry("claude-3.5-sonnet", "c35"),
+    ]
+    a = ByModelNameAllocator(pool)
+    a.allocate(model_name="glm-5")
+    a.allocate(model_name="glm-5.1")
+    snapshot = a.state_dict()
+
+    # ``counters`` must be a list so persistence never re-parses model names.
+    assert isinstance(snapshot["counters"], list)
+    by_name = {record["model_name"]: record["index"] for record in snapshot["counters"]}
+    assert by_name == {"glm-5": 1, "glm-5.1": 1, "claude-3.5-sonnet": 0}
+
+    b = ByModelNameAllocator(pool)
+    b.load_state_dict(snapshot)
+    assert b.allocate(model_name="glm-5").to_team_model_config().model_client_config.api_base == "http://g5b"
+    assert b.allocate(model_name="glm-5.1").to_team_model_config().model_client_config.api_base == "http://g51a"
 
 
 # ---------------------------------------------------------------------------
@@ -552,7 +599,8 @@ def test_persist_leader_config_includes_allocator_state():
 
     bucket = session.state["teams"]["t"]
     snapshot = bucket["model_allocator_state"]
-    assert snapshot["inner_indexes"] == {"gpt-4": 1, "claude": 1}
+    by_name = {record["model_name"]: record["index"] for record in snapshot["counters"]}
+    assert by_name == {"gpt-4": 1, "claude": 1}
     assert "pool_digest" in snapshot
 
 

@@ -252,11 +252,11 @@ class SpawnManager:
                     )
 
         ctx = self._configurator.ctx
-        # Role isn't stored on the member row; infer it from the live
-        # human-agent roster the leader holds. Without this the standard
-        # spawn path would label every UNSTARTED member as TEAMMATE and
-        # the human agent would inherit the wrong tool / rail set.
-        role = TeamRole.HUMAN_AGENT if team_backend.is_human_agent(teammate.member_name) else TeamRole.TEAMMATE
+        # Role is persisted on the member row (``TeamMember.role``) so
+        # cold recovery picks up dynamically-spawned humans too. Legacy
+        # DB files without the column get a backfilled ``teammate``
+        # default via ``database.engine._ensure_team_member_role_column``.
+        role = TeamRole(teammate.role)
         return TeamRuntimeContext(
             role=role,
             member_name=teammate.member_name,

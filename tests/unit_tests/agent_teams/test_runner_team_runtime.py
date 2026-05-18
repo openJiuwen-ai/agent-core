@@ -111,10 +111,9 @@ class FakeTeamAgent:
         self.invoke_calls = 0
         self.stream_calls = 0
 
-    async def invoke(self, inputs: Any, session=None) -> Any:
+    def persist_session_manifest(self, session) -> None:
         from openjiuwen.agent_teams.runtime.metadata import write_team_namespace
 
-        self.invoke_calls += 1
         write_team_namespace(
             session,
             self.team_name,
@@ -137,6 +136,10 @@ class FakeTeamAgent:
                 },
             },
         )
+
+    async def invoke(self, inputs: Any, session=None) -> Any:
+        self.invoke_calls += 1
+        self.persist_session_manifest(session)
         return {"team_name": self.team_name, "session_id": session.get_session_id()}
 
     async def stream(self, inputs: Any, session=None) -> AsyncIterator[Any]:
@@ -208,17 +211,50 @@ async def test_runner_run_agent_team_streaming_accepts_spec_and_emits_runtime_re
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_runner_run_agent_team_streaming_without_stream_logger_is_silent(isolated_checkpointer):
-    """Omitting ``stream_logger`` leaves the diagnostic logger untouched."""
+async def test_runner_run_agent_team_streaming_flushes_team_manifest_before_runtime_ready(isolated_checkpointer):
+    from openjiuwen.agent_teams.runtime.metadata import read_team_namespace
+
+    await Runner.start()
+    session_id = f"team_manifest_{uuid.uuid4().hex}"
+    team_name = "manifest_team"
+    spec = TeamAgentSpec.model_construct(team_name=team_name, agents={})
+    agent = FakeTeamAgent(team_name, stream_label="team.chunk")
+
+    stream = Runner.run_agent_team_streaming(
+        agent_team=spec,
+        inputs={"query": "hello"},
+        session=session_id,
+    )
+    try:
+        with patch.object(TeamAgentSpec, "build", return_value=agent):
+            ready_chunk = await stream.__anext__()
+
+        assert ready_chunk.payload["event_type"] == "team.runtime_ready"
+
+        restored = create_agent_team_session(session_id=session_id)
+        await restored.pre_run()
+        bucket = read_team_namespace(restored, team_name)
+
+        assert bucket is not None
+        assert bucket["spec"]["team_name"] == team_name
+        assert bucket["context"]["db_config"]["connection_string"] == ":memory:"
+    finally:
+        await stream.aclose()
+        await Runner.stop()
+        await isolated_checkpointer.release(session_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_runner_run_agent_team_streaming_without_stream_logger(isolated_checkpointer, tmp_path):
+    """Omitting ``stream_logger`` leaves no diagnostic file behind."""
     await Runner.start()
     session_id = f"team_spec_{uuid.uuid4().hex}"
     spec = TeamAgentSpec.model_construct(team_name="spec_team", agents={})
     agent = FakeTeamAgent("spec_team", stream_label="team.chunk")
+    target = tmp_path / "stream.log"
 
-    with (
-        patch.object(TeamAgentSpec, "build", return_value=agent),
-        patch("openjiuwen.agent_teams.monitor.stream_logger.team_logger") as log_mock,
-    ):
+    with patch.object(TeamAgentSpec, "build", return_value=agent):
         chunks = [
             chunk
             async for chunk in Runner.run_agent_team_streaming(
@@ -229,9 +265,7 @@ async def test_runner_run_agent_team_streaming_without_stream_logger_is_silent(i
         ]
 
     assert len(chunks) == 2
-    assert log_mock.info.call_count == 0
-    assert log_mock.debug.call_count == 0
-    assert log_mock.warning.call_count == 0
+    assert not target.exists()
 
     await Runner.stop()
     await isolated_checkpointer.release(session_id)
@@ -239,20 +273,19 @@ async def test_runner_run_agent_team_streaming_without_stream_logger_is_silent(i
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_runner_run_agent_team_streaming_with_stream_logger_logs(isolated_checkpointer):
-    """Passing a ``TeamStreamLogger`` logs chunks without perturbing the stream."""
+async def test_runner_run_agent_team_streaming_with_stream_logger_writes_file(isolated_checkpointer, tmp_path):
+    """Passing a ``TeamStreamLogger`` writes aggregated records to its file
+    without perturbing the streamed chunks."""
     from openjiuwen.agent_teams.monitor import TeamStreamLogger
 
     await Runner.start()
     session_id = f"team_spec_{uuid.uuid4().hex}"
     spec = TeamAgentSpec.model_construct(team_name="spec_team", agents={})
     agent = FakeTeamAgent("spec_team", stream_label="team.chunk")
-    stream_logger = TeamStreamLogger()
+    log_path = tmp_path / "stream.log"
+    stream_logger = TeamStreamLogger(log_path)
 
-    with (
-        patch.object(TeamAgentSpec, "build", return_value=agent),
-        patch("openjiuwen.agent_teams.monitor.stream_logger.team_logger") as log_mock,
-    ):
+    with patch.object(TeamAgentSpec, "build", return_value=agent):
         chunks = [
             chunk
             async for chunk in Runner.run_agent_team_streaming(
@@ -267,9 +300,10 @@ async def test_runner_run_agent_team_streaming_with_stream_logger_logs(isolated_
     assert len(chunks) == 2
     assert chunks[0].payload["event_type"] == "team.runtime_ready"
     assert chunks[1].payload["event_type"] == "team.chunk"
-    # The runtime_ready chunk + the FakeTeamAgent message were logged.
-    emitted = log_mock.info.call_args_list + log_mock.debug.call_args_list
-    assert len(emitted) >= 1
+    # File got the runtime_ready record at minimum; flush ran in finally.
+    text = log_path.read_text(encoding="utf-8")
+    assert "category=runtime_ready" in text
+    assert "stream end" in text
 
     await Runner.stop()
     await isolated_checkpointer.release(session_id)
@@ -1283,7 +1317,13 @@ class TestTeamRuntimeManagerStopTeam:
 
         with patch("openjiuwen.agent_teams.runtime.manager.create_monitor", return_value="monitor") as mocked:
             assert await manager.get_monitor(team_name=team_name, session_id=session_id) == "monitor"
-            mocked.assert_called_once_with(fake_agent)
+            mocked.assert_called_once_with(fake_agent, hide_dm=False)
+
+        with patch("openjiuwen.agent_teams.runtime.manager.create_monitor", return_value="dm_hidden") as mocked:
+            assert (
+                await manager.get_monitor(team_name=team_name, session_id=session_id, hide_dm=True) == "dm_hidden"
+            )
+            mocked.assert_called_once_with(fake_agent, hide_dm=True)
 
         assert await manager.get_monitor(team_name=team_name, session_id="other") is None
         assert await manager.get_monitor(team_name="missing", session_id=session_id) is None

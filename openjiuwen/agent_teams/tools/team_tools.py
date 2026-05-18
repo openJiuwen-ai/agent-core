@@ -9,6 +9,7 @@ and messaging capabilities as tools for agents to use.
 """
 
 import json
+import re
 from abc import ABC
 from functools import wraps
 from typing import (
@@ -129,10 +130,17 @@ MEMBER_TOOLS: Set[str] = MEMBER_ONLY_TOOLS | SHARED_TOOLS
 
 # Tools available to the reserved ``human_agent`` role. The human
 # agent acts on its corresponding external user's behalf, so it gets
-# read access to tasks and a self-only completion tool. It does not
-# get ``send_message`` — user voice goes through ``HumanAgentInbox``
-# with explicit ``@target`` routing, not through an LLM-controlled
-# tool. It does not get ``claim_task`` — autonomous claiming is a
+# read access to tasks, a self-only completion tool, and the shared
+# ``send_message`` tool so the user can ask the avatar to relay a
+# message to other members ("tell the leader I'm in a meeting").
+# The behavioural constraint — that the avatar must **not** speak on
+# its own initiative and may only send when the user explicitly
+# instructs a relay — is enforced in the HITT system prompt section,
+# not in the tool's ``invoke``. The user's own voice still flows
+# through ``HumanAgentInbox`` with explicit ``@target`` routing; this
+# tool is a complementary path for user-driven outbound speech.
+#
+# ``claim_task`` is intentionally absent — autonomous claiming is a
 # teammate behavior; the user's avatar must wait for explicit leader
 # assignment via ``update_task(assignee=...)`` instead.
 #
@@ -142,7 +150,20 @@ MEMBER_TOOLS: Set[str] = MEMBER_ONLY_TOOLS | SHARED_TOOLS
 HUMAN_AGENT_TOOLS: Set[str] = {
     "view_task",
     "member_complete_task",
+    "send_message",
 }
+
+
+# ``member_name`` is used verbatim as a primary key, a message routing
+# token, and a path segment under ``team_home``. Allowing non-ASCII
+# (e.g. CJK) or shell-significant characters in any of those positions
+# silently breaks routing on some transports and produces unreadable
+# directory layouts on disk. Restrict to the DNS-label-style alphabet
+# used everywhere else in the ecosystem (k8s pods, docker containers):
+# lowercase ASCII letters, digits, and hyphen, with a leading letter so
+# the name is never a bare number or starts with a separator. Enforced
+# at the only LLM-facing entry point (``spawn_member``).
+_MEMBER_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]*$")
 
 
 # ========== Team Management ==========
@@ -309,6 +330,19 @@ class SpawnMemberTool(TeamTool):
         display_name = inputs.get("display_name")
         desc = inputs.get("desc", "")
         role_type = (inputs.get("role_type") or "teammate").lower()
+
+        if not member_name or not _MEMBER_NAME_PATTERN.match(member_name):
+            return ToolOutput(
+                success=False,
+                error=(
+                    f"Invalid member_name {member_name!r}: must start with a "
+                    "lowercase ASCII letter (a-z), followed by lowercase "
+                    "letters, digits (0-9) or hyphen (-); no uppercase, "
+                    "underscore, whitespace, or non-ASCII characters "
+                    "(including CJK) — member_name is reused as a routing "
+                    "token and a filesystem path segment"
+                ),
+            )
 
         if role_type not in {"teammate", "human_agent"}:
             return ToolOutput(
@@ -1286,6 +1320,21 @@ class SendMessageTool(TeamTool):
                 success=False,
                 error="'user' cannot be combined in multicast; send to user separately",
             )
+
+        # A multicast covering every other team member is just a more
+        # expensive broadcast — reject it and force the caller onto the
+        # broadcast path. list_members() already excludes the caller, so
+        # an exact set match means the targets are the whole roster.
+        if self._team:
+            roster = {member.member_name for member in await self._team.list_members()}
+            if roster and set(deduped) == roster:
+                return ToolOutput(
+                    success=False,
+                    error=(
+                        "Multicast targets cover every other team member; "
+                        "use to='*' to broadcast instead — same delivery, lower cost."
+                    ),
+                )
 
         await self._auto_start_members()
 

@@ -68,8 +68,8 @@ class MockMemoryIndex(BaseMemoryIndex):
             return self._data[user_id][scope_id].get(mem_id)
         return None
 
-    async def list_memories(self, user_id: str, scope_id: str, offset: int, limit: int,
-                            mem_types: list[str]) -> list[MemoryDoc]:
+    async def list_memories(self, user_id: str, scope_id: str, offset: int = 0, limit: int = 100,
+                            mem_types: list[str] | None = None) -> list[MemoryDoc]:
         if user_id not in self._data or scope_id not in self._data[user_id]:
             return []
         docs = sorted(self._data[user_id][scope_id].values(), key=lambda d: d.timestamp, reverse=True)

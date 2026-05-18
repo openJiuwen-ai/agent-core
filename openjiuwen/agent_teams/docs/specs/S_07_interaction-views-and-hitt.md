@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/interaction/`、`openjiuwen/agent_teams/constants.py`、`openjiuwen/agent_teams/runtime/manager.py`（`_dispatch_payload`）、`openjiuwen/agent_teams/agent/coordination/handlers/message.py`（HITT inbound 钩子）|
-| 最近一次修订日期 | 2026-05-14 |
-| 关联 feature | — |
+| 最近一次修订日期 | 2026-05-15 |
+| 关联 feature | F_13_human-agent-send-message.md |
 
 ## 范围 / 边界
 
@@ -329,7 +329,7 @@ RESERVED_MEMBER_NAMES: frozenset[str] = frozenset({
 ### 运行约束（代码层 + Prompt 层双重保证）
 
 1. `human_agent` 是保留成员名，作动态 spawn 的默认人类成员名；自定 HUMAN_AGENT 成员名可避开此保留名。普通 teammate 的 predefined 成员仍然不允许撞保留名（`_validate_reserved_names`）。
-2. human-agent 走标准 `UNSTARTED → spawn` 流程（与 teammate 一致），但工具集仅保留 `view_task` + `member_complete_task`（`HUMAN_AGENT_TOOLS`）；rail 装配会剥离 `FirstIterationGate` / `TeamToolApprovalRail`。
+2. human-agent 走标准 `UNSTARTED → spawn` 流程（与 teammate 一致），工具集为 `HUMAN_AGENT_TOOLS` = `view_task` + `member_complete_task` + `send_message`；rail 装配会剥离 `FirstIterationGate` / `TeamToolApprovalRail`。其中 `send_message` 是**用户驱动的转发通道**：能否调用、给谁、说什么完全由用户在 Inbox 输入里的明确指令决定。约束写在 `team_hitt` prompt section 里（不在 `invoke()` 里加 caller-role 分支）——选择 prompt 而非代码强约束是因为「该不该转发」是语义判断，最适合让 LLM 在 prompt 引导下判断；如果未来发现 LLM 越权滥用，再加 tool-level 静态护栏（如 multicast/broadcast 拒收）。
 3. 一旦 `task.assignee` 指向某个 human-agent 且状态 CLAIMED，`UpdateTaskTool` 拒绝 reassign 和 cancel；批量 cancel 链路也跳过。
 4. 发送给 human-agent 的点对点消息 `is_read=True`；广播后 human-agent 的 `read_at` 立即跟进。
 5. `TeamPolicyRail` 注入 `team_hitt` section（priority=12），按 role 给 leader / teammate / human_agent 下达角色特定的行为约束。section 注入条件来自 `backend.hitt_enabled()`——反映运行时 effective flag，不依赖 roster 是否已 spawn。
@@ -340,6 +340,6 @@ RESERVED_MEMBER_NAMES: frozenset[str] = frozenset({
 - **runtime 子系统（`S_06_runtime-pool-dispatch`）**：`TeamRuntimeManager.interact / register_human_agent_inbound / pause_team / stop_team / release_session / delete_team` 以本规约定义的 payload / inbox / `DeliverResult` 为契约。`_dispatch_payload` 依赖三视角与 inbox 的映射不变；`InteractGate` 不感知具体 channel，只控制并发。新视角加进来时必须在 `_dispatch_payload` 显式补一支，runtime 不会自动 fallback。
 - **coordination 子系统（`S_03_coordination-protocol`）**：dispatcher / handler 永远拿到的是 `EventMessage` 或 `InnerEventMessage`，不是 `InteractPayload`。本规约的不变量 1（解析唯一性）和不变量 11（interaction 不感知 wake-up）配合 coordination 的铁律 1（不做决策）共同保证 mention regex 不会再次出现在 dispatcher。`MessageHandler.on_message_or_broadcast` 是消息总线 → `HumanAgentInboundEvent` 的唯一桥梁。
 - **prompts 子系统（`S_09_prompts-and-rails`）**：`team_hitt` section 的内容由 prompts 维护，本规约仅约束注入条件（`backend.hitt_enabled()`）和 priority。
-- **tools 子系统（`S_08_team-tools-contract`）**：`HUMAN_AGENT_TOOLS` 白名单（`view_task` + `member_complete_task`）由 tools 定义；本规约仅约束 human-agent rail 装配剥离 `FirstIterationGate` / `TeamToolApprovalRail` 这条不变量。
+- **tools 子系统（`S_08_team-tools-contract`）**：`HUMAN_AGENT_TOOLS` 白名单（`view_task` + `member_complete_task` + `send_message`）由 tools 定义；本规约仅约束 human-agent rail 装配剥离 `FirstIterationGate` / `TeamToolApprovalRail` 这条不变量，以及 `send_message` 在 human-agent 角色下「用户驱动转发」的语义约束（由 prompt 强制）。
 - **schema 层（`S_12_schema-data-models`）**：`TeamRole.HUMAN_AGENT`、`TeamMemberSpec.role_type` 是本规约依赖的输入；本规约不在 schema 里加字段，新增视角应在 `interaction/payload.py` 加 dataclass，不要污染 schema。
 - **CLI 子系统（`S_15_cli-tui`）**：`run_team_cli` 文本入口透传给 `Runner.interact_agent_team`，唯一一次解析在 `parse_interact_str`；CLI 不做二次解析、不读 mention regex。`HumanAgentInboundEvent` 的反向通道由 CLI `inbox_sink` 渲染。

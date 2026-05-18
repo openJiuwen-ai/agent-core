@@ -58,13 +58,14 @@ async def db():
             display_name="HITT",
             leader_member_name="team_leader",
         )
-        for name in (HUMAN, TEAMMATE):
+        for name, role in ((HUMAN, TeamRole.HUMAN_AGENT.value), (TEAMMATE, TeamRole.TEAMMATE.value)):
             await database.member.create_member(
                 member_name=name,
                 team_name="hitt_team",
                 display_name=name,
                 agent_card=AgentCard().model_dump_json(),
                 status="READY",
+                role=role,
                 mode=MemberMode.BUILD_MODE.value,
             )
         yield database
@@ -96,6 +97,11 @@ async def team_backend(db, messager):
         ],
         enable_hitt=True,
     )
+    # ``predefined_members`` is consumed by ``build_team``; this fixture
+    # short-circuits that path by writing rows directly in the ``db``
+    # fixture, so seed the in-memory HITT roster from DB the same way
+    # cold-recovery does in production.
+    await backend.refresh_human_agent_roster()
     yield backend
 
 

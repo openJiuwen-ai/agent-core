@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/models/` |
-| 最近一次修订日期 | 2026-05-09 |
+| 最近一次修订日期 | 2026-05-16 |
 | 关联 feature | — |
 
 ## 范围 / 边界
@@ -208,7 +208,7 @@ class ModelAllocator(Protocol):
 | 类 | `allocate(None)` | `allocate(name)` | 持久化字段 | 备注 |
 |---|---|---|---|---|
 | `RoundRobinModelAllocator` | 推进 `_index`，返回下一条 | 同上（忽略 name） | `index` + `pool_digest` | 全 pool 线性轮转，name-agnostic |
-| `ByModelNameAllocator` | `None` | 取 group → 推进 group 内 `_inner_indexes[name]` → 返回 | `inner_indexes`（dict）+ `pool_digest` | 缺 name 或 name 未在池中 → `None`，调用方走 per-agent 兜底 |
+| `ByModelNameAllocator` | `None` | 取 group → 推进 group 内 `_inner_indexes[name]` → 返回 | `counters`（list of `{model_name, index}`）+ `pool_digest`；`load_state_dict` 兼容读旧 `inner_indexes`（dict）格式 | 缺 name 或 name 未在池中 → `None`，调用方走 per-agent 兜底。`counters` 用 list 而非 `dict[model_name, int]`，是因为 model_name 可能含 `.` / `[`（如 `"glm-5.1"`），而 session 持久化层把这类字符当 nested-path 解读 |
 | `RouterAllocator` | 返回 `pool[0]` 作为团队默认模型 | name 唯一映射 → 命中即返回；未命中 → `None` | 仅 `pool_digest` | 构造时校验池非空 + name 唯一；`load_state_dict` no-op |
 
 `pool_digest` 由 `_pool_digest` 计算：每条 entry 取

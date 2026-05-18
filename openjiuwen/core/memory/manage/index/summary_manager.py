@@ -43,9 +43,9 @@ class SummaryManager(BaseMemoryManager):
             for mem_unit in memory_list:
                 if not isinstance(mem_unit, SummaryUnit):
                     continue
-                plaintext_content = BaseMemoryManager.decrypt_memory_if_needed(
+                plaintext_content = BaseMemoryManager.encrypt_memory_if_needed(
                     key=self.crypto_key,
-                    ciphertext=mem_unit.summary
+                    plaintext=mem_unit.summary
                 ) if self.crypto_key else mem_unit.summary
 
                 memory_doc = MemoryDoc(
@@ -176,20 +176,20 @@ class SummaryManager(BaseMemoryManager):
             user_id=user_id,
             scope_id=scope_id,
             query=query,
-            mem_type=self.mem_type,
+            mem_types=[self.mem_type],
             top_k=top_k
         )
 
         result = []
         for memory_doc, score in search_results:
-            encrypted_content = BaseMemoryManager.encrypt_memory_if_needed(
+            decrypted_content = BaseMemoryManager.decrypt_memory_if_needed(
                 key=self.crypto_key,
-                plaintext=memory_doc.text
+                ciphertext=memory_doc.text
             ) if self.crypto_key else memory_doc.text
 
             result.append({
                 "id": memory_doc.id,
-                "mem": encrypted_content,
+                "mem": decrypted_content,
                 "mem_type": memory_doc.type,
                 "timestamp": memory_doc.timestamp,
                 "score": score,
@@ -199,7 +199,7 @@ class SummaryManager(BaseMemoryManager):
         return result
 
     async def list_user_summary(self, user_id: str, scope_id: str,
-                                offset: int, batch_size: int) -> list[dict[str, Any]]:
+                                offset: int = 0, batch_size: int = 100) -> list[dict[str, Any]]:
         if not self.memory_index:
             memory_logger.warning(
                 "memory_index is not initialized, cannot list user summary",
@@ -216,14 +216,14 @@ class SummaryManager(BaseMemoryManager):
             return []
         result = []
         for memory_doc in summary_memories:
-            encrypted_content = BaseMemoryManager.encrypt_memory_if_needed(
+            decrypted_content = BaseMemoryManager.decrypt_memory_if_needed(
                 key=self.crypto_key,
-                plaintext=memory_doc.text
+                ciphertext=memory_doc.text
             ) if self.crypto_key else memory_doc.text
 
             result.append({
                 "id": memory_doc.id,
-                "mem": encrypted_content,
+                "mem": decrypted_content,
                 "mem_type": memory_doc.type,
                 "timestamp": memory_doc.timestamp,
                 "source_id": memory_doc.fields.get("source_id"),

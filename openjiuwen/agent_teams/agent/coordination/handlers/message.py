@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """Message-domain coordination events.
 
 Owns MESSAGE / BROADCAST routing, periodic mailbox polling, and the
@@ -102,11 +102,19 @@ class MessageHandler(BaseCoordinationHandler):
     async def _process_unread_messages(self, member_name: str, *, use_steer: bool = True) -> None:
         """Read unread messages, feed to agent one by one, loop until no new messages.
 
+        The role lookup happens once up front: a member is or is not a
+        human-agent for the lifetime of this drain, so per-message
+        ``is_human_agent`` checks would just churn the same backend
+        call. The flag selects the harness-input template — see
+        ``_format_message``.
+
         Args:
             member_name: Current member ID.
             use_steer: When True, use steer instead of follow_up for running agent.
         """
         seen_ids: set[str] = set()
+        backend = self._infra.team_backend
+        is_human_agent = backend is not None and backend.is_human_agent(member_name)
 
         while True:
             all_unread = await self._read_all_unread(member_name)
@@ -125,7 +133,7 @@ class MessageHandler(BaseCoordinationHandler):
                         msg.message_id,
                     )
                     return
-                text = self._format_message(msg)
+                text = self._format_message(msg, is_human_agent=is_human_agent)
                 team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
                 await self._round.deliver_input(text, use_steer=use_steer)
@@ -238,16 +246,25 @@ class MessageHandler(BaseCoordinationHandler):
         merged.sort(key=lambda m: m.timestamp, reverse=True)
         return merged
 
-    @staticmethod
-    def _format_message(msg: Any) -> str:
+    def _format_message(self, msg: Any, *, is_human_agent: bool) -> str:
         """Format one TeamMessage for agent input.
 
         Includes message_id so the agent can call mark_message_read,
         and distinguishes direct vs broadcast messages.
+
+        Rendering is role-aware. A teammate / leader sees
+        ``dispatcher.msg_received`` ("reply via send_message if the
+        sender is waiting"). A human_agent avatar sees
+        ``hitt.msg_received_for_human``, which frames the message as a
+        notification for the controlling human and tells the avatar LLM
+        not to autonomously call ``send_message`` — the avatar's
+        outbound actions are driven only by Inbox instructions from
+        its controller.
         """
         msg_type = t("dispatcher.msg_type_broadcast") if msg.broadcast else t("dispatcher.msg_type_direct")
+        key = "hitt.msg_received_for_human" if is_human_agent else "dispatcher.msg_received"
         return t(
-            "dispatcher.msg_received",
+            key,
             msg_type=msg_type,
             message_id=msg.message_id,
             sender=msg.from_member_name,

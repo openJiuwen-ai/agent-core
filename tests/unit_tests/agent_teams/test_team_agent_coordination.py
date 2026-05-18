@@ -483,6 +483,197 @@ async def test_task_claimed_for_other_member_skipped_when_round_in_flight():
     agent.steer.assert_not_called()
 
 
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_task_claimed_for_self_uses_teammate_template():
+    """Self-claim by a regular member keeps the teammate-style prompt.
+
+    Regression guard for the role-aware branch in ``on_task_claimed``:
+    when ``is_human_agent(member_name)`` is False, the assignee sees the
+    existing ``[任务指派]`` text that urges them to call ``view_task`` and
+    work on the task autonomously.
+    """
+    agent = _make_leader()
+    # Make sure the leader is NOT registered as a human-agent member —
+    # the default after _make_leader is an empty roster, but assert it
+    # explicitly so the test does not silently drift.
+    assert "leader-1" not in agent.team_backend.human_agent_names()
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.get = AsyncMock(return_value=MagicMock(title="Fix bug"))
+    agent._is_agent_running = lambda: False
+    agent._start_agent = AsyncMock()
+    agent.steer = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskClaimedEvent(
+            team_name="test-team",
+            member_name="leader-1",
+            task_id="task-42",
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_claimed(event)
+
+    agent._start_agent.assert_awaited_once()
+    content = agent._start_agent.await_args.args[0]
+    assert "[任务指派]" in content
+    assert "task-42" in content
+    # Teammate prompt steers toward autonomous execution via view_task.
+    assert "view_task" in content
+    # Must not pick the controller-facing HITT variant.
+    assert "控制者" not in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_task_claimed_for_self_uses_human_template_when_human_agent():
+    """Self-claim by a human-agent avatar renders the controller-facing prompt.
+
+    When the current member is registered as a human-agent, the
+    self-assignment branch must use ``hitt.task_assigned_to_self_human``
+    so the avatar LLM frames the event as a notification for its
+    controller (not as a self-execution prompt). The task title is
+    inlined so the controller sees what was assigned without a separate
+    ``view_task`` round-trip.
+    """
+    agent = _make_leader()
+    # Register the leader's member_name as a human-agent member. The
+    # role check in TaskBoardHandler only consults
+    # ``backend.is_human_agent`` — TeamRole itself is not gated, so
+    # piggy-backing on the leader fixture keeps the test small.
+    agent.team_backend._human_agent_names.add("leader-1")
+
+    task_row = MagicMock()
+    task_row.title = "Write design doc"
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.get = AsyncMock(return_value=task_row)
+    agent._is_agent_running = lambda: False
+    agent._start_agent = AsyncMock()
+    agent.steer = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskClaimedEvent(
+            team_name="test-team",
+            member_name="leader-1",
+            task_id="task-7",
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_claimed(event)
+
+    agent._configurator.task_manager.get.assert_awaited_once_with("task-7")
+    agent._start_agent.assert_awaited_once()
+    content = agent._start_agent.await_args.args[0]
+    # Controller-facing HITT prefix and inlined title.
+    assert "[任务指派给控制者]" in content
+    assert "task-7" in content
+    assert "Write design doc" in content
+    # Must not show the teammate guidance to autonomously call view_task.
+    assert "view_task" not in content
+    # Strict prohibition: the avatar LLM must see that autonomous behavior
+    # is forbidden and that it should stay silent until the controller
+    # explicitly instructs via Inbox. Without these keywords the model
+    # tends to drift into autonomous tool calls or acknowledgements.
+    assert "严格禁止" in content
+    assert "保持静默" in content
+    assert "send_message" in content
+    assert "member_complete_task" in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_task_claimed_for_human_self_swallows_title_lookup_error():
+    """Title lookup failure must not break the dispatch loop.
+
+    ``task_manager.get`` raising is logged + swallowed by the handler;
+    the prompt still goes out with an empty title placeholder so the
+    avatar still gets notified.
+    """
+    agent = _make_leader()
+    agent.team_backend._human_agent_names.add("leader-1")
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.get = AsyncMock(side_effect=RuntimeError("db down"))
+    agent._is_agent_running = lambda: False
+    agent._start_agent = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskClaimedEvent(
+            team_name="test-team",
+            member_name="leader-1",
+            task_id="task-9",
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_claimed(event)
+
+    agent._start_agent.assert_awaited_once()
+    content = agent._start_agent.await_args.args[0]
+    assert "[任务指派给控制者]" in content
+    assert "task-9" in content
+
+
+@pytest.mark.level0
+def test_format_message_uses_teammate_template_when_not_human():
+    """Default rendering keeps the teammate-style ``dispatcher.msg_received``."""
+    agent = _make_leader()
+    handler = agent._coordination.dispatcher.message
+
+    msg = MagicMock()
+    msg.message_id = "msg-1"
+    msg.from_member_name = "dev-1"
+    msg.content = "ping"
+    msg.broadcast = False
+
+    text = handler._format_message(msg, is_human_agent=False)
+    assert "msg-1" in text
+    assert "dev-1" in text
+    assert "ping" in text
+    # Teammate template carries the autonomous-reply guidance.
+    assert "send_message" in text
+    # And must not have leaked the controller-facing wording.
+    assert "控制者" not in text
+
+
+@pytest.mark.level0
+def test_format_message_uses_human_template_when_human_agent():
+    """HITT rendering frames the message as a for-controller notification.
+
+    Distinguishes direct vs broadcast through the ``msg_type`` field and
+    embeds the autonomy-suppressing tip so the avatar LLM does not
+    auto-trigger ``send_message`` on team-side messages.
+    """
+    agent = _make_leader()
+    handler = agent._coordination.dispatcher.message
+
+    direct = MagicMock()
+    direct.message_id = "msg-direct"
+    direct.from_member_name = "leader"
+    direct.content = "are you around?"
+    direct.broadcast = False
+
+    direct_text = handler._format_message(direct, is_human_agent=True)
+    assert "[转发给控制者的单播消息]" in direct_text
+    assert "msg-direct" in direct_text
+    assert "are you around?" in direct_text
+    # Strict prohibition keywords — the body must explicitly forbid
+    # autonomous replies (send_message), require the avatar to stay
+    # silent, and frame the input as a controller-facing notification
+    # rather than something to act on.
+    assert "严格禁止" in direct_text
+    assert "保持静默" in direct_text
+    assert "send_message" in direct_text
+
+    bcast = MagicMock()
+    bcast.message_id = "msg-bcast"
+    bcast.from_member_name = "leader"
+    bcast.content = "stand-up in 5"
+    bcast.broadcast = True
+
+    bcast_text = handler._format_message(bcast, is_human_agent=True)
+    assert "[转发给控制者的广播消息]" in bcast_text
+    assert "严格禁止" in bcast_text
+    assert "保持静默" in bcast_text
+
+
 def _make_claimed_task(
     task_id: str,
     assignee: str,

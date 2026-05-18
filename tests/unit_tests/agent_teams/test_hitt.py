@@ -347,17 +347,26 @@ async def test_backend_spawn_human_agent_blocked_when_hitt_disabled(team_backend
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_human_agent_role_tool_set(team_backend):
-    """human_agent gets only view_task + member_complete_task — no send_message,
-    no claim_task, no team coordination tools.
+    """human_agent gets view_task + member_complete_task + send_message —
+    no claim_task and no leader-only coordination tools.
+
+    ``send_message`` is exposed so the user can ask the avatar to relay
+    outbound messages ("tell the leader I'm in a meeting"); the HITT
+    prompt section enforces the "user-driven only" constraint, not the
+    tool's ``invoke()``.
+
     workspace_meta is attached by TeamToolRail elsewhere when a
     workspace_manager is configured, so it's not part of this set.
     """
     tools = create_team_tools(role="human_agent", agent_team=team_backend)
     names = sorted(tool.card.name for tool in tools if tool.card is not None)
     assert names == sorted(HUMAN_AGENT_TOOLS)
-    assert "send_message" not in names
+    assert "send_message" in names
+    assert "member_complete_task" in names
+    assert "view_task" in names
     assert "claim_task" not in names
     assert "update_task" not in names
+    assert "spawn_member" not in names
 
 
 @pytest.mark.asyncio
@@ -818,6 +827,45 @@ def test_hitt_section_human_agent_describes_constrained_tools():
 
 
 @pytest.mark.level0
+def test_hitt_section_human_agent_send_message_is_user_driven_cn():
+    """human_agent has send_message, but the prompt must bind it to
+    user-issued relay instructions and forbid autonomous use."""
+    section = build_team_hitt_section(
+        role=TeamRole.HUMAN_AGENT,
+        human_agent_names=[HUMAN_AGENT_MEMBER_NAME],
+        language="cn",
+        self_member_name=HUMAN_AGENT_MEMBER_NAME,
+    )
+    assert section is not None
+    body = section.content["cn"]
+    # The avatar must have send_message available...
+    assert "有 `send_message`" in body
+    # ...but explicitly framed as a user-driven relay, with autonomous
+    # use prohibited.
+    assert "转发通道" in body or "转告" in body
+    assert "不允许" in body
+    # The old "no send_message" claim must not survive.
+    assert "没有 `send_message`" not in body
+
+
+@pytest.mark.level0
+def test_hitt_section_human_agent_send_message_is_user_driven_en():
+    """English mirror of the cn user-driven send_message constraint."""
+    section = build_team_hitt_section(
+        role=TeamRole.HUMAN_AGENT,
+        human_agent_names=[HUMAN_AGENT_MEMBER_NAME],
+        language="en",
+        self_member_name=HUMAN_AGENT_MEMBER_NAME,
+    )
+    assert section is not None
+    body = section.content["en"]
+    assert "do have `send_message`" in body
+    assert "user-driven" in body or "relay channel" in body
+    assert "Never" in body or "never" in body
+    assert "no `send_message`" not in body
+
+
+@pytest.mark.level0
 def test_hitt_section_leader_lists_every_human_member():
     """Leader must see every registered human member name inline."""
     section = build_team_hitt_section(
@@ -843,6 +891,168 @@ def test_hitt_section_human_agent_tells_self_apart():
     assert section is not None
     body = section.content["cn"]
     assert "human_pm" in body
+
+
+@pytest.mark.level0
+def test_hitt_section_human_agent_strictly_forbids_autonomous_behavior_cn():
+    """Avatar prompt must spell out the strict prohibition on autonomous
+    replies and autonomous behavior when team event notifications land.
+
+    Regression guard: without the explicit "严格禁止" framing the avatar
+    LLM drifts into autonomous send_message / member_complete_task when
+    it sees something that looks reply-shaped or task-shaped in its input.
+    """
+    section = build_team_hitt_section(
+        role=TeamRole.HUMAN_AGENT,
+        human_agent_names=[HUMAN_AGENT_MEMBER_NAME],
+        language="cn",
+        self_member_name=HUMAN_AGENT_MEMBER_NAME,
+    )
+    assert section is not None
+    body = section.content["cn"]
+    # The notification prefixes must be named so the avatar recognises them.
+    assert "[转发给控制者的" in body
+    assert "[任务指派给控制者]" in body
+    # Strict-prohibition keywords must appear: both autonomous replies
+    # and autonomous tool calls are forbidden until the controller
+    # explicitly instructs.
+    assert "严格禁止" in body
+    assert "send_message" in body
+    assert "member_complete_task" in body
+
+
+@pytest.mark.level0
+def test_hitt_section_human_agent_strictly_forbids_autonomous_behavior_en():
+    """English mirror of the strict-prohibition guard."""
+    section = build_team_hitt_section(
+        role=TeamRole.HUMAN_AGENT,
+        human_agent_names=[HUMAN_AGENT_MEMBER_NAME],
+        language="en",
+        self_member_name=HUMAN_AGENT_MEMBER_NAME,
+    )
+    assert section is not None
+    body = section.content["en"]
+    assert "[For-Controller" in body
+    assert "[Task Assigned For Controller]" in body
+    assert "strictly forbidden" in body
+    assert "send_message" in body
+    assert "member_complete_task" in body
+
+
+@pytest.mark.level0
+def test_hitt_section_teammate_default_is_anonymous_cn():
+    """Default (expose_human_agents_to_teammates=False): teammate
+    must receive a HITT section that carries the collaboration
+    guidance but does NOT list any human_agent member_name and does
+    NOT use the "真实人类" label. Otherwise peer role (teammate vs
+    human_agent) would leak into the teammate's system prompt.
+    """
+    section = build_team_hitt_section(
+        role=TeamRole.TEAMMATE,
+        human_agent_names=["human_pm", "human_designer"],
+        language="cn",
+    )
+    assert section is not None
+    body = section.content["cn"]
+    # Anonymous variant carries the guidance.
+    assert "send_message" in body
+    # Roster must not leak: no concrete member_name, no "real humans" tag.
+    assert "human_pm" not in body
+    assert "human_designer" not in body
+    assert "真实人类" not in body
+    assert "下列人类成员" not in body
+
+
+@pytest.mark.level0
+def test_hitt_section_teammate_default_is_anonymous_en():
+    """English mirror of the teammate-default-anonymous guard."""
+    section = build_team_hitt_section(
+        role=TeamRole.TEAMMATE,
+        human_agent_names=["human_pm", "human_designer"],
+        language="en",
+    )
+    assert section is not None
+    body = section.content["en"]
+    assert "send_message" in body
+    assert "human_pm" not in body
+    assert "human_designer" not in body
+    assert "real humans" not in body.lower()
+    assert "the team includes the following human" not in body.lower()
+
+
+@pytest.mark.level0
+def test_hitt_section_teammate_with_expose_flag_lists_roster_cn():
+    """expose_human_agents_to_teammates=True restores the legacy
+    roster-exposing variant: every human_agent member_name is listed
+    inline and the "真实人类" label is back.
+    """
+    section = build_team_hitt_section(
+        role=TeamRole.TEAMMATE,
+        human_agent_names=["human_pm", "human_designer"],
+        language="cn",
+        expose_human_agents_to_teammates=True,
+    )
+    assert section is not None
+    body = section.content["cn"]
+    assert "human_pm" in body
+    assert "human_designer" in body
+    assert "真实人类" in body
+    assert "send_message" in body
+
+
+@pytest.mark.level0
+def test_hitt_section_teammate_with_expose_flag_lists_roster_en():
+    """English mirror of the teammate-expose-flag-lists-roster guard."""
+    section = build_team_hitt_section(
+        role=TeamRole.TEAMMATE,
+        human_agent_names=["human_pm", "human_designer"],
+        language="en",
+        expose_human_agents_to_teammates=True,
+    )
+    assert section is not None
+    body = section.content["en"]
+    assert "human_pm" in body
+    assert "human_designer" in body
+    assert "real humans" in body.lower()
+    assert "send_message" in body
+
+
+@pytest.mark.level0
+def test_hitt_section_expose_flag_does_not_affect_leader_or_human_agent():
+    """The expose flag is teammate-only: leader and human_agent
+    branches must produce the same content with or without it.
+    """
+    leader_off = build_team_hitt_section(
+        role=TeamRole.LEADER,
+        human_agent_names=["human_pm"],
+        language="cn",
+        expose_human_agents_to_teammates=False,
+    )
+    leader_on = build_team_hitt_section(
+        role=TeamRole.LEADER,
+        human_agent_names=["human_pm"],
+        language="cn",
+        expose_human_agents_to_teammates=True,
+    )
+    assert leader_off is not None and leader_on is not None
+    assert leader_off.content["cn"] == leader_on.content["cn"]
+
+    human_off = build_team_hitt_section(
+        role=TeamRole.HUMAN_AGENT,
+        human_agent_names=["human_pm"],
+        language="cn",
+        self_member_name="human_pm",
+        expose_human_agents_to_teammates=False,
+    )
+    human_on = build_team_hitt_section(
+        role=TeamRole.HUMAN_AGENT,
+        human_agent_names=["human_pm"],
+        language="cn",
+        self_member_name="human_pm",
+        expose_human_agents_to_teammates=True,
+    )
+    assert human_off is not None and human_on is not None
+    assert human_off.content["cn"] == human_on.content["cn"]
 
 
 # ---------------------------------------------------------------------------

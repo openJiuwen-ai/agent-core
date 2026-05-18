@@ -47,11 +47,11 @@ from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode
 from openjiuwen.harness.prompts import resolve_language as _resolve_language
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.memory.manager import TeamMemoryManager
     from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
     from openjiuwen.agent_teams.rails import FirstIterationGate
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.harness.tools.worktree import WorktreeManager
-    from openjiuwen.agent_teams.memory.manager import TeamMemoryManager
 
 
 def _resolve_team_mode(spec: TeamAgentSpec) -> str:
@@ -371,6 +371,7 @@ class AgentConfigurator:
             team_workspace_mount=team_workspace_mount,
             team_workspace_path=team_workspace_path,
             team_backend=self.team_backend,
+            expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
         )
 
         # Human agents have no autonomous task loop and no mailbox poll

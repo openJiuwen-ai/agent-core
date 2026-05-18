@@ -1246,6 +1246,25 @@ class GlobTool(Tool):
                 relative_paths.append(item)
         return relative_paths
 
+    @staticmethod
+    def _expand_brace_pattern(pattern: str) -> List[str]:
+        """Expand shell-style brace patterns like *.{py,js} into ['*.py', '*.js']."""
+        if '{' not in pattern or '}' not in pattern:
+            return [pattern]
+
+        def expand_group(s: str) -> List[str]:
+            match = re.search(r'\{([^{}]*)\}', s)
+            if not match:
+                return [s]
+            prefix = s[:match.start()]
+            suffix = s[match.end():]
+            results = []
+            for opt in match.group(1).split(','):
+                results.extend(expand_group(prefix + opt.strip() + suffix))
+            return results
+
+        return expand_group(pattern)
+
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         pattern = inputs.get("pattern")
         if not pattern:
@@ -1258,13 +1277,22 @@ class GlobTool(Tool):
 
         started_at = time.perf_counter()
 
-        res = await self.operation.fs().search_files(path, pattern)
-        if res.code != StatusCode.SUCCESS.code:
-            return ToolOutput(success=False, error=res.message)
+        expanded_patterns = self._expand_brace_pattern(pattern)
+        all_matching_files: List[str] = []
+        seen: set = set()
 
-        matching_files = [item.path for item in res.data.matching_files] if res.data else []
-        truncated = len(matching_files) > self.DEFAULT_MAX_RESULTS
-        limited_files = matching_files[:self.DEFAULT_MAX_RESULTS]
+        for pat in expanded_patterns:
+            res = await self.operation.fs().search_files(path, pat)
+            if res.code != StatusCode.SUCCESS.code:
+                return ToolOutput(success=False, error=res.message)
+            if res.data:
+                for item in res.data.matching_files:
+                    if item.path not in seen:
+                        seen.add(item.path)
+                        all_matching_files.append(item.path)
+
+        truncated = len(all_matching_files) > self.DEFAULT_MAX_RESULTS
+        limited_files = all_matching_files[:self.DEFAULT_MAX_RESULTS]
         filenames = self._relativize_paths(limited_files, path)
         duration_ms = int((time.perf_counter() - started_at) * 1000)
 

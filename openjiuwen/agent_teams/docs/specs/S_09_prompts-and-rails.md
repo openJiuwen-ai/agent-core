@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订日期 | 2026-05-09 |
-| 关联 feature | — |
+| 最近一次修订日期 | 2026-05-16 |
+| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md` |
 
 ## 范围 / 边界
 
@@ -38,6 +38,7 @@
 5. **section name 全局唯一**：`SystemPromptBuilder._sections` 是 `dict[str, PromptSection]`，同名 add 直接覆盖。团队 section 与 harness 内置 section（safety / capabilities / runtime / ...）必须不冲突。
 6. **section priority 单调约定**：团队静态 section 占 11–16，团队动态 section 占 65–66；harness 内置 section 排在 0–10、20–60、70–99。priority 升序拼接，相同 priority 顺序由 `dict` 插入序决定。
 7. **role-specific section 在不应出现的角色下返回 `None`**：`build_team_workflow_section` / `build_team_lifecycle_section` 在 `role != LEADER` 时返回 `None`；`build_team_hitt_section` 在没有 human_agent 注册时返回 `None`。**禁止用空字符串占位**——返回 `None` 等价于不挂 section。
+   - **TEAMMATE 默认走 anonymous 变体**：`build_team_hitt_section` 对 `role == TEAMMATE` 默认渲染一段**无名单、无 "real humans" 标签**的 role-neutral section（只承载"跨成员一律 `send_message`、容忍延迟、不要推断 peer 身份"等通用协作守则），peer role 不会泄漏到其它成员的 system prompt。开关 `TeamAgentSpec.expose_human_agents_to_teammates=True` 切换回旧版 roster-exposing section（列出所有 human_agent `member_name` + "real humans" 标签）。LEADER / HUMAN_AGENT 分支不受开关影响，始终拿完整 roster section。
 8. **`.md` 模板里只能用 `{{double_brace}}` 占位符**：单花括号会被 `PromptTemplate.format` 当字面量。当前只有 `system_prompt.md` 使用占位符；`cn/` `en/` 下的模板均为纯文本。
 
 ### 双语 / i18n

@@ -37,21 +37,32 @@ STRINGS: dict[str, str] = {
     # ===== spawn_member ========================================================
     # spawn_member._desc lives in descs/en/spawn_member.md
     "spawn_member.member_name": (
-        "Unique member name (semantic slug, e.g. 'backend-dev-1'); "
-        "serves as primary identifier and routing key "
-        "for all message/approval/task operations"
+        "[PUBLIC] Unique member name (semantic slug, e.g. 'backend-dev-1', "
+        "DNS-label-style kebab-case). **Must start with a lowercase ASCII "
+        "letter (a-z); the rest may be lowercase letters, digits (0-9) or "
+        "hyphen (-)** — no uppercase, underscore, whitespace, CJK or any "
+        "other non-ASCII characters. Serves as the primary identifier and "
+        "the routing key for all message/approval/task operations; must be "
+        "unique within the team"
     ),
     "spawn_member.display_name": (
-        "Human-readable display label for the member (e.g. 'Backend Expert'). "
-        "Purely presentational — not used for routing"
+        "[PUBLIC] Human-readable display label for the member (e.g. 'Backend Expert'); "
+        "purely presentational, not used for routing. "
+        "Injected into every other member's system prompt and returned by list_members — "
+        "do not put private content here"
     ),
     "spawn_member.desc": (
-        "Long-term role profile of the member, including professional background, "
+        "[PUBLIC] Long-term role profile of the member, including professional background, "
         "core expertise, preferred task types, collaboration style, "
-        "and boundaries the member should not own"
+        "and boundaries the member should not own. "
+        "Injected into every other member's system prompt and returned by list_members — "
+        "never put your internal assessment of the member, sensitive goals, "
+        "or confidential strategy here"
     ),
     "spawn_member.role_type": (
-        "Optional. Member role type. 'teammate' (default) = regular LLM teammate, "
+        "[INTERNAL] Optional. Member role type — drives framework wiring, "
+        "never rendered into any member's prompt text. "
+        "'teammate' (default) = regular LLM teammate, "
         "requires model_name/prompt to drive its avatar. 'human_agent' = human "
         "member driven by the real user via HumanAgentInbox; **rejects** model_name "
         "and prompt (the framework template manages them) — passing those fields "
@@ -59,11 +70,12 @@ STRINGS: dict[str, str] = {
         "the current build_team instance must not have disabled HITT"
     ),
     "spawn_member.prompt": (
-        "The first instruction the member receives at startup. "
-        "Use it to define initial priorities, task selection guidance, constraints, "
-        "or coordination expectations; give clear direction, "
-        "avoid generic startup filler, "
-        "and do not repeat the generic workflow. "
+        "[PRIVATE, visible only to this member] Long-term working conventions, "
+        "injected only into this member's own system prompt: stable working style, "
+        "technical preferences, collaboration constraints, "
+        "and any hidden goals or sensitive directives meant only for this member. "
+        "Do not write current-batch tasks or generic startup filler such as "
+        "'start working' or 'check the task list'. "
         "Forbidden when role_type='human_agent'"
     ),
     "spawn_member.model_name": (
@@ -176,13 +188,14 @@ STRINGS: dict[str, str] = {
     # ===== send_message ========================================================
     # send_message._desc lives in descs/en/send_message.md
     "send_message.to": (
-        'Recipient: member_name for point-to-point (e.g. "backend-dev-1"); '
+        'Recipient: member_name for a point-to-point DM (e.g. "backend-dev-1"), '
+        "visible only to you and that member; "
         'array of member names (e.g. ["m1","m2"]) for multicast — same content sent '
         "as separate messages to each member, cost is linear in recipient count and "
         "MORE expensive than broadcast for the same audience, use only when truly needed "
         'and cannot mix with "*"/"user"; '
         '"user" (teammates only, to reply to the user); '
-        '"*" for broadcast'
+        '"*" to broadcast on the team channel, visible to all members'
     ),
     "send_message.content": "Message content with clear action guidance or information",
     "send_message.summary": "5-10 word summary for message preview and logging",

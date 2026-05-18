@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/monitor/`、`openjiuwen/agent_teams/observability/`（预留） |
-| 最近一次修订日期 | 2026-05-14 |
+| 最近一次修订日期 | 2026-05-17 |
 | 关联 feature | F_09_team-stream-logging.md |
 
 ## 范围 / 边界
@@ -15,7 +15,7 @@
 
 1. **`monitor/` 子模块**——团队运行态的**只读观察面**：
    - `TeamMonitor` 暴露给 SDK / CLI / 上层 UI 的查询 API（团队/成员/任务/邮箱）+ 实时事件流（`MonitorEvent` 异步迭代器），以及 `Runner.get_agent_team_monitor` 这个公共 facade。
-   - `TeamStreamLogger`——`Runner.run_agent_team_streaming` 流式输出的**聚合诊断日志**处理对象：调用方构造后经 `stream_logger` 入参注入，runner 把每个 chunk 喂给它，它按 `(成员, 角色, 类别)` 聚合后用 `team_logger` 落日志。它是 `monitor/` 里唯一会主动写日志的设施，但仍是只读观察者（不碰 team 运行时状态）。
+   - `TeamStreamLogger`——`Runner.run_agent_team_streaming` 流式输出的**聚合诊断日志**处理对象：调用方用目标文件路径构造（`TeamStreamLogger(file_path=...)`）后经 `stream_logger` 入参注入，runner 把每个 chunk 喂给它，它**按 `(成员, 角色)` source 独立聚合** token 流再写入该文件。它是 `monitor/` 里唯一会主动写文件的设施，**不走 `team_logger`**（自管 open/write/flush/close），但仍是只读观察者——不碰 team 运行时状态。
 2. **`observability/` 子模块**——OpenTelemetry / 结构化日志 / metrics 的可观测性接入点。**当前仅 `__init__.py` 占位、源文件为空**（git 历史里有 `f151dad0` / `dd634e54` / `69a9354d` 三次 OTel 接入提交，目前实现已被回退/重构中），本规约把它当作"已规划但未上线"的扩展点处理。
 
 **不管**的事情：
@@ -41,8 +41,10 @@
 9. **不直接订阅 EventBus / messager**。monitor 通过 `TeamAgent.add_event_listener(handler)` 挂在 leader 的 `event_listeners` 列表上；fan-out 在 `coordination/kernel.py:_filter_self` 里。这是有意为之的"事件已经过 dispatcher 粗筛"的二次消费点，避免监控自己再去 messager 上多订一份 topic、跟 EventBus 抢消息。
 10. **`get_agent_team_monitor` 寻址语义与其它 lifecycle facade 一致**。Key 是 `(team_name, session_id)`；pool 里没匹配 entry 返回 `None`、不抛异常（与 `pause_agent_team` / `stop_agent_team` 的失败语义对齐，见 S_01）。
 11. **`observability/` 不挂载 monitor**。即便后续 OTel 上线，监控数据流（`TeamMonitor.events()` 队列）与遥测数据流（OTel span / metrics）是**两条独立通路**。一边给"想看"的调用方，一边给 APM / 日志后端。不要让其中一条退化成另一条的派生。
-12. **`TeamStreamLogger` 永不向流式路径抛异常**。`feed` / `flush` 整体被 `try / except Exception` 包住，失败只 `team_logger.exception` 留痕——诊断日志挂掉绝不能搞挂它观察的 stream。与不变量 2「监控失败不阻断 team 运行」同源。
-13. **`TeamStreamLogger` 是一次性的、与单次 run 绑定**。每次 `run_agent_team_streaming` 调用配一个新实例（`_has_llm_output` 等去重门控、token 累积缓冲贯穿整个 run）。runner 不构造、不复用——构造责任在调用方（CLI / SDK），runner 只 `feed` / `flush`，类型在 `TYPE_CHECKING` 下引用。
+12. **`TeamStreamLogger` 永不向流式路径抛异常**。`feed` / `flush` 整体被 `try / except Exception` 包住，失败时尽力把错误标记行写回自己的输出文件（写不进去就静默吞）——诊断 logger 挂掉绝不能搞挂它观察的 stream。`__init__` 不在此豁免范围：路径不可用直接抛，让调用方在构造时立刻发现。与不变量 2「监控失败不阻断 team 运行」同源。
+13. **`TeamStreamLogger` 是一次性的、与单次 run 绑定**。每次 `run_agent_team_streaming` 调用配一个新实例：`__init__` 用调用方给的 `file_path` 以 append 模式打开文件，`flush()` 在 stream 结束时把所有 source 的尾段写完并 close 文件。`_llm_output_seen` 等去重门控、`_runs` 累积缓冲贯穿整个 run。runner 不构造、不复用——构造责任在调用方（CLI / SDK），runner 只 `feed` / `flush`，类型在 `TYPE_CHECKING` 下引用。
+14. **聚合按 source 独立维护**。`_runs: dict[(member, role), _Run]`——每个 source 有自己的待定累积段；同一 source 切换 category 或遇到该 source 的离散 chunk 时 flush **该 source 的段**，**不同 source 的 chunk 交错不互相打断**。leader 与 teammate 在 inprocess fan-out 下 chunk 必然交错，单一游标模型会把每个 token 切成独立记录、彻底破坏聚合，故须按 source 分桶。
+15. **`hide_dm` 是 monitor 实例级别的对称过滤**。`TeamMonitor(hide_dm=True)` 同时作用于 pull 与 push 两条路径：`get_messages` 把非广播消息（`MessageInfo.broadcast=False`）从结果中剔除——单收件人 DM 视图（带 `to_member_name`）直接返 `[]`，全 team 视图走 `get_team_messages(broadcast=True)` 下推到 DAO；`_on_event` 丢弃 `MonitorEventType.MESSAGE` 事件，`BROADCAST` 不动。两路必须一致：单边过滤会让"流里看不到 DM 但 query 仍能查到"或反之，破坏调用方对"hide_dm = DM 不可见"的语义预期。`hide_dm` 只屏蔽消息维度，team / member / task 事件不受影响。
 
 ## 接口契约
 
@@ -67,8 +69,14 @@ __all__ = [
 #### 工厂
 
 ```python
-def create_monitor(team_agent: TeamAgent) -> TeamMonitor:
+def create_monitor(team_agent: TeamAgent, *, hide_dm: bool = False) -> TeamMonitor:
     """Create a TeamMonitor bound to a leader TeamAgent.
+
+    Args:
+        team_agent: A fully configured leader TeamAgent instance.
+        hide_dm: When True, instructs the returned ``TeamMonitor`` to
+            drop every non-broadcast message from both query results
+            and the live event stream. Defaults to False.
 
     Raises:
         ValueError: team_agent.role != LEADER, or team_backend is None.
@@ -101,7 +109,7 @@ class TeamMonitor:
 | `get_members(status=None)` | 可选 `MemberStatus` 字符串 | `list[MemberInfo]` | 全成员 / 按状态过滤 |
 | `get_member(member_name)` | `str` | `MemberInfo \| None` | 单成员；不存在返回 None |
 | `get_tasks(status=None)` | 可选 `TaskStatus` 字符串 | `list[TaskInfo]` | 全任务 / 按状态过滤 |
-| `get_messages(*, to_member_name=None, from_member_name=None)` | keyword-only | `list[MessageInfo]` | 邮箱消息；`to_member_name` 走单成员收件箱视图，否则全 team |
+| `get_messages(*, to_member_name=None, from_member_name=None)` | keyword-only | `list[MessageInfo]` | 邮箱消息；`to_member_name` 走单成员收件箱视图，否则全 team。`hide_dm=True` 时单成员视图直接返 `[]`，全 team 视图退化为广播仅留 |
 
 所有查询 API 都在 `_bound_session()` 上下文管理器中执行——调用方协程不需要预先 `set_session_id`。
 
@@ -134,8 +142,14 @@ async def Runner.get_agent_team_monitor(
     *,
     team_name: str,
     session_id: str,
+    hide_dm: bool = False,
 ) -> TeamMonitor | None:
-    """Return a TeamMonitor for the active TeamAgent runtime, if present."""
+    """Return a TeamMonitor for the active TeamAgent runtime, if present.
+
+    ``hide_dm`` forwards to ``TeamMonitor``; when True the monitor drops
+    every non-broadcast message from both query results and the live
+    event stream.
+    """
 ```
 
 行为（实现链：`Runner.get_agent_team_monitor` → `_RunnerImpl.get_agent_team_monitor` → `TeamRuntimeManager.get_monitor` → `_pool._resolve_entry` → `create_monitor(entry.agent)`）：
@@ -148,42 +162,78 @@ async def Runner.get_agent_team_monitor(
 
 ```python
 class TeamStreamLogger:
+    def __init__(self, file_path: str | Path) -> None:
+        """Open ``file_path`` for appending aggregated stream records.
+        Parent dirs are created if missing. Raises on an unusable path
+        so the caller fails fast at construction time."""
+
     def feed(self, chunk: OutputSchema) -> None:
-        """Consume one stream chunk: buffer it (token streams) or log it
-        immediately (discrete chunks). Never raises."""
+        """Consume one stream chunk: buffer it (token streams) or write
+        it immediately (discrete chunks). Never raises."""
 
     def flush(self) -> None:
-        """Emit any buffered run; call once after the stream ends.
-        Never raises."""
+        """Flush every pending per-source run and close the file. Call
+        once after the stream ends. Never raises."""
 ```
 
-用法：调用方构造一个实例，经 `Runner.run_agent_team_streaming(..., stream_logger=...)` 注入；
-runner 在 leader 路径上对每个 chunk 调 `feed`，并在 `finally` 里第一时间调 `flush`。
+用法：调用方用目标文件路径构造一个实例，经
+`Runner.run_agent_team_streaming(..., stream_logger=...)` 注入；runner 在 leader 路径上对每个
+chunk 调 `feed`，并在 `finally` 里第一时间调 `flush`（关闭文件）。**logger 自管 open / write /
+flush / close**，**不走 `team_logger`**。
 
 **聚合模型**：`feed` 把 chunk 按 `type` 归到一个 *category*，再分两类处理——
 
-- **累积型**（`llm_output` / `llm_reasoning`）：token 流缓冲，直到 `(成员, 角色, category)`
-  任一变化或遇到离散 chunk 时，把整段拼成一条记录落日志。
-- **离散型**（`tool_call` / `tool_result` / `__interaction__` / `controller_output` /
-  `message` / `todo.updated` / 未知类型）：先 flush 待定的累积段，再立即单独落一条。
+- **累积型**（`llm_output` / `llm_reasoning`）：token 流缓冲到 `self._runs[(member, role)]`
+  对应的 `_Run` 里。**每个 source 一个独立累积段**。同一 source 切换 category、该 source 出现
+  离散 chunk、或 `flush()` 时，flush 该 source 的段为一条记录。
+- **离散型**（`tool_call` / `tool_result` / `tool_update` / `__interaction__` /
+  `controller_output` / `message` / `todo.updated` / 未知类型）：先 flush **该 source** 的
+  待定累积段，再立即写一条。
 
-**级别映射**：文本输出（`llm_output` / `answer`）→ INFO；思考（`llm_reasoning`）与工具调用
-（`tool_call` / `tool_result`）→ DEBUG；中断（`__interaction__`）与任务失败
-（`controller_output`）→ WARN；其余（`message` / `todo.updated` / 未知）→ INFO。
+按 source 分桶是不变量 14——单一游标会被不同成员的 chunk 交错打断成 token 级记录。
 
-**日志格式**：单条记录 = 一行 header（`[team.stream] member=<名> role=<角色> category=<类别>`）
-+ 每行加 `  | ` 前缀的原始内容块，换行原样保留，多行 markdown 完整可读。内容作为单个位置
-参数传给 `team_logger`，模型输出 / 工具参数里的字面 `{}` 不会被 formatter 误解析。
+**级别标签**（写入 record 的明文 level，不再走 `team_logger` 的级别过滤）：文本输出
+（`llm_output` / `answer`）→ `[INFO]`；思考（`llm_reasoning`）与工具调用（`tool_call` /
+`tool_result` / `tool_update`）→ `[DEBUG]`；中断（`__interaction__`）与任务失败
+（`controller_output`）→
+`[WARN]`；其余（`message` / `todo.updated` / 未知）→ `[INFO]`。映射由 `_CATEGORY_LEVEL` 表
+声明式给出。
+
+**记录格式**：每条记录 = 一行 header + 每行加 `  | ` 前缀的原始内容块，换行原样保留，
+多行 markdown 完整可读。append 写入目标文件，每条记录后跟一个换行分隔：
+
+```
+2026-05-15 10:13:10.534 [INFO] member=team_leader role=leader category=text
+  | Here is the plan:
+  |
+  | 1. Research
+  | 2. Implement
+```
+
+时间戳是 `feed` 调用时的本地时钟；首行带 `[LEVEL]` 标签 + `member=` / `role=` / `category=`。
+内容里的字面 `{}` / `%s` 不会被任何 formatter 处理（直接 `file.write`），无注入面。
 
 **与契约相关的细节**：
 
-- chunk 上的 `source_member` / `role` 来自 `TeamOutputSchema`（S_05 / S_12）；非
-  `TeamOutputSchema`（裸 `OutputSchema`）的 chunk 走 `<unknown>` 兜底。
-- `answer` chunk 在已出现过 `llm_output` 时丢弃（去重，对齐 CLI renderer）。
+- chunk 上的 `source_member` / `role` 来自 `TeamOutputSchema`（S_05 / S_12）；**非
+  `TeamOutputSchema`（裸 `OutputSchema`）的 chunk 直接跳过**——tracer span 等基础设施
+  层通过 session 归一化漏进 stream 时全是裸 `OutputSchema`，不属于团队成员输出，留在日志
+  里只会淹没真正的团队流程（chunk 计数仍 +1，只是不写记录）。
+- `answer` chunk 在**同一 source** 已出现过 `llm_output` 时丢弃（per-source 去重，对齐 CLI
+  renderer 的 `has_llm_output` 但按 source 维度）。
 - `team.runtime_ready`（`message` chunk 且 `payload.event_type` 命中）单列为
   `runtime_ready` 类别。
+- `tool_call` / `tool_result` 的 payload 在缺少标准 `tool_name` / `tool_args` /
+  `tool_result` 字段时（非 `tool_tracker` 路径的不同 schema），fallback 为整个 payload 的
+  capped 字符串——保证记录有实际内容而不是 `tool_name= tool_args=` 两个空字段。
+- `tool_update` 是第三方 rail（如 `jiuwenclaw/stream_event_rail`）对一次 tool call 进度
+  状态的通知，payload shape `{"tool_update": {"tool_name", "tool_call_id", "arguments",
+  "status"}}`；logger 抽出内嵌字段写一行 `tool_name=… status=… tool_call_id=… arguments=…`，
+  不再落到 `category=other` 里 dump 整个 payload。
 - `tool_result` / `tool_args` 内容超阈值截断；模型文本输出（`llm_output` /
   `llm_reasoning` / `answer`）永不截断。
+- `feed` / `flush` 内部出错时，best-effort 写一行 `[WARN] ... error: ...` 标记到同一文件；
+  写不进去就静默吞。绝不让异常逃逸到 runner。
 
 ### `observability/` 占位
 

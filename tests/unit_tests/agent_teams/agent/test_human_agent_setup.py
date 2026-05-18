@@ -13,8 +13,10 @@ suite locks down the structural invariants that make that work:
   task loop, no autonomous mailbox poll);
 * ``TeamToolApprovalRail`` continues to attach to teammates only and
   never to human agents (their tool calls are user-authorized);
-* ``spawn_manager.build_context_from_db`` infers the role from the
-  team's live human-agent roster (no role column on the member row).
+* ``spawn_manager.build_context_from_db`` reads the role straight off
+  the persisted ``team_member.role`` column so cold-recovery picks up
+  dynamically-spawned humans without depending on the leader's
+  in-memory HITT roster.
 """
 
 from __future__ import annotations
@@ -144,13 +146,22 @@ def test_human_agent_spawn_payload_marks_role() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_human_agent_role_inferred_from_backend(team_backend, db):
-    """spawn_manager must derive HUMAN_AGENT role from the live roster
-    (the member row has no role column to read).
+async def test_human_agent_role_restored_from_member_row(team_backend, db):
+    """spawn_manager reads ``TeamRole.HUMAN_AGENT`` straight off the
+    persisted ``team_member.role`` column.
+
+    This is the cold-recovery contract: a fresh leader process must
+    rebuild a human agent's runtime profile (tools / rails / prompt
+    sections) without depending on the previous leader process's
+    in-memory HITT roster — that legacy hack lost any dynamically
+    spawned human across restarts.
     """
     from openjiuwen.agent_teams.agent.spawn_manager import SpawnManager
+    from openjiuwen.core.single_agent import AgentCard
 
-    # Seed an UNSTARTED human agent row, mirroring what build_team would do.
+    # Seed an UNSTARTED human agent row, mirroring what build_team /
+    # spawn_human_agent would do — pass the role explicitly so it lands
+    # on the persisted row.
     await db.team.create_team(
         team_name="hitt_team",
         display_name="HITT",
@@ -159,11 +170,9 @@ async def test_human_agent_role_inferred_from_backend(team_backend, db):
     await team_backend.spawn_member(
         member_name="human_alice",
         display_name="Alice",
-        agent_card=__import__(
-            "openjiuwen.core.single_agent",
-            fromlist=["AgentCard"],
-        ).AgentCard(),
+        agent_card=AgentCard(),
         desc="user avatar",
+        role=TeamRole.HUMAN_AGENT,
     )
 
     leader = _human_agent_team()

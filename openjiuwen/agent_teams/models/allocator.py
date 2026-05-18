@@ -239,9 +239,22 @@ class ByModelNameAllocator:
         return Allocation(entry=group[idx], group_index=idx)
 
     def state_dict(self) -> dict:
-        """Snapshot per-group counters + pool digest for session persistence."""
+        """Snapshot per-group counters + pool digest for session persistence.
+
+        Counters are serialised as a list of ``{"model_name", "index"}``
+        records rather than a ``dict[model_name, int]``. Model names may
+        contain '.' or '[' (e.g. ``"glm-5.1"``, ``"claude-3.5-sonnet"``),
+        and the session persistence layer historically interpreted such
+        characters in dict keys as nested-path encoding — which silently
+        rewrote keys like ``"glm-5.1"`` into ``{"glm-5": {"1": ...}}``
+        and crashed when sibling keys formed conflicting path prefixes.
+        Using a list keeps every model name as an opaque string value.
+        """
         return {
-            "inner_indexes": dict(self._inner_indexes),
+            "counters": [
+                {"model_name": name, "index": index}
+                for name, index in self._inner_indexes.items()
+            ],
             "pool_digest": self._pool_digest,
         }
 
@@ -252,14 +265,31 @@ class ByModelNameAllocator:
         layout that no longer matches reality. Returning to zero is the
         only safe default — keeping stale counters would bias the new
         rotation.
+
+        Accepts both the current list format under ``"counters"`` and the
+        legacy ``"inner_indexes"`` dict format so sessions persisted by
+        older versions still load cleanly.
         """
         if state.get("pool_digest") != self._pool_digest:
             self._inner_indexes = {name: 0 for name in self._groups}
             return
-        inner = state.get("inner_indexes") or {}
-        if not isinstance(inner, dict):
+        counters = state.get("counters")
+        if isinstance(counters, list):
+            for record in counters:
+                if not isinstance(record, dict):
+                    continue
+                name = record.get("model_name")
+                if name not in self._inner_indexes:
+                    continue
+                try:
+                    self._inner_indexes[name] = int(record.get("index", 0))
+                except (TypeError, ValueError):
+                    self._inner_indexes[name] = 0
             return
-        for name, raw in inner.items():
+        legacy = state.get("inner_indexes")
+        if not isinstance(legacy, dict):
+            return
+        for name, raw in legacy.items():
             if name not in self._inner_indexes:
                 continue
             try:

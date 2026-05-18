@@ -21,6 +21,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
@@ -250,7 +252,11 @@ class SimpleMemoryIndex(BaseMemoryIndex):
                     scope_id=scope_id,
                     metadata={"collection": col},
                 )
-                return
+                raise build_error(
+                    StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                    memory_type="vector store",
+                    error_msg="vector store failed: embedding model not initialized",
+                )
 
             if embeddings:
                 await self._ensure_collection(col, len(embeddings[0]))
@@ -403,8 +409,8 @@ class SimpleMemoryIndex(BaseMemoryIndex):
             return None
         return self._kv_data_to_memory_doc(json.loads(raw), mem_id)
 
-    async def list_memories(self, user_id: str, scope_id: str, offset: int,
-                            limit: int, mem_types: list[str] | None = None) -> list[MemoryDoc]:
+    async def list_memories(self, user_id: str, scope_id: str, offset: int = 0,
+                            limit: int = 100, mem_types: list[str] | None = None) -> list[MemoryDoc]:
         """List memory documents with pagination, reading from the KV store."""
         ids_key = self._kv_ids_key(user_id, scope_id)
         raw = self._decode(await self._kv_store.get(ids_key)) or ""

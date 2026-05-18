@@ -270,7 +270,7 @@ class TestSpawnMemberTool:
         tool = SpawnMemberTool(agent_team, t)
         result = await tool.invoke(
             {
-                "member_name": "member_explicit_tm",
+                "member_name": "member-explicit-tm",
                 "display_name": "Member",
                 "desc": "Test member",
                 "role_type": "teammate",
@@ -404,6 +404,49 @@ class TestSpawnMemberTool:
         assert result.success is True, result.error
         assert result.data["role_type"] == "human_agent"
         assert team.is_human_agent("alice") is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    @pytest.mark.parametrize(
+        "bad_name",
+        [
+            "后端开发1",
+            "Member1",
+            "backend_dev_1",
+            "backend dev",
+            "backend.dev",
+            "1backend",
+            "-backend",
+            "",
+        ],
+    )
+    async def test_invoke_rejects_non_portable_member_name(self, agent_team, t, bad_name):
+        """member_name must follow DNS-label kebab-case (a-z + 0-9 + hyphen, leading letter)."""
+        tool = SpawnMemberTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "member_name": bad_name,
+                "display_name": "x",
+                "desc": "x",
+            }
+        )
+        assert result.success is False
+        assert "Invalid member_name" in (result.error or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_accepts_kebab_case_member_name(self, agent_team, t):
+        """Lowercase kebab-case names with a leading letter pass validation."""
+        tool = SpawnMemberTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "backend-dev-1",
+                "display_name": "Backend Dev",
+                "desc": "ok",
+            }
+        )
+        assert result.success is True, result.error
+        assert result.data["member_name"] == "backend-dev-1"
 
 
 class TestShutdownMemberTool:
@@ -1263,17 +1306,15 @@ class TestSendMessageTool:
     @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_invoke_multicast_all_success(self, agent_team, t, sample_agent_card):
-        """Multicast to existing members returns success with all delivered"""
-        await agent_team.spawn_member(
-            member_name="m1",
-            display_name="M1",
-            agent_card=sample_agent_card,
-        )
-        await agent_team.spawn_member(
-            member_name="m2",
-            display_name="M2",
-            agent_card=sample_agent_card,
-        )
+        """Multicast to a strict subset of members returns success with all delivered"""
+        # Spawn a third member so ["m1", "m2"] stays a strict subset of the
+        # roster — a multicast covering every other member is rejected.
+        for name in ("m1", "m2", "m3"):
+            await agent_team.spawn_member(
+                member_name=name,
+                display_name=name.upper(),
+                agent_card=sample_agent_card,
+            )
 
         tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
         result = await tool.invoke({"to": ["m1", "m2"], "content": "Hello"})
@@ -1328,16 +1369,13 @@ class TestSendMessageTool:
         sample_agent_card,
     ):
         """Duplicate names are removed while preserving first-seen order"""
-        await agent_team.spawn_member(
-            member_name="m1",
-            display_name="M1",
-            agent_card=sample_agent_card,
-        )
-        await agent_team.spawn_member(
-            member_name="m2",
-            display_name="M2",
-            agent_card=sample_agent_card,
-        )
+        # m3 keeps the deduped ["m1", "m2"] a strict subset of the roster.
+        for name in ("m1", "m2", "m3"):
+            await agent_team.spawn_member(
+                member_name=name,
+                display_name=name.upper(),
+                agent_card=sample_agent_card,
+            )
 
         tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
         result = await tool.invoke({"to": ["m1", "m1", "m2"], "content": "Hi"})
@@ -1384,11 +1422,14 @@ class TestSendMessageTool:
         sample_agent_card,
     ):
         """Single-element list still returns type=multicast (no auto-degrade)"""
-        await agent_team.spawn_member(
-            member_name="m1",
-            display_name="M1",
-            agent_card=sample_agent_card,
-        )
+        # m2 keeps ["m1"] a strict subset — a single-element multicast that
+        # covers the whole roster would be rejected, not degraded.
+        for name in ("m1", "m2"):
+            await agent_team.spawn_member(
+                member_name=name,
+                display_name=name.upper(),
+                agent_card=sample_agent_card,
+            )
 
         tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
         result = await tool.invoke({"to": ["m1"], "content": "Hi"})
@@ -1406,17 +1447,42 @@ class TestSendMessageTool:
         sample_agent_card,
     ):
         """Blank/whitespace entries are dropped before validation"""
-        await agent_team.spawn_member(
-            member_name="m1",
-            display_name="M1",
-            agent_card=sample_agent_card,
-        )
+        # m2 keeps the cleaned ["m1"] a strict subset of the roster.
+        for name in ("m1", "m2"):
+            await agent_team.spawn_member(
+                member_name=name,
+                display_name=name.upper(),
+                agent_card=sample_agent_card,
+            )
 
         tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
         result = await tool.invoke({"to": ["m1", "  ", ""], "content": "Hi"})
 
         assert result.success is True
         assert result.data["delivered"] == ["m1"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_multicast_rejects_full_roster(
+        self,
+        agent_team,
+        t,
+        sample_agent_card,
+    ):
+        """Multicast covering every other member is rejected — must broadcast"""
+        for name in ("m1", "m2"):
+            await agent_team.spawn_member(
+                member_name=name,
+                display_name=name.upper(),
+                agent_card=sample_agent_card,
+            )
+
+        tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
+        result = await tool.invoke({"to": ["m1", "m2"], "content": "Hi"})
+
+        assert result.success is False
+        assert "broadcast" in result.error
+        assert result.data is None
 
     @pytest.mark.asyncio
     @pytest.mark.level1

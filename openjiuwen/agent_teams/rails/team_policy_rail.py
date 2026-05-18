@@ -90,6 +90,7 @@ class TeamPolicyRail(DeepAgentRail):
         team_workspace_mount: str | None = None,
         team_workspace_path: str | None = None,
         team_backend: "TeamBackend | None" = None,
+        expose_human_agents_to_teammates: bool = False,
     ) -> None:
         super().__init__()
         self._language = language
@@ -114,6 +115,7 @@ class TeamPolicyRail(DeepAgentRail):
             team_mode=team_mode,
             base_prompt=base_prompt,
             human_agent_names=human_names,
+            expose_human_agents_to_teammates=expose_human_agents_to_teammates,
         )
 
         # Dynamic section caches: keyed on table-level mtime probes so
@@ -177,6 +179,7 @@ class TeamPolicyRail(DeepAgentRail):
         team_mode: str,
         base_prompt: str | None,
         human_agent_names: list[str],
+        expose_human_agents_to_teammates: bool,
     ) -> list[PromptSection]:
         """Construct the never-changing sections once at rail init time."""
         builders = [
@@ -191,6 +194,7 @@ class TeamPolicyRail(DeepAgentRail):
                 human_agent_names=human_agent_names,
                 language=self._language,
                 self_member_name=member_name,
+                expose_human_agents_to_teammates=expose_human_agents_to_teammates,
             ),
             build_team_workflow_section(
                 role=role,

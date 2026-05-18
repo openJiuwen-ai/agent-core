@@ -160,8 +160,8 @@ class BaseMemoryIndex(ABC):
         """
         pass
 
-    async def list_memories(self, user_id: str, scope_id: str, offset: int,
-                            limit: int, mem_types: list[str]) -> list[MemoryDoc]:
+    async def list_memories(self, user_id: str, scope_id: str, offset: int = 0,
+                            limit: int = 100, mem_types: list[str] | None = None) -> list[MemoryDoc]:
         """
         Retrieve a paginated list of memory documents for a specific user and scope.
 

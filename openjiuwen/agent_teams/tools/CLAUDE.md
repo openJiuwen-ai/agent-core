@@ -32,7 +32,8 @@ Tools never reach into `TeamDatabase` directly — they go through `TeamBackend`
 | `update_task` | ✓ | | one tool handles title/content edit, cancel, assign (with reassignment reset), and `add_blocked_by` |
 | `view_task` | ✓ | ✓ | `action ∈ {list, get, claimable}`; default `list` |
 | `claim_task` | | ✓ | `status ∈ {claimed, completed}`; completion path appends a next-step nudge |
-| `send_message` | ✓ | ✓ | `to == "*"` → broadcast; leader call auto-starts UNSTARTED members |
+| `send_message` | ✓ | ✓ | `to == "*"` → broadcast; leader call auto-starts UNSTARTED members. Also attached to `human_agent` as a user-driven relay channel — the HITT prompt section forbids autonomous use; only user-issued "tell `<member>` …" instructions may trigger it. |
+| `member_complete_task` | | | `human_agent` only — self-only task completion |
 | `workspace_meta` | ✓ | ✓ | workspace lock + version history |
 
 Plan-mode gating is enforced in the factory:
