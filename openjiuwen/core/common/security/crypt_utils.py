@@ -111,3 +111,4 @@ class CryptUtils:
             return CryptUtils._CRYPT_REGISTRY.get(name)
 
 
+AesGcmCrypt()
