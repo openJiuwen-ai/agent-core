@@ -12,10 +12,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
-from openjiuwen.agent_evolving.experience.types import PendingChange
 from openjiuwen.agent_evolving.experience import (
-    OnlineEvolutionOrchestrator,
     ExperienceTracker,
+    OnlineEvolutionOrchestrator,
 )
 from openjiuwen.agent_evolving.experience.scorer import (
     EVALUATE_LLM_POLICY,
@@ -23,7 +22,7 @@ from openjiuwen.agent_evolving.experience.scorer import (
     ExperienceScorer,
 )
 from openjiuwen.agent_evolving.experience.skill_experience_manager import ExperienceManager
-from openjiuwen.agent_evolving.experience.types import ExperienceApprovalRequest, ExperienceProposal
+from openjiuwen.agent_evolving.experience.types import ExperienceApprovalRequest, ExperienceProposal, PendingChange
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.optimizer.skill_call import SkillExperienceOptimizer
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
@@ -48,13 +47,13 @@ from openjiuwen.core.operator.skill_call import SkillExperienceOperator
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
 from openjiuwen.core.sys_operation import SysOperation
-from openjiuwen.harness.rails.evolution.approval_runtime import EvolutionApprovalRuntime
 from openjiuwen.harness.rails.evolution.approval_events import (
     attach_evolution_meta,
     build_evolution_progress_event,
     build_simplify_approval_event,
     build_skill_approval_event,
 )
+from openjiuwen.harness.rails.evolution.approval_runtime import EvolutionApprovalRuntime
 from openjiuwen.harness.rails.evolution.contracts import EvolutionRequestResult, SimplifyRequestResult
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail
 
@@ -76,6 +75,7 @@ class SkillEvolutionRail(EvolutionRail):
     """
 
     priority = 80
+    _DEFAULT_MEMBER_ROLE = "teammate"
     _SKILL_MD_RE = re.compile(r"[/\\]([^/\\]+)[/\\]SKILL\.md", re.IGNORECASE)
     _EXPERIENCE_RECORD_HEADING_RE = re.compile(r"#+\s*\[([A-Za-z0-9_-]+)\]")
 

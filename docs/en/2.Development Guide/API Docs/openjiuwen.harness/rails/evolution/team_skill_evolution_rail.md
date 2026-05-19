@@ -68,6 +68,9 @@ class TeamSkillRail(
     language: str = "cn",
     trajectory_store: Optional[TrajectoryStore] = None,
     team_trajectory_store: Optional[TrajectoryStore] = None,
+    trajectory_source: Optional[TrajectorySource] = None,
+    trajectory_sink: Optional[TrajectorySink] = None,
+    member_role: Optional[str] = None,
     auto_scan: bool = True,
     auto_save: bool = False,
     async_evolution: bool = True,
@@ -91,7 +94,10 @@ class TeamSkillRail(
 * **model** (str): Model name.
 * **language** (str): Language setting.
 * **trajectory_store** (TrajectoryStore, optional): Trajectory store instance.
-* **team_trajectory_store** (TrajectoryStore, optional): Team trajectory store instance.
+* **team_trajectory_store** (TrajectoryStore, optional): Deprecated team trajectory store instance. Use `trajectory_source` / `trajectory_sink` for runtime aggregation.
+* **trajectory_source** (TrajectorySource, optional): Runtime source for aggregated member trajectory evidence.
+* **trajectory_sink** (TrajectorySink, optional): Runtime sink for publishing this member's latest trajectory snapshot.
+* **member_role** (str, optional): Role written to published snapshots. Defaults to `"leader"` for team skill evolution.
 * **auto_scan** (bool): Whether to detect passive team completion and trigger passive evolution, defaults to `True`.
 * **auto_save** (bool): Whether to auto-save generated experience records, defaults to `False` (requires user approval).
 * **async_evolution** (bool): Whether to execute evolution asynchronously, defaults to `True`.
@@ -105,6 +111,30 @@ class TeamSkillRail(
 * **simplify_llm_policy** (LLMInvokePolicy): Experience simplify LLM invocation policy.
 * **eval_interval** (int): Number of presentations between experience scoring checks. Must be at least 1.
 * **evolution_total_timeout_secs** (float): Background evolution total timeout budget, defaults to 600s.
+
+### Runtime Trajectory Source/Sink
+
+`TeamSkillRail` uses `trajectory_source` and `trajectory_sink` for online team trajectory aggregation. A common setup is to pass the same `InMemoryTrajectoryRegistry` as both:
+
+```python
+from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
+from openjiuwen.harness.rails import TeamSkillRail
+
+trajectory_registry = InMemoryTrajectoryRegistry()
+
+team_rail = TeamSkillRail(
+    skills_dir="/path/to/skills",
+    llm=model_client,
+    model="gpt-4",
+    team_id="research-team",
+    trajectory_source=trajectory_registry,
+    trajectory_sink=trajectory_registry,
+)
+```
+
+The rail publishes `MemberTrajectorySnapshot` values after invoke. Snapshots contain `team_id`, `session_id`, `member_id`, `member_role`, `trajectory`, and `recorded_at_ms`; they do not contain a public revision. `InMemoryTrajectoryRegistry` owns latest-snapshot ordering: newer `recorded_at_ms` wins, and equal timestamps are resolved by registry receive order.
+
+To aggregate multiple members, every rail or agent that should contribute evidence must publish to the same `trajectory_sink`; this rail then reads that shared registry through `trajectory_source`.
 
 ### Priority
 
@@ -129,6 +159,18 @@ Team skill experience optimizer.
 ### evolution_config -> dict
 
 Complete evolution configuration, including phase LLM invocation policies and timeout settings.
+
+---
+
+## Runtime Trajectory Methods
+
+### set_trajectory_source(source) -> None
+
+Bind or replace the runtime `TrajectorySource` used to aggregate team trajectory evidence.
+
+### set_trajectory_sink(sink, *, team_id, member_role=None) -> None
+
+Bind or replace the runtime `TrajectorySink` used to publish this rail's member snapshots. `team_id` is required when `sink` is not `None`. `member_role` defaults to `"leader"` for team skill evolution.
 
 ---
 
@@ -324,6 +366,7 @@ Trajectory issue dataclass:
 ## Example
 
 ```python
+from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.harness.rails import TeamSkillCreateRail, TeamSkillRail
 from openjiuwen.harness import create_deep_agent
 
@@ -333,11 +376,16 @@ create_rail = TeamSkillCreateRail(
     min_team_members_for_create=2,
 )
 
+trajectory_registry = InMemoryTrajectoryRegistry()
+
 # Create team skill evolution rail
 team_rail = TeamSkillRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    team_id="research-team",
+    trajectory_source=trajectory_registry,
+    trajectory_sink=trajectory_registry,
     auto_save=False,
     async_evolution=True,
 )

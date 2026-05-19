@@ -18,10 +18,9 @@ from pathlib import Path
 from typing import Any, Optional, Union
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
-from openjiuwen.agent_evolving.experience.types import PendingChange
 from openjiuwen.agent_evolving.experience import (
-    OnlineEvolutionOrchestrator,
     ExperienceTracker,
+    OnlineEvolutionOrchestrator,
 )
 from openjiuwen.agent_evolving.experience.scorer import (
     EVALUATE_LLM_POLICY,
@@ -32,6 +31,7 @@ from openjiuwen.agent_evolving.experience.skill_experience_manager import Experi
 from openjiuwen.agent_evolving.experience.types import (
     ExperienceApprovalRequest,
     ExperienceProposal,
+    PendingChange,
 )
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.optimizer.skill_call.team_skill_experience_optimizer import (
@@ -47,8 +47,9 @@ from openjiuwen.agent_evolving.signal import (
     make_team_user_intent_signal,
 )
 from openjiuwen.agent_evolving.trajectory import (
-    TeamTrajectoryAggregator,
     Trajectory,
+    TrajectorySink,
+    TrajectorySource,
     TrajectoryStore,
 )
 from openjiuwen.agent_evolving.updater import SingleDimUpdater
@@ -58,13 +59,13 @@ from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.operator.skill_call import SkillExperienceOperator
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
-from openjiuwen.harness.rails.evolution.approval_runtime import EvolutionApprovalRuntime
 from openjiuwen.harness.rails.evolution.approval_events import (
     attach_evolution_meta,
     build_evolution_progress_event,
     build_simplify_approval_event,
     build_team_skill_approval_event_from_records,
 )
+from openjiuwen.harness.rails.evolution.approval_runtime import EvolutionApprovalRuntime
 from openjiuwen.harness.rails.evolution.contracts import (
     EvolutionRequestResult,
     EvolutionSnapshot,
@@ -137,6 +138,7 @@ class TeamSkillEvolutionRail(EvolutionRail):
     """
 
     priority = 80
+    _DEFAULT_MEMBER_ROLE = "leader"
     _SKILL_MD_RE = re.compile(r"[/\\]([^/\\]+)[/\\]SKILL\.md", re.IGNORECASE)
     _EXPERIENCE_RECORD_HEADING_RE = re.compile(r"#+\s*\[([A-Za-z0-9_-]+)\]")
 
@@ -149,6 +151,9 @@ class TeamSkillEvolutionRail(EvolutionRail):
         language: str = "cn",
         trajectory_store: Optional[TrajectoryStore] = None,
         team_trajectory_store: Optional[TrajectoryStore] = None,
+        trajectory_source: Optional[TrajectorySource] = None,
+        trajectory_sink: Optional[TrajectorySink] = None,
+        member_role: Optional[str] = None,
         auto_scan: bool = True,
         auto_save: bool = False,
         async_evolution: bool = True,
@@ -204,6 +209,13 @@ class TeamSkillEvolutionRail(EvolutionRail):
         self._passive_evolution_pending = False
         self._host_completion_pending_session_id: Optional[str] = None
         self._team_id = team_id
+        self._trajectory_source = trajectory_source
+        if trajectory_sink is not None:
+            self.set_trajectory_sink(
+                trajectory_sink,
+                team_id=team_id,
+                member_role=member_role,
+            )
         self._trajectories_dir = trajectories_dir
         self._manager = ExperienceManager(
             store=self._store,
@@ -247,6 +259,10 @@ class TeamSkillEvolutionRail(EvolutionRail):
             auto_save,
             team_id,
         )
+
+    def set_trajectory_source(self, source: Optional[TrajectorySource]) -> None:
+        """Bind this rail to a runtime team trajectory source."""
+        self._trajectory_source = source
 
     @property
     def store(self) -> EvolutionStore:
@@ -466,7 +482,6 @@ class TeamSkillEvolutionRail(EvolutionRail):
             self._passive_evolution_pending
             or self._host_completion_pending_session_id == self._current_builder_session_id()
         )
-
 
     async def _on_after_evolution_triggered(
         self,
@@ -1028,25 +1043,25 @@ class TeamSkillEvolutionRail(EvolutionRail):
         )
 
     def _aggregate_team_trajectory(self, trajectory: Trajectory) -> Trajectory:
-        """Return aggregated team trajectory when a shared team store has data."""
-        team_trajectory_store = getattr(self, "_team_trajectory_store", None)
-        if team_trajectory_store is None:
+        """Return aggregated team trajectory when a runtime source has data."""
+        source = getattr(self, "_trajectory_source", None)
+        if source is None:
             return trajectory
 
-        aggregator = TeamTrajectoryAggregator(
-            store=team_trajectory_store,
-            team_id=getattr(self, "_team_id", None) or "unknown",
+        team_id = getattr(self, "_team_id", None) or "unknown"
+        team_traj = source.get_trajectory(
+            team_id=team_id,
+            session_id=trajectory.session_id or "",
+            filter_collaborative=True,
         )
-        team_traj = aggregator.aggregate(trajectory.session_id, filter_collaborative=True)
-        if not team_traj.members:
+        if team_traj is None or not team_traj.steps:
             return trajectory
 
         self._emit_progress(
             "detecting_signals",
-            f"aggregated {team_traj.combined.meta.get('member_count', len(team_traj.members))} members, "
-            f"{len(team_traj.combined.steps)} collaborative steps",
+            f"aggregated {team_traj.meta.get('member_count', 0)} members, {len(team_traj.steps)} collaborative steps",
         )
-        return team_traj.combined
+        return team_traj
 
     async def _handle_evolution_from_signals(
         self,

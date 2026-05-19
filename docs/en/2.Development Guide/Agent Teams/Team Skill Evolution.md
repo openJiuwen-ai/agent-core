@@ -34,7 +34,8 @@ Unlike regular Skills, Team Skills:
 | `TeamSkillRail` | Public rail for online evolution: trajectory analysis, user request, aggregated experience record generation/approval. It is the compatibility public alias for `TeamSkillEvolutionRail`. |
 | `TeamSkillExperienceOptimizer` | LLM-driven experience record generation. `TeamSkillOptimizer` remains available as a compatibility alias. |
 | `ExperienceScorer` | Experience scoring and simplify maintenance |
-| `TeamTrajectoryAggregator` | Aggregate team member trajectories |
+| `InMemoryTrajectoryRegistry` | Runtime source/sink for publishing member snapshots and aggregating team trajectory evidence |
+| `TeamTrajectoryAggregator` | Offline/debug aggregation utility for stored member trajectories |
 
 ---
 
@@ -82,13 +83,20 @@ agent = create_deep_agent(
 ### TeamSkillRail Configuration
 
 ```python
+from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
+from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.rails import TeamSkillRail
+
+trajectory_registry = InMemoryTrajectoryRegistry()
 
 team_rail = TeamSkillRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
     language="en",
+    team_id="research-team",
+    trajectory_source=trajectory_registry,
+    trajectory_sink=trajectory_registry,
     auto_save=False,           # generated records require user approval
     async_evolution=True,      # Execute evolution asynchronously
     evolution_total_timeout_secs=600.0,
@@ -101,6 +109,12 @@ agent = create_deep_agent(
     skills=["research-team"],  # Load existing team skill
 )
 ```
+
+`trajectory_source` and `trajectory_sink` are the runtime integration points for team trajectory aggregation. Rails publish `MemberTrajectorySnapshot` values to the sink after invoke; `TeamSkillRail` reads the source when passive or user-requested evolution needs team-level evidence.
+
+To aggregate multiple members, every rail or agent that should contribute evidence must publish to the same `trajectory_sink`; `TeamSkillRail` then reads that shared registry through `trajectory_source`.
+
+`MemberTrajectorySnapshot` contains only published content: `team_id`, `session_id`, `member_id`, `member_role`, `trajectory`, and `recorded_at_ms`. Snapshot freshness ordering is owned by `InMemoryTrajectoryRegistry`: newer `recorded_at_ms` wins, and equal timestamps are resolved by the registry's receive order.
 
 ### Trigger Timing
 

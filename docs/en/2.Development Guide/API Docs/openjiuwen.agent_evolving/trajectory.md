@@ -149,6 +149,83 @@ class FileTrajectoryStore(base_dir: Path)
 
 ---
 
+## class openjiuwen.agent_evolving.trajectory.registry.MemberTrajectorySnapshot
+
+Latest bounded trajectory snapshot for one team member in one session.
+
+```text
+class MemberTrajectorySnapshot(
+    team_id: str,
+    session_id: str,
+    member_id: str,
+    member_role: str | None,
+    trajectory: Trajectory,
+    recorded_at_ms: int,
+)
+```
+
+* **team_id**(str): Team ID.
+* **session_id**(str): Session ID.
+* **member_id**(str): Team member ID.
+* **member_role**(str, optional): Runtime member role such as `"leader"` or `"teammate"`.
+* **trajectory**(Trajectory): Member trajectory snapshot.
+* **recorded_at_ms**(int): Snapshot record time in milliseconds.
+
+### make(team_id, member_id, trajectory, member_role=None, session_id=None, recorded_at_ms=None) -> MemberTrajectorySnapshot
+
+Create a snapshot and fill runtime defaults. When `session_id` is omitted, the snapshot uses `trajectory.session_id` or `""`. When `recorded_at_ms` is omitted, the current wall-clock time is used.
+
+`MemberTrajectorySnapshot` represents published content only. It does not expose a revision number; latest-snapshot ordering is owned by the registry that receives snapshots.
+
+---
+
+## class openjiuwen.agent_evolving.trajectory.registry.TrajectorySink
+
+Protocol for publishing member trajectory snapshots.
+
+### publish_member_trajectory(snapshot) -> None
+
+Publish the latest bounded trajectory snapshot for one member.
+
+---
+
+## class openjiuwen.agent_evolving.trajectory.registry.TrajectorySource
+
+Protocol for reading aggregated runtime trajectory evidence.
+
+### get_trajectory(team_id, session_id, filter_collaborative=True) -> Trajectory | None
+
+Return the aggregated team trajectory for a session, or `None` when the source has no snapshots for that `(team_id, session_id)`.
+
+---
+
+## class openjiuwen.agent_evolving.trajectory.registry.InMemoryTrajectoryRegistry
+
+In-memory runtime registry that implements both `TrajectorySink` and `TrajectorySource`.
+
+```text
+class InMemoryTrajectoryRegistry()
+```
+
+### publish_member_trajectory(snapshot) -> None
+
+Receive one member snapshot. For the same `(team_id, session_id, member_id)`, the registry keeps the latest snapshot by this ordering:
+
+1. Newer `recorded_at_ms` wins.
+2. If `recorded_at_ms` is equal, the snapshot received later by this registry wins.
+
+The receive order is registry-local internal state and is not part of `MemberTrajectorySnapshot`.
+
+### get_trajectory(team_id, session_id, filter_collaborative=True) -> Trajectory | None
+
+Aggregate the latest snapshot for each member in the session. When `filter_collaborative=True`, teammate trajectories are filtered to collaboration-relevant steps before merging.
+
+### clear_session(team_id, session_id) -> None
+
+Remove all snapshots for one team session.
+
+---
+
 ## class openjiuwen.agent_evolving.trajectory.aggregator.TeamTrajectory
 
 Aggregated team trajectory for a single session.

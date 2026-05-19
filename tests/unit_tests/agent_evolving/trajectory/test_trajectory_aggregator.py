@@ -22,6 +22,7 @@ from openjiuwen.agent_evolving.trajectory.types import (
     TrajectoryStep,
 )
 from openjiuwen.agent_evolving.trajectory.aggregator import filter_member_trajectory
+from openjiuwen.agent_evolving.trajectory.aggregator import aggregate_member_trajectories
 
 
 def _build_member_trajectory(
@@ -38,7 +39,7 @@ def _build_member_trajectory(
         builder.record_step(
             TrajectoryStep(
                 kind="tool",
-                detail=ToolCallDetail(tool_name=f"tool_{i}"),
+                detail=ToolCallDetail(tool_name="view_task"),
                 start_time_ms=1000 * i,
             )
         )
@@ -192,7 +193,7 @@ class TestFilterMemberTrajectory:
         assert len(result.steps) == 1
 
     def test_filters_internal_file_edit(self):
-        """Pure internal code execution tools should be filtered out."""
+        """Tools outside the collaboration whitelist should be filtered out."""
         steps = [
             TrajectoryStep(
                 kind="tool",
@@ -211,22 +212,60 @@ class TestFilterMemberTrajectory:
 
         assert len(result.steps) == 0
 
-    def test_keeps_skill_read(self):
-        """read_file for SKILL.md should be kept."""
+    def test_filters_unknown_tool_calls(self):
+        """Unknown tools are not collaboration evidence by default."""
         steps = [
             TrajectoryStep(
                 kind="tool",
-                detail=ToolCallDetail(
-                    tool_name="read_file", call_args="team_skills/research/SKILL.md"
-                ),
-                meta={"operator_id": "read_file"},
+                detail=ToolCallDetail(tool_name="custom_debug_tool"),
+                meta={"operator_id": "custom_debug_tool"},
             ),
         ]
         traj = Trajectory(execution_id="e1", session_id="s1", steps=steps)
 
         result = filter_member_trajectory(traj)
 
-        assert len(result.steps) == 1
+        assert len(result.steps) == 0
+
+    def test_filters_regular_file_read(self):
+        """File access is only kept when it targets skill-related files."""
+        steps = [
+            TrajectoryStep(
+                kind="tool",
+                detail=ToolCallDetail(tool_name="read_file", call_args="notes.txt"),
+                meta={"operator_id": "read_file"},
+            ),
+            TrajectoryStep(
+                kind="tool",
+                detail=ToolCallDetail(tool_name="write_file", call_args="src/app.py"),
+                meta={"operator_id": "write_file"},
+            ),
+        ]
+        traj = Trajectory(execution_id="e1", session_id="s1", steps=steps)
+
+        result = filter_member_trajectory(traj)
+
+        assert len(result.steps) == 0
+
+    def test_keeps_skill_file_access(self):
+        """read_file/write_file for SKILL.md should be kept."""
+        steps = [
+            TrajectoryStep(
+                kind="tool",
+                detail=ToolCallDetail(tool_name="read_file", call_args="team_skills/research/SKILL.md"),
+                meta={"operator_id": "read_file"},
+            ),
+            TrajectoryStep(
+                kind="tool",
+                detail=ToolCallDetail(tool_name="write_file", call_args="team_skills/research/SKILL.md"),
+                meta={"operator_id": "write_file"},
+            ),
+        ]
+        traj = Trajectory(execution_id="e1", session_id="s1", steps=steps)
+
+        result = filter_member_trajectory(traj)
+
+        assert len(result.steps) == 2
 
     def test_mixed_steps_keep_only_collaborative(self):
         """Mixed steps should only keep collaborative ones.
@@ -321,10 +360,14 @@ class TestTeamTrajectoryAggregatorWithStore:
                 start_time_ms=300,
             ),
         ]
-        store.save(Trajectory(
-            execution_id="e1", session_id="s1", steps=steps1,
-            meta={"member_id": "m1"},
-        ))
+        store.save(
+            Trajectory(
+                execution_id="e1",
+                session_id="s1",
+                steps=steps1,
+                meta={"member_id": "m1"},
+            )
+        )
 
         # Member 2: only collaborative
         steps2 = [
@@ -334,10 +377,14 @@ class TestTeamTrajectoryAggregatorWithStore:
                 start_time_ms=150,
             ),
         ]
-        store.save(Trajectory(
-            execution_id="e2", session_id="s1", steps=steps2,
-            meta={"member_id": "m2"},
-        ))
+        store.save(
+            Trajectory(
+                execution_id="e2",
+                session_id="s1",
+                steps=steps2,
+                meta={"member_id": "m2"},
+            )
+        )
 
         agg = TeamTrajectoryAggregator(store=store, team_id="t1")
         result = agg.aggregate("s1")
@@ -363,10 +410,14 @@ class TestTeamTrajectoryAggregatorWithStore:
                 start_time_ms=200,
             ),
         ]
-        store.save(Trajectory(
-            execution_id="e1", session_id="s1", steps=steps,
-            meta={"member_id": "m1"},
-        ))
+        store.save(
+            Trajectory(
+                execution_id="e1",
+                session_id="s1",
+                steps=steps,
+                meta={"member_id": "m1"},
+            )
+        )
 
         agg = TeamTrajectoryAggregator(store=store, team_id="t1")
         result = agg.aggregate("s1", filter_collaborative=False)
@@ -407,14 +458,22 @@ class TestTeamTrajectoryAggregatorWithStore:
             ),
         ]
 
-        store.save(Trajectory(
-            execution_id="leader-exec", session_id="s1", steps=leader_steps,
-            meta={"member_id": leader_id, "member_role": "leader"},
-        ))
-        store.save(Trajectory(
-            execution_id="member-exec", session_id="s1", steps=member_steps,
-            meta={"member_id": "researcher", "member_role": "teammate"},
-        ))
+        store.save(
+            Trajectory(
+                execution_id="leader-exec",
+                session_id="s1",
+                steps=leader_steps,
+                meta={"member_id": leader_id, "member_role": "leader"},
+            )
+        )
+        store.save(
+            Trajectory(
+                execution_id="member-exec",
+                session_id="s1",
+                steps=member_steps,
+                meta={"member_id": "researcher", "member_role": "teammate"},
+            )
+        )
 
         agg = TeamTrajectoryAggregator(store=store, team_id="t1")
         result = agg.aggregate("s1")
@@ -431,33 +490,37 @@ class TestTeamTrajectoryAggregatorWithStore:
         store = InMemoryTrajectoryStore()
         leader_id = "jiuwen_team_sess_123_team_leader"
 
-        store.save(Trajectory(
-            execution_id="leader-round-1",
-            session_id="s1",
-            steps=[
-                TrajectoryStep(
-                    kind="tool",
-                    detail=ToolCallDetail(
-                        tool_name="skill_tool",
-                        call_args={"skill_name": "short-video-production-swarm"},
+        store.save(
+            Trajectory(
+                execution_id="leader-round-1",
+                session_id="s1",
+                steps=[
+                    TrajectoryStep(
+                        kind="tool",
+                        detail=ToolCallDetail(
+                            tool_name="skill_tool",
+                            call_args={"skill_name": "short-video-production-swarm"},
+                        ),
+                        start_time_ms=100,
                     ),
-                    start_time_ms=100,
-                ),
-            ],
-            meta={"member_id": leader_id, "member_role": "leader"},
-        ))
-        store.save(Trajectory(
-            execution_id="leader-round-2",
-            session_id="s1",
-            steps=[
-                TrajectoryStep(
-                    kind="tool",
-                    detail=ToolCallDetail(tool_name="view_task"),
-                    start_time_ms=200,
-                ),
-            ],
-            meta={"member_id": leader_id, "member_role": "leader"},
-        ))
+                ],
+                meta={"member_id": leader_id, "member_role": "leader"},
+            )
+        )
+        store.save(
+            Trajectory(
+                execution_id="leader-round-2",
+                session_id="s1",
+                steps=[
+                    TrajectoryStep(
+                        kind="tool",
+                        detail=ToolCallDetail(tool_name="view_task"),
+                        start_time_ms=200,
+                    ),
+                ],
+                meta={"member_id": leader_id, "member_role": "leader"},
+            )
+        )
 
         agg = TeamTrajectoryAggregator(store=store, team_id="t1")
         result = agg.aggregate("s1")
@@ -483,18 +546,22 @@ class TestTeamTrajectoryAggregatorWithStore:
             start_time_ms=200,
         )
 
-        store.save(Trajectory(
-            execution_id="leader-snapshot-1",
-            session_id="s1",
-            steps=[skill_step],
-            meta={"member_id": leader_id, "member_role": "leader"},
-        ))
-        store.save(Trajectory(
-            execution_id="leader-snapshot-2",
-            session_id="s1",
-            steps=[skill_step, view_task_step],
-            meta={"member_id": leader_id, "member_role": "leader"},
-        ))
+        store.save(
+            Trajectory(
+                execution_id="leader-snapshot-1",
+                session_id="s1",
+                steps=[skill_step],
+                meta={"member_id": leader_id, "member_role": "leader"},
+            )
+        )
+        store.save(
+            Trajectory(
+                execution_id="leader-snapshot-2",
+                session_id="s1",
+                steps=[skill_step, view_task_step],
+                meta={"member_id": leader_id, "member_role": "leader"},
+            )
+        )
 
         agg = TeamTrajectoryAggregator(store=store, team_id="t1")
         result = agg.aggregate("s1")
@@ -515,7 +582,8 @@ class TestTeamTrajectoryAggregatorWithStore:
         with tempfile.TemporaryDirectory() as tmp:
             store = FileTrajectoryStore(Path(tmp))
             traj = Trajectory(
-                execution_id="e1", session_id="s1",
+                execution_id="e1",
+                session_id="s1",
                 steps=[TrajectoryStep(kind="tool", detail=ToolCallDetail(tool_name="claim_task"), start_time_ms=100)],
                 meta={"member_id": "m1"},
             )
@@ -530,3 +598,52 @@ class TestTeamTrajectoryAggregatorWithStore:
         """Aggregator requires either store or trajectories_dir."""
         with pytest.raises(ValueError, match="Either"):
             TeamTrajectoryAggregator(team_id="t1")
+
+
+def test_aggregate_member_trajectories_uses_latest_prefix_snapshot():
+    old = _build_member_trajectory("leader", "session-1", step_count=1)
+    old.meta["member_role"] = "leader"
+    new = _build_member_trajectory("leader", "session-1", step_count=2)
+    new.meta["member_role"] = "leader"
+
+    combined = aggregate_member_trajectories(
+        [old, new],
+        team_id="team-1",
+        session_id="session-1",
+        filter_collaborative=True,
+    )
+
+    assert len(combined.steps) == 2
+    assert combined.meta["member_count"] == 1
+
+
+def test_aggregate_member_trajectories_filters_teammate_internals():
+    teammate = Trajectory(
+        execution_id="teammate-1",
+        session_id="session-1",
+        source="online",
+        steps=[
+            TrajectoryStep(
+                kind="llm",
+                detail=LLMCallDetail(model="gpt-4", messages=[]),
+                meta={"operator_id": "researcher/llm_main"},
+            ),
+            TrajectoryStep(
+                kind="tool",
+                detail=ToolCallDetail(tool_name="send_message"),
+                meta={"operator_id": "send_message"},
+                start_time_ms=2,
+            ),
+        ],
+        meta={"member_id": "researcher", "member_role": "teammate"},
+    )
+
+    combined = aggregate_member_trajectories(
+        [teammate],
+        team_id="team-1",
+        session_id="session-1",
+        filter_collaborative=True,
+    )
+
+    assert len(combined.steps) == 1
+    assert combined.steps[0].detail.tool_name == "send_message"

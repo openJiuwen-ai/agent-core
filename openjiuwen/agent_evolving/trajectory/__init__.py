@@ -4,12 +4,19 @@
 from openjiuwen.agent_evolving.trajectory.aggregator import (
     TeamTrajectory,
     TeamTrajectoryAggregator,
+    aggregate_member_trajectories,
     filter_member_trajectory,
 )
 from openjiuwen.agent_evolving.trajectory.builder import TrajectoryBuilder
 from openjiuwen.agent_evolving.trajectory.extractor import TrajectoryExtractor
 from openjiuwen.agent_evolving.trajectory.extractor import (
     TrajectoryExtractor as TracerTrajectoryExtractor,
+)
+from openjiuwen.agent_evolving.trajectory.registry import (
+    InMemoryTrajectoryRegistry,
+    MemberTrajectorySnapshot,
+    TrajectorySink,
+    TrajectorySource,
 )
 from openjiuwen.agent_evolving.trajectory.store import (
     FileTrajectoryStore,
@@ -44,5 +51,10 @@ __all__ = [
     "FileTrajectoryStore",
     "TeamTrajectory",
     "TeamTrajectoryAggregator",
+    "aggregate_member_trajectories",
     "filter_member_trajectory",
+    "InMemoryTrajectoryRegistry",
+    "MemberTrajectorySnapshot",
+    "TrajectorySink",
+    "TrajectorySource",
 ]
