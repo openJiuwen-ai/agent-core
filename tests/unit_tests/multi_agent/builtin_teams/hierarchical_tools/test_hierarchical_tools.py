@@ -598,37 +598,63 @@ class TestHierarchicalTeamStream:
     async def test_stream_sends_to_root_agent(self):
         team = _make_team(root_id="root")
         _add_agent(team, "root")
-        send_calls = []
+        get_agent_calls = []
+        stream_calls = []
 
-        async def capture(**kwargs):
-            send_calls.append(kwargs)
-            return {"out": "v"}
+        async def fake_stream(inputs, session=None):
+            stream_calls.append({"inputs": inputs, "session": session})
+            return
+            yield  # make it an async generator
 
-        with patch.object(team.runtime, "send", side_effect=capture), \
-             patch.object(team.runtime, "start", new=AsyncMock()), \
-             patch.object(team.runtime, "stop", new=AsyncMock()):
+        mock_agent = MagicMock()
+        mock_agent.stream = fake_stream
+
+        original_get = None
+
+        def capture_get_agent(agent_id):
+            get_agent_calls.append(agent_id)
+            return mock_agent
+
+        with patch.object(team.runtime, "start", new=AsyncMock()), \
+             patch.object(team.runtime, "stop", new=AsyncMock()), \
+             patch("openjiuwen.core.runner.Runner") as mock_runner:
+            mock_runner.resource_mgr.get_agent = AsyncMock(side_effect=capture_get_agent)
             async for _ in team.stream({"q": "hi"}):
                 pass
 
-        assert send_calls[0]["recipient"] == "root"
+        assert get_agent_calls[0] == "root"
+        assert len(stream_calls) == 1
+        assert "conversation_id" in stream_calls[0]["inputs"]
 
     @pytest.mark.asyncio
     async def test_stream_sender_is_team_card_id(self):
         team = _make_team(root_id="root", tid="stream_team")
         _add_agent(team, "root")
-        send_calls = []
+        get_agent_calls = []
+        stream_calls = []
 
-        async def capture(**kwargs):
-            send_calls.append(kwargs)
-            return {"out": "v"}
+        async def fake_stream(inputs, session=None):
+            stream_calls.append({"inputs": inputs, "session": session})
+            return
+            yield  # make it an async generator
 
-        with patch.object(team.runtime, "send", side_effect=capture), \
-             patch.object(team.runtime, "start", new=AsyncMock()), \
-             patch.object(team.runtime, "stop", new=AsyncMock()):
+        mock_agent = MagicMock()
+        mock_agent.stream = fake_stream
+
+        def capture_get_agent(agent_id):
+            get_agent_calls.append(agent_id)
+            return mock_agent
+
+        with patch.object(team.runtime, "start", new=AsyncMock()), \
+             patch.object(team.runtime, "stop", new=AsyncMock()), \
+             patch("openjiuwen.core.runner.Runner") as mock_runner:
+            mock_runner.resource_mgr.get_agent = AsyncMock(side_effect=capture_get_agent)
             async for _ in team.stream({"q": "hi"}):
                 pass
 
-        assert send_calls[0]["sender"] == "stream_team"
+        assert get_agent_calls[0] == "root"
+        assert len(stream_calls) == 1
+        assert stream_calls[0]["inputs"]["sender"] == "stream_team"
 
     @pytest.mark.asyncio
     async def test_stream_with_string_input(self):

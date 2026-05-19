@@ -152,12 +152,24 @@ class HierarchicalTeam(BaseTeam):
         await self._setup_hierarchy()
 
         async def _run(team_session: Session, sid: str) -> None:
-            await self.runtime.send(
-                message=inputs,
-                recipient=self._root_agent_id,
-                sender=self.card.id,
-                session_id=sid,
-            )
+            from openjiuwen.core.runner import Runner
+
+            agent = await Runner.resource_mgr.get_agent(agent_id=self._root_agent_id)
+
+            try:
+                # Ensure inputs has the correct conversation_id and sender
+                if isinstance(inputs, dict):
+                    inputs_with_sid = {**inputs, "conversation_id": sid, "sender": self.card.id}
+                else:
+                    inputs_with_sid = {"query": inputs, "conversation_id": sid, "sender": self.card.id}
+
+                async for chunk in agent.stream(inputs_with_sid, session=None):
+                    await team_session.write_stream(chunk)
+
+            except Exception as e:
+                logger.error(f"[{self.__class__.__name__}] Error during streaming: {e}")
+                error_result = {"output": str(e), "result_type": "error"}
+                await team_session.write_stream(error_result)
 
         async for chunk in standalone_stream_context(
             self.runtime, self.card, inputs, _run, session
