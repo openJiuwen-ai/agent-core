@@ -149,6 +149,83 @@ class FileTrajectoryStore(base_dir: Path)
 
 ---
 
+## class openjiuwen.agent_evolving.trajectory.registry.MemberTrajectorySnapshot
+
+单个团队成员在单个 session 内发布的最新有界轨迹 snapshot。
+
+```text
+class MemberTrajectorySnapshot(
+    team_id: str,
+    session_id: str,
+    member_id: str,
+    member_role: str | None,
+    trajectory: Trajectory,
+    recorded_at_ms: int,
+)
+```
+
+* **team_id**(str)：团队 ID。
+* **session_id**(str)：会话 ID。
+* **member_id**(str)：团队成员 ID。
+* **member_role**(str，可选)：运行时成员角色，例如 `"leader"` 或 `"teammate"`。
+* **trajectory**(Trajectory)：成员轨迹 snapshot。
+* **recorded_at_ms**(int)：snapshot 记录时间，毫秒。
+
+### make(team_id, member_id, trajectory, member_role=None, session_id=None, recorded_at_ms=None) -> MemberTrajectorySnapshot
+
+创建 snapshot 并填充运行时默认值。未传 `session_id` 时使用 `trajectory.session_id` 或 `""`；未传 `recorded_at_ms` 时使用当前 wall-clock 时间。
+
+`MemberTrajectorySnapshot` 只表达发布内容，不暴露 revision。最新 snapshot 的判定顺序由接收 snapshot 的 registry 维护。
+
+---
+
+## class openjiuwen.agent_evolving.trajectory.registry.TrajectorySink
+
+发布成员轨迹 snapshot 的协议。
+
+### publish_member_trajectory(snapshot) -> None
+
+发布单个成员的最新有界轨迹 snapshot。
+
+---
+
+## class openjiuwen.agent_evolving.trajectory.registry.TrajectorySource
+
+读取运行时聚合轨迹证据的协议。
+
+### get_trajectory(team_id, session_id, filter_collaborative=True) -> Trajectory | None
+
+返回某个 session 的团队聚合轨迹；当 source 中没有对应 `(team_id, session_id)` 的 snapshot 时返回 `None`。
+
+---
+
+## class openjiuwen.agent_evolving.trajectory.registry.InMemoryTrajectoryRegistry
+
+同时实现 `TrajectorySink` 和 `TrajectorySource` 的内存运行时 registry。
+
+```text
+class InMemoryTrajectoryRegistry()
+```
+
+### publish_member_trajectory(snapshot) -> None
+
+接收一条成员 snapshot。对于相同 `(team_id, session_id, member_id)`，registry 按以下规则保留最新 snapshot：
+
+1. `recorded_at_ms` 更新的 snapshot 覆盖旧 snapshot。
+2. `recorded_at_ms` 相同时，本 registry 更晚接收的 snapshot 覆盖旧 snapshot。
+
+接收顺序是 registry 内部状态，不属于 `MemberTrajectorySnapshot` 的 public schema。
+
+### get_trajectory(team_id, session_id, filter_collaborative=True) -> Trajectory | None
+
+聚合同一 session 内每个成员的最新 snapshot。`filter_collaborative=True` 时，teammate 轨迹会先过滤为协作相关步骤再合并。
+
+### clear_session(team_id, session_id) -> None
+
+清理某个团队 session 的全部 snapshot。
+
+---
+
 ## class openjiuwen.agent_evolving.trajectory.aggregator.TeamTrajectory
 
 单个 session 的团队聚合轨迹。

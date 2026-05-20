@@ -89,6 +89,12 @@ get_config(cls) -> RunnerConfig
 
 **返回**：**RunnerConfig**，当前配置对象。
 
+## 配置说明
+
+`RunnerConfig` 主要控制 Runner 的全局行为，例如分布式运行和检查点配置。A2A 相关的运行时细节
+（例如 `AgentCard`、`interface_url` 和 transport 选择）则由 A2A 适配器和服务端层单独配置，
+而不是放在 `RunnerConfig` 中。
+
 ### run_agent
 
 ```python
@@ -109,7 +115,7 @@ async run_agent(
 **参数**:
 
 * **agent**(str|BaseAgent|LegacyBaseAgent)：agent的ID或agent实例。不可取值为`None`或`''`。
-* **inputs**(Any)：执行agent的输入数据。
+* **inputs**(Any)：执行agent的输入数据。对于远程智能体路径，调用方通常会包含 `conversation_id`；如果提供，Runner 会将其复用为请求会话标识。
 * **session**(str|Session)：会话ID或会话实例。默认为`None`，表示使用默认会话。
 * **context**(ModelContext)：用于存储用户对话信息的上下文引擎。默认为`None`，表示不开启上下文引擎功能。
 * **envs**(dict[str, Any])：执行环境配置，例如模型参数、系统变量等。默认为`None`。

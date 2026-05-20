@@ -29,7 +29,7 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent import ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.core.session.session import Session
+from openjiuwen.core.session.agent_team import Session
 
 
 # ============================================================================
@@ -147,10 +147,10 @@ data_analyst_card = AgentCard(
     input_params={
         "type": "object",
         "properties": {
-            "data_description": {"type": "string", "description": "数据描述"},
+            "query": {"type": "string", "description": "数据描述"},
             "analysis_goal": {"type": "string", "description": "分析目标"}
         },
-        "required": ["data_description", "analysis_goal"]
+        "required": ["query", "analysis_goal"]
     }
 )
 
@@ -172,11 +172,9 @@ async def main():
 
     # 1. 创建叶子节点 Agent（第三层）
     statistics_expert = StatisticsExpert(card=statistics_expert_card)
-    Runner.resource_mgr.add_agent(statistics_expert_card, lambda: statistics_expert)
 
     # 2. 创建第二层 Agent
     literature_researcher = LiteratureResearcher(card=literature_researcher_card)
-    Runner.resource_mgr.add_agent(literature_researcher_card, lambda: literature_researcher)
 
     data_analyst_config = ReActAgentConfig(
         model_config_obj=model_request_config,
@@ -187,7 +185,6 @@ async def main():
         }]
     )
     data_analyst = DataAnalyst(card=data_analyst_card).configure(data_analyst_config)
-    Runner.resource_mgr.add_agent(data_analyst_card, lambda: data_analyst)
 
     # 3. 创建根节点 Agent（第一层）
     director_config = ReActAgentConfig(
@@ -203,7 +200,6 @@ async def main():
         }]
     )
     research_director = ResearchDirector(card=research_director_card).configure(director_config)
-    Runner.resource_mgr.add_agent(research_director_card, lambda: research_director)
 
     # 4. 创建 HierarchicalTeam 并构建层次结构
     team_card = TeamCard(
@@ -237,16 +233,27 @@ async def main():
         parent_agent_id="data_analyst"
     )
 
-    # 5. 运行团队
-    print("\n任务：研究人工智能在医疗诊断中的应用\n")
-    result = await team.invoke({
-        "query": "请研究人工智能在医疗诊断中的应用，包括文献调研和数据分析"
-    })
+    # 5. 运行团队 - 流式执行
+    print("\n任务：研究人工智能在医疗诊断中的应用\n", flush=True)
 
-    print("\n" + "=" * 80)
-    print("研究结果：")
-    print("=" * 80)
-    print(result)
+    collected_chunks = []
+    async for chunk in team.stream({
+        "query": "请研究人工智能在医疗诊断中的应用，包括文献调研和数据分析"
+    }):
+        collected_chunks.append(chunk)
+        # 打印流式输出
+        if hasattr(chunk, 'payload'):
+            payload = chunk.payload
+            if isinstance(payload, dict):
+                if 'content' in payload:
+                    print(payload['content'], end='', flush=True)
+                elif 'output' in payload:
+                    print(payload['output'], end='', flush=True)
+        elif isinstance(chunk, dict):
+            if 'content' in chunk:
+                print(chunk['content'], end='', flush=True)
+            elif 'output' in chunk:
+                print(chunk['output'], end='', flush=True)
 
 
 if __name__ == "__main__":

@@ -172,7 +172,8 @@ class Workflow(metaclass=_WorkflowMeta):
             outputs_schema: dict | Transformer = None,
             stream_inputs_schema: dict | Transformer = None,
             stream_outputs_schema: dict | Transformer = None,
-            comp_ability: list[ComponentAbility] = None
+            comp_ability: list[ComponentAbility] = None,
+            max_retries: int = 0
     ) -> Self:
         """
         Add a component to the workflow graph.
@@ -186,6 +187,7 @@ class Workflow(metaclass=_WorkflowMeta):
             stream_inputs_schema: Schema for streaming inputs
             stream_outputs_schema: Schema for streaming outputs
             comp_ability: List of component capabilities (streaming, batching, etc.)
+            max_retries: Maximum number of retries on failure (default: 0, no retry)
 
         Returns:
             Self for method chaining
@@ -197,7 +199,8 @@ class Workflow(metaclass=_WorkflowMeta):
                                          outputs_schema=outputs_schema,
                                          stream_inputs_schema=stream_inputs_schema,
                                          stream_outputs_schema=stream_outputs_schema,
-                                         comp_ability=comp_ability)
+                                         comp_ability=comp_ability,
+                                         max_retries=max_retries)
         return self
 
     def set_end_comp(

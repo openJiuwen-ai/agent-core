@@ -49,7 +49,7 @@ class SkillEvolutionRail(
 * **auto_save** (bool): Whether generated passive records are auto-approved and persisted. Defaults to `True`; production hosts should usually set this to `False` and consume approval events.
 * **language** (str): Prompt language, commonly `"cn"` or `"en"`.
 * **trajectory_store** (TrajectoryStore, optional): Store for captured execution trajectories.
-* **team_trajectory_store** (TrajectoryStore, optional): Optional shared trajectory store; this does not turn regular skill evolution into team-skill evolution.
+* **team_trajectory_store** (TrajectoryStore, optional): Deprecated shared trajectory store parameter. It emits a deprecation warning and does not enable runtime team aggregation for regular skill evolution.
 * **eval_interval** (int): Number of presentations between experience scoring checks. Must be at least 1.
 * **evolution_total_timeout_secs** (float): Background evolution timeout budget.
 * **generate_records_llm_policy** (LLMInvokePolicy): LLM retry/timeout policy for record generation.

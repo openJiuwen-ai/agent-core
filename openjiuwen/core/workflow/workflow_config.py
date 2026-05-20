@@ -29,6 +29,7 @@ class NodeSpec(BaseModel):
     io_configs: CompIOConfig = None  # Configuration for regular (non-streaming) I/O
     stream_io_configs: CompIOConfig = None  # Configuration for streaming I/O
     abilities: List[ComponentAbility] = Field(default_factory=list)  # List of component abilities supported
+    max_retries: int = Field(default=0, ge=0)
 
 
 class WorkflowSpec(BaseModel):

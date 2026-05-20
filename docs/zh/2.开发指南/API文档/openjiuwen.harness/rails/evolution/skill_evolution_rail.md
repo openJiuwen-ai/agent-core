@@ -49,7 +49,7 @@ class SkillEvolutionRail(
 * **auto_save** (bool): 是否自动审批并持久化生成的被动记录，默认 `True`；生产宿主通常应设置为 `False` 并消费审批事件。
 * **language** (str): prompt 语言，常见值为 `"cn"` 或 `"en"`。
 * **trajectory_store** (TrajectoryStore, 可选): 执行轨迹存储。
-* **team_trajectory_store** (TrajectoryStore, 可选): 可选共享轨迹存储；这不会把普通 skill 演进变为 team skill 演进。
+* **team_trajectory_store** (TrajectoryStore, 可选): 已废弃的共享轨迹存储参数。传入时会产生 deprecation warning，且不会为普通 skill 演进启用运行时团队聚合。
 * **eval_interval** (int): 经验展示评分检查间隔，必须大于等于 1。
 * **evolution_total_timeout_secs** (float): 后台演进总超时预算。
 * **generate_records_llm_policy** (LLMInvokePolicy): 经验记录生成阶段的 LLM 重试/超时策略。

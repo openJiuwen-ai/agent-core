@@ -100,7 +100,9 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                              **self._log_message)
                 if is_subgraph:
                     batch_inputs = {INPUTS_KEY: batch_inputs, CONFIG_KEY: config}
-                results = await self._executable.on_invoke(batch_inputs, session=self._session, context=self._context)
+                results = await self._executable.on_invoke(
+                    batch_inputs, session=self._session, context=self._context
+                )
                 results = await self._post_invoke(results)
                 logger.debug(f"Post-process results for [{self._node_id}] ability [{ability.name}]",
                              event_type=LogEventType.GRAPH_VERTEX_ABILITY_RUNNING,
@@ -185,6 +187,29 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         finally:
             if event and not event.is_set():
                 event.set()
+
+    async def _run_executable_with_retry(self, ability: ComponentAbility, is_subgraph: bool = False,
+                                         config: Any = None, event: asyncio.Event = None) -> bool:
+        max_retries = self._node_config.max_retries if self._node_config else 0
+        if max_retries <= 0:
+            return await self._run_executable(ability, is_subgraph, config, event)
+
+        for attempt in range(max_retries + 1):
+            try:
+                return await self._run_executable(ability, is_subgraph, config, event)
+            except GraphInterrupt:
+                raise
+            except (BaseError, Exception) as e:
+                if attempt < max_retries:
+                    logger.warning(
+                        f"Node [{self._node_id}] ability [{ability.name}] "
+                        f"failed on attempt {attempt + 1}/{max_retries + 1}, will retry",
+                        event_type=LogEventType.GRAPH_VERTEX_ABILITY_ERROR,
+                        exception=e,
+                        **self._log_message
+                    )
+                    continue
+                raise
 
     async def __call__(self, state: GraphState, config) -> Output:
         logger.info(f"Begin to call batch-in node [{self._node_id}]", event_type=LogEventType.GRAPH_VERTEX_CALL_START,
@@ -385,7 +410,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                             ability in [ComponentAbility.INVOKE, ComponentAbility.STREAM]]
             for ability in call_ability:
                 current_ability = ability
-                await self._run_executable(ability, is_subgraph, config)
+                await self._run_executable_with_retry(ability, is_subgraph, config)
             if len(call_ability) == 0:
                 await self.__trace_component_begin__()
 
@@ -454,7 +479,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             call_ability = self._stream_abilities()
             for ability in call_ability:
                 e = asyncio.Event()
-                task = asyncio.create_task(self._run_executable(ability, event=e))
+                task = asyncio.create_task(self._run_executable_with_retry(ability, event=e))
                 tasks.append(task)
                 await e.wait()
             event.set()

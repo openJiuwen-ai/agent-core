@@ -456,10 +456,13 @@ class TeamAgent(BaseAgent):
         dispatcher = self._coordination.dispatcher
         if harness is None or dispatcher is None:
             return
-        from openjiuwen.harness.rails import TeamSkillRail
+        from openjiuwen.harness.rails import TeamSkillCreateRail, TeamSkillEvolutionRail
 
-        for rail in harness.find_rails(TeamSkillRail):
-            dispatcher.team_completion.register_completion_callback(rail.notify_team_completed)
+        for rail_type in (TeamSkillEvolutionRail, TeamSkillCreateRail):
+            for rail in harness.find_rails(rail_type):
+                notify_team_completed = getattr(rail, "notify_team_completed", None)
+                if notify_team_completed is not None:
+                    dispatcher.team_completion.register_completion_callback(notify_team_completed)
 
     def _resolve_agent_spec(
         self,

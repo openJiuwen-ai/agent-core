@@ -229,9 +229,11 @@ async def test_runtime_extension_skills_are_refreshed_and_preferred(
         if isinstance(rail, SkillUseRail)
     )
     skill_dirs = list(skill_rail.skills_dir)
-    assert skill_dirs[0].endswith("demo_ext/skills")
+    assert Path(skill_dirs[0]).as_posix().endswith(
+        "demo_ext/skills"
+    )
     assert skill_rail.skills[0].name == "shared_skill"
-    assert str(skill_rail.skills[0].directory).endswith(
+    assert Path(skill_rail.skills[0].directory).as_posix().endswith(
         "demo_ext/skills/shared_skill"
     )
 
@@ -377,6 +379,6 @@ async def test_unload_harness_config_removes_skill_dirs_from_shared_rail(
     skill_dirs_after = list(skill_rail.skills_dir)
     assert str(old_root) in skill_dirs_after
     assert not any(
-        d.endswith("demo_ext/skills")
+        Path(d).as_posix().endswith("demo_ext/skills")
         for d in skill_dirs_after
     )

@@ -11,7 +11,7 @@
 | [experience](openjiuwen.agent_evolving/experience.md) | 在线经验生命周期编排（OnlineEvolutionOrchestrator、ExperienceManager、ExperienceTracker、ExperienceScorer） |
 | [signal](openjiuwen.agent_evolving/signal.md) | 演进信号检测与 fingerprint 工具（EvolutionSignal、SignalDetector、TeamSignalDetector） |
 | [trainer](openjiuwen.agent_evolving/trainer.md) | 训练编排（Trainer、Progress、Callbacks） |
-| [trajectory](openjiuwen.agent_evolving/trajectory.md) | 轨迹类型与抽取（Trajectory、TrajectoryExtractor、iter_steps 等） |
+| [trajectory](openjiuwen.agent_evolving/trajectory.md) | 轨迹类型、抽取、存储与运行时聚合 registry（Trajectory、TrajectoryExtractor、InMemoryTrajectoryRegistry 等） |
 | [updater](openjiuwen.agent_evolving/updater.md) | 更新器（`Updater`、`SingleDimUpdater`、`MultiDimUpdater`） |
 | [checkpointing](openjiuwen.agent_evolving/checkpointing.md) | 检查点与恢复（`EvolveCheckpoint`、`FileCheckpointStore`、`CheckpointManager`） |
 | [optimizer](openjiuwen.agent_evolving/optimizer/optimizer.md) | 优化器基类（BaseOptimizer、TextualParameter、InstructionOptimizer） |

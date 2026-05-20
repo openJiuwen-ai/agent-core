@@ -109,6 +109,7 @@ async def test_team_skill_create_rail_queues_follow_up_after_spawn_threshold(tmp
                 ),
             )
         )
+    assert await rail.notify_team_completed() is True
     await rail.after_task_iteration(
         _ctx(
             agent,

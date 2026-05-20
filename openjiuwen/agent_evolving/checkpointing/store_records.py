@@ -12,7 +12,6 @@ from typing import Any, Dict, Optional
 from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionLog,
     EvolutionRecord,
-    EvolutionTarget,
     UsageStats,
 )
 from openjiuwen.core.common.logging import logger
@@ -209,6 +208,7 @@ class StoreRecordsHelper:
         final_score = new_score if new_score is not None else max(all_scores)
 
         primary_record.change.content = new_content
+        primary_record.summary = None
         primary_record.score = final_score
         primary_record.timestamp = datetime.now(tz=timezone.utc).isoformat()
 
@@ -250,6 +250,7 @@ class StoreRecordsHelper:
             return None
 
         target_record.change.content = new_content
+        target_record.summary = None
         if new_score is not None:
             target_record.score = new_score
         target_record.timestamp = datetime.now(tz=timezone.utc).isoformat()

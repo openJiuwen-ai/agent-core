@@ -17,9 +17,11 @@ add_agent(self,
 
 **参数：**
 
-* **card**(AgentCard)：代理的元数据卡片，包含配置和标识信息。
+* **card**(AgentCard)：代理的元数据卡片，包含配置和标识信息。对于 A2A 代理以及 `RemoteAgent` 调用方，这个卡片必须由上游代码显式提供；资源管理器不会替调用方兜底生成卡片。
 * **agent**(AgentProvider | RemoteAgent)：可调用提供者，用于创建或返回代理实例。
 * **tag**(Optional[Tag | list[Tag]]，可选)：用于分类和过滤代理的标签。
+
+对于 A2A 代理，调用方必须显式提供具体的 `AgentCard`；资源管理器不会替调用方兜底生成卡片。
 
 **返回：**
 

@@ -89,6 +89,12 @@ Get the current Runner configuration.
 
 **Returns**: **RunnerConfig**, current configuration object.
 
+## Configuration Notes
+
+`RunnerConfig` controls global runner behavior such as distributed execution and checkpointing. A2A-specific runtime details
+(for example, `AgentCard`, `interface_url`, and transport selection) are configured through the A2A adapter and server
+layers instead of `RunnerConfig`.
+
 ### run_agent
 
 ```python
@@ -109,7 +115,7 @@ Execute an agent and return its result.
 **Parameters**:
 
 * **agent** (str | BaseAgent | LegacyBaseAgent): Agent ID or agent instance. Cannot be `None` or `''`.
-* **inputs** (Any): Input data for executing the agent.
+* **inputs** (Any): Input data for executing the agent. For remote agent paths, callers commonly include `conversation_id`; when present, Runner reuses it as the request session identifier.
 * **session** (str | Session): Session ID or session instance. Default is `None`, indicating use of default session.
 * **context** (ModelContext): Context engine for storing user conversation information. Default is `None`, indicating context engine functionality is not enabled.
 * **envs** (dict[str, Any]): Execution environment configuration, such as model parameters, system variables, etc. Default is `None`.

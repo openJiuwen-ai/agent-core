@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-import logging
+# import logging
 import shutil
 import sys
 from dataclasses import dataclass, field
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
         TaskContext,
     )
 
-logger = logging.getLogger(__name__)
+from openjiuwen.core.common.logging import logger
 
 
 @dataclass
@@ -265,7 +265,19 @@ def _preview_extension_components(
                 or "unknown"
             )
         if resources.skills and resources.skills.dirs:
-            skills = list(resources.skills.dirs)
+            root = Path(runtime_ext.runtime_path).resolve()
+            for skill_dir in resources.skills.dirs:
+                skill_root = root / skill_dir
+                if not skill_root.is_dir():
+                    continue
+                for child in sorted(
+                    skill_root.iterdir(),
+                    key=lambda p: p.name,
+                ):
+                    if child.is_dir() and (
+                        child / "SKILL.md"
+                    ).is_file():
+                        skills.append(child.name)
     return LoadedComponents(
         rails=rails, tools=tools, skills=skills,
     )

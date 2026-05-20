@@ -9,6 +9,11 @@ from typing import Any, AsyncIterator
 
 from openjiuwen.auto_harness.contexts import (
     SessionContext,
+    TaskContext,
+    TaskRuntime,
+)
+from openjiuwen.auto_harness.infra.runtime_extension_merger import (
+    MergedExtensionError,
 )
 from openjiuwen.auto_harness.pipelines import (
     EXTENDED_EVOLVE_PIPELINE,
@@ -25,11 +30,17 @@ from openjiuwen.auto_harness.schema import (
     CycleResult,
     ExtensionDesign,
     ExtensionDesignArtifact,
+    OptimizationTask,
+    RuntimeExtensionArtifact,
     SessionResultsArtifact,
     StageSlot,
 )
 from openjiuwen.auto_harness.stages.assess import (
     ExtendAssessStage,
+)
+from openjiuwen.auto_harness.stages.merge import (
+    MergeActivationBlock,
+    MergeSuccessResult,
 )
 from openjiuwen.auto_harness.stages.plan import (
     ExtendPlanStage,
@@ -154,42 +165,59 @@ class ExtendedEvolvePipeline(BasePipeline):
             "failed" if failed_extensions else "success",
         )
 
-        verified_by_name = {
-            item.design.extension_name: item
-            for item in verified_tasks
-        }
         if verified_tasks:
             yield _top_stage_result(
                 "activate",
                 "running",
             )
-        activated_names: set[str] = set()
-        for design in designs_to_run:
-            if design.extension_name in activated_names:
-                continue
-            verified = verified_by_name.get(
-                design.extension_name
-            )
-            if verified is None:
-                continue
-            activated_names.add(design.extension_name)
-            logger.info(
-                "[AutoHarnessExtendedPipeline] extension activate dispatch: extension=%s kind=%s",
-                design.extension_name,
-                design.kind,
-            )
+
+        activate_started_at = len(ctx.orchestrator.results)
+        if len(verified_tasks) == 1:
+            logger.info("[AutoHarnessExtendedPipeline] only get 1 verified tasks")
             async for chunk in ExtensionTaskPipeline.run_activate_stream(
                 ctx.orchestrator,
-                verified,
+                verified_tasks[0],
             ):
                 yield chunk
+        elif len(verified_tasks) > 1:
+            logger.info("[AutoHarnessExtendedPipeline] get multiple verified tasks")
+            merge_before_activate = MergeActivationBlock()
+            merged_artifact: RuntimeExtensionArtifact | None = None
+            try:
+                async for chunk in merge_before_activate.stream(
+                    ctx.orchestrator,
+                    verified_tasks,
+                ):
+                    if isinstance(chunk, MergeSuccessResult):
+                        merged_artifact = chunk.artifact
+                    else:
+                        yield chunk
+            except MergedExtensionError as exc:
+                ctx.orchestrator.record_cycle_result(
+                    CycleResult(
+                        success=False,
+                        error=f"merge multiple extensions failed: {exc}",
+                    )
+                )
+            else:
+                merged_verified = _build_merged_verified_task(
+                    ctx.orchestrator,
+                    merged_artifact,
+                )
+                async for chunk in ExtensionTaskPipeline.run_activate_stream(
+                    ctx.orchestrator,
+                    merged_verified,
+                ):
+                    yield chunk
+
         if verified_tasks:
-            activate_failed = False
-            recent_results = ctx.orchestrator.results[-len(verified_tasks):]
-            for result in recent_results:
-                if not result.success:
-                    activate_failed = True
-                    break
+            activate_results = ctx.orchestrator.results[
+                activate_started_at:
+            ]
+            activate_failed = any(
+                not result.success
+                for result in activate_results
+            )
             yield _top_stage_result(
                 "activate",
                 "failed" if activate_failed else "success",
@@ -462,4 +490,46 @@ def _top_stage_result(
             "messages": [],
             "metrics": {},
         },
+    )
+
+
+def _build_merged_verified_task(
+    orchestrator: Any,
+    merged: RuntimeExtensionArtifact,
+) -> VerifiedExtensionTask:
+    """Construct a self-consistent VerifiedExtensionTask for the merged package.
+
+    The merged extension is a brand-new entity (not a child of any source
+    extension), so it owns its own ``OptimizationTask``, ``ExtensionDesign``
+    and ``TaskContext``.  This keeps ``extension_target`` /
+    ``runtime_extension`` / ``task_id`` aligned for downstream activation.
+    """
+    design = ExtensionDesign(
+        gap_id="merged",
+        extension_name=merged.extension_name,
+        kind="merged",
+    )
+    task = OptimizationTask(
+        topic=f"runtime-extension:{merged.extension_name}",
+    )
+    session_root = str(orchestrator.ensure_session_runtime_dir())
+    runtime = TaskRuntime(
+        related=[],
+        wt_path=session_root,
+        edit_safety_rail=None,
+        preexisting_dirty_files=[],
+        task_agent=None,
+        commit_agent=None,
+    )
+    ctx = TaskContext(
+        orchestrator=orchestrator,
+        task=task,
+        runtime=runtime,
+    )
+    ctx.put_artifact("extension_target", design)
+    ctx.put_artifact("runtime_extension", merged)
+    return VerifiedExtensionTask(
+        design=design,
+        task=task,
+        ctx=ctx,
     )

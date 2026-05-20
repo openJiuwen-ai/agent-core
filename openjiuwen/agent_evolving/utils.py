@@ -81,6 +81,26 @@ def infer_skill_from_texts(
     return max(hits.items(), key=lambda item: item[1].ranking_key())[0]
 
 
+def parse_top_level_frontmatter(content: str) -> dict[str, str]:
+    """Parse only top-level scalar fields from Markdown frontmatter."""
+    text = content.strip()
+    if not text.startswith("---"):
+        return {}
+    end = text.find("---", 3)
+    if end == -1:
+        return {}
+
+    frontmatter: dict[str, str] = {}
+    for line in text[3:end].strip().split("\n"):
+        if not line or line[0].isspace() or line.startswith("-"):
+            continue
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        frontmatter[key.strip()] = value.strip()
+    return frontmatter
+
+
 def _extract_skill_tool_name(payload: Any) -> str:
     """Extract ``skill_name`` from skill_tool arguments when possible."""
     if isinstance(payload, dict):

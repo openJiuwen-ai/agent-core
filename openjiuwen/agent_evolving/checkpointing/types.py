@@ -122,6 +122,7 @@ class EvolutionRecord:
     score: float = 0.6
     usage_stats: Optional[UsageStats] = None
     skill_version: Optional[str] = None
+    summary: Optional[str] = None
 
     @classmethod
     def make(
@@ -129,8 +130,10 @@ class EvolutionRecord:
         source: str,
         context: str,
         change: EvolutionPatch,
+        *,
         score: float = 0.6,
         skill_version: Optional[str] = None,
+        summary: Optional[str] = None,
     ) -> "EvolutionRecord":
         return cls(
             id=f"ev_{uuid.uuid4().hex[:8]}",
@@ -141,6 +144,7 @@ class EvolutionRecord:
             score=score,
             usage_stats=UsageStats(),
             skill_version=skill_version,
+            summary=summary,
         )
 
     def to_dict(self) -> dict:
@@ -157,6 +161,8 @@ class EvolutionRecord:
             payload["usage_stats"] = self.usage_stats.to_dict()
         if self.skill_version is not None:
             payload["skill_version"] = self.skill_version
+        if self.summary:
+            payload["summary"] = self.summary
         return payload
 
     @classmethod
@@ -173,6 +179,7 @@ class EvolutionRecord:
             score=data.get("score", 0.6),
             usage_stats=usage_stats,
             skill_version=data.get("skill_version"),
+            summary=data.get("summary"),
         )
 
     @property

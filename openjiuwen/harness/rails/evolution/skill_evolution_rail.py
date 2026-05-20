@@ -12,10 +12,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
-from openjiuwen.agent_evolving.experience.types import PendingChange
 from openjiuwen.agent_evolving.experience import (
-    OnlineEvolutionOrchestrator,
     ExperienceTracker,
+    OnlineEvolutionOrchestrator,
 )
 from openjiuwen.agent_evolving.experience.scorer import (
     EVALUATE_LLM_POLICY,
@@ -23,7 +22,7 @@ from openjiuwen.agent_evolving.experience.scorer import (
     ExperienceScorer,
 )
 from openjiuwen.agent_evolving.experience.skill_experience_manager import ExperienceManager
-from openjiuwen.agent_evolving.experience.types import ExperienceApprovalRequest, ExperienceProposal
+from openjiuwen.agent_evolving.experience.types import ExperienceApprovalRequest, ExperienceProposal, PendingChange
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.optimizer.skill_call import SkillExperienceOptimizer
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
@@ -41,26 +40,26 @@ from openjiuwen.agent_evolving.signal import (
 )
 from openjiuwen.agent_evolving.trajectory import Trajectory, TrajectoryStore
 from openjiuwen.agent_evolving.updater import SingleDimUpdater
-from openjiuwen.agent_evolving.utils import infer_skill_from_texts
+from openjiuwen.agent_evolving.utils import infer_skill_from_texts, parse_top_level_frontmatter
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
-from openjiuwen.core.memory.lite.frontmatter import parse_frontmatter
 from openjiuwen.core.operator.skill_call import SkillExperienceOperator
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
 from openjiuwen.core.sys_operation import SysOperation
-from openjiuwen.harness.rails.evolution.approval_runtime import EvolutionApprovalRuntime
 from openjiuwen.harness.rails.evolution.approval_events import (
     attach_evolution_meta,
     build_evolution_progress_event,
     build_simplify_approval_event,
     build_skill_approval_event,
 )
+from openjiuwen.harness.rails.evolution.approval_runtime import EvolutionApprovalRuntime
 from openjiuwen.harness.rails.evolution.contracts import EvolutionRequestResult, SimplifyRequestResult
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail
 
 _MAX_PROCESSED_SIGNAL_KEYS = 500
 _DEFAULT_EVOLUTION_TOTAL_TIMEOUT_SECS = 600.0
+_NON_REGULAR_SKILL_KINDS = {"team-skill", "swarm-skill"}
 
 
 class SkillEvolutionRail(EvolutionRail):
@@ -76,6 +75,7 @@ class SkillEvolutionRail(EvolutionRail):
     """
 
     priority = 80
+    _DEFAULT_MEMBER_ROLE = "teammate"
     _SKILL_MD_RE = re.compile(r"[/\\]([^/\\]+)[/\\]SKILL\.md", re.IGNORECASE)
     _EXPERIENCE_RECORD_HEADING_RE = re.compile(r"#+\s*\[([A-Za-z0-9_-]+)\]")
 
@@ -370,17 +370,30 @@ class SkillEvolutionRail(EvolutionRail):
                 return
 
             logger.info("[SkillEvolutionRail] collected %d messages", len(messages))
+            self._emit_progress(
+                "started",
+                "starting regular skill evolution analysis for completed conversation",
+            )
             if not messages:
                 logger.info("[SkillEvolutionRail] no messages, skipping")
+                self._emit_progress(
+                    "cancelled",
+                    "no conversation messages available; cancelling regular skill evolution analysis",
+                )
+                await self._experience_tracker.evaluate_presented(presented_entries)
                 return
 
-            self._emit_progress("detecting_signals", "detecting regular skill evolution signals")
             all_skill_names = self._evolution_store.list_skill_names()
             skill_names = [name for name in all_skill_names if self._is_regular_skill(name)]
             logger.info(
                 "[SkillEvolutionRail] found %d regular skills (filtered from %d local skills)",
                 len(skill_names),
                 len(all_skill_names),
+            )
+            self._emit_progress(
+                "detecting_signals",
+                f"checking {len(skill_names)} regular skill(s) for evolution signals "
+                f"(filtered from {len(all_skill_names)} local skill(s))",
             )
 
             detector = SignalDetector(
@@ -439,6 +452,21 @@ class SkillEvolutionRail(EvolutionRail):
                 if not signal.skill_name:
                     continue
                 skill_groups.setdefault(signal.skill_name, []).append(signal)
+
+            if not skill_groups:
+                if signals:
+                    message = (
+                        "detected evolution signals but no regular skill could be attributed; "
+                        "cancelling regular skill evolution analysis"
+                    )
+                else:
+                    message = (
+                        "no skill usage of a regular skill or actionable evolution signal detected; "
+                        "cancelling regular skill evolution analysis"
+                    )
+                self._emit_progress("cancelled", message)
+                await self._experience_tracker.evaluate_presented(presented_entries)
+                return
 
             # Evolve existing skills (when signals are attributed to known skills)
             for skill_name, skill_signals in skill_groups.items():
@@ -681,7 +709,7 @@ class SkillEvolutionRail(EvolutionRail):
         )
 
     def _is_regular_skill(self, name: str) -> bool:
-        """Exclude team skills from 1D skill evolution detection.
+        """Exclude team/swarm skills from 1D skill evolution detection.
 
         If the skill directory cannot be resolved from a mocked or incomplete
         store, keep the skill eligible rather than silently disabling
@@ -704,8 +732,8 @@ class SkillEvolutionRail(EvolutionRail):
 
         try:
             text = skill_md.read_text(encoding="utf-8")
-            frontmatter = parse_frontmatter(text) or {}
-            return frontmatter.get("kind") != "team-skill"
+            frontmatter = parse_top_level_frontmatter(text)
+            return frontmatter.get("kind") not in _NON_REGULAR_SKILL_KINDS
         except Exception:
             return True
 

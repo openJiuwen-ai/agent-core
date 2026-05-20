@@ -11,7 +11,6 @@ from typing import Any, Dict, List, Optional
 
 from openjiuwen.agent_evolving.checkpointing.evolution_store import EvolutionStore
 from openjiuwen.agent_evolving.checkpointing.types import (
-    VALID_SECTIONS,
     EvolutionPatch,
     EvolutionRecord,
     EvolutionTarget,
@@ -22,6 +21,11 @@ from openjiuwen.agent_evolving.optimizer.llm_resilience import (
     LLMInvokePolicy,
     invoke_text_with_retry,
     invoke_text_with_retry_and_prompt,
+)
+from openjiuwen.agent_evolving.optimizer.skill_call.experience_draft_parser import (
+    ParsedExperienceDraft,
+    normalize_summary,
+    parse_experience_drafts_with_error,
 )
 from openjiuwen.agent_evolving.signal import (
     build_team_trajectory_summary,
@@ -110,42 +114,6 @@ def _looks_truncated(text: str) -> bool:
     opens = text.count("{") + text.count("[")
     closes = text.count("}") + text.count("]")
     return opens > closes + 1
-
-
-def _parse_single_patch(data: dict) -> Optional[EvolutionPatch]:
-    action = data.get("action", "append")
-    if action == "skip":
-        return EvolutionPatch(
-            section="",
-            action="skip",
-            content="",
-            skip_reason=data.get("skip_reason", "unknown"),
-        )
-
-    section = data.get("section", "Troubleshooting")
-    if section not in VALID_SECTIONS:
-        section = "Troubleshooting"
-
-    raw_target = data.get("target", "body")
-    try:
-        target = EvolutionTarget(raw_target)
-    except ValueError:
-        target = EvolutionTarget.BODY
-
-    merge_target = data.get("merge_target")
-    if merge_target in ("null", None):
-        merge_target = None
-
-    return EvolutionPatch(
-        section=section,
-        action="append",
-        content=data.get("content", ""),
-        target=target,
-        merge_target=merge_target,
-        script_filename=data.get("script_filename"),
-        script_language=data.get("script_language"),
-        script_purpose=data.get("script_purpose"),
-    )
 
 
 class TeamSkillExperienceOptimizer(BaseOptimizer):
@@ -347,7 +315,7 @@ class TeamSkillExperienceOptimizer(BaseOptimizer):
 
         logger.info("[TeamSkillOptimizer] calling aggregated LLM flow (skill=%s)", ctx.skill_name)
         try:
-            patches = await self._generate_patches_with_retries(
+            drafts = await self._generate_drafts_with_retries(
                 prompt=prompt,
                 retry_prompt=retry_prompt,
             )
@@ -364,7 +332,8 @@ class TeamSkillExperienceOptimizer(BaseOptimizer):
         merged_context = self._build_context(ctx.signals)
         text_records: List[EvolutionRecord] = []
         script_records: List[EvolutionRecord] = []
-        for patch in patches:
+        for draft in drafts:
+            patch = draft.patch
             if patch.action == "skip":
                 logger.info(
                     "[TeamSkillOptimizer] aggregated flow skipped record (reason=%s)",
@@ -384,6 +353,7 @@ class TeamSkillExperienceOptimizer(BaseOptimizer):
                 context=merged_context,
                 change=patch,
                 score=initial_score,
+                summary=draft.summary,
             )
             if is_script:
                 script_records.append(record)
@@ -408,7 +378,7 @@ class TeamSkillExperienceOptimizer(BaseOptimizer):
         roles_summary = "N/A"
         workflow_summary = "N/A"
 
-        summary = self._build_trajectory_summary(trajectory)
+        summary = build_team_trajectory_summary(trajectory)
         if "spawn_member" in summary:
             role_mentions = re.findall(r"role[_-]?([a-z]+)", summary, re.IGNORECASE)
             if role_mentions:
@@ -479,6 +449,7 @@ class TeamSkillExperienceOptimizer(BaseOptimizer):
                 content=content,
                 target=EvolutionTarget.BODY,
             ),
+            summary=normalize_summary(parsed.get("summary")),
         )
 
     async def generate_trajectory_patch(
@@ -489,7 +460,7 @@ class TeamSkillExperienceOptimizer(BaseOptimizer):
         trajectory_issues: list[dict],
     ) -> Optional[EvolutionRecord]:
         try:
-            summary = self._build_trajectory_summary(trajectory)
+            summary = build_team_trajectory_summary(trajectory)
         except Exception as exc:
             logger.warning("[TeamSkillOptimizer] trajectory_patch: failed to build summary: %s", exc)
             return None
@@ -563,11 +534,8 @@ class TeamSkillExperienceOptimizer(BaseOptimizer):
                 content=content,
                 target=EvolutionTarget.BODY,
             ),
+            summary=normalize_summary(parsed.get("summary")),
         )
-
-    @staticmethod
-    def _build_trajectory_summary(trajectory: Trajectory) -> str:
-        return build_team_trajectory_summary(trajectory)
 
     @staticmethod
     def _build_frontmatter(name: str, description: str, roles: List[Dict]) -> str:
@@ -768,6 +736,23 @@ class TeamSkillExperienceOptimizer(BaseOptimizer):
         attempt_number: int = 1,
         parse_error: str = "",
     ) -> tuple[List[EvolutionPatch] | None, str]:
+        drafts, retry_raw = await self.retry_parse_drafts(
+            broken_raw=broken_raw,
+            original_prompt=original_prompt,
+            attempt_number=attempt_number,
+            parse_error=parse_error,
+        )
+        if drafts is None:
+            return None, retry_raw
+        return [draft.patch for draft in drafts], retry_raw
+
+    async def retry_parse_drafts(
+        self,
+        broken_raw: str,
+        original_prompt: str,
+        attempt_number: int = 1,
+        parse_error: str = "",
+    ) -> tuple[List[ParsedExperienceDraft] | None, str]:
         truncated = _looks_truncated(broken_raw)
         if truncated:
             if attempt_number >= 3:
@@ -800,36 +785,20 @@ class TeamSkillExperienceOptimizer(BaseOptimizer):
             logger.error("[TeamSkillOptimizer] retry LLM call failed: %s", exc)
             return None, ""
 
-        patches, _last_error = self._parse_patches_with_error(retry_raw)
-        if patches is None:
+        drafts, _last_error = parse_experience_drafts_with_error(retry_raw, _extract_json_with_error)
+        if drafts is None:
             strategy = "regeneration" if truncated else ("strict_fix" if attempt_number >= 3 else "fix")
             logger.warning("[TeamSkillOptimizer] retry (%s) also failed, giving up", strategy)
             return None, retry_raw
-        logger.info("[TeamSkillOptimizer] retry succeeded, got %d patches", len(patches))
-        return patches, retry_raw
+        logger.info("[TeamSkillOptimizer] retry succeeded, got %d patches", len(drafts))
+        return drafts, retry_raw
 
-    @staticmethod
-    def _parse_patches_with_error(raw: str) -> tuple[List[EvolutionPatch] | None, str]:
-        data, last_error = _extract_json_with_error(raw)
-        if data is None:
-            return None, last_error
-
-        items = data if isinstance(data, list) else [data]
-        patches: List[EvolutionPatch] = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            patch = _parse_single_patch(item)
-            if patch is not None:
-                patches.append(patch)
-        return patches, ""
-
-    async def _generate_patches_with_retries(
+    async def _generate_drafts_with_retries(
         self,
         *,
         prompt: str,
         retry_prompt: str,
-    ) -> List[EvolutionPatch]:
+    ) -> List[ParsedExperienceDraft]:
         raw, prompt_used = await invoke_text_with_retry_and_prompt(
             llm=self._llm,
             model=self._model,
@@ -838,14 +807,14 @@ class TeamSkillExperienceOptimizer(BaseOptimizer):
             policy=self._record_llm_policy,
         )
 
-        patches, last_error = self._parse_patches_with_error(raw)
-        if patches is not None:
-            return patches
+        drafts, last_error = parse_experience_drafts_with_error(raw, _extract_json_with_error)
+        if drafts is not None:
+            return drafts
 
         last_raw = raw
         for attempt in range(2, 4):
             logger.warning("[TeamSkillOptimizer] aggregated parse failed, repair attempt %d/3", attempt)
-            repaired, retry_raw = await self.retry_parse(
+            repaired, retry_raw = await self.retry_parse_drafts(
                 broken_raw=last_raw,
                 original_prompt=prompt_used,
                 attempt_number=attempt,
@@ -855,7 +824,7 @@ class TeamSkillExperienceOptimizer(BaseOptimizer):
                 return repaired
             if retry_raw:
                 last_raw = retry_raw
-                _, last_error = self._parse_patches_with_error(retry_raw)
+                _, last_error = parse_experience_drafts_with_error(retry_raw, _extract_json_with_error)
 
         raise ValueError("TeamSkillExperienceOptimizer aggregated response could not be parsed")
 

@@ -7,6 +7,8 @@ from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.store.base_memory_index import BaseMemoryIndex, MemoryDoc
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.manage.mem_model.memory_unit import SummaryUnit, BaseMemoryUnit, MemoryType
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
 
@@ -43,9 +45,9 @@ class SummaryManager(BaseMemoryManager):
             for mem_unit in memory_list:
                 if not isinstance(mem_unit, SummaryUnit):
                     continue
-                plaintext_content = BaseMemoryManager.encrypt_memory_if_needed(
+                plaintext_content = BaseMemoryManager.decrypt_memory_if_needed(
                     key=self.crypto_key,
-                    plaintext=mem_unit.summary
+                    ciphertext=mem_unit.summary
                 ) if self.crypto_key else mem_unit.summary
 
                 memory_doc = MemoryDoc(
@@ -63,172 +65,178 @@ class SummaryManager(BaseMemoryManager):
 
     async def add_memories(self, user_id: str, scope_id: str, memories: dict[str, list[BaseMemoryUnit]],
                            llm: Tuple[str, Model] | None = None, **kwargs):
-        if not self.memory_index:
-            memory_logger.warning(
-                "memory_index is not initialized, cannot add memories",
-                event_type=LogEventType.MEMORY_STORE,
-                memory_type=self.mem_type,
-                user_id=user_id,
-                scope_id=scope_id
-            )
-            return []
-        memory_docs = self._convert_to_memory_docs(memories)
-        if not memory_docs:
-            memory_logger.warning(
-                "No valid summary docs to add",
-                event_type=LogEventType.MEMORY_STORE,
-                memory_type=self.mem_type,
-                user_id=user_id,
-                scope_id=scope_id
-            )
-            return []
-        await self.memory_index.add_memories(user_id, scope_id, memory_docs)
-        return memories[self.mem_type]
+        self._validate_required_params(
+            user_id, scope_id, self.memory_index,
+            StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR, self.mem_type,
+        )
+
+        try:
+            memory_docs = self._convert_to_memory_docs(memories)
+            if not memory_docs:
+                memory_logger.warning(
+                    "No valid summary docs to add",
+                    event_type=LogEventType.MEMORY_STORE,
+                    memory_type=self.mem_type,
+                    user_id=user_id,
+                    scope_id=scope_id
+                )
+                return []
+            await self.memory_index.add_memories(user_id, scope_id, memory_docs)
+            return memories[self.mem_type]
+        except BaseError:
+            raise
+        except Exception as e:
+            self._wrap_exception(e, StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR, self.mem_type)
 
     async def update(self, user_id: str, scope_id: str, mem_id: str, new_memory: str, **kwargs):
-        if not self.memory_index:
-            memory_logger.warning(
-                "memory_index is not initialized, cannot update memory",
-                event_type=LogEventType.MEMORY_STORE,
-                memory_type=self.mem_type,
-                user_id=user_id,
-                scope_id=scope_id
-            )
-            return False
-        memory_doc = await self.memory_index.get_by_id(user_id, scope_id, mem_id)
-        if not memory_doc:
-            return False
-        updated_doc = MemoryDoc(
-            id=mem_id,
-            text=new_memory,
-            type=self.mem_type,
-            timestamp=datetime.now(timezone.utc).astimezone(),
-            fields=memory_doc.fields
+        self._validate_required_params(
+            user_id, scope_id, self.memory_index,
+            StatusCode.MEMORY_UPDATE_MEMORY_EXECUTION_ERROR, self.mem_type,
         )
-        await self.memory_index.update_memories(user_id, scope_id, [updated_doc])
-        return True
+
+        try:
+            memory_doc = await self.memory_index.get_by_id(user_id, scope_id, mem_id)
+            if not memory_doc:
+                return False
+            updated_doc = MemoryDoc(
+                id=mem_id,
+                text=new_memory,
+                type=self.mem_type,
+                timestamp=datetime.now(timezone.utc).astimezone(),
+                fields=memory_doc.fields
+            )
+            await self.memory_index.update_memories(user_id, scope_id, [updated_doc])
+            return True
+        except BaseError:
+            raise
+        except Exception as e:
+            self._wrap_exception(e, StatusCode.MEMORY_UPDATE_MEMORY_EXECUTION_ERROR, self.mem_type)
 
     async def delete(self, user_id: str, scope_id: str, mem_id: str, **kwargs):
-        if not self.memory_index:
-            memory_logger.warning(
-                "memory_index is not initialized, cannot delete memory",
-                event_type=LogEventType.MEMORY_STORE,
-                memory_type=self.mem_type,
-                user_id=user_id,
-                scope_id=scope_id
-            )
-            return False
-        await self.memory_index.delete_memories(user_id, scope_id, [mem_id])
-        return True
-
-    async def delete_by_user_id(self, user_id: str, scope_id: str, **kwargs):
-        if not self.memory_index:
-            memory_logger.warning(
-                "memory_index is not initialized, cannot delete by user_id",
-                event_type=LogEventType.MEMORY_STORE,
-                memory_type=self.mem_type,
-                user_id=user_id,
-                scope_id=scope_id
-            )
-            return False
-        await self.memory_index.delete_by_user_and_scope(user_id, scope_id)
-        return True
-
-    async def get(self, user_id: str, scope_id: str, mem_id: str) -> dict[str, Any] | None:
-        if not self.memory_index:
-            memory_logger.warning(
-                "memory_index is not initialized, cannot get memory",
-                event_type=LogEventType.MEMORY_RETRIEVE,
-                memory_type=self.mem_type,
-                user_id=user_id,
-                scope_id=scope_id
-            )
-            return None
-        memory_doc = await self.memory_index.get_by_id(user_id, scope_id, mem_id)
-        if not memory_doc:
-            return None
-
-        encrypted_content = BaseMemoryManager.encrypt_memory_if_needed(
-            key=self.crypto_key,
-            plaintext=memory_doc.text
-        ) if self.crypto_key else memory_doc.text
-
-        return {
-            "id": memory_doc.id,
-            "mem": encrypted_content,
-            "mem_type": memory_doc.type,
-            "timestamp": memory_doc.timestamp,
-            "source_id": memory_doc.fields.get("source_id"),
-            "metadata": memory_doc.fields.get("metadata")
-        }
-
-    async def search(self, user_id: str, scope_id: str, query: str, top_k: int, **kwargs):
-        if not self.memory_index:
-            memory_logger.warning(
-                "memory_index is not initialized, cannot search memories",
-                event_type=LogEventType.MEMORY_RETRIEVE,
-                memory_type=self.mem_type,
-                user_id=user_id,
-                scope_id=scope_id
-            )
-            return []
-        search_results = await self.memory_index.search(
-            user_id=user_id,
-            scope_id=scope_id,
-            query=query,
-            mem_types=[self.mem_type],
-            top_k=top_k
+        self._validate_required_params(
+            user_id, scope_id, self.memory_index,
+            StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR, self.mem_type,
         )
 
-        result = []
-        for memory_doc, score in search_results:
-            decrypted_content = BaseMemoryManager.decrypt_memory_if_needed(
+        try:
+            await self.memory_index.delete_memories(user_id, scope_id, [mem_id])
+            return True
+        except BaseError:
+            raise
+        except Exception as e:
+            self._wrap_exception(e, StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR, self.mem_type)
+
+    async def delete_by_user_id(self, user_id: str, scope_id: str, **kwargs):
+        self._validate_required_params(
+            user_id, scope_id, self.memory_index,
+            StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR, self.mem_type,
+        )
+
+        try:
+            await self.memory_index.delete_by_user_and_scope(user_id, scope_id)
+            return True
+        except BaseError:
+            raise
+        except Exception as e:
+            self._wrap_exception(e, StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR, self.mem_type)
+
+    async def get(self, user_id: str, scope_id: str, mem_id: str) -> dict[str, Any] | None:
+        self._validate_required_params(
+            user_id, scope_id, self.memory_index,
+            StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR, self.mem_type,
+        )
+
+        try:
+            memory_doc = await self.memory_index.get_by_id(user_id, scope_id, mem_id)
+            if not memory_doc:
+                return None
+
+            encrypted_content = BaseMemoryManager.encrypt_memory_if_needed(
                 key=self.crypto_key,
-                ciphertext=memory_doc.text
+                plaintext=memory_doc.text
             ) if self.crypto_key else memory_doc.text
 
-            result.append({
+            return {
                 "id": memory_doc.id,
-                "mem": decrypted_content,
+                "mem": encrypted_content,
                 "mem_type": memory_doc.type,
                 "timestamp": memory_doc.timestamp,
-                "score": score,
                 "source_id": memory_doc.fields.get("source_id"),
                 "metadata": memory_doc.fields.get("metadata")
-            })
-        return result
+            }
+        except BaseError:
+            raise
+        except Exception as e:
+            self._wrap_exception(e, StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR, self.mem_type)
+
+    async def search(self, user_id: str, scope_id: str, query: str, top_k: int, **kwargs):
+        self._validate_required_params(
+            user_id, scope_id, self.memory_index,
+            StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR, self.mem_type,
+        )
+
+        try:
+            search_results = await self.memory_index.search(
+                user_id=user_id,
+                scope_id=scope_id,
+                query=query,
+                mem_types=[self.mem_type],
+                top_k=top_k
+            )
+
+            result = []
+            for memory_doc, score in search_results:
+                encrypted_content = BaseMemoryManager.encrypt_memory_if_needed(
+                    key=self.crypto_key,
+                    plaintext=memory_doc.text
+                ) if self.crypto_key else memory_doc.text
+
+                result.append({
+                    "id": memory_doc.id,
+                    "mem": encrypted_content,
+                    "mem_type": memory_doc.type,
+                    "timestamp": memory_doc.timestamp,
+                    "score": score,
+                    "source_id": memory_doc.fields.get("source_id"),
+                    "metadata": memory_doc.fields.get("metadata")
+                })
+            return result
+        except BaseError:
+            raise
+        except Exception as e:
+            self._wrap_exception(e, StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR, self.mem_type)
 
     async def list_user_summary(self, user_id: str, scope_id: str,
                                 offset: int = 0, batch_size: int = 100) -> list[dict[str, Any]]:
-        if not self.memory_index:
-            memory_logger.warning(
-                "memory_index is not initialized, cannot list user summary",
-                event_type=LogEventType.MEMORY_RETRIEVE,
-                memory_type=self.mem_type,
-                user_id=user_id,
-                scope_id=scope_id
-            )
-            return []
+        self._validate_required_params(
+            user_id, scope_id, self.memory_index,
+            StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR, self.mem_type,
+        )
 
-        summary_memories = await self.memory_index.list_memories(user_id, scope_id,
-                                                    offset, batch_size, [self.mem_type])
-        if not summary_memories:
-            return []
-        result = []
-        for memory_doc in summary_memories:
-            decrypted_content = BaseMemoryManager.decrypt_memory_if_needed(
-                key=self.crypto_key,
-                ciphertext=memory_doc.text
-            ) if self.crypto_key else memory_doc.text
+        try:
+            summary_memories = await self.memory_index.list_memories(user_id, scope_id,
+                                                        offset, batch_size, [self.mem_type])
+            if not summary_memories:
+                return []
+            result = []
+            for memory_doc in summary_memories:
+                encrypted_content = BaseMemoryManager.encrypt_memory_if_needed(
+                    key=self.crypto_key,
+                    plaintext=memory_doc.text
+                ) if self.crypto_key else memory_doc.text
 
-            result.append({
-                "id": memory_doc.id,
-                "mem": decrypted_content,
-                "mem_type": memory_doc.type,
-                "timestamp": memory_doc.timestamp,
-                "source_id": memory_doc.fields.get("source_id"),
-                "metadata": memory_doc.fields.get("metadata")
-            })
+                result.append({
+                    "id": memory_doc.id,
+                    "mem": encrypted_content,
+                    "mem_type": memory_doc.type,
+                    "timestamp": memory_doc.timestamp,
+                    "source_id": memory_doc.fields.get("source_id"),
+                    "metadata": memory_doc.fields.get("metadata")
+                })
 
-        result.sort(key=lambda x: x['timestamp'], reverse=True)
-        return result
+            result.sort(key=lambda x: x['timestamp'], reverse=True)
+            return result
+        except BaseError:
+            raise
+        except Exception as e:
+            self._wrap_exception(e, StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR, self.mem_type)

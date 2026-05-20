@@ -16,13 +16,13 @@ from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionRecord,
     EvolutionTarget,
 )
+from openjiuwen.agent_evolving.experience import (
+    ExperienceTracker,
+    OnlineEvolutionOrchestrator,
+)
 from openjiuwen.agent_evolving.experience.scorer import (
     EVALUATE_LLM_POLICY,
     SIMPLIFY_LLM_POLICY,
-)
-from openjiuwen.agent_evolving.experience import (
-    OnlineEvolutionOrchestrator,
-    ExperienceTracker,
 )
 from openjiuwen.agent_evolving.experience.skill_experience_manager import ExperienceManager
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
@@ -38,11 +38,11 @@ from openjiuwen.agent_evolving.trajectory.types import LLMCallDetail, Trajectory
 from openjiuwen.agent_evolving.types import ApplyResult
 from openjiuwen.core.foundation.llm import SystemMessage
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs, ToolCallInputs
+from openjiuwen.harness.rails.evolution.approval_runtime import EvolutionApprovalRuntime
 from openjiuwen.harness.rails.evolution.skill_evolution_rail import (
     _MAX_PROCESSED_SIGNAL_KEYS,
     SkillEvolutionRail,
 )
-from openjiuwen.harness.rails.evolution.approval_runtime import EvolutionApprovalRuntime
 
 
 def _make_rail(tmp_path, *, auto_scan: bool = True, auto_save: bool = True) -> SkillEvolutionRail:
@@ -126,6 +126,10 @@ def _approval_events(events):
     return [event for event in events if event.type == "chat.ask_user_question"]
 
 
+def _progress_events(events):
+    return [event for event in events if event.payload.get("_evolution_meta", {}).get("event_kind") == "progress"]
+
+
 class _MsgContext:
     def __init__(self, messages=None, *, raise_error: bool = False):
         self._messages = list(messages) if messages else []
@@ -185,6 +189,14 @@ def test_public_llm_policy_constants_are_importable():
     assert GENERATE_RECORDS_LLM_POLICY.attempt_timeout_secs == 60
     assert EVALUATE_LLM_POLICY.attempt_timeout_secs == 30
     assert SIMPLIFY_LLM_POLICY.attempt_timeout_secs == 60
+
+
+def test_trajectory_sink_defaults_member_role_to_teammate(tmp_path):
+    rail = _make_rail(tmp_path)
+
+    rail.set_trajectory_sink(Mock(), team_id="team-a")
+
+    assert rail._member_role == "teammate"
 
 
 def test_properties_and_clear_processed_signals(tmp_path):
@@ -803,7 +815,7 @@ def test_infer_primary_skill_prefers_skills_path_over_legacy_skill_md(tmp_path):
     assert result == "new-skill"
 
 
-def test_is_regular_skill_filters_team_skill(tmp_path):
+def test_is_regular_skill_filters_team_and_swarm_skill(tmp_path):
     rail = SkillEvolutionRail(
         skills_dir=str(tmp_path / "skills"),
         llm=Mock(),
@@ -824,9 +836,16 @@ def test_is_regular_skill_filters_team_skill(tmp_path):
         "---\nname: team-skill\nkind: team-skill\n---\n# Team",
         encoding="utf-8",
     )
+    swarm_dir = tmp_path / "skills" / "swarm-skill"
+    swarm_dir.mkdir(parents=True)
+    (swarm_dir / "SKILL.md").write_text(
+        "---\nname: swarm-skill\nkind: swarm-skill\nroles:\n  - name: planner\n    kind: ai_agent\n---\n# Swarm",
+        encoding="utf-8",
+    )
 
     assert rail._is_regular_skill("regular-skill") is True
     assert rail._is_regular_skill("team-skill") is False
+    assert rail._is_regular_skill("swarm-skill") is False
 
 
 # =============================================================================
@@ -853,7 +872,9 @@ async def test_run_evolution_zero_signals_creates_conversation_review(tmp_path):
     rail._stage_evolution_from_signals = AsyncMock(return_value=None)
     rail._evolution_store.append_record = AsyncMock()
 
-    await rail.run_evolution(_trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None))
+    await rail.run_evolution(
+        _trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None)
+    )
 
     rail._stage_evolution_from_signals.assert_awaited_once()
     call_args = rail._stage_evolution_from_signals.await_args
@@ -903,9 +924,7 @@ async def test_run_evolution_uses_normalized_messages_for_signal_detection(tmp_p
         trajectory,
         messages=[{"role": "system", "content": "system prompt"}],
     )
-    detector.detect_user_intent.assert_awaited_once_with(
-        [{"role": "system", "content": "system prompt"}]
-    )
+    detector.detect_user_intent.assert_awaited_once_with([{"role": "system", "content": "system prompt"}])
 
 
 @pytest.mark.asyncio
@@ -927,7 +946,9 @@ async def test_run_evolution_uses_llm_for_passive_user_messages(tmp_path):
     rail._evolver._llm.invoke = AsyncMock(
         return_value={"content": '{"is_feedback": true, "excerpt": "不对，你应该先检查文件是否存在"}'}
     )
-    await rail.run_evolution(_trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None))
+    await rail.run_evolution(
+        _trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None)
+    )
 
     rail._stage_evolution_from_signals.assert_awaited_once()
     signals_passed = rail._stage_evolution_from_signals.await_args.kwargs["signals"]
@@ -954,7 +975,9 @@ async def test_run_evolution_user_messages_without_llm_feedback_fall_back_to_con
     rail._stage_evolution_from_signals = AsyncMock(return_value=None)
 
     rail._evolver._llm.invoke = AsyncMock(return_value={"content": '{"is_feedback": false, "excerpt": ""}'})
-    await rail.run_evolution(_trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None))
+    await rail.run_evolution(
+        _trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None)
+    )
 
     rail._stage_evolution_from_signals.assert_awaited_once()
     signals_passed = rail._stage_evolution_from_signals.await_args.kwargs["signals"]
@@ -979,7 +1002,9 @@ async def test_run_evolution_user_messages_llm_failure_falls_back_to_rule_signal
     rail._stage_evolution_from_signals = AsyncMock(return_value=None)
 
     rail._evolver._llm.invoke = AsyncMock(side_effect=RuntimeError("llm down"))
-    await rail.run_evolution(_trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None))
+    await rail.run_evolution(
+        _trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None)
+    )
 
     rail._stage_evolution_from_signals.assert_awaited_once()
     signals_passed = rail._stage_evolution_from_signals.await_args.kwargs["signals"]
@@ -1006,7 +1031,9 @@ async def test_run_evolution_deduplicates_user_intent_against_existing_signal(tm
     rail._evolver._llm.invoke = AsyncMock(
         return_value={"content": '{"is_feedback": true, "excerpt": "不对，你应该先检查文件是否存在"}'}
     )
-    await rail.run_evolution(_trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None))
+    await rail.run_evolution(
+        _trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None)
+    )
 
     signals_passed = rail._stage_evolution_from_signals.await_args.kwargs["signals"]
     assert len(signals_passed) == 1
@@ -1022,13 +1049,42 @@ async def test_run_evolution_zero_signals_no_primary_skill_returns(tmp_path):
     rail._infer_primary_skill = Mock(return_value=None)
     rail._stage_evolution_from_signals = AsyncMock()
 
-    await rail.run_evolution(_trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None))
+    await rail.run_evolution(
+        _trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None)
+    )
 
     rail._stage_evolution_from_signals.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_run_evolution_filters_team_skills_from_detection(tmp_path):
+async def test_run_evolution_emits_started_and_cancelled_when_no_skill_used(tmp_path):
+    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+
+    messages = [{"role": "user", "content": "hi"}]
+    rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
+    rail._infer_primary_skill = Mock(return_value=None)
+    rail._stage_evolution_from_signals = AsyncMock()
+
+    await rail.run_evolution(
+        _trajectory_with_messages(messages),
+        AgentCallbackContext(agent=None, inputs=None, session=None),
+    )
+
+    events = _progress_events(await rail.drain_pending_host_events())
+    stages = [event.payload["_evolution_meta"]["stage"] for event in events]
+    contents = [event.payload["content"] for event in events]
+
+    assert stages[0] == "started"
+    assert "detecting_signals" in stages
+    assert stages[-1] == "cancelled"
+    assert "regular skill" in contents[-1]
+    assert "no skill usage" in contents[-1]
+    assert "cancelling" in contents[-1]
+    rail._stage_evolution_from_signals.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_filters_team_and_swarm_skills_from_detection(tmp_path):
     rail = SkillEvolutionRail(
         skills_dir=str(tmp_path / "skills"),
         llm=Mock(),
@@ -1051,14 +1107,22 @@ async def test_run_evolution_filters_team_skills_from_detection(tmp_path):
         "---\nname: team-skill-a\nkind: team-skill\n---\n# Team Skill A",
         encoding="utf-8",
     )
+    swarm_dir = tmp_path / "skills" / "swarm-skill-a"
+    swarm_dir.mkdir(parents=True)
+    (swarm_dir / "SKILL.md").write_text(
+        "---\nname: swarm-skill-a\nkind: swarm-skill\nroles:\n  - name: planner\n    kind: ai_agent\n---\n# Swarm Skill A",
+        encoding="utf-8",
+    )
 
     messages = [{"role": "user", "content": "hi"}]
     rail._evolution_store = EvolutionStore(str(tmp_path / "skills"))
-    rail._evolution_store.list_skill_names = Mock(return_value=["skill-a", "team-skill-a"])
+    rail._evolution_store.list_skill_names = Mock(return_value=["skill-a", "team-skill-a", "swarm-skill-a"])
     rail._infer_primary_skill = Mock(return_value=None)
     rail._stage_evolution_from_signals = AsyncMock()
 
-    await rail.run_evolution(_trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None))
+    await rail.run_evolution(
+        _trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None)
+    )
 
     rail._infer_primary_skill.assert_called_once_with(messages, ["skill-a"])
 

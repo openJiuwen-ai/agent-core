@@ -17,9 +17,11 @@ Add a single agent to the resource manager.
 
 **Parameters:**
 
-* **card**(AgentCard): The agent's metadata card, containing configuration and identification information.
+* **card**(AgentCard): The agent's metadata card, containing configuration and identification information. For A2A-backed agents and `RemoteAgent` callers, this card must be supplied by upstream code; the resource manager does not invent a fallback card.
 * **agent**(AgentProvider | RemoteAgent): Callable provider for creating or returning an agent instance.
 * **tag**(Optional[Tag | list[Tag]], optional): Tags for categorizing and filtering agents.
+
+For A2A-backed agents, the caller must provide a concrete `AgentCard`; the resource manager does not invent a fallback card.
 
 **Returns:**
 

@@ -11,7 +11,7 @@
 | [experience](openjiuwen.agent_evolving/experience.md) | Online experience lifecycle orchestration (OnlineEvolutionOrchestrator, ExperienceManager, ExperienceTracker, ExperienceScorer) |
 | [signal](openjiuwen.agent_evolving/signal.md) | Evolution signal detection and fingerprint utilities (EvolutionSignal, SignalDetector, TeamSignalDetector) |
 | [trainer](openjiuwen.agent_evolving/trainer.md) | Training orchestration (Trainer, Progress,Callbacks) |
-| [trajectory](openjiuwen.agent_evolving/trajectory.md) | Trajectory types and extraction (Trajectory, TrajectoryExtractor, iter_steps, etc.) |
+| [trajectory](openjiuwen.agent_evolving/trajectory.md) | Trajectory types, extraction, stores, and runtime aggregation registry (Trajectory, TrajectoryExtractor, InMemoryTrajectoryRegistry, etc.) |
 | [updater](openjiuwen.agent_evolving/updater.md) | Updaters (`Updater`, `SingleDimUpdater`, `MultiDimUpdater`) |
 | [checkpointing](openjiuwen.agent_evolving/checkpointing.md) | Checkpoint and restore (`EvolveCheckpoint`, `FileCheckpointStore`, `CheckpointManager`) |
 | [optimizer](openjiuwen.agent_evolving/optimizer/optimizer.md) | Optimizer base classes (BaseOptimizer, TextualParameter, InstructionOptimizer) |

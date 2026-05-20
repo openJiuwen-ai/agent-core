@@ -633,6 +633,46 @@ def create_learnings_agent(
     )
 
 
+def create_merge_ext_agent(
+    config: "AutoHarnessConfig",
+    *,
+    workspace_override: str,
+    extra_rails: Optional[List["AgentRail"]] = None,
+) -> "DeepAgent":
+    """Create the merge-extension repair agent.
+
+    Workspace is locked to ``merged_extensions/`` to prevent edits
+    outside the merge boundary.  No skills are mounted — the agent
+    relies on prompt instructions + basic filesystem + shell tools.
+    """
+    rails = _build_readonly_rails(config)
+    if extra_rails:
+        rails.extend(extra_rails)
+
+    tools = _build_research_tools(config)
+
+    return create_deep_agent(
+        model=config.model,
+        card=AgentCard(
+            name="auto-harness-merge-ext",
+            description="修复合并扩展产物的静态校验错误",
+        ),
+        system_prompt=(
+            "You are repairing a merged runtime extension. "
+            "Only modify files inside merged_extensions/. "
+            "Do not change business logic."
+        ),
+        tools=tools or None,
+        rails=rails or None,
+        workspace=workspace_override,
+        language=config.language,
+        max_iterations=config.resolve_agent_iterations("merge_ext", 8),
+        completion_timeout=config.model_timeout_secs,
+        auto_create_workspace=False,
+        sysoperation=_build_trusted_local_sys_operation("auto-harness-merge-ext"),
+    )
+
+
 def create_activate_guide_agent(
     config: "AutoHarnessConfig",
     *,

@@ -92,6 +92,7 @@ async def execute_single_component(
         def __init__(self, inputs_schema, outputs_schema=None):
             self.io_configs = SimpleIOConfig(inputs_schema, outputs_schema)
             self.abilities = [ComponentAbility.INVOKE]
+            self.max_retries = 0
 
             # Set input schema and output schema
 
@@ -170,7 +171,8 @@ class BaseWorkflow:
             outputs_schema: dict | Transformer = None,
             stream_inputs_schema: dict | Transformer = None,
             stream_outputs_schema: dict | Transformer = None,
-            comp_ability: list[ComponentAbility] = None
+            comp_ability: list[ComponentAbility] = None,
+            max_retries: int = 0
     ) -> Self:
         self._validate_comp_id(comp_id)
         self._validate_schemas(comp_id, inputs_schema, outputs_schema, stream_inputs_schema, stream_outputs_schema)
@@ -178,7 +180,8 @@ class BaseWorkflow:
         node_spec = NodeSpec(
             io_configs=CompIOConfig(inputs_schema=inputs_schema, outputs_schema=outputs_schema),
             stream_io_configs=CompIOConfig(inputs_schema=stream_inputs_schema, outputs_schema=stream_outputs_schema),
-            abilities=comp_ability if comp_ability is not None else [])
+            abilities=comp_ability if comp_ability is not None else [],
+            max_retries=max_retries)
         self._workflow_spec.comp_configs[comp_id] = node_spec
         if wait_for_all is None:
             wait_for_all = False

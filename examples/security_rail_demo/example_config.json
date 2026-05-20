@@ -1,0 +1,16 @@
+{
+  "ApiKeyGuardReject": {
+    "name": "ApiKeyGuardReject",
+    "class_name": "ApikeyguardrejectRail",
+    "enabled": false,
+    "description": "Blocks API key/secret leakage completely (REJECT mode)",
+    "priority": 89
+  },
+  "ApiKeyGuardInterrupt": {
+    "name": "ApiKeyGuardInterrupt",
+    "class_name": "ApikeyguardinterruptRail",
+    "enabled": false,
+    "description": "Requires human approval for API key operations (INTERRUPT mode)",
+    "priority": 89
+  }
+}

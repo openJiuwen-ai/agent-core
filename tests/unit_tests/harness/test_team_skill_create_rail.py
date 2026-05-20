@@ -8,6 +8,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from openjiuwen.agent_evolving.trajectory import ToolCallDetail, TrajectoryBuilder, TrajectoryStep
+from openjiuwen.core.single_agent.rail.base import InvokeInputs
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionTriggerPoint
 from openjiuwen.harness.rails.skills.team_skill_create_rail import TeamSkillCreateRail
 
@@ -21,9 +23,13 @@ def _make_rail(tmp_path, *, auto_trigger=True) -> TeamSkillCreateRail:
 
 def _set_builder_tool_calls(rail, tool_names: list[str]) -> None:
     """Set up a mock TrajectoryBuilder with given tool calls."""
-    from openjiuwen.agent_evolving.trajectory import TrajectoryBuilder, TrajectoryStep, ToolCallDetail
-
     builder = TrajectoryBuilder(session_id="test", source="test")
+    _append_builder_tool_calls(builder, tool_names)
+    rail._builder = builder
+
+
+def _append_builder_tool_calls(builder: TrajectoryBuilder, tool_names: list[str]) -> None:
+    """Append mock tool calls to an existing TrajectoryBuilder."""
     for name in tool_names:
         step = TrajectoryStep(
             kind="tool",
@@ -31,7 +37,13 @@ def _set_builder_tool_calls(rail, tool_names: list[str]) -> None:
             meta={"operator_id": name},
         )
         builder.record_step(step)
-    rail._builder = builder
+
+
+def _make_invoke_ctx(agent: MagicMock, conversation_id: str = "test") -> MagicMock:
+    ctx = MagicMock()
+    ctx.agent = agent
+    ctx.inputs = InvokeInputs(query="run team", conversation_id=conversation_id)
+    return ctx
 
 
 class TestTeamSkillCreateRailConstructor:
@@ -75,7 +87,7 @@ class TestTeamSkillCreateRailOnAfterTaskIteration:
     """_on_after_task_iteration detects thresholds and triggers follow_up."""
 
     @pytest.mark.asyncio
-    async def test_follow_up_when_threshold_met(self, tmp_path):
+    async def test_after_task_iteration_follow_up_when_threshold_met_after_completion(self, tmp_path):
         rail = _make_rail(tmp_path)
         _set_builder_tool_calls(rail, ["spawn_member"] * 3)
 
@@ -83,9 +95,9 @@ class TestTeamSkillCreateRailOnAfterTaskIteration:
         controller.enqueue_follow_up = MagicMock()
         agent = MagicMock()
         agent._loop_controller = controller
-        ctx = MagicMock()
-        ctx.agent = agent
+        ctx = _make_invoke_ctx(agent)
 
+        assert await rail.notify_team_completed() is True
         await rail._on_after_task_iteration(ctx)
 
         controller.enqueue_follow_up.assert_called_once()
@@ -104,9 +116,9 @@ class TestTeamSkillCreateRailOnAfterTaskIteration:
         controller.enqueue_follow_up = MagicMock()
         agent = MagicMock()
         agent._loop_controller = controller
-        ctx = MagicMock()
-        ctx.agent = agent
+        ctx = _make_invoke_ctx(agent)
 
+        assert await rail.notify_team_completed() is True
         await rail._on_after_task_iteration(ctx)
 
         controller.enqueue_follow_up.assert_not_called()
@@ -120,9 +132,135 @@ class TestTeamSkillCreateRailOnAfterTaskIteration:
         controller.enqueue_follow_up = MagicMock()
         agent = MagicMock()
         agent._loop_controller = controller
-        ctx = MagicMock()
-        ctx.agent = agent
+        ctx = _make_invoke_ctx(agent)
+
+        assert await rail.notify_team_completed() is False
+        await rail._on_after_task_iteration(ctx)
+
+        controller.enqueue_follow_up.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_follow_up_until_team_completed(self, tmp_path):
+        rail = _make_rail(tmp_path)
+        _set_builder_tool_calls(rail, ["spawn_member"] * 3)
+
+        controller = MagicMock()
+        controller.enqueue_follow_up = MagicMock()
+        agent = MagicMock()
+        agent._loop_controller = controller
+        ctx = _make_invoke_ctx(agent)
 
         await rail._on_after_task_iteration(ctx)
+        await rail._on_after_invoke(ctx)
+
+        controller.enqueue_follow_up.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_follow_up_after_team_completed_mark(self, tmp_path):
+        rail = _make_rail(tmp_path)
+        _set_builder_tool_calls(rail, ["spawn_member"] * 3)
+
+        controller = MagicMock()
+        controller.enqueue_follow_up = MagicMock()
+        agent = MagicMock()
+        agent._loop_controller = controller
+        ctx = _make_invoke_ctx(agent)
+
+        result = await rail.notify_team_completed()
+        await rail._on_after_invoke(ctx)
+
+        assert result is True
+        controller.enqueue_follow_up.assert_called_once()
+        prompt = controller.enqueue_follow_up.call_args[0][0]
+        assert "team-skill-creator" in prompt
+
+    @pytest.mark.asyncio
+    async def test_completion_mark_does_not_apply_to_new_session(self, tmp_path):
+        rail = _make_rail(tmp_path)
+        _set_builder_tool_calls(rail, ["spawn_member"] * 3)
+
+        controller = MagicMock()
+        controller.enqueue_follow_up = MagicMock()
+        agent = MagicMock()
+        agent._loop_controller = controller
+
+        assert await rail.notify_team_completed() is True
+
+        rail._builder = TrajectoryBuilder(session_id="other-session", source="test")
+        ctx = _make_invoke_ctx(agent, conversation_id="other-session")
+        await rail._on_after_invoke(ctx)
+
+        controller.enqueue_follow_up.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_follow_up_only_once_per_completed_session(self, tmp_path):
+        rail = _make_rail(tmp_path)
+        _set_builder_tool_calls(rail, ["spawn_member"] * 3)
+
+        controller = MagicMock()
+        controller.enqueue_follow_up = MagicMock()
+        agent = MagicMock()
+        agent._loop_controller = controller
+        ctx = _make_invoke_ctx(agent)
+
+        assert await rail.notify_team_completed() is True
+        await rail._on_after_invoke(ctx)
+        assert await rail.notify_team_completed() is True
+        await rail._on_after_invoke(ctx)
+
+        controller.enqueue_follow_up.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_follow_up_can_repeat_in_same_session_after_new_team_run(self, tmp_path):
+        rail = _make_rail(tmp_path)
+        _set_builder_tool_calls(rail, ["spawn_member"] * 2)
+
+        controller = MagicMock()
+        controller.enqueue_follow_up = MagicMock()
+        agent = MagicMock()
+        agent._loop_controller = controller
+        ctx = _make_invoke_ctx(agent)
+
+        assert await rail.notify_team_completed() is True
+        await rail._on_after_invoke(ctx)
+
+        _append_builder_tool_calls(rail._builder, ["spawn_member"] * 2)
+        assert await rail.notify_team_completed() is True
+        await rail._on_after_invoke(ctx)
+
+        assert controller.enqueue_follow_up.call_count == 2
+
+    @pytest.mark.parametrize("skill_kind", ["team-skill", "swarm-skill"])
+    @pytest.mark.asyncio
+    async def test_no_follow_up_when_existing_team_skill_was_used(self, tmp_path, skill_kind):
+        skills_dir = tmp_path / "skills"
+        team_skill_dir = skills_dir / "research-team"
+        team_skill_dir.mkdir(parents=True)
+        (team_skill_dir / "SKILL.md").write_text(
+            f"---\nname: research-team\nkind: {skill_kind}\nroles:\n  - name: planner\n    kind: ai_agent\n---\n# Research Team\n",
+            encoding="utf-8",
+        )
+        rail = TeamSkillCreateRail(skills_dir=str(skills_dir))
+        _set_builder_tool_calls(rail, ["spawn_member"] * 2)
+        rail._builder.record_step(
+            TrajectoryStep(
+                kind="tool",
+                detail=ToolCallDetail(
+                    tool_name="skill_tool",
+                    call_args={"skill_name": "research-team", "relative_file_path": "SKILL.md"},
+                    call_result="loaded",
+                ),
+                meta={"operator_id": "skill_tool"},
+            )
+        )
+
+        controller = MagicMock()
+        controller.enqueue_follow_up = MagicMock()
+        agent = MagicMock()
+        agent._loop_controller = controller
+        ctx = _make_invoke_ctx(agent)
+
+        assert await rail.notify_team_completed() is True
+        await rail._on_after_invoke(ctx)
 
         controller.enqueue_follow_up.assert_not_called()

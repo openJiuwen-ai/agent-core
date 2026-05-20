@@ -1,6 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """DeepAgent rail definitions."""
+
+# fmt: off
+# ruff: noqa: I001
 from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails.evolution import (
@@ -24,7 +27,17 @@ from openjiuwen.harness.rails.memory import (
     MemoryRail,
 )
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
-from openjiuwen.harness.rails.security import PermissionInterruptRail, SecurityRail
+from openjiuwen.harness.rails.security import (
+    BaseSecurityRail,
+    PermissionInterruptRail,
+    SafetyPromptRail,
+    SecurityAllow,
+    SecurityCheckContext,
+    SecurityDecision,
+    SecurityInterrupt,
+    SecurityReject,
+    SecurityRail,
+)
 from openjiuwen.harness.rails.skills import (
     SkillCreateRail,
     SkillUseRail,
@@ -40,12 +53,14 @@ from openjiuwen.harness.rails.subagent import (
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
 from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
+# fmt: on
 
 __all__ = [
     "AgentModeRail",
     "AskUserPayload",
     "AskUserRail",
     "BaseInterruptRail",
+    "BaseSecurityRail",
     "CodingMemoryRail",
     "ConfirmInterruptRail",
     "ContextEvolutionRail",
@@ -59,6 +74,12 @@ __all__ = [
     "MemoryRail",
     "PermissionInterruptRail",
     "ProgressiveToolRail",
+    "SafetyPromptRail",
+    "SecurityAllow",
+    "SecurityCheckContext",
+    "SecurityDecision",
+    "SecurityInterrupt",
+    "SecurityReject",
     "SecurityRail",
     "SessionRail",
     "SkillCreateRail",
@@ -69,8 +90,8 @@ __all__ = [
     "SysOperationRail",
     "TaskCompletionRail",
     "TaskPlanningRail",
-    "TeamSkillEvolutionRail",
     "TeamSkillCreateRail",
+    "TeamSkillEvolutionRail",
     "TeamSkillRail",
     "TrajectoryRail",
     "VerificationContractRail",

@@ -563,6 +563,7 @@ class AutoHarnessConfig:
             "learnings": 5,
             "explore_subagent": 20,
             "browser_subagent": 20,
+            "merge_ext": 8,
         }
     )
 
