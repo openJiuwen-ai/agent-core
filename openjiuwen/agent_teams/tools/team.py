@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.i18n import t
+from openjiuwen.agent_teams.interaction.bridge_protocol import BridgeProtocolAdapter
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
@@ -42,6 +43,8 @@ from openjiuwen.agent_teams.schema.status import (
     TaskStatus,
 )
 from openjiuwen.agent_teams.schema.team import (
+    BridgeMailboxInjectMode,
+    BridgeMemberSpec,
     MemberOpResult,
     TeamCompletionSnapshot,
     TeamMemberSpec,
@@ -84,6 +87,7 @@ class TeamBackend:
         model_config_allocator: Optional[Callable[[Optional[str]], Optional["Allocation"]]] = None,
         leader_allocation: Optional["Allocation"] = None,
         enable_hitt: bool = False,
+        enable_bridge: bool = False,
         *,
         on_team_cleaned: Callable[[], Awaitable[None]] | None = None,
         on_team_built: Callable[[], Awaitable[None]] | None = None,
@@ -118,6 +122,11 @@ class TeamBackend:
                 when True, the runtime instance flag (mutated by
                 ``build_team``) decides whether the capability is
                 actually engaged.
+            enable_bridge: Spec-level Bridge-Agent capability ceiling.
+                Symmetric to ``enable_hitt`` for the bridge feature.
+                When False, ``spawn_bridge_agent`` returns failure and
+                predefined BRIDGE_AGENT members are skipped at
+                ``build_team`` time.
             on_team_cleaned: Optional async callback fired exactly once
                 on the ``clean_team`` SUCCESS path. NOT fired on the early
                 ``return False`` path (active members remain). The hosting
@@ -147,6 +156,12 @@ class TeamBackend:
         # enable beyond it.
         self._spec_enable_hitt: bool = enable_hitt
         self._enable_hitt: bool = enable_hitt
+        # Bridge capability ceiling — symmetric to HITT. Predefined
+        # BRIDGE_AGENT members are registered at ``build_team`` only
+        # when ``_enable_bridge`` is True; ``spawn_bridge_agent`` gates
+        # on the same flag for dynamic spawn.
+        self._spec_enable_bridge: bool = enable_bridge
+        self._enable_bridge: bool = enable_bridge
         # Fired once on the build_team / clean_team success paths so the
         # hosting TeamAgent can persist DB lifecycle state and latch
         # state.team_cleaned deterministically inside the leader's round.
@@ -177,6 +192,23 @@ class TeamBackend:
         # Holds raw callables (not wrapped) so the dispatcher can decide
         # async vs sync invocation at call time.
         self._human_agent_inbound_callbacks: dict[str, Any] = {}
+        # Bridge-agent registry. ``_bridge_member_specs`` indexes the
+        # ``BridgeMemberSpec`` rows by member_name so the coordination
+        # message handler can read ``mailbox_inject_mode`` /
+        # ``protocol`` / ``adapter_config`` at deliver time without
+        # re-walking the predefined list. Seeded from
+        # ``predefined_members`` so restart paths reconstruct the
+        # index without replaying spawn.
+        self._bridge_member_specs: dict[str, BridgeMemberSpec] = {
+            m.member_name: m for m in self.predefined_members if isinstance(m, BridgeMemberSpec)
+        }
+        # Concrete protocol adapter per bridge member. Phase-1 stays
+        # empty; SDK injects via ``set_bridge_adapter`` when an adapter
+        # implementation lands. ``None`` is allowed and means "no
+        # adapter wired" — the auto-forward path then substitutes
+        # ``REMOTE_UNAVAILABLE_SENTINEL`` so the bridge degrades to a
+        # normal teammate.
+        self._bridge_adapters: dict[str, BridgeProtocolAdapter] = {}
         self.message_manager = TeamMessageManager(
             self.team_name,
             member_name,
@@ -941,6 +973,7 @@ class TeamBackend:
         leader_display_name: str,
         leader_desc: str,
         enable_hitt: Optional[bool] = None,
+        enable_bridge: Optional[bool] = None,
     ):
         """Create a team and register the leader as a member.
 
@@ -958,6 +991,10 @@ class TeamBackend:
                 ceiling is False is a config error and raises. When the
                 effective flag is False, predefined HUMAN_AGENT members
                 are skipped (with a warning).
+            enable_bridge: Runtime instance Bridge switch. Same semantics
+                as ``enable_hitt`` applied to the bridge feature.
+                Predefined BRIDGE_AGENT members are skipped (with a
+                warning) when the effective flag is False.
         """
         # Step A: enforce spec ceiling
         if enable_hitt is True and not self._spec_enable_hitt:
@@ -972,11 +1009,25 @@ class TeamBackend:
                     "at build_team time."
                 ),
             )
+        if enable_bridge is True and not self._spec_enable_bridge:
+            from openjiuwen.core.common.exception.codes import StatusCode
+            from openjiuwen.core.common.exception.errors import raise_error
+
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason=(
+                    "build_team(enable_bridge=True) requires TeamAgentSpec.enable_bridge=True "
+                    "(capability ceiling). Spec has enable_bridge=False — cannot enable Bridge "
+                    "at build_team time."
+                ),
+            )
 
         # Step B: compute effective flag and persist on backend so all
         # downstream spawn paths see a single source of truth.
         effective_enable_hitt = self._spec_enable_hitt if enable_hitt is None else enable_hitt
         self._enable_hitt = effective_enable_hitt
+        effective_enable_bridge = self._spec_enable_bridge if enable_bridge is None else enable_bridge
+        self._enable_bridge = effective_enable_bridge
 
         # Create team in database
         team_name = self.team_name
@@ -1012,8 +1063,18 @@ class TeamBackend:
         # Register predefined teammates (UNSTARTED, launched later via broadcast).
         # Human agents are filtered out and handled by
         # ``_spawn_human_agents`` so they never enter the startup loop.
+        # Bridge agents share the teammate registration path (they are
+        # full teammates locally) but are skipped if ``enable_bridge``
+        # is disabled on this run.
+        skipped_bridge_specs: list[BridgeMemberSpec] = []
         for member_spec in self.predefined_members:
             if member_spec.role_type == TeamRole.HUMAN_AGENT:
+                continue
+            if isinstance(member_spec, BridgeMemberSpec) and not effective_enable_bridge:
+                skipped_bridge_specs.append(member_spec)
+                # Drop the index entry as well so downstream code does
+                # not treat it as a bridge when ``enable_bridge`` is off.
+                self._bridge_member_specs.pop(member_spec.member_name, None)
                 continue
             member_card_id = f"{team_name}_{member_spec.member_name}"
             member_card = AgentCard(
@@ -1032,6 +1093,14 @@ class TeamBackend:
                 execution_status=ExecutionStatus.IDLE,
                 mode=self.teammate_mode,
                 allocation=allocation,
+                role=member_spec.role_type,
+            )
+        if skipped_bridge_specs:
+            team_logger.warning(
+                "Skipped %d predefined BRIDGE_AGENT(s) for team %s because "
+                "build_team(enable_bridge=False) overrode the spec capability",
+                len(skipped_bridge_specs),
+                team_name,
             )
 
         # HITT: register every declared human member when the effective
@@ -1235,3 +1304,158 @@ class TeamBackend:
         off" while ``spawn_human_agent`` waits to be called.
         """
         return self._enable_hitt
+
+    # ------------------------------------------------------------------
+    # Bridge-agent surface
+    # ------------------------------------------------------------------
+
+    def bridge_enabled(self) -> bool:
+        """Whether the Bridge capability is currently engaged.
+
+        Symmetric to ``hitt_enabled``. Tools / rails / coordination
+        handlers gate on this — it's True when both the spec ceiling
+        and the ``build_team`` runtime switch allow bridges.
+        """
+        return self._enable_bridge
+
+    def is_bridge_agent(self, member_name: Optional[str]) -> bool:
+        """Whether ``member_name`` is a registered bridge-agent member."""
+        if not member_name:
+            return False
+        return member_name in self._bridge_member_specs
+
+    def bridge_agent_names(self) -> frozenset[str]:
+        """Snapshot of currently registered bridge-agent member names."""
+        return frozenset(self._bridge_member_specs.keys())
+
+    def get_bridge_member_spec(self, member_name: str) -> Optional[BridgeMemberSpec]:
+        """Return the ``BridgeMemberSpec`` for ``member_name``, or None.
+
+        Returned spec carries ``mailbox_inject_mode`` / ``protocol`` /
+        ``adapter_config`` — single source of truth for the mailbox
+        auto-forward path.
+        """
+        return self._bridge_member_specs.get(member_name)
+
+    def set_bridge_adapter(
+        self,
+        member_name: str,
+        adapter: Optional[BridgeProtocolAdapter],
+    ) -> None:
+        """Register / clear the protocol adapter for a bridge member.
+
+        SDK / business layer calls this after spawn to wire a concrete
+        adapter instance. ``adapter=None`` removes a prior registration
+        (the bridge then falls back to ``REMOTE_UNAVAILABLE_SENTINEL``).
+        Unknown member names raise ``KeyError`` so typos surface
+        immediately instead of silently dropping the relay.
+        """
+        if member_name not in self._bridge_member_specs:
+            raise KeyError(
+                f"'{member_name}' is not a registered bridge-agent member; "
+                f"registered members: {sorted(self._bridge_member_specs.keys())}"
+            )
+        if adapter is None:
+            self._bridge_adapters.pop(member_name, None)
+        else:
+            self._bridge_adapters[member_name] = adapter
+
+    def get_bridge_adapter(self, member_name: str) -> Optional[BridgeProtocolAdapter]:
+        """Return the adapter registered for ``member_name``, or None."""
+        return self._bridge_adapters.get(member_name)
+
+    async def spawn_bridge_agent(
+        self,
+        *,
+        member_name: str,
+        display_name: str,
+        persona: str,
+        desc: Optional[str] = None,
+        model_name: Optional[str] = None,
+        mailbox_inject_mode: BridgeMailboxInjectMode = BridgeMailboxInjectMode.PASSTHROUGH,
+        protocol: str = "",
+        adapter_config: Optional[dict[str, Any]] = None,
+    ) -> MemberOpResult:
+        """Register a bridge-agent member dynamically.
+
+        Used by ``SpawnMemberTool`` when ``role_type='bridge_agent'``.
+        Predefined bridge members are registered inline in
+        ``build_team`` and reach this method only via the dynamic path.
+
+        Bridge members share the standard teammate DB row (so they
+        appear in the roster, accept tasks, send messages exactly like
+        a teammate) and additionally index into
+        ``_bridge_member_specs`` so the coordination message handler
+        can find their mailbox configuration at deliver time.
+
+        Args:
+            member_name: Unique member identifier.
+            display_name: Human-readable label.
+            persona: Persona text — same field the local teammate
+                LLM uses as identity AND the briefing string the
+                remote agent receives at ``adapter.connect``. Required.
+            desc: Optional persona override stored on the DB row;
+                defaults to ``persona`` when omitted.
+            model_name: Optional model pool hint forwarded to the
+                allocator (``None`` falls back to per-agent default).
+            mailbox_inject_mode: Outbound wrap format for inbound
+                messages relayed to the remote.
+            protocol: Adapter lookup key. Empty string in Phase-1.
+            adapter_config: Free-form adapter parameters (timeout,
+                endpoint, ...). Passed verbatim to ``adapter.connect``.
+
+        Returns:
+            ``MemberOpResult``. Returns failure when Bridge capability
+            is disabled or the underlying ``spawn_member`` rejects the
+            registration.
+        """
+        if not self._enable_bridge:
+            return MemberOpResult.fail(
+                "Cannot spawn bridge agent: Bridge capability is disabled "
+                "(enable_bridge=False on TeamAgentSpec or build_team)"
+            )
+
+        if not persona:
+            return MemberOpResult.fail(
+                "spawn_bridge_agent requires non-empty 'persona' — it is the "
+                "briefing the remote agent adopts via adapter.connect"
+            )
+
+        resolved_desc = desc or persona
+        member_card = AgentCard(
+            id=f"{self.team_name}_{member_name}",
+            name=display_name,
+            description=resolved_desc,
+        )
+        allocation = self._allocate_model_config(model_name) if self._allocate_model_config else None
+        result = await self.spawn_member(
+            member_name=member_name,
+            display_name=display_name,
+            agent_card=member_card,
+            desc=resolved_desc,
+            prompt=None,
+            status=MemberStatus.UNSTARTED,
+            execution_status=ExecutionStatus.IDLE,
+            mode=self.teammate_mode,
+            allocation=allocation,
+            role=TeamRole.BRIDGE_AGENT,
+        )
+        if not result.ok:
+            team_logger.warning(
+                "Failed to register bridge agent '%s' for team %s: %s",
+                member_name,
+                self.team_name,
+                result.reason,
+            )
+            return result
+
+        self._bridge_member_specs[member_name] = BridgeMemberSpec(
+            member_name=member_name,
+            display_name=display_name,
+            persona=persona,
+            model_name=model_name,
+            mailbox_inject_mode=mailbox_inject_mode,
+            protocol=protocol,
+            adapter_config=adapter_config or {},
+        )
+        return result

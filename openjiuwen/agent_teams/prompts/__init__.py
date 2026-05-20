@@ -28,6 +28,7 @@ from openjiuwen.agent_teams.prompts.policy import (
 from openjiuwen.agent_teams.prompts.section_cache import MtimeSectionCache
 from openjiuwen.agent_teams.prompts.sections import (
     TeamSectionName,
+    build_team_bridge_section,
     build_team_extra_section,
     build_team_hitt_section,
     build_team_info_section,
@@ -65,6 +66,7 @@ __all__ = [
     "TeamSectionName",
     "apply_team_plan_agent_prompt",
     "build_system_prompt",
+    "build_team_bridge_section",
     "build_team_plan_agent_card",
     "build_team_extra_section",
     "build_team_hitt_section",

@@ -12,10 +12,12 @@ from __future__ import annotations
 
 from typing import (
     TYPE_CHECKING,
+    Annotated,
     Any,
     Callable,
     Literal,
     Optional,
+    Union,
 )
 
 from pydantic import (
@@ -33,6 +35,7 @@ from openjiuwen.agent_teams.memory import TeamMemoryConfig
 from openjiuwen.agent_teams.models.pool import ModelPoolEntry, ModelRouterConfig
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import (
+    BridgeMemberSpec,
     TeamLifecycle,
     TeamMemberSpec,
     TeamRole,
@@ -123,6 +126,22 @@ class StorageSpec(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Predefined member union
+# ---------------------------------------------------------------------------
+#
+# ``predefined_members`` entries dispatch on ``role_type``: bridge entries
+# carry extra fields (mailbox_inject_mode / protocol / adapter_config), so
+# the spec layer needs to materialize ``BridgeMemberSpec`` rather than the
+# base ``TeamMemberSpec`` for those rows. Pydantic v2's discriminated union
+# does the dispatch when both arms declare the discriminator as ``Literal``
+# (already wired in ``schema/team.py``).
+PredefinedMemberSpec = Annotated[
+    Union[BridgeMemberSpec, TeamMemberSpec],
+    Field(discriminator="role_type"),
+]
+
+
+# ---------------------------------------------------------------------------
 # TeamAgentSpec
 # ---------------------------------------------------------------------------
 
@@ -172,7 +191,7 @@ class TeamAgentSpec(BaseModel):
     """Member execution mode: ``build_mode`` or ``plan_mode``."""
     spawn_mode: str = "process"
     leader: LeaderSpec = LeaderSpec()
-    predefined_members: list[TeamMemberSpec] = []
+    predefined_members: list[PredefinedMemberSpec] = []
     model_pool: list[ModelPoolEntry] = []
     """Optional pool of LLM endpoints shared by every team member.
 
@@ -283,6 +302,27 @@ class TeamAgentSpec(BaseModel):
     sees the full roster (it owns spawn / approval flows); a
     human_agent always sees the roster (it includes itself).
     """
+    enable_bridge: bool = False
+    """Spec-level Bridge-Agent capability ceiling.
+
+    True opens the capability — the framework will register every
+    BRIDGE_AGENT member declared in ``predefined_members`` during
+    ``build_team``, and the leader's ``spawn_member`` tool may
+    additionally bring up new bridge members at runtime via
+    ``role_type='bridge_agent'``. False forbids both paths.
+
+    Bridge agents are full local teammates paired with a remote
+    independent agent reachable through a pure-text protocol. The
+    framework auto-forwards inbound mailbox messages to the remote
+    via ``BridgeProtocolAdapter.relay`` and composes the original
+    body with the remote's reply into the bridge avatar's context.
+    See ``BridgeMemberSpec`` for per-member configuration.
+
+    Consistency check (``build()`` time):
+    - ``enable_bridge=False`` with any BRIDGE_AGENT in predefined → error.
+    - ``enable_bridge=True`` with no BRIDGE_AGENT predefined → allowed
+      (dynamic spawn path).
+    """
     language: Optional[str] = None
     """Preferred language for prompts and tool descriptions ("cn" or "en").
 
@@ -373,6 +413,7 @@ class TeamAgentSpec(BaseModel):
 
         self._validate_reserved_names()
         self._validate_hitt_consistency()
+        self._validate_bridge_consistency()
 
         resolved_language = resolve_language(self.language)
         for role_spec in self.agents.values():
@@ -558,10 +599,39 @@ class TeamAgentSpec(BaseModel):
             ),
         )
 
+    def _validate_bridge_consistency(self) -> None:
+        """Reject configs where predefined BRIDGE_AGENT members exist without Bridge enabled.
+
+        ``enable_bridge`` is the spec-level capability ceiling for the
+        bridge feature. Declaring a BRIDGE_AGENT predefined member without
+        opening that ceiling is a misconfiguration. The reverse
+        (``enable_bridge=True`` with no predefined BRIDGE_AGENT) is
+        allowed: callers may rely on dynamic
+        ``spawn_member(role_type='bridge_agent', ...)`` after build.
+        """
+        if self.enable_bridge:
+            return
+        if not any(m.role_type == TeamRole.BRIDGE_AGENT for m in self.predefined_members):
+            return
+
+        from openjiuwen.core.common.exception.codes import StatusCode
+        from openjiuwen.core.common.exception.errors import raise_error
+
+        offenders = [m.member_name for m in self.predefined_members if m.role_type == TeamRole.BRIDGE_AGENT]
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason=(
+                f"predefined_members contains BRIDGE_AGENT role(s) {offenders} "
+                f"but enable_bridge=False; set enable_bridge=True (capability ceiling) "
+                f"or remove the bridge member(s)"
+            ),
+        )
+
 
 __all__ = [
     "DeepAgentSpec",
     "LeaderSpec",
+    "PredefinedMemberSpec",
     "StorageSpec",
     "TeamAgentSpec",
     "TransportSpec",

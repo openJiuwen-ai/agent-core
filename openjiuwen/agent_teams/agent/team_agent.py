@@ -279,6 +279,20 @@ class TeamAgent(BaseAgent):
             return None
         return self._spawn_manager.lookup_inprocess_agent(member_name)
 
+    def lookup_bridge_agent_runtime(self, member_name: str) -> Optional["TeamAgent"]:
+        """Resolve an inprocess-spawned bridge agent's live ``TeamAgent``.
+
+        Symmetric to ``lookup_human_agent_runtime``. The coordination
+        message handler uses this when it needs to deliver a composed
+        ``original_body + remote_reply`` payload directly into the
+        bridge avatar's DeepAgent. Returns ``None`` for subprocess
+        spawns or when the avatar has not been spawned yet.
+        """
+        backend = self._configurator.team_backend
+        if backend is None or not backend.is_bridge_agent(member_name):
+            return None
+        return self._spawn_manager.lookup_inprocess_agent(member_name)
+
     def is_agent_ready(self) -> bool:
         return self._configurator.harness is not None
 

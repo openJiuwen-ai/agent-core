@@ -118,6 +118,7 @@ class MessageHandler(BaseCoordinationHandler):
         seen_ids: set[str] = set()
         backend = self._infra.team_backend
         is_human_agent = backend is not None and backend.is_human_agent(member_name)
+        is_bridge = self._blueprint.role == TeamRole.BRIDGE_AGENT and backend is not None
 
         while True:
             all_unread = await self._read_all_unread(member_name)
@@ -136,11 +137,118 @@ class MessageHandler(BaseCoordinationHandler):
                         msg.message_id,
                     )
                     return
-                text = self._format_message(msg, is_human_agent=is_human_agent)
+                if is_bridge:
+                    text = await self._bridge_deliverable_for(member_name, msg)
+                else:
+                    text = self._format_message(msg, is_human_agent=is_human_agent)
                 team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
                 await self._round.deliver_input(text, use_steer=use_steer)
                 await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
+
+    async def _bridge_deliverable_for(self, member_name: str, msg: Any) -> str:
+        """Build the text delivered to a bridge avatar's DeepAgent.
+
+        The bridge avatar is a full local teammate, but inbound team
+        messages must first be auto-forwarded to its remote backing
+        agent (via ``BridgeProtocolAdapter.relay``) so the remote's
+        text reply is part of the avatar's next context. The avatar
+        then schedules — it decides whether to ``send_message`` the
+        remote reply back to the team, claim/complete tasks, or stay
+        silent. The local LLM passes the remote output through verbatim;
+        the explicit instructions in the composed template enforce that
+        contract.
+
+        Falls back to ``REMOTE_UNAVAILABLE_SENTINEL`` when no adapter
+        is wired or when the adapter raises — the bridge then degrades
+        to a normal teammate-style mailbox round.
+        """
+        from openjiuwen.agent_teams.agent.bridge_inbound_compose import compose_bridge_inbound
+        from openjiuwen.agent_teams.agent.bridge_outbound_wrap import wrap_outbound_to_remote
+        from openjiuwen.agent_teams.interaction.bridge_protocol import REMOTE_UNAVAILABLE_SENTINEL
+        from openjiuwen.agent_teams.schema.team import (
+            BridgeMailboxInjectMode,
+        )
+
+        backend = self._infra.team_backend
+        spec = backend.get_bridge_member_spec(member_name) if backend is not None else None
+        # Defensive: if the role inference labelled this member as a
+        # bridge but the spec dict has no entry (e.g. mid-recovery race),
+        # fall back to the plain teammate format. A bridge avatar is
+        # never a human_agent, so the human-forwarding template stays off.
+        if spec is None:
+            return self._format_message(msg, is_human_agent=False)
+
+        language = "cn"
+        team_spec = self._blueprint.team_spec
+        if team_spec is not None and team_spec.language:
+            language = team_spec.language
+
+        outbound_text = wrap_outbound_to_remote(
+            sender=msg.from_member_name,
+            sender_display_name=await self._lookup_display_name(msg.from_member_name),
+            sender_role=await self._lookup_role(msg.from_member_name),
+            sender_persona=await self._lookup_persona(msg.from_member_name),
+            body=msg.content,
+            broadcast=bool(getattr(msg, "broadcast", False)),
+            task_hint=None,
+            mode=spec.mailbox_inject_mode or BridgeMailboxInjectMode.PASSTHROUGH,
+            language=language,
+        )
+
+        adapter = backend.get_bridge_adapter(member_name) if backend is not None else None
+        remote_reply: str = REMOTE_UNAVAILABLE_SENTINEL
+        if adapter is not None:
+            try:
+                remote_reply = await adapter.relay(member_name=member_name, text=outbound_text)
+            except Exception as exc:
+                team_logger.warning(
+                    "bridge_agent[%s] relay raised: %s — falling back to sentinel",
+                    member_name,
+                    exc,
+                )
+                remote_reply = REMOTE_UNAVAILABLE_SENTINEL
+
+        return compose_bridge_inbound(
+            original_sender=msg.from_member_name,
+            original_body=msg.content,
+            remote_reply=remote_reply,
+            language=language,
+        )
+
+    async def _lookup_display_name(self, member_name: str) -> Any:
+        backend = self._infra.team_backend
+        if backend is None or backend.db is None:
+            return None
+        try:
+            row = await backend.db.member.get_member(member_name, backend.team_name)
+        except Exception:
+            return None
+        return row.display_name if row is not None else None
+
+    async def _lookup_persona(self, member_name: str) -> Any:
+        backend = self._infra.team_backend
+        if backend is None or backend.db is None:
+            return None
+        try:
+            row = await backend.db.member.get_member(member_name, backend.team_name)
+        except Exception:
+            return None
+        return row.desc if row is not None else None
+
+    async def _lookup_role(self, member_name: str) -> Any:
+        backend = self._infra.team_backend
+        if backend is None:
+            return None
+        if backend.is_human_agent(member_name):
+            return TeamRole.HUMAN_AGENT
+        if backend.is_bridge_agent(member_name):
+            return TeamRole.BRIDGE_AGENT
+        # The leader uses the team's leader_member_name from team_spec.
+        team_spec = self._blueprint.team_spec
+        if team_spec is not None and member_name == team_spec.leader_member_name:
+            return TeamRole.LEADER
+        return TeamRole.TEAMMATE
 
     async def _notify_human_agent_inbound(self, event: CoordinationEvent) -> None:
         """Forward a team-side message to the SDK's human-agent callbacks.

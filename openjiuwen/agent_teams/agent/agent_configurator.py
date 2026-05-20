@@ -58,13 +58,15 @@ if TYPE_CHECKING:
 def _resolve_team_mode(spec: TeamAgentSpec) -> str:
     if spec.team_mode is not None:
         return spec.team_mode
-    # HUMAN_AGENT predefined members are HITT roster declarations, not a
-    # signal to flip the team away from "default". A non-human predefined
-    # roster derives "hybrid": the leader keeps its spawn_member tool so
-    # the roster can still grow at runtime. Lock it down by setting an
-    # explicit "predefined" team_mode.
-    non_human_predefined = [m for m in spec.predefined_members if m.role_type != TeamRole.HUMAN_AGENT]
-    return "hybrid" if non_human_predefined else "default"
+    # HUMAN_AGENT predefined members are HITT roster declarations, and
+    # BRIDGE_AGENT entries are bridge-to-remote declarations — neither
+    # is a signal to flip the team away from "default". A roster of
+    # ordinary predefined teammates derives "hybrid": the leader keeps
+    # its spawn_member tool so the roster can still grow at runtime.
+    # Lock it down by setting an explicit "predefined" team_mode.
+    avatar_roles = {TeamRole.HUMAN_AGENT, TeamRole.BRIDGE_AGENT}
+    non_avatar_predefined = [m for m in spec.predefined_members if m.role_type not in avatar_roles]
+    return "hybrid" if non_avatar_predefined else "default"
 
 
 class AgentConfigurator:
@@ -554,6 +556,7 @@ class AgentConfigurator:
             model_config_allocator=self.model_allocator.allocate if self.model_allocator else None,
             leader_allocation=self.leader_allocation if is_leader else None,
             enable_hitt=spec.enable_hitt,
+            enable_bridge=spec.enable_bridge,
             on_team_cleaned=on_team_cleaned,
             on_team_built=on_team_built,
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,

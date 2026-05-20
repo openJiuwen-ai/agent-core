@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -66,16 +66,41 @@ class TeamLifecycle(str, Enum):
 class TeamRole(str, Enum):
     """Supported team roles.
 
-    ``HUMAN_AGENT`` is a first-class member representing a human
-    collaborator. It shares equal standing with leader and teammate in
-    the model's mental model, but its runtime footprint differs:
-    it owns no DeepAgent process, only the ``send_message`` tool,
-    and stays in ``READY`` until the team is cleaned.
+    ``HUMAN_AGENT`` and ``BRIDGE_AGENT`` are avatar-style roles driven
+    by external delegates. ``HUMAN_AGENT`` represents a human user
+    interacting via the SDK inbox; its DeepAgent stays idle until the
+    user explicitly drives it. ``BRIDGE_AGENT`` is a full local teammate
+    paired with an external independent agent reachable through a
+    pure-text protocol — the local LLM acts as a scheduler while
+    concrete work output is produced by the remote agent and surfaced
+    through framework-managed mailbox auto-forwarding.
     """
 
     LEADER = "leader"
     TEAMMATE = "teammate"
     HUMAN_AGENT = "human_agent"
+    BRIDGE_AGENT = "bridge_agent"
+
+
+class BridgeMailboxInjectMode(str, Enum):
+    """How a team-side mailbox message is wrapped before forwarding to
+    the remote agent via ``BridgeProtocolAdapter.relay``.
+
+    Note this controls the OUTBOUND payload to the remote, not how the
+    message appears in the bridge avatar's local context. The bridge
+    avatar always sees the original body plus the remote's reply,
+    regardless of this mode.
+
+    PASSTHROUGH — body forwarded verbatim with a minimal sender header.
+        Suitable when the remote was briefed once via ``connect`` and
+        does not need per-message context refresh.
+    REPHRASE — full sender context (role + persona + optional task
+        hint) wrapped around the body. Suitable for stateless wrapping
+        CLIs where every relayed turn needs full context.
+    """
+
+    PASSTHROUGH = "passthrough"
+    REPHRASE = "rephrase"
 
 
 class TeamMemberSpec(BaseModel):
@@ -83,13 +108,22 @@ class TeamMemberSpec(BaseModel):
 
     Used only for ``predefined_members`` at team creation time.
     Not a runtime data carrier — spawn/restart paths read from DB directly.
+
+    The ``role_type`` field is restricted to non-bridge roles here so a
+    discriminated union (see ``BridgeMemberSpec``) can distinguish
+    bridge entries cleanly. New role-specific fields belong on a
+    subclass, not on this base.
     """
 
     model_config = ConfigDict(protected_namespaces=())
 
     member_name: str
     display_name: str
-    role_type: TeamRole = TeamRole.TEAMMATE
+    role_type: Literal[
+        TeamRole.LEADER,
+        TeamRole.TEAMMATE,
+        TeamRole.HUMAN_AGENT,
+    ] = TeamRole.TEAMMATE
     persona: str
     prompt_hint: Optional[str] = None
     model_name: Optional[str] = None
@@ -101,6 +135,49 @@ class TeamMemberSpec(BaseModel):
     or the named router entry (``router``). Ignored by the ``round_robin``
     strategy. ``None`` (default) means the member uses its per-agent model
     (or, under ``router``, the router's first declared model_name).
+    """
+
+
+class BridgeMemberSpec(TeamMemberSpec):
+    """Predefined-member spec for a bridge agent.
+
+    A bridge agent is a full local teammate (its DeepAgent runs locally
+    and owns the full teammate tool set) paired with a remote
+    independent agent reachable via a pure-text protocol
+    (``BridgeProtocolAdapter``). The remote produces concrete work
+    output; the local LLM acts as a scheduler — choosing when to
+    claim/complete tasks, when to reply, and to whom, while passing
+    the remote's output through verbatim.
+
+    The framework consults ``BridgeProtocolAdapter`` only on the mailbox
+    path: when a team-side message arrives for this member it is
+    auto-forwarded to the remote, and the remote's reply is composed
+    with the original body before being delivered into the avatar's
+    context. The bridge avatar itself never invokes the adapter; it
+    is unaware of the protocol layer.
+    """
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    role_type: Literal[TeamRole.BRIDGE_AGENT] = TeamRole.BRIDGE_AGENT
+
+    mailbox_inject_mode: BridgeMailboxInjectMode = BridgeMailboxInjectMode.PASSTHROUGH
+    """How team-side mailbox messages are wrapped before being relayed
+    to the remote. See ``BridgeMailboxInjectMode``."""
+
+    protocol: str = ""
+    """Protocol identifier (e.g. ``"a2a"`` / ``"acp"`` / ``"claudecode"``).
+
+    Reserved for future adapter lookup. An empty string means
+    "no adapter wired yet" — the bridge member is registered and acts
+    as a normal teammate, with auto-forwarding falling back to the
+    ``remote agent unavailable`` sentinel.
+    """
+
+    adapter_config: dict[str, Any] = Field(default_factory=dict)
+    """Free-form adapter parameters (endpoint URL, auth handle,
+    relay timeout, ...). Verbatim passthrough to
+    ``BridgeProtocolAdapter.connect``; the runtime never inspects it.
     """
 
 
@@ -163,6 +240,9 @@ class TeamRuntimeContext(BaseModel):
 
 
 __all__ = [
+    "BridgeMailboxInjectMode",
+    "BridgeMemberSpec",
+    "MemberOpResult",
     "TeamCompletionSnapshot",
     "TeamLifecycle",
     "TeamMemberSpec",

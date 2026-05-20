@@ -253,9 +253,11 @@ class SpawnManager:
 
         ctx = self._configurator.ctx
         # Role is persisted on the member row (``TeamMember.role``) so
-        # cold recovery picks up dynamically-spawned humans too. Legacy
-        # DB files without the column get a backfilled ``teammate``
-        # default via ``database.engine._ensure_team_member_role_column``.
+        # cold recovery picks up dynamically-spawned avatars (human and
+        # bridge) too — both spawn paths write their ``TeamRole`` through
+        # ``spawn_member(role=...)``. Legacy DB files without the column
+        # get a backfilled ``teammate`` default via
+        # ``database.engine._ensure_team_member_role_column``.
         role = TeamRole(teammate.role)
         return TeamRuntimeContext(
             role=role,

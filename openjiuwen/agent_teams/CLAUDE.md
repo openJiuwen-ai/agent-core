@@ -171,9 +171,11 @@ Messager 是点对点 + broadcast 的统一抽象，**任何直接新建 socket 
 
 跨成员的文件共享区，支持锁 / 版本 / 冲突策略。独立于 worktree：**worktree 管代码隔离，workspace 管产物协同**。
 
-### interaction/ — 外部交互入口 + HITT
+### interaction/ — 外部交互入口 + HITT + Bridge Agent
 
 三种交互视角（`GodViewMessage` / `OperatorMessage` / `HumanAgentMessage`）+ `UserInbox` / `HumanAgentInbox` 的实现层，所有 HITT runtime 表面（`enable_hitt` 分层开关、人类成员来源、一致性约束、运行约束）也落在这里。
+
+Bridge Agent 把外部独立 agent（claudecode / codex / openclaw / hermes 等）以"团队成员"形式接入：`bridge_protocol.py` 定义纯文本 `BridgeProtocolAdapter`（connect / relay / close），`BridgeMemberSpec(TeamMemberSpec)` 子类 + `enable_bridge` 是 capability ceiling，dynamic spawn 走 `SpawnMemberTool(role_type='bridge_agent')`；bridge avatar 本地是完整 teammate，远程做实际工作，框架在 mailbox 路径自动转发原消息给远程并把回复组合进 avatar context（参见 `agent/coordination/handlers/message.py:_bridge_deliverable_for`）。详见 `docs/features/F_07_bridge-agent.md`。
 
 详见 [`interaction/CLAUDE.md`](interaction/CLAUDE.md)。
 

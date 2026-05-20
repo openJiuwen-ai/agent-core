@@ -310,7 +310,7 @@ class SpawnMemberTool(TeamTool):
                 "desc": {"type": "string", "description": t("spawn_member", "desc")},
                 "role_type": {
                     "type": "string",
-                    "enum": ["teammate", "human_agent"],
+                    "enum": ["teammate", "human_agent", "bridge_agent"],
                     "default": "teammate",
                     "description": t("spawn_member", "role_type"),
                 },
@@ -318,6 +318,20 @@ class SpawnMemberTool(TeamTool):
                 "model_name": {
                     "type": "string",
                     "description": t("spawn_member", "model_name"),
+                },
+                "mailbox_inject_mode": {
+                    "type": "string",
+                    "enum": ["passthrough", "rephrase"],
+                    "default": "passthrough",
+                    "description": t("spawn_member", "mailbox_inject_mode"),
+                },
+                "protocol": {
+                    "type": "string",
+                    "description": t("spawn_member", "protocol"),
+                },
+                "adapter_config": {
+                    "type": "object",
+                    "description": t("spawn_member", "adapter_config"),
                 },
             },
             "required": ["member_name", "display_name", "desc"],
@@ -345,11 +359,14 @@ class SpawnMemberTool(TeamTool):
                 ),
             )
 
-        if role_type not in {"teammate", "human_agent"}:
+        if role_type not in {"teammate", "human_agent", "bridge_agent"}:
             return ToolOutput(
                 success=False,
-                error=f"Invalid role_type '{role_type}'; expected 'teammate' or 'human_agent'",
+                error=(f"Invalid role_type '{role_type}'; expected 'teammate', 'human_agent', or 'bridge_agent'"),
             )
+
+        if role_type == "bridge_agent":
+            return await self._spawn_bridge(inputs)
 
         if role_type == "human_agent":
             # Capability gate: fail fast to LLM before touching backend.
@@ -407,6 +424,82 @@ class SpawnMemberTool(TeamTool):
                 "member_name": member_name,
                 "display_name": display_name,
                 "role_type": "teammate",
+            },
+            error=None if result.ok else result.reason,
+        )
+
+    async def _spawn_bridge(self, inputs: Dict[str, Any]) -> ToolOutput:
+        """Dispatch path for ``role_type='bridge_agent'``.
+
+        Bridge agents are full local teammates paired with a remote
+        independent agent reachable through a pure-text protocol.
+        Persona is required because it is sent to the remote agent
+        via ``adapter.connect`` as the briefing the remote adopts.
+        ``model_name`` is optional (falls back to framework default).
+        """
+        from openjiuwen.agent_teams.schema.team import BridgeMailboxInjectMode
+
+        if not self.team.bridge_enabled():
+            return ToolOutput(
+                success=False,
+                error=(
+                    "Cannot spawn bridge agent: Bridge capability is "
+                    "disabled (enable_bridge=False on TeamAgentSpec or "
+                    "build_team). Either enable Bridge in the team "
+                    "spec or use role_type='teammate'."
+                ),
+            )
+
+        member_name = inputs.get("member_name")
+        display_name = inputs.get("display_name")
+        # ``desc`` is the per-tool persona surface; ``prompt`` is a
+        # plain hint (optional). For bridge agents the persona MUST
+        # be non-empty because it doubles as the remote's briefing.
+        persona = inputs.get("desc") or inputs.get("prompt") or ""
+        if not persona:
+            return ToolOutput(
+                success=False,
+                error=(
+                    "role_type='bridge_agent' requires a non-empty "
+                    "'desc' (or 'prompt') — it is the persona/briefing "
+                    "the remote agent adopts via adapter.connect"
+                ),
+            )
+
+        mode_raw = (inputs.get("mailbox_inject_mode") or "passthrough").lower()
+        try:
+            inject_mode = BridgeMailboxInjectMode(mode_raw)
+        except ValueError:
+            return ToolOutput(
+                success=False,
+                error=(f"Invalid mailbox_inject_mode '{mode_raw}'; expected 'passthrough' or 'rephrase'"),
+            )
+
+        adapter_config = inputs.get("adapter_config") or {}
+        if not isinstance(adapter_config, dict):
+            return ToolOutput(
+                success=False,
+                error="adapter_config must be an object/dict",
+            )
+
+        result = await self.team.spawn_bridge_agent(
+            member_name=member_name,
+            display_name=display_name,
+            persona=persona,
+            desc=inputs.get("desc"),
+            model_name=inputs.get("model_name"),
+            mailbox_inject_mode=inject_mode,
+            protocol=inputs.get("protocol") or "",
+            adapter_config=adapter_config,
+        )
+        return ToolOutput(
+            success=result.ok,
+            data={
+                "member_name": member_name,
+                "display_name": display_name,
+                "role_type": "bridge_agent",
+                "mailbox_inject_mode": inject_mode.value,
+                "protocol": inputs.get("protocol") or "",
             },
             error=None if result.ok else result.reason,
         )

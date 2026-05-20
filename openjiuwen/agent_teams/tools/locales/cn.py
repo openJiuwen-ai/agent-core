@@ -50,7 +50,13 @@ STRINGS: dict[str, str] = {
         "'teammate'（默认）= 普通 LLM 队友，需提供 model_name/prompt；"
         "'human_agent' = 人类成员，由真人通过 HumanAgentInbox 驱动，"
         "**不接受** model_name 与 prompt（由框架内置模板托管），传入这两个字段会报错。"
-        "选用 'human_agent' 需要 spec.enable_hitt=True 且当前 build_team 实例未禁用 HITT"
+        "选用 'human_agent' 需要 spec.enable_hitt=True 且当前 build_team 实例未禁用 HITT。"
+        "'bridge_agent' = 桥接外部独立 agent（如 claudecode / codex / hermes 等）。"
+        "本地是完整 teammate（按 teammate 行为认领任务、收发消息），但具体工作产出由通过协议接入的"
+        "远程 agent 完成；本地 LLM 只做调度，原样转发远程结果。"
+        "选用 'bridge_agent' 时 'desc' 字段必填（同时作为团队 persona 和远程的 system prompt 核心）；"
+        "可选传入 mailbox_inject_mode / protocol / adapter_config / model_name。"
+        "选用 'bridge_agent' 需要 spec.enable_bridge=True 且当前 build_team 实例未禁用 Bridge"
     ),
     "spawn_member.prompt": (
         "[私有，仅该成员自己可见] 成员的长期工作约定，注入该成员自己的 system prompt："
@@ -61,7 +67,20 @@ STRINGS: dict[str, str] = {
     ),
     "spawn_member.model_name": (
         "可选。建议该成员使用的模型名称（如 gpt-4、claude-sonnet-4 等）；"
-        "未指定时由系统自动选择合适的模型。当 role_type='human_agent' 时禁止传入"
+        "未指定时由系统自动选择合适的模型。当 role_type='human_agent' 时禁止传入；"
+        "role_type='bridge_agent' 时为本地调度 LLM 的模型选择，可选"
+    ),
+    "spawn_member.mailbox_inject_mode": (
+        "仅 role_type='bridge_agent' 时使用。控制团队消息被自动转发给远程 agent 时的形态："
+        "'passthrough'（默认）= 仅加最简发送者前缀直传；'rephrase' = 包装完整发送者上下文（角色、人设、相关任务）"
+    ),
+    "spawn_member.protocol": (
+        "仅 role_type='bridge_agent' 时使用。协议标识（如 'a2a' / 'acp' / 'claudecode'）。"
+        "目前作为元数据保留，用于后续 BridgeProtocolAdapter 适配器查找；空字符串表示尚未绑定适配器"
+    ),
+    "spawn_member.adapter_config": (
+        "仅 role_type='bridge_agent' 时使用。协议适配器配置（如 endpoint、auth、relay_timeout_s 等），"
+        "原样透传给 BridgeProtocolAdapter.connect。结构由具体适配器实现自行定义"
     ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/cn/shutdown_member.md

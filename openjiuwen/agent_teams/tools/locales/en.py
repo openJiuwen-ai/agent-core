@@ -67,7 +67,17 @@ STRINGS: dict[str, str] = {
         "member driven by the real user via HumanAgentInbox; **rejects** model_name "
         "and prompt (the framework template manages them) — passing those fields "
         "raises an error. Choosing 'human_agent' requires spec.enable_hitt=True and "
-        "the current build_team instance must not have disabled HITT"
+        "the current build_team instance must not have disabled HITT. "
+        "'bridge_agent' = bridge to an external independent agent (e.g. claudecode "
+        "/ codex / hermes). Behaves as a full teammate locally (claims tasks, "
+        "sends/receives messages); concrete work output is produced by the remote "
+        "agent reached over a pure-text protocol, and the local LLM only "
+        "schedules — it passes the remote's output through verbatim. Choosing "
+        "'bridge_agent' requires non-empty 'desc' (used both as the teammate "
+        "persona and the remote's connect briefing) and optional "
+        "mailbox_inject_mode / protocol / adapter_config / model_name. Requires "
+        "spec.enable_bridge=True and the current build_team instance must not have "
+        "disabled Bridge"
     ),
     "spawn_member.prompt": (
         "[PRIVATE, visible only to this member] Long-term working conventions, "
@@ -82,7 +92,26 @@ STRINGS: dict[str, str] = {
         "Optional. Suggested model name for this member "
         "(e.g. gpt-4, claude-sonnet-4); "
         "the system picks an appropriate model when omitted. "
-        "Forbidden when role_type='human_agent'"
+        "Forbidden when role_type='human_agent'; "
+        "for role_type='bridge_agent' it selects the local scheduler LLM"
+    ),
+    "spawn_member.mailbox_inject_mode": (
+        "Only used when role_type='bridge_agent'. Controls how team-side "
+        "mailbox messages are wrapped before being relayed to the remote agent. "
+        "'passthrough' (default) prefixes only the sender label; 'rephrase' "
+        "wraps full sender context (role, persona, optional task hint)"
+    ),
+    "spawn_member.protocol": (
+        "Only used when role_type='bridge_agent'. Protocol identifier "
+        "(e.g. 'a2a' / 'acp' / 'claudecode'). Reserved for future "
+        "BridgeProtocolAdapter lookup; empty string means no adapter is "
+        "wired yet (bridge degrades to a normal teammate)"
+    ),
+    "spawn_member.adapter_config": (
+        "Only used when role_type='bridge_agent'. Free-form adapter "
+        "configuration (endpoint, auth, relay_timeout_s, ...). Passed "
+        "verbatim to BridgeProtocolAdapter.connect — schema is up to the "
+        "concrete adapter implementation"
     ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/en/shutdown_member.md

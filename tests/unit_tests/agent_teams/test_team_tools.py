@@ -250,7 +250,7 @@ class TestSpawnMemberTool:
         # role_type is exposed to the LLM with a default of teammate.
         props = tool.card.input_params["properties"]
         assert "role_type" in props
-        assert props["role_type"]["enum"] == ["teammate", "human_agent"]
+        assert props["role_type"]["enum"] == ["teammate", "human_agent", "bridge_agent"]
         assert props["role_type"]["default"] == "teammate"
 
     @pytest.mark.asyncio
