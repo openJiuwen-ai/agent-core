@@ -68,7 +68,19 @@ class SpawnManager:
         team_logger.info("[{}] spawning teammate: {}", self._configurator.member_name or "?", member_name)
 
         spec = self._configurator.spec
-        if spec and spec.spawn_mode == "inprocess":
+        if ctx.cli_agent:
+            # External CLI member: TeamAgent shell runs in-process while the
+            # third-party CLI binary is the subprocess driven via stdin.
+            from openjiuwen.agent_teams.spawn.external_cli_spawn import external_cli_spawn
+
+            handle = await external_cli_spawn(
+                team_agent=self._get_team_agent(),
+                ctx=ctx,
+                initial_message=initial_message,
+                session_id=get_session_id() or session,
+            )
+            self._wire_inprocess_chunk_forward(handle)
+        elif spec and spec.spawn_mode == "inprocess":
             from openjiuwen.agent_teams.spawn.inprocess_spawn import inprocess_spawn
 
             handle = await inprocess_spawn(

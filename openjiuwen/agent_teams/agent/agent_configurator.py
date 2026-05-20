@@ -48,6 +48,7 @@ from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode
 from openjiuwen.harness.prompts import resolve_language as _resolve_language
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.agent.member_runtime import MemberRuntime
     from openjiuwen.agent_teams.memory.manager import TeamMemoryManager
     from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
     from openjiuwen.agent_teams.rails import FirstIterationGate
@@ -152,11 +153,11 @@ class AgentConfigurator:
         self._infra.message_manager = value
 
     @property
-    def harness(self) -> Optional[TeamHarness]:
+    def harness(self) -> Optional["MemberRuntime"]:
         return self._resources.harness
 
     @harness.setter
-    def harness(self, value: Optional[TeamHarness]) -> None:
+    def harness(self, value: Optional["MemberRuntime"]) -> None:
         self._resources.harness = value
 
     @property
@@ -191,10 +192,16 @@ class AgentConfigurator:
     def model_allocator(self, value: Optional["ModelAllocator"]) -> None:
         self._resources.model_allocator = value
 
-    def configure(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> TeamHarness:
-        """Main entry point: configure infrastructure and build the harness."""
+    def configure(
+        self,
+        spec: TeamAgentSpec,
+        ctx: TeamRuntimeContext,
+        *,
+        member_runtime: Optional["MemberRuntime"] = None,
+    ) -> "MemberRuntime":
+        """Main entry point: configure infrastructure and build the runtime."""
         self.setup_infra(spec, ctx)
-        return self.setup_agent(spec, ctx)
+        return self.setup_agent(spec, ctx, member_runtime=member_runtime)
 
     def setup_infra(
         self,
@@ -300,8 +307,22 @@ class AgentConfigurator:
         self,
         spec: TeamAgentSpec,
         ctx: TeamRuntimeContext,
-    ) -> TeamHarness:
-        """Phase 2: build prompt, create DeepAgent through TeamHarness, set up coordination."""
+        *,
+        member_runtime: Optional["MemberRuntime"] = None,
+    ) -> "MemberRuntime":
+        """Phase 2: build the member runtime and set up coordination.
+
+        The default path builds a ``TeamHarness`` over DeepAgent. When
+        ``member_runtime`` is supplied (e.g. an ``ExternalCliRuntime`` for an
+        external CLI member), it is adopted as-is and the DeepAgent / rail /
+        memory / customizer setup is skipped — coordination still drives it
+        through the same :class:`MemberRuntime` surface.
+        """
+        if member_runtime is not None:
+            self.harness = member_runtime
+            self.memory_manager = None
+            return member_runtime
+
         agent_spec = self.resolve_agent_spec(spec, ctx.role, ctx.member_name)
         resolved_language = self._blueprint.language if self._blueprint else _resolve_language(agent_spec.language)
         member_name = ctx.member_name

@@ -237,6 +237,15 @@ class TeamRuntimeContext(BaseModel):
     db_config: DatabaseConfig | MemoryDatabaseConfig = Field(default_factory=DatabaseConfig)
     member_model: Optional[TeamModelConfig] = None
     """TeamModelConfig assigned to this member by the allocator."""
+    cli_agent: Optional[str] = None
+    """When set, this teammate is driven by an external CLI agent (the named
+    adapter, e.g. ``"claude"`` / ``"codex"``) instead of a local DeepAgent.
+
+    The spawn path launches the CLI as a subprocess and the configurator
+    builds an ``ExternalCliRuntime`` in place of ``TeamHarness``. ``None``
+    (default) keeps the standard DeepAgent-backed member. See
+    ``agent_teams/external/cli_agent``.
+    """
 
 
 __all__ = [

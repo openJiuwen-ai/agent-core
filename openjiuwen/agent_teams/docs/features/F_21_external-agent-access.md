@@ -101,20 +101,34 @@ mid-turn steer（用户选定 stdin 传输，Unix 优先、接口预留 PTY/Wind
   turn 输入并消费 stdout 至 adapter 判定轮次完成（CLI stdout 留作内部，不进 team 流）；
   steer/follow_up 写 stdin；rail/memory/customizer 钩子为 no-op。
 
-**剩余（invasive 集成，未实现）：**
+**spawn/configurator 接线（已实现并回归）：**
 
-- **spawn/configurator 接线**：`spawn_manager.spawn_teammate` 加 external_cli 分支（走
-  inprocess 形态：TeamAgent shell + coordination 跑在 leader 进程，CLI 二进制是子进程）；
-  `agent_configurator.setup_agent`（`TeamHarness.build()` 调用点）按成员 runtime 分支构造
-  `ExternalCliRuntime`、跳过 rails/memory/customizer；`resources.harness` 类型放宽到
-  `MemberRuntime | None`。
-- **schema 判别**：external_cli teammate 与普通 teammate 都是 role_type=TEAMMATE，
-  role_type 判别区分不开——需独立判别字段（如成员级 `cli_agent` 字段）而非 role 判别。
-- **`tools/team.py` spawn_external_cli_agent**：镜像 `spawn_bridge_agent` 注册 + 拉起 +
-  生命周期回收。
+- `schema/team.py`：`TeamRuntimeContext.cli_agent: Optional[str]`——置位即表示该 teammate
+  由外部 CLI 驱动（role 仍是 TEAMMATE，用成员级字段判别而非 role 判别）。
+- `agent_configurator.setup_agent(spec, ctx, *, member_runtime=None)`：传入 runtime 时直接
+  采用、跳过 DeepAgent/rail/memory/customizer；经 `configure` 从 `TeamAgent.configure` 透传。
+- `resources.harness` / `TeamAgent.harness` / configurator `harness` 类型放宽到
+  `MemberRuntime | None`（`TeamHarness` 结构上满足）。
+- `external/cli_agent/spawn.py:launch_external_cli`：按 `ctx` 建 descriptor、注入 env、
+  `create_subprocess_exec` 拉起 CLI、包成 `ExternalCliRuntime`。
+- `spawn/external_cli_spawn.py`：镜像 `inprocess_spawn`——先（async）拉起 CLI 建 runtime，
+  再 `teammate.configure(spec, ctx, member_runtime=runtime)`，TeamAgent shell + coordination
+  在本进程跑，finally 关 injector + terminate 子进程。
+- `spawn_manager.spawn_teammate`：`if ctx.cli_agent` 分支走 `external_cli_spawn`。
+- 回归：全 `agent_teams` 套件 1143 passed（gated 改动不碰既有路径）；新增集成测试用真实
+  echo 子进程驱动一轮 + descriptor-from-ctx。
+
+**剩余（operator 触发层 + 验证）：**
+
+- **operator 触发入口**：动态 spawn 现走 `_on_teammate_created` → `build_context_from_db`
+  重建 ctx，所以要让 `ctx.cli_agent` 可按成员发现。**无需 DB 加列**——镜像 bridge 的
+  `_bridge_member_specs` 做法：`TeamBackend` 加 `_external_cli_specs`（member→cli_agent）
+  内存注册表 + `spawn_external_cli_agent(...)` 方法 + `build_context_from_db` 读注册表置
+  `ctx.cli_agent`。局限同 bridge Phase-1：跨进程冷恢复需 predefined 声明（注册表是
+  per-process）。再加一个 leader 工具是可选糖。
 - **真实 CLI 端到端验证**：adapter 的 stdin 输入格式与轮次完成检测依赖各 CLI（及版本）
-  的真实 stdout 协议，需在能跑 claude/codex 的环境实测调参。本次仅用 fake transport
-  单测了 runtime 的契约行为。
+  的真实 stdout 协议，需在能跑 claude/codex 的环境实测调参。本次仅用 fake/echo 子进程
+  验证了 runtime + spawn 的契约行为。
 
 **其它遗留：**
 
