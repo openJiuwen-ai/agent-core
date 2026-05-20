@@ -61,6 +61,7 @@ class MemoryRail(DeepAgentRail):
         self._is_proactive = is_proactive
         self.system_prompt_builder = None
         self._tool_ctx: MemoryToolContext | None = None
+        self._is_read_only = False
 
     def init(self, agent) -> None:
         """Initialize the rail.
@@ -108,6 +109,8 @@ class MemoryRail(DeepAgentRail):
         if not self._initialized:
             await self._init_memory_manager(ctx)
             self._initialized = True
+        self._is_read_only = isinstance(ctx.inputs, InvokeInputs) and (
+                    ctx.inputs.is_cron() or ctx.inputs.is_heartbeat())
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Update system_prompt_builder with memory section before model call.
@@ -119,10 +122,9 @@ class MemoryRail(DeepAgentRail):
             return
 
         self.system_prompt_builder.remove_section("memory")
-        is_read_only = isinstance(ctx.inputs, InvokeInputs) and (ctx.inputs.is_cron() or ctx.inputs.is_heartbeat())
         memory_section = build_memory_section(
             language=self.system_prompt_builder.language,
-            read_only=is_read_only,
+            read_only=self._is_read_only,
             is_proactive=self._is_proactive
         )
         if memory_section is not None:
