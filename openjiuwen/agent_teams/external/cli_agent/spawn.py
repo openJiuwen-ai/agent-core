@@ -24,7 +24,7 @@ from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.external.cli_agent.adapters import CliAgentAdapter, build_adapter
 from openjiuwen.agent_teams.external.cli_agent.injector import StdinPipeInjector
 from openjiuwen.agent_teams.external.descriptor import TeamJoinDescriptor
-from openjiuwen.agent_teams.external.runtime import ExternalCliRuntime
+from openjiuwen.agent_teams.external.runtime import ExternalCliRuntime, ReinvokeCliRuntime
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -61,31 +61,43 @@ async def _aiter_stdout(stream: asyncio.StreamReader) -> AsyncIterator[str]:
         yield raw.decode("utf-8", errors="replace").rstrip("\n")
 
 
-async def launch_external_cli(
+async def build_cli_runtime(
     ctx: TeamRuntimeContext,
     *,
     cwd: str | None = None,
     command_override: tuple[str, ...] | None = None,
-) -> tuple[ExternalCliRuntime, asyncio.subprocess.Process]:
-    """Spawn the CLI for ``ctx.cli_agent`` and wrap it in an ExternalCliRuntime.
+) -> ExternalCliRuntime | ReinvokeCliRuntime:
+    """Build the member runtime for ``ctx.cli_agent``.
+
+    Picks the runtime by the adapter's ``supports_stdin_injection``:
+    streaming CLIs (claude / codex) launch one long-lived subprocess now and
+    return an :class:`ExternalCliRuntime`; one-shot CLIs (openclaw / hermes)
+    return a :class:`ReinvokeCliRuntime` that launches a fresh subprocess per
+    turn. The returned runtime owns its subprocess(es); ``aclose`` tears down.
 
     Args:
         ctx: Member runtime context; ``ctx.cli_agent`` names the adapter.
-        cwd: Working directory for the subprocess.
+        cwd: Working directory for the subprocess(es).
         command_override: Optional full launch argv (e.g. an absolute path).
-
-    Returns:
-        The runtime plus the live subprocess (caller owns its teardown).
     """
     if not ctx.cli_agent:
         raise_error(
             StatusCode.AGENT_TEAM_CONFIG_INVALID,
-            reason="launch_external_cli called without ctx.cli_agent set",
+            reason="build_cli_runtime called without ctx.cli_agent set",
         )
     adapter: CliAgentAdapter = build_adapter(ctx.cli_agent, command_override=command_override)
     descriptor = descriptor_from_context(ctx)
-
     env = {**os.environ, **descriptor.to_env()}
+
+    if not adapter.supports_stdin_injection:
+        # One-shot CLI: no eager launch; the runtime spawns per turn.
+        return ReinvokeCliRuntime(
+            member_name=ctx.member_name or "",
+            adapter=adapter,
+            env=env,
+            cwd=cwd,
+        )
+
     command = adapter.build_command()
     team_logger.info("[external-cli] launching {} for member {}", command, ctx.member_name)
     process = await asyncio.create_subprocess_exec(
@@ -102,13 +114,13 @@ async def launch_external_cli(
             error_msg=f"external CLI '{ctx.cli_agent}' did not expose stdin/stdout pipes",
         )
 
-    runtime = ExternalCliRuntime(
+    return ExternalCliRuntime(
         member_name=ctx.member_name or "",
         adapter=adapter,
         injector=StdinPipeInjector(process.stdin),
         output_lines=_aiter_stdout(process.stdout),
+        process=process,
     )
-    return runtime, process
 
 
-__all__ = ["descriptor_from_context", "launch_external_cli"]
+__all__ = ["build_cli_runtime", "descriptor_from_context"]

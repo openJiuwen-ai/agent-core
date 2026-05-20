@@ -103,19 +103,25 @@ mid-turn steer（用户选定 stdin 传输，Unix 优先、接口预留 PTY/Wind
     非交互；输入 submission `{"op":{"type":"user_input",...}}`，完成 = event
     `msg.type=="task_complete"`。
   - **openclaw**（低置信）：ClawTeam 走一次性 `--message`（prompt 走 argv 非 stdin），
-    不适配持续 stdin 模型——标 `supports_stdin_injection=False`，待补 re-invoke-per-turn
+    `supports_stdin_injection=False`，由 ReinvokeCliRuntime 每轮 `openclaw --local
+    --session-id <id> --message <prompt>` 驱动（session-id 提供跨轮连续性）。原 re-invoke-per-turn
     runtime 或确认交互模式。
   - **hermes**（NousResearch/hermes-agent，已调研官方 CLI）：`hermes -z "<prompt>" --yolo`
     一次性入口——prompt 走 argv（stdin 仅补充上下文），输出纯文本最终答案后退出，无多轮
     stdin 循环、无结构化轮次分隔（轮次完成 = 进程退出/EOF）；`--yolo` 跳过危险命令审批；
     跨轮用 `--continue`/`--resume <id>`；MCP 回调走 `hermes mcp add <name> --command
     openjiuwen-team-mcp`。与 openclaw 同属一次性模型 → `supports_stdin_injection=False`，
-    需 re-invoke-per-turn runtime（每条入站消息跑一次 `hermes -z`，读 stdout 到 EOF）。
-  claude/codex 适配持续 stdin 模型；openclaw/hermes 为一次性，需 re-invoke runtime（未做）。
+    由 ReinvokeCliRuntime 每轮跑一次 `hermes -z --yolo [--continue] <prompt>`、读 stdout 到 EOF。
+  claude/codex 走持续 stdin 的 ExternalCliRuntime；openclaw/hermes 走一次性的
+  ReinvokeCliRuntime（已实现）。两种 runtime 由 adapter `supports_stdin_injection` 在
+  `build_cli_runtime` 处自动分流。
   四者均未对真实二进制验证，adapters.py 注释逐条标注置信度与待验证项。
-- `external/runtime.py`：`ExternalCliRuntime` 实现 `MemberRuntime`——run_streaming 写入
-  turn 输入并消费 stdout 至 adapter 判定轮次完成（CLI stdout 留作内部，不进 team 流）；
-  steer/follow_up 写 stdin；rail/memory/customizer 钩子为 no-op。
+- `external/runtime.py`：`_CliRuntimeBase`（共享 `MemberRuntime` 表面 + 共用 no-op 钩子）派生
+  两种 runtime：`ExternalCliRuntime`（持续 stdin 流式——写 turn 输入并消费 stdout 至 adapter
+  判定轮次完成，steer/follow_up 写 stdin，进程长存）与 `ReinvokeCliRuntime`（一次性——每轮
+  `create_subprocess_exec` 新进程，prompt 走 argv、读 stdout 到 EOF；steer/follow_up 缓冲、
+  本轮内以 follow-up 再调排空，不丢消息；进程退出即轮次完成）。两者 CLI stdout 均留作内部、
+  不进 team 流；rail/memory/customizer 钩子为 no-op。
 
 **spawn/configurator 接线（已实现并回归）：**
 
@@ -125,8 +131,9 @@ mid-turn steer（用户选定 stdin 传输，Unix 优先、接口预留 PTY/Wind
   采用、跳过 DeepAgent/rail/memory/customizer；经 `configure` 从 `TeamAgent.configure` 透传。
 - `resources.harness` / `TeamAgent.harness` / configurator `harness` 类型放宽到
   `MemberRuntime | None`（`TeamHarness` 结构上满足）。
-- `external/cli_agent/spawn.py:launch_external_cli`：按 `ctx` 建 descriptor、注入 env、
-  `create_subprocess_exec` 拉起 CLI、包成 `ExternalCliRuntime`。
+- `external/cli_agent/spawn.py:build_cli_runtime`：按 `ctx` 建 descriptor、注入 env，按
+  adapter `supports_stdin_injection` 分流——流式则拉起长存子进程包成 `ExternalCliRuntime`，
+  一次性则返回 `ReinvokeCliRuntime`（每轮自拉子进程）。runtime 自持子进程、`aclose` 收尾。
 - `spawn/external_cli_spawn.py`：镜像 `inprocess_spawn`——先（async）拉起 CLI 建 runtime，
   再 `teammate.configure(spec, ctx, member_runtime=runtime)`，TeamAgent shell + coordination
   在本进程跑，finally 关 injector + terminate 子进程。

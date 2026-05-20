@@ -58,8 +58,18 @@ class CliAgentAdapter:
         input_format: Input framing strategy (see ``INPUT_*``).
         completion: Turn-completion strategy (see ``COMPLETION_*``).
         supports_stdin_injection: Whether mid-turn stdin writes are observed.
-            False CLIs degrade to turn-boundary delivery (no mid-turn steer)
-            and need a re-invoke-per-turn runtime to work at all.
+            ``True`` CLIs run under the persistent-stdin streaming runtime;
+            ``False`` (one-shot) CLIs run under the re-invoke-per-turn runtime
+            (a fresh process per turn, prompt passed as argv, no mid-turn
+            steer).
+        prompt_flag: One-shot only. Pass the per-turn prompt as
+            ``<prompt_flag> <prompt>`` (e.g. openclaw ``--message``); ``None``
+            appends the prompt as the trailing positional argv.
+        session_flag: One-shot only. Add ``<session_flag> <session_id>`` on
+            every turn for per-member session isolation (e.g. openclaw
+            ``--session-id``).
+        continue_args: One-shot only. Args appended on turns *after* the first
+            for cross-turn continuity (e.g. hermes ``("--continue",)``).
     """
 
     name: str
@@ -67,10 +77,33 @@ class CliAgentAdapter:
     input_format: str = INPUT_TEXT
     completion: str = COMPLETION_NONE
     supports_stdin_injection: bool = True
+    prompt_flag: str | None = None
+    session_flag: str | None = None
+    continue_args: tuple[str, ...] = ()
 
     def build_command(self, extra_args: tuple[str, ...] = ()) -> list[str]:
         """Return the launch argv, optionally with extra args appended."""
         return [*self.command, *extra_args]
+
+    def build_turn_command(self, prompt: str, *, session_id: str, first_turn: bool) -> list[str]:
+        """Build the per-turn launch argv for a one-shot (re-invoke) CLI.
+
+        Args:
+            prompt: The turn's message text.
+            session_id: Per-member session id for ``session_flag`` CLIs.
+            first_turn: Whether this is the member's first turn (controls
+                ``continue_args``).
+        """
+        argv = list(self.command)
+        if self.session_flag and session_id:
+            argv += [self.session_flag, session_id]
+        if not first_turn and self.continue_args:
+            argv += list(self.continue_args)
+        if self.prompt_flag:
+            argv += [self.prompt_flag, prompt]
+        else:
+            argv.append(prompt)
+        return argv
 
     def format_input(self, text: str) -> str:
         """Frame one turn's input text for writing to the CLI stdin."""
@@ -159,18 +192,19 @@ _BUILTIN: dict[str, CliAgentAdapter] = {
         input_format=INPUT_CODEX_PROTO,
         completion=COMPLETION_CODEX_TASK_COMPLETE,
     ),
-    # OpenClaw CLI — low confidence. ClawTeam drives it one-shot
-    # (`openclaw --local --session-id <id> --message "<msg>"`), i.e. the
-    # prompt is an argv flag, not streamed on stdin. That does NOT fit the
-    # persistent-stdin runtime, so injection is disabled here. TODO: either
-    # confirm an interactive/stdin-streaming mode, or add a
-    # re-invoke-per-turn runtime and pass the message via `--message`.
+    # OpenClaw CLI — one-shot (re-invoke runtime). ClawTeam drives it as
+    # `openclaw --local --session-id <id> --message "<msg>"`: prompt via the
+    # --message flag, per-member continuity via a stable --session-id. The
+    # re-invoke runtime launches this once per inbound message and reads
+    # stdout to EOF. VERIFY flags against the real CLI.
     "openclaw": CliAgentAdapter(
         name="openclaw",
         command=("openclaw", "--local"),
         input_format=INPUT_TEXT,
         completion=COMPLETION_NONE,
         supports_stdin_injection=False,
+        prompt_flag="--message",
+        session_flag="--session-id",
     ),
     # Hermes Agent (NousResearch/hermes-agent) — one-shot, NOT stdin-streaming
     # (researched from the official CLI reference). `hermes -z "<prompt>"` is
@@ -181,16 +215,19 @@ _BUILTIN: dict[str, CliAgentAdapter] = {
     # dangerous-command approval prompts. Cross-turn continuity uses
     # `--continue` / `--resume <session_id>`. The team MCP server is registered
     # out of band: `hermes mcp add <name> --command openjiuwen-team-mcp`.
-    # Because the prompt is an argv arg and the process exits per turn, stdin
-    # injection does not apply; this needs a re-invoke-per-turn runtime (one
+    # The prompt is the trailing positional argv and the process exits per
+    # turn, so it runs under the re-invoke runtime: one
     # `hermes -z --yolo [--continue] "<message>"` per inbound message, reading
-    # stdout to EOF), which is not yet implemented.
+    # stdout to EOF. `--continue` resumes the most-recent session for
+    # cross-turn context — note this races across concurrent hermes members
+    # (the version's named-session support would isolate them; VERIFY).
     "hermes": CliAgentAdapter(
         name="hermes",
         command=("hermes", "-z", "--yolo"),
         input_format=INPUT_TEXT,
         completion=COMPLETION_NONE,
         supports_stdin_injection=False,
+        continue_args=("--continue",),
     ),
     # Line-based echo agent used by tests and simple integrations: one input
     # line, output terminated by an explicit end-of-turn marker.

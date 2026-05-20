@@ -13,7 +13,7 @@ from openjiuwen.agent_teams.external.cli_agent.adapters import (
     build_adapter,
 )
 from openjiuwen.agent_teams.external.cli_agent.injector import StdinPipeInjector
-from openjiuwen.agent_teams.external.runtime import ExternalCliRuntime
+from openjiuwen.agent_teams.external.runtime import ExternalCliRuntime, ReinvokeCliRuntime
 from openjiuwen.agent_teams.harness import TeamHarness
 from openjiuwen.core.common.exception.errors import BaseError
 
@@ -191,3 +191,43 @@ async def test_stdin_pipe_injector_writes_newline_framed():
     await injector.aclose()
     stdout, _ = await proc.communicate()
     assert stdout.decode().strip() == "hello"
+
+
+# ---- one-shot (re-invoke) adapters + runtime ------------------------------
+
+
+@pytest.mark.level0
+def test_hermes_build_turn_command_positional_with_continue():
+    adapter = build_adapter("hermes")
+    assert not adapter.supports_stdin_injection
+    first = adapter.build_turn_command("do it", session_id="s1", first_turn=True)
+    assert first[0] == "hermes" and first[-1] == "do it"
+    assert "--continue" not in first
+    later = adapter.build_turn_command("again", session_id="s1", first_turn=False)
+    assert "--continue" in later and later[-1] == "again"
+
+
+@pytest.mark.level0
+def test_openclaw_build_turn_command_message_and_session():
+    adapter = build_adapter("openclaw")
+    assert not adapter.supports_stdin_injection
+    argv = adapter.build_turn_command("review", session_id="sess-9", first_turn=True)
+    assert "--session-id" in argv
+    assert argv[argv.index("--session-id") + 1] == "sess-9"
+    assert "--message" in argv
+    assert argv[argv.index("--message") + 1] == "review"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_reinvoke_runtime_buffers_followups():
+    runtime = ReinvokeCliRuntime(
+        member_name="cli-1",
+        adapter=build_adapter("hermes"),
+        env={},
+    )
+    await runtime.steer("a")
+    await runtime.follow_up("b")
+    assert runtime._drain_pending() == "a\n\n---\n\nb"
+    assert runtime._drain_pending() is None
+    assert isinstance(runtime, ReinvokeCliRuntime)

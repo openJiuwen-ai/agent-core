@@ -14,11 +14,10 @@ the configurator skips DeepAgent / rail / memory setup.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import contextvars
 from typing import TYPE_CHECKING, Any, Optional
 
-from openjiuwen.agent_teams.external.cli_agent.spawn import launch_external_cli
+from openjiuwen.agent_teams.external.cli_agent.spawn import build_cli_runtime
 from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
 from openjiuwen.core.common.logging import team_logger
 
@@ -60,7 +59,7 @@ async def external_cli_spawn(
         description=f"External CLI member: {ctx.persona}" if ctx.persona else "External CLI member",
     )
 
-    runtime, process = await launch_external_cli(ctx)
+    runtime = await build_cli_runtime(ctx)
 
     teammate = _TeamAgent(card)
     teammate.configure(spec, ctx, member_runtime=runtime)
@@ -83,9 +82,6 @@ async def external_cli_spawn(
             raise
         finally:
             await runtime.aclose()
-            with contextlib.suppress(ProcessLookupError):
-                if process.returncode is None:
-                    process.terminate()
 
     task = run_ctx.run(asyncio.get_running_loop().create_task, _run())
     handle = InProcessSpawnHandle(
