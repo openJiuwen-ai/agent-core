@@ -213,6 +213,14 @@ class SessionMemoryConfig(BaseModel):
     incremental_mode: bool = Field(default=False)
 
 
+_MEMORY_UPDATE_SYSTEM_PROMPT = (
+    "You are a session memory updater. "
+    "Your only task is to update a markdown notes file based on conversation context. "
+    "Use only the edit_file tool. Do not execute shell commands, "
+    "do not interact with users, do not use any other tools."
+)
+
+
 class SessionMemoryUpdateAgent:
     """Dedicated session-memory updater backed by a real ReActAgent."""
 
@@ -280,7 +288,7 @@ class SessionMemoryUpdateAgent:
         await session.pre_run(inputs=inputs)
         try:
             await self._prime_inherited_context(session, context_messages)
-            system_tokens = ContextUtils.estimate_tokens(self._inherited_system_prompt or "")
+            system_tokens = ContextUtils.estimate_tokens(_MEMORY_UPDATE_SYSTEM_PROMPT)
             context_tokens = sum(ContextUtils.estimate_message_tokens(m) for m in context_messages)
             query_tokens = ContextUtils.estimate_tokens(inputs.get("query", ""))
             llm_input_tokens = system_tokens + context_tokens + query_tokens
@@ -320,10 +328,9 @@ class SessionMemoryUpdateAgent:
         full_scan_tokens: int = 0,
     ) -> None:
         model = self._ensure_direct_model()
-        prompt_messages: List[BaseMessage] = []
-        inherited_system_prompt = (self._inherited_system_prompt or "").strip()
-        if inherited_system_prompt:
-            prompt_messages.append(SystemMessage(content=inherited_system_prompt))
+        prompt_messages: List[BaseMessage] = [
+            SystemMessage(content=_MEMORY_UPDATE_SYSTEM_PROMPT),
+        ]
         prompt_messages.extend(context_messages)
         if is_incremental:
             prompt_messages.append(
@@ -402,7 +409,7 @@ class SessionMemoryUpdateAgent:
             description="Updates the session memory markdown file using filesystem tools.",
         )
         self._agent_card = agent_card
-        prompt_template = self._build_prompt_template(self._inherited_system_prompt)
+        prompt_template = self._build_prompt_template(_MEMORY_UPDATE_SYSTEM_PROMPT)
         agent_config = ReActAgentConfig(
             model_name=self._config.model.model_name,
             prompt_template=prompt_template,
@@ -474,7 +481,7 @@ class SessionMemoryUpdateAgent:
             return
         config = getattr(self._agent, "_config", None)
         if config is not None:
-            config.prompt_template = self._build_prompt_template(self._inherited_system_prompt)
+            config.prompt_template = self._build_prompt_template(_MEMORY_UPDATE_SYSTEM_PROMPT)
 
     def _create_agent_session(self):
         if self._agent_card is None:
