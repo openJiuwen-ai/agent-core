@@ -124,8 +124,8 @@ class AsyncProcessHandler:
                     timeout=30
                 )
                 return InvokeData(
-                    stdout=timeout_stdout.decode(self._encoding, errors='replace') if timeout_stdout else "",
-                    stderr=timeout_stderr.decode(self._encoding, errors='replace') if timeout_stderr else "",
+                    stdout=self._decode_output(timeout_stdout) if timeout_stdout else "",
+                    stderr=self._decode_output(timeout_stderr) if timeout_stderr else "",
                     exit_code=self._process.returncode if self._process.returncode is not None else -1,
                     exception=ori_ex
                 )
@@ -141,9 +141,9 @@ class AsyncProcessHandler:
                     exception=ori_ex
                 )
 
-        # Decode output
-        stdout_text = stdout.decode(self._encoding, errors='replace') if stdout else ""
-        stderr_text = stderr.decode(self._encoding, errors='replace') if stderr else ""
+        # Decode output with fallback encoding support
+        stdout_text = self._decode_output(stdout) if stdout else ""
+        stderr_text = self._decode_output(stderr) if stderr else ""
         # Defensive handling to ensure non-None exit code
         final_exit_code = exit_code if exit_code is not None else -1
         return InvokeData(
@@ -151,6 +151,28 @@ class AsyncProcessHandler:
             stderr=stderr_text,
             exit_code=final_exit_code
         )
+
+    def _decode_output(self, data: bytes) -> str:
+        """Decode subprocess output with encoding fallback.
+
+        Tries the primary encoding first (default UTF-8). If that fails,
+        falls back to GB18030 (superset of GBK/GB2312 for Chinese text).
+        Final fallback is latin-1 (never fails, preserves raw bytes).
+        """
+        try:
+            return data.decode(self._encoding)
+        except (UnicodeDecodeError, LookupError):
+            if self._encoding.lower() not in ("utf-8", "utf8"):
+                try:
+                    return data.decode("utf-8")
+                except (UnicodeDecodeError, LookupError):
+                    sys_operation_logger.warning("Failed to decode output with UTF-8 encoding")
+                    pass
+            try:
+                return data.decode("gb18030")
+            except (UnicodeDecodeError, LookupError):
+                sys_operation_logger.warning("Failed to decode output with GB18030 encoding")
+                return data.decode("latin-1", errors="replace")
 
     async def stream(self) -> AsyncGenerator[StreamEvent, None]:
         """Async generator for emitting process stream events in order.
@@ -295,7 +317,7 @@ class AsyncProcessHandler:
                                                         "returncode": self._process.returncode,
                                                         "queue_size": self._queue.qsize()})
                     break
-                data = chunk.decode(self._encoding, errors="replace")
+                data = self._decode_output(chunk)
                 event = StreamEvent(type=stream_type, data=data)
                 await self._queue.put(event)
                 total_num += 1

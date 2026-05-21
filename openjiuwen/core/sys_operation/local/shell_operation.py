@@ -63,6 +63,19 @@ def _available_powershell() -> str:
 class ShellOperation(BaseShellOperation):
     """Shell operation"""
 
+    @staticmethod
+    def _inject_ps_utf8(command: str) -> str:
+        """Set UTF-8 console output encoding for Windows PowerShell subprocesses.
+
+        Sets $OutputEncoding and [Console]::OutputEncoding to UTF-8 so all
+        PowerShell stdout/stderr output is UTF-8 regardless of the file's
+        original encoding. This solves garbled output in the Python subprocess
+        pipe, while leaving file-read encoding up to the caller (guided by
+        prompt instructions).
+        """
+        prefix = "$OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+        return prefix + command
+
     _DANGEROUS_PATTERNS: List[Tuple[re.Pattern, str]] = [
         (re.compile(r"\brm\s+-rf\b", re.IGNORECASE), "rm -rf"),
         (re.compile(r"\bdel\s+/[a-z]*[fsq][a-z]*\b", re.IGNORECASE), "del /f /s /q"),
@@ -98,10 +111,12 @@ class ShellOperation(BaseShellOperation):
             if shell_type == ShellType.AUTO:
                 if _looks_like_powershell(command):
                     exe = _available_powershell()
+                    command = ShellOperation._inject_ps_utf8(command)
                     return [exe, "-NoProfile", "-NonInteractive", "-Command", command], False, "powershell"
                 return command, True, "cmd"
             if shell_type == ShellType.POWERSHELL:
                 exe = _available_powershell()
+                command = ShellOperation._inject_ps_utf8(command)
                 return [exe, "-NoProfile", "-NonInteractive", "-Command", command], False, "powershell"
             if shell_type == ShellType.CMD:
                 return command, True, "cmd"
