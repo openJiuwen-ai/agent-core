@@ -46,3 +46,49 @@ def test_react_agent_builds_multimodal_user_message_from_tool_result() -> None:
         "type": "image_url",
         "image_url": {"url": "data:image/png;base64,abc"},
     }
+
+
+def test_react_agent_batches_multiple_multimodal_tool_results_into_one_user_message() -> None:
+    first = ToolOutput(
+        success=True,
+        data={
+            "content": "Image file read: /tmp/a.png",
+            "multimodal": [
+                {
+                    "type": "image",
+                    "source_path": "/tmp/a.png",
+                    "data_url": "data:image/png;base64,aaa",
+                }
+            ],
+        },
+    )
+    second = ToolOutput(
+        success=True,
+        data={
+            "content": "Image file read: /tmp/b.jpg",
+            "multimodal": [
+                {
+                    "type": "image",
+                    "source_path": "/tmp/b.jpg",
+                    "data_url": "data:image/jpeg;base64,bbb",
+                }
+            ],
+        },
+    )
+
+    message = ReActAgent._build_multimodal_tool_results_message([first, second])
+
+    assert message is not None
+    assert message.role == "user"
+    assert len(message.content) == 5
+    assert message.content[0]["type"] == "text"
+    assert "/tmp/a.png" in message.content[0]["text"]
+    assert "/tmp/b.jpg" in message.content[0]["text"]
+    assert message.content[2] == {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,aaa"},
+    }
+    assert message.content[4] == {
+        "type": "image_url",
+        "image_url": {"url": "data:image/jpeg;base64,bbb"},
+    }
