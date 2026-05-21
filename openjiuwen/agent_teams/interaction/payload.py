@@ -122,6 +122,9 @@ class DeliverResult:
         """Build a failure result with a short reason token."""
         return cls(ok=False, reason=reason)
 
+    def __bool__(self) -> bool:
+        return self.ok
+
 
 __all__ = [
     "DeliverResult",

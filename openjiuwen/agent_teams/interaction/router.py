@@ -13,7 +13,7 @@ Grammar
 ::
 
     input := channel? recipients? body
-    channel := "# " | "$" name " "          # default "# " when absent
+    channel := "# " | "$" name (" " | "@")  # default "# " when absent
     recipients := ("@" name " ")*           # zero or more
     body := <remaining text after consuming channel + recipients>
 
@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 
 _MENTION_RE = re.compile(r"^@(\S+)\s+([\s\S]+)$")
 _GOD_VIEW_PREFIX = "# "
-_HUMAN_AGENT_PREFIX_RE = re.compile(r"^\$(\S+)\s+([\s\S]*)$")
+_HUMAN_AGENT_PREFIX_RE = re.compile(r"^\$([^\s@]+)(?:\s+|(?=@))([\s\S]*)$")
 _RECIPIENT_RE = re.compile(r"^@(\S+)\s+")
 
 BROADCAST_TARGETS: frozenset[str] = frozenset({"all", "*"})
