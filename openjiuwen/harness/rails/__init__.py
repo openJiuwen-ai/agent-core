@@ -21,9 +21,27 @@ from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
 from openjiuwen.harness.rails.session_rail import SessionRail
 from openjiuwen.harness.rails.memory_rail import MemoryRail
 from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
+from openjiuwen.harness.rails.security import (
+    BaseSecurityRail,
+    SecurityAllow,
+    SecurityCheckContext,
+    SecurityDecision,
+    SecurityInterrupt,
+    SecurityReject,
+    SecurityAlert,
+    SecurityAlertLevel,
+)
 
 __all__ = [
+    "BaseSecurityRail",
     "DeepAgentRail",
+    "SecurityAlert",
+    "SecurityAlertLevel",
+    "SecurityAllow",
+    "SecurityCheckContext",
+    "SecurityDecision",
+    "SecurityInterrupt",
+    "SecurityReject",
     "EvolutionRail",
     "TrajectoryRail",
     "TaskPlanningRail",

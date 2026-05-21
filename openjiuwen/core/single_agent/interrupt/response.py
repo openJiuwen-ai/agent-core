@@ -11,6 +11,7 @@ class InterruptRequest(BaseModel):
     message: str = ""
     payload_schema: dict = Field(default_factory=dict)
     auto_confirm_key: str = ""
+    ui_options: list[dict] | None = None
 
 
 class ToolCallInterruptRequest(InterruptRequest):
