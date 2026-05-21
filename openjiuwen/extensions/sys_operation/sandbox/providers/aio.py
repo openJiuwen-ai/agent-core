@@ -1006,6 +1006,7 @@ class AIOCodeProvider(BaseCodeProvider):
             language: str = "python",
             timeout: int = 300,
             environment: Optional[Dict[str, str]] = None,
+            cwd: Optional[str] = None,
             options: Optional[Dict[str, Any]] = None,
             **kwargs,
     ) -> ExecuteCodeResult:
@@ -1069,6 +1070,7 @@ class AIOCodeProvider(BaseCodeProvider):
     async def execute_code_stream(self, code: str, *, language: str = "python",
                                   timeout: int = 300,
                                   environment: Optional[Dict[str, str]] = None,
+                                  cwd: Optional[str] = None,
                                   options: Optional[Dict[str, Any]] = None,
                                   **kwargs) -> AsyncIterator[ExecuteCodeStreamResult]:
         data = ExecuteCodeChunkData(chunk_index=0, exit_code=-1)

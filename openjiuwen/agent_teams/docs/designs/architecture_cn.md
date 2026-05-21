@@ -1063,7 +1063,7 @@ Runner.interact_agent_team(payload, *, team_name, session_id)
 1. 保留名 `human_agent` 仅用作动态 spawn 默认名；自定义 HUMAN_AGENT 成员名可避此名
 2. HumanAgent 走标准 UNSTARTED → spawn 流程，但工具集仅 `HUMAN_AGENT_TOOLS`；rail 装配剥离 `FirstIterationGate` 与 `TeamToolApprovalRail`
 3. 任务 `assignee` 指向 human-agent 且 CLAIMED 时，`UpdateTaskTool` 拒绝 reassign / cancel
-4. 发给 human-agent 的点对点消息 `is_read=True`；广播后 human-agent `read_at` 立即跟进
+4. 发给 human-agent 的点对点消息与广播 **保持 `is_read=False`**；human-agent 走与 teammate 一致的 `MessageHandler._process_unread_messages` poll → `deliver_input` → `mark_message_read` 路径（详见 `docs/features/F_20_human-agent-mailbox-unread-flip.md`）
 5. `TeamPolicyRail` 注入 `team_hitt` section（P:12），按 role 下达 leader / teammate / human_agent 行为约束。section 注入条件来自 `backend.hitt_enabled()` 反映 effective flag，不依赖 roster
 
 `HumanAgentInboundEvent(member_name, sender, body, broadcast, message_id, timestamp)` 通过 `Runner.register_human_agent_inbound(team_name, session_id, member_name, callback)` 推给业务层，让外部 UI / 通讯渠道把团队消息送达对应的人类用户。

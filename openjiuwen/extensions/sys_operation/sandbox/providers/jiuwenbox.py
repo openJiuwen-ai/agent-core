@@ -1504,6 +1504,7 @@ class JiuwenBoxCodeProvider(_JiuwenBoxProviderMixin, BaseCodeProvider):
         language: str = "python",
         timeout: int = 300,
         environment: Optional[Dict[str, str]] = None,
+        cwd: Optional[str] = None,
         options: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> ExecuteCodeResult:
@@ -1627,6 +1628,7 @@ class JiuwenBoxCodeProvider(_JiuwenBoxProviderMixin, BaseCodeProvider):
         language: str = "python",
         timeout: int = 300,
         environment: Optional[Dict[str, str]] = None,
+        cwd: Optional[str] = None,
         options: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> AsyncIterator[ExecuteCodeStreamResult]:

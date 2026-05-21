@@ -689,6 +689,7 @@ class LocalCodeProvider(BaseCodeProvider):
             language: Literal['python', 'javascript'] = "python",
             timeout: int = 300,
             environment: Optional[Dict[str, str]] = None,
+            cwd: Optional[str] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> ExecuteCodeResult:
         if not code or not code.strip():
@@ -752,6 +753,7 @@ class LocalCodeProvider(BaseCodeProvider):
             language: Literal['python', 'javascript'] = "python",
             timeout: int = 300,
             environment: Optional[Dict[str, str]] = None,
+            cwd: Optional[str] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[ExecuteCodeStreamResult]:
         if not code or not code.strip():

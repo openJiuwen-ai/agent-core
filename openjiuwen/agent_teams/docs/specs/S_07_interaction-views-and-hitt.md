@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/interaction/`、`openjiuwen/agent_teams/constants.py`、`openjiuwen/agent_teams/runtime/manager.py`（`_dispatch_payload`）、`openjiuwen/agent_teams/agent/coordination/handlers/message.py`（HITT inbound 钩子）|
-| 最近一次修订日期 | 2026-05-15 |
+| 最近一次修订日期 | 2026-05-17 |
 | 关联 feature | F_13_human-agent-send-message.md |
 
 ## 范围 / 边界
@@ -331,7 +331,7 @@ RESERVED_MEMBER_NAMES: frozenset[str] = frozenset({
 1. `human_agent` 是保留成员名，作动态 spawn 的默认人类成员名；自定 HUMAN_AGENT 成员名可避开此保留名。普通 teammate 的 predefined 成员仍然不允许撞保留名（`_validate_reserved_names`）。
 2. human-agent 走标准 `UNSTARTED → spawn` 流程（与 teammate 一致），工具集为 `HUMAN_AGENT_TOOLS` = `view_task` + `member_complete_task` + `send_message`；rail 装配会剥离 `FirstIterationGate` / `TeamToolApprovalRail`。其中 `send_message` 是**用户驱动的转发通道**：能否调用、给谁、说什么完全由用户在 Inbox 输入里的明确指令决定。约束写在 `team_hitt` prompt section 里（不在 `invoke()` 里加 caller-role 分支）——选择 prompt 而非代码强约束是因为「该不该转发」是语义判断，最适合让 LLM 在 prompt 引导下判断；如果未来发现 LLM 越权滥用，再加 tool-level 静态护栏（如 multicast/broadcast 拒收）。
 3. 一旦 `task.assignee` 指向某个 human-agent 且状态 CLAIMED，`UpdateTaskTool` 拒绝 reassign 和 cancel；批量 cancel 链路也跳过。
-4. 发送给 human-agent 的点对点消息 `is_read=True`；广播后 human-agent 的 `read_at` 立即跟进。
+4. 发送给 human-agent 的点对点消息与广播 **保持 `is_read=False`**。human-agent 走与 teammate 一致的 `MessageHandler._process_unread_messages` poll → `deliver_input` → `mark_message_read` 路径；写入侧自动标已读会绕过 poll 路径，avatar 的 DeepAgent 就收不到消息（见 F_20）。
 5. `TeamPolicyRail` 注入 `team_hitt` section（priority=12），按 role 给 leader / teammate / human_agent 下达角色特定的行为约束。section 注入条件来自 `backend.hitt_enabled()`——反映运行时 effective flag，不依赖 roster 是否已 spawn。
 6. `_resolve_team_mode` 只把**非 HUMAN_AGENT** 的 predefined member 计入 `hybrid` 派生——所以纯 HITT 团队（仅声明人类成员）仍然是 `default` 模式，leader 保留 `spawn_member` 工具。
 

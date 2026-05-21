@@ -110,8 +110,6 @@ class TaskBoardHandler(BaseCoordinationHandler):
         member_name = self._blueprint.member_name
         if not member_name or self._infra.task_manager is None:
             return
-        if self._round.has_in_flight_round():
-            return
         await self._poll.resume_polls()
         team_logger.debug("task trigger detected, nudging idle agent: member_name={}", member_name)
         await self._nudge_idle_agent(member_name)

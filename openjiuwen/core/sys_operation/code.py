@@ -26,6 +26,7 @@ class BaseCodeOperation(BaseOperation, ABC):
             language: Literal['python', 'javascript'] = "python",
             timeout: int = 300,
             environment: Optional[Dict[str, str]] = None,
+            cwd: Optional[str] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> ExecuteCodeResult:
         """
@@ -36,6 +37,7 @@ class BaseCodeOperation(BaseOperation, ABC):
             language: Programming language of the code. Strict type constraint to 'python' or 'javascript'.
             timeout: Maximum execution time in seconds. Defaults to 300 seconds (5 minutes).
             environment: Key-value dict of custom environment variables.
+            cwd: Working directory for the execution environment, when supported by the provider.
             options: Additional execution configuration options.
 
         Returns:
@@ -51,6 +53,7 @@ class BaseCodeOperation(BaseOperation, ABC):
             language: Literal['python', 'javascript'] = "python",
             timeout: int = 300,
             environment: Optional[Dict[str, str]] = None,
+            cwd: Optional[str] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[ExecuteCodeStreamResult]:
         """
@@ -63,6 +66,7 @@ class BaseCodeOperation(BaseOperation, ABC):
             timeout: Maximum execution time in seconds. Terminates the process if exceeded.
                 Must be a positive integer. Defaults to 300 seconds (5 minutes).
             environment: Key-value dict of custom environment variables.
+            cwd: Working directory for the execution environment, when supported by the provider.
             options: Additional execution configuration options.
 
         Returns:

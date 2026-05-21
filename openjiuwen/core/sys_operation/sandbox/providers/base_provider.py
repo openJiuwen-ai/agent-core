@@ -205,6 +205,7 @@ class BaseCodeProvider(BaseCodeProtocal, ABC):
             language: Literal['python', 'javascript'] = "python",
             timeout: int = 300,
             environment: Optional[Dict[str, str]] = None,
+            cwd: Optional[str] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> ExecuteCodeResult:
         raise NotImplementedError(f"{self.__class__.__name__}.execute_code is not implemented")
@@ -216,6 +217,7 @@ class BaseCodeProvider(BaseCodeProtocal, ABC):
             language: Literal['python', 'javascript'] = "python",
             timeout: int = 300,
             environment: Optional[Dict[str, str]] = None,
+            cwd: Optional[str] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[ExecuteCodeStreamResult]:
         raise NotImplementedError(f"{self.__class__.__name__}.execute_code_stream is not implemented")

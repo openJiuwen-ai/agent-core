@@ -5,7 +5,8 @@ from typing import Dict, Any, AsyncIterator, Optional
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.foundation.tool.base import Tool
-from openjiuwen.core.sys_operation import SysOperation
+from openjiuwen.core.sys_operation import OperationMode, SysOperation
+from openjiuwen.core.sys_operation.cwd import get_cwd
 from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
@@ -35,7 +36,11 @@ class CodeTool(Tool):
         language = inputs.get("language", "python")
         timeout = self._resolve_timeout(inputs.get("timeout", 300))
 
-        res = await self.operation.code().execute_code(code, language=language, timeout=timeout)
+        kwargs: Dict[str, Any] = {"language": language, "timeout": timeout}
+        if self.operation.mode == OperationMode.LOCAL:
+            kwargs["cwd"] = get_cwd()
+
+        res = await self.operation.code().execute_code(code, **kwargs)
         if res.code != StatusCode.SUCCESS.code:
             return ToolOutput(success=False, error=res.message)
 

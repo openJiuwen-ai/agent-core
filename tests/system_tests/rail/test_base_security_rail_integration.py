@@ -11,11 +11,13 @@ Tests the security rail lifecycle with MockLLM and real tools:
 """
 
 import os
-import unittest
 from unittest.mock import patch, MagicMock
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 
 import pytest
+import pytest_asyncio
+
+from openjiuwen.core.runner import Runner
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent import AgentCard, ReActAgentConfig, ReActAgent
@@ -247,16 +249,17 @@ class LowPrioritySecurityRail(BaseSecurityRail):
         return self.allow()
 
 
-class TestBaseSecurityRailIntegration(unittest.IsolatedAsyncioTestCase):
+class TestBaseSecurityRailIntegration:
     """Integration tests for BaseSecurityRail with ReActAgent."""
 
-    async def asyncSetUp(self):
+    @pytest_asyncio.fixture(autouse=True)
+    async def setup_runner(self):
         await Runner.start()
         _invoke_tracker.clear()
-
-    async def asyncTearDown(self):
+        yield
         await Runner.stop()
 
+    @pytest.mark.asyncio
     async def test_security_reject_modifies_tool_result(self):
         """SecurityReject in after_tool_call should replace tool result."""
         tool_id = "read_reject_test"
@@ -278,6 +281,7 @@ class TestBaseSecurityRailIntegration(unittest.IsolatedAsyncioTestCase):
         assert _invoke_tracker[tool_id]["count"] == 1
         assert "blocked" in result.get("output", "").lower()
 
+    @pytest.mark.asyncio
     async def test_security_allow_passes_tool_result(self):
         """SecurityAllow should let tool result pass unchanged."""
         tool_id = "read_allow_test"
@@ -299,6 +303,7 @@ class TestBaseSecurityRailIntegration(unittest.IsolatedAsyncioTestCase):
         assert _invoke_tracker[tool_id]["count"] == 1
         assert "safe" in result.get("output", "").lower() or "content" in result.get("output", "").lower()
 
+    @pytest.mark.asyncio
     async def test_multi_event_rail_records_all_events(self):
         """Rail listening to multiple events should record each invocation."""
         tool_id = "read_multi_test"
@@ -321,6 +326,7 @@ class TestBaseSecurityRailIntegration(unittest.IsolatedAsyncioTestCase):
         assert AgentCallbackEvent.BEFORE_MODEL_CALL in rail.events
         assert AgentCallbackEvent.AFTER_TOOL_CALL in rail.events
 
+    @pytest.mark.asyncio
     async def test_priority_ordering_high_runs_before_low(self):
         """Higher priority rails should execute before lower priority."""
         tool_id = "read_priority_test"
@@ -345,6 +351,7 @@ class TestBaseSecurityRailIntegration(unittest.IsolatedAsyncioTestCase):
 
         assert order_list == ["high_priority", "low_priority"]
 
+    @pytest.mark.asyncio
     @pytest.mark.skip(reason="Requires proper session setup for HITL interrupt flow")
     async def test_security_interrupt_with_human_approval(self):
         """SecurityInterrupt should pause and resume with human input."""
@@ -375,6 +382,7 @@ class TestBaseSecurityRailIntegration(unittest.IsolatedAsyncioTestCase):
 
         assert mock_llm.call_count == 1
 
+    @pytest.mark.asyncio
     @pytest.mark.skip(reason="Requires proper session setup for HITL interrupt flow")
     async def test_security_interrupt_with_human_rejection(self):
         """SecurityInterrupt should force finish when human rejects."""
@@ -406,6 +414,7 @@ class TestBaseSecurityRailIntegration(unittest.IsolatedAsyncioTestCase):
         assert "Rejected by human" in result.get("output", "")
         assert mock_llm.call_count == 0
 
+    @pytest.mark.asyncio
     async def test_chain_of_tool_calls_with_mixed_results(self):
         """Rail should handle tool calls with pattern detection."""
         tool_id = "read_chain_test"
@@ -428,16 +437,17 @@ class TestBaseSecurityRailIntegration(unittest.IsolatedAsyncioTestCase):
         assert _invoke_tracker[tool_id]["count"] == 1
 
 
-class TestBaseSecurityRailDecisionFlow(unittest.IsolatedAsyncioTestCase):
+class TestBaseSecurityRailDecisionFlow:
     """Tests for security decision application flow."""
 
-    async def asyncSetUp(self):
+    @pytest_asyncio.fixture(autouse=True)
+    async def setup_runner(self):
         await Runner.start()
         _invoke_tracker.clear()
-
-    async def asyncTearDown(self):
+        yield
         await Runner.stop()
 
+    @pytest.mark.asyncio
     async def test_reject_modifies_tool_message(self):
         """SecurityReject should modify tool_message content."""
         tool_id = "read_decision_test"
@@ -481,6 +491,7 @@ class TestBaseSecurityRailDecisionFlow(unittest.IsolatedAsyncioTestCase):
         assert _invoke_tracker[tool_id]["count"] == 1
         assert "blocked" in result.get("output", "").lower()
 
+    @pytest.mark.asyncio
     async def test_allow_preserves_original_result(self):
         """SecurityAllow should preserve original tool result."""
         tool_id = "read_preserve_test"

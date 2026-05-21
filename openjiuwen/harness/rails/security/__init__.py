@@ -5,6 +5,8 @@
 
 from openjiuwen.harness.rails.security.base_security_rail import (
     BaseSecurityRail,
+    SecurityAlert,
+    SecurityAlertLevel,
     SecurityAllow,
     SecurityCheckContext,
     SecurityDecision,
@@ -21,6 +23,8 @@ __all__ = [
     "BaseSecurityRail",
     "PermissionInterruptRail",
     "SafetyPromptRail",
+    "SecurityAlert",
+    "SecurityAlertLevel",
     "SecurityAllow",
     "SecurityCheckContext",
     "SecurityDecision",

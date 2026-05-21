@@ -20,6 +20,7 @@ class BaseCodeProtocal(ABC):
             language: Literal['python', 'javascript'] = "python",
             timeout: int = 300,
             environment: Optional[Dict[str, str]] = None,
+            cwd: Optional[str] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> ExecuteCodeResult:
         pass
@@ -32,6 +33,7 @@ class BaseCodeProtocal(ABC):
             language: Literal['python', 'javascript'] = "python",
             timeout: int = 300,
             environment: Optional[Dict[str, str]] = None,
+            cwd: Optional[str] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[ExecuteCodeStreamResult]:
         pass

@@ -19,6 +19,7 @@ Responsibilities:
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import List, Optional, TYPE_CHECKING
 
@@ -46,6 +47,13 @@ _HIDDEN_IN_PLAN = _TODO_TOOL_NAMES | _SESSION_TOOL_NAMES
 _HIDDEN_IN_NORMAL = frozenset({"enter_plan_mode", "exit_plan_mode"})
 
 _PLAN_FILE_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
+
+# Git write operations that must be blocked in plan mode.
+# Read-only git commands (status, log, diff, branch, remote, etc.) are allowed.
+_GIT_WRITE_RE = re.compile(
+    r"\bgit\s+(add|commit|push|pull|reset\s+--hard|checkout\s+--\.|clean\s+-[a-zA-Z]*f|"
+    r"stash\s+(drop|clear)|branch\s+-D|merge|tag|amend|rebase)\b"
+)
 
 DEFAULT_PLAN_MODE_ALLOWED_TOOLS: tuple[str, ...] = (
     "switch_mode",
@@ -284,7 +292,24 @@ class AgentModeRail(DeepAgentRail):
             self._reject_tool(ctx, allow_msg)
             return
 
-        # 3c. write_file / edit_file → must target plan file only
+        # 3c. bash → block git write operations
+        if tool_name == "bash":
+            command = self._extract_bash_command(ctx)
+            if _GIT_WRITE_RE.search(command):
+                logger.info("reject bash call: git write operation in plan mode")
+                if self._language_is_cn():
+                    git_msg = (
+                        f"[AgentModeRail] plan 模式下禁止执行 git 写操作（{command!r}）。"
+                    )
+                else:
+                    git_msg = (
+                        f"[AgentModeRail] Git write operations are blocked in plan mode "
+                        f"({command!r})."
+                    )
+                self._reject_tool(ctx, git_msg)
+                return
+
+        # 3d. write_file / edit_file → must target plan file only
         if tool_name in _PLAN_FILE_WRITE_TOOLS:
             file_path = self._extract_file_path(ctx)
             plan_path = agent.get_plan_file_path(session)
@@ -495,6 +520,31 @@ class AgentModeRail(DeepAgentRail):
                 return ""
         if isinstance(args, dict):
             return str(args.get("file_path", ""))
+        return ""
+
+    def _extract_bash_command(self, ctx: AgentCallbackContext) -> str:
+        """Extract the shell command string from a bash tool invocation.
+
+        Args:
+            ctx: Callback context.
+
+        Returns:
+            The command string, or empty string if not extractable.
+        """
+        inputs = ctx.inputs
+        if isinstance(inputs, ToolCallInputs):
+            args = inputs.tool_args
+        else:
+            args = getattr(inputs, "tool_args", None)
+        if args is None:
+            args = {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except (ValueError, TypeError):
+                return ""
+        if isinstance(args, dict):
+            return str(args.get("command", ""))
         return ""
 
 

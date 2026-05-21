@@ -5,9 +5,9 @@ import pytest
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
-    InvokeInputs,
     ModelCallInputs,
 )
+from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 from openjiuwen.harness.rails import (
     BaseSecurityRail,
     SafetyPromptRail,
@@ -30,18 +30,6 @@ class _RejectModelRail(BaseSecurityRail):
         await super().apply_security_decision(security_ctx, decision)
 
 
-class _BeforeInvokeRail(BaseSecurityRail):
-    supported_events = {AgentCallbackEvent.BEFORE_INVOKE}
-
-    def __init__(self):
-        super().__init__()
-        self.events = []
-
-    async def run_security_check(self, security_ctx: SecurityCheckContext):
-        self.events.append(security_ctx.event)
-        return self.allow()
-
-
 class _TestPromptRail(BaseSecurityRail):
     supported_events = {AgentCallbackEvent.BEFORE_MODEL_CALL}
 
@@ -60,21 +48,6 @@ def test_base_security_rail_registers_only_supported_events():
     callbacks = rail.get_callbacks()
 
     assert set(callbacks) == {AgentCallbackEvent.BEFORE_MODEL_CALL}
-
-
-@pytest.mark.asyncio
-async def test_base_security_rail_supports_non_model_tool_events():
-    rail = _BeforeInvokeRail()
-    callbacks = rail.get_callbacks()
-    ctx = AgentCallbackContext(
-        agent=object(),
-        inputs=InvokeInputs(query="hello"),
-    )
-
-    assert set(callbacks) == {AgentCallbackEvent.BEFORE_INVOKE}
-    await callbacks[AgentCallbackEvent.BEFORE_INVOKE](ctx)
-
-    assert rail.events == [AgentCallbackEvent.BEFORE_INVOKE]
 
 
 @pytest.mark.asyncio
@@ -106,3 +79,34 @@ async def test_test_prompt_rail_allows_model_call():
     await rail.before_model_call(ctx)
 
     assert ctx.consume_force_finish() is None
+
+
+class _ModelInterruptRail(BaseSecurityRail):
+    supported_events = {AgentCallbackEvent.BEFORE_MODEL_CALL}
+
+    async def run_security_check(self, security_ctx: SecurityCheckContext):
+        return self.interrupt(
+            InterruptRequest(message="Should be auto-rejected"),
+            subject_id="test_interrupt",
+        )
+
+    async def apply_security_decision(self, security_ctx: SecurityCheckContext, decision):
+        if isinstance(decision, SecurityReject):
+            security_ctx.callback_ctx.request_force_finish(self._build_force_finish_result(decision))
+            return
+        await super().apply_security_decision(security_ctx, decision)
+
+
+@pytest.mark.asyncio
+async def test_security_interrupt_on_model_event_auto_rejected():
+    rail = _ModelInterruptRail()
+    ctx = AgentCallbackContext(
+        agent=object(),
+        inputs=ModelCallInputs(),
+    )
+
+    await rail.before_model_call(ctx)
+
+    finish = ctx.consume_force_finish()
+    assert finish is not None
+    assert "Should be auto-rejected" in finish.result.get("output", "")

@@ -29,6 +29,7 @@ from openjiuwen.agent_teams.schema.events import (
     MemberStatusChangedEvent,
     MessageEvent,
     TaskClaimedEvent,
+    TaskCompletedEvent,
     TaskListDrainedEvent,
     TeamCleanedEvent,
     TeamCompletedEvent,
@@ -457,15 +458,29 @@ async def test_task_claimed_for_other_member_falls_through_to_board_nudge():
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_task_claimed_for_other_member_skipped_when_round_in_flight():
-    """A leader already running a round must not be nudged on a teammate claim."""
+async def test_task_claimed_for_other_member_nudges_leader_via_steer_when_busy():
+    """A leader already running a round is nudged via steer on a teammate claim.
+
+    Previously the ``on_task_board_event`` guard on ``has_in_flight_round``
+    silently dropped the nudge.  After the fix, ``deliver_input`` handles
+    the busy state internally (steer / pending_inputs), so the board
+    context still reaches the leader.
+    """
     agent = _make_leader()
+    incomplete_task = MagicMock()
+    incomplete_task.task_id = "task-8"
+    incomplete_task.title = "In progress"
+    incomplete_task.content = "Working"
+    incomplete_task.status = "claimed"
+    incomplete_task.assignee = "dev-1"
+
     agent._configurator.task_manager = MagicMock()
-    agent._configurator.task_manager.list_tasks = AsyncMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[incomplete_task])
 
     in_flight = MagicMock()
     in_flight.done = MagicMock(return_value=False)
     agent._stream_controller.agent_task = in_flight
+    agent._is_agent_running = lambda: True
     agent._start_agent = AsyncMock()
     agent.steer = AsyncMock()
 
@@ -478,9 +493,12 @@ async def test_task_claimed_for_other_member_skipped_when_round_in_flight():
     )
     await agent._coordination.dispatcher.task_board.on_task_claimed(event)
 
-    agent._configurator.task_manager.list_tasks.assert_not_called()
+    # Leader is busy → steer receives the board context (not silently dropped)
+    agent._configurator.task_manager.list_tasks.assert_awaited_once()
+    agent.steer.assert_awaited_once()
+    content = agent.steer.await_args.args[0]
+    assert "task-8" in content
     agent._start_agent.assert_not_called()
-    agent.steer.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1256,3 +1274,131 @@ async def test_register_team_completion_callbacks_wires_skill_rail():
     agent._register_team_completion_callbacks()
 
     assert skill_rail.notify_team_completed in handler._completion_callbacks
+
+
+# ------------------------------------------------------------------
+# Regression: TASK_COMPLETED must reach leader even when busy
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_task_completed_nudges_leader_with_all_done_when_idle():
+    """When the last task completes and the leader is idle, the
+    "all tasks done" summary prompt is delivered via _start_agent."""
+    agent = _make_leader()
+    completed_task = MagicMock()
+    completed_task.task_id = "task-5"
+    completed_task.title = "Final task"
+    completed_task.content = "Done"
+    completed_task.status = "completed"
+    completed_task.assignee = "member-5"
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[completed_task])
+    agent._is_agent_running = lambda: False
+    agent._start_agent = AsyncMock()
+    agent.steer = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskCompletedEvent(
+            team_name="test-team",
+            task_id="task-5",
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    # Leader is idle → _start_agent receives the "all done" summary prompt
+    agent._start_agent.assert_awaited_once()
+    content = agent._start_agent.await_args.args[0]
+    assert "完成" in content or "complete" in content.lower()
+    agent.steer.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_task_completed_nudges_leader_via_steer_when_busy():
+    """When the last task completes and the leader is busy, the
+    "all tasks done" summary prompt is delivered via steer instead of
+    being silently dropped.
+
+    Regression guard: previously ``on_task_board_event`` returned early
+    when ``has_in_flight_round()`` was True, causing the summary prompt
+    to never reach the leader.  The fix delegates queuing to
+    ``deliver_input`` which uses steer / pending_inputs internally.
+    """
+    agent = _make_leader()
+    completed_task = MagicMock()
+    completed_task.task_id = "task-5"
+    completed_task.title = "Final task"
+    completed_task.content = "Done"
+    completed_task.status = "completed"
+    completed_task.assignee = "member-5"
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[completed_task])
+
+    # Simulate leader busy (agent running)
+    agent._is_agent_running = lambda: True
+    agent._has_in_flight_round = lambda: True
+    agent._start_agent = AsyncMock()
+    agent.steer = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskCompletedEvent(
+            team_name="test-team",
+            task_id="task-5",
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    # Leader is busy → steer receives the "all done" summary prompt
+    # (previously this was silently dropped)
+    agent.steer.assert_awaited_once()
+    content = agent.steer.await_args.args[0]
+    assert "完成" in content or "complete" in content.lower()
+    agent._start_agent.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_task_completed_with_incomplete_tasks_nudges_leader_board():
+    """When a task completes but others remain incomplete, the leader
+    receives the task board overview (not the "all done" prompt)."""
+    agent = _make_leader()
+    completed_task = MagicMock()
+    completed_task.task_id = "task-1"
+    completed_task.title = "Done task"
+    completed_task.content = "Finished"
+    completed_task.status = "completed"
+    completed_task.assignee = "member-1"
+
+    incomplete_task = MagicMock()
+    incomplete_task.task_id = "task-2"
+    incomplete_task.title = "Pending task"
+    incomplete_task.content = "In progress"
+    incomplete_task.status = "claimed"
+    incomplete_task.assignee = "member-2"
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(
+        return_value=[completed_task, incomplete_task]
+    )
+    agent._is_agent_running = lambda: False
+    agent._start_agent = AsyncMock()
+    agent.steer = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskCompletedEvent(
+            team_name="test-team",
+            task_id="task-1",
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_board_event(event)
+
+    # Not all done → leader gets the task board overview
+    agent._start_agent.assert_awaited_once()
+    content = agent._start_agent.await_args.args[0]
+    assert "task-2" in content
+    # Should NOT contain the "all done" summary prompt
+    assert "完成" not in content or "task" in content.lower()

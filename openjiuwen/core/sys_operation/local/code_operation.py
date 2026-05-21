@@ -83,6 +83,7 @@ class CodeOperation(BaseCodeOperation):
             language: Literal["python", "javascript"] = "python",
             timeout: int = 300,
             environment: Optional[Dict[str, str]] = None,
+            cwd: Optional[str] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> ExecuteCodeResult:
         """
@@ -93,6 +94,7 @@ class CodeOperation(BaseCodeOperation):
             language: Programming language of the code. Strict type constraint to 'python' or 'javascript'.
             timeout: Maximum execution time in seconds. Defaults to 300 seconds (5 minutes).
             environment: Key-value dict of custom environment variables.
+            cwd: Working directory for the subprocess.
             options: Additional execution configuration options.
 
         Returns:
@@ -154,7 +156,8 @@ class CodeOperation(BaseCodeOperation):
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=env
+                env=env,
+                cwd=cwd,
             )
 
             encoding = (options or {}).get("encoding", "utf-8")
@@ -213,6 +216,7 @@ class CodeOperation(BaseCodeOperation):
             language: Literal["python", "javascript"] = "python",
             timeout: int = 300,
             environment: Optional[Dict[str, str]] = None,
+            cwd: Optional[str] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[ExecuteCodeStreamResult]:
         """
@@ -225,6 +229,7 @@ class CodeOperation(BaseCodeOperation):
             timeout: Maximum execution time in seconds. Terminates the process if exceeded.
                 Must be a positive integer. Defaults to 300 seconds (5 minutes).
             environment: Key-value dict of custom environment variables.
+            cwd: Working directory for the subprocess.
             options: Additional execution configuration options.
 
         Returns:
@@ -294,7 +299,8 @@ class CodeOperation(BaseCodeOperation):
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=env
+                env=env,
+                cwd=cwd,
             )
             chunk_size = (options or {}).get("chunk_size", 1024)
             encoding = (options or {}).get("encoding", "utf-8")

@@ -470,7 +470,15 @@ async def test_cancel_all_preserves_human_agent_claimed_task(built_team, db):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_direct_message_to_human_agent_is_auto_read(built_team, db):
+async def test_direct_message_to_human_agent_stays_unread(built_team, db):
+    """Messages addressed to a human-agent must remain unread on write.
+
+    Human agents share the polling mailbox path with teammates — the
+    coordination MessageHandler drains unread messages and feeds them
+    into the avatar's DeepAgent via deliver_input. Auto-marking on write
+    used to pre-empt that path and prevent delivery; see
+    F_20_human-agent-mailbox-unread-flip.
+    """
     mm = built_team.message_manager
     msg_id = await mm.send_message(
         content="please review",
@@ -479,7 +487,7 @@ async def test_direct_message_to_human_agent_is_auto_read(built_team, db):
     assert msg_id is not None
     messages = await mm.get_messages(to_member_name=HUMAN_AGENT_MEMBER_NAME)
     assert len(messages) == 1
-    assert messages[0].is_read is True
+    assert messages[0].is_read is False
 
 
 @pytest.mark.asyncio
@@ -512,16 +520,22 @@ async def test_direct_message_to_regular_member_is_unread(team_backend, db):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_broadcast_auto_advances_human_agent_read_watermark(built_team, db):
+async def test_broadcast_to_human_agent_stays_unread(built_team, db):
+    """Broadcasts to a human-agent must remain unread on write.
+
+    Same rationale as the direct-message test — the polling mailbox path
+    is what delivers broadcasts into the avatar's DeepAgent. See
+    F_20_human-agent-mailbox-unread-flip.
+    """
     mm = built_team.message_manager
     msg_id = await mm.broadcast_message(content="global announcement")
     assert msg_id is not None
-    # human_agent's read_at must be set — unread-only fetch returns empty.
     unread = await mm.get_broadcast_messages(
         member_name=HUMAN_AGENT_MEMBER_NAME,
         unread_only=True,
     )
-    assert unread == []
+    assert len(unread) == 1
+    assert unread[0].message_id == msg_id
 
 
 # ---------------------------------------------------------------------------
@@ -692,28 +706,29 @@ async def test_build_team_registers_every_declared_human_member(multi_human_back
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_direct_message_auto_read_for_every_human_member(multi_human_backend, db):
-    """send_message to any of the declared human members must auto-mark-read."""
+async def test_direct_message_to_every_human_member_stays_unread(multi_human_backend, db):
+    """send_message to any declared human member must stay unread on write."""
     mm = multi_human_backend.message_manager
     for name in ("human_designer", "human_pm"):
         msg_id = await mm.send_message(content=f"hi {name}", to_member_name=name)
         assert msg_id is not None
         messages = await mm.get_messages(to_member_name=name)
-        assert any(m.is_read for m in messages if m.to_member_name == name)
+        assert not any(m.is_read for m in messages if m.to_member_name == name)
 
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_broadcast_auto_marks_read_for_every_human_member(
+async def test_broadcast_to_every_human_member_stays_unread(
     multi_human_backend,
 ):
-    """Broadcast advances every human member's read watermark."""
+    """Broadcast must remain unread for every human member on write."""
     mm = multi_human_backend.message_manager
     msg_id = await mm.broadcast_message(content="hello team")
     assert msg_id is not None
     for name in ("human_designer", "human_pm"):
         unread = await mm.get_broadcast_messages(member_name=name, unread_only=True)
-        assert unread == []
+        assert len(unread) == 1
+        assert unread[0].message_id == msg_id
 
 
 @pytest.mark.asyncio

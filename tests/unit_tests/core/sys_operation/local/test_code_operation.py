@@ -93,6 +93,24 @@ class TestSysOperationExecuteCode:
         assert result.data.stderr == ""
 
     @pytest.mark.asyncio
+    async def test_execute_python_code_with_cwd(self, sys_op: SysOperation, tmp_path):
+        """Test code execution uses the explicit working directory."""
+        cwd = tmp_path / "code-cwd"
+        cwd.mkdir()
+        code = "import os; print(os.getcwd())"
+
+        result: ExecuteCodeResult = await sys_op.code().execute_code(
+            code=code,
+            language="python",
+            cwd=str(cwd),
+        )
+
+        assert result.code == StatusCode.SUCCESS.code
+        assert result.data is not None
+        assert result.data.exit_code == 0
+        assert result.data.stdout.strip() == str(cwd.resolve())
+
+    @pytest.mark.asyncio
     async def test_execute_javascript_code_success(self, sys_op: SysOperation):
         """Test successful execution of valid JavaScript code (requires Node.js installed)"""
         node_found = self.check_node_executable(local_nodejs_path="")

@@ -25,11 +25,12 @@ class CodeOperation(BaseCodeOperation, BaseSandboxMixin):
             language: Literal['python', 'javascript'] = "python",
             timeout: int = 300,
             environment: Optional[Dict[str, str]] = None,
+            cwd: Optional[str] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> ExecuteCodeResult:
         raw = await self.invoke(
             "execute_code", code=code, language=language,
-            timeout=timeout, environment=environment, options=options
+            timeout=timeout, environment=environment, cwd=cwd, options=options
         )
         return raw if isinstance(raw, ExecuteCodeResult) else ExecuteCodeResult(**raw)
 
@@ -40,10 +41,11 @@ class CodeOperation(BaseCodeOperation, BaseSandboxMixin):
             language: Literal['python', 'javascript'] = "python",
             timeout: int = 300,
             environment: Optional[Dict[str, str]] = None,
+            cwd: Optional[str] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[ExecuteCodeStreamResult]:
         async for item in self.invoke_stream(
             "execute_code_stream", code=code, language=language,
-            timeout=timeout, environment=environment, options=options
+            timeout=timeout, environment=environment, cwd=cwd, options=options
         ):
             yield ExecuteCodeStreamResult(**item) if isinstance(item, dict) else item

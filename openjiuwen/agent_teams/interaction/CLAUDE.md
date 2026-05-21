@@ -41,6 +41,6 @@
 1. `human_agent` 是保留成员名（`constants.RESERVED_MEMBER_NAMES`），用作动态 spawn 的默认人类成员名；自定 HUMAN_AGENT 成员名可避开此保留名。普通 teammate 的 predefined 成员仍然不允许撞保留名（`_validate_reserved_names`）。
 2. human-agent 走标准 UNSTARTED → spawn 流程（与 teammate 一致），但工具集仅保留 `view_task` + `member_complete_task`（`HUMAN_AGENT_TOOLS`）；rail 装配会剥离 `FirstIterationGate` / `TeamToolApprovalRail`。
 3. 一旦 `task.assignee` 指向某个 human-agent 且状态 CLAIMED，`UpdateTaskTool` 拒绝 reassign 和 cancel；批量 cancel 链路也跳过。
-4. 发送给 human-agent 的点对点消息 `is_read=True`；广播后 human-agent 的 `read_at` 立即跟进。
+4. 发送给 human-agent 的点对点消息与广播 **保持 `is_read=False`**——human-agent 与 teammate 共用 `MessageHandler._process_unread_messages` poll 路径，由该路径在 deliver 完成后调 `mark_message_read`。在写入侧自动标已读会绕过 poll 路径，让 avatar 的 DeepAgent 永远收不到消息。见 `docs/features/F_20_human-agent-mailbox-unread-flip.md`。
 5. TeamPolicyRail 注入 `team_hitt` section（priority=12），按 role 给 leader/teammate/human_agent 下达角色特定的行为约束。section 注入条件来自 `backend.hitt_enabled()` —— 反映运行时 effective flag，不依赖 roster 是否已 spawn。
 6. 团队事件（task 指派 / message / broadcast）流向 human-agent harness 时**直接**走 coordination 的 `deliver_input`（与 teammate 路径同），但渲染文本走 `hitt.*` i18n 模板：`hitt.task_assigned_to_self_human`（前缀 `[任务指派给控制者]`）/ `hitt.msg_received_for_human`（前缀 `[转发给控制者的{msg_type}]`），文案里指代 avatar 背后真人时用「控制者 / controller」，区别 leader 侧的「用户 / user」。avatar 见到这些前缀时不应自主调 send_message / member_complete_task / claim_task —— 行为约束由 `prompts/sections.py::_hitt_section_human_agent_cn/en` 同步保证。SDK 的 `on_inbound` 回调通道（`MessageHandler._notify_human_agent_inbound`）保留作为可选的 out-of-band 通知，不在 task 指派路径上复制。

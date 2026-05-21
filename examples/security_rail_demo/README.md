@@ -31,6 +31,7 @@ Then restart jiuwenclaw. Enable one extension at a time in the config to test ea
 |--------|------|------------|----------|
 | `ApiKeyGuardReject` | REJECT | `ApikeyguardrejectRail` | Blocks execution completely |
 | `ApiKeyGuardInterrupt` | INTERRUPT | `ApikeyguardinterruptRail` | Requires human approval |
+| `ModelCallGuard` | REJECT | `ModelcallguardRail` | Blocks secrets in LLM input/output |
 
 ## Testing Each Mode
 
@@ -225,6 +226,7 @@ PYTHONPATH=. uv run pytest \
 |-------------|-------------|
 | `ApiKeyGuardReject/rail.py` | REJECT mode - blocks execution |
 | `ApiKeyGuardInterrupt/rail.py` | INTERRUPT mode - HITL approval |
+| `ModelCallGuard/rail.py` | REJECT mode - blocks secrets in LLM input/output |
 | `example_config.json` | Extension config for Reject + Interrupt |
 
 ## Related Documentation

@@ -86,6 +86,41 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
         self.assertTrue(ctx.extra.get("_skip_tool"))
         self.assertIn("not available in plan mode", ctx.inputs.tool_result["error"])
 
+    async def test_before_tool_call_rejects_git_pull_in_plan_mode(self) -> None:
+        rail, ctx, _ = _make_ctx(
+            "bash",
+            mode="plan",
+            tool_args={"command": "git pull origin main"},
+        )
+        await rail.before_tool_call(ctx)
+        self.assertTrue(ctx.extra.get("_skip_tool"))
+        self.assertIn("Git write operations are blocked in plan mode", ctx.inputs.tool_result["error"])
+
+
+    async def test_before_tool_call_rejects_git_add_in_plan_mode(self) -> None:
+        rail, ctx, _ = _make_ctx(
+            "bash",
+            mode="plan",
+            tool_args={"command": "git add ."},
+        )
+
+        await rail.before_tool_call(ctx)
+
+        self.assertTrue(ctx.extra.get("_skip_tool"))
+        self.assertIn("Git write operations are blocked in plan mode", ctx.inputs.tool_result["error"])
+
+    async def test_before_tool_call_allows_git_status_in_plan_mode(self) -> None:
+        rail, ctx, _ = _make_ctx(
+            "bash",
+            mode="plan",
+            tool_args={"command": "git status"},
+        )
+
+        await rail.before_tool_call(ctx)
+
+        self.assertIsNone(ctx.extra.get("_skip_tool"))
+        self.assertIsNone(ctx.inputs.tool_result)
+
     async def test_before_tool_call_write_or_edit_only_plan_file(self) -> None:
         rail, ctx_bad, _ = _make_ctx(
             "write_file",

@@ -167,7 +167,6 @@ class TeamBackend:
             member_name,
             self.db,
             messager,
-            human_agent_names=self._human_agent_names,
         )
 
         # Filesystem paths to remove when the team is cleaned.

@@ -60,8 +60,8 @@ class MessageDao:
         """
         message_model = _get_message_model()
         for attempt in range(_DB_RETRY_ATTEMPTS):
-            async with self._session_local() as session:
-                try:
+            try:
+                async with self._session_local() as session:
                     message = message_model(
                         message_id=message_id,
                         team_name=team_name,
@@ -74,30 +74,31 @@ class MessageDao:
                     )
                     session.add(message)
                     await session.commit()
-                    team_logger.info("Message %s created", message_id)
-                    return True
-                except IntegrityError as e:
-                    await session.rollback()
-                    team_logger.error("Failed to create %s, reason is %s", message_id, e)
+                team_logger.info("Message %s created", message_id)
+                return True
+            except IntegrityError as e:
+                team_logger.error("Failed to create %s, reason is %s", message_id, e)
+                return False
+            except OperationalError as e:
+                # Connection has been released by ``async with`` __aexit__ above;
+                # the back-off sleep below must stay outside that block, otherwise
+                # the pool sees a leaked checkout and concurrent writers eventually
+                # hit ``QueuePool ... timed out``.
+                if attempt >= _DB_RETRY_ATTEMPTS - 1:
+                    team_logger.error(
+                        "Failed to create message %s after %d attempts: %s",
+                        message_id,
+                        _DB_RETRY_ATTEMPTS,
+                        e,
+                    )
                     return False
-                except OperationalError as e:
-                    await session.rollback()
-                    if attempt < _DB_RETRY_ATTEMPTS - 1:
-                        delay = _DB_RETRY_BASE_DELAY * (2**attempt)
-                        team_logger.warning(
-                            "Database locked on create_message (attempt %d), retrying in %ss",
-                            attempt + 1,
-                            delay,
-                        )
-                        await asyncio.sleep(delay)
-                    else:
-                        team_logger.error(
-                            "Failed to create message %s after %d attempts: %s",
-                            message_id,
-                            _DB_RETRY_ATTEMPTS,
-                            e,
-                        )
-                        return False
+                delay = _DB_RETRY_BASE_DELAY * (2**attempt)
+                team_logger.warning(
+                    "Database locked on create_message (attempt %d), retrying in %ss",
+                    attempt + 1,
+                    delay,
+                )
+                await asyncio.sleep(delay)
         return False
 
     async def get_messages(
