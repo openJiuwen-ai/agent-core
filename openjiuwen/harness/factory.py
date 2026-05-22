@@ -155,6 +155,7 @@ def create_deep_agent(
     prompt_mode: Optional[str] = None,
     vision_model_config: Optional[VisionModelConfig] = None,
     audio_model_config: Optional[AudioModelConfig] = None,
+    enable_read_image_multimodal: bool = True,
     enable_task_planning: bool = False,
     restrict_to_work_dir: bool = True,
     default_mode: AgentMode = AgentMode.NORMAL,
@@ -196,6 +197,9 @@ def create_deep_agent(
         audio_model_config: Shared audio-model
             configuration injected into all audio
             tools registered by DeepAgent rails.
+        enable_read_image_multimodal: When True, read_file attaches image bytes
+            as native multimodal input. When False, read_file returns image
+            metadata only and suggests using vision tools if available.
         enable_task_planning: Enable task_planning_rail.
         restrict_to_work_dir: If True, restrict file access to workspace directory.
             If False, allow access to any path including system root.
@@ -273,6 +277,7 @@ def create_deep_agent(
         prompt_mode=prompt_mode,
         vision_model_config=vision_model_config,
         audio_model_config=audio_model_config,
+        enable_read_image_multimodal=enable_read_image_multimodal,
         enable_async_subagent=enable_async_subagent,
         add_general_purpose_agent=add_general_purpose_agent,
         default_mode=default_mode,
