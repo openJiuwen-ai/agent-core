@@ -750,3 +750,86 @@ async def test_team_cleaned_closes_even_when_cancel_requested() -> None:
     await sc._run_one_round("hi")
 
     assert sc.stream_queue.get_nowait() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_emit_completion_and_close_marker_precedes_sentinel() -> None:
+    """The completion marker lands on the queue strictly before the None sentinel."""
+    harness = _make_harness_with_abort([])
+    sc = _make_controller(harness)
+    sc.stream_queue = asyncio.Queue()
+
+    sc.emit_completion_and_close(member_count=2, task_count=3)
+
+    marker = sc.stream_queue.get_nowait()
+    assert isinstance(marker, TeamOutputSchema)
+    assert marker.payload["event_type"] == "team.completed"
+    assert marker.payload["member_count"] == 2
+    assert marker.payload["task_count"] == 3
+    assert marker.source_member == "m"
+    assert marker.role == TeamRole.LEADER
+    assert sc.stream_queue.get_nowait() is None
+
+
+def test_emit_completion_and_close_noop_without_queue() -> None:
+    """No queue means the round already tore down — emit is a silent no-op."""
+    harness = _make_harness_with_abort([])
+    sc = _make_controller(harness)
+    sc.stream_queue = None
+
+    sc.emit_completion_and_close(member_count=1, task_count=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_round_end_triggers_completion_poll_callback() -> None:
+    """A clean round end with no pending work fires the completion-poll callback."""
+    calls: list[None] = []
+
+    async def _on_poll() -> None:
+        calls.append(None)
+
+    harness = _make_harness_with_abort([])
+    state = TeamAgentState()
+    blueprint = SimpleNamespace(member_name="leader", role=TeamRole.LEADER)
+
+    async def _noop(_: Any) -> None:
+        return None
+
+    sc = StreamController(
+        blueprint_getter=lambda: blueprint,
+        state=state,
+        resources=PrivateAgentResources(harness=harness),
+        status_updater=_noop,
+        execution_updater=_noop,
+        request_completion_poll_callback=_on_poll,
+    )
+    sc.stream_queue = asyncio.Queue()
+
+    async def _ok_round(_message: Any) -> None:
+        return None
+
+    sc._execute_round = _ok_round  # type: ignore[assignment]
+
+    await sc._run_one_round("hi")
+
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_round_end_without_callback_is_silent() -> None:
+    """A teammate (no completion-poll callback) ends a round without enqueuing markers."""
+    harness = _make_harness_with_abort([])
+    sc = _make_controller(harness)
+    sc.stream_queue = asyncio.Queue()
+
+    async def _ok_round(_message: Any) -> None:
+        return None
+
+    sc._execute_round = _ok_round  # type: ignore[assignment]
+
+    await sc._run_one_round("hi")
+
+    assert sc.stream_queue.empty()

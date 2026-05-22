@@ -77,6 +77,7 @@ class TeamLifecycleController(Protocol):
     """TeamAgent-level lifecycle effects that span multiple managers."""
 
     async def shutdown_self(self) -> None: ...
+    async def conclude_completed_round(self, member_count: int, task_count: int) -> None: ...
 
 
 @runtime_checkable
@@ -230,7 +231,7 @@ class BaseCoordinationHandler:
 | `MessageHandler` | `TeamEvent.MESSAGE` / `TeamEvent.BROADCAST` / `InnerEventType.POLL_MAILBOX` / `TeamEvent.MEMBER_SHUTDOWN`（fan-out） | 无 | `on_message_or_broadcast`：leader 在 MESSAGE 上 `_ack_user_bound_message` + `_notify_human_agent_inbound`，所有 role 接着 `_poll.resume_polls` + `_process_unread_messages`；`on_poll_mailbox` 周期 sweep；`on_member_shutdown_drain` 仅 teammate 给自己 drain（`use_steer=True`） |
 | `TaskBoardHandler` | `TeamEvent.TASK_CLAIMED` + 5 个 `TASK_*`：`CREATED` / `UPDATED` / `COMPLETED` / `CANCELLED` / `UNBLOCKED` | 无 | `on_task_claimed`：targeted 自身 → `deliver_input`；非自身 → 走 `on_task_board_event` 兜底（防 idle leader 错过 board 变更）。`on_task_board_event` 在 `has_in_flight_round()` 否时 `_nudge_idle_agent`，向 idle agent 喂任务清单；leader 全部任务终结时按 lifecycle 喂 all-done prompt |
 | `StaleTaskHandler` | `InnerEventType.POLL_TASK` | `_last_stale_nudge`（共享）+ `_last_pending_nudge: dict[str, float]`（私有，仅 leader 用） | `on_poll_task` → `_check_stale_claimed_tasks` + `_check_stale_pending_tasks`。stale claim：`task.updated_at` 超过 `_STALE_CLAIM_SECONDS` (10min) 触发；自己持有 → `deliver_input`，leader 观察他人 → `message_manager.send_message`。stale pending（仅 leader）：超过 `_STALE_PENDING_SECONDS` (10min) 自喂 prompt、由 LLM 决定如何分派 |
-| `TeamCompletionHandler` | `InnerEventType.POLL_TASK` / `TeamEvent.TASK_LIST_DRAINED` / `TeamEvent.TEAM_COMPLETED` | `_team_completed_emitted: bool` + `_completion_callbacks: list`（私有） | `on_poll_task`：leader 且 idle 时评估 `TeamBackend.is_team_completed()`（成员全 settled + 任务全终态 + 无未读消息），按上升沿发 `TEAM_COMPLETED`、下降沿重新武装。`on_task_list_drained`：记日志 + fire `_completion_callbacks`（`TeamAgent` 在 deepagent 建好后经 `register_completion_callback` 把 `TeamSkillRail.notify_team_completed` 注册进来，注册表非空即 gate）。`on_team_completed`：消费记日志。`POLL_TASK` 与 `StaleTaskHandler` 共享 event_key，注册靠后 → fan-out 在其之后 |
+| `TeamCompletionHandler` | `InnerEventType.POLL_TASK` / `TeamEvent.TASK_LIST_DRAINED` / `TeamEvent.TEAM_COMPLETED` | `_team_completed_emitted: bool` + `_completion_callbacks: list`（私有） | `on_poll_task`：leader 且 idle 时评估 `TeamBackend.is_team_completed()`（任务全终态 + 成员全 settled + 无未读直消息，广播不计），按上升沿发 `TEAM_COMPLETED`、下降沿重新武装；**persistent 团队额外调 `self._lifecycle.conclude_completed_round(...)` 结束 leader 流触发 auto-pause（temporary 不调，靠 clean_team 收尾）**。`rearm()`：清上升沿幂等标志，`kernel.start`（冷启动 / resume / recover）每次调一次，使每个 run cycle 独立判定完成。`on_task_list_drained`：记日志 + fire `_completion_callbacks`（`TeamAgent` 在 deepagent 建好后经 `register_completion_callback` 把 `TeamSkillRail.notify_team_completed` 注册进来，注册表非空即 gate）。`on_team_completed`：消费记日志。`POLL_TASK` 与 `StaleTaskHandler` 共享 event_key，注册靠后 → fan-out 在其之后 |
 
 ### CoordinationKernel
 

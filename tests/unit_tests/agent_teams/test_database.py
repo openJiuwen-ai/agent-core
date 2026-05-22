@@ -20,6 +20,7 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
+from openjiuwen.agent_teams.tools.memory_database import InMemoryTeamDatabase
 from openjiuwen.agent_teams.tools.models import (
     _get_message_model,
     _get_message_read_status_model,
@@ -3106,3 +3107,49 @@ async def test_mutate_dependency_graph_rejects_terminal_target(db):
     )
     assert result.ok is False
     assert "claimed" in result.reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_in_memory_has_unread_messages_honors_include_broadcast() -> None:
+    """In-memory has_unread_messages mirrors the SQL DAO and gates broadcasts."""
+    db = InMemoryTeamDatabase()
+    await db.initialize()
+    await db.create_member(
+        member_name="leader",
+        team_name="t1",
+        display_name="leader",
+        agent_card=AgentCard().model_dump_json(),
+        status="ready",
+    )
+    await db.create_member(
+        member_name="dev",
+        team_name="t1",
+        display_name="dev",
+        agent_card=AgentCard().model_dump_json(),
+        status="ready",
+    )
+
+    # No messages → nothing unread.
+    assert await db.has_unread_messages("t1") is False
+
+    # Unread broadcast: counted by default, excluded on request.
+    await db.create_message(
+        message_id="b1",
+        team_name="t1",
+        from_member_name="leader",
+        content="hi",
+        broadcast=True,
+    )
+    assert await db.has_unread_messages("t1") is True
+    assert await db.has_unread_messages("t1", include_broadcast=False) is False
+
+    # Unread direct message: counted under both settings.
+    await db.create_message(
+        message_id="d1",
+        team_name="t1",
+        from_member_name="leader",
+        content="ping",
+        to_member_name="dev",
+    )
+    assert await db.has_unread_messages("t1", include_broadcast=False) is True

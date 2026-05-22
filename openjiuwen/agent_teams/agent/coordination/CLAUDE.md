@@ -22,7 +22,7 @@
 | `self._blueprint` | `TeamAgentBlueprint` | 静态身份（role / member_name / lifecycle / spec）|
 | `self._infra` | `TeamInfra` | per-process 容器（task_manager / message_manager / team_backend / messager / workspace_manager）|
 | `self._round` | `AgentRoundController` | 跟 TeamHarness 打交道（deliver_input / cancel_agent / resume_interrupt / has_in_flight_round / has_pending_interrupt / is_agent_running）|
-| `self._lifecycle` | `TeamLifecycleController` | TeamAgent 级副作用（shutdown_self）|
+| `self._lifecycle` | `TeamLifecycleController` | TeamAgent 级副作用（`shutdown_self` / `conclude_completed_round`）|
 | `self._poll` | `PollController` | EventBus 自身的 poll 控制（pause_polls / resume_polls）|
 
 handler **不持有原始 host 引用**。新增依赖一律通过 narrow protocol 字段或显式构造参数注入，避免重新滑回上帝接口。
@@ -34,7 +34,7 @@ handler **不持有原始 host 引用**。新增依赖一律通过 narrow protoc
 | `MessageHandler` | `MESSAGE` / `BROADCAST` / `POLL_MAILBOX` + `MEMBER_SHUTDOWN`（fan-out） | 无 | `on_message_or_broadcast`（leader 额外 ack user-bound + 通知 human-agent inbound）/ `on_poll_mailbox` / `on_member_shutdown_drain`（仅 teammate 给自己 drain）。`_format_message` 是 role-aware：是 human-agent 时走 `hitt.msg_received_for_human` 前缀 `[转发给控制者的…]`，否则走 `dispatcher.msg_received` |
 | `TaskBoardHandler` | `TASK_CLAIMED` / 5 个 `TASK_*` | 无 | `on_task_claimed`（targeted assignment）/ `on_task_board_event` → `_nudge_idle_agent`。self 分支 role-aware：是 human-agent 时走 `hitt.task_assigned_to_self_human` 前缀 `[任务指派给控制者]`（best-effort 查 task title 内联），否则走 `dispatcher.task_assigned_to_self` |
 | `StaleTaskHandler` | `POLL_TASK` | 共享 `stale_claim_throttle` + 独占 `_last_pending_nudge` | `on_poll_task` → `_check_stale_claimed_tasks` + `_check_stale_pending_tasks` |
-| `TeamCompletionHandler` | `POLL_TASK` / `TASK_LIST_DRAINED` / `TEAM_COMPLETED` | 独占 `_team_completed_emitted` + `_completion_callbacks` | `on_poll_task`（leader idle 时评估 `TeamBackend.is_team_completed()` 并按上升沿发 `TEAM_COMPLETED`）/ `on_task_list_drained`（记日志 + fire `_completion_callbacks`，`TeamAgent` 在 deepagent 建好后把 `TeamSkillRail.notify_team_completed` 经 `register_completion_callback` 注册进来）/ `on_team_completed`（消费记日志）|
+| `TeamCompletionHandler` | `POLL_TASK` / `TASK_LIST_DRAINED` / `TEAM_COMPLETED` | 独占 `_team_completed_emitted` + `_completion_callbacks` | `on_poll_task`（leader idle 时评估 `TeamBackend.is_team_completed()` 并按上升沿发 `TEAM_COMPLETED`；**persistent 团队额外调 `_lifecycle.conclude_completed_round` 结束 leader 流触发 auto-pause，temporary 不调**）/ `rearm`（清上升沿标志，`kernel.start` 每次调，使每个 run cycle 独立判定）/ `on_task_list_drained`（记日志 + fire `_completion_callbacks`，`TeamAgent` 在 deepagent 建好后把 `TeamSkillRail.notify_team_completed` 经 `register_completion_callback` 注册进来）/ `on_team_completed`（消费记日志）|
 
 `MemberHandler` 与 `StaleTaskHandler` 在 `EventDispatcher.__init__` 拿到同一个 `dict[str, float]` 引用（`stale_claim_throttle`），保证"成员状态变化 nudge"和"poll 周期 nudge"两条路径不会在同一 stale 窗口内对同一 task 重复 nudge。`_last_pending_nudge` 仅 leader 自己用，留在 `StaleTaskHandler` 私有字段。
 

@@ -983,6 +983,45 @@ class InMemoryTeamDatabase:
         result.sort(key=lambda m: m.timestamp)
         return result
 
+    async def has_unread_messages(self, team_name: str, *, include_broadcast: bool = True) -> bool:
+        """Return True if any team message is still unread by its intended reader.
+
+        In-memory mirror of ``MessageDao.has_unread_messages``. Direct
+        messages are unread when ``is_read`` is False; broadcasts use the
+        per-member read watermark in ``_read_status`` (a broadcast is unread
+        by member M when M is not its sender and M's watermark does not yet
+        cover the broadcast timestamp).
+
+        Args:
+            team_name: Team identifier.
+            include_broadcast: When False, only direct (point-to-point)
+                messages count toward the check; the broadcast watermark
+                comparison is skipped. Defaults to True.
+
+        Returns:
+            True if at least one matching message has not been read.
+        """
+        for msg in self._messages:
+            if msg.team_name != team_name or msg.broadcast:
+                continue
+            if not msg.is_read:
+                return True
+        if not include_broadcast:
+            return False
+        broadcasts = [m for m in self._messages if m.team_name == team_name and m.broadcast]
+        if not broadcasts:
+            return False
+        member_names = [name for name, member in self._members.items() if member.team_name == team_name]
+        for member_name in member_names:
+            read_status = self._read_status.get((member_name, team_name))
+            watermark = read_status.read_at if read_status else None
+            for msg in broadcasts:
+                if msg.from_member_name == member_name:
+                    continue
+                if watermark is None or msg.timestamp > watermark:
+                    return True
+        return False
+
     async def mark_message_read(self, message_id: str, member_name: str) -> bool:
         async with self._lock:
             msg = None

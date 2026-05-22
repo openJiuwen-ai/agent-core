@@ -27,7 +27,7 @@
 | `spawn_manager.py` | `SpawnManager` | teammate 进程生命周期：拉起 / 心跳 / 重启 / 取消 |
 | `recovery_manager.py` | `RecoveryManager` | 团队级容错：成员崩溃恢复、状态对齐 |
 | `session_manager.py` | `SessionManager` | session checkpoint 读写、生命周期 |
-| `stream_controller.py` | `StreamController` | DeepAgent 的 stream 队列、round 状态、pending input、interrupt 收纳；自动给 chunk 升级为 `TeamOutputSchema` 并通过 `add_chunk_observer` 对外 fan-out |
+| `stream_controller.py` | `StreamController` | DeepAgent 的 stream 队列、round 状态、pending input、interrupt 收纳；自动给 chunk 升级为 `TeamOutputSchema` 并通过 `add_chunk_observer` 对外 fan-out；`emit_completion_and_close` 发完成标记 chunk + 关流；round-end 经注入的 `request_completion_poll_callback` 触发 leader 完成评估 |
 
 ## coordination/ — 唤醒循环
 

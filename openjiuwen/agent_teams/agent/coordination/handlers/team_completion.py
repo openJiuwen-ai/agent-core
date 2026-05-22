@@ -83,6 +83,16 @@ class TeamCompletionHandler(BaseCoordinationHandler):
         """
         self._completion_callbacks.append(callback)
 
+    def rearm(self) -> None:
+        """Reset the rising-edge guard so the next completion re-emits.
+
+        Called by the kernel on every ``start`` (cold start / resume /
+        recover) so each run cycle evaluates team completion independently:
+        a paused team that resumes can conclude again without first having
+        to leave and re-enter the completed state.
+        """
+        self._team_completed_emitted = False
+
     async def on_poll_task(self, event: InnerEventMessage) -> None:
         """Leader-idle tick: evaluate the three completion conditions.
 
@@ -109,6 +119,15 @@ class TeamCompletionHandler(BaseCoordinationHandler):
 
         await self._publish_team_completed(team_backend.team_name, snapshot)
         self._team_completed_emitted = True
+
+        # Persistent teams auto-pause on completion: close the leader stream
+        # so the Runner finally drives finalize -> pause. Temporary teams are
+        # torn down by their leader via clean_team, not here.
+        if self._blueprint.lifecycle == "persistent":
+            await self._lifecycle.conclude_completed_round(
+                snapshot.member_count,
+                snapshot.task_count,
+            )
 
     async def _publish_team_completed(self, team_name: str, snapshot: TeamCompletionSnapshot) -> None:
         """Publish TEAM_COMPLETED on the team topic; log on failure."""

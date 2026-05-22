@@ -49,7 +49,7 @@ from openjiuwen.core.single_agent.schema.agent_card import (
 )
 
 
-def _make_leader() -> TeamAgent:
+def _make_leader(lifecycle: str = "temporary") -> TeamAgent:
     team_spec = TeamSpec(
         team_name="test-team",
         display_name="test-team",
@@ -59,6 +59,7 @@ def _make_leader() -> TeamAgent:
     spec = TeamAgentSpec(
         agents={"leader": DeepAgentSpec()},
         team_name="test-team",
+        lifecycle=lifecycle,
         leader=LeaderSpec(
             member_name="leader-1",
             display_name="Leader",
@@ -1402,3 +1403,74 @@ async def test_task_completed_with_incomplete_tasks_nudges_leader_board():
     assert "task-2" in content
     # Should NOT contain the "all done" summary prompt
     assert "完成" not in content or "task" in content.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_persistent_completion_closes_leader_stream():
+    """A completed persistent team emits a completion marker then closes the stream."""
+    agent = _make_leader(lifecycle="persistent")
+    snapshot = TeamCompletionSnapshot(member_count=2, task_count=3)
+    _wire_completion_handler(agent, snapshot)
+    agent._stream_controller.stream_queue = asyncio.Queue()
+
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK, payload={})
+    await agent._coordination.dispatcher.team_completion.on_poll_task(event)
+
+    marker = agent._stream_controller.stream_queue.get_nowait()
+    assert marker.payload["event_type"] == "team.completed"
+    assert marker.payload["member_count"] == 2
+    assert marker.payload["task_count"] == 3
+    assert agent._stream_controller.stream_queue.get_nowait() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_temporary_completion_does_not_close_stream():
+    """A temporary team still emits TEAM_COMPLETED but never closes its own stream."""
+    agent = _make_leader()
+    snapshot = TeamCompletionSnapshot(member_count=1, task_count=1)
+    messager = _wire_completion_handler(agent, snapshot)
+    agent._stream_controller.stream_queue = asyncio.Queue()
+
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK, payload={})
+    await agent._coordination.dispatcher.team_completion.on_poll_task(event)
+
+    messager.publish.assert_awaited_once()
+    assert agent._stream_controller.stream_queue.empty()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_persistent_completion_concludes_once_per_rising_edge():
+    """The completion marker is enqueued once until the team leaves completion."""
+    agent = _make_leader(lifecycle="persistent")
+    snapshot = TeamCompletionSnapshot(member_count=1, task_count=1)
+    _wire_completion_handler(agent, snapshot)
+    agent._stream_controller.stream_queue = asyncio.Queue()
+
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK, payload={})
+    await agent._coordination.dispatcher.team_completion.on_poll_task(event)
+    await agent._coordination.dispatcher.team_completion.on_poll_task(event)
+
+    # marker + sentinel from the first tick only.
+    assert agent._stream_controller.stream_queue.qsize() == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_rearm_allows_completion_to_conclude_again():
+    """rearm() resets the guard so a resumed completed team concludes again."""
+    agent = _make_leader(lifecycle="persistent")
+    snapshot = TeamCompletionSnapshot(member_count=1, task_count=1)
+    _wire_completion_handler(agent, snapshot)
+    handler = agent._coordination.dispatcher.team_completion
+    agent._stream_controller.stream_queue = asyncio.Queue()
+
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK, payload={})
+    await handler.on_poll_task(event)
+    handler.rearm()
+    await handler.on_poll_task(event)
+
+    # Two rising edges → two markers + two sentinels.
+    assert agent._stream_controller.stream_queue.qsize() == 4

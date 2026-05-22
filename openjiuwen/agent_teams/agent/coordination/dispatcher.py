@@ -94,14 +94,19 @@ class AgentRoundController(Protocol):
 class TeamLifecycleController(Protocol):
     """TeamAgent-level lifecycle effects that span multiple managers.
 
-    Currently only ``shutdown_self`` — invoked when the team has been
-    dissolved and a non-leader member must abandon its loop. Future
-    cross-manager orchestration (e.g. ``recover_team``) belongs here
-    rather than on the round controller.
+    ``shutdown_self`` is invoked when the team has been dissolved and a
+    non-leader member must abandon its loop. ``conclude_completed_round``
+    ends a completed persistent team's leader stream so the Runner finally
+    can pause it. Both coordinate across stream / session / member state,
+    so they belong here rather than on the round controller.
     """
 
     async def shutdown_self(self) -> None:
         """Force-shutdown this agent in response to team dissolution."""
+        ...
+
+    async def conclude_completed_round(self, member_count: int, task_count: int) -> None:
+        """Emit a team-completed marker chunk, then close the leader stream."""
         ...
 
 

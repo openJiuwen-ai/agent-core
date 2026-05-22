@@ -87,6 +87,7 @@ class TeamAgent(BaseAgent):
             status_updater=self._update_status,
             execution_updater=self._update_execution,
             wake_mailbox_callback=self._wake_mailbox_if_interrupt_cleared,
+            request_completion_poll_callback=self._request_completion_poll,
         )
         self._coordination = CoordinationKernel(self)
 
@@ -624,6 +625,24 @@ class TeamAgent(BaseAgent):
                 )
         self._close_stream()
 
+    async def conclude_completed_round(self, member_count: int, task_count: int) -> None:
+        """Emit a team-completed marker chunk, then close the leader stream.
+
+        Drives the auto-pause path for a completed persistent team: closing
+        the stream makes the Runner's stream loop break on the None sentinel
+        and call ``manager.finalize``, which pauses the team. The marker
+        chunk lets the SDK consumer distinguish a completion-driven end from
+        an error/cancel end. Best-effort and idempotent -- the completion
+        handler's rising-edge guard ensures one call per completion.
+        """
+        team_logger.info(
+            "[{}] concluding completed round: {} member(s), {} task(s)",
+            self._member_name() or "?",
+            member_count,
+            task_count,
+        )
+        self._stream_controller.emit_completion_and_close(member_count, task_count)
+
     async def _start_agent(self, initial_message: Any) -> None:
         await self._stream_controller.start_round(initial_message)
 
@@ -637,6 +656,26 @@ class TeamAgent(BaseAgent):
 
     async def _wake_mailbox_if_interrupt_cleared(self) -> None:
         await self._coordination.wake_mailbox_if_interrupt_cleared()
+
+    async def _request_completion_poll(self) -> None:
+        """Enqueue a POLL_TASK so the leader re-evaluates team completion now.
+
+        Leader + persistent only: temporary teams conclude via clean_team,
+        and teammates never own the team-level conclusion. Lets a round-end
+        settle trigger the completion check immediately instead of waiting
+        for the next periodic POLL_TASK tick. Best-effort -- an absent or
+        stopped event bus silently drops the enqueue.
+        """
+        if self.role != TeamRole.LEADER or self.lifecycle != "persistent":
+            return
+        from openjiuwen.agent_teams.agent.coordination.event_bus import (
+            InnerEventMessage,
+            InnerEventType,
+        )
+
+        await self._coordination.enqueue(
+            InnerEventMessage(event_type=InnerEventType.POLL_TASK),
+        )
 
     def _member_name(self) -> Optional[str]:
         return self._configurator.member_name

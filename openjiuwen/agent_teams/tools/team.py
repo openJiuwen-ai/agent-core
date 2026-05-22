@@ -750,12 +750,15 @@ class TeamBackend:
     async def is_team_completed(self) -> Optional[TeamCompletionSnapshot]:
         """Evaluate whether the whole team has reached a completed state.
 
-        Returns a snapshot only when all three conditions hold at once:
-            1. Every member -- including the leader -- is in a settled
-               status (``MEMBER_SETTLED_STATUSES``).
-            2. At least one task exists and every task is terminal
+        Returns a snapshot only when all three conditions hold at once,
+        checked in order task -> member -> message:
+            1. At least one task exists and every task is terminal
                (``TASK_TERMINAL_STATUSES``).
-            3. No direct or broadcast message is left unread by any member.
+            2. Every member -- including the leader -- is in a settled
+               status (``MEMBER_SETTLED_STATUSES``).
+            3. No direct (point-to-point) message is left unread by any
+               member. Broadcast messages are excluded -- a fan-out
+               announcement does not block team conclusion.
 
         Read-only; safe to call repeatedly. Queries the member DAO directly
         so the leader itself is part of the roster check (``list_members``
@@ -765,19 +768,19 @@ class TeamBackend:
             A ``TeamCompletionSnapshot`` when the team is complete,
             otherwise ``None``.
         """
-        members = await self.db.member.get_team_members(self.team_name)
-        if not members:
-            return None
-        if any(member.status not in MEMBER_SETTLED_STATUSES for member in members):
-            return None
-
         tasks = await self.task_manager.list_tasks()
         if not tasks:
             return None
         if any(task.status not in TASK_TERMINAL_STATUSES for task in tasks):
             return None
 
-        if await self.message_manager.has_unread_messages():
+        members = await self.db.member.get_team_members(self.team_name)
+        if not members:
+            return None
+        if any(member.status not in MEMBER_SETTLED_STATUSES for member in members):
+            return None
+
+        if await self.message_manager.has_unread_messages(include_broadcast=False):
             return None
 
         return TeamCompletionSnapshot(member_count=len(members), task_count=len(tasks))

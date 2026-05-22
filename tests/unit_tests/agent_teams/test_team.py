@@ -1072,6 +1072,21 @@ async def test_is_team_completed_unread_message_returns_none(agent_team, db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
+async def test_is_team_completed_ignores_unread_broadcast(agent_team, db):
+    """A pending broadcast does not block completion; only direct messages do."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.READY.value)
+    await _drain_one_task(agent_team)
+    await agent_team.message_manager.broadcast_message(content="announce")
+
+    snapshot = await agent_team.is_team_completed()
+
+    assert snapshot is not None
+    assert snapshot.member_count == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.level0
 async def test_clean_team_fires_callback_on_success(db, message_bus):
     """clean_team runs on_team_cleaned exactly once on the success path."""
