@@ -253,9 +253,18 @@ class SkillUseRail(DeepAgentRail):
         )
 
         if self.include_tools:
+            deep_config = getattr(agent, "deep_config", None)
+            enable_read_image_multimodal = bool(
+                getattr(deep_config, "enable_read_image_multimodal", True)
+            )
             tools.extend(
                 [
-                    ReadFileTool(self.sys_operation, language=lang, agent_id=agent_id),
+                    ReadFileTool(
+                        self.sys_operation,
+                        language=lang,
+                        agent_id=agent_id,
+                        enable_image_multimodal=enable_read_image_multimodal,
+                    ),
                     CodeTool(self.sys_operation, language=lang, agent_id=agent_id),
                     BashTool(self.sys_operation, language=lang, agent_id=agent_id),
                 ]

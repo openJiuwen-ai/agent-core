@@ -13,6 +13,7 @@ from openjiuwen.core.sys_operation import (
     SysOperationCard,
 )
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
+from openjiuwen.harness.tools.filesystem import ReadFileTool
 
 
 class _AbilityManager:
@@ -27,9 +28,14 @@ class _AbilityManager:
 
 
 class _Agent:
-    def __init__(self) -> None:
+    def __init__(self, *, enable_read_image_multimodal: bool = True) -> None:
         self.ability_manager = _AbilityManager()
         self.system_prompt_builder = type("_Builder", (), {"language": "en"})()
+        self.deep_config = type(
+            "_Config",
+            (),
+            {"enable_read_image_multimodal": enable_read_image_multimodal},
+        )()
 
 
 def test_sys_operation_rail_registers_base_tools(tmp_path):
@@ -97,6 +103,34 @@ def test_sys_operation_rail_with_code_tool(tmp_path):
             rail.init(agent)
 
             assert "code" in agent.ability_manager.cards
+        finally:
+            rail.uninit(agent)
+            Runner.resource_mgr.remove_sys_operation(sys_operation_id=card.id)
+            await Runner.stop()
+
+    asyncio.run(_run())
+
+
+def test_sys_operation_rail_applies_read_image_multimodal_config(tmp_path):
+    async def _run():
+        await Runner.start()
+        try:
+            card = SysOperationCard(
+                id="test_sys_operation_rail_read_image_multimodal_config",
+                mode=OperationMode.LOCAL,
+                work_config=LocalWorkConfig(work_dir=str(tmp_path)),
+            )
+            Runner.resource_mgr.add_sys_operation(card)
+            sys_operation = Runner.resource_mgr.get_sys_operation(card.id)
+
+            rail = SysOperationRail()
+            rail.set_sys_operation(sys_operation)
+            agent = _Agent(enable_read_image_multimodal=False)
+
+            rail.init(agent)
+
+            read_tool = next(tool for tool in rail.tools if isinstance(tool, ReadFileTool))
+            assert read_tool.enable_image_multimodal is False
         finally:
             rail.uninit(agent)
             Runner.resource_mgr.remove_sys_operation(sys_operation_id=card.id)

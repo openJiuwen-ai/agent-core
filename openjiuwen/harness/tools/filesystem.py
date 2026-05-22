@@ -278,9 +278,16 @@ class ReadFileTool(Tool):
     PDF_AT_MENTION_INLINE_THRESHOLD: int = 100
     _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
 
-    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
+    def __init__(
+        self,
+        operation: SysOperation,
+        language: str = "cn",
+        agent_id: Optional[str] = None,
+        enable_image_multimodal: bool = True,
+    ):
         super().__init__(build_tool_card("read_file", "ReadFileTool", language, agent_id=agent_id))
         self.operation = operation
+        self.enable_image_multimodal = enable_image_multimodal
 
     # ------------------------------------------------------------------
     # File-type predicates
@@ -646,9 +653,7 @@ class ReadFileTool(Tool):
                     resized = fallback
                     image_type = "jpeg"
 
-        encoded = base64.b64encode(resized).decode("ascii")
         mime_type = f"image/{image_type}"
-        data_url = f"data:{mime_type};base64,{encoded}"
         parts = [
             f"Image file read: {file_path}",
             f"format: {image_type}",
@@ -657,6 +662,21 @@ class ReadFileTool(Tool):
         ]
         if dimensions:
             parts.append(f"dimensions: {dimensions}")
+
+        if not self.enable_image_multimodal:
+            parts.append(
+                "Image bytes are not attached because read_file native image multimodal input is disabled."
+            )
+            parts.append(
+                "If a vision tool is configured, call image_ocr or visual_question_answering with this file path."
+            )
+            return {
+                "content": "\n".join(parts),
+                "multimodal": [],
+            }
+
+        encoded = base64.b64encode(resized).decode("ascii")
+        data_url = f"data:{mime_type};base64,{encoded}"
         parts.append("Image bytes are attached as multimodal input and omitted from this tool result.")
         return {
             "content": "\n".join(parts),

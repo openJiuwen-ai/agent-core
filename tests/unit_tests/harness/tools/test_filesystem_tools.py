@@ -94,6 +94,25 @@ async def test_read_file_image_returns_multimodal_payload(sys_op, temp_dir):
 
 
 @pytest.mark.asyncio
+async def test_read_file_image_can_disable_multimodal_payload(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op, enable_image_multimodal=False)
+    file_path = os.path.join(temp_dir, "one_pixel.png")
+    raw = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+    with open(file_path, "wb") as fh:
+        fh.write(raw)
+
+    read_res = await read_tool.invoke({"file_path": file_path})
+
+    assert read_res.success is True
+    assert "Image file read:" in read_res.data["content"]
+    assert "base64," not in read_res.data["content"]
+    assert read_res.data["multimodal"] == []
+    assert "native image multimodal input is disabled" in read_res.data["content"]
+
+
+@pytest.mark.asyncio
 async def test_write_file_tool_requires_read_before_overwrite(sys_op, temp_dir):
     write_tool = WriteFileTool(sys_op)
     file_path = os.path.join(temp_dir, "existing.txt")
