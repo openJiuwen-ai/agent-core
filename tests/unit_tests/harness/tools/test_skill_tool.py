@@ -110,7 +110,7 @@ async def test_skill_tool_invalid_skill(sys_op, temp_dir):
     assert skill_res.error is not None
 
 @pytest.mark.asyncio
-async def test_skill_tool_reference_file(sys_op, temp_dir):
+async def test_skill_tool_rejects_non_skill_md_path(sys_op, temp_dir):
     skills_root = Path(temp_dir) / "skills"
     skills_root.mkdir(parents=True, exist_ok=True)
     skill_list = []
@@ -124,8 +124,9 @@ async def test_skill_tool_reference_file(sys_op, temp_dir):
     skill_tool = SkillTool(sys_op, get_skill_list)
 
     skill_res = await skill_tool.invoke({"skill_name": "test_skill_1", "relative_file_path": "reference/temp_file.md"})
-    assert skill_res.success is True
-    assert _data_contains_str(skill_res.data, "test_skill_1 temp file content")
+    assert skill_res.success is False
+    assert skill_res.error is not None
+    assert "SKILL.md" in skill_res.error
 
 @pytest.mark.asyncio
 async def test_skill_tool_invalid_reference_file(sys_op, temp_dir):

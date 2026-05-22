@@ -22,6 +22,8 @@ _TREE_SKIP_DIR_NAMES: frozenset[str] = frozenset({
     "node_modules"
 })
 
+_ALLOWED_SKILL_RELATIVE_FILE = "SKILL.md"
+
 
 def _truthy_flag(value: Any) -> bool:
     if isinstance(value, bool):
@@ -138,6 +140,12 @@ def _build_skill_directory_ascii_tree(
     )
     text = "\n".join(out)
     return [text], truncated, None
+
+
+def _is_allowed_skill_relative_file(relative_file_path: str) -> bool:
+    """``skill_tool`` may only read the primary ``SKILL.md`` at the skill root."""
+    normalized = normalize_skill_relative_file_path(relative_file_path)
+    return normalized.replace("\\", "/").removeprefix("./") == _ALLOWED_SKILL_RELATIVE_FILE
 
 
 def _normalize_skill_lookup_key(skill_name: str) -> str:
@@ -296,6 +304,15 @@ class SkillTool(Tool):
         relative_file_path = normalize_skill_relative_file_path(
             str(inputs.get("relative_file_path") or "")
         )
+        if not _is_allowed_skill_relative_file(relative_file_path):
+            return ToolOutput(
+                success=False,
+                error=(
+                    f"skill_tool only supports reading {_ALLOWED_SKILL_RELATIVE_FILE}; "
+                    f"got relative_file_path={relative_file_path!r}. "
+                    "Use filesystem tools for other files under the skill directory."
+                ),
+            )
         include_tree = _opt_in_flag_default_true(inputs.get("include_directory_tree"))
         tree_max_depth = _clamp_int(
             inputs.get("tree_max_depth"),

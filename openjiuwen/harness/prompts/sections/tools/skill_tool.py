@@ -10,10 +10,13 @@ from openjiuwen.harness.prompts.sections.tools.base import (
 )
 
 DESCRIPTION: Dict[str, str] = {
-    "cn": "使用此工具查看特定技能的内容；可在注册表未收录时按 skills 根目录递归定位同名 skill。"
-         "默认返回目录树与已发现 skill 名列表；若不需要可显式传 include_directory_tree / include_discovered_skill_names 为 false。",
-    "en": "View skill file contents; can resolve skills by recursive directory search when not in the registry. "
-         "By default includes a directory tree and discovered skill names; pass those flags as false to disable.",
+    "cn": "使用此工具查看特定技能的 SKILL.md 正文；可在注册表未收录时按 skills 根目录递归定位同名 skill。"
+         "仅支持读取技能根目录下的 SKILL.md。默认返回目录树与已发现 skill 名列表；"
+         "若不需要可显式传 include_directory_tree / include_discovered_skill_names 为 false。",
+    "en": "View a skill's SKILL.md body; can resolve skills by recursive directory search when not in the registry. "
+         "Only SKILL.md at the skill root is readable. "
+         "By default includes a directory tree and discovered skill names; "
+         "pass those flags as false to disable.",
 }
 
 SKILL_TOOL_PARAMS: Dict[str, Dict[str, str]] = {
@@ -22,9 +25,9 @@ SKILL_TOOL_PARAMS: Dict[str, Dict[str, str]] = {
         "en": "Name of the skill",
     },
     "relative_file_path": {
-        "cn": "可选。查看技能目录中指定路径（relative_file_path）下的特定文件。留空则查看主 SKILL.md 文件。",
-        "en": "Optional. Views a specific file within the skill directory at the relative_file_path. "\
-              "Leave blank to view the main SKILL.md file.",
+        "cn": "可选。仅支持读取技能根目录下的 SKILL.md（留空或传 SKILL / SKILL.md 均可）。其他路径会被拒绝。",
+        "en": "Optional. Only SKILL.md at the skill root is supported (omit, or pass SKILL / SKILL.md). "
+              "Other paths are rejected.",
     },
     "include_directory_tree": {
         "cn": "默认 true。为 false 时不返回 directory_tree。为 true 时返回技能根下的 ASCII 目录树（├──/└──），有深度与行数上限。",
