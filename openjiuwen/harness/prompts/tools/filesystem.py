@@ -111,6 +111,13 @@ READ_FILE_PARAMS: Dict[str, Dict[str, str]] = {
         "cn": "PDF 专属页码范围，例如 '1-5'、'3'、'10-20'。每次最多 20 页",
         "en": "PDF-only page range, e.g. '1-5', '3', '10-20'. Maximum 20 pages per request",
     },
+    "caption": {
+        "cn": "可选。读取 skills/… 下的图片时，填入 SKILL.md 中的图片说明文字（Markdown alt），用于多模态用户提示。",
+        "en": (
+            "Optional. When reading an image under skills/, pass the figure caption "
+            "(markdown alt text from SKILL.md) for the multimodal user prompt."
+        ),
+    },
 }
 
 WRITE_FILE_PARAMS: Dict[str, Dict[str, str]] = {
@@ -219,6 +226,7 @@ def get_read_file_input_params(language: str = "cn") -> Dict[str, Any]:
             "offset": {"type": "integer", "description": _desc(p, "offset", language)},
             "limit": {"type": "integer", "description": _desc(p, "limit", language)},
             "pages": {"type": "string", "description": _desc(p, "pages", language)},
+            "caption": {"type": "string", "description": _desc(p, "caption", language)},
         },
         "required": ["file_path"],
     }
