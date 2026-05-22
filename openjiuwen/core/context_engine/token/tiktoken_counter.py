@@ -32,11 +32,10 @@ class TiktokenCounter(TokenCounter):
     __slots__ = ("_enc", "_model", "_fallback_warning_printed")
 
     def __init__(self, model: str = "gpt-4") -> None:
-        import tiktoken
-
         self._model = model
         enc_name = self._MODEL2ENC.get(model, "cl100k_base")
         try:
+            import tiktoken
             self._enc = tiktoken.get_encoding(enc_name)
             self._fallback_warning_printed = False
         except Exception:
