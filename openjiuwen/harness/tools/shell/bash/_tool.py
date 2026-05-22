@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 import time
 from dataclasses import dataclass
 from typing import (
@@ -43,6 +44,17 @@ from openjiuwen.harness.tools.filesystem import (
     _parse_rm_targets,
     _record_rm_targets_before_deletion,
 )
+
+# Matches sudo not already followed by -n / -En / --non-interactive
+_SUDO_NEEDS_N_RE = re.compile(
+    r"\bsudo\b(?!(?:\s+-[a-zA-Z]*n|\s+--non-interactive))(?=\s)"
+)
+
+
+def _make_sudo_noninteractive(command: str) -> str:
+    """Inject -n into sudo calls so they fail fast instead of hanging for a password."""
+    return _SUDO_NEEDS_N_RE.sub("sudo -n", command)
+
 
 _VALID_SHELL_TYPES = frozenset({"auto", "cmd", "powershell", "bash", "sh"})
 
@@ -122,7 +134,7 @@ class BashTool(Tool):
         if shell_type not in _VALID_SHELL_TYPES:
             shell_type = "auto"
         return _BashInputs(
-            command=(inputs.get("command") or "").strip(),
+            command=_make_sudo_noninteractive((inputs.get("command") or "").strip()),
             timeout=BashTool._resolve_timeout(inputs.get("timeout", 300)),
             workdir=inputs.get("workdir", ""),
             run_in_background=bool(inputs.get("run_in_background", False)),
