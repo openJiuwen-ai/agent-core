@@ -425,6 +425,35 @@ class OpenAIModelClient(BaseModelClient):
             if async_client is not None:
                 await async_client.close()
 
+    @staticmethod
+    def _extract_image_prompt(messages: List[UserMessage]) -> str:
+        """Build prompt string from UserMessage content for images.generate."""
+        if not messages:
+            raise build_error(
+                StatusCode.MODEL_INVOKE_PARAM_ERROR,
+                error_msg="Image generation requires at least one message.",
+            )
+
+        text_parts: List[str] = []
+        for msg in messages:
+            content = msg.content
+            if isinstance(content, str):
+                if content.strip():
+                    text_parts.append(content.strip())
+            elif isinstance(content, list):
+                for item in content:
+                    if isinstance(item, str) and item.strip():
+                        text_parts.append(item.strip())
+                    elif isinstance(item, dict) and item.get("text"):
+                        text_parts.append(str(item["text"]).strip())
+
+        if not text_parts:
+            raise build_error(
+                StatusCode.MODEL_INVOKE_PARAM_ERROR,
+                error_msg="Image generation requires a non-empty text prompt.",
+            )
+        return "\n".join(text_parts)
+
     async def generate_image(
             self,
             messages: List[UserMessage],
@@ -438,7 +467,78 @@ class OpenAIModelClient(BaseModelClient):
             seed: int = 0,
             **kwargs
     ) -> ImageGenerationResponse:
-        pass
+        """Generate image via OpenAI ``images.generate`` API."""
+        request_custom_headers = kwargs.pop("custom_headers", None)
+        timeout = kwargs.pop("timeout", None)
+
+        effective_model = model or self.model_config.model_name
+        prompt = self._extract_image_prompt(messages)
+
+        generate_params: dict[str, Any] = {
+            "model": effective_model,
+            "prompt": prompt,
+            "n": n if n is not None else 1,
+            **kwargs,
+        }
+        if size is not None:
+            generate_params["size"] = size
+
+        effective_headers = self._build_request_headers(
+            self._base_headers,
+            request_custom_headers,
+        )
+        if effective_headers:
+            generate_params["extra_headers"] = effective_headers
+
+        async_client = None
+        try:
+            llm_logger.info(
+                "Calling OpenAI image generation API.",
+                event_type=LogEventType.LLM_CALL_START,
+                model_name=effective_model,
+                model_provider=self.model_client_config.client_provider,
+            )
+
+            async_client = self._create_async_openai_client(timeout=timeout)
+            response = await async_client.images.generate(**generate_params)
+
+            image_urls: List[str] = []
+            images_base64: List[str] = []
+            if response.data:
+                for image_item in response.data:
+                    if getattr(image_item, "url", None):
+                        image_urls.append(image_item.url)
+                    if getattr(image_item, "b64_json", None):
+                        images_base64.append(image_item.b64_json)
+
+            if not image_urls and not images_base64:
+                raise build_error(
+                    StatusCode.MODEL_CALL_FAILED,
+                    error_msg="No images returned from OpenAI image generation API.",
+                )
+
+            return ImageGenerationResponse(
+                model=effective_model,
+                images=image_urls,
+                images_base64=images_base64,
+                created=getattr(response, "created", None),
+            )
+
+        except Exception as e:
+            llm_logger.error(
+                "OpenAI image generation API error.",
+                event_type=LogEventType.LLM_CALL_ERROR,
+                model_name=effective_model,
+                model_provider=self.model_client_config.client_provider,
+                exception=str(e),
+            )
+            raise build_error(
+                StatusCode.MODEL_CALL_FAILED,
+                error_msg=f"OpenAI image generation error: {str(e)}",
+            ) from e
+        finally:
+            if async_client is not None:
+                await async_client.close()
 
     async def generate_video(
             self,
