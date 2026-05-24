@@ -160,7 +160,7 @@ speedscope:
 	@echo $(START)View it at https://www.speedscope.app$(END)
 
 test:
-	@echo NOTE: To supply arguments to pytest (for example, to use pytest-xdist), try running
+	@echo $(START)NOTE: To supply arguments to pytest (for example, to use pytest-xdist), try running$(END)
 	@echo $(START)  > make test TESTFLAGS=$(DQ)...$(DQ)$(END)
 	@$(RUN_CMD) pytest $(TESTFLAGS)
 
