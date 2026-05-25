@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import (
@@ -20,8 +21,9 @@ from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.shell.bash._output import (
-    persist_large_output,
-    truncate_output,
+    CommandOutput,
+    render_partial_on_failure,
+    render_tool_content,
 )
 from openjiuwen.harness.tools.shell.bash._permission import (
     check_permission,
@@ -32,10 +34,18 @@ from openjiuwen.harness.tools.shell.bash._security import (
     check_injection,
     get_destructive_warning,
 )
-from openjiuwen.harness.tools.shell.bash._semantics import (
-    interpret_exit_code,
-    is_silent,
+from openjiuwen.harness.tools.shell.bash._semantics import interpret_exit_code
+
+# Matches sudo not already followed by -n / -En / --non-interactive
+_SUDO_NEEDS_N_RE = re.compile(
+    r"\bsudo\b(?!(?:\s+-[a-zA-Z]*n|\s+--non-interactive))(?=\s)"
 )
+
+
+def _make_sudo_noninteractive(command: str) -> str:
+    """Inject -n into sudo calls so they fail fast instead of hanging for a password."""
+    return _SUDO_NEEDS_N_RE.sub("sudo -n", command)
+
 
 _VALID_SHELL_TYPES = frozenset({"auto", "cmd", "powershell", "bash", "sh"})
 
@@ -93,17 +103,33 @@ class BashTool(Tool):
         return max(1, min(timeout, max_timeout))
 
     @staticmethod
+    def _resolve_max_output_chars(raw_value: Any, default: int = 0) -> int:
+        """Parse and validate a max_output_chars value. 0 means no limit."""
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            value = default
+        if value == 0:
+            return 0
+        try:
+            max_chars = int(os.getenv("BASH_TOOL_MAX_OUTPUT_CHARS") or "20000")
+        except ValueError:
+            max_chars = 20000
+        max_chars = max(200, max_chars)
+        return max(200, min(value, max_chars))
+
+    @staticmethod
     def _parse_inputs(inputs: Dict[str, Any]) -> _BashInputs:
         """Parse and clamp tool inputs."""
         shell_type = inputs.get("shell_type", "auto")
         if shell_type not in _VALID_SHELL_TYPES:
             shell_type = "auto"
         return _BashInputs(
-            command=(inputs.get("command") or "").strip(),
+            command=_make_sudo_noninteractive((inputs.get("command") or "").strip()),
             timeout=BashTool._resolve_timeout(inputs.get("timeout", 300)),
             workdir=inputs.get("workdir", ""),
             run_in_background=bool(inputs.get("run_in_background", False)),
-            max_output_chars=max(200, min(int(inputs.get("max_output_chars", 8000)), 20000)),
+            max_output_chars=BashTool._resolve_max_output_chars(inputs.get("max_output_chars", 0)),
             shell_type=shell_type,
             description=inputs.get("description", ""),
         )
@@ -148,6 +174,22 @@ class BashTool(Tool):
             p.command, cwd=resolved_cwd, timeout=p.timeout, shell_type=p.shell_type,
         )
         if res.code != StatusCode.SUCCESS.code:
+            # A post-launch failure (e.g. timeout) still carries output collected
+            # before the kill in res.data; surface it instead of dropping it.
+            partial = None
+            if res.data is not None:
+                partial = render_partial_on_failure(
+                    CommandOutput(
+                        stdout=res.data.stdout or "",
+                        stderr=res.data.stderr or "",
+                        exit_code=res.data.exit_code if res.data.exit_code is not None else -1,
+                        warning=warning,
+                        max_output_chars=p.max_output_chars,
+                    ),
+                    res.message,
+                )
+            if partial is not None:
+                return ToolOutput(success=False, data={"content": partial}, error=partial)
             return ToolOutput(success=False, error=res.message)
 
         exit_code = res.data.exit_code if res.data else -1
@@ -155,27 +197,21 @@ class BashTool(Tool):
         stderr = (res.data.stderr or "") if res.data else ""
 
         meaning = interpret_exit_code(p.command, exit_code, stdout, stderr)
-        silent = is_silent(p.command)
 
-        # persist large outputs to disk before truncation
-        persisted_path: str | None = None
-        persisted_size: int | None = None
-        if len(stdout) + len(stderr) > p.max_output_chars:
-            persisted_path, persisted_size = persist_large_output(stdout, stderr)
-
+        content, is_error = render_tool_content(
+            CommandOutput(
+                stdout=stdout,
+                stderr=stderr,
+                exit_code=exit_code,
+                warning=warning,
+                max_output_chars=p.max_output_chars,
+            ),
+            meaning.is_error,
+        )
         return ToolOutput(
-            success=not meaning.is_error,
-            data={
-                "stdout": truncate_output(stdout, p.max_output_chars),
-                "stderr": truncate_output(stderr, p.max_output_chars),
-                "exit_code": exit_code,
-                "return_code_interpretation": meaning.message,
-                "no_output_expected": silent,
-                "destructive_warning": warning,
-                "persisted_output_path": persisted_path,
-                "persisted_output_size": persisted_size,
-            },
-            error=truncate_output(stderr, p.max_output_chars) if meaning.is_error else None,
+            success=not is_error,
+            data={"content": content},
+            error=content if is_error else None,
         )
 
     # ── stream ────────────────────────────────────────────────
@@ -241,19 +277,21 @@ class BashTool(Tool):
 
         # final summary after stream ends
         meaning = interpret_exit_code(p.command, final_exit_code, accumulated_stdout, accumulated_stderr)
-        silent = is_silent(p.command)
+
+        content, is_error = render_tool_content(
+            CommandOutput(
+                stdout=accumulated_stdout,
+                stderr=accumulated_stderr,
+                exit_code=final_exit_code,
+                warning=warning,
+                max_output_chars=p.max_output_chars,
+            ),
+            meaning.is_error,
+        )
         yield ToolOutput(
-            success=not meaning.is_error,
-            data={
-                "stdout": truncate_output(accumulated_stdout, p.max_output_chars),
-                "stderr": truncate_output(accumulated_stderr, p.max_output_chars),
-                "exit_code": final_exit_code,
-                "return_code_interpretation": meaning.message,
-                "no_output_expected": silent,
-                "destructive_warning": warning,
-                "elapsed_time_seconds": round(time.monotonic() - start, 2),
-            },
-            error=truncate_output(accumulated_stderr, p.max_output_chars) if meaning.is_error else None,
+            success=not is_error,
+            data={"content": content},
+            error=content if is_error else None,
         )
 
     def _guard(self, p: _BashInputs):
