@@ -470,13 +470,19 @@ class SkillEvolutionRail(EvolutionRail):
 
             # Evolve existing skills (when signals are attributed to known skills)
             for skill_name, skill_signals in skill_groups.items():
-                await self._handle_evolution_from_signals(
+                request = await self._handle_evolution_from_signals(
                     skill_name=skill_name,
                     signals=skill_signals,
                     messages=messages,
                     ctx=ctx,
                     requires_approval=not self._auto_save,
                 )
+                if request is None:
+                    self._emit_progress(
+                        "completed",
+                        f"no evolution records generated for '{skill_name}'",
+                        skill_name=skill_name,
+                    )
 
             await self._experience_tracker.evaluate_presented(presented_entries)
         except Exception as exc:

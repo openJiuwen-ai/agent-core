@@ -423,6 +423,35 @@ async def test_run_evolution_auto_save_false_emits_real_approval_event(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_run_evolution_emits_completed_when_signals_generate_no_records(tmp_path):
+    rail = _make_rail(tmp_path, auto_scan=True, auto_save=False)
+    messages = [{"role": "user", "content": "please review whether this skill learned anything"}]
+    trajectory = _trajectory_with_messages(messages)
+    signal = _make_signal("skill-a", excerpt="review this conversation")
+    detector = Mock()
+    detector.bind_llm.return_value = detector
+    detector.detect_trajectory_signals.return_value = [signal]
+    detector.detect_user_intent = AsyncMock(return_value=[])
+
+    rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
+    rail._stage_evolution_from_signals = AsyncMock(return_value=None)
+
+    with patch(
+        "openjiuwen.harness.rails.evolution.skill_evolution_rail.SignalDetector",
+        return_value=detector,
+    ):
+        await rail.run_evolution(trajectory, AgentCallbackContext(agent=None, inputs=None, session=None))
+
+    rail._stage_evolution_from_signals.assert_awaited_once()
+    events = _progress_events(await rail.drain_pending_host_events())
+    stages = [event.payload["_evolution_meta"]["stage"] for event in events]
+    assert "generating_updates" in stages
+    assert stages[-1] == "completed"
+    assert events[-1].payload["_evolution_meta"]["skill_name"] == "skill-a"
+    assert "no evolution records generated" in events[-1].payload["content"]
+
+
+@pytest.mark.asyncio
 async def test_run_evolution_filters_empty_skill_name_and_swallow_exceptions(tmp_path):
     rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
     messages = [
