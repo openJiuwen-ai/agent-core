@@ -84,6 +84,23 @@ class ExternalTeamClient:
         self._connected = False
 
     @property
+    def session_id(self) -> str:
+        """The team session id this client is bound to.
+
+        Drives the per-session dynamic table names. Callers that dispatch
+        operations across task boundaries (e.g. an MCP server handling each
+        tool call in its own task) must re-assert this on the session-id
+        contextvar before each operation, since the bind done in
+        ``connect()`` only lives in that call's task context.
+        """
+        return self._descriptor.session_id
+
+    @property
+    def language(self) -> str:
+        """The team runtime language this client renders with."""
+        return self._descriptor.language
+
+    @property
     def member_name(self) -> str:
         """The member identity this client serves."""
         return self._descriptor.member_name

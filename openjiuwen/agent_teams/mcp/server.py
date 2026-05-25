@@ -20,21 +20,32 @@ from typing import Any, Awaitable, Callable
 
 from mcp.server.fastmcp import FastMCP
 
+from openjiuwen.agent_teams.context import set_session_id
 from openjiuwen.agent_teams.external.client import ExternalTeamClient
 from openjiuwen.agent_teams.external.descriptor import TeamJoinDescriptor
 from openjiuwen.agent_teams.external.format import render_task_board
+from openjiuwen.agent_teams.i18n import set_language
 
 SERVER_NAME = "openjiuwen-team-member"
 
 INSTRUCTIONS = """\
 You are a member of an OpenJiuWen agent team. Collaborate with the leader and
 teammates over a shared task board and mailbox using these tools. The team
-does not see your free text — only what you send via tools.
+does not see your free text, your reasoning, or your local file edits — only
+the tool calls you make here are visible to the team.
 
-Loop: read_inbox to see messages and the task board, claim_task on work that
-fits you, get_task for the full requirement, do the work, send_message to
-report, then complete_task. Refer to members by name. An empty inbox is
-normal. Reading the inbox marks messages read.
+Workflow for an assigned task — do every step, in order:
+1. read_inbox / get_task — read the full requirement and the task_id.
+2. claim_task(task_id) — take ownership.
+3. Do the actual work (e.g. write the requested file).
+4. complete_task(task_id) — MANDATORY. The task stays OPEN until you call it;
+   writing a file or replying in plain text does NOT complete the task.
+5. send_message to the leader — MANDATORY. Report what you did.
+
+A turn is finished only after BOTH complete_task AND send_message have been
+called. Do not stop after merely claiming or after doing the work — that
+leaves the task unfinished and the leader waiting. Refer to members by name.
+An empty inbox is normal; reading it marks messages read.
 """
 
 # Async callable that produces a connected ExternalTeamClient.
@@ -58,6 +69,13 @@ class _ClientHolder:
     async def get(self) -> ExternalTeamClient:
         if self._client is None:
             self._client = await self._factory()
+        # FastMCP handles each tool call in its own task, so the session-id
+        # contextvar bound inside ``connect()`` does not survive to later
+        # calls. Re-assert it (and language) on every call so the per-session
+        # dynamic table names resolve consistently — otherwise a later call
+        # sees an empty session id and targets a non-existent table.
+        set_session_id(self._client.session_id)
+        set_language(self._client.language)  # type: ignore[arg-type]
         return self._client
 
 

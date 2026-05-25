@@ -4,6 +4,7 @@
 """Tests for the P2 external-CLI building blocks: adapters, injector, runtime."""
 
 import asyncio
+import os
 
 import pytest
 
@@ -261,3 +262,48 @@ async def test_reinvoke_runtime_buffers_followups():
     assert runtime._drain_pending() == "a\n\n---\n\nb"
     assert runtime._drain_pending() is None
     assert isinstance(runtime, ReinvokeCliRuntime)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_reinvoke_runtime_surfaces_failed_turn(monkeypatch):
+    """A CLI turn that fails (e.g. codex out of credits) must be perceivable.
+
+    Drives a fake CLI that floods stderr (>64KB, enough to fill the OS pipe
+    buffer) and exits non-zero. The run must (a) not deadlock — proving stderr
+    is drained — and (b) log a warning carrying the exit code and the stderr
+    reason, so an out-of-credits / auth / crash failure is visible instead of
+    looking like the member silently did nothing.
+    """
+    import sys
+    from unittest.mock import MagicMock
+
+    from openjiuwen.agent_teams.external import runtime as runtime_mod
+    from openjiuwen.agent_teams.external.cli_agent.adapters import (
+        COMPLETION_NONE,
+        INPUT_TEXT,
+        CliAgentAdapter,
+    )
+
+    # 200KB of stderr (well past the ~64KB pipe buffer) ending in the reason.
+    script = "import sys; sys.stderr.write('X' * 200000); sys.stderr.write('\\nError: insufficient credits'); sys.exit(1)"
+    adapter = CliAgentAdapter(
+        name="fake-broke",
+        command=(sys.executable, "-c", script),
+        input_format=INPUT_TEXT,
+        completion=COMPLETION_NONE,
+        supports_stdin_injection=False,
+    )
+    mock_logger = MagicMock()
+    monkeypatch.setattr(runtime_mod, "team_logger", mock_logger)
+
+    runtime = ReinvokeCliRuntime(member_name="codex-1", adapter=adapter, env=dict(os.environ))
+    # Completes without hanging — if stderr were not drained this would block.
+    async for _ in runtime.run_streaming({"query": "write the file"}, session_id="s"):
+        pass
+
+    assert mock_logger.warning.called, "a failed CLI turn must emit a warning"
+    flat = " ".join(str(arg) for call in mock_logger.warning.call_args_list for arg in call.args)
+    assert "codex-1" in flat
+    assert "1" in flat  # the non-zero exit code
+    assert "insufficient credits" in flat  # the stderr reason is surfaced

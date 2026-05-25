@@ -80,16 +80,48 @@
 - `pytest tests/unit_tests/agent_teams/`：1190 passed, 16 skipped。
 - 系统测试 `tests/system_tests/agent_swarm/agent_team_external_cli_e2e.py`：组建 4 人临时团队
   （2 claude + 2 codex），各在团队 workspace 写一个文件、leader 校验存在、`clean_team` 解散。
-  需真实 claude/codex 二进制 + leader LLM endpoint（`API_BASE`/`LEADER_API_KEY`/`MODEL_NAME`）+
-  PATH 上的 `openjiuwen-team-mcp`，故仅手动运行、不进 CI；脚本以退出码 0/1 自校验。本次按需求**只
-  编写、未实跑**（凭据由用户自验）。
+  需真实 claude/codex 二进制 + leader LLM endpoint（`API_BASE`/`LEADER_API_KEY` 或 `API_KEY`/
+  `MODEL_NAME`）+ PATH 上的 `openjiuwen-team-mcp`（脚本默认改用 `python -m
+  openjiuwen.agent_teams.mcp`，免装 console script），故仅手动运行、不进 CI；脚本以退出码 0/1 自校验。
+
+## 真实运行验证与发现的修复
+
+用真实 claude (2.1.150) + codex (0.133.0) + glm-5 leader 实跑后，确认机制可用，并修复了一批
+**只有跨进程真跑才暴露**的问题（claude-1/claude-2 稳定 claim→complete→report；codex 路径多轮
+完整跑通；4 文件均正确写入 workspace）：
+
+1. **codex adapter 失配**：codex 0.133.0 无 `proto` 子命令。改用 `codex exec
+   --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check`（一次性，trailing positional
+   prompt；workspace 非 git repo 必须 `--skip-git-repo-check`）。一次性路径也接入 MCP 注入：
+   `build_turn_command` 新增 `extra_args`、`ReinvokeCliRuntime.launch_extra_args` 每轮带上
+   `-c mcp_servers...`。
+2. **嵌套 CLI env 泄漏**：团队若运行在某 CLI agent 会话内（如 Claude Code），子 claude 会继承
+   `CLAUDECODE`/`CLAUDE_CODE_*` 而进入嵌套降级态（写文件但不走 MCP）。`CliAgentAdapter.env_strip_prefixes`
+   按 adapter 剥离父会话标记（claude 剥 `CLAUDECODE`/`CLAUDE_CODE_`，codex 不剥以保留 `CODEX_HOME`）。
+3. **`no such table` / session 丢失**：`session_id` 走 contextvar，FastMCP 每个工具调用各自一个
+   task，`connect()` 里设的 session 不跨调用存活 → 后续调用用空 session 算出不存在的动态表名。
+   `_ClientHolder.get()` 每次调用重绑 `session_id`+language（`ExternalTeamClient` 暴露
+   `session_id`/`language` 属性）。
+4. **zmq bind 冲突 ×2**：① `send_message` auto-start 在成员状态翻转前并发重复 spawn 同一成员 →
+   `SpawnManager.spawn_teammate` 加同步在飞守卫幂等；② 外部 client（MCP server 进程）与进程内
+   shell 撞同一 `direct_addr` ROUTER → `descriptor_from_context` 给外部 client 用 ephemeral
+   `tcp://127.0.0.1:*`（它只 publish + 读 DB，不收 direct）。
+5. **CLI 失败不可感知 + stderr 死锁**：两个 runtime 此前丢弃 CLI stderr、忽略退出码——CLI 失败
+   （额度耗尽/鉴权/崩溃）表现成"成员没干活"，且未读的 stderr 管道写满会卡死子进程。改为并发排空
+   stderr + 检查退出码，非零即 `team_logger.warning` 带 stderr 尾部（真实 codex 没钱实测可见
+   `exit code 1` + `ERROR: You've...`）。
+6. **挂死无超时**：`ReinvokeCliRuntime` 单轮 `turn_timeout_s`（默认 180s），CLI 轮挂死自动
+   terminate + 重拉自愈。
+
+并提速：消除外部成员"join 后空等"那一轮（初始消息改为"查一次收件箱、无任务即结束本轮、勿等待"）、
+god-view 引导 leader 一次批量建任务。
 
 ## 已知遗留
 
-- **真实 CLI 端到端验证**：adapter 的输入 framing / 轮次完成 / MCP 注入 argv 仍依赖各 CLI（及
-  版本）真实行为，需在能跑 claude/codex 的环境实测调参（adapters.py 注释逐条标注置信度）。
-- **codex MCP 注册的 `-c` 值解析**：`-c mcp_servers.<key>.command="..."` 的引号/嵌套键解析按
-  codex 文档假设，待真实版本核对。
+- **CLI 失败上报给 leader**：当前 CLI 失败只落日志（可感知），未接进协调层事件流让 leader 主动
+  改派/跳过——leader 仍会等到任务完成或轮次结束。后续可把 member-CLI 失败做成团队事件。
+- **高并发启动竞争**：多个 CLI agent + 各自重量级 MCP server 同时冷启动时，个别 `codex exec` 可能
+  启动挂死（已由单轮超时兜底自愈，但首轮会浪费一个 timeout 周期）。
 - **一次性 CLI 的 MCP 注入**：openclaw/hermes 走带外注册，未在 spawn 路径自动化。
 - **predefined 外部 CLI 成员**：跨进程冷恢复仍需 predefined 声明（role_type=TEAMMATE 判别 union
   冲突），同 F_21 遗留。

@@ -75,8 +75,14 @@ os.environ.setdefault("IS_SENSITIVE", "false")
 
 # Required leader LLM endpoint env. The external CLI members carry their own
 # credentials (claude / codex are authenticated locally), so only the leader
-# needs an endpoint here.
-_REQUIRED_ENV = ("API_BASE", "LEADER_API_KEY", "MODEL_NAME")
+# needs an endpoint here. The leader key is read from LEADER_API_KEY, falling
+# back to API_KEY (the convention used by the sibling main.py entry).
+_REQUIRED_ENV = ("API_BASE", "MODEL_NAME")
+
+
+def _leader_api_key() -> str | None:
+    """Return the leader LLM key from LEADER_API_KEY or API_KEY."""
+    return os.environ.get("LEADER_API_KEY") or os.environ.get("API_KEY")
 
 # (member_name, cli_agent) roster: two claude + two codex.
 _MEMBERS: tuple[tuple[str, str], ...] = (
@@ -88,6 +94,16 @@ _MEMBERS: tuple[tuple[str, str], ...] = (
 
 _SESSION_ID = "external_cli_session"
 
+# Hard ceiling on the autonomous leader round so a confused leader that never
+# calls clean_team cannot hang the run forever.
+_RUN_TIMEOUT_S = 1200.0
+
+# Launch the team MCP server via the current interpreter + module entry so the
+# run does not depend on the ``openjiuwen-team-mcp`` console script being on
+# PATH. The server is a child of the CLI subprocess and inherits PYTHONPATH /
+# OPENJIUWEN_TEAM_JOIN from it.
+_MCP_SERVER_COMMAND = [sys.executable, "-m", "openjiuwen.agent_teams.mcp"]
+
 
 def _leader_model() -> dict[str, Any]:
     """Build the leader TeamModelConfig dict from the environment."""
@@ -95,7 +111,7 @@ def _leader_model() -> dict[str, Any]:
         "model_client_config": {
             "client_provider": "OpenAI",
             "api_base": os.environ["API_BASE"],
-            "api_key": os.environ["LEADER_API_KEY"],
+            "api_key": _leader_api_key(),
             "timeout": 120,
             "verify_ssl": False,
         },
@@ -154,8 +170,18 @@ def _build_spec(team_name: str, workspace_path: Path) -> TeamAgentSpec:
         },
         "storage": {"type": "sqlite"},
         "external_cli_agents": [
-            {"cli_agent": "claude", "cwd": str(workspace_path), "inject_mcp": True},
-            {"cli_agent": "codex", "cwd": str(workspace_path), "inject_mcp": True},
+            {
+                "cli_agent": "claude",
+                "cwd": str(workspace_path),
+                "inject_mcp": True,
+                "mcp_server_command": _MCP_SERVER_COMMAND,
+            },
+            {
+                "cli_agent": "codex",
+                "cwd": str(workspace_path),
+                "inject_mcp": True,
+                "mcp_server_command": _MCP_SERVER_COMMAND,
+            },
         ],
     }
     return TeamAgentSpec.model_validate(cfg)
@@ -171,14 +197,22 @@ def _god_view_query(workspace_path: Path) -> str:
         "1. 用 spawn_member 拉起 4 个外部 CLI 成员（role_type='external_cli'）：\n"
         f"{roster_lines}\n"
         "   每个成员的 desc 说明它是负责写文件的外部 CLI 协作者。\n\n"
-        "2. 用 create_task 为每个成员各建一个任务，要求成员在团队共享工作目录里写入一个文件：\n"
+        "2. 用**一次** create_task 调用批量创建全部 4 个任务（tasks 数组，一个成员一条，"
+        "尽量减少往返）。每个任务的 content 必须写成"
+        "成员要严格按顺序执行的强制清单（逐字照抄下面五步，把 <member>/<file> 换成实际值）：\n"
         f"   - 共享工作目录绝对路径：{workspace_path}\n"
-        "   - 文件名见上表（如 claude-1.md），文件内容写一行：'<member_name> reporting in.'\n"
-        "   - 任务内容里明确告诉成员：写完后用 complete_task 标记完成，并用 send_message 向 team_leader 汇报。\n\n"
+        "     『(1) claim_task 认领本任务；"
+        "(2) 在共享工作目录写文件 <abs_path>/<file>.md，内容写一行：<member> reporting in.；"
+        "(3) 【强制】调用 complete_task(task_id) 把任务标记完成——只写文件不算完成，不调 complete_task 任务会一直挂着；"
+        "(4) 【强制】用 send_message 向 team_leader 汇报已完成；"
+        "(5) complete_task 和 send_message 都调用过，本任务才算结束。』\n\n"
         "3. 把任务分派给对应成员（send_message 会自动启动未启动的成员）。\n\n"
-        "4. 等四个成员都汇报完成后，逐一确认这 4 个文件都已真实存在"
+        "4. 持续用 view_task 跟踪任务状态。**只有状态变成 completed 才算成员完成**——"
+        "如果某成员只认领（claimed）却迟迟不 completed，用 send_message 明确催它："
+        "『立即调用 complete_task(<task_id>) 标记完成，并 send_message 汇报』，直到四个任务全部 completed。\n\n"
+        "5. 四个任务都 completed 后，逐一确认这 4 个文件都已真实存在"
         "（通过本地文件系统读取共享工作目录）。\n\n"
-        "5. 全部确认存在后，调用 clean_team 解散这个临时团队，并简要汇报结果。\n"
+        "6. 全部确认存在后，调用 clean_team 解散这个临时团队，并简要汇报结果。\n"
     )
 
 
@@ -189,6 +223,8 @@ def _expected_files(workspace_path: Path) -> list[Path]:
 
 async def _run() -> int:
     missing = [name for name in _REQUIRED_ENV if not os.environ.get(name)]
+    if _leader_api_key() is None:
+        missing.append("LEADER_API_KEY|API_KEY")
     if missing:
         logger.error("missing required env: {}", ", ".join(missing))
         print(f"[skip] set the required env first: {', '.join(missing)}")
@@ -196,6 +232,9 @@ async def _run() -> int:
 
     team_name = f"external_cli_team_{uuid.uuid4().hex[:8]}"
     workspace_path = team_home(team_name) / "team-workspace"
+    # Create the workspace up front: each CLI subprocess is launched with its
+    # cwd set here, and create_subprocess_exec fails if the cwd is missing.
+    workspace_path.mkdir(parents=True, exist_ok=True)
     spec = _build_spec(team_name, workspace_path)
 
     logger.info("team={} workspace={}", team_name, workspace_path)
@@ -207,7 +246,13 @@ async def _run() -> int:
 
     await Runner.start()
     try:
-        await consume_stream(spec, _god_view_query(workspace_path), _SESSION_ID)
+        await asyncio.wait_for(
+            consume_stream(spec, _god_view_query(workspace_path), _SESSION_ID),
+            timeout=_RUN_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.error("run exceeded {}s budget; checking partial output", _RUN_TIMEOUT_S)
+        print(f"[timeout] leader round exceeded {_RUN_TIMEOUT_S}s")
     finally:
         present = [p for p in _expected_files(workspace_path) if p.is_file()]
         missing_files = [p for p in _expected_files(workspace_path) if not p.is_file()]

@@ -85,6 +85,13 @@ class CliAgentAdapter:
         mcp_inject: How to register a stdio MCP server with this CLI (see
             ``MCP_INJECT_*``). ``MCP_INJECT_NONE`` (default) means the spawn
             path cannot auto-inject team tools for this CLI.
+        env_strip_prefixes: Env-var name prefixes to remove from the spawned
+            CLI's environment. Used to drop a *parent* agent session's markers
+            so the child runs as a fresh, independent instance instead of a
+            nested one — e.g. launching a claude member from inside a Claude
+            Code session would otherwise inherit ``CLAUDECODE`` /
+            ``CLAUDE_CODE_*`` and make the child behave as a nested claude.
+            Empty (default) keeps the full inherited environment.
     """
 
     name: str
@@ -96,12 +103,20 @@ class CliAgentAdapter:
     session_flag: str | None = None
     continue_args: tuple[str, ...] = ()
     mcp_inject: str = MCP_INJECT_NONE
+    env_strip_prefixes: tuple[str, ...] = ()
 
     def build_command(self, extra_args: tuple[str, ...] = ()) -> list[str]:
         """Return the launch argv, optionally with extra args appended."""
         return [*self.command, *extra_args]
 
-    def build_turn_command(self, prompt: str, *, session_id: str, first_turn: bool) -> list[str]:
+    def build_turn_command(
+        self,
+        prompt: str,
+        *,
+        session_id: str,
+        first_turn: bool,
+        extra_args: tuple[str, ...] = (),
+    ) -> list[str]:
         """Build the per-turn launch argv for a one-shot (re-invoke) CLI.
 
         Args:
@@ -109,12 +124,17 @@ class CliAgentAdapter:
             session_id: Per-member session id for ``session_flag`` CLIs.
             first_turn: Whether this is the member's first turn (controls
                 ``continue_args``).
+            extra_args: Extra launch args inserted before the prompt on every
+                turn (e.g. MCP-server registration). Kept ahead of the prompt
+                so CLIs that take the prompt as a trailing positional (codex
+                exec) still parse the flags.
         """
         argv = list(self.command)
         if self.session_flag and session_id:
             argv += [self.session_flag, session_id]
         if not first_turn and self.continue_args:
             argv += list(self.continue_args)
+        argv += list(extra_args)
         if self.prompt_flag:
             argv += [self.prompt_flag, prompt]
         else:
@@ -219,25 +239,32 @@ _BUILTIN: dict[str, CliAgentAdapter] = {
         input_format=INPUT_CLAUDE_STREAM_JSON,
         completion=COMPLETION_RESULT_JSON,
         mcp_inject=MCP_INJECT_CLAUDE_FLAG,
+        # Drop a parent Claude Code session's markers so a claude member
+        # spawned from inside another claude runs as a fresh top-level
+        # instance, not a degraded nested one.
+        env_strip_prefixes=("CLAUDECODE", "CLAUDE_CODE_"),
     ),
-    # Codex CLI — moderate confidence. `codex proto` runs the JSONL protocol
-    # stream over stdin/stdout: stdin takes "submission" objects
-    # ({"id", "op": {"type": "user_input", "items": [...]}}) and stdout emits
-    # "event" objects ({"id", "msg": {"type": ...}}); a turn ends on
-    # msg.type == "task_complete". Config overrides make it non-interactive.
-    # VERIFY: proto submission/event schema and the config keys per version.
+    # Codex CLI (>= 0.13x) — `codex exec` runs one prompt non-interactively
+    # and exits (one-shot, so it runs under the re-invoke runtime). The prompt
+    # is the trailing positional argv; the process exit / stdout EOF ends the
+    # turn. `--dangerously-bypass-approvals-and-sandbox` runs without approval
+    # prompts or sandbox; `--skip-git-repo-check` is required because the team
+    # workspace is not a git repo (codex exec otherwise refuses to run). MCP
+    # servers register via `-c mcp_servers.<name>...` (codex_override), applied
+    # on every re-invocation. NOTE: the legacy `codex proto` JSONL stream
+    # (INPUT_CODEX_PROTO / COMPLETION_CODEX_TASK_COMPLETE) was removed in
+    # current codex; verify the exec flags per installed version.
     "codex": CliAgentAdapter(
         name="codex",
         command=(
             "codex",
-            "proto",
-            "-c",
-            'approval_policy="never"',
-            "-c",
-            'sandbox_mode="danger-full-access"',
+            "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--skip-git-repo-check",
         ),
-        input_format=INPUT_CODEX_PROTO,
-        completion=COMPLETION_CODEX_TASK_COMPLETE,
+        input_format=INPUT_TEXT,
+        completion=COMPLETION_NONE,
+        supports_stdin_injection=False,
         mcp_inject=MCP_INJECT_CODEX_OVERRIDE,
     ),
     # OpenClaw CLI — one-shot (re-invoke runtime). ClawTeam drives it as

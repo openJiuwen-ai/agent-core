@@ -38,6 +38,29 @@ from openjiuwen.core.common.logging import team_logger
 # Joins buffered mid-turn messages into a single follow-up prompt.
 _FOLLOWUP_SEP = "\n\n---\n\n"
 
+# How much of a failed CLI's stderr to keep for the diagnostic log line.
+_STDERR_TAIL_LIMIT = 2000
+
+
+async def _read_stderr_tail(stream: Optional[asyncio.StreamReader]) -> str:
+    """Drain a subprocess stderr to EOF and return its tail.
+
+    Draining matters for two reasons: an unread stderr pipe fills its OS
+    buffer and blocks the CLI's next stderr write — a stuck write is
+    indistinguishable from a hang — and the tail carries the human-readable
+    failure reason (auth / quota / credit exhaustion / crash) that would
+    otherwise be lost when only stdout is consumed.
+    """
+    if stream is None:
+        return ""
+    tail = b""
+    while True:
+        chunk = await stream.read(4096)
+        if not chunk:
+            break
+        tail = (tail + chunk)[-_STDERR_TAIL_LIMIT:]
+    return tail.decode("utf-8", errors="replace").strip()
+
 
 async def _terminate(process: Optional[asyncio.subprocess.Process]) -> None:
     """Terminate a subprocess if still running. Idempotent and quiet."""
@@ -149,8 +172,20 @@ class ExternalCliRuntime(_CliRuntimeBase):
         self._output_lines = output_lines
         self._process = process
         self._abort_requested = False
+        self._stderr_task: Optional[asyncio.Task[str]] = None
+
+    def _ensure_stderr_drain(self) -> None:
+        """Start draining the long-lived process stderr exactly once.
+
+        An unread stderr pipe fills and blocks the CLI's next stderr write
+        (a stuck write looks like a hang), so drain it in the background for
+        the lifetime of the process; the tail is surfaced at aclose.
+        """
+        if self._stderr_task is None and self._process is not None and self._process.stderr is not None:
+            self._stderr_task = asyncio.create_task(_read_stderr_tail(self._process.stderr))
 
     async def _drive(self, inputs: dict[str, Any]) -> None:
+        self._ensure_stderr_drain()
         query = inputs.get("query")
         text = query if isinstance(query, str) else str(query)
         self._abort_requested = False
@@ -178,6 +213,22 @@ class ExternalCliRuntime(_CliRuntimeBase):
         """Close stdin and terminate the long-lived subprocess. Idempotent."""
         await self._injector.aclose()
         await _terminate(self._process)
+        if self._stderr_task is not None:
+            if not self._stderr_task.done():
+                self._stderr_task.cancel()
+            stderr_tail = ""
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                stderr_tail = await self._stderr_task
+            self._stderr_task = None
+            returncode = self._process.returncode if self._process is not None else None
+            if returncode not in (0, None) and stderr_tail:
+                team_logger.warning(
+                    "[external-cli] member {} CLI exited with code {} (likely auth/quota/credit "
+                    "exhaustion or a crash). stderr: {}",
+                    self._member_name,
+                    returncode,
+                    stderr_tail,
+                )
 
 
 class ReinvokeCliRuntime(_CliRuntimeBase):
@@ -197,12 +248,27 @@ class ReinvokeCliRuntime(_CliRuntimeBase):
         env: dict[str, str],
         cwd: Optional[str] = None,
         cli_session_id: Optional[str] = None,
+        launch_extra_args: tuple[str, ...] = (),
+        turn_timeout_s: float = 180.0,
     ):
-        """Hold the launch config; subprocesses are created per turn."""
+        """Hold the launch config; subprocesses are created per turn.
+
+        Args:
+            launch_extra_args: Extra launch args added to every re-invocation
+                before the prompt (e.g. MCP-server registration), since a
+                one-shot CLI needs them on each fresh process.
+            turn_timeout_s: Hard ceiling on a single CLI invocation. A
+                third-party CLI can hang on startup (slow MCP handshake,
+                resource contention); without a ceiling that blocks the member
+                forever. On timeout the subprocess is terminated and the turn
+                ends, so buffered follow-ups re-invoke a fresh process.
+        """
         super().__init__(member_name=member_name, adapter=adapter)
         self._env = env
         self._cwd = cwd
         self._cli_session_id = cli_session_id or uuid.uuid4().hex
+        self._turn_timeout_s = turn_timeout_s
+        self._launch_extra_args = launch_extra_args
         self._first_turn = True
         self._pending: list[str] = []
         self._aborted = False
@@ -223,6 +289,7 @@ class ReinvokeCliRuntime(_CliRuntimeBase):
             prompt,
             session_id=self._cli_session_id,
             first_turn=self._first_turn,
+            extra_args=self._launch_extra_args,
         )
         self._first_turn = False
         team_logger.info("[external-cli] re-invoke {} for member {}", argv, self._member_name)
@@ -236,16 +303,57 @@ class ReinvokeCliRuntime(_CliRuntimeBase):
         )
         self._current = proc
         try:
-            if proc.stdin is not None:
-                proc.stdin.close()
+            await asyncio.wait_for(self._consume_turn(proc), timeout=self._turn_timeout_s)
+        except asyncio.TimeoutError:
+            team_logger.warning(
+                "[external-cli] member {} turn exceeded {}s; terminating hung subprocess",
+                self._member_name,
+                self._turn_timeout_s,
+            )
+            await _terminate(proc)
+        finally:
+            self._current = None
+
+    async def _consume_turn(self, proc: asyncio.subprocess.Process) -> None:
+        """Drain stdout+stderr to EOF, await exit, and surface a failure.
+
+        Stderr is drained concurrently so the CLI cannot block on a full
+        stderr pipe; a non-zero exit is logged with the stderr tail so a
+        failed turn (auth / quota / credit exhaustion / crash) is visible
+        rather than looking like the member simply did nothing.
+        """
+        if proc.stdin is not None:
+            proc.stdin.close()
+        stderr_reader = asyncio.create_task(_read_stderr_tail(proc.stderr))
+        try:
             if proc.stdout is not None:
                 while True:
                     line = await proc.stdout.readline()
                     if not line or self._aborted:
                         break
             await proc.wait()
+            # Normal exit: let stderr finish draining, then surface failures.
+            stderr_tail = await stderr_reader
+            self._report_exit(proc.returncode, stderr_tail)
         finally:
-            self._current = None
+            # Abnormal path (timeout cancel / error): drop the reader cleanly.
+            if not stderr_reader.done():
+                stderr_reader.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await stderr_reader
+
+    def _report_exit(self, returncode: Optional[int], stderr_tail: str) -> None:
+        """Log a warning when the CLI turn exited non-zero."""
+        if returncode in (0, None):
+            return
+        detail = f" stderr: {stderr_tail}" if stderr_tail else ""
+        team_logger.warning(
+            "[external-cli] member {} CLI turn exited with code {} and did no team work "
+            "(likely auth/quota/credit exhaustion or a crash).{}",
+            self._member_name,
+            returncode,
+            detail,
+        )
 
     def _drain_pending(self) -> Optional[str]:
         if not self._pending:

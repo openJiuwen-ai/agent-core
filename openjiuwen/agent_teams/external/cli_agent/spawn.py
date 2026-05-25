@@ -41,6 +41,15 @@ def descriptor_from_context(ctx: TeamRuntimeContext) -> TeamJoinDescriptor:
         )
     team_name = ctx.team_spec.team_name if ctx.team_spec else ""
     language = (ctx.team_spec.language if ctx.team_spec else None) or "cn"
+    transport = ctx.messager_config or MessagerTransportConfig()
+    # The in-process member shell already binds this member's ``direct_addr``
+    # ROUTER. The external client (the CLI's MCP server, a separate process)
+    # only publishes events to the pub/sub bus and reads the shared db — it
+    # never receives direct ROUTER messages — so hand it an ephemeral
+    # ``direct_addr`` to avoid colliding with the shell's bind on the same
+    # port. Pub/sub publish/subscribe still target the leader's broker.
+    if transport.direct_addr:
+        transport = transport.model_copy(update={"direct_addr": "tcp://127.0.0.1:*"})
     return TeamJoinDescriptor(
         session_id=get_session_id() or "",
         team_name=team_name,
@@ -48,7 +57,7 @@ def descriptor_from_context(ctx: TeamRuntimeContext) -> TeamJoinDescriptor:
         role=ctx.role.value,
         language=language,
         db_config=ctx.db_config,
-        transport_config=ctx.messager_config or MessagerTransportConfig(),
+        transport_config=transport,
     )
 
 
@@ -101,24 +110,36 @@ async def build_cli_runtime(
         )
     adapter: CliAgentAdapter = build_adapter(ctx.cli_agent, command_override=command_override)
     descriptor = descriptor_from_context(ctx)
-    # The descriptor env is authoritative for team identity, so it is applied
-    # after ``extra_env`` — a misconfigured extra_env cannot shadow the join.
-    env = {**os.environ, **(extra_env or {}), **descriptor.to_env()}
-
-    if not adapter.supports_stdin_injection:
-        # One-shot CLI: no eager launch; the runtime spawns per turn.
-        return ReinvokeCliRuntime(
-            member_name=ctx.member_name or "",
-            adapter=adapter,
-            env=env,
-            cwd=cwd,
-        )
+    # Start from the inherited environment minus any parent agent-session
+    # markers (e.g. CLAUDECODE / CLAUDE_CODE_* when the team itself runs inside
+    # a Claude Code session) so the spawned CLI is a fresh, independent
+    # instance rather than a nested one. The descriptor env is authoritative
+    # for team identity, so it is applied last — a misconfigured extra_env
+    # cannot shadow the join.
+    base_env = {
+        key: value
+        for key, value in os.environ.items()
+        if not any(key.startswith(prefix) for prefix in adapter.env_strip_prefixes)
+    }
+    env = {**base_env, **(extra_env or {}), **descriptor.to_env()}
 
     mcp_args: tuple[str, ...] = ()
     if inject_mcp:
         mcp_args = tuple(
             adapter.mcp_launch_args(server_name=mcp_server_name, server_command=mcp_server_command)
         )
+
+    if not adapter.supports_stdin_injection:
+        # One-shot CLI: no eager launch; the runtime spawns per turn and adds
+        # the MCP-registration args to each invocation.
+        return ReinvokeCliRuntime(
+            member_name=ctx.member_name or "",
+            adapter=adapter,
+            env=env,
+            cwd=cwd,
+            launch_extra_args=mcp_args,
+        )
+
     command = adapter.build_command(extra_args=mcp_args)
     team_logger.info("[external-cli] launching {} for member {}", command, ctx.member_name)
     process = await asyncio.create_subprocess_exec(
