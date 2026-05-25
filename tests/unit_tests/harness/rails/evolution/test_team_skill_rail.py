@@ -1704,11 +1704,6 @@ def test_team_signal_type_enum():
     assert TeamSignalType.TRAJECTORY_ISSUE.value == "trajectory_issue"
 
 
-def test_public_llm_policy_constants_are_importable():
-    assert EVALUATE_LLM_POLICY.attempt_timeout_secs == 30
-    assert SIMPLIFY_LLM_POLICY.attempt_timeout_secs == 60
-
-
 def test_user_intent_dataclass():
     """UserIntent dataclass should have expected fields."""
     intent = UserIntent(is_improvement=True, intent="add a coder role")

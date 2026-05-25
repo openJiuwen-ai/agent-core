@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
 
@@ -419,16 +420,33 @@ class ExperienceManager:
         user_intent: Optional[str] = None,
     ) -> Optional[str]:
         """Stage simplify governance for a skill."""
+        started_at = time.monotonic()
         if not self._store.skill_exists(skill_name):
+            logger.info(
+                "[ExperienceManager] request_simplify skipped: kind=%s skill=%s reason=skill_not_found",
+                self._kind,
+                skill_name,
+            )
             return None
 
         evo_log = await self._store.load_full_evolution_log(skill_name)
         records = evo_log.entries
         if not records:
+            logger.info(
+                "[ExperienceManager] request_simplify skipped: kind=%s skill=%s reason=no_records",
+                self._kind,
+                skill_name,
+            )
             return None
 
         content = await self._store.read_skill_content(skill_name)
         summary = self._store.extract_description_from_skill_md(content)
+        logger.info(
+            "[ExperienceManager] request_simplify loaded records: kind=%s skill=%s records=%d",
+            self._kind,
+            skill_name,
+            len(records),
+        )
         actions = await self._scorer.simplify(
             skill_name=skill_name,
             skill_summary=summary,
@@ -436,6 +454,12 @@ class ExperienceManager:
             user_intent=user_intent,
         )
         if not actions:
+            logger.info(
+                "[ExperienceManager] request_simplify finished without actions: kind=%s skill=%s elapsed=%.1fs",
+                self._kind,
+                skill_name,
+                time.monotonic() - started_at,
+            )
             return None
 
         request_id = f"evolve_simplify_{uuid.uuid4().hex[:8]}"
@@ -444,6 +468,14 @@ class ExperienceManager:
             "skill_name": skill_name,
             "actions": actions,
         }
+        logger.info(
+            "[ExperienceManager] request_simplify staged: kind=%s skill=%s request=%s actions=%d elapsed=%.1fs",
+            self._kind,
+            skill_name,
+            request_id,
+            len(actions),
+            time.monotonic() - started_at,
+        )
         return request_id
 
     async def approve_simplify(self, request_id: str) -> Dict[str, int]:

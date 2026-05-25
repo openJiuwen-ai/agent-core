@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import BaseError, build_error
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
 
@@ -110,6 +110,17 @@ async def invoke_text_with_retry_and_prompt(
                     )
                 except Exception as exc:
                     last_error = exc
+                    logger.warning(
+                        "[llm_resilience] LLM attempt failed: model=%s attempt=%d/%d prompt_chars=%d "
+                        "timeout=%.1fs timeout_like=%s error=%s",
+                        model,
+                        attempt,
+                        max(policy.max_attempts, 1),
+                        len(current_prompt),
+                        timeout_secs,
+                        _is_timeout_like(exc),
+                        exc,
+                    )
                     if (
                         retry_prompt is not None
                         and attempt < policy.max_attempts
@@ -144,6 +155,12 @@ async def invoke_text_with_retry_and_prompt(
                             last_error=last_error,
                             last_response=raw,
                         )
+                    logger.warning(
+                        "[llm_resilience] empty LLM response; retrying: model=%s attempt=%d/%d",
+                        model,
+                        attempt,
+                        max(policy.max_attempts, 1),
+                    )
                     await _sleep_before_retry(policy, started_at, attempt)
                     continue
 
@@ -163,11 +180,29 @@ async def invoke_text_with_retry_and_prompt(
                                 last_error=last_error,
                                 last_response=raw,
                             )
+                        logger.warning(
+                            "[llm_resilience] unusable LLM response; retrying: model=%s attempt=%d/%d "
+                            "response_chars=%d",
+                            model,
+                            attempt,
+                            max(policy.max_attempts, 1),
+                            len(raw),
+                        )
                         await _sleep_before_retry(policy, started_at, attempt)
                         continue
 
                 return raw, current_prompt
     except TimeoutError as exc:
+        logger.warning(
+            "[llm_resilience] LLM total budget exceeded: model=%s attempts_started=%d prompt_chars=%d "
+            "total_budget=%.1fs elapsed=%.1fs last_error=%s",
+            model,
+            attempts_started,
+            len(prompt),
+            policy.total_budget_secs,
+            time.monotonic() - started_at,
+            last_error,
+        )
         _raise_llm_resilience_error(
             StatusCode.TOOLCHAIN_EVOLVING_TOOL_CALL_LLM_CALL_EXECUTION_ERROR,
             reason="total_budget_exceeded",

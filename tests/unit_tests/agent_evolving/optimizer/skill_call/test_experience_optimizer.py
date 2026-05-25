@@ -170,7 +170,7 @@ class TestSkillExperienceOptimizerGenerate:
         assert records[0].summary == "When tool calls time out, retry with a shorter prompt."
         assert records[1].change.content == "B"
         assert records[1].summary == "Clarify selection wording when users ask for audits."
-        assert llm.invoke.await_args_list[0].kwargs["timeout"] == 60
+        assert llm.invoke.await_args_list[0].kwargs["timeout"] == 150
 
     @staticmethod
     @pytest.mark.asyncio

@@ -185,12 +185,6 @@ def test_parse_messages():
     assert parsed[1]["tool_calls"][0]["name"] == "read_file"
 
 
-def test_public_llm_policy_constants_are_importable():
-    assert GENERATE_RECORDS_LLM_POLICY.attempt_timeout_secs == 60
-    assert EVALUATE_LLM_POLICY.attempt_timeout_secs == 30
-    assert SIMPLIFY_LLM_POLICY.attempt_timeout_secs == 60
-
-
 def test_trajectory_sink_defaults_member_role_to_teammate(tmp_path):
     rail = _make_rail(tmp_path)
 

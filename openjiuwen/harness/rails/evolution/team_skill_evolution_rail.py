@@ -74,19 +74,19 @@ from openjiuwen.harness.rails.evolution.contracts import (
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint
 
 _TEAM_USER_REQUEST_LLM_POLICY = LLMInvokePolicy(
-    attempt_timeout_secs=30,
-    total_budget_secs=90,
-    max_attempts=3,
+    attempt_timeout_secs=60,
+    total_budget_secs=120,
+    max_attempts=2,
 )
 _TEAM_TRAJECTORY_ISSUE_LLM_POLICY = LLMInvokePolicy(
-    attempt_timeout_secs=60,
-    total_budget_secs=180,
-    max_attempts=3,
+    attempt_timeout_secs=150,
+    total_budget_secs=300,
+    max_attempts=2,
 )
 _TEAM_RECORD_LLM_POLICY = LLMInvokePolicy(
-    attempt_timeout_secs=120,
-    total_budget_secs=420,
-    max_attempts=3,
+    attempt_timeout_secs=150,
+    total_budget_secs=300,
+    max_attempts=2,
 )
 _DEFAULT_TEAM_EVOLUTION_TOTAL_TIMEOUT_SECS = 720.0
 _TEAM_TASK_NON_TERMINAL_STATES = ("pending", "claimed", "in_progress", "blocked")
