@@ -79,6 +79,14 @@ class SysOperationRail(DeepAgentRail):
         if self._with_code_tool:
             self.tools.append(CodeTool(self.sys_operation, lang, agent_id))
 
+        # 工具 id 形如 "WriteFileTool_<agent_id>" 与 SysOperation 实例无关; 若上一次 agent
+        # 生命周期里的同名工具仍残留在 resource_mgr (例如 adapter cleanup 未驱动 rail.uninit),
+        # 直接 add_tool 会因 resource_already_exist 静默失败, 旧工具实例继续持有过期的
+        # SysOperation 引用, 导致 SANDBOX 切换时 fs/shell 调用走 LOCAL 并写穿宿主。
+        # 这里与 SkillUseRail.init 同款 idempotent 注册: 已存在则先 remove, 再 add。
+        for tool in self.tools:
+            if Runner.resource_mgr.get_tool(tool.card.id) is not None:
+                Runner.resource_mgr.remove_tool(tool.card.id)
         Runner.resource_mgr.add_tool(self.tools)
 
         for tool in self.tools:
