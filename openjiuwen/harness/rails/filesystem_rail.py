@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
@@ -23,14 +25,30 @@ class FileSystemRail(DeepAgentRail):
 
     priority = 100
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        enable_read_image_multimodal: Optional[bool] = None,
+    ) -> None:
         super().__init__()
         self.tools = None
+        self._enable_read_image_multimodal = enable_read_image_multimodal
 
     def init(self, agent) -> None:
         lang = agent.system_prompt_builder.language
         agent_id = getattr(getattr(agent, "card", None), "id", None)
-        read_tool = ReadFileTool(self.sys_operation, lang, agent_id)
+        enable_read_image_multimodal = self._enable_read_image_multimodal
+        if enable_read_image_multimodal is None:
+            deep_config = getattr(agent, "deep_config", None)
+            enable_read_image_multimodal = bool(
+                getattr(deep_config, "enable_read_image_multimodal", True)
+            )
+        read_tool = ReadFileTool(
+            self.sys_operation,
+            lang,
+            agent_id,
+            enable_image_multimodal=enable_read_image_multimodal,
+        )
         write_tool = WriteFileTool(self.sys_operation, lang, agent_id)
         edit_tool = EditFileTool(self.sys_operation, lang, agent_id)
         glob_tool = GlobTool(self.sys_operation, lang, agent_id)

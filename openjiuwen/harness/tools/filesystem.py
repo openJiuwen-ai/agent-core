@@ -148,10 +148,17 @@ class ReadFileTool(Tool):
     FILE_UNCHANGED_STUB: str = "File unchanged since last read. Reuse the previously returned content."
     _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
 
-    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
+    def __init__(
+        self,
+        operation: SysOperation,
+        language: str = "cn",
+        agent_id: Optional[str] = None,
+        enable_image_multimodal: bool = True,
+    ):
         super().__init__(build_tool_card("read_file", "ReadFileTool", language, agent_id=agent_id))
         self.operation = operation
         self._snapshots: Dict[Tuple[str, int, int, str], _ReadSnapshot] = {}
+        self.enable_image_multimodal = enable_image_multimodal
 
     # ------------------------------------------------------------------
     # File-type predicates
@@ -459,9 +466,12 @@ class ReadFileTool(Tool):
         except Exception:
             return None
 
-    async def _read_image(self, file_path: str, model_name: str) -> str:
+    async def _read_image(self, file_path: str, model_name: str) -> Dict[str, Any]:
         if model_name and not self._is_pdf_supported(model_name):
-            return "Current model does not support vision image payload."
+            return {
+                "content": "Current model does not support vision image payload.",
+                "multimodal": [],
+            }
 
         res = await self.operation.fs().read_file(file_path, mode="bytes")
         if res.code != StatusCode.SUCCESS.code:
@@ -474,6 +484,7 @@ class ReadFileTool(Tool):
 
         _, ext = os.path.splitext(file_path.lower())
         image_type = ext.lstrip(".") or "png"
+        dimensions: Optional[str] = None
 
         # Step 1: standard resize (thumbnail to 1536×1536).
         resized = raw
@@ -482,6 +493,7 @@ class ReadFileTool(Tool):
             with Image.open(io.BytesIO(raw)) as img:
                 detected_format = (img.format or "PNG").lower()
                 image_type = detected_format  # prefer format detected from buffer
+                dimensions = f"{img.width}x{img.height}"
                 img.thumbnail((1536, 1536))
                 out = io.BytesIO()
                 img.save(out, format=detected_format.upper())
@@ -507,8 +519,43 @@ class ReadFileTool(Tool):
                     resized = fallback
                     image_type = "jpeg"
 
+        mime_type = f"image/{image_type}"
+        parts = [
+            f"Image file read: {file_path}",
+            f"format: {image_type}",
+            f"size_bytes: {len(raw)}",
+            f"transmitted_size_bytes: {len(resized)}",
+        ]
+        if dimensions:
+            parts.append(f"dimensions: {dimensions}")
+
+        if not self.enable_image_multimodal:
+            parts.append(
+                "Image bytes are not attached because read_file native image multimodal input is disabled."
+            )
+            parts.append(
+                "If a vision tool is configured, call image_ocr or visual_question_answering with this file path."
+            )
+            return {
+                "content": "\n".join(parts),
+                "multimodal": [],
+            }
+
         encoded = base64.b64encode(resized).decode("ascii")
-        return f"data:image/{image_type};base64,{encoded}"
+        data_url = f"data:{mime_type};base64,{encoded}"
+        parts.append("Image bytes are attached as multimodal input and omitted from this tool result.")
+        return {
+            "content": "\n".join(parts),
+            "multimodal": [
+                {
+                    "type": "image",
+                    "source": "read_file",
+                    "source_path": file_path,
+                    "mime_type": mime_type,
+                    "data_url": data_url,
+                }
+            ],
+        }
 
     # ------------------------------------------------------------------
     # invoke / stream
@@ -624,7 +671,14 @@ class ReadFileTool(Tool):
         except Exception as exc:
             return ToolOutput(success=False, error=str(exc))
 
-        line_count = len(rendered.splitlines()) if rendered else 0
+        if isinstance(rendered, dict):
+            content = str(rendered.get("content", ""))
+            result_data = dict(rendered)
+        else:
+            content = rendered
+            result_data = {"content": content}
+
+        line_count = len(content.splitlines()) if content else 0
         if mtime_ns:
             self._snapshots[key] = _ReadSnapshot(mtime_ns=mtime_ns, line_count=line_count)
 
@@ -640,7 +694,8 @@ class ReadFileTool(Tool):
         return ToolOutput(
             success=True,
             data={
-                "content": rendered,
+                **result_data,
+                "content": content,
                 "file_path": file_path,
                 "unchanged": False,
                 "line_count": line_count,

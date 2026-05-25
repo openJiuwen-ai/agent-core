@@ -889,11 +889,82 @@ class ReActAgent(BaseAgent):
 
         results = await self.ability_manager.execute(ctx=ctx, tool_call=tool_calls, session=session)
 
-        for _, tool_message in results:
+        for tool_result, tool_message in results:
             if tool_message is not None:
                 await context.add_messages(tool_message)
 
+        multimodal_message = self._build_multimodal_tool_results_message(
+            tool_result for tool_result, _ in results
+        )
+        if multimodal_message is not None:
+            await context.add_messages(multimodal_message)
+
         return results
+
+    @staticmethod
+    def _build_multimodal_tool_result_messages(tool_result: Any) -> List[UserMessage]:
+        message = ReActAgent._build_multimodal_tool_results_message([tool_result])
+        return [message] if message is not None else []
+
+    @staticmethod
+    def _build_multimodal_tool_results_message(tool_results: Any) -> Optional[UserMessage]:
+        content: List[dict[str, Any]] = []
+        loaded_paths: List[str] = []
+
+        for tool_result in tool_results:
+            for item in ReActAgent._iter_multimodal_image_items(tool_result):
+                source_path = str(item.get("source_path") or "unknown image")
+                data_url = item["data_url"]
+                loaded_paths.append(source_path)
+                content.append(
+                    {
+                        "type": "text",
+                        "text": f"Image loaded from read_file: {source_path}",
+                    }
+                )
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": data_url,
+                        },
+                    }
+                )
+
+        if not content:
+            return None
+
+        if len(loaded_paths) > 1:
+            summary_lines = [
+                "Images loaded by tool results:",
+                *[f"{index}. {path}" for index, path in enumerate(loaded_paths, start=1)],
+            ]
+            content.insert(0, {"type": "text", "text": "\n".join(summary_lines)})
+
+        return UserMessage(content=content)
+
+    @staticmethod
+    def _iter_multimodal_image_items(tool_result: Any) -> List[dict[str, Any]]:
+        data = getattr(tool_result, "data", None)
+        if not isinstance(data, dict):
+            return []
+
+        multimodal_items = data.get("multimodal")
+        if not isinstance(multimodal_items, list):
+            return []
+
+        image_items: List[dict[str, Any]] = []
+        for item in multimodal_items:
+            if not isinstance(item, dict) or item.get("type") != "image":
+                continue
+
+            data_url = item.get("data_url")
+            if not isinstance(data_url, str) or not data_url.startswith("data:image/"):
+                continue
+
+            image_items.append(item)
+
+        return image_items
 
     def _is_interrupted(self, tool_result: Any) -> bool:
         """Detect whether a tool result signals workflow interruption."""
