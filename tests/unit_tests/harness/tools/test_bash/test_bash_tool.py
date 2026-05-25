@@ -60,8 +60,7 @@ async def test_echo(sys_op) -> None:
     tool = BashTool(sys_op)
     res = await tool.invoke({"command": "echo hello"})
     assert res.success is True
-    assert "hello" in res.data["stdout"]
-    assert res.data["exit_code"] == 0
+    assert "hello" in res.data["content"]
     assert res.error is None
 
 
@@ -70,7 +69,7 @@ async def test_exit_1_is_error(sys_op) -> None:
     tool = BashTool(sys_op)
     res = await tool.invoke({"command": "echo fail && exit 1"})
     assert res.success is False
-    assert res.data["exit_code"] == 1
+    assert res.data["content"].startswith("Exit code")
 
 
 # ── semantic exit codes ───────────────────────────────────────
@@ -79,9 +78,9 @@ async def test_exit_1_is_error(sys_op) -> None:
 async def test_grep_no_match_is_not_error(sys_op) -> None:
     tool = BashTool(sys_op)
     res = await tool.invoke({"command": "echo hello | grep nonexistent_pattern_xyz"})
+    # grep exits 1 on no match: treated as success, empty merged output.
     assert res.success is True
-    assert res.data["exit_code"] == 1
-    assert res.data["return_code_interpretation"] == "No matches found"
+    assert res.data["content"] == ""
 
 
 @pytest.mark.asyncio
@@ -89,20 +88,19 @@ async def test_grep_match_success(sys_op) -> None:
     tool = BashTool(sys_op)
     res = await tool.invoke({"command": "echo hello | grep hello"})
     assert res.success is True
-    assert res.data["exit_code"] == 0
-    assert "hello" in res.data["stdout"]
+    assert "hello" in res.data["content"]
 
 
-# ── silent command detection ──────────────────────────────────
+# ── silent command produces empty content ─────────────────────
 
 @pytest.mark.asyncio
-async def test_silent_flag(sys_op) -> None:
+async def test_silent_command_empty_content(sys_op) -> None:
     tool = BashTool(sys_op)
     workspace = tempfile.mkdtemp()
     try:
         res = await tool.invoke({"command": f"mkdir -p {workspace}/sub"})
         assert res.success is True
-        assert res.data["no_output_expected"] is True
+        assert res.data["content"] == ""
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
 
@@ -112,10 +110,9 @@ async def test_silent_flag(sys_op) -> None:
 @pytest.mark.asyncio
 async def test_destructive_warning_present(sys_op) -> None:
     tool = BashTool(sys_op)
-    # git commit --amend on a non-git dir will fail, but the warning should still be in data
+    # git commit --amend triggers a destructive warning, now prepended to content.
     res = await tool.invoke({"command": "git commit --amend -m test"})
-    assert res.data["destructive_warning"] is not None
-    assert "rewrite" in res.data["destructive_warning"].lower()
+    assert "rewrite" in res.data["content"].lower()
 
 
 # ── injection blocked ────────────────────────────────────────
@@ -146,28 +143,6 @@ async def test_workdir_nonexistent_dir_fails(sys_op_sandboxed) -> None:
     res = await tool.invoke({"command": "echo hi", "workdir": missing})
     assert res.success is False
     assert res.error is not None
-
-
-# ── output truncation ─────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_smart_truncation(sys_op) -> None:
-    tool = BashTool(sys_op)
-    py = "python" if os.name == "nt" else "python3"
-    res = await tool.invoke({
-        "command": f'{py} -c "print(\'x\' * 500)"',
-        "max_output_chars": 250,
-    })
-    assert res.success is True
-    assert "lines omitted" in res.data["stdout"]
-
-
-@pytest.mark.asyncio
-async def test_no_truncation_within_limit(sys_op) -> None:
-    tool = BashTool(sys_op)
-    res = await tool.invoke({"command": "echo hello", "max_output_chars": 8000})
-    assert res.success is True
-    assert "omitted" not in res.data["stdout"]
 
 
 # ── background execution ─────────────────────────────────────
@@ -248,10 +223,9 @@ async def test_large_output_persisted(sys_op) -> None:
         "max_output_chars": 1000,
     })
     assert res.success is True
-    assert res.data["persisted_output_path"] is not None
-    assert res.data["persisted_output_size"] > 0
-    # verify the file exists and has content
-    assert os.path.isfile(res.data["persisted_output_path"])
+    # large output is persisted and surfaced as a <persisted-output> preview.
+    assert "<persisted-output>" in res.data["content"]
+    assert "Output too large" in res.data["content"]
 
 
 @pytest.mark.asyncio
@@ -259,8 +233,20 @@ async def test_small_output_not_persisted(sys_op) -> None:
     tool = BashTool(sys_op)
     res = await tool.invoke({"command": "echo hello"})
     assert res.success is True
-    assert res.data["persisted_output_path"] is None
-    assert res.data["persisted_output_size"] is None
+    assert "<persisted-output>" not in res.data["content"]
+    assert "hello" in res.data["content"]
+
+
+# ── timeout surfaces collected output ─────────────────────────
+
+@pytest.mark.asyncio
+async def test_timeout_returns_collected_output(sys_op) -> None:
+    tool = BashTool(sys_op)
+    # echo runs first, then sleep blows the 1s timeout: the kill must not drop
+    # the output already collected before it.
+    res = await tool.invoke({"command": "echo partial; sleep 5", "timeout": 1})
+    assert res.success is False
+    assert "partial" in res.data["content"]
 
 
 # ── empty command ─────────────────────────────────────────────

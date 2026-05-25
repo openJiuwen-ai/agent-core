@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -73,3 +74,146 @@ def persist_large_output(stdout: str, stderr: str) -> tuple[str, int]:
         path.write_bytes(content_bytes)
 
     return str(path), len(content_bytes)
+
+
+# ── model-facing result rendering ────────────────────────────
+#
+# Renders command output into the Anthropic tool_result shape (a single content
+# string + is_error). Standalone reimplementation -- intentionally independent
+# of the anyshell engine -- covering the two paths the shell tools actually
+# take: a semantic error and a normal (data) result.
+
+_PERSISTED_OUTPUT_TAG = "<persisted-output>"
+_PERSISTED_OUTPUT_CLOSING_TAG = "</persisted-output>"
+_PREVIEW_SIZE_BYTES = 2000
+_LEADING_BLANK_LINES = re.compile(r"^(\s*\n)+")
+
+
+def _format_file_size(size_in_bytes: float) -> str:
+    """Render a byte count as bytes / KB / MB / GB (trailing .0 stripped)."""
+    kb = size_in_bytes / 1024
+    if kb < 1:
+        return f"{size_in_bytes} bytes"
+    if kb < 1024:
+        text = f"{kb:.1f}"
+        return f"{text[:-2] if text.endswith('.0') else text}KB"
+    mb = kb / 1024
+    if mb < 1024:
+        text = f"{mb:.1f}"
+        return f"{text[:-2] if text.endswith('.0') else text}MB"
+    gb = mb / 1024
+    text = f"{gb:.1f}"
+    return f"{text[:-2] if text.endswith('.0') else text}GB"
+
+
+def _generate_preview(content: str, max_bytes: int) -> tuple[str, bool]:
+    """Return (preview, has_more), cutting on a line boundary when possible."""
+    if len(content) <= max_bytes:
+        return content, False
+    truncated = content[:max_bytes]
+    last_newline = truncated.rfind("\n")
+    cut = last_newline if last_newline > max_bytes * 0.5 else max_bytes
+    return content[:cut], True
+
+
+def _build_persisted_message(filepath: str, original_size: int, preview: str, has_more: bool) -> str:
+    """Wrap an oversized-output preview in a <persisted-output> block."""
+    msg = f"{_PERSISTED_OUTPUT_TAG}\n"
+    msg += f"Output too large ({_format_file_size(original_size)}). Full output saved to: {filepath}\n\n"
+    msg += f"Preview (first {_format_file_size(_PREVIEW_SIZE_BYTES)}):\n"
+    msg += preview
+    msg += "\n...\n" if has_more else "\n"
+    msg += _PERSISTED_OUTPUT_CLOSING_TAG
+    return msg
+
+
+def _prepend_warning(content: str, warning: str | None) -> str:
+    """Prepend a destructive-command warning to content, keeping it visible."""
+    if not warning:
+        return content
+    return f"{warning}\n{content}" if content else warning
+
+
+def _merge(first: str, second: str) -> str:
+    """Join two output streams with a newline, dropping empty ones."""
+    if not first:
+        return second
+    if not second:
+        return first
+    return f"{first}\n{second}"
+
+
+def render_tool_content(
+    stdout: str,
+    stderr: str,
+    exit_code: int,
+    is_error: bool,
+    warning: str | None,
+    max_output_chars: int,
+) -> tuple[str, bool]:
+    """Render command output into the model-facing (content, is_error) standard.
+
+    Mirrors the bash_v2 post-processing without depending on the anyshell engine:
+    stdout and stderr are merged (the error path surfaces the merged stream after
+    an ``Exit code N`` header), oversized output is persisted to disk and shown as
+    a ``<persisted-output>`` preview, and any destructive-command warning is
+    prepended so it stays visible to the model.
+
+    Args:
+        stdout: Captured standard output.
+        stderr: Captured standard error.
+        exit_code: Process exit code.
+        is_error: Whether the exit code is semantically an error, as decided by
+            the command-aware ``interpret_exit_code``.
+        warning: Destructive-command warning to prepend, or None.
+        max_output_chars: Persist-to-disk threshold; 0 disables persistence.
+
+    Returns:
+        The ``(content, is_error)`` pair for the Anthropic tool_result shape.
+    """
+    if is_error:
+        # Error path: stderr leads so the failure detail comes first.
+        merged = _merge(stderr, stdout)
+        parts = [f"Exit code {exit_code}", merged]
+        return _prepend_warning("\n".join(p for p in parts if p), warning), True
+
+    # Data path: stdout leads.
+    merged = _merge(stdout, stderr)
+    processed = _LEADING_BLANK_LINES.sub("", merged).rstrip() if merged else merged
+    if max_output_chars > 0 and len(merged) > max_output_chars:
+        path, size = persist_large_output(stdout, stderr)
+        preview, has_more = _generate_preview(processed, _PREVIEW_SIZE_BYTES)
+        processed = _build_persisted_message(path, size, preview, has_more)
+    return _prepend_warning(processed, warning), False
+
+
+def render_partial_on_failure(
+    failure_message: str,
+    stdout: str,
+    stderr: str,
+    exit_code: int,
+    warning: str | None,
+    max_output_chars: int,
+) -> str | None:
+    """Render output collected before a post-launch failure (e.g. a timeout).
+
+    The shell layer kills the process on timeout but still collects whatever was
+    written before the kill. This surfaces that output to the model with the
+    failure reason as a header, instead of dropping it.
+
+    Args:
+        failure_message: Why the command failed (e.g. the timeout message).
+        stdout: Output collected before the failure.
+        stderr: Error output collected before the failure.
+        exit_code: Process exit code (often a kill signal for timeouts).
+        warning: Destructive-command warning to prepend, or None.
+        max_output_chars: Persist-to-disk threshold; 0 disables persistence.
+
+    Returns:
+        The model-facing content string, or None when nothing was collected (the
+        caller should fall back to the bare failure message).
+    """
+    if not stdout and not stderr:
+        return None
+    content, _ = render_tool_content(stdout, stderr, exit_code, True, warning, max_output_chars)
+    return f"{failure_message}\n{content}" if content else failure_message

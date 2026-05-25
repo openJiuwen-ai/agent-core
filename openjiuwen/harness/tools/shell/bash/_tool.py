@@ -22,8 +22,8 @@ from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.shell.bash._output import (
-    persist_large_output,
-    truncate_output,
+    render_partial_on_failure,
+    render_tool_content,
 )
 from openjiuwen.harness.tools.shell.bash._permission import (
     check_permission,
@@ -34,10 +34,7 @@ from openjiuwen.harness.tools.shell.bash._security import (
     check_injection,
     get_destructive_warning,
 )
-from openjiuwen.harness.tools.shell.bash._semantics import (
-    interpret_exit_code,
-    is_silent,
-)
+from openjiuwen.harness.tools.shell.bash._semantics import interpret_exit_code
 from openjiuwen.core.session import get_current_session
 from openjiuwen.harness.tools.filesystem import (
     _detect_and_record_deletions,
@@ -205,6 +202,20 @@ class BashTool(Tool):
             p.command, cwd=resolved_cwd, timeout=p.timeout, shell_type=p.shell_type,
         )
         if res.code != StatusCode.SUCCESS.code:
+            # A post-launch failure (e.g. timeout) still carries output collected
+            # before the kill in res.data; surface it instead of dropping it.
+            partial = None
+            if res.data is not None:
+                partial = render_partial_on_failure(
+                    res.message,
+                    res.data.stdout or "",
+                    res.data.stderr or "",
+                    res.data.exit_code if res.data.exit_code is not None else -1,
+                    warning,
+                    p.max_output_chars,
+                )
+            if partial is not None:
+                return ToolOutput(success=False, data={"content": partial}, error=partial)
             return ToolOutput(success=False, error=res.message)
 
         exit_code = res.data.exit_code if res.data else -1
@@ -212,31 +223,18 @@ class BashTool(Tool):
         stderr = (res.data.stderr or "") if res.data else ""
 
         meaning = interpret_exit_code(p.command, exit_code, stdout, stderr)
-        silent = is_silent(p.command)
 
         # ── post-execution: cross-reference history for missed deletions ──
         if _history_path is not None and not meaning.is_error:
             await _detect_and_record_deletions(_history_path)
 
-        # persist large outputs to disk before truncation
-        persisted_path: str | None = None
-        persisted_size: int | None = None
-        if p.max_output_chars > 0 and len(stdout) + len(stderr) > p.max_output_chars:
-            persisted_path, persisted_size = persist_large_output(stdout, stderr)
-
+        content, is_error = render_tool_content(
+            stdout, stderr, exit_code, meaning.is_error, warning, p.max_output_chars,
+        )
         return ToolOutput(
-            success=not meaning.is_error,
-            data={
-                "stdout": truncate_output(stdout, p.max_output_chars),
-                "stderr": truncate_output(stderr, p.max_output_chars),
-                "exit_code": exit_code,
-                "return_code_interpretation": meaning.message,
-                "no_output_expected": silent,
-                "destructive_warning": warning,
-                "persisted_output_path": persisted_path,
-                "persisted_output_size": persisted_size,
-            },
-            error=truncate_output(stderr, p.max_output_chars) if meaning.is_error else None,
+            success=not is_error,
+            data={"content": content},
+            error=content if is_error else None,
         )
 
     # ── stream ────────────────────────────────────────────────
@@ -314,19 +312,18 @@ class BashTool(Tool):
         if _history_path is not None and not meaning.is_error:
             await _detect_and_record_deletions(_history_path)
 
-        silent = is_silent(p.command)
+        content, is_error = render_tool_content(
+            accumulated_stdout,
+            accumulated_stderr,
+            final_exit_code,
+            meaning.is_error,
+            warning,
+            p.max_output_chars,
+        )
         yield ToolOutput(
-            success=not meaning.is_error,
-            data={
-                "stdout": truncate_output(accumulated_stdout, p.max_output_chars),
-                "stderr": truncate_output(accumulated_stderr, p.max_output_chars),
-                "exit_code": final_exit_code,
-                "return_code_interpretation": meaning.message,
-                "no_output_expected": silent,
-                "destructive_warning": warning,
-                "elapsed_time_seconds": round(time.monotonic() - start, 2),
-            },
-            error=truncate_output(accumulated_stderr, p.max_output_chars) if meaning.is_error else None,
+            success=not is_error,
+            data={"content": content},
+            error=content if is_error else None,
         )
 
     def _guard(self, p: _BashInputs):

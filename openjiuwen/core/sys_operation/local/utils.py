@@ -125,12 +125,40 @@ class AsyncProcessHandler:
                 "AsyncProcessHandler: invoke() and stream() are mutually exclusive, only one can be executed once")
 
         self._is_executed = True
+        # Drain stdout/stderr continuously into buffers instead of communicate():
+        # communicate()'s internally buffered data is lost when its wait_for is
+        # cancelled (timeout or user cancel), so output written before the kill
+        # would vanish. Reading into our own buffers keeps it recoverable.
+        stdout_buf = bytearray()
+        stderr_buf = bytearray()
+
+        async def _drain(stream, buf: bytearray) -> None:
+            if stream is None:
+                return
+            while True:
+                chunk = await stream.read(65536)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+
+        readers = [
+            asyncio.create_task(_drain(self._process.stdout, stdout_buf)),
+            asyncio.create_task(_drain(self._process.stderr, stderr_buf)),
+        ]
+
+        def _decode(buf: bytearray) -> str:
+            return buf.decode(self._encoding, errors='replace')
+
+        async def _finish_readers(grace: float) -> None:
+            try:
+                await asyncio.wait_for(asyncio.gather(*readers, return_exceptions=True), timeout=grace)
+            except asyncio.TimeoutError:
+                for reader in readers:
+                    if not reader.done():
+                        reader.cancel()
+
         try:
-            stdout, stderr = await asyncio.wait_for(
-                self._process.communicate(),
-                timeout=self._overall_timeout
-            )
-            exit_code = self._process.returncode
+            await asyncio.wait_for(self._process.wait(), timeout=self._overall_timeout)
         except asyncio.CancelledError:
             sys_operation_logger.warning(
                 "Process cancelled by user, killing subprocess tree",
@@ -138,56 +166,30 @@ class AsyncProcessHandler:
                 metadata={"pid": self._process.pid},
             )
             self._kill_process_tree()
-            try:
-                await asyncio.wait_for(self._process.communicate(), timeout=5)
-            except Exception as ex:
-                sys_operation_logger.warning(
-                    "Failed to drain subprocess after cancellation",
-                    event_type=LogEventType.SYS_OP_ERROR,
-                    exception=ex,
-                    metadata={"pid": self._process.pid},
-                )
+            await _finish_readers(5)
             raise
         except asyncio.TimeoutError as ori_ex:
-            error_msg = f"Process communicate timed out after {self._overall_timeout} seconds" \
-                if not str(ori_ex) else None
             sys_operation_logger.error("Get process result time out",
                                        event_type=LogEventType.SYS_OP_ERROR,
-                                       error_message=error_msg,
+                                       error_message=f"Process timed out after {self._overall_timeout} seconds",
                                        exception=ori_ex,
                                        metadata={"timeout": self._overall_timeout})
-            try:
-                self._kill_process_tree()
-                timeout_stdout, timeout_stderr = await asyncio.wait_for(
-                    self._process.communicate(),
-                    timeout=30
-                )
-                return InvokeData(
-                    stdout=timeout_stdout.decode(self._encoding, errors='replace') if timeout_stdout else "",
-                    stderr=timeout_stderr.decode(self._encoding, errors='replace') if timeout_stderr else "",
-                    exit_code=self._process.returncode if self._process.returncode is not None else -1,
-                    exception=ori_ex
-                )
-            except Exception as ex:
-                sys_operation_logger.error("Kill process error",
-                                           event_type=LogEventType.SYS_OP_ERROR,
-                                           exception=ex,
-                                           metadata={"timeout": 30})
-                return InvokeData(
-                    stdout="",
-                    stderr="kill process failed, error: " + str(ex),
-                    exit_code=self._process.returncode if self._process.returncode is not None else -1,
-                    exception=ori_ex
-                )
+            self._kill_process_tree()
+            # Killing closes the pipes; collect whatever was written before the kill.
+            await _finish_readers(30)
+            return InvokeData(
+                stdout=_decode(stdout_buf),
+                stderr=_decode(stderr_buf),
+                exit_code=self._process.returncode if self._process.returncode is not None else -1,
+                exception=ori_ex
+            )
 
-        # Decode output
-        stdout_text = stdout.decode(self._encoding, errors='replace') if stdout else ""
-        stderr_text = stderr.decode(self._encoding, errors='replace') if stderr else ""
-        # Defensive handling to ensure non-None exit code
-        final_exit_code = exit_code if exit_code is not None else -1
+        # Normal completion: ensure both drainers have read through to EOF.
+        await asyncio.gather(*readers, return_exceptions=True)
+        final_exit_code = self._process.returncode if self._process.returncode is not None else -1
         return InvokeData(
-            stdout=stdout_text,
-            stderr=stderr_text,
+            stdout=_decode(stdout_buf),
+            stderr=_decode(stderr_buf),
             exit_code=final_exit_code
         )
 
