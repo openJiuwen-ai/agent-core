@@ -79,13 +79,16 @@ class MessageHandler(BaseCoordinationHandler):
     async def on_member_shutdown_drain(self, event: EventMessage) -> None:
         """Drain own mailbox when this teammate is the one shutting down.
 
-        Leader does not drain on shutdown events — it observes other
-        members' shutdowns at the lifecycle level. Only the teammate
+        Teammate-only: the leader observes other members' shutdowns at
+        the lifecycle level, and a human agent has no autonomous round —
+        draining its mailbox would ``deliver_input`` and resurrect a
+        round just as the avatar is collapsing (its own teardown rides
+        ``MemberHandler`` → ``shutdown_self`` instead). Only the teammate
         whose own ``member_name`` matches the event's payload drains.
         Steer mode ensures the messages land even if the agent is in
         the middle of a round.
         """
-        if self._blueprint.role == TeamRole.LEADER:
+        if self._blueprint.role != TeamRole.TEAMMATE:
             return
         member_name = self._blueprint.member_name
         if not member_name or self._infra.message_manager is None:

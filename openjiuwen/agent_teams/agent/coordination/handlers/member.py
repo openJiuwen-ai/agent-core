@@ -81,12 +81,14 @@ class MemberHandler(BaseCoordinationHandler):
             await self._handle_teammate_member_event(event)
 
     async def _handle_teammate_member_event(self, event: CoordinationEvent) -> None:
-        """Handle member events as a teammate — only react to events targeting self.
+        """Handle member events as a non-leader — only react to events targeting self.
 
-        ``MEMBER_SHUTDOWN`` is intentionally not handled here — the
-        mailbox drain is owned by ``MessageHandler.on_member_shutdown_drain``
-        (also registered on this event_key, fanned out by the
-        framework after this callback runs).
+        Teammate ``MEMBER_SHUTDOWN`` teardown is intentionally not handled
+        here: a teammate consumes its shutdown message through the mailbox
+        drain (``MessageHandler.on_member_shutdown_drain``, registered on
+        the same event_key) and a final round, then closes its stream at
+        round-end. A human agent has no such autonomous round, so its own
+        ``MEMBER_SHUTDOWN`` routes to :meth:`_shutdown_human_agent`.
         """
         member_name = self._blueprint.member_name
         target_id = event.get_payload().member_name
@@ -94,6 +96,30 @@ class MemberHandler(BaseCoordinationHandler):
             return
         if event.event_type == TeamEvent.MEMBER_CANCELED:
             await self._round.cancel_agent()
+        elif event.event_type == TeamEvent.MEMBER_SHUTDOWN and self._blueprint.role == TeamRole.HUMAN_AGENT:
+            await self._shutdown_human_agent(event)
+
+    async def _shutdown_human_agent(self, event: CoordinationEvent) -> None:
+        """Tear a human-agent avatar down on its own shutdown event.
+
+        A human agent has no autonomous round, so it cannot ride the
+        teammate teardown path (mailbox drain -> final round -> round-end
+        ``close_stream``). Two cases:
+
+        * A controller-driven round is in flight and the shutdown is not
+          forced: leave it alone. ``shutdown_member`` writes
+          ``SHUTDOWN_REQUESTED`` before publishing this event, so
+          ``_run_one_round``'s round-end check closes the stream once that
+          round finishes naturally -- the same path teammates ride. This
+          honors "do not interrupt the controller's current turn".
+        * Idle (no round to ride) or ``force=True``: collapse the avatar
+          directly via ``shutdown_self`` -- idle leaves nothing to
+          interrupt (``cooperative_cancel`` is a no-op), and force is a
+          deliberate immediate teardown.
+        """
+        force = getattr(event.get_payload(), "force", False)
+        if force or not self._round.has_in_flight_round():
+            await self._lifecycle.shutdown_self()
 
     async def _handle_leader_member_event(self, event: CoordinationEvent) -> None:
         """Handle member events as the leader — observe other members' lifecycle."""

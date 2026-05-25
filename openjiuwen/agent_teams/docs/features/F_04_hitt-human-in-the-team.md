@@ -134,7 +134,7 @@ await Runner.register_human_agent_inbound(
 
 - 与 Teammate 完全对齐：`UNSTARTED → BUSY/READY` 流转、支持 `shutdown_member` / `restart`、参与 session checkpoint。
 - 不需要 `prompt` / `initial_message`：avatar 起进程后 idle，只在 inbox 入站时才被驱动。
-- 协调 dispatcher 对 `HUMAN_AGENT` role **静音**所有自动触发 LLM 的事件：`POLL_TASK` / `POLL_MAILBOX` / `TASK_CLAIMED`（针对自己）/ stale-claim 自纠等，仅保留 `CLEANED`（收尾）和 `MEMBER_CANCELED`（取消）。
+- 协调 dispatcher 对 `HUMAN_AGENT` role **静音**所有自动触发 LLM 的事件：`POLL_TASK` / `POLL_MAILBOX` / `TASK_CLAIMED`（针对自己）/ stale-claim 自纠等，仅放行 `CLEANED`（团队收尾）/ `MEMBER_SHUTDOWN`（自身收尾）/ `MEMBER_CANCELED`（取消）/ `STANDBY`（暂停 poll timer）。`MEMBER_SHUTDOWN` 的收摊不打断控制者当前回合：有 in-flight round 且非 force 时不动它，靠那一轮 round-end 自检 close_stream；只有空闲或 force 才直接 `shutdown_self`。最新白名单与收摊策略以 `S_03_coordination-protocol.md` 机制 10 为准。
 
 ### 唯一解析点
 

@@ -237,14 +237,18 @@ class EventDispatcher:
         # (via HumanAgentInbox) drives their LLM. All other team-side
         # events (incoming messages, task assignments, stale-claim
         # nudges) must NOT autonomously poke the LLM. The whitelist:
-        # CLEANED tears the agent down with the team; MEMBER_CANCELED
-        # routes to cancel_agent (no autonomous nudge); STANDBY pauses
-        # the periodic poll timers so a paused leader does not leave
-        # human-agent avatars polling forever. Everything else stays
-        # muted.
+        # CLEANED tears the agent down with the team; MEMBER_SHUTDOWN
+        # tears the avatar down on its own shutdown request (a human
+        # agent has no autonomous round to consume the shutdown message
+        # the way a teammate does, so it must collapse directly);
+        # MEMBER_CANCELED routes to cancel_agent (no autonomous nudge);
+        # STANDBY pauses the periodic poll timers so a paused leader does
+        # not leave human-agent avatars polling forever. Everything else
+        # stays muted.
         if role == TeamRole.HUMAN_AGENT:
             if event.event_type not in (
                 TeamEvent.CLEANED,
+                TeamEvent.MEMBER_SHUTDOWN,
                 TeamEvent.MEMBER_CANCELED,
                 TeamEvent.STANDBY,
             ):
