@@ -8,11 +8,12 @@ import fnmatch
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 import threading
 from pathlib import Path, PurePosixPath
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Callable, ClassVar, Dict, List, Optional, Sequence, Tuple, TypeVar
 
 import httpx
 
@@ -210,6 +211,36 @@ def _raise_for_status(response: httpx.Response) -> None:
     raise httpx.HTTPStatusError(message, request=response.request, response=response)
 
 
+# jiuwenbox server 端 ``SandboxNotFoundError`` 的 ``error`` 字段恒为
+# ``"Sandbox '<id>' not found"``; 其他 404 (例如 ``File not found: <path>``)
+# 不应触发沙箱重建。 用前缀 + ``not found`` 双匹配, 大小写不敏感, 抗未来微调。
+_SANDBOX_NOT_FOUND_RE = re.compile(r"^\s*Sandbox\b.*\bnot found\b", re.IGNORECASE)
+
+
+def _is_sandbox_not_found_error(exc: BaseException) -> bool:
+    """``True`` 当且仅当 ``exc`` 是 jiuwenbox 服务端报「沙箱不存在」的 404.
+
+    与「文件不存在 / 目录不存在」等 404 严格区分; 后者会原样 reraise 而不
+    触发上层自动重建路径。
+    """
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    resp = exc.response
+    if resp is None or resp.status_code != 404:
+        return False
+    try:
+        payload = resp.json()
+    except ValueError:
+        text = resp.text or ""
+        return bool(_SANDBOX_NOT_FOUND_RE.match(text))
+    if isinstance(payload, dict):
+        for key in ("error", "detail", "message"):
+            value = payload.get(key)
+            if isinstance(value, str) and _SANDBOX_NOT_FOUND_RE.match(value):
+                return True
+    return False
+
+
 class _JiuwenBoxClient:
     def __init__(self, base_url: str, timeout_seconds: float = 30.0) -> None:
         self._client = httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout_seconds)
@@ -229,6 +260,40 @@ class _JiuwenBoxClient:
         response = self._client.post("/api/v1/sandboxes", json=body)
         _raise_for_status(response)
         return response.json()["id"]
+
+    def set_idle_timeout(
+        self,
+        *,
+        idle_timeout: Optional[int] = None,
+        idle_check_interval: Optional[int] = None,
+    ) -> None:
+        """``PUT /api/v1/timeout`` —— 配置 jiuwenbox server 的 idle reaper 策略.
+
+        jiuwenbox 的空闲沙箱回收由 ``SandboxManager.policy.timeout`` (root policy)
+        驱动, 而非 per-sandbox policy 的 ``timeout`` 子段 (后者仅供 ``GET
+        /policies/{id}`` 配置回显, 不影响 reaping 行为)。 因此要让客户端配置的
+        ``idle_ttl_seconds`` / ``idle_check_interval`` 真正生效, 必须显式调用
+        ``PUT /api/v1/timeout``。
+
+        本接口走 ``UpdateTimeoutRequest`` 的 partial update 语义:
+        ``model_dump(exclude_unset=True)`` 决定哪些字段实际生效 —— 只有 body
+        里出现的字段会被写回 server, 没传的字段保留之前的值。 因此:
+
+        - 两个参数都为 ``None`` 时直接 no-op (不发请求, 不破坏服务端默认值).
+        - 任一非 ``None`` 时只把非 ``None`` 的字段塞进 body; ``idle_check_
+          interval=None`` 不会被强制写成 null (server 端会拒绝 ``null``).
+        - ``idle_timeout=0`` / 负数透传给 server, 由 ``TimeoutPolicy`` 统一
+          归一化为 ``None`` (即"禁用 reaper")。
+        """
+        body: dict[str, Any] = {}
+        if idle_timeout is not None:
+            body["idle_timeout"] = idle_timeout
+        if idle_check_interval is not None:
+            body["idle_check_interval"] = idle_check_interval
+        if not body:
+            return
+        response = self._client.put("/api/v1/timeout", json=body)
+        _raise_for_status(response)
 
     def delete_sandbox(self, sandbox_id: str) -> None:
         """``DELETE /api/v1/sandboxes/{sandbox_id}``; 204 视为成功, 404 当作幂等成功。
@@ -365,7 +430,9 @@ class _JiuwenBoxClient:
                 include_dirs=True,
             )
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
+            # 「沙箱不存在」的 404 必须重新抛出, 让上层 retry 包装感知;
+            # 仅「文件 / 目录不存在」的 404 才视为 "path 不存在", 返回 False。
+            if exc.response.status_code == 404 and not _is_sandbox_not_found_error(exc):
                 return False
             raise
         return any(item.get("path") == sandbox_path for item in items)
@@ -381,7 +448,7 @@ class _JiuwenBoxClient:
         try:
             self._client.close()
         except Exception:  # noqa: BLE001
-            pass
+            logger.warning("[jiuwenbox] close client failed")
 
     def __enter__(self) -> "_JiuwenBoxClient":
         return self
@@ -390,9 +457,53 @@ class _JiuwenBoxClient:
         self.close()
 
 
+# ─── 沙箱丢失自动重建参数 ─────────────────────────────────────────────────
+# 远端 jiuwenbox 重启 / 沙箱被回收时, 所有 fs / shell / code op 会收到
+# 「Sandbox '<id>' not found」404; 包装层 ``_execute_with_sandbox_retry``
+# 会自动 force_recreate + 重试。 重试次数与退避间隔在这里集中常量化:
+# - ``JIUWENBOX_SANDBOX_RECREATE_RETRIES`` 环境变量覆盖默认值; 非法 / 缺失
+#   回落 ``_DEFAULT_SANDBOX_RECREATE_RETRIES``; 显式 0 = 禁用重试。
+# - 退避间隔目前固定 1.0 秒, 本期不对外暴露。
+_DEFAULT_SANDBOX_RECREATE_RETRIES = 3
+_SANDBOX_RECREATE_RETRY_SLEEP_SECONDS = 1.0
+
+
+def _resolve_recreate_retries() -> int:
+    """读 ``JIUWENBOX_SANDBOX_RECREATE_RETRIES``; 非法 / 缺失回落默认, ``0`` 禁用重试."""
+    raw = os.environ.get("JIUWENBOX_SANDBOX_RECREATE_RETRIES")
+    if raw is None or raw.strip() == "":
+        return _DEFAULT_SANDBOX_RECREATE_RETRIES
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "[jiuwenbox] JIUWENBOX_SANDBOX_RECREATE_RETRIES=%r 非法, 回落默认 %d",
+            raw, _DEFAULT_SANDBOX_RECREATE_RETRIES,
+        )
+        return _DEFAULT_SANDBOX_RECREATE_RETRIES
+    return max(value, 0)
+
+
+_T = TypeVar("_T")
+
+
 class _JiuwenBoxProviderMixin:
     _shared_lock = threading.Lock()
     _shared_sandbox_ids: Dict[str, str] = {}
+    # 类级 asyncio.Lock, 串行化沙箱重建; 防止 N 个 op 同时撞 "Sandbox not found"
+    # 时各自发起一次 ``create_sandbox``。 ``asyncio.Lock`` 需绑定 event loop,
+    # 所以走 lazy init; 初始化本身用 ``_recreate_lock_init`` (threading.Lock)
+    # 保护以兼容多线程首次访问的竞争。
+    _recreate_lock: ClassVar[Optional[asyncio.Lock]] = None
+    _recreate_lock_init: ClassVar[threading.Lock] = threading.Lock()
+
+    # ``_configure_server_idle_timeout`` 里用来跨实例去重 ``PUT /api/v1/timeout``
+    # 的进程内缓存: 同一个 ``base_url`` 上一次成功 PUT 过的 (idle_timeout,
+    # idle_check_interval) 二元组。 后续 PUT 撞同样的值时跳过, 避免给
+    # jiuwenbox server 带来 stop+start reaper 的额外延迟 (服务端虽然已经做了
+    # 短路, 客户端再省一次 HTTP RTT 仍然划算)。
+    _idle_timeout_cache: ClassVar[Dict[str, Tuple[Optional[int], Optional[int]]]] = {}
+    _idle_timeout_cache_lock: ClassVar[threading.Lock] = threading.Lock()
 
     _client: Optional[_JiuwenBoxClient]
     _sandbox_id: Optional[str]
@@ -468,6 +579,88 @@ class _JiuwenBoxProviderMixin:
         value = extra_params.get("sandbox_id")
         return value if isinstance(value, str) and value else None
 
+    def _idle_timeout_from_launcher(self) -> Tuple[Optional[int], Optional[int]]:
+        """从 ``launcher_config`` 读取 ``idle_ttl_seconds`` / ``idle_check_interval``.
+
+        返回 ``(idle_timeout, idle_check_interval)`` 二元组; 缺失项为 ``None``。
+
+        - ``idle_ttl_seconds`` 是 ``SandboxLauncherConfig`` 的通用字段, 直接从
+          ``launcher_config`` 上读。
+        - ``idle_check_interval`` 是 jiuwenbox 私有的 reaper 轮询间隔, 故走
+          ``launcher_config.extra_params["idle_check_interval"]`` (由
+          ``create_sandbox_sysop_card`` 在显式给值时塞入), 避免给通用 schema
+          加 jiuwenbox-only 的字段。 缺失或非整数视为 ``None``。
+        """
+        launcher_config = (
+            getattr(self.config, "launcher_config", None)
+            if self.config is not None
+            else None
+        )
+        idle_timeout = getattr(launcher_config, "idle_ttl_seconds", None)
+        extra_params = self._launcher_extra_params()
+        raw_check = extra_params.get("idle_check_interval") if isinstance(extra_params, dict) else None
+        idle_check_interval: Optional[int]
+        if isinstance(raw_check, bool):
+            # bool 是 int 子类, 隐式落进 idle_check_interval 几乎肯定是配置误写;
+            # 显式拒掉而不是悄悄当 1 / 0 用。
+            idle_check_interval = None
+        elif isinstance(raw_check, int):
+            idle_check_interval = raw_check
+        elif isinstance(raw_check, float):
+            idle_check_interval = int(raw_check)
+        else:
+            idle_check_interval = None
+        return idle_timeout, idle_check_interval
+
+    def _configure_server_idle_timeout(self) -> None:
+        """``PUT /api/v1/timeout`` 把 ``launcher_config`` 上的空闲驱逐配置写回 jiuwenbox.
+
+        该接口影响的是 jiuwenbox 全局根 policy (``SandboxManager.policy.timeout``),
+        因此每次首创建沙箱前调用一次即可让本进程后续所有沙箱共享同一份空闲淘汰
+        策略。 两个值都为 ``None`` 时 no-op (不动 server 默认状态)。
+
+        去重: 用类级 ``_idle_timeout_cache`` 按 ``base_url`` 记录上一次成功写入
+        的二元组, 命中即跳过本次 PUT。 多个 provider 实例 (fs / shell / code)
+        同进程并存时, 只有第一次需要真发请求, 后续都走缓存; 服务端虽然也做了
+        幂等短路 (``update_timeout_policy`` 比对 ``new_timeout == self.policy.
+        timeout``), 但能省一次 HTTP RTT 总归更好。
+
+        失败仅记 warning 且不写缓存, 不抛 —— 主动空闲淘汰只是辅助 hygiene, 不应
+        让一次配置写失败把整个沙箱创建链路一起拖垮 (用户至少要能跑起来 sandbox);
+        失败不写缓存是为了下一次 ``_get_sandbox_id`` 还能再 retry 一遍。
+        """
+        idle_timeout, idle_check_interval = self._idle_timeout_from_launcher()
+        if idle_timeout is None and idle_check_interval is None:
+            return
+        base_url = _endpoint_value(self.endpoint, self.config, "base_url")
+        cache_key = str(base_url).rstrip("/") if base_url else ""
+        target = (idle_timeout, idle_check_interval)
+        with self._idle_timeout_cache_lock:
+            if self._idle_timeout_cache.get(cache_key) == target:
+                return
+        try:
+            self._get_client().set_idle_timeout(
+                idle_timeout=idle_timeout,
+                idle_check_interval=idle_check_interval,
+            )
+            logger.info(
+                "[jiuwenbox] PUT /api/v1/timeout: idle_timeout=%s "
+                "idle_check_interval=%s",
+                idle_timeout,
+                idle_check_interval,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[jiuwenbox] PUT /api/v1/timeout failed (idle_timeout=%s, "
+                "idle_check_interval=%s): %s",
+                idle_timeout,
+                idle_check_interval,
+                exc,
+            )
+            return
+        with self._idle_timeout_cache_lock:
+            self._idle_timeout_cache[cache_key] = target
+
     @classmethod
     def register_shared_sandbox_id(cls, shared_key: str, sandbox_id: str) -> None:
         """把 ``shared_key -> sandbox_id`` 写入跨实例共享缓存。
@@ -536,6 +729,11 @@ class _JiuwenBoxProviderMixin:
                 self._sandbox_id = self._shared_sandbox_ids.get(shared_key)
                 newly_created = False
                 if self._sandbox_id is None:
+                    # 先把 idle reaper 配置 (``idle_ttl_seconds`` /
+                    # ``idle_check_interval``) 写到 server 根 policy, 再建沙箱。
+                    # jiuwenbox 的 reaper 只看根 policy, per-sandbox policy
+                    # 的 timeout 字段不生效, 因此必须显式 ``PUT /timeout``。
+                    self._configure_server_idle_timeout()
                     self._sandbox_id = self._get_client().create_sandbox(
                         **self._sandbox_create_options_from_launcher_extra_params(),
                     )
@@ -555,6 +753,113 @@ class _JiuwenBoxProviderMixin:
                 self._shared_sandbox_ids[shared_key] = self._sandbox_id
                 self._launcher_extra_params(create=True)["sandbox_id"] = self._sandbox_id
         return self._sandbox_id
+
+    @classmethod
+    def _get_recreate_lock(cls) -> asyncio.Lock:
+        """Lazy-init 的类级 ``asyncio.Lock``; 用 threading.Lock 兜底首次访问竞争.
+
+        ``asyncio.Lock`` 必须在有 running event loop 时构造 (旧版 Python 行为);
+        而首次访问可能并发于多个线程 (fs / shell / code provider 同进程内被不同
+        协程调度), 因此用 ``_recreate_lock_init`` 作为 fast-double-checked
+        sentinel, 确保只 new 一个 ``asyncio.Lock``。
+        """
+        if cls._recreate_lock is None:
+            with cls._recreate_lock_init:
+                if cls._recreate_lock is None:
+                    cls._recreate_lock = asyncio.Lock()
+        return cls._recreate_lock
+
+    async def _execute_with_sandbox_retry(self, op: Callable[[str], _T]) -> _T:
+        """跑 ``op(sandbox_id)``; 若命中「沙箱不存在」404, 最多循环 N 次 (env 覆盖, 默认 3)
+        重建 + 重试, 每轮 ``sleep(1s)``。
+
+        循环语义:
+        - 总尝试次数 = ``1 (initial) + max_retries`` (initial 在 attempt=0 直接跑;
+          后续 attempt=1..N 每次先 ``sleep`` 再 ``_recreate_sandbox_after_loss``,
+          然后用新 id 再跑一次 ``op``)。
+        - 重建本身抛异常 (网络挂了 / server 还没起来) → 记 warning 后 continue
+          进入下一轮重试; 用尽 N 次仍 404 时, 抛出最后一次的 ``HTTPStatusError``。
+        - 非沙箱 404 (例如 ``File not found: /foo``) 立刻 reraise, 不进入重试分支。
+        - ``N=0`` 退化为「跑一次, 不重试」。
+        """
+        max_retries = _resolve_recreate_retries()
+        last_exc: Optional[httpx.HTTPStatusError] = None
+        stale_sandbox_id = self._get_sandbox_id()
+        for attempt in range(max_retries + 1):
+            if attempt == 0:
+                sandbox_id = stale_sandbox_id
+            else:
+                await asyncio.sleep(_SANDBOX_RECREATE_RETRY_SLEEP_SECONDS)
+                logger.info(
+                    "[jiuwenbox] sandbox-not-found 自动重建 attempt %d/%d (stale=%s)",
+                    attempt, max_retries, stale_sandbox_id,
+                )
+                try:
+                    sandbox_id = await self._recreate_sandbox_after_loss(
+                        stale_sandbox_id=stale_sandbox_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # 重建本身失败 (网络挂了 / server 还没起来): 记 warning, 进
+                    # 入下一轮; 不直接抛, 因为下一轮 sleep 后服务可能已恢复。
+                    logger.warning(
+                        "[jiuwenbox] 重建沙箱失败 (attempt %d/%d): %s",
+                        attempt, max_retries, exc,
+                    )
+                    continue
+            try:
+                return await asyncio.to_thread(op, sandbox_id)
+            except httpx.HTTPStatusError as exc:
+                if not _is_sandbox_not_found_error(exc):
+                    raise
+                last_exc = exc
+                # 把当前刚拿到的 id 也作为 stale, 下一轮 force_recreate 时一起 DELETE
+                stale_sandbox_id = sandbox_id
+                logger.warning(
+                    "[jiuwenbox] sandbox %s 不存在 (attempt %d/%d)",
+                    sandbox_id, attempt, max_retries,
+                )
+        raise last_exc
+
+    async def _recreate_sandbox_after_loss(self, *, stale_sandbox_id: str) -> str:
+        """串行化重建沙箱, 并把新 id 写回 ``launcher.extra_params`` + ``self._sandbox_id``.
+
+        双检逻辑: 进锁后先看 ``launcher.extra_params["sandbox_id"]`` 与
+        ``_shared_sandbox_ids[shared_key]`` 是否已被其他协程更新到非 stale id;
+        若已更新, 直接复用, 避免重复 ``create_sandbox`` HTTP 调用。
+        """
+        base_url = _endpoint_value(self.endpoint, self.config, "base_url")
+        if not base_url:
+            raise ValueError("jiuwenbox provider requires endpoint.base_url")
+        create_options = self._sandbox_create_options_from_launcher_extra_params()
+        extra_params = self._launcher_extra_params()
+        preserve_files_upload = (
+            extra_params.get("preserve_files_upload") if isinstance(extra_params, dict) else None
+        )
+
+        async with self._get_recreate_lock():
+            # 双检 1: launcher.extra_params 是不是已经被另一个协程更新过了
+            current = self._sandbox_id_from_launcher_extra_params()
+            shared_key = self._shared_scope_key()
+            # 双检 2: shared cache 是不是已经有新 id 了
+            with self._shared_lock:
+                cached = self._shared_sandbox_ids.get(shared_key)
+            for candidate in (current, cached):
+                if candidate and candidate != stale_sandbox_id:
+                    self._sandbox_id = candidate
+                    return candidate
+
+            new_id = await force_recreate_jiuwenbox_sandbox(
+                base_url,
+                **create_options,
+                timeout_seconds=float(self._timeout_seconds),
+                preserve_files_upload=preserve_files_upload,
+                extra_stale_sandbox_ids=[stale_sandbox_id],
+            )
+            # force_recreate 内部已 ``register_shared_sandbox_id`` + 删旧, 这里
+            # 只需同步本实例的 ``_sandbox_id`` 与 launcher.extra_params。
+            self._sandbox_id = new_id
+            self._launcher_extra_params(create=True)["sandbox_id"] = new_id
+            return new_id
 
 
 def clear_jiuwenbox_shared_sandbox(base_url: str) -> list[str]:
@@ -723,8 +1028,8 @@ def _upload_preserve_files_best_effort(
                 _upload_preserve_files(client, sandbox_id, upload_entries)
             )
             return -1
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:
+            logger.warning("[jiuwenbox] preserve_files upload failed")
     return _upload_preserve_files_sync(client, sandbox_id, upload_entries)
 
 
@@ -735,6 +1040,7 @@ async def force_recreate_jiuwenbox_sandbox(
     policy_mode: str | None = None,
     timeout_seconds: float = 30.0,
     preserve_files_upload: Any = None,
+    extra_stale_sandbox_ids: Sequence[str] | None = None,
 ) -> str:
     """清除指定 ``base_url`` 的 sandbox_id 缓存, 并立即在远端创建新 sandbox 实例.
 
@@ -749,6 +1055,13 @@ async def force_recreate_jiuwenbox_sandbox(
         preserve_files_upload: ``copy`` 模式下需要在新 sandbox 中重新上传的固有
             文件/目录列表 (``[{host_path, sandbox_path, kind}, ...]``); ``mount``
             模式下传 ``None`` 或 ``[]``。
+        extra_stale_sandbox_ids: 额外需要 best-effort 删除的旧 sandbox_id 列表;
+            会和 ``clear_jiuwenbox_shared_sandbox(base_url)`` 的结果合并去重后
+            一起送进 delete-stale 循环。 retry 路径 (provider op 撞 "Sandbox
+            not found" 时) 拿到的 stale ``_sandbox_id`` 不一定还留在
+            ``_shared_sandbox_ids`` 里 (例如来自 ``launcher.extra_params``,
+            或 cache 早就被另一次 force_recreate 清空过); 通过这个参数显式
+            把它捎进来, 保证 server 端的活跃 sandbox 计数会被回收。
 
     Returns:
         新创建的 sandbox_id; 调用方应回写到 ``launcher_config.extra_params["sandbox_id"]``.
@@ -761,6 +1074,15 @@ async def force_recreate_jiuwenbox_sandbox(
     # (jiuwenbox 端**没有** idle-TTL 自动清理: ``sandbox_manager`` 里把
     # registry 视为 ephemeral across restarts, 只在进程重启时才丢弃描述符)。
     stale_sandbox_ids = clear_jiuwenbox_shared_sandbox(base_url)
+    # 合并调用方显式声明的额外 stale id (例如 retry 路径上从 op 抛出来的 404
+    # 对应的那个 sandbox_id), 按出现顺序去重——shared cache 里的优先, 调用方
+    # 的追加。 这样既保证 cache 那批一定走到, 又不重复 DELETE 同一个 ID。
+    if extra_stale_sandbox_ids:
+        seen = set(stale_sandbox_ids)
+        for extra in extra_stale_sandbox_ids:
+            if isinstance(extra, str) and extra and extra not in seen:
+                stale_sandbox_ids.append(extra)
+                seen.add(extra)
     with _JiuwenBoxClient(base_url=base_url, timeout_seconds=timeout_seconds) as client:
         sandbox_id = await asyncio.to_thread(
             client.create_sandbox, policy=policy, policy_mode=policy_mode,
@@ -892,15 +1214,11 @@ async def _run_local_subprocess(
 def _read_excluded_commands(extra: Any) -> list[str] | None:
     """从 ``launcher_config.extra_params`` 读出 exclude 列表.
 
-    优先读新键 ``excluded_commands``; 若不存在再读 legacy 键
-    ``shell_exclude_patterns``, 以保证 provider 升级前/后都能识别 agent-server
-    下发的字段。返回 None 表示没有配置 exclude 列表。
+    读取 ``excluded_commands`` 字段; 返回 ``None`` 表示没有配置该列表。
     """
     if not isinstance(extra, dict):
         return None
     raw = extra.get("excluded_commands")
-    if raw is None:
-        raw = extra.get("shell_exclude_patterns")
     if isinstance(raw, list):
         return raw
     return None
@@ -958,7 +1276,9 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
         if validation_error:
             return _build_fs_error_result("read_file", validation_error, ReadFileResult)
         try:
-            raw = await asyncio.to_thread(self._get_client().download_bytes, self._get_sandbox_id(), path)
+            raw = await self._execute_with_sandbox_retry(
+                lambda sid: self._get_client().download_bytes(sid, path)
+            )
             if mode == "bytes":
                 content: str | bytes = raw
             else:
@@ -988,9 +1308,13 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
                     text += "\n"
                 raw = text.encode("utf-8")
             if append:
-                await asyncio.to_thread(self._get_client().append_bytes, self._get_sandbox_id(), path, raw)
+                await self._execute_with_sandbox_retry(
+                    lambda sid: self._get_client().append_bytes(sid, path, raw)
+                )
             else:
-                await asyncio.to_thread(self._get_client().upload_bytes, self._get_sandbox_id(), path, raw)
+                await self._execute_with_sandbox_retry(
+                    lambda sid: self._get_client().upload_bytes(sid, path, raw)
+                )
             return WriteFileResult(
                 code=StatusCode.SUCCESS.code,
                 message=StatusCode.SUCCESS.errmsg,
@@ -1011,14 +1335,15 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
         **kwargs,
     ) -> ListFilesResult:
         try:
-            raw_items = await asyncio.to_thread(
-                self._get_client().list_files,
-                self._get_sandbox_id(),
-                path,
-                recursive=recursive,
-                max_depth=max_depth,
-                include_files=True,
-                include_dirs=False,
+            raw_items = await self._execute_with_sandbox_retry(
+                lambda sid: self._get_client().list_files(
+                    sid,
+                    path,
+                    recursive=recursive,
+                    max_depth=max_depth,
+                    include_files=True,
+                    include_dirs=False,
+                )
             )
             items = [_item_from_payload(item) for item in raw_items]
             if file_types:
@@ -1049,14 +1374,15 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
         **kwargs,
     ) -> ListDirsResult:
         try:
-            raw_items = await asyncio.to_thread(
-                self._get_client().list_files,
-                self._get_sandbox_id(),
-                path,
-                recursive=recursive,
-                max_depth=max_depth,
-                include_files=False,
-                include_dirs=True,
+            raw_items = await self._execute_with_sandbox_retry(
+                lambda sid: self._get_client().list_files(
+                    sid,
+                    path,
+                    recursive=recursive,
+                    max_depth=max_depth,
+                    include_files=False,
+                    include_dirs=True,
+                )
             )
             items = _sort_fs_items([_item_from_payload(item) for item in raw_items], sort_by, sort_descending)
             return ListDirsResult(
@@ -1173,15 +1499,15 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
     ) -> UploadFileResult:
         try:
             if not overwrite:
-                exists = await asyncio.to_thread(
-                    self._get_client().path_exists,
-                    self._get_sandbox_id(),
-                    target_path,
+                exists = await self._execute_with_sandbox_retry(
+                    lambda sid: self._get_client().path_exists(sid, target_path)
                 )
                 if exists:
                     raise FileExistsError(f"File already exists: {target_path}")
             raw = Path(local_path).read_bytes()
-            await asyncio.to_thread(self._get_client().upload_bytes, self._get_sandbox_id(), target_path, raw)
+            await self._execute_with_sandbox_retry(
+                lambda sid: self._get_client().upload_bytes(sid, target_path, raw)
+            )
             return UploadFileResult(
                 code=StatusCode.SUCCESS.code,
                 message=StatusCode.SUCCESS.errmsg,
@@ -1233,7 +1559,9 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
                 target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists() and not overwrite:
                 raise FileExistsError(f"File already exists: {local_path}")
-            raw = await asyncio.to_thread(self._get_client().download_bytes, self._get_sandbox_id(), source_path)
+            raw = await self._execute_with_sandbox_retry(
+                lambda sid: self._get_client().download_bytes(sid, source_path)
+            )
             target.write_bytes(raw)
             return DownloadFileResult(
                 code=StatusCode.SUCCESS.code,
@@ -1276,12 +1604,13 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
         exclude_patterns: Optional[List[str]] = None,
     ) -> SearchFilesResult:
         try:
-            raw_items = await asyncio.to_thread(
-                self._get_client().search_files,
-                self._get_sandbox_id(),
-                path,
-                pattern,
-                exclude_patterns,
+            raw_items = await self._execute_with_sandbox_retry(
+                lambda sid: self._get_client().search_files(
+                    sid,
+                    path,
+                    pattern,
+                    exclude_patterns,
+                )
             )
             items = _sort_fs_items([_item_from_payload(item) for item in raw_items], "name", False)
             return SearchFilesResult(
@@ -1337,13 +1666,14 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
             return self._wrap_shell_local_result(command, cwd, timeout, local_result)
 
         try:
-            result = await asyncio.to_thread(
-                self._get_client().exec,
-                self._get_sandbox_id(),
-                ["bash", "-lc", command],
-                cwd=workdir,
-                timeout=exec_timeout,
-                environment=environment,
+            result = await self._execute_with_sandbox_retry(
+                lambda sid: self._get_client().exec(
+                    sid,
+                    ["bash", "-lc", command],
+                    cwd=workdir,
+                    timeout=exec_timeout,
+                    environment=environment,
+                )
             )
             stdout = result.get("stdout") or ""
             stderr = result.get("stderr") or ""
@@ -1504,6 +1834,7 @@ class JiuwenBoxCodeProvider(_JiuwenBoxProviderMixin, BaseCodeProvider):
         language: str = "python",
         timeout: int = 300,
         environment: Optional[Dict[str, str]] = None,
+        cwd: Optional[str] = None,
         options: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> ExecuteCodeResult:
@@ -1540,13 +1871,14 @@ class JiuwenBoxCodeProvider(_JiuwenBoxProviderMixin, BaseCodeProvider):
             return self._wrap_code_local_result(code, language, timeout, local_result)
 
         try:
-            result = await asyncio.to_thread(
-                self._get_client().exec,
-                self._get_sandbox_id(),
-                command,
-                cwd="/tmp",
-                timeout=exec_timeout,
-                environment=merged_env,
+            result = await self._execute_with_sandbox_retry(
+                lambda sid: self._get_client().exec(
+                    sid,
+                    command,
+                    cwd="/tmp",
+                    timeout=exec_timeout,
+                    environment=merged_env,
+                )
             )
             result_data = ExecuteCodeData(
                 code_content=code,
@@ -1627,6 +1959,7 @@ class JiuwenBoxCodeProvider(_JiuwenBoxProviderMixin, BaseCodeProvider):
         language: str = "python",
         timeout: int = 300,
         environment: Optional[Dict[str, str]] = None,
+        cwd: Optional[str] = None,
         options: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> AsyncIterator[ExecuteCodeStreamResult]:

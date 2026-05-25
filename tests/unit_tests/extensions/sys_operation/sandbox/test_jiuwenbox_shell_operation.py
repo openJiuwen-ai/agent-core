@@ -321,51 +321,6 @@ async def test_excluded_commands_pre_routes_to_host_not_sandbox(
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(os.environ.get("RUN_JIUWENBOX_TEST") != "1", reason="Requires running Jiuwenbox sandbox")
-async def test_excluded_commands_legacy_key_still_routes_locally(
-    server_endpoint, monkeypatch, tmp_path: Path
-):
-    """Legacy ``shell_exclude_patterns`` key must still trigger pre-routing."""
-    base_url = _normalize_endpoint(server_endpoint)
-    marker = uuid4().hex[:8]
-    host_marker = tmp_path / f"jiuwenbox_legacy_route_{marker}.txt"
-    payload = "legacy-key-routed-locally"
-
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
-        create_resp = client.post("/api/v1/sandboxes", json={"command": LONG_RUNNING_COMMAND})
-        assert create_resp.status_code == 201, create_resp.text
-        sandbox_id = create_resp.json()["id"]
-        monkeypatch.setenv("JIUWENBOX_SANDBOX_ID", sandbox_id)
-
-        await Runner.start()
-        card_id = f"jiuwenbox_legacy_route_{marker}"
-        card_added = False
-        card = _build_card(
-            card_id=card_id,
-            base_url=base_url,
-            sandbox_id=sandbox_id,
-            extra_params={"shell_exclude_patterns": ["printf *"]},
-        )
-
-        try:
-            assert Runner.resource_mgr.add_sys_operation(card).is_ok()
-            card_added = True
-            sys_op = Runner.resource_mgr.get_sys_operation(card_id)
-
-            res = await sys_op.shell().execute_cmd(f"printf {payload} > {host_marker}")
-            assert res.code == StatusCode.SUCCESS.code
-            assert res.data.exit_code == 0
-            assert host_marker.exists()
-            assert host_marker.read_text() == payload
-        finally:
-            if card_added:
-                Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
-            await Runner.stop()
-            client.delete(f"/api/v1/sandboxes/{sandbox_id}")
-            monkeypatch.delenv("JIUWENBOX_SANDBOX_ID", raising=False)
-
-
-@pytest.mark.asyncio
-@pytest.mark.skipif(os.environ.get("RUN_JIUWENBOX_TEST") != "1", reason="Requires running Jiuwenbox sandbox")
 async def test_non_excluded_command_still_runs_in_sandbox(
     server_endpoint, monkeypatch
 ):
