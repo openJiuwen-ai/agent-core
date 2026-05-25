@@ -578,6 +578,7 @@ class AgentConfigurator:
             leader_allocation=self.leader_allocation if is_leader else None,
             enable_hitt=spec.enable_hitt,
             enable_bridge=spec.enable_bridge,
+            external_cli_agents=spec.external_cli_agents,
             on_team_cleaned=on_team_cleaned,
             on_team_built=on_team_built,
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,

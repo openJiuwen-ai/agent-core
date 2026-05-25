@@ -23,7 +23,7 @@ Tools never reach into `TeamDatabase` directly — they go through `TeamBackend`
 |---|---|---|---|
 | `build_team` | ✓ | | entry point — description carries the full workflow |
 | `clean_team` | ✓ (temporary only) | | requires every teammate shutdown first; not wired for `lifecycle="persistent"` (operator tears those down via SDK facades) |
-| `spawn_member` | ✓ | | takes optional `model_config_allocator` callback; `role_type ∈ {teammate (default), human_agent}`; `human_agent` rejects `model_name`/`prompt` and requires HITT to be engaged on the backend |
+| `spawn_member` | ✓ | | takes optional `model_config_allocator` callback; `role_type ∈ {teammate (default), human_agent, bridge_agent, external_cli}`; `human_agent` rejects `model_name`/`prompt` and requires HITT; `external_cli` requires `cli_agent` (a kind declared in `TeamAgentSpec.external_cli_agents`) + `desc`, dispatches to `spawn_external_cli_agent` |
 | `shutdown_member` | ✓ | | `force=True` skips the normal shutdown sequence |
 | `approve_plan` | ✓ (plan_mode only) | | wired only when `teammate_mode == "plan_mode"` |
 | `approve_tool` | ✓ (plan_mode only) | | same gating as `approve_plan` |

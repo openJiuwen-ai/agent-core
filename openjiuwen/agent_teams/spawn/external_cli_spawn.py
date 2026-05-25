@@ -59,7 +59,27 @@ async def external_cli_spawn(
         description=f"External CLI member: {ctx.persona}" if ctx.persona else "External CLI member",
     )
 
-    runtime = await build_cli_runtime(ctx)
+    # Resolve the static launch config declared on the spec for this CLI kind.
+    # The member was registered through ``spawn_external_cli_agent`` which
+    # already validated a matching entry exists; fall back to defaults if it
+    # is somehow absent so the launch still produces a usable runtime.
+    cli_cfg = None
+    for entry in spec.external_cli_agents:
+        if entry.cli_agent == ctx.cli_agent:
+            cli_cfg = entry
+            break
+
+    if cli_cfg is not None:
+        runtime = await build_cli_runtime(
+            ctx,
+            cwd=cli_cfg.cwd,
+            command_override=tuple(cli_cfg.command) if cli_cfg.command else None,
+            inject_mcp=cli_cfg.inject_mcp,
+            mcp_server_command=tuple(cli_cfg.mcp_server_command),
+            extra_env=cli_cfg.env or None,
+        )
+    else:
+        runtime = await build_cli_runtime(ctx)
 
     teammate = _TeamAgent(card)
     teammate.configure(spec, ctx, member_runtime=runtime)

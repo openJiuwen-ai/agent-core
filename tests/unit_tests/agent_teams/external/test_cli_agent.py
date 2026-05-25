@@ -66,6 +66,36 @@ def test_available_adapters_includes_known_clis():
     assert {"claude", "codex", "openclaw", "hermes", "generic"} <= names
 
 
+@pytest.mark.level0
+def test_claude_mcp_launch_args_use_mcp_config_flag():
+    adapter = build_adapter("claude")
+    args = adapter.mcp_launch_args(server_name="openjiuwen-team", server_command=("openjiuwen-team-mcp",))
+    assert args[0] == "--mcp-config"
+    import json
+
+    config = json.loads(args[1])
+    assert config["mcpServers"]["openjiuwen-team"]["command"] == "openjiuwen-team-mcp"
+    assert config["mcpServers"]["openjiuwen-team"]["args"] == []
+
+
+@pytest.mark.level0
+def test_codex_mcp_launch_args_use_config_override():
+    adapter = build_adapter("codex")
+    args = adapter.mcp_launch_args(server_name="openjiuwen-team", server_command=("openjiuwen-team-mcp", "--flag"))
+    assert args[0] == "-c"
+    # Hyphen in the server name is normalised to an underscore for the TOML key.
+    assert 'mcp_servers.openjiuwen_team.command="openjiuwen-team-mcp"' == args[1]
+    assert 'mcp_servers.openjiuwen_team.args=["--flag"]' == args[3]
+
+
+@pytest.mark.level1
+def test_one_shot_adapters_have_no_mcp_injection():
+    # openclaw / hermes register their MCP server out of band, not via launch args.
+    for name in ("openclaw", "hermes", "generic"):
+        adapter = build_adapter(name)
+        assert adapter.mcp_launch_args(server_name="t", server_command=("openjiuwen-team-mcp",)) == []
+
+
 # ---- runtime --------------------------------------------------------------
 
 

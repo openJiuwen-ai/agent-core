@@ -45,6 +45,7 @@ from openjiuwen.agent_teams.schema.status import (
 from openjiuwen.agent_teams.schema.team import (
     BridgeMailboxInjectMode,
     BridgeMemberSpec,
+    ExternalCliAgentSpec,
     MemberOpResult,
     TeamCompletionSnapshot,
     TeamMemberSpec,
@@ -89,6 +90,7 @@ class TeamBackend:
         enable_hitt: bool = False,
         enable_bridge: bool = False,
         *,
+        external_cli_agents: list[ExternalCliAgentSpec] | None = None,
         on_team_cleaned: Callable[[], Awaitable[None]] | None = None,
         on_team_built: Callable[[], Awaitable[None]] | None = None,
         plan_storage_dir: str | None = None,
@@ -127,6 +129,12 @@ class TeamBackend:
                 When False, ``spawn_bridge_agent`` returns failure and
                 predefined BRIDGE_AGENT members are skipped at
                 ``build_team`` time.
+            external_cli_agents: Static launch configs for external CLI
+                agents (``TeamAgentSpec.external_cli_agents``). The
+                non-empty set of declared ``cli_agent`` names is the
+                capability ceiling for external-CLI members:
+                ``spawn_external_cli_agent`` rejects any ``cli_agent`` not
+                declared here.
             on_team_cleaned: Optional async callback fired exactly once
                 on the ``clean_team`` SUCCESS path. NOT fired on the early
                 ``return False`` path (active members remain). The hosting
@@ -217,6 +225,14 @@ class TeamBackend:
         # In-memory (per-process), mirroring the bridge spec registry; a
         # cross-process cold recovery re-seeds from predefined declarations.
         self._external_cli_specs: dict[str, str] = {}
+        # Static per-CLI launch configs from the spec, keyed by cli_agent
+        # name. The non-empty key set is the capability ceiling: spawning an
+        # external-CLI member requires a matching config here. The spawn path
+        # reads the matched config (command / cwd / mcp injection / env) to
+        # launch the subprocess.
+        self._external_cli_configs: dict[str, ExternalCliAgentSpec] = {
+            c.cli_agent: c for c in (external_cli_agents or [])
+        }
         self.message_manager = TeamMessageManager(
             self.team_name,
             member_name,
@@ -1484,6 +1500,14 @@ class TeamBackend:
         """Return a snapshot of all registered external-CLI member names."""
         return frozenset(self._external_cli_specs)
 
+    def external_cli_config(self, cli_agent: str) -> Optional[ExternalCliAgentSpec]:
+        """Return the static launch config for a ``cli_agent`` kind, or None."""
+        return self._external_cli_configs.get(cli_agent)
+
+    def external_cli_kinds(self) -> frozenset[str]:
+        """Return the set of ``cli_agent`` kinds declared in the spec."""
+        return frozenset(self._external_cli_configs)
+
     async def spawn_external_cli_agent(
         self,
         *,
@@ -1521,6 +1545,15 @@ class TeamBackend:
 
         if not persona:
             return MemberOpResult.fail("spawn_external_cli_agent requires non-empty 'persona'")
+        # Capability ceiling: the CLI kind must be pre-declared in
+        # ``TeamAgentSpec.external_cli_agents`` (all launch knowledge is
+        # static there; the spawn call only names the kind).
+        if cli_agent not in self._external_cli_configs:
+            declared = ", ".join(sorted(self._external_cli_configs)) or "<none>"
+            return MemberOpResult.fail(
+                f"cli_agent '{cli_agent}' is not declared in TeamAgentSpec.external_cli_agents "
+                f"(declared: {declared}); add a static config entry for it first"
+            )
         if cli_agent not in available_adapters():
             return MemberOpResult.fail(f"Unknown cli_agent '{cli_agent}'; known: {', '.join(available_adapters())}")
 

@@ -66,6 +66,10 @@ async def build_cli_runtime(
     *,
     cwd: str | None = None,
     command_override: tuple[str, ...] | None = None,
+    inject_mcp: bool = True,
+    mcp_server_name: str = "openjiuwen-team",
+    mcp_server_command: tuple[str, ...] = ("openjiuwen-team-mcp",),
+    extra_env: dict[str, str] | None = None,
 ) -> ExternalCliRuntime | ReinvokeCliRuntime:
     """Build the member runtime for ``ctx.cli_agent``.
 
@@ -79,6 +83,16 @@ async def build_cli_runtime(
         ctx: Member runtime context; ``ctx.cli_agent`` names the adapter.
         cwd: Working directory for the subprocess(es).
         command_override: Optional full launch argv (e.g. an absolute path).
+        inject_mcp: When True (default), append the adapter's MCP-server
+            registration args so the CLI starts the team MCP server and gets
+            the team collaboration tools. Adapters without an injection
+            strategy ignore this. Only the streaming path injects; one-shot
+            CLIs register their MCP server out of band.
+        mcp_server_name: Logical name the CLI registers the MCP server under.
+        mcp_server_command: Launch argv for the team MCP stdio server.
+        extra_env: Extra environment merged over the inherited env + the
+            team-join descriptor (descriptor wins is not desired, so this is
+            applied last only for non-descriptor keys).
     """
     if not ctx.cli_agent:
         raise_error(
@@ -87,7 +101,9 @@ async def build_cli_runtime(
         )
     adapter: CliAgentAdapter = build_adapter(ctx.cli_agent, command_override=command_override)
     descriptor = descriptor_from_context(ctx)
-    env = {**os.environ, **descriptor.to_env()}
+    # The descriptor env is authoritative for team identity, so it is applied
+    # after ``extra_env`` — a misconfigured extra_env cannot shadow the join.
+    env = {**os.environ, **(extra_env or {}), **descriptor.to_env()}
 
     if not adapter.supports_stdin_injection:
         # One-shot CLI: no eager launch; the runtime spawns per turn.
@@ -98,7 +114,12 @@ async def build_cli_runtime(
             cwd=cwd,
         )
 
-    command = adapter.build_command()
+    mcp_args: tuple[str, ...] = ()
+    if inject_mcp:
+        mcp_args = tuple(
+            adapter.mcp_launch_args(server_name=mcp_server_name, server_command=mcp_server_command)
+        )
+    command = adapter.build_command(extra_args=mcp_args)
     team_logger.info("[external-cli] launching {} for member {}", command, ctx.member_name)
     process = await asyncio.create_subprocess_exec(
         *command,

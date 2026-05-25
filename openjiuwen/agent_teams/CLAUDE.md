@@ -210,7 +210,18 @@ messager，不经本地 avatar 代理。与 F_07 bridge（本地完整 DeepAgent
   MCP 工具，协同协议放进 server-level instructions（工具 schema 自描述，无需单独 skill）。
   这是仓库首个 MCP server（其余 MCP 代码都是 client）。
 
-设计文档见 `docs/features/F_21_external-agent-access.md`。
+**team 拉起外部 CLI 成员（F_22）**：CLI 启动知识静态预置在
+`TeamAgentSpec.external_cli_agents`（`ExternalCliAgentSpec` 列表：`cli_agent` 种类标识 +
+`command`/`cwd`/`inject_mcp`/`mcp_server_command`/`env`），非空集即外部 CLI 成员的能力上限。
+leader 用 `spawn_member(role_type='external_cli', cli_agent=<name>)` 按名引用，不在 spawn
+调用里传启动细节。spawn 路径（`external_cli_spawn` → `build_cli_runtime`）按 adapter 自动注入
+团队 MCP server——claude `--mcp-config <inline-json>`、codex `-c mcp_servers...`；MCP server
+是 CLI 子进程，继承 CLI 的 `OPENJIUWEN_TEAM_JOIN` env，自动绑定到对应成员身份。一次性 CLI
+（openclaw/hermes）的 MCP 走带外注册，`mcp_inject=none`。
+
+设计文档见 `docs/features/F_21_external-agent-access.md`（接入面 + spawn 接线）与
+`docs/features/F_22_external-cli-spawn-member-and-mcp-injection.md`（spawn_member 角色 +
+静态 spec 配置 + MCP 自动注入）。
 
 ### worktree — Git worktree 隔离
 

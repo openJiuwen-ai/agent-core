@@ -163,10 +163,12 @@ mid-turn steer（用户选定 stdin 传输，Unix 优先、接口预留 PTY/Wind
 - **predefined 外部 CLI 成员**：需解决 role_type=TEAMMATE 的判别union冲突（成员级字段
   而非 role 判别），用于跨进程冷恢复。
 - **leader 工具**：把 `spawn_external_cli_agent` 暴露为 LLM 可调工具是可选糖（当前为
-  SDK/operator 方法）。
+  SDK/operator 方法）。**已在 F_22 解决**：`spawn_member(role_type='external_cli',
+  cli_agent=...)`。
 - **MCP 配置注入**：`launch_external_cli` 已注入 `OPENJIUWEN_TEAM_JOIN` env（CLI 衍生的
   MCP server 进程继承之）；写各 CLI 专属的 `.mcp.json` 指向 `openjiuwen-team-mcp` 是
-  per-CLI best-effort，未做。
+  per-CLI best-effort，未做。**已在 F_22 解决**：claude `--mcp-config` / codex
+  `-c mcp_servers...` 由 spawn 路径按 adapter 自动注入（流式 CLI）。
 
 **其它遗留：**
 

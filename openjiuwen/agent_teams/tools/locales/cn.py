@@ -56,7 +56,18 @@ STRINGS: dict[str, str] = {
         "远程 agent 完成；本地 LLM 只做调度，原样转发远程结果。"
         "选用 'bridge_agent' 时 'desc' 字段必填（同时作为团队 persona 和远程的 system prompt 核心）；"
         "可选传入 mailbox_inject_mode / protocol / adapter_config / model_name。"
-        "选用 'bridge_agent' 需要 spec.enable_bridge=True 且当前 build_team 实例未禁用 Bridge"
+        "选用 'bridge_agent' 需要 spec.enable_bridge=True 且当前 build_team 实例未禁用 Bridge。"
+        "'external_cli' = 直接拉起第三方 CLI agent（claudecode / codex 等）作为队友，"
+        "其大脑是 CLI 子进程而非本地 LLM，通过自动注入的团队 MCP 工具收发消息与认领任务。"
+        "选用 'external_cli' 时 'cli_agent' 字段必填（指定 CLI 类型），'desc' 必填（成员 persona），"
+        "禁止传入 model_name/prompt（模型与配置都在 CLI 侧）。"
+        "'cli_agent' 取值必须是 spec.external_cli_agents 中预先声明过的 CLI 类型"
+    ),
+    "spawn_member.cli_agent": (
+        "仅 role_type='external_cli' 时使用。要拉起的第三方 CLI agent 类型标识，"
+        "如 'claude'（claudecode）或 'codex'。取值必须命中 spec.external_cli_agents 中"
+        "预先声明的某条静态配置——具体启动命令、工作目录、MCP 注入等都在那条配置里，"
+        "本字段只负责按名引用"
     ),
     "spawn_member.prompt": (
         "[私有，仅该成员自己可见] 成员的长期工作约定，注入该成员自己的 system prompt："

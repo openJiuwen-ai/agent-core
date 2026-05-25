@@ -181,6 +181,47 @@ class BridgeMemberSpec(TeamMemberSpec):
     """
 
 
+class ExternalCliAgentSpec(BaseModel):
+    """Static launch config for one kind of external CLI agent.
+
+    Pre-declared on ``TeamAgentSpec.external_cli_agents`` so the runtime
+    ``spawn_member(role_type='external_cli', cli_agent=...)`` call only needs
+    to name the CLI kind — all launch knowledge lives here, not in the spawn
+    call. One entry configures every member spawned under its ``cli_agent``
+    name (each member still gets its own subprocess and team-join identity).
+    """
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    cli_agent: str
+    """Adapter kind identifier (``"claude"`` / ``"codex"`` / ``"openclaw"`` /
+    ``"hermes"``). Selects the built-in adapter and is the value passed to
+    ``spawn_member(cli_agent=...)``. See ``agent_teams/external/cli_agent``."""
+
+    command: Optional[list[str]] = None
+    """Full launch argv overriding the adapter's built-in command (e.g. an
+    absolute binary path or extra flags). ``None`` uses the built-in command."""
+
+    cwd: Optional[str] = None
+    """Working directory for the CLI subprocess. ``None`` inherits the team
+    process cwd. Set to the team workspace so the CLI's native file writes
+    land in the shared workspace."""
+
+    inject_mcp: bool = True
+    """Whether the spawn path auto-registers the team MCP server with the CLI
+    so it gets the team collaboration tools (read_inbox / claim_task / ...).
+    Injection is CLI-specific (claude ``--mcp-config``, codex
+    ``-c mcp_servers...``); adapters without an injection strategy ignore it."""
+
+    mcp_server_command: list[str] = Field(default_factory=lambda: ["openjiuwen-team-mcp"])
+    """Launch argv for the team MCP stdio server registered with the CLI.
+    Defaults to the ``openjiuwen-team-mcp`` console-script entry."""
+
+    env: dict[str, str] = Field(default_factory=dict)
+    """Extra environment variables for the CLI subprocess, merged over the
+    inherited process env (the team-join descriptor is injected separately)."""
+
+
 class TeamSpec(BaseModel):
     """Definition of a team and its goal."""
 
@@ -251,6 +292,7 @@ class TeamRuntimeContext(BaseModel):
 __all__ = [
     "BridgeMailboxInjectMode",
     "BridgeMemberSpec",
+    "ExternalCliAgentSpec",
     "MemberOpResult",
     "TeamCompletionSnapshot",
     "TeamLifecycle",

@@ -310,9 +310,13 @@ class SpawnMemberTool(TeamTool):
                 "desc": {"type": "string", "description": t("spawn_member", "desc")},
                 "role_type": {
                     "type": "string",
-                    "enum": ["teammate", "human_agent", "bridge_agent"],
+                    "enum": ["teammate", "human_agent", "bridge_agent", "external_cli"],
                     "default": "teammate",
                     "description": t("spawn_member", "role_type"),
+                },
+                "cli_agent": {
+                    "type": "string",
+                    "description": t("spawn_member", "cli_agent"),
                 },
                 "prompt": {"type": "string", "description": t("spawn_member", "prompt")},
                 "model_name": {
@@ -359,14 +363,20 @@ class SpawnMemberTool(TeamTool):
                 ),
             )
 
-        if role_type not in {"teammate", "human_agent", "bridge_agent"}:
+        if role_type not in {"teammate", "human_agent", "bridge_agent", "external_cli"}:
             return ToolOutput(
                 success=False,
-                error=(f"Invalid role_type '{role_type}'; expected 'teammate', 'human_agent', or 'bridge_agent'"),
+                error=(
+                    f"Invalid role_type '{role_type}'; expected 'teammate', "
+                    "'human_agent', 'bridge_agent', or 'external_cli'"
+                ),
             )
 
         if role_type == "bridge_agent":
             return await self._spawn_bridge(inputs)
+
+        if role_type == "external_cli":
+            return await self._spawn_external_cli(inputs)
 
         if role_type == "human_agent":
             # Capability gate: fail fast to LLM before touching backend.
@@ -504,12 +514,63 @@ class SpawnMemberTool(TeamTool):
             error=None if result.ok else result.reason,
         )
 
+    async def _spawn_external_cli(self, inputs: Dict[str, Any]) -> ToolOutput:
+        """Dispatch path for ``role_type='external_cli'``.
+
+        Spawns a teammate whose brain is a third-party CLI subprocess
+        (claudecode / codex / ...) driven by an ``ExternalCliRuntime``. The
+        CLI kind is named by ``cli_agent`` and must match a static config
+        declared in ``TeamAgentSpec.external_cli_agents`` — all launch
+        knowledge (command, cwd, MCP injection, env) lives there, so this
+        call carries only the role type and the CLI identifier. ``desc`` is
+        the persona stored on the member row.
+        """
+        member_name = inputs.get("member_name")
+        display_name = inputs.get("display_name")
+        cli_agent = (inputs.get("cli_agent") or "").strip()
+        persona = inputs.get("desc") or inputs.get("prompt") or ""
+
+        if not cli_agent:
+            return ToolOutput(
+                success=False,
+                error=(
+                    "role_type='external_cli' requires 'cli_agent' naming a CLI "
+                    "kind declared in TeamAgentSpec.external_cli_agents "
+                    "(e.g. 'claude' or 'codex')"
+                ),
+            )
+        if not persona:
+            return ToolOutput(
+                success=False,
+                error="role_type='external_cli' requires a non-empty 'desc' (the member persona)",
+            )
+
+        result = await self.team.spawn_external_cli_agent(
+            member_name=member_name,
+            display_name=display_name,
+            cli_agent=cli_agent,
+            persona=persona,
+            desc=inputs.get("desc"),
+        )
+        return ToolOutput(
+            success=result.ok,
+            data={
+                "member_name": member_name,
+                "display_name": display_name,
+                "role_type": "external_cli",
+                "cli_agent": cli_agent,
+            },
+            error=None if result.ok else result.reason,
+        )
+
     def map_result(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Failed to spawn member"
         d = output.data
         role = d.get("role_type", "teammate")
-        return f"Member spawned: member_name={d['member_name']} display_name={d['display_name']} role={role}"
+        cli_agent = d.get("cli_agent")
+        suffix = f" cli_agent={cli_agent}" if cli_agent else ""
+        return f"Member spawned: member_name={d['member_name']} display_name={d['display_name']} role={role}{suffix}"
 
 
 class ShutdownMemberTool(TeamTool):

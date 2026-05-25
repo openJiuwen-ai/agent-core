@@ -77,7 +77,21 @@ STRINGS: dict[str, str] = {
         "persona and the remote's connect briefing) and optional "
         "mailbox_inject_mode / protocol / adapter_config / model_name. Requires "
         "spec.enable_bridge=True and the current build_team instance must not have "
-        "disabled Bridge"
+        "disabled Bridge. "
+        "'external_cli' = launch a third-party CLI agent (claudecode / codex / ...) "
+        "directly as a teammate; its brain is the CLI subprocess rather than a local "
+        "LLM, and it sends messages / claims tasks through the auto-injected team MCP "
+        "tools. Choosing 'external_cli' requires 'cli_agent' (the CLI kind) and "
+        "non-empty 'desc' (the member persona), and rejects model_name/prompt (the "
+        "model and config live on the CLI side). 'cli_agent' must name a CLI kind "
+        "pre-declared in spec.external_cli_agents"
+    ),
+    "spawn_member.cli_agent": (
+        "Only used when role_type='external_cli'. Identifier of the third-party CLI "
+        "agent kind to launch, e.g. 'claude' (claudecode) or 'codex'. Must match a "
+        "static config entry pre-declared in spec.external_cli_agents — the launch "
+        "command, working directory and MCP injection all live in that entry; this "
+        "field only references it by name"
     ),
     "spawn_member.prompt": (
         "[PRIVATE, visible only to this member] Long-term working conventions, "

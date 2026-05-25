@@ -38,6 +38,18 @@ INPUT_STREAM_JSON = INPUT_CLAUDE_STREAM_JSON
 # Codex proto: one JSONL "submission" per turn on stdin.
 INPUT_CODEX_PROTO = "codex_proto"
 
+# ---- MCP-server injection strategies ----
+# How to register a stdio MCP server with the CLI so the spawned agent gets
+# the team collaboration tools. The team-join descriptor is NOT embedded in
+# the MCP config: the MCP server is a child of the CLI process and inherits
+# its environment (which carries OPENJIUWEN_TEAM_JOIN), so each member's
+# server binds to that member's identity automatically.
+MCP_INJECT_NONE = "none"
+# Claude Code: pass an inline JSON config via ``--mcp-config <json>``.
+MCP_INJECT_CLAUDE_FLAG = "claude_flag"
+# Codex: set config keys via repeated ``-c mcp_servers.<name>.<key>=<value>``.
+MCP_INJECT_CODEX_OVERRIDE = "codex_override"
+
 # ---- turn-completion strategies ----
 COMPLETION_NONE = "none"
 # Claude Code stream-json: final event line is {"type": "result", ...}.
@@ -70,6 +82,9 @@ class CliAgentAdapter:
             ``--session-id``).
         continue_args: One-shot only. Args appended on turns *after* the first
             for cross-turn continuity (e.g. hermes ``("--continue",)``).
+        mcp_inject: How to register a stdio MCP server with this CLI (see
+            ``MCP_INJECT_*``). ``MCP_INJECT_NONE`` (default) means the spawn
+            path cannot auto-inject team tools for this CLI.
     """
 
     name: str
@@ -80,6 +95,7 @@ class CliAgentAdapter:
     prompt_flag: str | None = None
     session_flag: str | None = None
     continue_args: tuple[str, ...] = ()
+    mcp_inject: str = MCP_INJECT_NONE
 
     def build_command(self, extra_args: tuple[str, ...] = ()) -> list[str]:
         """Return the launch argv, optionally with extra args appended."""
@@ -131,6 +147,36 @@ class CliAgentAdapter:
             return bool(marker) and marker in line
         return False
 
+    def mcp_launch_args(self, *, server_name: str, server_command: tuple[str, ...]) -> list[str]:
+        """Build launch argv that registers a stdio MCP server with this CLI.
+
+        Returns the extra arguments to append to the launch command so the
+        CLI starts the named stdio MCP server (giving the agent the team
+        collaboration tools). Returns an empty list for CLIs without an
+        injection strategy (``MCP_INJECT_NONE``).
+
+        Args:
+            server_name: Logical MCP server name as the CLI should register it.
+            server_command: Launch argv for the MCP server (binary + args).
+        """
+        if not server_command:
+            return []
+        binary = server_command[0]
+        args = list(server_command[1:])
+        if self.mcp_inject == MCP_INJECT_CLAUDE_FLAG:
+            config = {"mcpServers": {server_name: {"command": binary, "args": args}}}
+            return ["--mcp-config", json.dumps(config)]
+        if self.mcp_inject == MCP_INJECT_CODEX_OVERRIDE:
+            # Codex parses ``-c key=value`` values as TOML/JSON, so quote the
+            # string and JSON-encode the args list. Dotted keys must use a
+            # bare-key-safe server name (no characters needing quoting).
+            key = server_name.replace("-", "_")
+            argv = ["-c", f"mcp_servers.{key}.command={json.dumps(binary)}"]
+            if args:
+                argv += ["-c", f"mcp_servers.{key}.args={json.dumps(args)}"]
+            return argv
+        return []
+
 
 def _json_field_equals(line: str, path: tuple[str, ...], expected: str) -> bool:
     """Return whether ``line`` is a JSON object with ``path`` == ``expected``."""
@@ -172,6 +218,7 @@ _BUILTIN: dict[str, CliAgentAdapter] = {
         ),
         input_format=INPUT_CLAUDE_STREAM_JSON,
         completion=COMPLETION_RESULT_JSON,
+        mcp_inject=MCP_INJECT_CLAUDE_FLAG,
     ),
     # Codex CLI — moderate confidence. `codex proto` runs the JSONL protocol
     # stream over stdin/stdout: stdin takes "submission" objects
@@ -191,6 +238,7 @@ _BUILTIN: dict[str, CliAgentAdapter] = {
         ),
         input_format=INPUT_CODEX_PROTO,
         completion=COMPLETION_CODEX_TASK_COMPLETE,
+        mcp_inject=MCP_INJECT_CODEX_OVERRIDE,
     ),
     # OpenClaw CLI — one-shot (re-invoke runtime). ClawTeam drives it as
     # `openclaw --local --session-id <id> --message "<msg>"`: prompt via the
@@ -279,4 +327,7 @@ __all__ = [
     "COMPLETION_NONE",
     "COMPLETION_RESULT_JSON",
     "COMPLETION_CODEX_TASK_COMPLETE",
+    "MCP_INJECT_NONE",
+    "MCP_INJECT_CLAUDE_FLAG",
+    "MCP_INJECT_CODEX_OVERRIDE",
 ]

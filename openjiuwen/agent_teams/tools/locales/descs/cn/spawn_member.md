@@ -23,6 +23,7 @@
 
 - **`teammate`（默认）**：常规 LLM 成员，必须给出 `desc` 与 `prompt`，可选 `model_name`。框架按 model 配置启动 DeepAgent。
 - **`human_agent`**：人类成员，由真人通过 HumanAgentInbox 驱动，**不接受** `model_name` 与 `prompt`（由框架内置模板托管），传入这两个字段会立刻报错。需要 `TeamAgentSpec.enable_hitt=True` 且当前 `build_team` 实例未禁用 HITT，否则被拒绝。`desc` / `display_name` 用作展示与持久化人设。
+- **`external_cli`**：第三方 CLI agent 成员（claudecode / codex 等），大脑是 CLI 子进程而非本地 LLM。必填 `cli_agent`（CLI 类型，如 `claude` / `codex`）与 `desc`（成员 persona），**不接受** `model_name` / `prompt`。`cli_agent` 必须命中 `TeamAgentSpec.external_cli_agents` 里预声明的某条静态配置（启动命令、工作目录、团队 MCP 工具注入都在那条配置里）。框架按该配置拉起 CLI 子进程并自动注入团队协作工具（read_inbox / claim_task / send_message 等）。
 
 必须先调用 build_team 组建团队，才能调用 spawn_member。调用顺序：build_team → create_task → spawn_member → send_message。spawn_member 只创建成员记录（状态为 UNSTARTED），首次调用 send_message 时系统会自动拉起所有未启动成员。成员完成后调用 shutdown_member 关闭。若 member_name 已存在，创建会失败，请使用不冲突的名称。
 

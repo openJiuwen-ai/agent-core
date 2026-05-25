@@ -36,6 +36,7 @@ from openjiuwen.agent_teams.models.pool import ModelPoolEntry, ModelRouterConfig
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import (
     BridgeMemberSpec,
+    ExternalCliAgentSpec,
     TeamLifecycle,
     TeamMemberSpec,
     TeamRole,
@@ -192,6 +193,17 @@ class TeamAgentSpec(BaseModel):
     spawn_mode: str = "process"
     leader: LeaderSpec = LeaderSpec()
     predefined_members: list[PredefinedMemberSpec] = []
+    external_cli_agents: list[ExternalCliAgentSpec] = []
+    """Static launch configs for external CLI agents (claudecode / codex / ...).
+
+    Each entry pre-declares how to launch one CLI kind and whether to
+    auto-inject the team MCP server. The runtime
+    ``spawn_member(role_type='external_cli', cli_agent=<name>)`` references an
+    entry by its ``cli_agent`` name, so the spawn call carries only the role
+    type and the CLI identifier — all launch knowledge stays here. A
+    ``cli_agent`` not declared here is rejected at spawn time (the non-empty
+    set is the capability ceiling for external-CLI members).
+    """
     model_pool: list[ModelPoolEntry] = []
     """Optional pool of LLM endpoints shared by every team member.
 
@@ -361,6 +373,27 @@ class TeamAgentSpec(BaseModel):
         if self.model_router is not None and self.model_pool:
             raise ValueError(
                 "model_pool and model_router are mutually exclusive; configure one or the other",
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_external_cli_unique(self) -> "TeamAgentSpec":
+        """Reject duplicate ``cli_agent`` names in ``external_cli_agents``.
+
+        Entries are resolved by ``cli_agent`` name at spawn time, so a
+        duplicate would silently shadow an earlier config. Surface the
+        collision while the caller is still looking at the spec.
+        """
+        seen: set[str] = set()
+        duplicates: set[str] = set()
+        for cfg in self.external_cli_agents:
+            if cfg.cli_agent in seen:
+                duplicates.add(cfg.cli_agent)
+            seen.add(cfg.cli_agent)
+        if duplicates:
+            raise ValueError(
+                f"external_cli_agents has duplicate cli_agent name(s) {sorted(duplicates)}; "
+                f"declare each CLI kind at most once",
             )
         return self
 
@@ -630,6 +663,7 @@ class TeamAgentSpec(BaseModel):
 
 __all__ = [
     "DeepAgentSpec",
+    "ExternalCliAgentSpec",
     "LeaderSpec",
     "PredefinedMemberSpec",
     "StorageSpec",
