@@ -12,6 +12,7 @@ import logging
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -27,8 +28,23 @@ def _decode_stdout(stdout: bytes) -> str:
     Windows consoles often use GBK (cp936) while Unix uses UTF-8.
     This function tries multiple encodings to handle both cases.
     """
-    # Try common encodings in order of likelihood
-    encodings = ["utf-8", sys.stdout.encoding or "utf-8", "gbk", "cp936", "latin-1"]
+    # Build encoding priority list based on platform
+    if sys.platform == "win32":
+        # Windows: prioritize GBK/CP936 for console output, then UTF-8
+        encodings = [
+            sys.stdout.encoding or "gbk",
+            "gbk",
+            "cp936",
+            "utf-8",
+            "latin-1",
+        ]
+    else:
+        # Unix/Linux: prioritize UTF-8
+        encodings = [
+            "utf-8",
+            sys.stdout.encoding or "utf-8",
+            "latin-1",
+        ]
     for encoding in encodings:
         try:
             return stdout.decode(encoding)
@@ -36,6 +52,43 @@ def _decode_stdout(stdout: bytes) -> str:
             continue
     # Fallback: decode with replacement chars
     return stdout.decode("utf-8", errors="replace")
+
+
+def _quote_path(path: str, convert_slashes: bool = True) -> str:
+    """Quote path for shell. Converts forward slashes to backslashes on Windows
+    for relative paths to avoid cmd.exe misinterpreting "/c" as its /c flag.
+
+    Args:
+        path: File path to quote.
+        convert_slashes: False for executable paths that may be Unix-style.
+    """
+    if sys.platform == "win32" and convert_slashes:
+        # Only convert relative paths; keep Windows/Unix absolute paths unchanged
+        is_relative = not (
+            (len(path) >= 2 and path[1] == ":" and path[0].isalpha())
+            or path.startswith("\\\\")
+            or path.startswith("/")
+        )
+        if is_relative:
+            path = path.replace("/", "\\")
+
+    # Platform-specific special chars. Windows: \ is path separator (not special).
+    # Unix: \ is escape char (needs quoting).
+    if sys.platform == "win32":
+        special_chars = ' \t\n\r"&|;<>()$`!*?[]{}'
+    else:
+        special_chars = ' \t\n\r"\'&|;<>()$`\\!*?[]{}'
+
+    for char in path:
+        if char in special_chars:
+            break
+    else:
+        return path  # No special chars, return unquoted
+
+    if sys.platform == "win32":
+        return '"' + path.replace('"', '""') + '"'
+    else:
+        return shlex.quote(path)
 
 _DEFAULT_YAML = str(
     Path(__file__).resolve().parent.parent
@@ -65,6 +118,8 @@ class CIGateRunner:
         self._gates = self._load_gates(
             config_path or _DEFAULT_YAML
         )
+        # Cache make availability check
+        self._make_available = shutil.which("make") is not None
 
     @staticmethod
     def _load_gates(path: str) -> List[Dict[str, Any]]:
@@ -97,14 +152,25 @@ class CIGateRunner:
         if self._python_executable:
             candidates.append(self._python_executable)
         if self._workspace:
-            candidates.append(
-                str(
-                    Path(self._workspace)
-                    / ".venv"
-                    / "bin"
-                    / "python"
+            # Cross-platform venv python path
+            if sys.platform == "win32":
+                candidates.append(
+                    str(
+                        Path(self._workspace)
+                        / ".venv"
+                        / "Scripts"
+                        / "python.exe"
+                    )
                 )
-            )
+            else:
+                candidates.append(
+                    str(
+                        Path(self._workspace)
+                        / ".venv"
+                        / "bin"
+                        / "python"
+                    )
+                )
         candidates.append(sys.executable)
 
         for candidate in candidates:
@@ -120,6 +186,48 @@ class CIGateRunner:
     def set_workspace(self, workspace: str) -> None:
         """Update command workspace."""
         self._workspace = workspace
+
+    async def _run_shell_command(
+        self,
+        cmd: str,
+        cwd: str | None = None,
+    ) -> asyncio.subprocess.Process:
+        """Create subprocess for shell command with cross-platform support.
+
+        On Windows, uses cmd.exe. On Unix, uses bash for better compatibility
+        with shell scripts and complex command chains.
+
+        Args:
+            cmd: Shell command string to execute.
+            cwd: Working directory for the subprocess.
+
+        Returns:
+            asyncio.subprocess.Process instance.
+        """
+        env = self._command_env()
+        if sys.platform == "win32":
+            # Windows: use cmd.exe with /c flag
+            # cmd.exe handles Windows paths and commands correctly
+            return await asyncio.create_subprocess_exec(
+                "cmd.exe",
+                "/c",
+                cmd,
+                cwd=cwd or self._workspace,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+            )
+        else:
+            # Unix/Linux: use bash for better shell compatibility
+            return await asyncio.create_subprocess_exec(
+                "bash",
+                "-c",
+                cmd,
+                cwd=cwd or self._workspace,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+            )
 
     def _command_env(self) -> dict[str, str]:
         """Build shell env that points tools at the chosen Python env.
@@ -141,19 +249,28 @@ class CIGateRunner:
         if python_path.name.startswith("python"):
             bin_dir = str(python_path.parent)
             # Prepend bin_dir to PATH so tools use the configured Python.
+            # Use os.pathsep for cross-platform compatibility (; on Windows, : on Unix)
             existing_path = env.get("PATH", "")
+            pathsep = os.pathsep
             env["PATH"] = (
-                f"{bin_dir}:{existing_path}"
+                f"{bin_dir}{pathsep}{existing_path}"
                 if existing_path
                 else bin_dir
             )
         return env
 
     def _normalize_command(self, cmd: str) -> str:
-        """为已知的不可靠门控命令转换为更直接的执行命令。"""
+        """为已知的不可靠门控命令转换为更直接的执行命令。
+
+        当 make 不可用时（常见于 Windows 环境未配置 Git Bash PATH），
+        自动转换为等效的 Python 工具调用，确保跨平台兼容性。
+        """
         stripped = cmd.strip()
-        python_executable = shlex.quote(
-            self._resolve_python_executable()
+        # Don't convert slashes for python executable path - it should remain
+        # in its native format (Windows: backslashes, Unix: forward slashes)
+        python_executable = _quote_path(
+            self._resolve_python_executable(),
+            convert_slashes=False,
         )
         if not stripped.startswith("make "):
             if stripped.startswith("python -m "):
@@ -172,26 +289,108 @@ class CIGateRunner:
                     prefix = stripped[: stripped.index("make ")]
                     return f"{prefix}{normalized_make}".strip()
             return cmd
+
+        # make command detected - check if make is available
+        # Handle case where _make_available wasn't initialized (test scenarios)
+        make_available = getattr(self, '_make_available', None)
+        if make_available is None:
+            make_available = shutil.which("make") is not None
+
+        if make_available:
+            # make is available, keep original command
+            return cmd
+
+        # make not available, convert to Python tool equivalents
+        logger.info("make not available, converting '%s' to Python tool equivalent", stripped)
         try:
             parts = shlex.split(stripped)
         except ValueError:
             return cmd
         if not parts or parts[0] != "make":
             return cmd
-        if "test" not in parts[1:]:
-            return cmd
-        target_index = parts.index("test")
-        assignments = parts[target_index + 1:]
-        if any("=" not in item for item in assignments):
-            return cmd
+
+        # Parse make target and arguments
+        target = parts[1] if len(parts) > 1 else ""
+        assignments = [p for p in parts[2:] if "=" in p]
         env_map: dict[str, str] = {}
         for item in assignments:
             key, value = item.split("=", 1)
             env_map[key] = value
-        testflags = env_map.get("TESTFLAGS", "").strip()
-        return (
-            f"{python_executable} -m pytest {testflags}"
-        ).strip()
+
+        # Handle different make targets
+        if target == "test":
+            testflags = env_map.get("TESTFLAGS", "").strip()
+            return (
+                f"{python_executable} -m pytest {testflags}"
+            ).strip()
+
+        if target == "type-check":
+            commits = env_map.get("COMMITS", "0")
+            changed_files = self._get_changed_files(commits)
+            if not changed_files:
+                return f"{python_executable} -c \"print('No files to type-check')\""
+            quoted_files = " ".join(_quote_path(f) for f in changed_files)
+            return f"{python_executable} -m mypy {quoted_files}"
+
+        if target == "check":
+            commits = env_map.get("COMMITS", "0")
+            changed_files = self._get_changed_files(commits)
+            if not changed_files:
+                return f"{python_executable} -c \"print('No files to check')\""
+            quoted_files = " ".join(_quote_path(f) for f in changed_files)
+            # Chain checks: ruff format + codespell + ruff lint + pylint
+            checks = [
+                f"{python_executable} -m ruff check --select I {quoted_files}",
+                f"{python_executable} -m ruff format --check {quoted_files}",
+                f"{python_executable} -m codespell {quoted_files}",
+                f"{python_executable} -m ruff check --show-fixes {quoted_files}",
+                f"{python_executable} -m pylint {quoted_files}",
+            ]
+            chain_sep = " & " if sys.platform == "win32" else " ; "
+            return chain_sep.join(checks)
+
+        # Unknown target, return original command (will likely fail but preserves behavior)
+        return cmd
+
+    def _get_changed_files(self, commits: str) -> list[str]:
+        """Get list of changed Python files for CI checks.
+
+        Args:
+            commits: Number of commits to check, or "0" for staged changes.
+
+        Returns:
+            List of Python file paths relative to workspace.
+        """
+        try:
+            commits_val = int(commits)
+            if commits_val > 0:
+                diff_option = f"HEAD~{commits_val}.."
+            else:
+                diff_option = "--cached"
+
+            result = subprocess.run(
+                ["git", "diff", "--name-only", diff_option, "--diff-filter=ACMR"],
+                cwd=self._workspace,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    "Failed to get changed files: %s",
+                    result.stderr.strip()[-500:] if result.stderr else "unknown error"
+                )
+                return []
+
+            files = [
+                f.strip()
+                for f in result.stdout.splitlines()
+                if f.strip() and (f.endswith(".py") or f.endswith(".pyi"))
+            ]
+            return files
+        except Exception as e:
+            logger.warning("Error getting changed files: %s", e)
+            return []
 
     async def _ensure_environment(self) -> None:
         """Run the optional install command once before gates execute."""
@@ -201,15 +400,7 @@ class CIGateRunner:
             self._prepared = True
             return
 
-        proc = await asyncio.create_subprocess_exec(
-            "bash",
-            "-c",
-            self._install_command,
-            cwd=self._workspace,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            env=self._command_env(),
-        )
+        proc = await self._run_shell_command(self._install_command)
         stdout, _ = await proc.communicate()
         output = _decode_stdout(stdout)
         if proc.returncode != 0:
@@ -268,13 +459,7 @@ class CIGateRunner:
         )
         try:
             await self._ensure_environment()
-            proc = await asyncio.create_subprocess_exec(
-                "bash", "-c", cmd,
-                cwd=self._workspace,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                env=self._command_env(),
-            )
+            proc = await self._run_shell_command(cmd)
             stdout, _ = await proc.communicate()
             output = _decode_stdout(stdout)
             output = self._sanitize_failure_output(output)
