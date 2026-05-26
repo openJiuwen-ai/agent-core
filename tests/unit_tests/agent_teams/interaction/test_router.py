@@ -29,7 +29,17 @@ from openjiuwen.agent_teams.interaction.payload import (
 from openjiuwen.agent_teams.interaction.router import (
     parse_interact_str,
     parse_mention,
+    resolve_targets,
 )
+
+
+def _exists_in(*known: str):
+    """Build an async roster predicate matching only ``known`` names."""
+
+    async def _predicate(name: str) -> bool:
+        return name in known
+
+    return _predicate
 
 
 # ----------------------------------------------------------------------
@@ -205,3 +215,67 @@ def test_parse_mention_primitive_still_works():
     """Sanity: the underlying ``@`` parser is unchanged."""
     assert parse_mention("@dev-1 hi") == ("dev-1", "hi")
     assert parse_mention("hello world") is None
+
+
+# ----------------------------------------------------------------------
+# resolve_targets — strict roster matching after parsing
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_resolve_targets_keeps_known_recipients():
+    """All recipients known → input list returned unchanged."""
+    payloads = parse_interact_str("# @m1 @m2 sync")
+    resolved = await resolve_targets(payloads, member_exists=_exists_in("m1", "m2"))
+    assert resolved == payloads
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_resolve_targets_folds_unknown_operator_to_god_view():
+    """A single unknown recipient folds into a god-view message, text preserved."""
+    payloads = parse_interact_str("# @ghost ship it")
+    resolved = await resolve_targets(payloads, member_exists=_exists_in())
+    assert resolved == [GodViewMessage(body="@ghost ship it")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_resolve_targets_folds_unknown_human_agent_to_avatar():
+    """Unknown recipient on the ``$`` channel folds to an avatar-drive message."""
+    payloads = parse_interact_str("$alice @ghost hi")
+    resolved = await resolve_targets(payloads, member_exists=_exists_in())
+    assert resolved == [HumanAgentMessage(body="@ghost hi", sender="alice")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_resolve_targets_partial_match_keeps_known_and_folds_unknown():
+    """Known recipients stay point-to-point; unknown ones fold into one message."""
+    payloads = parse_interact_str("# @m1 @ghost on it")
+    resolved = await resolve_targets(payloads, member_exists=_exists_in("m1"))
+    assert resolved == [
+        OperatorMessage(body="on it", target="m1"),
+        GodViewMessage(body="@ghost on it"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_resolve_targets_multiple_unknown_rejoin_in_one_message():
+    """Several unknown recipients rejoin as ``@a @b body`` in a single message."""
+    payloads = parse_interact_str("# @g1 @g2 stand-up in 5")
+    resolved = await resolve_targets(payloads, member_exists=_exists_in())
+    assert resolved == [GodViewMessage(body="@g1 @g2 stand-up in 5")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_resolve_targets_passes_through_broadcast_and_god_view():
+    """Broadcast / god-view payloads carry no named target — never touched."""
+    predicate = _exists_in()  # roster is empty, but these never hit it
+    god = await resolve_targets(parse_interact_str("# plain"), member_exists=predicate)
+    assert god == [GodViewMessage(body="plain")]
+    bcast = await resolve_targets(parse_interact_str("# @all heads up"), member_exists=predicate)
+    assert bcast == [OperatorMessage(body="heads up")]

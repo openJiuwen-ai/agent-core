@@ -250,4 +250,6 @@ prompt_toolkit + rich 驱动的交互式 CLI。`run_team_cli(*, specs, yaml_path
 
 ## 提交约定
 
-本模块改动的 commit footer 固定：`Refs: #751`。见 `CLAUDE.local.md` 的 Git 提交规范。
+本模块改动的 commit message scope 固定用 `swarm`（如 `feat(swarm): ...`）。
+
+footer 用 `Refs: #<issue>` 格式关联 issue。issue 号若无法从当前上下文明确，必须先询问用户，不要臆造或留空。

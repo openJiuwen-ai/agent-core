@@ -32,7 +32,10 @@ from openjiuwen.agent_teams.interaction import (
     UnknownHumanAgentError,
     UserInbox,
 )
-from openjiuwen.agent_teams.interaction.router import parse_interact_str
+from openjiuwen.agent_teams.interaction.router import (
+    parse_interact_str,
+    resolve_targets,
+)
 from openjiuwen.agent_teams.monitor import (
     TeamMonitor,
     create_monitor,
@@ -347,10 +350,18 @@ class TeamRuntimeManager:
         - ``$<name> body`` → :class:`HumanAgentMessage` driving that
           avatar.
         - Either form may be followed by one or more ``@<member>``
-          recipients (e.g. ``# @m1 @m2 hi``); each named recipient
+          recipients (e.g. ``# @m1 @m2 hi``); each known recipient
           becomes its own bus message and ``@all`` / ``@*`` collapses
           into a single broadcast.
         - No recognised prefix → :class:`GodViewMessage(body=payload)`.
+
+        Recipients are strict-matched against the live roster after
+        parsing (:func:`resolve_targets`). An ``@<member>`` that matches
+        no roster row is not a routing directive — its mention folds
+        back into a single no-mention message delivered to the channel
+        default (leader for ``#``, avatar for ``$``) with the original
+        text preserved, instead of writing a bus message to a
+        non-existent member.
 
         Multi-recipient inputs fan out to multiple
         ``_dispatch_payload`` calls under the same gate ticket. The
@@ -379,6 +390,13 @@ class TeamRuntimeManager:
         if ticket is None:
             return DeliverResult.failure("gate_closed")
         try:
+            # Strict-match ``@<member>`` recipients against the live
+            # roster once we hold the ticket. Unknown mentions are not
+            # routing directives — they fold back into a no-mention
+            # message for the leader / avatar instead of silently
+            # writing a bus message to a non-existent member.
+            payloads = await self._resolve_recipients(entry.agent, payloads)
+
             last_result: DeliverResult = DeliverResult.success(None)
             for entry_payload in payloads:
                 last_result = await self._dispatch_payload(entry.agent, entry_payload)
@@ -387,6 +405,28 @@ class TeamRuntimeManager:
             return last_result
         finally:
             await entry.interact_gate.consume_done(ticket)
+
+    @staticmethod
+    async def _resolve_recipients(
+        agent: "TeamAgent",
+        payloads: list[InteractPayload],
+    ) -> list[InteractPayload]:
+        """Validate ``@<member>`` recipients against the live roster.
+
+        Backends expose ``get_member(name) -> TeamMember | None``; we
+        adapt it to the boolean predicate :func:`resolve_targets` needs.
+        When no backend is bound (god-view-only agent), there is no
+        roster to match against and payloads pass through unchanged.
+        """
+        backend = agent.team_backend
+        if backend is None:
+            return payloads
+
+        async def _member_exists(name: str) -> bool:
+            """Roster predicate backed by the live team backend."""
+            return await backend.get_member(name) is not None
+
+        return await resolve_targets(payloads, member_exists=_member_exists)
 
     @staticmethod
     async def _dispatch_payload(agent: "TeamAgent", payload: InteractPayload) -> DeliverResult:

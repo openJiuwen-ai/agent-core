@@ -183,6 +183,87 @@ roster row).
 """
 
 
+def _named_target(payload: "InteractPayload") -> str | None:
+    """Return the point-to-point recipient carried by ``payload``.
+
+    ``None`` for channels that address no single roster member —
+    god-view, avatar-drive, and broadcast (``@all`` / ``@*``). Those
+    never hit the roster and pass through :func:`resolve_targets`
+    untouched.
+    """
+    from openjiuwen.agent_teams.interaction.payload import (
+        HumanAgentMessage,
+        OperatorMessage,
+    )
+
+    if not isinstance(payload, (OperatorMessage, HumanAgentMessage)):
+        return None
+    target = payload.target
+    if target is None or target in BROADCAST_TARGETS:
+        return None
+    return target
+
+
+def _fold_unknown_mentions(unknown: list["InteractPayload"]) -> "InteractPayload":
+    """Fold unknown ``@<member>`` payloads back into one no-mention message.
+
+    An ``@<member>`` that matches no roster row is not a routing
+    directive — it is plain text the user typed. We re-attach those
+    mentions to the shared body and route the result to the channel's
+    default audience: the leader's DeepAgent for the operator channel,
+    or the speaking avatar for the human-agent channel. The original
+    text (``@ghost body``) is preserved verbatim.
+    """
+    from openjiuwen.agent_teams.interaction.payload import (
+        GodViewMessage,
+        HumanAgentMessage,
+    )
+
+    sample = unknown[0]
+    mentions = " ".join(f"@{p.target}" for p in unknown)
+    general_body = f"{mentions} {sample.body}" if sample.body else mentions
+    if isinstance(sample, HumanAgentMessage):
+        return HumanAgentMessage(body=general_body, sender=sample.sender)
+    return GodViewMessage(body=general_body)
+
+
+async def resolve_targets(
+    payloads: list["InteractPayload"],
+    *,
+    member_exists: MemberExistsCheck,
+) -> list["InteractPayload"]:
+    """Strict-match ``@<member>`` recipients against the live roster.
+
+    :func:`parse_interact_str` is pure syntax — it fans every
+    ``@<member>`` token out into a targeted payload without knowing the
+    roster. This resolution step applies the roster:
+
+    * Known recipients keep their point-to-point payload untouched.
+    * Unknown recipients are not routing directives; their mentions are
+      folded back into a single no-mention message (see
+      :func:`_fold_unknown_mentions`) addressed to the channel default
+      (leader for ``#``, avatar for ``$``), preserving the user's text.
+    * God-view / avatar-drive / broadcast payloads carry no named
+      target and pass through unchanged.
+
+    When every recipient is known the input list is returned as-is.
+    Otherwise the result is ``<known point-to-point payloads> +
+    [<one folded no-mention payload>]``.
+    """
+    unknown: list["InteractPayload"] = []
+    kept: list["InteractPayload"] = []
+    for payload in payloads:
+        name = _named_target(payload)
+        if name is None or await member_exists(name):
+            kept.append(payload)
+        else:
+            unknown.append(payload)
+
+    if not unknown:
+        return payloads
+    return kept + [_fold_unknown_mentions(unknown)]
+
+
 async def deliver_direct(
     body: str,
     *,
@@ -219,4 +300,5 @@ __all__ = [
     "is_reserved_name",
     "parse_interact_str",
     "parse_mention",
+    "resolve_targets",
 ]

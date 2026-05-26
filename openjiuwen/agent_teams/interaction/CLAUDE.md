@@ -7,7 +7,7 @@
 | 文件 | 作用 |
 |---|---|
 | `payload.py` | `GodViewMessage` / `OperatorMessage` / `HumanAgentMessage` 三种交互视角的 dataclass + `InteractPayload` Union + `DeliverResult(ok, message_id, reason)` 统一返回类型 |
-| `router.py` | `parse_mention(raw) -> (target, body) \| None` 纯函数；`is_reserved_name(name)` 校验保留名 |
+| `router.py` | `parse_interact_str(body)` 纯语法解析(`# / $ / @member` 前缀 → typed payloads，不查 roster)；`parse_mention(raw) -> (target, body) \| None` 纯函数；`resolve_targets(payloads, *, member_exists)` async 后处理：严格匹配 `@member` recipient，未知 mention 折回为"无 @ 消息"投给 leader/avatar(保留原文，见 F_23)；`is_reserved_name(name)` 校验保留名 |
 | `user_inbox.py` | `UserInbox`：user 侧显式 API。`broadcast` / `direct` / `deliver_to_leader`，全部返回 `DeliverResult` |
 | `human_agent_inbox.py` | `HumanAgentInbox`：human_agent 对外发声，仅在 HITT 启用时可用。`send` 成功返 `DeliverResult`；HITT 关闭抛 `HumanAgentNotEnabledError`，未知 sender 抛 `UnknownHumanAgentError`（manager 层捕获转 `DeliverResult.failure(reason)`） |
 
