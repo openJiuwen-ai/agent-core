@@ -437,7 +437,7 @@ class TeamSkillEvolutionRail(EvolutionRail):
         presented_entries = self._consume_presented_entries(session)
         team_snapshot = EvolutionSnapshot(
             trajectory=base_snapshot.trajectory,
-            messages=base_snapshot.messages,
+            messages=list(base_snapshot.messages),
             skill_name="team-skill",
         ).to_legacy_dict()
         team_snapshot["presented_entries"] = presented_entries
@@ -572,7 +572,8 @@ class TeamSkillEvolutionRail(EvolutionRail):
             )
             messages: list[dict] = []
             presented_entries = []
-            if snapshot is not None:
+            using_async_snapshot = snapshot is not None
+            if using_async_snapshot:
                 messages = list(snapshot["messages"])
                 presented_entries = snapshot.get("presented_entries", [])
             elif ctx is not None:
@@ -583,7 +584,8 @@ class TeamSkillEvolutionRail(EvolutionRail):
             team_trajectory = self._aggregate_team_trajectory(trajectory)
             if team_trajectory is not trajectory:
                 trajectory = team_trajectory
-                messages = self._collect_messages_from_trajectory(trajectory)
+                if not using_async_snapshot:
+                    messages = self._collect_messages_from_trajectory(trajectory)
 
             used_skill = self._detect_used_team_skill(trajectory)
             if not used_skill:

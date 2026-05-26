@@ -20,6 +20,7 @@ import warnings
 from enum import Enum
 from typing import Any, List, Optional
 
+from openjiuwen.agent_evolving.signal.from_conv import ConversationSignalDetector
 from openjiuwen.agent_evolving.trajectory import (
     InMemoryTrajectoryStore,
     LLMCallDetail,
@@ -557,10 +558,11 @@ class EvolutionRail(DeepAgentRail):
 
     @classmethod
     def _collect_messages_from_trajectory(cls, trajectory: Optional[Trajectory]) -> List[dict]:
-        """Derive message-like dicts from recorded LLM trajectory steps."""
+        """Derive message-like dicts from recorded trajectory steps."""
         if trajectory is None:
             return []
-        normalized = cls._normalize_callback_messages(trajectory.to_messages())
+        raw = ConversationSignalDetector.convert_trajectory_to_messages(trajectory)
+        normalized = cls._normalize_callback_messages(raw)
         deduped: List[dict] = []
         for message in normalized:
             if message not in deduped:

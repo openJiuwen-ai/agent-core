@@ -619,7 +619,12 @@ async def test_on_approve_flushes_snapshot_records(tmp_path):
     rail = _make_rail(tmp_path, auto_save=False)
     request_id = "skill_evolve_req"
     rail._manager.approve_request = AsyncMock(return_value=Mock(applied_count=1, pending_count=0))
-    rail._pending_approval_snapshots[request_id] = Mock(skill_name="skill-a")
+    rail._pending_approval_snapshots[request_id] = Mock(
+        skill_name="skill-a",
+        payload=[],
+        messages=None,
+        is_shared_records=False,
+    )
 
     await rail.on_approve(request_id)
 
@@ -631,7 +636,12 @@ async def test_on_reject_discards_snapshot_records(tmp_path):
     rail = _make_rail(tmp_path, auto_save=False)
     request_id = "skill_evolve_req"
     rail._manager.reject_request = AsyncMock(return_value=Mock(rejected_count=1))
-    rail._pending_approval_snapshots[request_id] = Mock(skill_name="skill-a")
+    rail._pending_approval_snapshots[request_id] = Mock(
+        skill_name="skill-a",
+        payload=[],
+        messages=None,
+        is_shared_records=False,
+    )
 
     await rail.on_reject(request_id)
 
@@ -2102,3 +2112,106 @@ async def test_request_rebuild_continues_on_archive_failure(tmp_path):
     assert result is not None
     rail._evolution_store.load_full_evolution_log.assert_called_once_with("test-skill")
     rail._evolution_store.clear_evolutions.assert_not_called()
+
+
+# =============================================================================
+# Experience sharing integration
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_on_approve_runs_qc_after_approval(tmp_path):
+    rail = _make_rail(tmp_path, auto_save=False)
+    record = _make_record("skill-a")
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+
+    rail._evolution_store.append_record = AsyncMock()
+
+    sharer = Mock()
+    sharer.has_pending = Mock(return_value=True)
+    sharer.flush_pending_uploads = AsyncMock()
+    rail._experience_sharer = sharer
+
+    stager = Mock()
+    stager.screen_and_stage = AsyncMock()
+    rail._share_stager = stager
+    rail._keyword_extractor = Mock()
+
+    request = _stage_approval_request(rail, "skill-a", [record])
+    await rail._emit_generated_records(ctx, "skill-a", request)
+    events = _approval_events(await rail.drain_pending_approval_events())
+    request_id = events[0].payload["request_id"]
+
+    await rail.on_approve(request_id)
+
+    stager.screen_and_stage.assert_awaited_once_with(
+        skill_name="skill-a",
+        records=[record],
+        messages=None,
+    )
+    sharer.flush_pending_uploads.assert_awaited_once_with("skill-a")
+
+
+@pytest.mark.asyncio
+async def test_on_reject_does_not_upload_shared_queue(tmp_path):
+    rail = _make_rail(tmp_path, auto_save=False)
+    record = _make_record("skill-a")
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+
+    sharer = Mock()
+    sharer.has_pending = Mock(return_value=True)
+    sharer.flush_pending_uploads = AsyncMock()
+    sharer.discard_pending_uploads = AsyncMock()
+    rail._experience_sharer = sharer
+    rail._share_stager = Mock()
+    rail._keyword_extractor = Mock()
+
+    request = _stage_approval_request(rail, "skill-a", [record])
+    await rail._emit_generated_records(ctx, "skill-a", request)
+    request_id = _approval_events(await rail.drain_pending_approval_events())[0].payload["request_id"]
+
+    await rail.on_reject(request_id)
+
+    sharer.flush_pending_uploads.assert_not_awaited()
+    sharer.discard_pending_uploads.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_on_approve_skips_upload_for_shared_hub_records(tmp_path):
+    rail = _make_rail(tmp_path, auto_save=False)
+    record = _make_record("skill-a")
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+
+    rail._evolution_store.append_record = AsyncMock()
+
+    stager = Mock()
+    stager.screen_and_stage = AsyncMock()
+    rail._experience_sharer = Mock()
+    rail._share_stager = stager
+    rail._keyword_extractor = Mock()
+
+    request = rail._manager.stage_records(
+        "skill-a",
+        [record],
+        source="experience_sharing",
+        is_shared_records=True,
+    )
+    await rail._emit_generated_records(ctx, "skill-a", request)
+    approval_event = _approval_events(await rail.drain_pending_approval_events())[0]
+    request_id = approval_event.payload["request_id"]
+    assert approval_event.payload["questions"][0]["header"] == "在线共享经验审批"
+
+    await rail.on_approve(request_id)
+
+    stager.screen_and_stage.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_is_sharing_enabled_requires_both_sharer_and_stager(tmp_path):
+    rail = _make_rail(tmp_path)
+    assert rail.is_sharing_enabled is False
+
+    rail._experience_sharer = Mock()
+    rail._share_stager = Mock()
+    rail._keyword_extractor = Mock()
+    assert rail.is_sharing_enabled is True

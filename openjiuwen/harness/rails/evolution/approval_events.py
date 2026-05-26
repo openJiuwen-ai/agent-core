@@ -71,10 +71,16 @@ def build_skill_approval_event(
     request_id: str,
     records: Iterable[EvolutionRecord],
     language: str = "cn",
+    *,
+    is_shared_records: bool = False,
 ) -> OutputSchema:
     """Build a skill experience approval event."""
     questions: List[Dict[str, Any]] = []
     is_en = _is_en(language)
+    if is_shared_records:
+        header = "Shared Experience Approval" if is_en else "在线共享经验审批"
+    else:
+        header = "Skill Evolution Approval" if is_en else "技能演进审批"
     for record in records:
         questions.append(
             {
@@ -85,22 +91,22 @@ def build_skill_approval_event(
                         f"- **Section**: {record.change.section}\n\n"
                         f"{record.change.content[:1000]}"
                     )
-                    if is_en else
-                    (
+                    if is_en
+                    else (
                         f"**Skill '{skill_name}' 演进生成了新经验：**\n\n"
                         f"- **目标**: {record.change.target.value}\n"
                         f"- **章节**: {record.change.section}\n\n"
                         f"{record.change.content[:1000]}"
                     )
                 ),
-                "header": "Skill Evolution Approval" if is_en else "技能演进审批",
+                "header": header,
                 "options": (
                     [
                         {"label": "Accept", "description": "Keep this evolution experience"},
                         {"label": "Reject", "description": "Discard this evolution experience"},
                     ]
-                    if is_en else
-                    [
+                    if is_en
+                    else [
                         {"label": "接收", "description": "保留此演进经验"},
                         {"label": "拒绝", "description": "丢弃此演进经验"},
                     ]
@@ -109,16 +115,21 @@ def build_skill_approval_event(
             }
         )
 
+    evolution_meta = EvolutionHostEventMeta(
+        event_kind="approval",
+        skill_name=skill_name,
+        request_id=request_id,
+        source="experience_sharing" if is_shared_records else None,
+    ).to_payload()
+    if is_shared_records:
+        evolution_meta["is_shared_records"] = "true"
+
     return OutputSchema(
         type="chat.ask_user_question",
         index=0,
         payload={
             "request_id": request_id,
-            "_evolution_meta": EvolutionHostEventMeta(
-                event_kind="approval",
-                skill_name=skill_name,
-                request_id=request_id,
-            ).to_payload(),
+            "_evolution_meta": evolution_meta,
             "questions": questions,
         },
     )
@@ -149,8 +160,8 @@ def build_simplify_approval_event(
                             f"{len(actions)} action(s):\n{preview}\n\n"
                             "Do you want to execute them?"
                         )
-                        if is_en else
-                        (
+                        if is_en
+                        else (
                             f"**精简 Skill '{skill_name}' 的演进经验**\n\n"
                             f"共 {len(actions)} 项操作：\n{preview}\n\n"
                             "是否执行？"
@@ -162,8 +173,8 @@ def build_simplify_approval_event(
                             {"label": "Execute", "description": "Run the simplify actions"},
                             {"label": "Cancel", "description": "Discard this simplify request"},
                         ]
-                        if is_en else
-                        [
+                        if is_en
+                        else [
                             {"label": "执行", "description": "执行精简操作"},
                             {"label": "取消", "description": "放弃本次精简"},
                         ]
@@ -191,17 +202,9 @@ def _build_team_skill_experience_question_event(
         question_payload.append(
             {
                 "question": (
-                    (
-                        f"**Team Skill '{skill_name}' evolution:**\n\n"
-                        f"- **Section**: {section}\n\n"
-                        f"{content[:1000]}"
-                    )
-                    if is_en else
-                    (
-                        f"**团队技能 '{skill_name}' 生成了演进经验：**\n\n"
-                        f"- **章节**: {section}\n\n"
-                        f"{content[:1000]}"
-                    )
+                    (f"**Team Skill '{skill_name}' evolution:**\n\n- **Section**: {section}\n\n{content[:1000]}")
+                    if is_en
+                    else (f"**团队技能 '{skill_name}' 生成了演进经验：**\n\n- **章节**: {section}\n\n{content[:1000]}")
                 ),
                 "header": "Team Skill Evolution Approval" if is_en else "团队技能演进审批",
                 "options": (
@@ -209,8 +212,8 @@ def _build_team_skill_experience_question_event(
                         {"label": "Accept", "description": "Keep this evolution"},
                         {"label": "Reject", "description": "Discard this evolution"},
                     ]
-                    if is_en else
-                    [
+                    if is_en
+                    else [
                         {"label": "接收", "description": "保留此演进经验"},
                         {"label": "拒绝", "description": "丢弃此演进经验"},
                     ]
@@ -244,9 +247,6 @@ def build_team_skill_approval_event_from_records(
     return _build_team_skill_experience_question_event(
         skill_name=skill_name,
         request_id=request_id,
-        questions=(
-            {"section": record.change.section, "content": record.change.content}
-            for record in records
-        ),
+        questions=({"section": record.change.section, "content": record.change.content} for record in records),
         language=language,
     )

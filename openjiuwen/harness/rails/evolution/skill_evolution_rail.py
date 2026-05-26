@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
+from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
 from openjiuwen.agent_evolving.experience import (
     ExperienceTracker,
     OnlineEvolutionOrchestrator,
@@ -56,13 +57,14 @@ from openjiuwen.harness.rails.evolution.approval_events import (
 from openjiuwen.harness.rails.evolution.approval_runtime import EvolutionApprovalRuntime
 from openjiuwen.harness.rails.evolution.contracts import EvolutionRequestResult, SimplifyRequestResult
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail
+from openjiuwen.harness.rails.evolution.skill_evolution_sharing import SkillEvolutionSharingMixin
 
 _MAX_PROCESSED_SIGNAL_KEYS = 500
 _DEFAULT_EVOLUTION_TOTAL_TIMEOUT_SECS = 600.0
 _NON_REGULAR_SKILL_KINDS = {"team-skill", "swarm-skill"}
 
 
-class SkillEvolutionRail(EvolutionRail):
+class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
     """Online auto-evolution rail for skill patching and persistence.
 
     Inherits EvolutionRail to gain automatic trajectory collection.
@@ -95,6 +97,7 @@ class SkillEvolutionRail(EvolutionRail):
         generate_records_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY,
         evaluate_llm_policy: LLMInvokePolicy = EVALUATE_LLM_POLICY,
         simplify_llm_policy: LLMInvokePolicy = SIMPLIFY_LLM_POLICY,
+        sharing_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Initialize SkillEvolutionRail.
 
@@ -107,6 +110,7 @@ class SkillEvolutionRail(EvolutionRail):
             language: Language for experience generation ("cn" or "en")
             trajectory_store: Optional trajectory store (inherited from EvolutionRail)
             eval_interval: Number of conversations between async evaluations
+            sharing_config: Optional cross-user sharing settings (enabled, hub_path, etc.)
         """
         if eval_interval < 1:
             raise ValueError("eval_interval must be >= 1")
@@ -167,6 +171,13 @@ class SkillEvolutionRail(EvolutionRail):
             store=self._evolution_store,
             scorer=self._scorer,
             eval_interval=self._eval_interval,
+        )
+        self._init_sharing(
+            sharing_config,
+            llm=llm,
+            model=model,
+            language=language,
+            evolution_store=self._evolution_store,
         )
 
     @property
@@ -277,6 +288,8 @@ class SkillEvolutionRail(EvolutionRail):
         """Hot-update LLM client and model."""
         self._evolver.update_llm(llm, model)
         self._scorer.update_llm(llm, model)
+        if self._keyword_extractor is not None:
+            self._keyword_extractor.update_llm(llm, model)
 
     def clear_processed_signals(self) -> None:
         """Clear signal fingerprints, typically on conversation boundary."""
@@ -468,16 +481,25 @@ class SkillEvolutionRail(EvolutionRail):
                 await self._experience_tracker.evaluate_presented(presented_entries)
                 return
 
-            # Evolve existing skills (when signals are attributed to known skills)
+            # Download hub experiences before local generation
+            incremental_messages = self._resolve_incremental_messages(messages, ctx, snapshot)
+            downloaded_per_skill: dict[str, List[EvolutionRecord]] = {}
+            if self.is_sharing_enabled and skill_groups:
+                downloaded_per_skill = await self._download_shared_experiences(
+                    messages,
+                    list(skill_groups.keys()),
+                    incremental_messages=incremental_messages,
+                )
+
             for skill_name, skill_signals in skill_groups.items():
-                request = await self._handle_evolution_from_signals(
+                generated = await self._evolve_skill_with_sharing(
                     skill_name=skill_name,
-                    signals=skill_signals,
+                    skill_signals=skill_signals,
                     messages=messages,
                     ctx=ctx,
-                    requires_approval=not self._auto_save,
+                    shared_records=downloaded_per_skill.get(skill_name, []),
                 )
-                if request is None:
+                if not generated:
                     self._emit_progress(
                         "completed",
                         f"no evolution records generated for '{skill_name}'",
@@ -606,6 +628,7 @@ class SkillEvolutionRail(EvolutionRail):
             request_id=approval_request.request_id,
             records=pending.payload,
             language=self._language,
+            is_shared_records=bool(getattr(pending, "is_shared_records", False)),
         )
         proposal = getattr(approval_request, "proposal", None)
         attach_evolution_meta(
@@ -792,7 +815,7 @@ class SkillEvolutionRail(EvolutionRail):
         if request is None:
             return None
 
-        def _on_auto_approved(staged_request: ExperienceApprovalRequest) -> None:
+        async def _on_auto_approved(staged_request: ExperienceApprovalRequest) -> None:
             logger.info(
                 "[SkillEvolutionRail] auto-approved evolution request for skill=%s (request=%s)",
                 skill_name,
@@ -805,6 +828,10 @@ class SkillEvolutionRail(EvolutionRail):
                     skill_name=skill_name,
                     request_id=staged_request.request_id,
                 )
+            await self._sharing_after_auto_approved(
+                skill_name=skill_name,
+                staged_request=staged_request,
+            )
 
         return await self.approval_runtime.finalize_staged_evolution_request(
             request,
@@ -826,6 +853,17 @@ class SkillEvolutionRail(EvolutionRail):
         ``PendingChange`` so the host can retry by calling ``approve_record``
         again with the same id.
         """
+        snapshot_pending = self._pending_approval_snapshots.get(request_id)
+        approved_records: List[EvolutionRecord] = []
+        approval_messages = None
+        is_shared = False
+        if snapshot_pending is not None:
+            payload = getattr(snapshot_pending, "payload", None)
+            if isinstance(payload, list):
+                approved_records = list(payload)
+            approval_messages = getattr(snapshot_pending, "messages", None)
+            is_shared = bool(getattr(snapshot_pending, "is_shared_records", False))
+
         pending, result = await self.approval_runtime.approve_pending_request(
             request_id,
             rail_name="SkillEvolutionRail",
@@ -836,11 +874,19 @@ class SkillEvolutionRail(EvolutionRail):
         if result.pending_count:
             return
         logger.info(
-            "[SkillEvolutionRail] user approved %d record(s) for skill=%s (request=%s)",
+            "[SkillEvolutionRail] user approved %d record(s) for skill=%s (request=%s, is_shared=%s)",
             result.applied_count,
             pending.skill_name,
             request_id,
+            is_shared,
         )
+        if not is_shared and approved_records:
+            await self._stage_records_for_share(
+                skill_name=pending.skill_name,
+                messages=approval_messages,
+                records=approved_records,
+            )
+            await self._flush_share_uploads(pending.skill_name)
 
     async def reject_record(self, request_id: str) -> None:
         """Reject staged evolution records without writing them.
@@ -1033,6 +1079,7 @@ class SkillEvolutionRail(EvolutionRail):
                 "session_id": session_id,
                 "presented_entries": presented_entries,
                 "skill_name": "skill-evolution",
+                "incremental_messages": self._resolve_incremental_messages(messages, ctx, None),
             }
         )
         return snapshot

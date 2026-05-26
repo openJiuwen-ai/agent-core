@@ -107,6 +107,7 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
 8. 文本经验（action 为 append，target 为 description/body）最多 2 条；脚本经验（target 为 script）最多 1 条
 9. 脚本经验的 content 字段直接放完整脚本源码，同时填写 script_filename、script_language、script_purpose
 10. 每条 append 经验必须填写 summary：一句话说明“何时适用 + 应做什么/避免什么”，不要换行、表格或代码块
+11. 每条 append 经验必须填写 keywords：10-20 个检索关键词，优先代码标识符/英文报错关键字，可附带中文术语以提升跨用户召回
 
 ## 输出格式
 只输出以下 JSON 数组，不要其他内容（即使只有一条，也必须用数组包裹）：
@@ -117,6 +118,7 @@ SKILL_EXPERIENCE_GENERATE_PROMPT_CN = """\
     "target": "description | body | script",
     "section": "Instructions | Examples | Troubleshooting | Scripts | Collaboration",
     "summary": "一句话经验摘要（仅 action 为 append 时填写，否则为 null）",
+    "keywords": ["10-20 个关键词（仅 action 为 append 时填写）"],
     "content": "Markdown 内容或脚本源码（仅 action 为 append 时填写）",
     "merge_target": "ev_xxxxxxxx 或 null",
     "script_filename": "文件名（仅 target 为 script 时填写，如 generate_chart.py）",
@@ -230,6 +232,7 @@ Determine the experience's target layer (target) and section (section), then gen
 8. Text experiences (action "append", target description/body): at most 2; script experiences (target script): at most 1
 9. For script experiences, put the full script source code in the content field, and fill in script_filename, script_language, script_purpose
 10. Every append experience must include summary: one sentence describing when it applies and what to do or avoid; no newlines, tables, or code blocks
+11. Every append experience must include keywords: 10-20 retrieval keywords; prefer code identifiers / English error keywords; you may add matching Chinese terms for cross-user recall
 
 ## Output Format
 Output only the following JSON array, nothing else (even if there is only one entry, it must be wrapped in an array):
@@ -240,6 +243,7 @@ Output only the following JSON array, nothing else (even if there is only one en
     "target": "description | body | script",
     "section": "Instructions | Examples | Troubleshooting | Scripts | Collaboration",
     "summary": "one-sentence experience summary (only when action is append, otherwise null)",
+    "keywords": ["10-20 keywords (only when action is append)"],
     "content": "Markdown content or script source code (fill only when action is append)",
     "merge_target": "ev_xxxxxxxx or null",
     "script_filename": "filename (only when target is script, e.g. generate_chart.py)",

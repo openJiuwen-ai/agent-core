@@ -205,7 +205,7 @@ class ConversationSignalDetector:
         signals: List[EvolutionSignal] = []
 
         if isinstance(trajectory_or_messages, Trajectory):
-            messages = self._convert_trajectory_to_messages(trajectory_or_messages)
+            messages = self.convert_trajectory_to_messages(trajectory_or_messages)
             signals.extend(self._detect_from_messages(messages))
             # Detect collaboration signals if in team member context
             signals.extend(self._detect_collaboration_signals(trajectory_or_messages))
@@ -265,7 +265,7 @@ class ConversationSignalDetector:
     ) -> List[EvolutionSignal]:
         """Use LLM judgment to turn passive user messages into standard signals."""
         messages = (
-            self._convert_trajectory_to_messages(trajectory_or_messages)
+            self.convert_trajectory_to_messages(trajectory_or_messages)
             if isinstance(trajectory_or_messages, Trajectory)
             else list(trajectory_or_messages)
         )
@@ -315,7 +315,7 @@ class ConversationSignalDetector:
         return [self._make_user_feedback_signal(excerpt, skill_name)]
 
     @staticmethod
-    def _convert_trajectory_to_messages(trajectory: Trajectory) -> List[dict]:
+    def convert_trajectory_to_messages(trajectory: Trajectory) -> List[dict]:
         """Convert Trajectory.steps to message list format.
 
         The message format matches what SignalDetector.detect() expects:

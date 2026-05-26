@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -616,6 +618,41 @@ class TestEvolutionStoreRecordMaintenance:
         assert [record.id for record in ranked] == ["ev_low", "ev_high"]
         assert ranked[0].usage_stats.times_presented == 3
         assert ranked[0].usage_stats.times_used == 2
+
+
+class TestPackSkillForSharing:
+    @staticmethod
+    def _read_tar_skill_md(package_bytes: bytes) -> str:
+        with tarfile.open(fileobj=io.BytesIO(package_bytes), mode="r:gz") as archive:
+            for member in archive.getmembers():
+                if member.name.endswith("SKILL.md"):
+                    extracted = archive.extractfile(member)
+                    assert extracted is not None
+                    return extracted.read().decode("utf-8")
+        raise AssertionError("SKILL.md not found in package")
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_pack_skill_for_sharing_omits_evolution_index_block(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(root, "skill-a", "# Skill A\n\nContent\n")
+        store = EvolutionStore(str(root))
+
+        await store.append_record(
+            "skill-a",
+            make_record("ev_1", content="body fix", summary="check bounds"),
+        )
+
+        local_skill_md = (root / "skill-a" / "SKILL.md").read_text(encoding="utf-8")
+        assert "evolution-index-start" in local_skill_md
+
+        package = await store.pack_skill_for_sharing("skill-a")
+        packed_skill_md = TestPackSkillForSharing._read_tar_skill_md(package)
+
+        assert "evolution-index-start" not in packed_skill_md
+        assert "evolution-index-end" not in packed_skill_md
+        assert "Experience Index" not in packed_skill_md
+        assert "# Skill A" in packed_skill_md
 
 
 class TestEvolutionStoreArchiveAndCreate:

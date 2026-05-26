@@ -7,8 +7,8 @@ from openjiuwen.agent_evolving.checkpointing.types import EvolutionPatch, Evolut
 from openjiuwen.harness.rails.evolution.approval_events import (
     build_evolution_progress_event,
     build_progress_event,
-    build_skill_approval_event,
     build_simplify_approval_event,
+    build_skill_approval_event,
     build_team_skill_approval_event_from_records,
 )
 
@@ -94,6 +94,31 @@ def test_build_simplify_approval_event_matches_existing_contract():
     assert event.payload["request_id"] == "evolve_simplify_1234"
     assert event.payload["questions"][0]["header"] == "Skill 精简审批"
     assert "共 2 项操作" in event.payload["questions"][0]["question"]
+
+
+def test_build_skill_approval_event_uses_shared_header_for_downloaded_records():
+    event = build_skill_approval_event(
+        skill_name="skill-a",
+        request_id="skill_evolve_shared",
+        records=[_make_record(content="shared experience")],
+        is_shared_records=True,
+    )
+
+    assert event.payload["questions"][0]["header"] == "在线共享经验审批"
+    assert event.payload["_evolution_meta"]["source"] == "experience_sharing"
+    assert event.payload["_evolution_meta"]["is_shared_records"] == "true"
+
+
+def test_build_skill_approval_event_shared_header_supports_english_language():
+    event = build_skill_approval_event(
+        skill_name="skill-a",
+        request_id="skill_evolve_shared_en",
+        records=[_make_record(content="shared experience")],
+        language="en",
+        is_shared_records=True,
+    )
+
+    assert event.payload["questions"][0]["header"] == "Shared Experience Approval"
 
 
 def test_build_skill_approval_event_supports_english_language():

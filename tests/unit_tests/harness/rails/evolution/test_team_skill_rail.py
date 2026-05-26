@@ -600,6 +600,7 @@ async def test_async_snapshot_messages_are_preserved_for_team_evolution():
         trajectory = build_patch_trajectory("deep-research-to-ppt")
         ctx = _MockCtx(context=_MsgContext(messages=[{"role": "user", "content": "请优化协作流程"}]))
         snapshot = await rail._snapshot_for_evolution(trajectory, ctx)
+        expected_messages = list(snapshot["messages"])
 
         captured: dict[str, Any] = {}
 
@@ -651,11 +652,11 @@ async def test_async_snapshot_messages_are_preserved_for_team_evolution():
 
         await rail.run_evolution(trajectory, ctx=None, snapshot=snapshot)
 
-        assert snapshot["messages"] == []
+        assert snapshot["messages"] == expected_messages
         assert captured["skill"] == "deep-research-to-ppt"
         assert captured["trajectory"] is trajectory
         assert captured["patch_trajectory"] is trajectory
-        assert captured["messages"] == []
+        assert captured["messages"] == expected_messages
         assert captured["signal"].context["source"] == "passive_trajectory"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

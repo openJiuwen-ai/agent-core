@@ -16,8 +16,8 @@ from openjiuwen.agent_evolving.experience.common import (
     commit_pending_change,
     execute_simplify_actions,
     make_pending_change,
-    request_rebuild_context,
     reject_pending_change,
+    request_rebuild_context,
 )
 from openjiuwen.agent_evolving.experience.lifecycle import LocalApplyPreview, PendingCommitResult, RebuildRequest
 from openjiuwen.agent_evolving.experience.scorer import ExperienceScorer
@@ -28,8 +28,8 @@ from openjiuwen.agent_evolving.experience.types import (
     PendingChange,
 )
 from openjiuwen.agent_evolving.protocols import (
-    APPROVE_ACTION,
     APPEND_MODE,
+    APPROVE_ACTION,
     EXPERIENCES_TARGET,
     LOCAL_APPLY_COMPLETED,
     PENDING_CHANGE_EFFECT,
@@ -168,6 +168,9 @@ class ExperienceManager:
         signal_source: Optional[str] = None,
         change_type: str = SKILL_EXPERIENCE_ENTRY,
         request_id_prefix: Optional[str] = None,
+        trajectory: Any | None = None,
+        messages: Optional[List[dict]] = None,
+        is_shared_records: bool = False,
     ) -> ExperienceApprovalRequest:
         """Snapshot one record batch into approval state."""
         proposal = ExperienceProposal(
@@ -184,6 +187,9 @@ class ExperienceManager:
             records=records,
             change_type=change_type,
             request_id_prefix=request_id_prefix,
+            trajectory=trajectory,
+            messages=messages,
+            is_shared_records=is_shared_records,
         )
 
     def stage_apply_results(
@@ -197,6 +203,7 @@ class ExperienceManager:
         user_query: str = "",
         signal_type: Optional[str] = None,
         signal_source: Optional[str] = None,
+        messages: Optional[List[dict]] = None,
     ) -> ExperienceApprovalRequest:
         """Stage already-generated online apply results through the shared lifecycle."""
         preview = self.build_local_apply_preview(skill_name, apply_results)
@@ -214,6 +221,7 @@ class ExperienceManager:
             proposal=proposal,
             preview=preview,
             request_id_prefix=request_id_prefix,
+            messages=messages,
         )
 
     def _stage_records(
@@ -223,6 +231,9 @@ class ExperienceManager:
         records: list[EvolutionRecord],
         change_type: str,
         request_id_prefix: Optional[str] = None,
+        trajectory: Any | None = None,
+        messages: Optional[List[dict]] = None,
+        is_shared_records: bool = False,
     ) -> ExperienceApprovalRequest:
         """Shared stage flow for skill/team-skill pending approval batches."""
         operator = self._skill_ops.get(proposal.skill_name)
@@ -245,6 +256,9 @@ class ExperienceManager:
             proposal=proposal,
             preview=self.build_local_apply_preview(proposal.skill_name, apply_results),
             request_id_prefix=request_id_prefix,
+            trajectory=trajectory,
+            messages=messages,
+            is_shared_records=is_shared_records,
         )
 
     def _stage_pending_request(
@@ -253,11 +267,17 @@ class ExperienceManager:
         proposal: ExperienceProposal,
         preview: LocalApplyPreview,
         request_id_prefix: Optional[str] = None,
+        trajectory: Any | None = None,
+        messages: Optional[List[dict]] = None,
+        is_shared_records: bool = False,
     ) -> ExperienceApprovalRequest:
         """Stage one pending request from previewed apply results."""
         pending = self._make_pending_change_from_preview(
             preview,
             request_id_prefix=request_id_prefix,
+            trajectory=trajectory,
+            messages=messages,
+            is_shared_records=is_shared_records,
         )
         staged_pending = self._stage_pending_change(pending)
         logger.info(
@@ -358,11 +378,17 @@ class ExperienceManager:
         preview: LocalApplyPreview,
         *,
         request_id_prefix: Optional[str] = None,
+        trajectory: Any | None = None,
+        messages: Optional[List[dict]] = None,
+        is_shared_records: bool = False,
     ) -> PendingChange:
         pending = make_pending_change(
             preview.skill_name,
             preview.records,
             request_id_prefix=request_id_prefix,
+            trajectory=trajectory,
+            messages=messages,
+            is_shared_records=is_shared_records,
         )
         pending.change_type = preview.change_type
         return pending

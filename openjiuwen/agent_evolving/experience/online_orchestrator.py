@@ -7,8 +7,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from openjiuwen.agent_evolving.checkpointing.evolution_store import EvolutionStore
-from openjiuwen.agent_evolving.experience.skill_experience_manager import ExperienceManager
 from openjiuwen.agent_evolving.experience.lifecycle import LocalApplyPreview
+from openjiuwen.agent_evolving.experience.skill_experience_manager import ExperienceManager
 from openjiuwen.agent_evolving.experience.types import EvolutionContext, ExperienceApprovalRequest
 from openjiuwen.agent_evolving.protocols import EXPERIENCES_TARGET, USER_INTENT_SIGNAL
 from openjiuwen.agent_evolving.signal import EvolutionSignal, EvolutionTarget, get_signal_source
@@ -92,6 +92,7 @@ class OnlineEvolutionOrchestrator:
             user_query=online_context.user_query,
             signal_type=self._get_signal_type(online_context),
             signal_source=self._get_signal_source(online_context),
+            messages=list(online_context.messages),
         )
         if requires_approval:
             return request

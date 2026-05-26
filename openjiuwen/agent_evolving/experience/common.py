@@ -8,9 +8,8 @@ import uuid
 from typing import Any, Callable, Dict, List, Optional
 
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
-from openjiuwen.agent_evolving.experience.types import PendingChange
 from openjiuwen.agent_evolving.experience.lifecycle import PendingCommitResult, RebuildRequest
-from openjiuwen.agent_evolving.experience.types import ExperienceApplyResult
+from openjiuwen.agent_evolving.experience.types import ExperienceApplyResult, PendingChange
 from openjiuwen.agent_evolving.protocols import EXPERIENCE_ENTRY, SKILL_EXPERIENCE_ENTRY
 from openjiuwen.core.common.logging import logger
 
@@ -20,9 +19,13 @@ def make_pending_change(
     records: List[EvolutionRecord],
     *,
     request_id_prefix: Optional[str] = None,
+    trajectory: Any | None = None,
+    messages: Optional[List[dict]] = None,
+    is_shared_records: bool = False,
 ) -> PendingChange:
     """Build a checkpointing snapshot for staged experience approval."""
-    pending = PendingChange.make(skill_name, records)
+    pending = PendingChange.make(skill_name, records, trajectory=trajectory, messages=messages)
+    pending.is_shared_records = is_shared_records
     if request_id_prefix:
         pending.change_id = f"{request_id_prefix}_{uuid.uuid4().hex[:8]}"
     return pending

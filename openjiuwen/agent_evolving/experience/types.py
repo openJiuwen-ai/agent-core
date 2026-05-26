@@ -10,10 +10,10 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
+from openjiuwen.agent_evolving.experience.lifecycle import HostFacingExperienceResult
 from openjiuwen.agent_evolving.protocols import SKILL_EXPERIENCE_ENTRY
 from openjiuwen.agent_evolving.signal.base import EvolutionSignal
 from openjiuwen.agent_evolving.types import ApplyResult
-from openjiuwen.agent_evolving.experience.lifecycle import HostFacingExperienceResult
 
 
 @dataclass
@@ -45,16 +45,41 @@ class PendingChange:
     payload: List[EvolutionRecord]
     created_at: str
     change_id: str = field(default_factory=lambda: f"skill_evolve_{uuid.uuid4().hex[:8]}")
+    is_shared_records: bool = False
+    trajectory: Any | None = None
+    messages: List[dict] | None = None
 
     @classmethod
-    def make(cls, skill_name: str, records: List[EvolutionRecord]) -> "PendingChange":
+    def make(
+        cls,
+        skill_name: str,
+        records: List[EvolutionRecord],
+        *,
+        trajectory: Any | None = None,
+        messages: List[dict] | None = None,
+    ) -> "PendingChange":
         return cls(
             operator_id=f"skill_experience_{skill_name}",
             skill_name=skill_name,
             change_type=SKILL_EXPERIENCE_ENTRY,
             payload=list(records),
             created_at=datetime.now(tz=timezone.utc).isoformat(),
+            trajectory=trajectory,
+            messages=list(messages) if messages is not None else None,
         )
+
+    @classmethod
+    def make_for_shared_records(
+        cls,
+        skill_name: str,
+        records: List[EvolutionRecord],
+        *,
+        trajectory: Any | None = None,
+        messages: List[dict] | None = None,
+    ) -> "PendingChange":
+        pending = cls.make(skill_name, records, trajectory=trajectory, messages=messages)
+        pending.is_shared_records = True
+        return pending
 
 
 @dataclass
@@ -87,11 +112,7 @@ class ExperienceApprovalRequest:
     def to_host_result(self) -> HostFacingExperienceResult:
         """Return the stable host-facing shape for a staged request."""
         pending_count = len(self.pending_change.payload) if self.pending_change is not None else 0
-        change_type = (
-            self.pending_change.change_type
-            if self.pending_change is not None
-            else SKILL_EXPERIENCE_ENTRY
-        )
+        change_type = self.pending_change.change_type if self.pending_change is not None else SKILL_EXPERIENCE_ENTRY
         return HostFacingExperienceResult.pending_approval(
             skill_name=self.skill_name,
             request_id=self.request_id or "",
