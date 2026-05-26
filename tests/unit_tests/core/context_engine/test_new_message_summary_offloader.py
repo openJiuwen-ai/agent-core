@@ -3,6 +3,7 @@
 # pylint: disable=protected-access
 
 import asyncio
+import importlib.util
 import json
 import sys
 import types
@@ -20,17 +21,20 @@ oauthlib_module = types.ModuleType("oauthlib")
 oauthlib_common_module = types.ModuleType("oauthlib.common")
 oauthlib_common_module.urlencode = _mock_urlencode
 oauthlib_module.common = oauthlib_common_module
-sys.modules.setdefault("oauthlib", oauthlib_module)
-sys.modules.setdefault("oauthlib.common", oauthlib_common_module)
+if importlib.util.find_spec("oauthlib") is None:
+    sys.modules.setdefault("oauthlib", oauthlib_module)
+    sys.modules.setdefault("oauthlib.common", oauthlib_common_module)
 
 openai_module = types.ModuleType("openai")
 openai_module.BaseModel = BaseModel
-sys.modules.setdefault("openai", openai_module)
+if importlib.util.find_spec("openai") is None:
+    sys.modules.setdefault("openai", openai_module)
 
 dashscope_module = types.ModuleType("dashscope")
 dashscope_module.MultiModalConversation = type("MultiModalConversation", (), {})
 dashscope_module.VideoSynthesis = type("VideoSynthesis", (), {})
-sys.modules.setdefault("dashscope", dashscope_module)
+if importlib.util.find_spec("dashscope") is None:
+    sys.modules.setdefault("dashscope", dashscope_module)
 
 
 def _mock_is_successful(*args, **kwargs):
@@ -43,9 +47,10 @@ pymilvus_utils_module = types.ModuleType("pymilvus.client.utils")
 pymilvus_utils_module.is_successful = _mock_is_successful
 pymilvus_client_module.utils = pymilvus_utils_module
 pymilvus_module.client = pymilvus_client_module
-sys.modules.setdefault("pymilvus", pymilvus_module)
-sys.modules.setdefault("pymilvus.client", pymilvus_client_module)
-sys.modules.setdefault("pymilvus.client.utils", pymilvus_utils_module)
+if importlib.util.find_spec("pymilvus") is None:
+    sys.modules.setdefault("pymilvus", pymilvus_module)
+    sys.modules.setdefault("pymilvus.client", pymilvus_client_module)
+    sys.modules.setdefault("pymilvus.client.utils", pymilvus_utils_module)
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.context_engine import ContextEngineConfig

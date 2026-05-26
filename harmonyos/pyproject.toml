@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openjiuwen-harmonyos"
+version = "0.1.10"
+description = "Minimal dependency distribution for the openJiuwen agent-core runtime."
+requires-python = ">=3.11"
+classifiers = [
+    'Development Status :: 4 - Beta',
+    'Programming Language :: Python',
+    'Programming Language :: Python :: Implementation :: CPython',
+    'Programming Language :: Python :: 3',
+    'Programming Language :: Python :: 3 :: Only',
+    'Programming Language :: Python :: 3.11',
+    'Programming Language :: Python :: 3.12',
+    'Programming Language :: Python :: 3.13',
+    'Programming Language :: Python :: 3.14',
+]
+dependencies = [
+    # HTTP clients
+    "aiohttp>=3.11.12",
+    "requests>=2.32.3",
+    # Date & time
+    "python-dateutil>=2.9.0.post0",
+    # File & locking
+    "filelock>=3.20.1",
+    "portalocker>=3.2.0",
+    "aiofiles>=25.1.0",
+    "anyio>=4.0.0",
+    # Validation & serialization
+    "pydantic>=2.11.0",
+    "pydantic-core>=2.46.0",
+    "PyYAML>=6.0",
+    "jsonschema>=4.25.1",
+    "json-repair>=0.55.0",
+    # Tool protocols
+    "fastmcp>=2.14.2,<3.0",
+    "mcp>=1.26.0",
+    # Database ORM
+    "sqlalchemy>=2.0.41",
+    "sqlmodel>=0.0.37",
+    "alembic>=1.13.1",
+    # AI/LLM
+    "openai>=1.108.0",
+    "tiktoken>=0.12.0",
+    "dashscope>=1.25.6",
+    # Utilities
+    "numpy!=2.4.0",
+    "cacheout>=0.16.0",
+    "pycryptodome>=3.23.0",
+    "charset-normalizer>=3.4.4",
+    "pysbd>=0.3.4",
+    "oauthlib>=3.3.1",
+    "python-dotenv>=1.2.1",
+    "tenacity>=9.1.2",
+    "loguru>=0.7.3",
+]
+
+[project.urls]
+Homepage = "https://openjiuwen.com"
+Documentation = "https://openjiuwen.com/docs-page"
+Repository = "https://gitcode.com/openJiuwen/agent-core.git"
+Changelog = "https://gitcode.com/openJiuwen/agent-core/releases"
+
+[tool.setuptools]
+package-dir = {"" = ".."}
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["openjiuwen*"]
+
+[tool.setuptools.package-data]
+openjiuwen = [
+    "**/prompts/**/*.md",
+    "**/locales/**/*.md",
+]

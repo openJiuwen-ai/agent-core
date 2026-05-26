@@ -30,7 +30,6 @@ Example::
 
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
-from pymilvus import utility
 
 from openjiuwen.core.common.logging import context_engine_logger as logger
 
@@ -48,6 +47,13 @@ _NS_MAX_LEN = 256
 # Milvus VARCHAR has a hard ceiling of 65 535 bytes; content may be long text,
 # so we truncate at this limit rather than raise an error.
 _CONTENT_MAX_LEN = 65_535
+
+
+def _get_utility() -> Any:
+    """Import pymilvus lazily so JSON-only runtimes do not require Milvus."""
+    from pymilvus import utility  # pylint: disable=import-outside-toplevel
+
+    return utility
 
 
 class MilvusConnector:
@@ -137,7 +143,7 @@ class MilvusConnector:
 
         self.dim = dim
 
-        if utility.has_collection(self.collection_name, using=self.alias):
+        if _get_utility().has_collection(self.collection_name, using=self.alias):
             self._collection = Collection(
                 name=self.collection_name, using=self.alias
             )
@@ -219,7 +225,7 @@ class MilvusConnector:
                 # Required for read-only ops (exists/count/load_from_db) on a
                 # collection that was created by a previous save_to_db() call.
                 from pymilvus import Collection  # pylint: disable=import-outside-toplevel
-                if not utility.has_collection(self.collection_name, using=self.alias):
+                if not _get_utility().has_collection(self.collection_name, using=self.alias):
                     raise ValueError(
                         "Vector dimension unknown. Provide `dim` in the constructor "
                         "or call save_to_db() with non-empty embedded data first."
@@ -506,7 +512,7 @@ class MilvusConnector:
             # Skip the Milvus network round-trip when the collection has already
             # been injected (e.g. via set_collection() in tests).
             if self._collection is None:
-                if not utility.has_collection(self.collection_name, using=self.alias):
+                if not _get_utility().has_collection(self.collection_name, using=self.alias):
                     return False
             collection = self._get_collection()
             expr = f'{_FIELD_NS} == "{namespace}"'

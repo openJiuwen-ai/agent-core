@@ -11,9 +11,8 @@ All built-in tools register via ``ToolMetadataProvider`` implementations.
 from __future__ import annotations
 
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.harness.prompts.builder import PromptSection
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.tools.base import (
@@ -95,6 +94,9 @@ from openjiuwen.harness.prompts.sections.tools.agent_mode import (
     EnterPlanModeMetadataProvider,
     ExitPlanModeMetadataProvider,
 )
+
+if TYPE_CHECKING:
+    from openjiuwen.core.foundation.tool.base import ToolCard
 
 # ---------------------------------------------------------------------------
 # Provider registry
@@ -198,6 +200,8 @@ def build_tool_card(
         description = description.format(**format_args)
 
     final_tool_id = f"{tool_id}_{agent_id}" if agent_id else f"{tool_id}_{uuid.uuid4().hex}"
+
+    from openjiuwen.core.foundation.tool.base import ToolCard
 
     return ToolCard(
         id=final_tool_id,

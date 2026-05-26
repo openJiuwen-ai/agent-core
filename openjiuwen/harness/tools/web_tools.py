@@ -15,7 +15,6 @@ from typing import Any, AsyncIterator, Dict, Optional
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 import requests
-from bs4 import BeautifulSoup
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -230,6 +229,13 @@ def _is_low_confidence_result_domain(url: str) -> bool:
 
 def _parse_html(html: str) -> BeautifulSoup:
     """Parse HTML with lxml when available, otherwise html.parser."""
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError as exc:
+        raise RuntimeError(
+            "Parsing HTML for web tools requires the optional dependency 'beautifulsoup4'."
+        ) from exc
+
     try:
         import lxml  # noqa: F401
 

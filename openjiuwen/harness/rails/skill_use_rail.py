@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
 
 import yaml
 
@@ -23,7 +23,6 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools import BashTool, CodeTool, ReadFileTool
 from openjiuwen.harness.tools.list_skill import ListSkillTool
 from openjiuwen.harness.tools import SkillTool, SkillCompleteTool
-from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.core.context_engine.active_skill_bodies import (
     ACTIVE_SKILL_HINTS_STATE_KEY,
     DEFAULT_MAX_ACTIVE_SKILL_BODIES,
@@ -40,6 +39,9 @@ from openjiuwen.core.context_engine.observability import (
 from openjiuwen.core.foundation.llm import SystemMessage, ToolMessage, UserMessage
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
 from openjiuwen.harness.prompts import resolve_language
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 
 
 def _coerce_ui_language_string(raw: Optional[str]) -> str:
@@ -140,7 +142,7 @@ class SkillUseRail(DeepAgentRail):
         include_skill_body_tools: bool = True,
         enabled_skills: Optional[Union[str, List[str]]] = None,
         disabled_skills: Optional[Union[str, List[str]]] = None,
-        evolution_store: Optional[EvolutionStore] = None,
+        evolution_store: Optional["EvolutionStore"] = None,
         max_active_skill_bodies: int = DEFAULT_MAX_ACTIVE_SKILL_BODIES,
         skill_tool_stub_language: Optional[str] = None,
     ):
@@ -182,7 +184,7 @@ class SkillUseRail(DeepAgentRail):
         self.include_skill_body_tools = include_skill_body_tools
         self.enabled_skills = self._normalize_name_set(enabled_skills)
         self.disabled_skills = self._normalize_name_set(disabled_skills)
-        self.evolution_store: Optional[EvolutionStore] = evolution_store
+        self.evolution_store: Optional["EvolutionStore"] = evolution_store
         self.max_active_skill_bodies = max_active_skill_bodies
         self.skill_tool_stub_language = skill_tool_stub_language
 

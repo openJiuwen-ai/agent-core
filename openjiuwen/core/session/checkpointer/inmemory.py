@@ -2,8 +2,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from abc import ABC, abstractmethod
 
-from pymilvus.client.utils import is_successful
-
 from openjiuwen.core.common.constants.constant import INTERACTIVE_INPUT
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error

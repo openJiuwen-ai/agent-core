@@ -21,13 +21,32 @@
 ### Installation
 
 - Operating System: Compatible with Windows, Linux, and macOS.
-- Python Version: Python version should be 3.11 or higher, but lower than 3.14. Please check your Python version before use, Python 3.11.4 is recommended.
+- Python Version: Python version should be 3.11 or higher. Please check your Python version before use, Python 3.11.4 is recommended.
 
-**Install from PyPI**
+**Installation Methods**
+
+Choose one of the following installation methods:
+
+Standard distribution from PyPI, with the core SDK/runtime dependencies declared by `openjiuwen`:
 
 ```bash
 pip install -U openjiuwen
 ```
+
+Optional dependency groups for the standard `openjiuwen` distribution:
+- `openjiuwen[all]`: installs all optional MQ, storage, and vector integrations.
+- `openjiuwen[all-mq]`: installs MQ integrations.
+- `openjiuwen[all-storage]`: installs storage integrations.
+- `openjiuwen[all-vector]`: installs vector database integrations.
+- Individual extras are also available, including `pulsar`, `elasticsearch`, `redis`, `sqlite`, `mysql`, `gaussdb`, `pgvector`, `gaussvector`, `chromadb`, `obs`, `zmq`, `sandbox`, and `cli`, for example `pip install -U "openjiuwen[sqlite]"`.
+
+Optional minimal dependency set for HarmonyOS, defined in `harmonyos/pyproject.toml`, with the same `openjiuwen` Python package and a smaller runtime dependency set:
+
+```bash
+pip install -U "openjiuwen-harmonyos @ git+https://gitcode.com/openJiuwen/agent-core.git@enterprise-dev#subdirectory=harmonyos"
+```
+
+Do not install `openjiuwen` and `openjiuwen-harmonyos` into the same environment. They are separate distributions that provide the same import package name, `openjiuwen`.
 
 ### Example
 

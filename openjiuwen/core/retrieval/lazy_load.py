@@ -111,11 +111,10 @@ def _load_chroma():
     _LAZY_IMPORT_CACHE["ChromaVectorField"] = ChromaVectorField
 
 
-def _load_parser():
+def _load_parser(name: str):
     from openjiuwen.core.retrieval.indexing.processor import parser
 
-    for name in parser.__all__:
-        _LAZY_IMPORT_CACHE[name] = getattr(parser, name)
+    _LAZY_IMPORT_CACHE[name] = getattr(parser, name)
 
 
 def _load_knowledge_base():
@@ -153,7 +152,7 @@ def lazy_load(name: str) -> Optional[object]:
     elif name in _LAZY_HTTPX:
         _load_httpx()
     elif name in _LAZY_PARSER:
-        _load_parser()
+        _load_parser(name)
     elif name in _LAZY_KNOWLEDGE_BASE:
         _load_knowledge_base()
     elif name in _LAZY_QUERY_REWRITER:

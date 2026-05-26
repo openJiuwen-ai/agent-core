@@ -21,13 +21,32 @@
 ### 安装
 
 - 操作系统：兼容Windows、Linux、macOS。
-- Python 版本：Python的版本应高于或者等于Python 3.11版本，并小于Python 3.14。使用前请检查Python版本信息，我们建议使用3.11.4版本。
+- Python 版本：Python 的版本应高于或者等于 Python 3.11。使用前请检查 Python 版本信息，我们建议使用 3.11.4 版本。
 
-**从PyPi安装**
+**安装方式**
+
+请根据场景选择以下安装方式：
+
+标准发行包可从 PyPI 安装，包含 `openjiuwen` 声明的核心 SDK/运行时依赖：
 
 ```bash
 pip install -U openjiuwen
 ```
+
+标准发行包 `openjiuwen` 支持的可选依赖项：
+- `openjiuwen[all]`：安装所有可选的 MQ、存储和向量数据库集成。
+- `openjiuwen[all-mq]`：安装 MQ 集成。
+- `openjiuwen[all-storage]`：安装存储集成。
+- `openjiuwen[all-vector]`：安装向量数据库集成。
+- 也可以按需安装单项 extras，包括 `pulsar`、`elasticsearch`、`redis`、`sqlite`、`mysql`、`gaussdb`、`pgvector`、`gaussvector`、`chromadb`、`obs`、`zmq`、`sandbox` 和 `cli`，例如 `pip install -U "openjiuwen[sqlite]"`。
+
+HarmonyOS 最小依赖集是可选安装方式，由 `harmonyos/pyproject.toml` 定义，提供同一个 `openjiuwen` Python 包，但运行时依赖更少：
+
+```bash
+pip install -U "openjiuwen-harmonyos @ git+https://gitcode.com/openJiuwen/agent-core.git@enterprise-dev#subdirectory=harmonyos"
+```
+
+不要在同一个环境中同时安装 `openjiuwen` 和 `openjiuwen-harmonyos`。它们是不同发行包，但提供相同的导入包名 `openjiuwen`。
 
 ### 样例
 

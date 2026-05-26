@@ -29,3 +29,11 @@ from .base_graph_store import GraphStore
 from .config import GraphConfig, GraphStoreIndexConfig, GraphStoreStorageConfig
 from .constants import ENTITY_COLLECTION, EPISODE_COLLECTION, RELATION_COLLECTION
 from .graph_object import Entity, Episode, Relation
+
+try:
+    from .milvus import register_milvus_support
+
+    register_milvus_support()
+except ImportError:
+    # Milvus is optional; it is registered eagerly only when its dependency is available.
+    pass

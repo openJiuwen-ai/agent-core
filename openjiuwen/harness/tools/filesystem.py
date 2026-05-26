@@ -17,8 +17,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, Any, AsyncIterator, List, Optional, Tuple
 
-import pdfplumber
-
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.base import Tool
@@ -416,6 +414,13 @@ class ReadFileTool(Tool):
         return "\n".join(blocks).strip()
 
     async def _read_pdf(self, file_path: str, pages: Optional[str]) -> str:
+        try:
+            import pdfplumber
+        except ImportError as exc:
+            raise RuntimeError(
+                "Reading PDF files requires the optional dependency 'pdfplumber'."
+            ) from exc
+
         res = await self.operation.fs().read_file(file_path, mode="bytes")
         if res.code != StatusCode.SUCCESS.code:
             raise RuntimeError(res.message)

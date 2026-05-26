@@ -7,8 +7,10 @@ Auto File Parser
 Uses plugin architecture, supports registering new file format parsers via decorators.
 """
 
+import importlib
+import importlib.util
 import os
-from typing import Callable, Dict, List, Optional, Type
+from typing import Callable, Dict, List, Optional, Tuple, Type
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -19,6 +21,20 @@ from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 
 # Global parser registry
 _PARSER_REGISTRY: Dict[str, Callable[[], Parser]] = {}
+_PARSER_REGISTRY_OWNERS: Dict[str, Optional[Type[Parser]]] = {}
+
+_DEFAULT_PARSER_MODULES: Tuple[Tuple[str, Optional[str]], ...] = (
+    ("openjiuwen.core.retrieval.indexing.processor.parser.txt_md_parser", None),
+    ("openjiuwen.core.retrieval.indexing.processor.parser.json_parser", None),
+    ("openjiuwen.core.retrieval.indexing.processor.parser.excel_parser", "doc-excel"),
+    ("openjiuwen.core.retrieval.indexing.processor.parser.pdf_parser", "doc-pdf"),
+    ("openjiuwen.core.retrieval.indexing.processor.parser.word_parser", "doc-word"),
+    ("openjiuwen.core.retrieval.indexing.processor.parser.image_parser", None),
+)
+
+_OPTIONAL_EXTENSION_DEPENDENCIES: Dict[str, Tuple[str, str]] = {
+    ".xlsx": ("openpyxl", "doc-excel"),
+}
 
 
 def register_parser(file_extensions: List[str]):
@@ -40,6 +56,7 @@ def register_parser(file_extensions: List[str]):
             normalized_ext = ext.lower()
             if normalized_ext not in _PARSER_REGISTRY:
                 _PARSER_REGISTRY[normalized_ext] = _create_parser_instance
+                _PARSER_REGISTRY_OWNERS[normalized_ext] = parser_class
                 logger.info(f"Registered parser {parser_class.__name__} for {normalized_ext}")
         return parser_class
 
@@ -60,18 +77,40 @@ class AutoFileParser(Parser):
 
     def _ensure_parsers_loaded(self):
         """Ensure all parsers are loaded and registered"""
-        # Dynamically import all parser modules to trigger decorator execution
-        try:
-            from openjiuwen.core.retrieval.indexing.processor.parser.excel_parser import ExcelParser
-            from openjiuwen.core.retrieval.indexing.processor.parser.json_parser import JSONParser
-            from openjiuwen.core.retrieval.indexing.processor.parser.pdf_parser import PDFParser
-            from openjiuwen.core.retrieval.indexing.processor.parser.txt_md_parser import (
-                TxtMdParser,
+        # Import parser modules one by one so optional document formats can fail independently.
+        for module_name, extra in _DEFAULT_PARSER_MODULES:
+            try:
+                importlib.import_module(module_name)
+            except ImportError as e:
+                if extra:
+                    logger.warning(
+                        "Skipping parser module %s because optional dependencies are missing. "
+                        "Install openjiuwen[%s] to enable it: %s",
+                        module_name,
+                        extra,
+                        e,
+                    )
+                else:
+                    logger.warning("Failed to import parser module %s: %s", module_name, e)
+
+        self._unregister_unavailable_optional_formats()
+
+    @staticmethod
+    def _unregister_unavailable_optional_formats():
+        for file_ext, (dependency, extra) in _OPTIONAL_EXTENSION_DEPENDENCIES.items():
+            if importlib.util.find_spec(dependency) is not None:
+                continue
+            if file_ext not in _PARSER_REGISTRY:
+                continue
+            _PARSER_REGISTRY.pop(file_ext, None)
+            _PARSER_REGISTRY_OWNERS.pop(file_ext, None)
+            logger.warning(
+                "Skipping parser for %s because optional dependency %r is missing. "
+                "Install openjiuwen[%s] to enable it.",
+                file_ext,
+                dependency,
+                extra,
             )
-            from openjiuwen.core.retrieval.indexing.processor.parser.word_parser import WordParser
-            from openjiuwen.core.retrieval.indexing.processor.parser.image_parser import ImageParser
-        except ImportError as e:
-            logger.warning(f"Failed to import some parser modules: {e}")
 
     async def parse(self, doc: str, doc_id: str = "", llm_client: Optional[Model] = None, **kwargs) -> List[Document]:
         """
@@ -157,6 +196,7 @@ class AutoFileParser(Parser):
         """
         normalized_ext = file_extension.lower()
         _PARSER_REGISTRY[normalized_ext] = parser_factory
+        _PARSER_REGISTRY_OWNERS[normalized_ext] = None
         logger.info(f"Dynamically registered parser for {normalized_ext}")
 
     @classmethod

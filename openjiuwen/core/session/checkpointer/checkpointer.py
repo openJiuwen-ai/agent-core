@@ -17,7 +17,6 @@ from pydantic import (
 )
 
 from openjiuwen.core.session.checkpointer.base import Checkpointer
-from openjiuwen.core.session.checkpointer.inmemory import InMemoryCheckpointer
 
 
 class CheckpointerConfig(BaseModel):
@@ -91,18 +90,38 @@ class CheckpointerFactory:
 
             # If type is "in_memory" and no instance was set, return default in-memory checkpointer
             if store_type == "in_memory":
-                return default_inmemory_checkpointer
+                return get_default_inmemory_checkpointer()
 
         # Otherwise, return the default checkpointer (if set) or default in-memory checkpointer
         if cls._default_checkpointer is None:
-            return default_inmemory_checkpointer
+            return get_default_inmemory_checkpointer()
         return cls._default_checkpointer
 
 
 @CheckpointerFactory.register("in_memory")
 class InMemoryCheckpointerProvider(CheckpointerProvider):
     async def create(self, conf: dict) -> Checkpointer:
-        return default_inmemory_checkpointer
+        return get_default_inmemory_checkpointer()
 
 
-default_inmemory_checkpointer = InMemoryCheckpointer()
+_default_inmemory_checkpointer: Checkpointer | None = None
+
+
+def get_default_inmemory_checkpointer() -> Checkpointer:
+    """Return the process-wide in-memory checkpointer, creating it on demand."""
+    global _default_inmemory_checkpointer
+    if _default_inmemory_checkpointer is None:
+        from openjiuwen.core.session.checkpointer.inmemory import InMemoryCheckpointer
+
+        _default_inmemory_checkpointer = InMemoryCheckpointer()
+    return _default_inmemory_checkpointer
+
+
+def __getattr__(name: str):
+    if name == "InMemoryCheckpointer":
+        from openjiuwen.core.session.checkpointer.inmemory import InMemoryCheckpointer
+
+        return InMemoryCheckpointer
+    if name == "default_inmemory_checkpointer":
+        return get_default_inmemory_checkpointer()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -4,18 +4,39 @@
 
 from __future__ import annotations
 
-from typing import Set
+from typing import TYPE_CHECKING, Set
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
-from openjiuwen.core.memory.lite.memory_tools import (
-    get_decorated_tools,
-    init_memory_manager_async,
-)
 from openjiuwen.harness.prompts.sections.memory import build_memory_section
 from openjiuwen.harness.rails.base import DeepAgentRail
+
+if TYPE_CHECKING:
+    from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
+
+
+_MEMORY_IMPORT_HINT = (
+    "MemoryRail requires optional memory dependencies. Install the memory/db/vector "
+    "dependencies or disable MemoryRail for minimal runtime profiles."
+)
+
+_memory_tools_cache: tuple | None = None
+
+
+def _load_memory_tools() -> tuple:
+    global _memory_tools_cache
+    if _memory_tools_cache is not None:
+        return _memory_tools_cache
+    try:
+        from openjiuwen.core.memory.lite.memory_tools import (
+            get_decorated_tools,
+            init_memory_manager_async,
+        )
+    except ImportError as exc:
+        raise ImportError(_MEMORY_IMPORT_HINT) from exc
+    _memory_tools_cache = get_decorated_tools, init_memory_manager_async
+    return _memory_tools_cache
 
 
 class MemoryRail(DeepAgentRail):
@@ -42,7 +63,7 @@ class MemoryRail(DeepAgentRail):
 
     def __init__(
         self,
-        embedding_config: EmbeddingConfig,
+        embedding_config: "EmbeddingConfig",
         is_proactive: bool = True,
     ):
         """Initialize MemoryRail.
@@ -133,6 +154,7 @@ class MemoryRail(DeepAgentRail):
         agent_id = "default"
 
         try:
+            _, init_memory_manager_async = _load_memory_tools()
             if hasattr(ctx.agent, "card") and ctx.agent.card:
                 agent_id = getattr(ctx.agent.card, "id", "default")
 
@@ -152,6 +174,8 @@ class MemoryRail(DeepAgentRail):
             else:
                 logger.warning("[MemoryRail] Memory manager initialization failed")
 
+        except ImportError as e:
+            logger.warning("[MemoryRail] %s", e)
         except Exception as e:
             logger.error(f"[MemoryRail] Failed to initialize memory manager: {e}")
 
@@ -166,6 +190,7 @@ class MemoryRail(DeepAgentRail):
             return
 
         try:
+            get_decorated_tools, _ = _load_memory_tools()
             memory_tools = get_decorated_tools()
 
             for tool in memory_tools:
@@ -190,6 +215,8 @@ class MemoryRail(DeepAgentRail):
                         f"[MemoryRail] Failed to register tool {tool.__name__}: {exc}"
                     )
 
+        except ImportError as e:
+            logger.warning("[MemoryRail] %s", e)
         except Exception as e:
             logger.error(f"[MemoryRail] Failed to register memory tools: {e}")
 

@@ -181,7 +181,7 @@ class GaussVectorStore(BaseVectorStore):
 
         try:
             cursor.execute(
-                f"SELECT EXISTS (SELECT table_name FROM information_schema.tables WHERE table_name = %s);",
+                "SELECT EXISTS (SELECT table_name FROM information_schema.tables WHERE table_name = %s);",
                 (collection_name,),
             )
             exists = cursor.fetchone()[0]
@@ -290,7 +290,7 @@ class GaussVectorStore(BaseVectorStore):
         cursor = self.connection.cursor()
         try:
             cursor.execute(
-                f"SELECT EXISTS (SELECT table_name FROM information_schema.tables WHERE table_name = %s);",
+                "SELECT EXISTS (SELECT table_name FROM information_schema.tables WHERE table_name = %s);",
                 (collection_name,),
             )
             exists = cursor.fetchone()[0]
@@ -354,7 +354,7 @@ class GaussVectorStore(BaseVectorStore):
                 )
 
             cursor.execute(
-                f"""
+                """
                 SELECT column_name, data_type, is_nullable, column_default
                 FROM information_schema.columns
                 WHERE table_name = %s
@@ -366,7 +366,7 @@ class GaussVectorStore(BaseVectorStore):
             columns = cursor.fetchall()
 
             cursor.execute(
-                f"""
+                """
                 SELECT kcu.column_name
                 FROM information_schema.table_constraints tc
                 JOIN information_schema.key_column_usage kcu
@@ -668,7 +668,7 @@ class GaussVectorStore(BaseVectorStore):
                 return {"distance_metric": "COSINE", "schema_version": 0}
 
             cursor.execute(
-                f"""
+                """
                 SELECT column_name, data_type
                 FROM information_schema.columns
                 WHERE table_name = %s AND data_type LIKE 'floatvector%%';
