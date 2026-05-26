@@ -25,12 +25,14 @@ from openjiuwen.agent_teams.schema.blueprint import (
     TeamAgentSpec,
 )
 from openjiuwen.agent_teams.schema.events import (
+    BroadcastEvent,
     EventMessage,
     MemberShutdownEvent,
     MemberStatusChangedEvent,
     MessageEvent,
     TaskClaimedEvent,
     TaskCompletedEvent,
+    TaskCreatedEvent,
     TaskListDrainedEvent,
     TeamCleanedEvent,
     TeamCompletedEvent,
@@ -393,6 +395,113 @@ async def test_human_agent_ignores_other_member_shutdown():
     await agent._coordination.dispatcher.dispatch(event)
 
     agent.shutdown_self.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_human_agent_dispatch_delivers_message_broadcast_and_task_claimed():
+    """F_14 team events must survive the human-agent whitelist in dispatch.
+
+    The role-aware rendering branches in ``MessageHandler`` /
+    ``TaskBoardHandler`` (``hitt.msg_received_for_human`` /
+    ``hitt.task_assigned_to_self_human``) are only reachable when
+    MESSAGE / BROADCAST / TASK_CLAIMED pass the coarse whitelist in
+    ``dispatch``. F_14 shipped those handler branches but left the
+    whitelist muting the events, so the controller-facing rendering
+    never ran. Drive each event through the real ``dispatch`` and
+    assert the framework is triggered with the matching event_type.
+    """
+    agent = _make_human_agent("human_alice")
+    trigger = AsyncMock()
+    agent._coordination.dispatcher._framework.trigger = trigger
+
+    models = [
+        MessageEvent(
+            team_name="hitt-team",
+            message_id="m1",
+            from_member_name="leader-1",
+            to_member_name="human_alice",
+        ),
+        BroadcastEvent(
+            team_name="hitt-team",
+            message_id="b1",
+            from_member_name="leader-1",
+        ),
+        TaskClaimedEvent(
+            team_name="hitt-team",
+            member_name="human_alice",
+            task_id="t1",
+        ),
+    ]
+    for model in models:
+        trigger.reset_mock()
+        event = EventMessage.from_event(model)
+        await agent._coordination.dispatcher.dispatch(event)
+        trigger.assert_awaited_once()
+        assert trigger.await_args.args[0] == event.event_type
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_human_agent_dispatch_mutes_task_board_survey_events():
+    """Task-board survey events stay muted for a human-agent avatar.
+
+    TASK_CREATED / TASK_UPDATED / ... drive ``_nudge_idle_agent``, which
+    would push the avatar to autonomously scan the board for claimable
+    work. Only TASK_CLAIMED (a direct assignment to the avatar) is a
+    controller notification; survey events must not reach the framework.
+    """
+    agent = _make_human_agent("human_alice")
+    trigger = AsyncMock()
+    agent._coordination.dispatcher._framework.trigger = trigger
+
+    event = EventMessage.from_event(
+        TaskCreatedEvent(
+            team_name="hitt-team",
+            task_id="t1",
+            status="pending",
+        )
+    )
+    await agent._coordination.dispatcher.dispatch(event)
+
+    trigger.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_human_agent_ignores_other_member_task_claim():
+    """A claim targeting someone else must not nudge a human-agent avatar.
+
+    A regular teammate / leader falls through to the board nudge so an
+    idle member sees the change (see
+    ``test_task_claimed_for_other_member_falls_through_to_board_nudge``).
+    A human-agent avatar never autonomously surveys the board, so
+    ``on_task_claimed`` short-circuits for a claim addressed to another
+    member — no ``list_tasks`` survey, no ``deliver_input``.
+    """
+    agent = _make_leader()
+    # Role check consults backend.is_human_agent (not TeamRole); piggy-back
+    # on the leader fixture as the existing human-template tests do.
+    agent.team_backend._human_agent_names.add("leader-1")
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[])
+    agent._is_agent_running = lambda: False
+    agent._start_agent = AsyncMock()
+    agent.steer = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskClaimedEvent(
+            team_name="test-team",
+            member_name="dev-1",
+            task_id="task-7",
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_claimed(event)
+
+    agent._configurator.task_manager.list_tasks.assert_not_awaited()
+    agent._start_agent.assert_not_called()
+    agent.steer.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -179,3 +179,53 @@ section 用例对术语调整不敏感，仍然通过（关键词如 `relay chan
    （leader 进程 fire on_inbound，human-agent 进程 deliver_input）。SDK 如果只看
    on_inbound，会和 avatar harness 看到的同一条消息分两路出现。下次清理时可以考虑
    只保留一条 —— 但本次保守起见保留向后兼容。
+
+## Follow-up：dispatch 白名单漏改导致团队事件从未送达（2026-05-26）
+
+### 症状
+
+本特性上线后，human-agent avatar 实际**从未**收到 message / broadcast / 任务指派
+事件——`MessageHandler._format_message` 的 `is_human_agent` 分支、
+`TaskBoardHandler.on_task_claimed` 的 `is_self_human` 分支这两段渲染逻辑是死代码，
+`hitt.msg_received_for_human` / `hitt.task_assigned_to_self_human` 从未实际触发。
+
+### 根因
+
+本特性首次落地（见上文「范围」）改了 8 个文件，**唯独漏了
+`agent/coordination/dispatcher.py`**。`dispatch()` 里有一段更早的 human-agent 粗筛
+白名单（旧设计是「avatar harness 静音团队事件、由 leader 的
+`_notify_human_agent_inbound` 回调通知真人」），它在 transport 事件分支只放行
+`{CLEANED, MEMBER_SHUTDOWN, MEMBER_CANCELED, STANDBY}` 四类生命周期事件，把
+`MESSAGE` / `BROADCAST` / `TASK_CLAIMED` 在进 framework 之前就 `return` 掉了。本特性
+新增的 handler 渲染分支因此永远走不到——新旧两套设计直接冲突，而白名单是漏网的旧逻辑。
+
+测试没抓到：本特性新增的 5 个用例全部**直接调 handler 方法**
+（`dispatcher.task_board.on_task_claimed(...)` / `handler._format_message(...)`），
+绕过了 `dispatch()` 这道粗筛门；而走 `dispatch()` 的 human-agent 用例只覆盖了白名单
+放行的生命周期事件（`MEMBER_SHUTDOWN` 等）。两层之间的缝隙正好漏掉了本特性。
+
+### 修复
+
+1. `dispatcher.py` 白名单增加放行 `TeamEvent.MESSAGE` / `TeamEvent.BROADCAST` /
+   `TeamEvent.TASK_CLAIMED`，并重写注释说明两组放行（生命周期 vs F_14 团队事件）。
+   任务板巡视事件（`TASK_CREATED` / `TASK_UPDATED` / ... → `_nudge_idle_agent`）
+   **继续静音**——它们没有 human-agent 渲染分支，会驱使 avatar 自主扫描任务板找活，
+   与本特性「avatar 不自主行动」矛盾。
+2. `TaskBoardHandler.on_task_claimed`：`is_self_human` 判断提前到入口算一次；human-agent
+   收到「指派给别人」的 `TASK_CLAIMED` 时**不** fall-through 到 `on_task_board_event`
+   →`_nudge_idle_agent`（avatar 不做任务板巡视），只有指派给自己的认领才 deliver。
+3. 补 3 个走 `dispatch()` 的端到端回归用例（`test_team_agent_coordination.py`）：
+   `test_human_agent_dispatch_delivers_message_broadcast_and_task_claimed`（三类穿过
+   白名单）、`test_human_agent_dispatch_mutes_task_board_survey_events`（巡视类被静音）、
+   `test_human_agent_ignores_other_member_task_claim`（指派给别人不 nudge）。
+
+### 拒绝的方案（Follow-up）
+
+- **放行全部 task 事件（含 `TASK_CREATED` 等板变动）**：会让 `_nudge_idle_agent` 把
+  「可认领任务列表」灌给 avatar、诱导它自主认领，与本特性核心矛盾，且这些事件没有
+  human-agent 渲染分支。只放行「指派给自己」语义明确的 `TASK_CLAIMED`。
+
+### 验证
+
+`pytest tests/unit_tests/agent_teams/test_team_agent_coordination.py test_hitt.py
+test_coordination_lifecycle.py test_coordination_loop.py`：129 通过，无回归。

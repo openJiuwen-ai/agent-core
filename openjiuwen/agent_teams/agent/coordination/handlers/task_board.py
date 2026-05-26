@@ -61,13 +61,21 @@ class TaskBoardHandler(BaseCoordinationHandler):
         if not member_name or self._infra.task_manager is None:
             return
         payload = event.get_payload()
+        backend = self._infra.team_backend
+        is_self_human = backend is not None and backend.is_human_agent(member_name)
         if payload.member_name != member_name:
+            # A claim targeting someone else nudges idle teammates / the
+            # leader with the refreshed board. A human-agent avatar never
+            # autonomously surveys the board for claimable work, so it
+            # ignores other members' claims — only a claim addressed to
+            # the avatar itself (its controller's assignment notification,
+            # rendered below) is delivered.
+            if is_self_human:
+                return
             await self.on_task_board_event(event)
             return
         await self._poll.resume_polls()
 
-        backend = self._infra.team_backend
-        is_self_human = backend is not None and backend.is_human_agent(member_name)
         if is_self_human:
             # Title lookup is best-effort: a glitch must not break the
             # dispatch loop. Same exception discipline as

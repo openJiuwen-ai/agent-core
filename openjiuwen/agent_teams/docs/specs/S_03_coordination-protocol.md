@@ -8,8 +8,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/coordination/` |
-| 最近一次修订日期 | 2026-05-25 |
-| 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_07_team-completion-events.md` |
+| 最近一次修订日期 | 2026-05-26 |
+| 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_07_team-completion-events.md`、`F_14_human-agent-team-event-rendering.md` |
 
 ## 范围 / 边界
 
@@ -44,7 +44,7 @@
 7. **handler 之间不直接互调**。跨域响应必须通过让两个 handler 各自注册同一个 `event_key`、走 framework fan-out 实现。
 8. **`AsyncCallbackFramework.trigger` 的异常语义是吞 + 续跑**：普通 `Exception` 被框架 log + continue，仅 `AbortError` 上抛。handler 必须自己用 `team_logger.error("...", exc_info=True)` 记录关键失败，**禁止依赖 framework swallow 当作隐式错误处理**。
 9. **`MemberHandler` 与 `StaleTaskHandler` 共享同一个 `dict[str, float]` 引用作为 stale-claim throttle**（在 `EventDispatcher.__init__` 中创建一次、传两个 handler）。同一 task 在一个 stale 窗口内不会被两条路径重复 nudge。
-10. **`HUMAN_AGENT` 角色禁止自主轮询与自主响应**：`InnerEventType.POLL_TASK` / `InnerEventType.POLL_MAILBOX` 在 dispatch 入口直接短路；transport 事件仅放行 `TeamEvent.CLEANED` / `TeamEvent.MEMBER_SHUTDOWN` / `TeamEvent.MEMBER_CANCELED` / `TeamEvent.STANDBY` 四类。其中 `MEMBER_SHUTDOWN` 放行是因为 human-agent 没有自主 round 去消费 shutdown 消息走 round-end `close_stream`（teammate 的路径）。`MemberHandler._shutdown_human_agent` 的收摊策略：**有 in-flight round 且非 `force` 则不打断**——`shutdown_member` 先写 `SHUTDOWN_REQUESTED` 再发事件，那一轮自然结束时 `_run_one_round` round-end 自检会 `close_stream`（与 teammate 同款，不打断控制者当前回合）；**空闲（无 round 可搭便车）或 `force=True` 才 `_lifecycle.shutdown_self()` 直接收摊**，否则成员永远卡在 `SHUTDOWN_REQUESTED`。
+10. **`HUMAN_AGENT` 角色禁止自主轮询与自主任务板巡视，但接收针对自己的团队事件（渲染成给控制者的通知）**：`InnerEventType.POLL_TASK` / `InnerEventType.POLL_MAILBOX` 在 dispatch 入口直接短路。transport 事件白名单分两组：**生命周期组** `TeamEvent.CLEANED` / `TeamEvent.MEMBER_SHUTDOWN` / `TeamEvent.MEMBER_CANCELED` / `TeamEvent.STANDBY`（驱动 avatar 自身收摊 / standby，不涉自主 round）；**F_14 团队事件组** `TeamEvent.MESSAGE` / `TeamEvent.BROADCAST` / `TeamEvent.TASK_CLAIMED`（进 avatar harness 后由 `MessageHandler._format_message` / `TaskBoardHandler.on_task_claimed` 的 role-aware 分支渲染成 `hitt.msg_received_for_human` / `hitt.task_assigned_to_self_human`，即"给控制者的通知"，avatar prompt 严格禁止自主行动）。其余事件保持静音——尤其是任务板巡视事件（`TASK_CREATED` / `TASK_UPDATED` / ... → `_nudge_idle_agent`）和 stale-claim / member-status nudge，它们会驱使 avatar 自主扫描任务板找活。配套：`TASK_CLAIMED` 里"指派给别人"的认领对 human-agent **不** fall-through 到任务板 nudge（`TaskBoardHandler.on_task_claimed` 在 `is_self_human` 时早退），只有指派给 avatar 自己的认领才 deliver。其中 `MEMBER_SHUTDOWN` 放行是因为 human-agent 没有自主 round 去消费 shutdown 消息走 round-end `close_stream`（teammate 的路径）。`MemberHandler._shutdown_human_agent` 的收摊策略：**有 in-flight round 且非 `force` 则不打断**——`shutdown_member` 先写 `SHUTDOWN_REQUESTED` 再发事件，那一轮自然结束时 `_run_one_round` round-end 自检会 `close_stream`（与 teammate 同款，不打断控制者当前回合）；**空闲（无 round 可搭便车）或 `force=True` 才 `_lifecycle.shutdown_self()` 直接收摊**，否则成员永远卡在 `SHUTDOWN_REQUESTED`。
 11. **dispatch 前置检查 `is_agent_ready()`**：未就绪时直接 return，handler 不会被触发。
 12. **`SHUTDOWN` inner 事件是 EventBus 自身的停机信号**，仅由 `EventBus.stop()` 写入；handler 不监听该事件。
 13. **session 绑定状态机是三态**：未绑（id=None, ts=None）/ 完整（id=X, ts=session）/ 半绑（id=X, ts=None）。`bind_session(session)` 进完整态、`release_session()` 完整→半绑、`unbind_session()` 任意态→未绑。`kernel.start` 在调用面显式分流：session 非 None 走 bind，否则走 unbind；不依赖被调方分支。
@@ -186,7 +186,7 @@ class EventDispatcher:
    - 否则 `await framework.trigger(event_type.value, event)`。
 3. transport `EventMessage` 分支：
    - `blueprint.member_name` 缺失 → return。
-   - `HUMAN_AGENT` 角色 + 不在 `{CLEANED, MEMBER_SHUTDOWN, MEMBER_CANCELED, STANDBY}` 白名单 → return（机制 2）。
+   - `HUMAN_AGENT` 角色 + 不在 `{CLEANED, MEMBER_SHUTDOWN, MEMBER_CANCELED, STANDBY, MESSAGE, BROADCAST, TASK_CLAIMED}` 白名单 → return（机制 2；前四类是生命周期事件，后三类是 F_14 渲染成"给控制者通知"的团队事件）。
    - 否则 `await framework.trigger(event.event_type, event)`。
 
 handler 实例作为公共属性暴露（`dispatcher.lifecycle / .member / ...`），用于测试断言与调试访问。
