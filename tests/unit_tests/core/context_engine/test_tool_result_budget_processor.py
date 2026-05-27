@@ -340,9 +340,8 @@ class TestToolResultBudgetProcessorFilesystemOffload:
         # Verify offload marker exists
         assert tool_msg.content.startswith(PERSISTED_OUTPUT_TAG)
 
-        # Verify OFFLOAD marker, reload call, and preview content are present
-        assert "[OFFLOAD: handle=" in tool_msg.content
-        assert "reload_original_context_messages" in tool_msg.content
+        # Verify "Output too large" text and preview content are present
+        assert "Output too large" in tool_msg.content
         assert unique_content[:20] in tool_msg.content
 
     @pytest.mark.asyncio
