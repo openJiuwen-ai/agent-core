@@ -807,6 +807,42 @@ class TeamAgent(BaseAgent):
             spawn_config=spawn_config,
         )
 
+    async def auto_start_member(self, member_name: str) -> bool:
+        """Start a single UNSTARTED member via TeamBackend.startup_member.
+
+        Best-effort: failure is logged but does not raise.
+        Returns True if the member was started.
+        """
+        backend = self.team_backend
+        if backend is None or not backend.is_leader:
+            return False
+        try:
+            started = await backend.startup_member(member_name, on_created=self._on_teammate_created)
+        except Exception as exc:
+            team_logger.error("auto_start_member({}) failed: {}", member_name, exc)
+            return False
+        if started:
+            team_logger.info("Auto-started member via interact: {}", member_name)
+        return started
+
+    async def auto_start_all(self) -> list[str]:
+        """Start all UNSTARTED members via TeamBackend.startup.
+
+        Best-effort: failure is logged but does not raise.
+        Returns list of member names that were started.
+        """
+        backend = self.team_backend
+        if backend is None or not backend.is_leader:
+            return []
+        try:
+            started = await backend.startup(on_created=self._on_teammate_created)
+            if started:
+                team_logger.info("Auto-started members via interact broadcast: {}", started)
+            return started
+        except Exception as exc:
+            team_logger.error("auto_start_all failed: {}", exc)
+            return []
+
     # ------------------------------------------------------------------
     # Fault tolerance: cleanup, restart, recover
     # ------------------------------------------------------------------

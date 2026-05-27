@@ -53,6 +53,9 @@ def _make_agent(*, known_members: set[str] | None = None) -> MagicMock:
         side_effect=lambda name: MagicMock(name=f"TeamMember:{name}") if name in members else None
     )
     agent.deliver_input = AsyncMock()
+    agent.has_team_member = AsyncMock(side_effect=lambda name: name in members)
+    agent.auto_start_member = AsyncMock(return_value=False)
+    agent.auto_start_all = AsyncMock(return_value=[])
     avatar = AsyncMock(name="HumanAgentRuntime")
     agent.lookup_human_agent_runtime = MagicMock(return_value=avatar)
     agent._avatar = avatar  # exposed for tests that want to assert on it
@@ -82,7 +85,7 @@ async def test_god_view_always_goes_to_leader():
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_operator_message_direct_routes_to_member():
-    """OperatorMessage with a target writes a user→target message."""
+    """OperatorMessage with a target auto-starts the member then writes a message."""
     agent = _make_agent()
 
     result = await TeamRuntimeManager._dispatch_payload(
@@ -91,6 +94,7 @@ async def test_operator_message_direct_routes_to_member():
     )
 
     assert result.ok
+    agent.auto_start_member.assert_awaited_once_with("dev-1")
     agent.team_backend.message_manager.send_message.assert_awaited_once_with(
         content="ping",
         to_member_name="dev-1",
@@ -102,7 +106,7 @@ async def test_operator_message_direct_routes_to_member():
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_operator_message_broadcasts_when_target_none():
-    """OperatorMessage with target=None broadcasts as the user."""
+    """OperatorMessage with target=None auto-starts all then broadcasts as the user."""
     agent = _make_agent()
 
     result = await TeamRuntimeManager._dispatch_payload(
@@ -111,6 +115,7 @@ async def test_operator_message_broadcasts_when_target_none():
     )
 
     assert result.ok
+    agent.auto_start_all.assert_awaited_once()
     agent.team_backend.message_manager.broadcast_message.assert_awaited_once_with(
         content="hello team",
         from_member_name="user",
@@ -155,13 +160,14 @@ async def _make_manager_with_agent(agent: MagicMock) -> TeamRuntimeManager:
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_interact_str_at_member_routes_via_operator():
-    """``interact("@dev-1 hi")`` parses to OperatorMessage(target='dev-1')."""
+    """``interact("@dev-1 hi")`` auto-starts dev-1 then writes a message."""
     agent = _make_agent(known_members={"dev-1"})
     manager = await _make_manager_with_agent(agent)
 
     result = await manager.interact("@dev-1 hi", team_name="alpha", session_id="s1")
 
     assert result.ok
+    agent.auto_start_member.assert_awaited_once_with("dev-1")
     agent.team_backend.message_manager.send_message.assert_awaited_once_with(
         content="hi",
         to_member_name="dev-1",
@@ -173,13 +179,14 @@ async def test_interact_str_at_member_routes_via_operator():
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_interact_str_at_all_broadcasts_via_operator():
-    """``interact("@all status")`` parses to OperatorMessage(target=None)."""
+    """``interact("@all status")`` auto-starts all then broadcasts."""
     agent = _make_agent()
     manager = await _make_manager_with_agent(agent)
 
     result = await manager.interact("@all status", team_name="alpha", session_id="s1")
 
     assert result.ok
+    agent.auto_start_all.assert_awaited_once()
     agent.team_backend.message_manager.broadcast_message.assert_awaited_once_with(
         content="status",
         from_member_name="user",

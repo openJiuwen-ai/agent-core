@@ -15,6 +15,9 @@ class MemberStatus(str, Enum):
 
     States:
         UNSTARTED: Member has been created but not yet started
+        STARTING: Member agent process is being spawned (transitional;
+            only the first startup path can transition UNSTARTED→STARTING,
+            acting as a CAS guard against duplicate spawn)
         READY: Member is ready to receive tasks
         BUSY: Member is currently processing a task
         PAUSED: Member coroutine has exited at the end of a round
@@ -33,6 +36,7 @@ class MemberStatus(str, Enum):
         ERROR: Member is in error state
     """
     UNSTARTED = "unstarted"
+    STARTING = "starting"
     READY = "ready"
     BUSY = "busy"
     PAUSED = "paused"
@@ -46,7 +50,14 @@ class MemberStatus(str, Enum):
 # State transition table for MemberStatus
 MEMBER_TRANSITIONS: Dict[MemberStatus, List[MemberStatus]] = {
     MemberStatus.UNSTARTED: [
+        MemberStatus.STARTING,
         MemberStatus.READY,
+        MemberStatus.SHUTDOWN,
+        MemberStatus.ERROR,
+    ],
+    MemberStatus.STARTING: [
+        MemberStatus.READY,
+        MemberStatus.UNSTARTED,
         MemberStatus.SHUTDOWN,
         MemberStatus.ERROR,
     ],

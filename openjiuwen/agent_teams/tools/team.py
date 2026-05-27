@@ -294,15 +294,44 @@ class TeamBackend:
         team_logger.info(f"Member {member_name} created successfully")
         return MemberOpResult.success()
 
+    async def _spawn_and_publish(
+        self,
+        member_name: str,
+        on_created: Callable[[str], Awaitable[None]],
+    ) -> None:
+        """Spawn a member agent and publish MemberSpawnedEvent.
+
+        Shared helper for startup() and startup_member().
+        Event publish failure is logged but does not raise.
+        """
+        await on_created(member_name)
+
+        try:
+            await self.messager.publish(
+                topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
+                message=EventMessage.from_event(
+                    MemberSpawnedEvent(
+                        team_name=self.team_name,
+                        member_name=member_name,
+                    ),
+                ),
+            )
+            team_logger.debug("Member spawned event published: {}", member_name)
+        except Exception as e:
+            team_logger.error("Failed to publish member spawned event for {}: {}", member_name, e)
+
+        team_logger.info("Member {} started", member_name)
+
     async def startup(
         self,
         on_created: Callable[[str], Awaitable[None]],
     ) -> list[str]:
         """Start all unstarted members.
 
-        Finds every member whose status is UNSTARTED, invokes
-        ``on_created`` to spin up the agent, and publishes a
-        MemberSpawnedEvent for each.
+        Finds every member whose status is UNSTARTED and starts
+        each via startup_member (which uses STARTING CAS guard).
+        On spawn failure, startup_member rolls back STARTING→UNSTARTED
+        and re-raises.
 
         Args:
             on_created: Callback that receives a member_name and
@@ -314,28 +343,46 @@ class TeamBackend:
         unstarted = await self.db.member.get_team_members(self.team_name, status=MemberStatus.UNSTARTED)
         started: list[str] = []
         for member in unstarted:
-            member_name = member.member_name
-
-            await on_created(member_name)
-
-            try:
-                await self.messager.publish(
-                    topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
-                    message=EventMessage.from_event(
-                        MemberSpawnedEvent(
-                            team_name=self.team_name,
-                            member_name=member_name,
-                        )
-                    ),
-                )
-                team_logger.debug(f"Member spawned event published: {member_name}")
-            except Exception as e:
-                team_logger.error(f"Failed to publish member spawned event for {member_name}: {e}")
-
-            started.append(member_name)
-            team_logger.info(f"Member {member_name} started")
-
+            await self.startup_member(member.member_name, on_created)
+            started.append(member.member_name)
         return started
+
+    async def startup_member(
+        self,
+        member_name: str,
+        on_created: Callable[[str], Awaitable[None]],
+    ) -> bool:
+        """Start a single UNSTARTED member.
+
+        Atomically transitions UNSTARTED→STARTING in DB first (CAS
+        guard), then invokes on_created to spawn the agent. If the
+        transition fails (member not found, not UNSTARTED, or already
+        STARTING/READY), returns False immediately — a concurrent
+        startup path already owns the spawn. If on_created raises,
+        rolls back STARTING→UNSTARTED so the member can be retried.
+
+        Args:
+            member_name: The member to start.
+            on_created: Callback that launches the agent process.
+
+        Returns:
+            True if the member was started, False otherwise.
+        """
+        transitioned = await self.db.member.try_transition_member_status(
+            member_name, self.team_name, MemberStatus.UNSTARTED, MemberStatus.STARTING,
+        )
+        if not transitioned:
+            return False
+
+        try:
+            await self._spawn_and_publish(member_name, on_created)
+        except Exception:
+            await self.db.member.try_transition_member_status(
+                member_name, self.team_name, MemberStatus.STARTING, MemberStatus.UNSTARTED,
+            )
+            raise
+
+        return True
 
     async def approve_plan(self, member_name: str, approved: bool, feedback: Optional[str] = None) -> bool:
         """Approve or reject a member's plan

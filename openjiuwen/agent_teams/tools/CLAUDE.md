@@ -5,7 +5,7 @@
 | File | Owns |
 |---|---|
 | `team_tools.py` | `TeamTool` base, `MappedToolOutput`, every `TeamTool` subclass, `create_team_tools` factory, permission sets (`LEADER_*`, `MEMBER_*`, `SHARED_TOOLS`) |
-| `team.py` | `TeamBackend` — the backend object every tool talks to (spawn/shutdown/clean/approve, roster queries, cleanup-path registry) |
+| `team.py` | `TeamBackend` — the backend object every tool talks to (spawn/shutdown/clean/approve, roster queries, cleanup-path registry). `startup_member` (single UNSTARTED→STARTING CAS + spawn), `startup` (batch via `startup_member`), `_spawn_and_publish` (shared helper) |
 | `task_manager.py` | `TeamTaskManager` — add/claim/complete/reset/cancel/approve_plan, event publishing, dependency refresh |
 | `message_manager.py` | `TeamMessageManager` — point-to-point + broadcast send, read-state queries |
 | `database.py` | `TeamDatabase` — SQL layer (static + per-session dynamic tables) |

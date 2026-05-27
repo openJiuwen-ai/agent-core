@@ -444,8 +444,19 @@ class TeamRuntimeManager:
         if isinstance(payload, OperatorMessage):
             inbox = UserInbox(backend.message_manager)
             if payload.target is None:
-                return await inbox.broadcast(payload.body)
-            return await inbox.direct(payload.target, payload.body)
+                # Start all UNSTARTED members before broadcasting
+                # so they subscribe to the event bus before the
+                # MessageEvent is published.
+                await agent.auto_start_all()
+                result = await inbox.broadcast(payload.body)
+                return result
+            # Start the targeted member before delivering the message
+            # so it subscribes to the event bus before MessageEvent
+            # is published. Startup failure does not prevent message
+            # persistence — the message stays in DB for later consumption.
+            await agent.auto_start_member(payload.target)
+            result = await inbox.direct(payload.target, payload.body)
+            return result
         if isinstance(payload, HumanAgentMessage):
             try:
                 inbox = HumanAgentInbox(

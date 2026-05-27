@@ -5,7 +5,7 @@
 
 from typing import List, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -176,6 +176,51 @@ class MemberDao:
             await session.commit()
             team_logger.debug("Member %s status updated to %s", member_name, status)
             return True
+
+    async def try_transition_member_status(
+        self,
+        member_name: str,
+        team_name: str,
+        from_status: MemberStatus,
+        to_status: MemberStatus,
+    ) -> bool:
+        """Atomically transition member status from from_status to to_status.
+
+        Uses a single UPDATE with WHERE status = from_status so only
+        one concurrent caller can succeed (rowcount=1). The database
+        transaction ensures atomicity; if the WHERE clause no longer
+        matches, rowcount=0 and the method returns False.
+
+        Args:
+            member_name: The member whose status to transition.
+            team_name: The team the member belongs to.
+            from_status: The expected current status (must match).
+            to_status: The target status.
+
+        Returns:
+            True if the transition succeeded, False otherwise.
+        """
+        async with self._session_local() as session:
+            result = await session.execute(
+                update(TeamMember)
+                .where(
+                    TeamMember.member_name == member_name,
+                    TeamMember.team_name == team_name,
+                    TeamMember.status == from_status.value,
+                )
+                .values(status=to_status.value)
+            )
+            await session.commit()
+            transitioned = result.rowcount == 1
+            if not transitioned:
+                team_logger.debug(
+                    "CAS %s -> %s for member %s failed (rowcount=%s)",
+                    from_status.value,
+                    to_status.value,
+                    member_name,
+                    result.rowcount,
+                )
+            return transitioned
 
     async def update_member_execution_status(
         self,

@@ -19,7 +19,7 @@
 
 | 文件 | 类 | 职责 |
 |---|---|---|
-| `team_agent.py` | `TeamAgent(BaseAgent)` | 唯一对外类。leader / teammate 都是它，行为由 `blueprint.role` 切 |
+| `team_agent.py` | `TeamAgent(BaseAgent)` | 唯一对外类。leader / teammate 都是它，行为由 `blueprint.role` 切。`auto_start_member` / `auto_start_all` 用于 interact dispatch 层 best-effort lazy startup |
 | `agent_configurator.py` | `AgentConfigurator` | DeepAgent 装配，挂 prompts/ 与 rails/ 子模块（spawn 时复用 `models/` 的 allocator 回调）；`_resolve_team_mode` 在这里 |
 | `member.py` | `TeamMember` | 成员状态机封装 |
 | `member_factory.py` | `create_member_handle(...)` | 集中 TeamMember 构造，leader / teammate 路径共用一份实现 |

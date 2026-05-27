@@ -94,7 +94,7 @@ task.py            # TaskSummary / TaskDetail —— 任务返回模型
 - `TeamRuntimeContext`：运行时上下文，携带 role / messager_config / db_config 等资源配置，是 `Spec → Runtime` 的边界。
 - 新增 spec 字段要想清楚：**属于装配数据**（放 Spec）还是**运行时资源**（放 Config/Manager/Runtime）。不要让 Spec 持有 `Runner`、`Session`、文件句柄。
 - **Session checkpoint 状态结构按 team 分桶**：`session.update_state` 的全局状态根上有一个 `teams` namespace —— `state["teams"][team_name] = {spec, context, model_allocator_state, lifecycle, db_state}`。同一 session 可以承载多个 team 的状态；读写一律走 `runtime/metadata.py` 的 `read_team_namespace / merge_team_namespace / read_team_db_state / merge_team_db_state`，不要直接在 root 上 `update_state({"spec": ...})`。`db_state` 用 `pending_create / created / cleaned` 标记 team DB row 生命周期。
-- `MemberStatus` 三态分得清：`PAUSED` 是自然 round-end idle（persistent team，coordination kernel `pause` 路径写）；`STOPPED` 是外部 `stop_team` 拆掉 runtime、但 team 仍 live（kernel `stop` 路径写）；`SHUTDOWN` 是永久退场。三者都可经 `RESTARTING` 复活，DB 写状态选谁取决于"为什么 runtime 不在了"。`schema.team.TeamLifecycle`（temporary / persistent）描述静态团队类型，`runtime.pool.RuntimeState`（running / paused）描述对象池中 team 的运行时状态——和 MemberStatus 是不同层次的枚举，不要混用。
+- `MemberStatus` 状态流转：`UNSTARTED`（DB 记录已创建，agent 进程未启动）→ `STARTING`（CAS guard 占位，正在 spawn）→ `READY`（agent 进程已就绪）→ `BUSY`/`PAUSED`/`STOPPED`/`SHUTDOWN`/`ERROR`。`STARTING` 是过渡态——只有第一个 startup 路径能 CAS 成功 `UNSTARTED→STARTING`，第二个并发路径查到 STARTING/READY 直接跳过。spawn 失败时 rollback `STARTING→UNSTARTED` 保证可重试。`PAUSED` 是自然 round-end idle（persistent team）；`STOPPED` 是外部 `stop_team` 拆掉 runtime、但 team 仍 live；`SHUTDOWN` 是永久退场。`BUSY`/`PAUSED`/`STOPPED`/`SHUTDOWN` 可经 `RESTARTING` 复活。`schema.team.TeamLifecycle`（temporary / persistent）描述静态团队类型，`runtime.pool.RuntimeState`（running / paused）描述对象池中 team 的运行时状态——和 MemberStatus 是不同层次的枚举，不要混用。
 - `TeamOutputSchema` 是 `core.session.stream.OutputSchema` 的子类（不污染 core 层），扩出 `source_member: str | None` 与 `role: TeamRole | None`。`Runner.run_agent_team_streaming` 的所有输出 chunk 在 team 路径下都会被 `StreamController` 自动升级为 `TeamOutputSchema` 并打上 `(member_name, role)` 标签。**inprocess 模式**下，`SpawnManager` 在 spawn teammate 时通过 `StreamController.add_chunk_observer` 把 teammate chunk fan-out 到 leader 的 `stream_queue`，让 leader 的 streaming 流出全成员 chunk；subprocess 模式不做转发（chunk 留在 teammate 进程内），扩展点已留好（messager-driven observer）。详见 `agent/CLAUDE.md` 的 StreamController 段。
 
 ### models/ — 多模型部署原语
@@ -141,8 +141,14 @@ Messager 是点对点 + broadcast 的统一抽象，**任何直接新建 socket 
 
 ### spawn/ — 成员启动
 
-两种启动模式走不同入口，但对外由 `TeamAgent.spawn_member` 统一：
+两种启动模式走不同入口，但对外由两条路径触发：
 
+- `TeamAgent.spawn_member`（工具层）→ `SpawnManager.spawn_teammate`：Leader LLM 调用 spawn_member tool 时触发
+- `TeamAgent.auto_start_member` / `auto_start_all`（interact dispatch 层）→ `TeamBackend.startup_member` / `startup`：用户通过 `@member` 或 `@all` 发消息时 best-effort lazy startup
+
+两条路径最终都走 `_on_teammate_created`（即 `SpawnManager.spawn_teammate`），并且都经过 `MemberStatus.UNSTARTED→STARTING` 的 CAS guard（`try_transition_member_status`）。模式由 `TeamAgentSpec.spawn_mode` 决定。
+
+启动模式：
 - `spawn_mode="process"` → `Runner.spawn_agent` 走子进程（跨平台，默认）。
 - `spawn_mode="inprocess"` → `inprocess_spawn` 在同 event loop 启动协程（适合测试或轻量场景）。
 - 顶层 `context.py` 的 `session_id` contextvars 是两种模式共享的上下文载体。

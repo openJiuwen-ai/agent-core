@@ -1221,3 +1221,188 @@ async def test_clean_team_no_callback_is_noop(db, message_bus):
     )
 
     assert await backend.clean_team() is True
+
+
+# ----------------------------------------------------------------------
+# startup_member / startup / try_transition_member_status
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_startup_member_transitions_to_starting_then_spawns(db, message_bus):
+    """startup_member atomically transitions UNSTARTED→STARTING and spawns."""
+    team_id = "startup_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Startup Team",
+        leader_member_name="leader1",
+    )
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+    )
+    card = AgentCard(name="Dev1", description="dev 1", version="1.0.0")
+    await backend.spawn_member(member_name="dev-1", display_name="Dev 1", agent_card=card)
+
+    on_created = AsyncMock()
+    result = await backend.startup_member("dev-1", on_created=on_created)
+
+    assert result is True
+    on_created.assert_awaited_once_with("dev-1")
+    member = await db.member.get_member("dev-1", team_id)
+    # STARTING state; agent process will later transition to READY.
+    assert member.status == MemberStatus.STARTING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_startup_member_returns_false_if_not_unstarted(db, message_bus):
+    """startup_member skips members that are not UNSTARTED."""
+    team_id = "skip_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Skip Team",
+        leader_member_name="leader1",
+    )
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+    )
+    card = AgentCard(name="Dev1", description="dev 1", version="1.0.0")
+    await backend.spawn_member(member_name="dev-1", display_name="Dev 1", agent_card=card)
+    # Manually transition to STARTING so startup_member sees non-UNSTARTED.
+    await db.member.update_member_status("dev-1", team_id, MemberStatus.STARTING.value)
+
+    on_created = AsyncMock()
+    result = await backend.startup_member("dev-1", on_created=on_created)
+
+    assert result is False
+    on_created.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_startup_member_returns_false_for_unknown_member(db, message_bus):
+    """startup_member returns False for a member that does not exist."""
+    team_id = "unknown_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Unknown Team",
+        leader_member_name="leader1",
+    )
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+    )
+
+    on_created = AsyncMock()
+    result = await backend.startup_member("ghost", on_created=on_created)
+
+    assert result is False
+    on_created.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_startup_member_rollback_on_spawn_failure(db, message_bus):
+    """startup_member rolls back STARTING→UNSTARTED when on_created raises."""
+    team_id = "rollback_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Rollback Team",
+        leader_member_name="leader1",
+    )
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+    )
+    card = AgentCard(name="Dev1", description="dev 1", version="1.0.0")
+    await backend.spawn_member(member_name="dev-1", display_name="Dev 1", agent_card=card)
+
+    on_created = AsyncMock(side_effect=RuntimeError("spawn crashed"))
+    with pytest.raises(RuntimeError, match="spawn crashed"):
+        await backend.startup_member("dev-1", on_created=on_created)
+
+    # Status should be rolled back to UNSTARTED for retry.
+    member = await db.member.get_member("dev-1", team_id)
+    assert member.status == MemberStatus.UNSTARTED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_startup_delegates_to_startup_member(db, message_bus):
+    """startup() uses startup_member per member, so all go through STARTING CAS."""
+    team_id = "batch_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Batch Team",
+        leader_member_name="leader1",
+    )
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+    )
+    card1 = AgentCard(name="Dev1", description="dev 1", version="1.0.0")
+    card2 = AgentCard(name="Dev2", description="dev 2", version="1.0.0")
+    await backend.spawn_member(member_name="dev-1", display_name="Dev 1", agent_card=card1)
+    await backend.spawn_member(member_name="dev-2", display_name="Dev 2", agent_card=card2)
+
+    on_created = AsyncMock()
+    started = await backend.startup(on_created=on_created)
+
+    assert sorted(started) == ["dev-1", "dev-2"]
+    call_args = [call[0][0] for call in on_created.await_args_list]
+    assert sorted(call_args) == ["dev-1", "dev-2"]
+    # Both members should be in STARTING state.
+    m1 = await db.member.get_member("dev-1", team_id)
+    m2 = await db.member.get_member("dev-2", team_id)
+    assert m1.status == MemberStatus.STARTING.value
+    assert m2.status == MemberStatus.STARTING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_try_transition_member_status_atomic_cas(db):
+    """try_transition_member_status uses atomic UPDATE WHERE, only one caller succeeds."""
+    team_id = "cas_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="CAS Team",
+        leader_member_name="leader1",
+    )
+    await db.member.create_member(
+        member_name="dev-1",
+        team_name=team_id,
+        display_name="Dev 1",
+        agent_card="{}",
+        status=MemberStatus.UNSTARTED.value,
+        role=TeamRole.TEAMMATE.value,
+    )
+
+    # First caller succeeds: UNSTARTED → STARTING.
+    ok1 = await db.member.try_transition_member_status(
+        "dev-1", team_id, MemberStatus.UNSTARTED, MemberStatus.STARTING,
+    )
+    assert ok1 is True
+
+    # Second caller fails: member is now STARTING, not UNSTARTED.
+    ok2 = await db.member.try_transition_member_status(
+        "dev-1", team_id, MemberStatus.UNSTARTED, MemberStatus.STARTING,
+    )
+    assert ok2 is False
