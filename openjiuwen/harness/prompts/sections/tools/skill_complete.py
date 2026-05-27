@@ -31,6 +31,17 @@ SKILL_COMPLETE_PARAMS: Dict[str, Dict[str, str]] = {
         "cn": "已完成的技能名称",
         "en": "Name of the completed skill",
     },
+    "report": {
+        "cn": (
+            "（可选）给用户的最终回复。提供后服务端直接作为本轮最终消息展示，"
+            "不要再单独写 stop 回复。禁止复述步骤，只写结果概要 + 产物路径。"
+        ),
+        "en": (
+            "(Optional) Final user-facing reply. When set, the server surfaces it "
+            "as this turn's final message — do not write a separate stop reply. "
+            "No step recaps; outcome summary + artifact paths only."
+        ),
+    },
 }
 
 
@@ -42,6 +53,10 @@ def get_skill_complete_input_params(language: str = "cn") -> Dict[str, Any]:
             "skill_name": {
                 "type": "string",
                 "description": p["skill_name"].get(language, p["skill_name"]["cn"]),
+            },
+            "report": {
+                "type": "string",
+                "description": p["report"].get(language, p["report"]["cn"]),
             },
         },
         "required": ["skill_name"],

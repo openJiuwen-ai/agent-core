@@ -340,9 +340,9 @@ class TestToolResultBudgetProcessorFilesystemOffload:
         # Verify offload marker exists
         assert tool_msg.content.startswith(PERSISTED_OUTPUT_TAG)
 
-        # Verify preview is correct
-        preview_start = "Preview (first 20 chars):"
-        assert preview_start in tool_msg.content
+        # Verify OFFLOAD marker, reload call, and preview content are present
+        assert "[OFFLOAD: handle=" in tool_msg.content
+        assert "reload_original_context_messages" in tool_msg.content
         assert unique_content[:20] in tool_msg.content
 
     @pytest.mark.asyncio
@@ -495,7 +495,7 @@ class TestToolResultBudgetProcessorBasic:
         processor = ToolResultBudgetProcessor(ToolResultBudgetProcessorConfig())
 
         already_offloaded = OffloadToolMessage(
-            content=f"{PERSISTED_OUTPUT_TAG}\nOutput too large...",
+            content=f"{PERSISTED_OUTPUT_TAG}\nThe full tool result has been stored...",
             tool_call_id="tc-x",
             offload_handle="fake-handle",
             offload_type="filesystem",

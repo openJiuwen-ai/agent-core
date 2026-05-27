@@ -27,10 +27,14 @@ class SkillCompleteTool(Tool):
         skill_name = str(inputs.get("skill_name", "") or "").strip()
         if not skill_name:
             return ToolOutput(success=False, error="skill_name is required")
+        report = str(inputs.get("report", "") or "").strip()
+        extra: Dict[str, Any] = {"unload_skill_name": skill_name}
+        if report:
+            extra["skill_complete_report"] = report
         return ToolOutput(
             success=True,
             data=f"Skill '{skill_name}' marked as complete; body unloaded.",
-            extra_metadata={"unload_skill_name": skill_name},
+            extra_metadata=extra,
         )
 
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:

@@ -249,6 +249,7 @@ class ToolResultBudgetProcessor(MessageOffloader):
         persisted_content = self._build_persisted_output_message(
             original_size=len(message.content),
             offload_handle="pending",
+            offload_type="pending",
             preview=preview,
             has_more=has_more,
         )
@@ -272,9 +273,11 @@ class ToolResultBudgetProcessor(MessageOffloader):
             actual_offload_type = getattr(offload_message, "offload_type", "unknown")
             offload_message.content = self._build_persisted_output_message(
                 original_size=len(message.content),
-                offload_handle=f"[[OFFLOAD: handle={actual_handle}, type={actual_offload_type}]]",
+                offload_handle=actual_handle,
+                offload_type=actual_offload_type,
                 preview=preview,
                 has_more=has_more,
+                origin_tool_name=getattr(message, "name", None),
             )
             return offload_message
         return message
@@ -284,15 +287,24 @@ class ToolResultBudgetProcessor(MessageOffloader):
         *,
         original_size: int,
         offload_handle: str,
+        offload_type: str,
         preview: str,
         has_more: bool,
+        origin_tool_name: str | None = None,
     ) -> str:
-        suffix = "\n...\n" if has_more else "\n"
+        hidden = max(original_size - len(preview), 0)
+        tail = f"[+{hidden} chars in storage]" if has_more else "[full result shown]"
+        source = f"`{origin_tool_name}`" if origin_tool_name else "the source tool"
         return (
             f"{PERSISTED_OUTPUT_TAG}\n"
-            f"Output too large ({original_size} bytes)."
-            f"Preview (first {len(preview)} chars):\n"
-            f"{preview}{suffix}"
+            f"[OFFLOAD: handle={offload_handle}, type={offload_type}] — "
+            f"full result ({original_size} chars) stored.\n"
+            f"To fetch the rest: "
+            f'reload_original_context_messages(offload_handle="{offload_handle}", '
+            f'offload_type="{offload_type}")\n'
+            f"Snippet ({len(preview)} of {original_size} chars):\n"
+            f"{preview}\n"
+            f"{tail}\n"
             f"{PERSISTED_OUTPUT_CLOSING_TAG}"
         )
 

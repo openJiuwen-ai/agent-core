@@ -35,6 +35,11 @@ _SESSION_MEMORY_STATE_KEY = "__session_memory__"
 _CONTEXT_MESSAGE_ID_KEY = "context_message_id"
 
 
+async def _sm_skip_ack_after_tool(ctx: "AgentCallbackContext") -> None:
+    """SM-edit 批量返回后直接 force_finish，跳过 LLM 多吐的 "All sections updated" ack 轮。"""
+    ctx.request_force_finish({"output": "session memory updated", "result_type": "answer"})
+
+
 DEFAULT_SESSION_MEMORY_TEMPLATE = """# Session Title
 _A short and distinctive 5-10 word descriptive title for the session. Super info dense, no filler_
 
@@ -272,7 +277,7 @@ class SessionMemoryUpdateAgent:
             )
             return
 
-        self._ensure_agent(notes_path)
+        await self._ensure_agent(notes_path)
         if self._agent is None:
             raise RuntimeError("Session memory update agent is not initialized")
         self._prime_notes_file_as_read(notes_path, current_notes)
@@ -384,7 +389,7 @@ class SessionMemoryUpdateAgent:
             return
         await context.add_messages(context_messages)
 
-    def _ensure_agent(
+    async def _ensure_agent(
         self,
         notes_path: Path,
     ) -> None:
@@ -429,6 +434,10 @@ class SessionMemoryUpdateAgent:
 
         self._agent = agent
         self._workspace_root = str(workspace_root)
+        from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
+        await agent.agent_callback_manager.register_callback(
+            AgentCallbackEvent.AFTER_TOOL_CALL, _sm_skip_ack_after_tool,
+        )
 
     def _ensure_direct_model(self) -> Model:
         if self._direct_model is not None:
