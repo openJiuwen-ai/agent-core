@@ -241,13 +241,16 @@ class TestCIGateRunnerInvoke(IsolatedAsyncioTestCase):
         tool._prepared = True
         tool._make_available = True  # initialize for test
         tool._gates = [
-            {"name": "lint", "command": "ruff check ."},
+            {"name": "lint", "command": "make check COMMITS=1"},
         ]
-        fake_proc = _FakeProc(1, b"E501 line too long")
         with patch(
-            "asyncio.create_subprocess_exec",
+            "openjiuwen.auto_harness.infra.ci_gate_runner.CIGateRunner._run_check_gate",
             new_callable=AsyncMock,
-            return_value=fake_proc,
+            return_value={
+                "name": "lint",
+                "passed": False,
+                "output": "E501 line too long",
+            },
         ):
             result = await tool.run("check")
         assert result["passed"] is False
@@ -368,6 +371,10 @@ class TestCIGateRunnerInvoke(IsolatedAsyncioTestCase):
         ) as mock_exec, patch(
             "pathlib.Path.is_file",
             return_value=True,
+        ), patch(
+            "openjiuwen.auto_harness.infra.ci_gate_runner.CIGateRunner._run_check_gate",
+            new_callable=AsyncMock,
+            return_value={"name": "lint", "passed": True, "output": ""},
         ):
             await tool._run_gate({
                 "name": "test",
@@ -375,9 +382,9 @@ class TestCIGateRunnerInvoke(IsolatedAsyncioTestCase):
             })
             await tool._run_gate({
                 "name": "lint",
-                "command": "echo ok",
+                "command": "make check COMMITS=1",
             })
-        assert mock_exec.await_count == 3
+        assert mock_exec.await_count == 2
         assert mock_exec.await_args_list[0].args[2] == (
             "uv sync --active --group dev --extra cli"
         )

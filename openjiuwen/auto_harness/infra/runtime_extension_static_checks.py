@@ -8,7 +8,9 @@ Used by both the verify stage (ExtendVerifyStage) and the merge stage
 
 from __future__ import annotations
 
+import os
 import asyncio
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,17 +54,20 @@ async def check_ruff(
     """
     errors: list[str] = []
     root_str = str(extension_root)
+    env = _build_ruff_env()
 
     # Step 1: auto-fix formatting and lint issues
+    python_executable = sys.executable
     for fix_cmd in (
-        ["ruff", "format", root_str],
-        ["ruff", "check", "--fix", root_str],
+        [python_executable, "-m", "ruff", "format", root_str],
+        [python_executable, "-m", "ruff", "check", "--fix", root_str],
     ):
         try:
             proc = await asyncio.create_subprocess_exec(
                 *fix_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
             await proc.communicate()
         except FileNotFoundError:
@@ -72,11 +77,14 @@ async def check_ruff(
     # Step 2: check remaining lint errors
     try:
         proc = await asyncio.create_subprocess_exec(
+            python_executable,
+            "-m",
             "ruff",
             "check",
             root_str,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
@@ -88,6 +96,28 @@ async def check_ruff(
         logger.debug("ruff not available, skipping lint")
 
     return errors
+
+
+def _build_ruff_env() -> dict[str, str]:
+    """Build subprocess env that ensures ruff can be found."""
+    env = dict(os.environ)
+    env["CI"] = "1"
+    venv = os.environ.get("VIRTUAL_ENV")
+    if not venv:
+        return env
+    venv_path = Path(venv)
+    if sys.platform == "win32":
+        bin_dir = str(venv_path / "Scripts")
+    else:
+        bin_dir = str(venv_path / "bin")
+    pathsep = os.pathsep
+    existing = env.get("PATH", "")
+    env["PATH"] = (
+        f"{bin_dir}{pathsep}{existing}"
+        if existing
+        else bin_dir
+    )
+    return env
 
 
 async def run_static_checks_against_runtime(

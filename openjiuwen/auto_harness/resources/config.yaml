@@ -27,7 +27,7 @@
 
 git:
   remote: ""                    # fork remote name（如 "k00591264"）
-  base_branch: "develop"        # PR 目标分支
+  base_branch: "develop-auto-harness"        # PR 目标分支
   user_name: ""                 # git commit 用户名
   user_email: ""                # git commit 邮箱
   fork_owner: ""                # fork 所有者（如 "SnapeK"）

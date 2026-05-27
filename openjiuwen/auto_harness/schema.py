@@ -62,6 +62,14 @@ def normalize_pipeline_preference(value: Any) -> str:
     return PIPELINE_PREFERENCE_AUTO
 
 
+def _venv_python_candidates(base_dir: str) -> list[Path]:
+    """Return platform-aware venv python paths under *base_dir*."""
+    venv = Path(base_dir) / ".venv"
+    if sys.platform == "win32":
+        return [venv / "Scripts" / "python.exe"]
+    return [venv / "bin" / "python"]
+
+
 def _default_immutable_files() -> list[str]:
     """Return built-in immutable files for the bundled Phase 1 pipeline."""
     return [
@@ -655,14 +663,14 @@ class AutoHarnessConfig:
         if self.ci_gate_python_executable:
             return self.ci_gate_python_executable
 
-        candidates = []
+        candidates: list[Path] = []
         if self.workspace:
-            candidates.append(
-                Path(self.workspace) / ".venv" / "bin" / "python"
+            candidates.extend(
+                _venv_python_candidates(self.workspace)
             )
         if self.local_repo:
-            candidates.append(
-                Path(self.local_repo) / ".venv" / "bin" / "python"
+            candidates.extend(
+                _venv_python_candidates(self.local_repo)
             )
 
         for candidate in candidates:

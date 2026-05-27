@@ -662,6 +662,8 @@ class ExtendImplementStage(ImplementStage):
             design,
         )
 
+        extension_root.mkdir(parents=True, exist_ok=True)
+
         prompt = _build_implement_ext_prompt(
             design,
             extension_root=extension_root,

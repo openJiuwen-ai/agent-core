@@ -22,6 +22,9 @@ from openjiuwen.auto_harness.contexts import (
 from openjiuwen.auto_harness.infra.parsers import (
     extract_text,
 )
+from openjiuwen.auto_harness.infra.ci_gate_runner import (
+    decode_stdout,
+)
 from openjiuwen.auto_harness.infra.runtime_extension_static_checks import (
     ExtStaticCheckResult,
     check_ruff,
@@ -826,20 +829,27 @@ async def _run_pytest_file(
     if python_path.is_file():
         bin_dir = str(python_path.parent)
         env["VIRTUAL_ENV"] = str(python_path.parent.parent)
-        env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+        pathsep = os.pathsep
+        env["PATH"] = (
+            f"{bin_dir}{pathsep}{env.get('PATH', '')}"
+            if env.get("PATH")
+            else bin_dir
+        )
     proc = await asyncio.create_subprocess_exec(
         python_executable,
         "-m",
         "pytest",
         str(test_file),
         "-q",
+        "-o",
+        "addopts=",
         cwd=str(cwd),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         env=env,
     )
     stdout, _ = await proc.communicate()
-    output = stdout.decode("utf-8", errors="replace")
+    output = decode_stdout(stdout)
     return _CIResult(
         passed=proc.returncode == 0,
         errors=output[-6000:],
