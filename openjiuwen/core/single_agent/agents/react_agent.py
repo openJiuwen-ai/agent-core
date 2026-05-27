@@ -717,6 +717,16 @@ class ReActAgent(BaseAgent):
         ctx.inputs.messages = context_window.get_messages()
         ctx.inputs.tools = context_window.get_tools()
 
+        # Append system-reminder messages injected by rails via ctx.extra.
+        # These are placed at the tail of the messages list (after context
+        # engine trimming) to ensure recency weight and guaranteed delivery.
+        system_reminders = ctx.extra.get("_system_reminders")
+        if system_reminders:
+            reminder_parts = [r["content"] for r in system_reminders]
+            ctx.inputs.messages.append(
+                SystemMessage(content="\n\n".join(reminder_parts))
+            )
+
         try:
             trace_ids = resolve_context_trace_ids(ctx.session, ctx.context)
             msgs_for_log = ctx.inputs.messages or []
