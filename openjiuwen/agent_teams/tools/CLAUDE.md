@@ -176,6 +176,13 @@ Wrap `invoke` body in `try/except` to catch unexpected errors from backend servi
 
 The ability layer renders tool results with `str(result)` — `MappedToolOutput.__str__` is what actually becomes the LLM-visible `ToolMessage.content`. `ToolOutput.data` is still present for programmatic consumers (events, logs).
 
+> **External members reuse these exact tools (F_26).** The `mcp/` server and
+> `skill/` CLI, in their `member` scope, expose the real `create_team_tools(role="teammate")`
+> instances (`view_task` / `claim_task` / `send_message`) and return `str(await tool.invoke(...))`
+> — so `map_result()` is the single source of LLM-facing text across in-process and
+> external CLI members. Keep tool descriptions / `map_result` role-neutral enough to read
+> well for a third-party CLI member too, not just an in-process DeepAgent.
+
 `map_result` strategies in this module:
 
 | Pattern | Tools | Strategy |

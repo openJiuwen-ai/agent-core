@@ -50,9 +50,9 @@ agent_teams/
 ├── reliability/         # 主动可靠性框架（健康信号采集 rail + 检测器 + 分级处置；opt-in）
 ├── team_workspace/      # 团队共享工作空间（跨成员的文件/锁/版本）
 ├── cli/                 # 交互式 TUI / 斜杠命令子模块（prompt_toolkit + rich）
-├── external/            # 外部 agent 接入核心（ExternalTeamClient + 连接 descriptor + inbound 渲染）
-├── skill/               # 外部 agent 的非交互 CLI + SKILL.md（skill+cli 封装）
-├── mcp/                 # 外部 agent 的 stdio MCP server（FastMCP，仓库首个 MCP server）
+├── external/            # 外部 agent 接入核心（ExternalTeamClient：scope 分化 member 真实工具 / operator 控制面）
+├── skill/               # 外部 agent 的非交互 CLI + SKILL_member.md / SKILL_operator.md（按 scope 分化）
+├── mcp/                 # 外部 agent 的 stdio MCP server（低层 mcp.server.lowlevel.Server，按 scope 分化）
 ├── workflow/            # Swarmflow 多 agent 工作流编排（dw 引擎移植 + worker backend + 4 层表示）
 └── worktree_remote.py   # 跨机器 worktree 后端（团队专属，generic 实现见 harness/tools/worktree）
 ```
@@ -199,18 +199,30 @@ messager，不经本地 avatar 代理。与 F_07 bridge（本地完整 DeepAgent
 - `external/descriptor.py`：`TeamJoinDescriptor`（session/team/member + role + language +
   db_config + transport_config）+ `TEAM_JOIN_ENV` 环境变量（`OPENJIUWEN_TEAM_JOIN`）。
   团队拉起外部 agent 时注入，或运维下发给独立服务。
-- `external/client.py`：`ExternalTeamClient` 按 descriptor 开 DB（`get_shared_db`）+ messager
-  （`create_messager`），复用 `TeamTaskManager` / `TeamMessageManager` 暴露
-  send/broadcast/view/list/claim/complete/update/list_members + `fetch_inbox`（poll）/
-  `watch`（zmq 订阅，事件即唤醒后回查 DB）。写路径与进程内成员对称：发同样的
-  `EventMessage` 到同样的 topic，进程内 handler 照常被 nudge。
+**两个场景，按 `descriptor.scope` 首次连接时分化（F_26）**——`scope` 与 team `role` 正交：
+
+- **member**（cli-agent 三方团队成员）：`ExternalTeamClient.connect` 建最小 `TeamBackend` +
+  `create_team_tools(role="teammate")`，对外暴露**真实** teammate `TeamTool`
+  （`view_task` / `claim_task[claimed|completed]` / `send_message`，结果即 `map_result()`
+  文本，与进程内成员逐字一致）+ 外部专有 `read_inbox`（原生 push、外部 pull）。`complete_task`
+  折进 `claim_task(status=completed)`、list/get/claimable 折进 `view_task`。MCP instructions
+  空（系统提示词已在 spawn 时直接注入 CLI，见 [[F_25]]）。
+- **operator**（团队外非成员控制接口，默认 scope）：`ExternalTeamClient` 的 per-op 方法
+  （send/broadcast/list/get/claimable/claim/complete/update/list_members + `create_task`）+
+  `fetch_inbox`/`watch`，全团队控制面；MCP instructions = 控制工作流。
+
+公共件：`client.tools`（member 真实工具字典）、`client.read_inbox()`（文本）、
+`client.bind_session_context()`（每调用重绑 session/language contextvar）。
 - `external/format.py`：纯函数把消息 / 任务板渲染成与进程内 dispatcher 一致的文本
-  （复用 `i18n.t` 文案）。
-- `skill/cli.py` + `skill/SKILL.md`：非交互脚本式 CLI（`team-member` 入口）+ 协同协议
-  教学文档。与 `cli/` 的交互式 TUI 不同——后者给人用，本 CLI 给外部 agent 脚本化调用。
-- `mcp/server.py`：FastMCP **stdio** server（`openjiuwen-team-mcp` 入口），把 ops 暴露为
-  MCP 工具，协同协议放进 server-level instructions（工具 schema 自描述，无需单独 skill）。
-  这是仓库首个 MCP server（其余 MCP 代码都是 client）。
+  （复用 `i18n.t` 文案）；`read_inbox` 用之。
+- `skill/cli.py`：非交互脚本式 CLI（`team-member` 入口），两段解析后按 scope 分化子命令
+  （member 驱动真实工具 / operator 控制面）。两份 skill 文档：`skill/SKILL_member.md` /
+  `skill/SKILL_operator.md`。与 `cli/` 的交互式 TUI 不同——后者给人用，本 CLI 给外部 agent
+  脚本化调用。
+- `mcp/server.py`：低层 `mcp.server.lowlevel.Server`（`openjiuwen-team-mcp` 入口；不用 FastMCP，
+  因 FastMCP 从函数签名推断 schema，无法暴露真实工具的 `card.input_params`）。`list_tools`/
+  `call_tool` 按 `client.scope` 在请求期分化；member 工具的 `inputSchema` 即 `card.input_params`、
+  结果即 `str(tool.invoke())`。这是仓库首个 MCP server（其余 MCP 代码都是 client）。
 
 **team 拉起外部 CLI 成员（F_22）**：CLI 启动知识静态预置在
 `TeamAgentSpec.external_cli_agents`（`ExternalCliAgentSpec` 列表：`cli_agent` 种类标识 +
