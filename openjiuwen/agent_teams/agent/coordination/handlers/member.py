@@ -23,6 +23,8 @@ from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
 from openjiuwen.agent_teams.schema.status import MemberStatus, TaskStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.timefmt import format_time_context
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
@@ -212,9 +214,11 @@ class MemberHandler(BaseCoordinationHandler):
         for task in stale:
             self._last_stale_nudge[task.task_id] = now
 
+        now_ms = get_current_time()
         lines = [t("dispatcher.stale_claim_header", count=len(stale))]
         for task in stale:
-            lines.append(f"- [{task.task_id}] {task.title}: {task.content}")
+            time_info = format_time_context(task.updated_at, now_ms)
+            lines.append(f"- [{task.task_id}] {task.title}: {task.content} ({time_info})")
         await message_manager.send_message("\n".join(lines), target_id)
         team_logger.info(
             "[leader] nudged {} about {} stale claimed task(s) after status → {}",

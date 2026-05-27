@@ -199,6 +199,28 @@ def test_compose_propagates_sentinel_when_no_adapter():
     assert REMOTE_UNAVAILABLE_SENTINEL in text
 
 
+@pytest.mark.level0
+def test_compose_includes_time_info_when_provided():
+    """A rendered send time shows up in the header so the bridge avatar
+    can gauge message delay; omitting it drops the time marker entirely."""
+    text = compose_bridge_inbound(
+        original_sender="alice",
+        original_body="ping",
+        remote_reply="pong",
+        language="en",
+        time_info="2026-05-27 14:30:05 +08:00 (3m ago)",
+    )
+    assert "2026-05-27 14:30:05 +08:00 (3m ago)" in text
+
+    plain = compose_bridge_inbound(
+        original_sender="alice",
+        original_body="ping",
+        remote_reply="pong",
+        language="en",
+    )
+    assert "·" not in plain
+
+
 # ---------------------------------------------------------------------------
 # build_bridge_persona / build_team_overview
 # ---------------------------------------------------------------------------

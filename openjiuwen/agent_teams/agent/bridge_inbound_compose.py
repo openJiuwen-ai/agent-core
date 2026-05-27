@@ -35,6 +35,7 @@ def compose_bridge_inbound(
     original_body: str,
     remote_reply: str,
     language: str = "cn",
+    time_info: str | None = None,
 ) -> str:
     """Build the text injected into the bridge avatar's context.
 
@@ -47,13 +48,21 @@ def compose_bridge_inbound(
             adapter is registered so the bridge LLM can react to the
             degradation.
         language: ``"cn"`` (default) or ``"en"``.
+        time_info: Pre-rendered ``<absolute local time> (<relative
+            diff>)`` of the inbound message's send time, or ``None`` to
+            omit it. Lets the bridge avatar gauge how delayed the
+            message is when it schedules the relay. Passed as a ready
+            string so this stays a zero-dependency pure function.
 
     Returns:
         Composed text suitable for ``agent.deliver_input``.
     """
     if language == "en":
+        header = f"[Team message from {original_sender}]"
+        if time_info:
+            header = f"[Team message from {original_sender} · {time_info}]"
         return (
-            f"[Team message from {original_sender}]\n"
+            f"{header}\n"
             f"{original_body}\n\n"
             f"[Remote executor's output — relay this verbatim back to the team]\n"
             f"{remote_reply}\n\n"
@@ -65,8 +74,11 @@ def compose_bridge_inbound(
             f"message has already been forwarded to the remote; do NOT "
             f"call send_message to forward it again."
         )
+    header = f"[来自团队成员 {original_sender} 的消息]"
+    if time_info:
+        header = f"[来自团队成员 {original_sender} 的消息 · {time_info}]"
     return (
-        f"[来自团队成员 {original_sender} 的消息]\n"
+        f"{header}\n"
         f"{original_body}\n\n"
         f"[外部执行者的执行结果（要原样回传给团队的内容）]\n"
         f"{remote_reply}\n\n"

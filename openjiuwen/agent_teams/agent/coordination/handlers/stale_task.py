@@ -204,9 +204,11 @@ class StaleTaskHandler(BaseCoordinationHandler):
         for task in fresh:
             self._last_pending_nudge[task.task_id] = now
 
+        now_ms = get_current_time()
         lines = [t("dispatcher.stale_pending_header")]
         for task in fresh:
-            lines.append(f"- [{task.task_id}] {task.title}: {task.content}")
+            time_info = format_time_context(task.updated_at, now_ms)
+            lines.append(f"- [{task.task_id}] {task.title}: {task.content} ({time_info})")
         content = "\n".join(lines)
 
         await self._round.deliver_input(content)

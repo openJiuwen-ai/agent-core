@@ -251,8 +251,15 @@ def build_server(
     async def list_tasks(status: str | None = None) -> list[dict[str, Any]]:
         """List team tasks, optionally filtered by status."""
         client = await holder.get()
+        now_ms = get_current_time()
         return [
-            {"task_id": t.task_id, "title": t.title, "status": t.status, "assignee": t.assignee}
+            {
+                "task_id": t.task_id,
+                "title": t.title,
+                "status": t.status,
+                "assignee": t.assignee,
+                "time": format_time_context(t.updated_at, now_ms),
+            }
             for t in await client.list_tasks(status=status)
         ]
 

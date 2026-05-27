@@ -216,6 +216,7 @@ class MessageHandler(BaseCoordinationHandler):
             original_body=msg.content,
             remote_reply=remote_reply,
             language=language,
+            time_info=format_time_context(msg.timestamp, get_current_time()),
         )
 
     async def _lookup_display_name(self, member_name: str) -> Any:
