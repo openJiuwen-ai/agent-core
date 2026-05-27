@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import warnings
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Union
 
 from openjiuwen.agent_evolving.signal.from_conv import ConversationSignalDetector
 from openjiuwen.agent_evolving.trajectory import (
@@ -89,6 +89,21 @@ def _normalize_member_role(role: Any) -> Optional[str]:
     return role_text or None
 
 
+def _normalize_skill_names(raw: Optional[Union[str, list[str]]]) -> set[str]:
+    """Normalize skill names into a set.
+
+    A string is treated as a single skill name; a list is treated as multiple names.
+    """
+    if raw is None:
+        return set()
+    if isinstance(raw, str):
+        name = raw.strip()
+        return {name} if name else set()
+    if isinstance(raw, list):
+        return {name.strip() for name in raw if name.strip()}
+    return set()
+
+
 class EvolutionTriggerPoint(Enum):
     """Configurable trigger points for evolution in EvolutionRail."""
 
@@ -125,6 +140,7 @@ class EvolutionRail(DeepAgentRail):
         evolution_trigger: EvolutionTriggerPoint = EvolutionTriggerPoint.AFTER_INVOKE,
         async_evolution: bool = True,
         max_concurrent_evolution: int = 1,
+        disabled_skills: Optional[Union[str, list[str]]] = None,
     ):
         """Initialize EvolutionRail.
 
@@ -145,6 +161,8 @@ class EvolutionRail(DeepAgentRail):
                 with the active ctx (backward-compatible).
             max_concurrent_evolution: Max concurrent run_evolution executions.
                 Limits LLM competition with the main agent flow. Default is 1.
+            disabled_skills: Optional deny-list of skill names excluded from self-optimization.
+                Supports a single skill name (str) or multiple names (list[str]).
         """
         super().__init__()
         if team_trajectory_store is not None:
@@ -158,6 +176,7 @@ class EvolutionRail(DeepAgentRail):
         self._max_trajectory_steps = max_trajectory_steps
         self._evolution_trigger = evolution_trigger
         self._trajectory_sink: Optional[TrajectorySink] = None
+        self._disabled_skills: set[str] = _normalize_skill_names(disabled_skills)
         self._team_id: Optional[str] = None
         self._member_role: Optional[str] = None
 
@@ -170,6 +189,16 @@ class EvolutionRail(DeepAgentRail):
     def trajectory_store(self) -> TrajectoryStore:
         """Get the trajectory store."""
         return self._trajectory_store
+
+    @property
+    def disabled_skills(self) -> set[str]:
+        """Set of skill names excluded from self-optimization."""
+        return self._disabled_skills
+
+    @classmethod
+    def _normalize_name_set(cls, raw: Optional[Union[str, list[str]]]) -> set[str]:
+        """Normalize skill names into a set."""
+        return _normalize_skill_names(raw)
 
     @property
     def builder(self) -> Optional[TrajectoryBuilder]:

@@ -45,13 +45,14 @@ from openjiuwen.harness.rails.evolution.skill_evolution_rail import (
 )
 
 
-def _make_rail(tmp_path, *, auto_scan: bool = True, auto_save: bool = True) -> SkillEvolutionRail:
+def _make_rail(tmp_path, *, auto_scan: bool = True, auto_save: bool = True, disabled_skills=None) -> SkillEvolutionRail:
     rail = SkillEvolutionRail(
         skills_dir=str(tmp_path / "skills"),
         llm=Mock(),
         model="dummy-model",
         auto_scan=auto_scan,
         auto_save=auto_save,
+        disabled_skills=disabled_skills,
     )
     rail._evolution_store = Mock()
     rail._evolution_store.read_skill_content = AsyncMock(return_value="# skill")
@@ -2215,3 +2216,78 @@ async def test_is_sharing_enabled_requires_both_sharer_and_stager(tmp_path):
     rail._share_stager = Mock()
     rail._keyword_extractor = Mock()
     assert rail.is_sharing_enabled is True
+
+
+# =============================================================================
+# disabled_skills Tests
+# =============================================================================
+
+
+def test_disabled_skills_constructor_parameter(tmp_path):
+    rail = SkillEvolutionRail(
+        skills_dir=str(tmp_path / "skills"),
+        llm=Mock(),
+        model="dummy-model",
+        disabled_skills=["skill-a", "skill-b"],
+    )
+    assert rail.disabled_skills == {"skill-a", "skill-b"}
+
+
+def test_disabled_skills_from_single_string(tmp_path):
+    rail = SkillEvolutionRail(
+        skills_dir=str(tmp_path / "skills"),
+        llm=Mock(),
+        model="dummy-model",
+        disabled_skills="skill-a",
+    )
+    assert rail.disabled_skills == {"skill-a"}
+
+
+def test_disabled_skills_defaults_to_empty(tmp_path):
+    rail = SkillEvolutionRail(
+        skills_dir=str(tmp_path / "skills"),
+        llm=Mock(),
+        model="dummy-model",
+    )
+    assert rail.disabled_skills == set()
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_filters_out_disabled_skills(tmp_path):
+    """run_evolution should exclude disabled skills from the evolution scope."""
+    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True, disabled_skills=["disabled-skill"])
+
+    messages = [
+        {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/active-skill/SKILL.md"}]},
+        {"role": "tool", "content": "Error: command failed", "name": "bash"},
+    ]
+    trajectory = _trajectory_with_messages(messages)
+
+    rail._evolution_store.list_skill_names = Mock(return_value=["active-skill", "disabled-skill"])
+    rail._is_regular_skill = Mock(return_value=True)
+    rail._collect_messages = AsyncMock(return_value=messages)
+    rail._handle_evolution_from_signals = AsyncMock()
+
+    await rail.run_evolution(trajectory, ctx=None, snapshot={"trajectory": trajectory, "messages": messages})
+
+    rail._handle_evolution_from_signals.assert_awaited_once()
+    call_kwargs = rail._handle_evolution_from_signals.call_args
+    assert call_kwargs.kwargs["skill_name"] == "active-skill"
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_all_skills_disabled(tmp_path):
+    """run_evolution should skip when all skills are disabled."""
+    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True, disabled_skills=["skill-a", "skill-b"])
+
+    messages = [{"role": "user", "content": "hello"}]
+    trajectory = _trajectory_with_messages(messages)
+
+    rail._evolution_store.list_skill_names = Mock(return_value=["skill-a", "skill-b"])
+    rail._is_regular_skill = Mock(return_value=True)
+    rail._collect_messages = AsyncMock(return_value=messages)
+    rail._handle_evolution_from_signals = AsyncMock()
+
+    await rail.run_evolution(trajectory, ctx=None, snapshot={"trajectory": trajectory, "messages": messages})
+
+    rail._handle_evolution_from_signals.assert_not_awaited()

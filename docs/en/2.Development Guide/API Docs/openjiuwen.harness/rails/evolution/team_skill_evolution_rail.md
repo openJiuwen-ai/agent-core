@@ -84,6 +84,7 @@ class TeamSkillRail(
     simplify_llm_policy: LLMInvokePolicy = ...,
     eval_interval: int = 5,
     evolution_total_timeout_secs: float = 600.0,
+    disabled_skills: Optional[Union[str, list[str]]] = None,
 )
 ```
 
@@ -111,6 +112,7 @@ class TeamSkillRail(
 * **simplify_llm_policy** (LLMInvokePolicy): Experience simplify LLM invocation policy.
 * **eval_interval** (int): Number of presentations between experience scoring checks. Must be at least 1.
 * **evolution_total_timeout_secs** (float): Background evolution total timeout budget, defaults to 600s.
+* **disabled_skills** (Optional[Union[str, list[str]]], optional): Deny-list of skill names excluded from self-optimization. Supports a single skill name (str) or multiple names (list[str]).
 
 ### Runtime Trajectory Source/Sink
 

@@ -84,6 +84,7 @@ class TeamSkillRail(
     simplify_llm_policy: LLMInvokePolicy = ...,
     eval_interval: int = 5,
     evolution_total_timeout_secs: float = 600.0,
+    disabled_skills: Optional[Union[str, list[str]]] = None,
 )
 ```
 
@@ -111,6 +112,7 @@ class TeamSkillRail(
 * **simplify_llm_policy** (LLMInvokePolicy): 经验简化 LLM 调用策略。
 * **eval_interval** (int): 经验展示评分检查间隔，必须大于等于 1。
 * **evolution_total_timeout_secs** (float): 后台演进总超时预算，默认 600s。
+* **disabled_skills** (Optional[Union[str, list[str]]], 可选): 排除自优化范围的技能拒绝列表。支持单个技能名（字符串）或多个技能名（字符串列表）。
 
 ### 运行时轨迹 Source/Sink
 

@@ -1569,6 +1569,126 @@ def test_detect_used_team_skill_prefers_skill_tool_and_filters_non_team_skill():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_detect_used_team_skill_excludes_disabled_skills():
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        team_dir_a = tmp / "team-skill-a"
+        team_dir_a.mkdir(parents=True)
+        (team_dir_a / "SKILL.md").write_text(
+            "---\nname: team-skill-a\nkind: team-skill\n---\n# Team Skill A",
+            encoding="utf-8",
+        )
+        team_dir_b = tmp / "team-skill-b"
+        team_dir_b.mkdir(parents=True)
+        (team_dir_b / "SKILL.md").write_text(
+            "---\nname: team-skill-b\nkind: team-skill\n---\n# Team Skill B",
+            encoding="utf-8",
+        )
+
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=MockLLM(),
+            model="mock-model",
+            async_evolution=False,
+            disabled_skills=["team-skill-a"],
+        )
+
+        trajectory = Trajectory(
+            execution_id="detect-disabled",
+            session_id="session-1",
+            source="online",
+            steps=[
+                TrajectoryStep(
+                    kind="tool",
+                    detail=ToolCallDetail(
+                        tool_name="read_file",
+                        call_args="/workspace/team-skill-a/SKILL.md",
+                    ),
+                ),
+                TrajectoryStep(
+                    kind="tool",
+                    detail=ToolCallDetail(
+                        tool_name="read_file",
+                        call_args="/workspace/team-skill-b/SKILL.md",
+                    ),
+                ),
+            ],
+        )
+
+        result = rail._detect_used_team_skill(trajectory)
+        assert result == "team-skill-b"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_detect_used_team_skill_returns_none_when_all_disabled():
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        team_dir = tmp / "team-skill-x"
+        team_dir.mkdir(parents=True)
+        (team_dir / "SKILL.md").write_text(
+            "---\nname: team-skill-x\nkind: team-skill\n---\n# Team Skill X",
+            encoding="utf-8",
+        )
+
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=MockLLM(),
+            model="mock-model",
+            async_evolution=False,
+            disabled_skills=["team-skill-x"],
+        )
+
+        trajectory = Trajectory(
+            execution_id="detect-all-disabled",
+            session_id="session-1",
+            source="online",
+            steps=[
+                TrajectoryStep(
+                    kind="tool",
+                    detail=ToolCallDetail(
+                        tool_name="read_file",
+                        call_args="/workspace/team-skill-x/SKILL.md",
+                    ),
+                ),
+            ],
+        )
+
+        result = rail._detect_used_team_skill(trajectory)
+        assert result is None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_team_skill_evolution_rail_disabled_skills_defaults_to_empty(tmp_path):
+    rail = TeamSkillRail(
+        skills_dir=str(tmp_path / "skills"),
+        llm=MockLLM(),
+        model="mock-model",
+    )
+    assert rail.disabled_skills == set()
+
+
+def test_team_skill_evolution_rail_disabled_skills_from_list(tmp_path):
+    rail = TeamSkillRail(
+        skills_dir=str(tmp_path / "skills"),
+        llm=MockLLM(),
+        model="mock-model",
+        disabled_skills=["skill-a", "skill-b"],
+    )
+    assert rail.disabled_skills == {"skill-a", "skill-b"}
+
+
+def test_team_skill_evolution_rail_disabled_skills_from_single_string(tmp_path):
+    rail = TeamSkillRail(
+        skills_dir=str(tmp_path / "skills"),
+        llm=MockLLM(),
+        model="mock-model",
+        disabled_skills="skill-a",
+    )
+    assert rail.disabled_skills == {"skill-a"}
+
+
 @pytest.mark.parametrize(
     ("result", "expected"),
     [

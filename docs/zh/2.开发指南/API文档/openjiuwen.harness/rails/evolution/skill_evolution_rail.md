@@ -37,6 +37,7 @@ class SkillEvolutionRail(
     generate_records_llm_policy: LLMInvokePolicy = ...,
     evaluate_llm_policy: LLMInvokePolicy = ...,
     simplify_llm_policy: LLMInvokePolicy = ...,
+    disabled_skills: Optional[Union[str, list[str]]] = None,
 )
 ```
 
@@ -55,6 +56,7 @@ class SkillEvolutionRail(
 * **generate_records_llm_policy** (LLMInvokePolicy): 经验记录生成阶段的 LLM 重试/超时策略。
 * **evaluate_llm_policy** (LLMInvokePolicy): 经验评分阶段的 LLM 重试/超时策略。
 * **simplify_llm_policy** (LLMInvokePolicy): simplify 治理阶段的 LLM 重试/超时策略。
+* **disabled_skills** (Optional[Union[str, list[str]]], 可选): 排除自优化范围的技能拒绝列表。支持单个技能名（字符串）或多个技能名（字符串列表）。
 
 ### 优先级
 

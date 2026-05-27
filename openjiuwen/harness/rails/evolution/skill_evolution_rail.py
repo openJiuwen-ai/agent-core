@@ -98,6 +98,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         evaluate_llm_policy: LLMInvokePolicy = EVALUATE_LLM_POLICY,
         simplify_llm_policy: LLMInvokePolicy = SIMPLIFY_LLM_POLICY,
         sharing_config: Optional[Dict[str, Any]] = None,
+        disabled_skills: Optional[Union[str, List[str]]] = None,
     ) -> None:
         """Initialize SkillEvolutionRail.
 
@@ -111,11 +112,17 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             trajectory_store: Optional trajectory store (inherited from EvolutionRail)
             eval_interval: Number of conversations between async evaluations
             sharing_config: Optional cross-user sharing settings (enabled, hub_path, etc.)
+            disabled_skills: Optional deny-list of skill names excluded from self-optimization.
+                Supports a single skill name (str) or multiple names (list[str]).
         """
         if eval_interval < 1:
             raise ValueError("eval_interval must be >= 1")
 
-        super().__init__(trajectory_store=trajectory_store, team_trajectory_store=team_trajectory_store)
+        super().__init__(
+            trajectory_store=trajectory_store,
+            team_trajectory_store=team_trajectory_store,
+            disabled_skills=disabled_skills,
+        )
         self._evolution_store = EvolutionStore(skills_dir)
         self._evolver = SkillExperienceOptimizer(
             llm,
@@ -398,6 +405,8 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
 
             all_skill_names = self._evolution_store.list_skill_names()
             skill_names = [name for name in all_skill_names if self._is_regular_skill(name)]
+            if self._disabled_skills:
+                skill_names = [name for name in skill_names if name not in self._disabled_skills]
             logger.info(
                 "[SkillEvolutionRail] found %d regular skills (filtered from %d local skills)",
                 len(skill_names),

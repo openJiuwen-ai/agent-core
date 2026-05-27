@@ -167,6 +167,7 @@ class TeamSkillEvolutionRail(EvolutionRail):
         simplify_llm_policy: LLMInvokePolicy = SIMPLIFY_LLM_POLICY,
         eval_interval: int = 5,
         evolution_total_timeout_secs: float = _DEFAULT_TEAM_EVOLUTION_TOTAL_TIMEOUT_SECS,
+        disabled_skills: Optional[Union[str, list[str]]] = None,
     ) -> None:
         if eval_interval < 1:
             raise ValueError("eval_interval must be >= 1")
@@ -177,6 +178,7 @@ class TeamSkillEvolutionRail(EvolutionRail):
             evolution_trigger=EvolutionTriggerPoint.AFTER_INVOKE,
             async_evolution=async_evolution,
             max_concurrent_evolution=max_concurrent_evolution,
+            disabled_skills=disabled_skills,
         )
         self._store = EvolutionStore(skills_dir)
         debug_dir = str(self._store.base_dirs[0].parent / "_debug")
@@ -912,6 +914,8 @@ class TeamSkillEvolutionRail(EvolutionRail):
 
         # Filter to only team/swarm skill kinds.
         known_skills = {name for name in all_skill_names if self._is_team_skill(name)}
+        if self._disabled_skills:
+            known_skills = {name for name in known_skills if name not in self._disabled_skills}
         if not known_skills:
             logger.info(
                 "[TeamSkillEvolutionRail] no team-skill kind skills found among %d total skills",

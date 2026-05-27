@@ -37,6 +37,7 @@ class SkillEvolutionRail(
     generate_records_llm_policy: LLMInvokePolicy = ...,
     evaluate_llm_policy: LLMInvokePolicy = ...,
     simplify_llm_policy: LLMInvokePolicy = ...,
+    disabled_skills: Optional[Union[str, list[str]]] = None,
 )
 ```
 
@@ -55,6 +56,7 @@ class SkillEvolutionRail(
 * **generate_records_llm_policy** (LLMInvokePolicy): LLM retry/timeout policy for record generation.
 * **evaluate_llm_policy** (LLMInvokePolicy): LLM retry/timeout policy for experience scoring.
 * **simplify_llm_policy** (LLMInvokePolicy): LLM retry/timeout policy for simplify governance.
+* **disabled_skills** (Optional[Union[str, list[str]]], optional): Deny-list of skill names excluded from self-optimization. Supports a single skill name (str) or multiple names (list[str]).
 
 ### Priority
 
