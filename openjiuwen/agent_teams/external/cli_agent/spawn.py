@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import uuid
 from typing import AsyncIterator
 
 from openjiuwen.agent_teams.context import get_session_id
@@ -70,6 +71,55 @@ async def _aiter_stdout(stream: asyncio.StreamReader) -> AsyncIterator[str]:
         yield raw.decode("utf-8", errors="replace").rstrip("\n")
 
 
+async def _register_mcp_out_of_band(
+    adapter: CliAgentAdapter,
+    *,
+    server_name: str,
+    server_command: tuple[str, ...],
+    env: dict[str, str],
+    cwd: str | None,
+    member_name: str,
+) -> None:
+    """Register the team MCP server with a CLI that has no launch-inject flag.
+
+    Some CLIs (gemini, hermes) register MCP servers via a subcommand that
+    persists to their own config rather than a launch flag. Runs that command
+    once (best-effort) so the member still gets team tools. When the adapter
+    has no registration mechanism either, logs a loud warning instead of
+    silently leaving the member without team tools.
+    """
+    register_cmd = adapter.mcp_register_command(server_name=server_name, server_command=server_command)
+    if register_cmd is None:
+        team_logger.warning(
+            "[external-cli] {} cannot auto-inject the team MCP server (no launch flag or "
+            "registration command); member {} will lack team tools unless registered out of band",
+            adapter.name,
+            member_name,
+        )
+        return
+    team_logger.info("[external-cli] registering team MCP for member {} via {}", member_name, register_cmd)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *register_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=cwd,
+        )
+        _, stderr = await proc.communicate()
+    except (OSError, ValueError) as exc:
+        team_logger.warning("[external-cli] team MCP registration for {} failed to launch: {}", adapter.name, exc)
+        return
+    if proc.returncode != 0:
+        tail = stderr.decode("utf-8", errors="replace")[-500:]
+        team_logger.warning(
+            "[external-cli] team MCP registration for {} exited {}: {}",
+            adapter.name,
+            proc.returncode,
+            tail,
+        )
+
+
 async def build_cli_runtime(
     ctx: TeamRuntimeContext,
     *,
@@ -78,6 +128,7 @@ async def build_cli_runtime(
     inject_mcp: bool = True,
     mcp_server_name: str = "openjiuwen-team",
     mcp_server_command: tuple[str, ...] = ("openjiuwen-team-mcp",),
+    system_prompt: str | None = None,
     extra_env: dict[str, str] | None = None,
 ) -> ExternalCliRuntime | ReinvokeCliRuntime:
     """Build the member runtime for ``ctx.cli_agent``.
@@ -99,6 +150,10 @@ async def build_cli_runtime(
             CLIs register their MCP server out of band.
         mcp_server_name: Logical name the CLI registers the MCP server under.
         mcp_server_command: Launch argv for the team MCP stdio server.
+        system_prompt: The member's team-rail system prompt. Passed as a launch
+            arg for CLIs that support it (claude ``--append-system-prompt``);
+            CLIs without a flag get it prepended to their first user message by
+            the caller, so it is ignored here for them.
         extra_env: Extra environment merged over the inherited env + the
             team-join descriptor (descriptor wins is not desired, so this is
             applied last only for non-descriptor keys).
@@ -123,24 +178,46 @@ async def build_cli_runtime(
     }
     env = {**base_env, **(extra_env or {}), **descriptor.to_env()}
 
+    # System prompt as a launch arg (claude --append-system-prompt). CLIs
+    # without a flag return [] here and get the prompt prepended to their first
+    # user message by the caller instead.
+    sp_args = tuple(adapter.system_prompt_args(system_prompt or ""))
+
     mcp_args: tuple[str, ...] = ()
     if inject_mcp:
         mcp_args = tuple(
             adapter.mcp_launch_args(server_name=mcp_server_name, server_command=mcp_server_command)
         )
+        if not mcp_args:
+            # No launch-injection flag for this CLI: register the team MCP
+            # server out of band (e.g. `gemini mcp add`) so the member still
+            # gets team tools, or warn loudly when nothing can register it.
+            await _register_mcp_out_of_band(
+                adapter,
+                server_name=mcp_server_name,
+                server_command=mcp_server_command,
+                env=env,
+                cwd=cwd,
+                member_name=ctx.member_name or "",
+            )
+
+    launch_extra_args = mcp_args + sp_args
 
     if not adapter.supports_stdin_injection:
         # One-shot CLI: no eager launch; the runtime spawns per turn and adds
-        # the MCP-registration args to each invocation.
+        # the MCP-registration args to each invocation. A canonical UUID is the
+        # member's stable session id across turns (CLIs that resume by id, e.g.
+        # gemini ``--session-id`` / ``--resume``, require a real UUID).
         return ReinvokeCliRuntime(
             member_name=ctx.member_name or "",
             adapter=adapter,
             env=env,
             cwd=cwd,
-            launch_extra_args=mcp_args,
+            cli_session_id=str(uuid.uuid4()),
+            launch_extra_args=launch_extra_args,
         )
 
-    command = adapter.build_command(extra_args=mcp_args)
+    command = adapter.build_command(extra_args=launch_extra_args)
     team_logger.info("[external-cli] launching {} for member {}", command, ctx.member_name)
     process = await asyncio.create_subprocess_exec(
         *command,

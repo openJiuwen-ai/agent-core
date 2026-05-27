@@ -130,7 +130,8 @@ async def test_runtime_run_streaming_writes_input_and_consumes_until_complete():
 
     chunks = [chunk async for chunk in runtime.run_streaming({"query": "do it"}, session_id="s")]
 
-    assert chunks == []  # stdout stays internal
+    # stdout narration is surfaced as output chunks up to the turn marker.
+    assert [c.payload["content"] for c in chunks] == ["thinking...", "more <<END_OF_TURN>>"]
     assert injector.writes == ["do it"]  # input delivered once
 
 
@@ -167,7 +168,220 @@ async def test_runtime_abort_stops_turn():
         output_lines=_slow_lines(),
     )
     chunks = [chunk async for chunk in runtime.run_streaming({"query": "go"}, session_id="s")]
-    assert chunks == []
+    # Only the pre-abort line is surfaced; abort stops before "line-2".
+    assert [c.payload["content"] for c in chunks] == ["line-1"]
+
+
+def _make_stderr_reader(payload: bytes) -> asyncio.StreamReader:
+    """Build a StreamReader pre-loaded with ``payload`` then EOF."""
+    reader = asyncio.StreamReader()
+    reader.feed_data(payload)
+    reader.feed_eof()
+    return reader
+
+
+class _FakeDeadProcess:
+    """Stand-in for a crashed long-lived CLI subprocess.
+
+    Exposes the attributes :class:`ExternalCliRuntime` reads: a non-zero
+    ``returncode`` (already exited) and a ``stderr`` StreamReader carrying the
+    failure reason. ``_terminate`` short-circuits because ``returncode`` is set.
+    """
+
+    def __init__(self, *, returncode: int, stderr: bytes) -> None:
+        self.returncode = returncode
+        self.stderr = _make_stderr_reader(stderr)
+
+    def terminate(self) -> None:  # pragma: no cover - never called (already exited)
+        raise AssertionError("terminate on an already-exited process")
+
+    async def wait(self) -> int:
+        return self.returncode
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_streaming_premature_eof_crash_raises_with_stderr():
+    """A streaming subprocess that dies mid-turn must raise, not return clean.
+
+    Without a turn-complete sentinel the stdout iterator simply ends at EOF;
+    the runtime inspects the dead process's returncode and raises a structured
+    error carrying the stderr reason, instead of silently reporting a
+    successful empty turn.
+    """
+    proc = _FakeDeadProcess(returncode=1, stderr=b"Error: invalid api key\n")
+    runtime = ExternalCliRuntime(
+        member_name="dev-1",
+        adapter=build_adapter("generic"),
+        injector=_RecordingInjector(),
+        output_lines=_lines("partial output", "more partial"),  # no <<END_OF_TURN>>
+        process=proc,
+    )
+
+    with pytest.raises(BaseError) as excinfo:
+        async for _ in runtime.run_streaming({"query": "go"}, session_id="s"):
+            pass
+
+    message = str(excinfo.value)
+    assert "dev-1" in message
+    assert "1" in message  # the non-zero exit code
+    assert "invalid api key" in message  # the stderr reason is surfaced
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_streaming_eof_without_process_does_not_raise():
+    """No process handle (or a clean exit) is a benign turn boundary, not a crash."""
+    runtime = ExternalCliRuntime(
+        member_name="dev-1",
+        adapter=build_adapter("generic"),
+        injector=_RecordingInjector(),
+        output_lines=_lines("some output"),  # iterator ends, no sentinel, no process
+    )
+    # Must complete normally — no process to inspect means no crash to surface.
+    async for _ in runtime.run_streaming({"query": "go"}, session_id="s"):
+        pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_reinvoke_inactivity_timeout_terminates_silent_process(monkeypatch):
+    """A subprocess that emits nothing is killed after the inactivity window.
+
+    Drives a real CLI that sleeps silently far longer than the (tiny)
+    inactivity timeout. The turn must end promptly via termination — proving
+    the no-output ceiling fires — well before the process would exit on its own.
+    """
+    import sys
+    import time as _time
+    from unittest.mock import MagicMock
+
+    from openjiuwen.agent_teams.external import runtime as runtime_mod
+    from openjiuwen.agent_teams.external.cli_agent.adapters import (
+        COMPLETION_NONE,
+        INPUT_TEXT,
+        CliAgentAdapter,
+    )
+
+    # Sleeps silently for 30s — far past the inactivity window below.
+    script = "import time; time.sleep(30)"
+    adapter = CliAgentAdapter(
+        name="fake-hang",
+        command=(sys.executable, "-c", script),
+        input_format=INPUT_TEXT,
+        completion=COMPLETION_NONE,
+        supports_stdin_injection=False,
+    )
+    monkeypatch.setattr(runtime_mod, "team_logger", MagicMock())
+
+    runtime = ReinvokeCliRuntime(
+        member_name="hang-1",
+        adapter=adapter,
+        env=dict(os.environ),
+        inactivity_timeout_s=0.3,
+    )
+    start = _time.monotonic()
+    async for _ in runtime.run_streaming({"query": "do it"}, session_id="s"):
+        pass
+    elapsed = _time.monotonic() - start
+    assert elapsed < 5.0, f"inactivity timeout did not fire promptly (took {elapsed:.1f}s)"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_reinvoke_inactivity_timeout_does_not_kill_active_process(monkeypatch):
+    """A subprocess that keeps emitting output is NOT killed by inactivity.
+
+    Drives a CLI that prints a line every 0.1s for ~1.5s with a 0.5s
+    inactivity window. Because each line resets the deadline, the process runs
+    to completion and exits cleanly — the gap between lines never exceeds the
+    window, so the watchdog never fires.
+    """
+    import sys
+    from unittest.mock import MagicMock
+
+    from openjiuwen.agent_teams.external import runtime as runtime_mod
+    from openjiuwen.agent_teams.external.cli_agent.adapters import (
+        COMPLETION_NONE,
+        INPUT_TEXT,
+        CliAgentAdapter,
+    )
+
+    # Emits 15 lines at 0.1s intervals (total ~1.5s), flushing each one.
+    script = (
+        "import sys, time\n"
+        "for i in range(15):\n"
+        "    print(i, flush=True)\n"
+        "    time.sleep(0.1)\n"
+    )
+    adapter = CliAgentAdapter(
+        name="fake-active",
+        command=(sys.executable, "-c", script),
+        input_format=INPUT_TEXT,
+        completion=COMPLETION_NONE,
+        supports_stdin_injection=False,
+    )
+    mock_logger = MagicMock()
+    monkeypatch.setattr(runtime_mod, "team_logger", mock_logger)
+
+    runtime = ReinvokeCliRuntime(
+        member_name="active-1",
+        adapter=adapter,
+        env=dict(os.environ),
+        inactivity_timeout_s=0.5,  # < total runtime, but > the 0.1s gap between lines
+    )
+    async for _ in runtime.run_streaming({"query": "work"}, session_id="s"):
+        pass
+
+    # Exited cleanly (code 0): no timeout warning, no failure warning.
+    flat = " ".join(str(arg) for call in mock_logger.warning.call_args_list for arg in call.args)
+    assert "timeout" not in flat, f"active process was wrongly timed out: {flat}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_reinvoke_abort_terminates_current_subprocess(monkeypatch):
+    """abort() must promptly kill the in-flight re-invoke subprocess.
+
+    Starts a long sleeping CLI turn in a background task, then aborts. The turn
+    task must finish promptly (the subprocess is terminated) rather than waiting
+    out the full sleep, and no further re-invocation is started.
+    """
+    import sys
+
+    from openjiuwen.agent_teams.external.cli_agent.adapters import (
+        COMPLETION_NONE,
+        INPUT_TEXT,
+        CliAgentAdapter,
+    )
+
+    script = "import time; time.sleep(30)"
+    adapter = CliAgentAdapter(
+        name="fake-long",
+        command=(sys.executable, "-c", script),
+        input_format=INPUT_TEXT,
+        completion=COMPLETION_NONE,
+        supports_stdin_injection=False,
+    )
+    runtime = ReinvokeCliRuntime(
+        member_name="long-1",
+        adapter=adapter,
+        env=dict(os.environ),
+        inactivity_timeout_s=60.0,  # large, so only abort can end the turn quickly
+    )
+
+    async def _run() -> None:
+        async for _ in runtime.run_streaming({"query": "long task"}, session_id="s"):
+            pass
+
+    task = asyncio.create_task(_run())
+    # Wait until the subprocess is actually live before aborting.
+    while runtime._current is None:
+        await asyncio.sleep(0.01)
+    await runtime.abort()
+    await asyncio.wait_for(task, timeout=5.0)  # raises if abort did not preempt
+    assert runtime._aborted
+    assert runtime._current is None
 
 
 @pytest.mark.level0

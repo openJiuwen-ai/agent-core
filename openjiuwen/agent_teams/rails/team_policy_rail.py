@@ -30,15 +30,9 @@ from typing import TYPE_CHECKING, Any, Optional
 from openjiuwen.agent_teams.prompts import (
     MtimeSectionCache,
     TeamSectionName,
-    build_team_bridge_section,
-    build_team_extra_section,
-    build_team_hitt_section,
     build_team_info_section,
-    build_team_lifecycle_section,
     build_team_members_section,
-    build_team_persona_section,
-    build_team_role_section,
-    build_team_workflow_section,
+    build_team_static_sections,
 )
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
@@ -186,46 +180,19 @@ class TeamPolicyRail(DeepAgentRail):
         bridge_agent_names: list[str],
     ) -> list[PromptSection]:
         """Construct the never-changing sections once at rail init time."""
-        builders = [
-            build_team_role_section(
-                role=role,
-                member_name=member_name,
-                teammate_mode=teammate_mode,
-                language=self._language,
-            ),
-            build_team_hitt_section(
-                role=role,
-                human_agent_names=human_agent_names,
-                language=self._language,
-                self_member_name=member_name,
-                expose_human_agents_to_teammates=expose_human_agents_to_teammates,
-            ),
-            build_team_bridge_section(
-                role=role,
-                bridge_agent_names=bridge_agent_names,
-                language=self._language,
-                self_member_name=member_name,
-            ),
-            build_team_workflow_section(
-                role=role,
-                team_mode=team_mode,
-                language=self._language,
-            ),
-            build_team_lifecycle_section(
-                role=role,
-                lifecycle=lifecycle,
-                language=self._language,
-            ),
-            build_team_persona_section(
-                persona=persona,
-                language=self._language,
-            ),
-            build_team_extra_section(
-                base_prompt=base_prompt,
-                language=self._language,
-            ),
-        ]
-        return [section for section in builders if section is not None]
+        return build_team_static_sections(
+            role=role,
+            persona=persona,
+            member_name=member_name,
+            lifecycle=lifecycle,
+            teammate_mode=teammate_mode,
+            team_mode=team_mode,
+            base_prompt=base_prompt,
+            language=self._language,
+            human_agent_names=human_agent_names,
+            expose_human_agents_to_teammates=expose_human_agents_to_teammates,
+            bridge_agent_names=bridge_agent_names,
+        )
 
     async def _fetch_and_build_info_section(self) -> Optional[PromptSection]:
         """Reload team metadata from DB and rebuild the info section."""

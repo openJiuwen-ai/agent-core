@@ -36,7 +36,7 @@ from typing import Any, Optional
 
 from openjiuwen.agent_teams.prompts.loader import load_template
 from openjiuwen.agent_teams.schema.team import TeamRole
-from openjiuwen.core.single_agent.prompts.builder import PromptSection
+from openjiuwen.core.single_agent.prompts.builder import PromptSection, SystemPromptBuilder
 
 # ---------------------------------------------------------------------------
 # Section name constants
@@ -940,6 +940,133 @@ def build_team_members_section(
     )
 
 
+def build_team_static_sections(
+    *,
+    role: TeamRole,
+    persona: str,
+    member_name: str | None,
+    lifecycle: str = "temporary",
+    teammate_mode: str = "build_mode",
+    team_mode: str = "default",
+    base_prompt: str | None = None,
+    language: str = "cn",
+    human_agent_names: list[str] | None = None,
+    expose_human_agents_to_teammates: bool = False,
+    bridge_agent_names: list[str] | None = None,
+) -> list[PromptSection]:
+    """Build the never-changing team sections for one member.
+
+    Single source of truth for the static section set: both
+    :class:`TeamPolicyRail` (in-process DeepAgent members) and the external
+    CLI spawn path consume this so every member's team prompt is built the
+    same way. Covers role / hitt / bridge / workflow / lifecycle / persona /
+    extra; the dynamic info / members sections are built separately because
+    they depend on live DB state.
+
+    Args:
+        role: LEADER or TEAMMATE (other roles get the role-appropriate slices).
+        persona: The member's persona text (empty drops the persona section).
+        member_name: Semantic member identifier.
+        lifecycle: Team lifecycle ("temporary" / "persistent").
+        teammate_mode: Teammate execution mode ("build_mode" / "plan_mode").
+        team_mode: Team mode ("default" / "predefined" / "hybrid").
+        base_prompt: Optional user-supplied prompt appended as the extra section.
+        language: Prompt language ("cn" / "en").
+        human_agent_names: Registered human-agent member names (HITT section).
+        expose_human_agents_to_teammates: Whether teammates see human agents.
+        bridge_agent_names: Registered bridge-agent member names (bridge section).
+
+    Returns:
+        The non-None sections, unsorted (the caller orders by priority).
+    """
+    builders = [
+        build_team_role_section(
+            role=role,
+            member_name=member_name,
+            teammate_mode=teammate_mode,
+            language=language,
+        ),
+        build_team_hitt_section(
+            role=role,
+            human_agent_names=human_agent_names,
+            language=language,
+            self_member_name=member_name,
+            expose_human_agents_to_teammates=expose_human_agents_to_teammates,
+        ),
+        build_team_bridge_section(
+            role=role,
+            bridge_agent_names=bridge_agent_names,
+            language=language,
+            self_member_name=member_name,
+        ),
+        build_team_workflow_section(
+            role=role,
+            team_mode=team_mode,
+            language=language,
+        ),
+        build_team_lifecycle_section(
+            role=role,
+            lifecycle=lifecycle,
+            language=language,
+        ),
+        build_team_persona_section(
+            persona=persona,
+            language=language,
+        ),
+        build_team_extra_section(
+            base_prompt=base_prompt,
+            language=language,
+        ),
+    ]
+    return [section for section in builders if section is not None]
+
+
+def build_team_member_system_prompt(
+    *,
+    role: TeamRole,
+    persona: str,
+    member_name: str | None,
+    lifecycle: str = "temporary",
+    teammate_mode: str = "build_mode",
+    team_mode: str = "default",
+    base_prompt: str | None = None,
+    language: str = "cn",
+    human_agent_names: list[str] | None = None,
+    expose_human_agents_to_teammates: bool = False,
+    bridge_agent_names: list[str] | None = None,
+) -> str:
+    """Render a member's team sections into a single standalone system prompt.
+
+    Used to give an external CLI member (whose brain is not a local DeepAgent)
+    the same team-rail sections an in-process member gets, assembled the same
+    way (priority-ordered, ``\\n\\n``-joined). It includes ONLY the team
+    sections — the harness / other DeepAgent rails do not apply to an external
+    CLI, so their prompt contributions are intentionally excluded.
+
+    Args mirror :func:`build_team_static_sections`.
+
+    Returns:
+        The rendered system prompt, or ``""`` when no section produced content.
+    """
+    sections = build_team_static_sections(
+        role=role,
+        persona=persona,
+        member_name=member_name,
+        lifecycle=lifecycle,
+        teammate_mode=teammate_mode,
+        team_mode=team_mode,
+        base_prompt=base_prompt,
+        language=language,
+        human_agent_names=human_agent_names,
+        expose_human_agents_to_teammates=expose_human_agents_to_teammates,
+        bridge_agent_names=bridge_agent_names,
+    )
+    builder = SystemPromptBuilder(language=language)
+    for section in sections:
+        builder.add_section(section)
+    return builder.build()
+
+
 __all__ = [
     "TeamSectionName",
     "build_team_bridge_section",
@@ -947,8 +1074,10 @@ __all__ = [
     "build_team_hitt_section",
     "build_team_info_section",
     "build_team_lifecycle_section",
+    "build_team_member_system_prompt",
     "build_team_members_section",
     "build_team_persona_section",
     "build_team_role_section",
+    "build_team_static_sections",
     "build_team_workflow_section",
 ]

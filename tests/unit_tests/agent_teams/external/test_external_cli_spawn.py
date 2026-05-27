@@ -31,6 +31,16 @@ _FAKE_CLI = (
 # A one-shot stand-in CLI: print the trailing argv prompt, then exit.
 _FAKE_ONESHOT = (sys.executable, "-u", "-c", "import sys\nprint('oneshot:', sys.argv[-1])\n")
 
+# A one-shot CLI that emits one line, sleeps, then emits another before exiting.
+# Used to prove the re-invoke runtime surfaces chunks live during the turn (the
+# first line must reach the consumer well before the process exits).
+_FAKE_ONESHOT_DRIBBLE = (
+    sys.executable,
+    "-u",
+    "-c",
+    "import time\nprint('early', flush=True)\ntime.sleep(0.4)\nprint('late', flush=True)\n",
+)
+
 
 def _ctx(member: str = "dev-1", cli_agent: str = "generic") -> TeamRuntimeContext:
     return TeamRuntimeContext(
@@ -72,9 +82,10 @@ async def test_build_cli_runtime_streaming_drives_a_turn():
 
     try:
         # run_streaming writes the input and consumes stdout until the
-        # generic adapter sees the end-of-turn marker; it must not hang.
+        # generic adapter sees the end-of-turn marker; it must not hang. The
+        # echoed line is surfaced as an output chunk.
         chunks = await asyncio.wait_for(_drain(), timeout=5.0)
-        assert chunks == []
+        assert "echo: hello" in [c.payload["content"] for c in chunks]
     finally:
         await runtime.aclose()
 
@@ -94,8 +105,42 @@ async def test_build_cli_runtime_oneshot_reinvokes_per_turn():
 
     try:
         # Each turn launches a fresh subprocess that prints the argv prompt
-        # and exits; the turn completes at stdout EOF without hanging.
-        assert await asyncio.wait_for(_drain("first"), timeout=5.0) == []
-        assert await asyncio.wait_for(_drain("second"), timeout=5.0) == []
+        # and exits; the turn completes at stdout EOF without hanging. The
+        # per-turn output is surfaced as a chunk after the re-invocation.
+        first = await asyncio.wait_for(_drain("first"), timeout=5.0)
+        assert [c.payload["content"] for c in first] == ["oneshot: first"]
+        second = await asyncio.wait_for(_drain("second"), timeout=5.0)
+        assert [c.payload["content"] for c in second] == ["oneshot: second"]
     finally:
         await runtime.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_reinvoke_surfaces_chunks_live_during_turn():
+    token = set_session_id("sess-1")
+    try:
+        runtime = await build_cli_runtime(
+            _ctx(cli_agent="hermes"),
+            command_override=_FAKE_ONESHOT_DRIBBLE,
+            inject_mcp=False,
+        )
+    finally:
+        reset_session_id(token)
+    assert isinstance(runtime, ReinvokeCliRuntime)
+
+    loop = asyncio.get_event_loop()
+    start = loop.time()
+    arrivals: list = []
+    try:
+        async for chunk in runtime.run_streaming({"query": "go"}, session_id="sess-1"):
+            arrivals.append((chunk.payload["content"], loop.time() - start))
+    finally:
+        await runtime.aclose()
+
+    assert [content for content, _ in arrivals] == ["early", "late"]
+    # The first chunk must arrive while the subprocess is still running — well
+    # before the ~0.4s it sleeps before its second line / exit — proving chunks
+    # are bridged live through the queue, not batched at turn end.
+    early_at = arrivals[0][1]
+    assert early_at < 0.3, f"first chunk arrived at {early_at:.2f}s: not surfaced live"
