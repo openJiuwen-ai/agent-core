@@ -161,13 +161,12 @@ class TeamAgentSpec(BaseModel):
     agents: dict[str, DeepAgentSpec]
     team_name: str = "agent_team"
     lifecycle: str = TeamLifecycle.TEMPORARY
-    enable_team_plan: bool = True
-    """Whether the leader must create a team-level plan for user approval
-    before the TeamAgent starts execution.
+    enable_team_plan: bool = False
+    """Whether the leader starts in single-agent plan mode for this run.
 
-    This only gates the team-level user approval step. ``teammate_mode``
-    remains the single switch that controls whether members submit
-    per-task plans to the leader.
+    This is a request/spec-level switch, not a YAML configuration entry.
+    ``teammate_mode`` remains the single switch that controls whether
+    members submit per-task plans to the leader.
     """
     teammate_mode: str = "build_mode"
     """Member execution mode: ``build_mode`` or ``plan_mode``."""

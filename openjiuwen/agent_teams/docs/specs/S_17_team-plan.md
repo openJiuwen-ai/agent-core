@@ -51,11 +51,11 @@
 `TeamAgentSpec` 暴露两个公开开关：
 
 ```python
-enable_team_plan: bool = True
+enable_team_plan: bool = False
 teammate_mode: str = "build_mode"
 ```
 
-`enable_team_plan=True` 表示 Leader 在首轮模型调用前进入 `DeepAgentState.plan_mode.mode == "plan"`。它只影响 Team-level Leader plan，不影响成员是否要提交计划。
+`enable_team_plan=True` 表示 Leader 在首轮模型调用前进入 `DeepAgentState.plan_mode.mode == "plan"`。它只影响 Team-level Leader plan，不影响成员是否要提交计划。该字段由调用方按请求模式写入 spec，例如 Claw 在 `/mode team.plan` 时设置为 `true`；它不是 YAML 配置项。
 
 `teammate_mode` 控制成员侧：
 
@@ -201,9 +201,9 @@ stateDiagram-v2
 
 ## 回归清单
 
-- `TeamAgentSpec.enable_team_plan` 默认 `True`。
+- `TeamAgentSpec.enable_team_plan` 默认 `False`。
 - `TeamAgentSpec.teammate_mode` 默认 `build_mode`。
-- `enable_team_plan=false` 只关闭 Leader plan-mode seed。
+- `enable_team_plan=true` 只开启 Leader plan-mode seed。
 - `teammate_mode=build_mode` 时不要求成员提交计划。
 - `teammate_mode=plan_mode` 时成员未提交计划不能完成任务。
 - Team-level plan 不注册 runtime pending approval future。

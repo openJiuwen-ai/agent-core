@@ -76,7 +76,7 @@ def predefined_members():
 def test_team_agent_spec_defaults_teammate_mode_to_build_mode():
     spec = TeamAgentSpec(agents={})
 
-    assert spec.enable_team_plan is True
+    assert spec.enable_team_plan is False
     assert spec.teammate_mode == "build_mode"
 
 

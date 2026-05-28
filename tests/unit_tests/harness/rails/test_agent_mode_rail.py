@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import Mock, patch
 
+from openjiuwen.harness.prompts.sections.agent_mode import build_plan_mode_section
 from openjiuwen.harness.rails import AgentModeRail
 from openjiuwen.harness.schema.state import DeepAgentState
 
@@ -62,6 +63,27 @@ def _make_ctx(tool_name: str, *, mode: str = "plan", tool_args=None, tools=None)
 
 
 class TestAgentModeRail(IsolatedAsyncioTestCase):
+    async def test_build_plan_mode_section_uses_team_prompt_context(self) -> None:
+        state = DeepAgentState()
+        state.plan_mode.mode = "plan"
+        state.plan_mode.prompt_context = "team"
+        agent = Mock()
+        agent.load_state.return_value = state
+        agent.get_plan_file_path.return_value = None
+        session = SimpleNamespace()
+
+        section = build_plan_mode_section(
+            "en",
+            "",
+            False,
+            agent=agent,
+            session=session,
+        )
+
+        content = section.content["en"]
+        self.assertIn("Team.plan mode is active", content)
+        self.assertIn("build_team", content)
+
     async def test_before_tool_call_passes_through_when_not_plan_mode(self) -> None:
         rail, ctx, _ = _make_ctx("some_random_tool", mode="auto")
 

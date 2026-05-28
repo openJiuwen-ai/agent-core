@@ -21,12 +21,12 @@
 
 默认配置保持保守：
 
-- `enable_team_plan=True`：`team.plan` 下默认让 Leader 先进入计划模式。
+- `enable_team_plan=True`：仅由请求模式写入 spec；`/mode team.plan` 下让 Leader 先进入计划模式，YAML 中不配置该字段。
 - `teammate_mode="build_mode"`：成员默认直接执行；需要成员计划审批时由 YAML / spec 显式改为 `plan_mode`。
 
 ## 配置入口
 
-`TeamAgentSpec.enable_team_plan` 只控制 Leader 是否在 team.plan run 的首轮被 seed 到单 agent plan 模式。它不是 Runner 层审批开关，也不会注册独立 pending approval future。
+`TeamAgentSpec.enable_team_plan` 只控制 Leader 是否在当前 run 的首轮被 seed 到单 agent plan 模式。它不是 YAML 配置项、不是 Runner 层审批开关，也不会注册独立 pending approval future。
 
 `TeamAgentSpec.teammate_mode` 控制成员执行方式：
 
@@ -157,8 +157,8 @@ stateDiagram-v2
 
 建议覆盖以下回归：
 
-- `TeamAgentSpec.enable_team_plan` 默认开启，`teammate_mode` 默认 `build_mode`。
-- `enable_team_plan=false` 时只跳过 Leader plan-mode seed，不影响成员任务执行。
+- `TeamAgentSpec.enable_team_plan` 默认关闭，`teammate_mode` 默认 `build_mode`。
+- `/mode team.plan` 时 Claw 在 spec 中设置 `enable_team_plan=true`，普通 `/mode team` 不设置。
 - `teammate_mode=build_mode` 时不暴露/不要求 member `submit_plan` / Leader `approve_plan`。
 - `teammate_mode=plan_mode` 时成员未 `submit_plan` 不允许完成任务。
 - `submit_plan` 只接受 `plan_path`，不会接收计划正文参数。

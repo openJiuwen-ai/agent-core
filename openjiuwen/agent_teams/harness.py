@@ -81,6 +81,8 @@ class TeamHarness:
         self._initial_plan_mode = initial_plan_mode
         self._initial_plan_mode_seeded = False
         self._active_agent_session: Optional[Any] = None
+        if self._is_initial_team_plan_leader():
+            self._specialize_team_plan_prompts()
 
     # ------------------------------------------------------------------
     # Construction
@@ -316,16 +318,38 @@ class TeamHarness:
         return agent_session
 
     def _ensure_initial_plan_mode(self, session: Any) -> None:
-        if not self._initial_plan_mode:
+        if not self._is_initial_team_plan_leader():
             return
         if self._initial_plan_mode_seeded:
-            return
-        if getattr(self._role, "value", self._role) != "leader":
             return
         state = self._deep_agent.load_state(session)
         if state.plan_mode.mode != "plan":
             self._deep_agent.switch_mode(session, "plan")
+            state = self._deep_agent.load_state(session)
+        state.plan_mode.prompt_context = "team"
+        self._deep_agent.save_state(session, state)
         self._initial_plan_mode_seeded = True
+
+    def _is_initial_team_plan_leader(self) -> bool:
+        return (
+            self._initial_plan_mode
+            and getattr(self._role, "value", self._role) == "leader"
+        )
+
+    def _specialize_team_plan_prompts(self) -> None:
+        deep_config = getattr(self._deep_agent, "deep_config", None)
+        if deep_config is None:
+            return
+        from openjiuwen.agent_teams.prompts.team_plan_agent import (
+            apply_team_plan_agent_prompt,
+        )
+
+        applied = apply_team_plan_agent_prompt(
+            getattr(deep_config, "subagents", None),
+            language=getattr(deep_config, "language", None),
+        )
+        if applied:
+            team_logger.info("[team.plan] specialized built-in plan_agent prompt")
 
     # ------------------------------------------------------------------
     # Rail / tool registration

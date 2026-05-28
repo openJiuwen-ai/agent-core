@@ -24,7 +24,7 @@ def _get_field(obj: Any, *names: str, default: Any = None) -> Any:
 
 def is_team_plan_enabled(spec: Any) -> bool:
     """Return whether the Leader should start in plan mode."""
-    return bool(_get_field(spec, "enable_team_plan", default=True))
+    return bool(_get_field(spec, "enable_team_plan", default=False))
 
 
 __all__ = ["is_team_plan_enabled"]
