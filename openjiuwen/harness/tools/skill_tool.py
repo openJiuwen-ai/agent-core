@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, FrozenSet, List, Optional, Set, Tuple, Union
 
@@ -14,6 +16,8 @@ from openjiuwen.core.context_engine.active_skill_bodies import (
     normalize_skill_relative_file_path,
 )
 from openjiuwen.harness.tools import ToolOutput
+
+_skill_tool_executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="skill_tool_")
 
 _TREE_SKIP_DIR_NAMES: frozenset[str] = frozenset({
     "output",
@@ -388,11 +392,15 @@ class SkillTool(Tool):
             if resolve_err or not skill:
                 err = resolve_err or f"Skill not found: {skill_name}"
                 if self._skill_search_roots and include_discovered:
-                    discovered, _ = _collect_discovered_skill_names(
-                        self._skill_search_roots,
-                        max_names=max_discovered,
-                        enabled_skill_names=self._enabled_skill_names,
-                        disabled_skill_names=self._disabled_skill_names,
+                    loop = asyncio.get_running_loop()
+                    discovered, _ = await loop.run_in_executor(
+                        _skill_tool_executor,
+                        lambda: _collect_discovered_skill_names(
+                            self._skill_search_roots,
+                            max_names=max_discovered,
+                            enabled_skill_names=self._enabled_skill_names,
+                            disabled_skill_names=self._disabled_skill_names,
+                        ),
                     )
                     if discovered:
                         err = f"{err}. Discovered skill names (sample): {', '.join(discovered[:30])}"
@@ -425,11 +433,15 @@ class SkillTool(Tool):
                     data["directory_tree_partial_errors"] = tree_err
 
             if include_discovered and self._skill_search_roots:
-                discovered, disc_trunc = _collect_discovered_skill_names(
-                    self._skill_search_roots,
-                    max_names=max_discovered,
-                    enabled_skill_names=self._enabled_skill_names,
-                    disabled_skill_names=self._disabled_skill_names,
+                loop = asyncio.get_running_loop()
+                discovered, disc_trunc = await loop.run_in_executor(
+                    _skill_tool_executor,
+                    lambda: _collect_discovered_skill_names(
+                        self._skill_search_roots,
+                        max_names=max_discovered,
+                        enabled_skill_names=self._enabled_skill_names,
+                        disabled_skill_names=self._disabled_skill_names,
+                    ),
                 )
                 data["discovered_skill_names"] = discovered
                 data["discovered_skill_names_truncated"] = disc_trunc
