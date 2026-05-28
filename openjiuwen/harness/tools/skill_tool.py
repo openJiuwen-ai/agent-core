@@ -148,33 +148,81 @@ def _is_allowed_skill_relative_file(relative_file_path: str) -> bool:
     return normalized.replace("\\", "/").removeprefix("./") == _ALLOWED_SKILL_RELATIVE_FILE
 
 
-def _normalize_skill_lookup_key(skill_name: str) -> str:
-    """Strip path separators; match directory basename only (same as legacy load_skill_tools)."""
-    clean = skill_name.replace("\\", "/").strip("/")
+def _parse_skill_name(skill_name: str) -> Tuple[str, str, bool]:
+    """Return ``(parent_relative_path, leaf_name, is_namespaced)`` for resolver."""
+    clean = skill_name.replace("\\", "/").strip().strip("/")
+    if not clean:
+        return "", "", False
     if "/" in clean:
-        clean = clean.rsplit("/", 1)[-1]
-    return clean.strip()
+        parts = [part for part in clean.split("/") if part]
+        if not parts:
+            return "", "", False
+        leaf = parts[-1]
+        parent = "/".join(parts[:-1])
+        return parent, leaf, True
+    return "", clean, False
 
 
-def _recursive_find_skill_directory(directory: Path, skill_name: str) -> Optional[Path]:
-    """Depth-first: first directory named ``skill_name`` that contains ``SKILL.md``."""
+def _recursive_find_skill_directory(directory: Path, skill_name: str) -> List[Path]:
+    """Depth-first: all directories named ``skill_name`` that contain ``SKILL.md``."""
     if not skill_name:
-        return None
+        return []
+    results: List[Path] = []
     try:
         children = sorted(directory.iterdir(), key=lambda p: p.name.lower())
     except (OSError, PermissionError):
-        return None
+        return results
     for child in children:
         if not child.is_dir():
             continue
         if child.name in _TREE_SKIP_DIR_NAMES or child.name.startswith("."):
             continue
         if child.name == skill_name and (child / "SKILL.md").is_file():
-            return child
-        found = _recursive_find_skill_directory(child, skill_name)
-        if found is not None:
-            return found
+            results.append(child)
+        results.extend(_recursive_find_skill_directory(child, skill_name))
+    return results
+
+
+def _resolve_namespaced_skill_directory(
+    roots: List[Path],
+    parent_rel: str,
+    leaf: str,
+) -> Optional[Path]:
+    """Resolve ``parent_rel/leaf/SKILL.md`` exactly under each search root."""
+    if not leaf:
+        return None
+    for root in roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        if parent_rel:
+            candidate = root / Path(parent_rel) / leaf
+        else:
+            candidate = root / leaf
+        if candidate.is_dir() and (candidate / "SKILL.md").is_file():
+            try:
+                return candidate.resolve()
+            except OSError:
+                return candidate
     return None
+
+
+def _relative_skill_path_from_roots(path: Path, roots: List[Path]) -> str:
+    """Return skill path relative to the first matching search root."""
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    for root in roots:
+        try:
+            root_resolved = root.resolve()
+        except OSError:
+            root_resolved = root
+        try:
+            rel = resolved.relative_to(root_resolved)
+        except ValueError:
+            continue
+        return str(rel).replace("\\", "/")
+    return resolved.name
 
 
 def _collect_discovered_skill_names(
@@ -184,19 +232,19 @@ def _collect_discovered_skill_names(
     enabled_skill_names: Optional[FrozenSet[str]] = None,
     disabled_skill_names: Optional[FrozenSet[str]] = None,
 ) -> Tuple[List[str], bool]:
-    """Recursively collect distinct directory names that contain ``SKILL.md`` under each root."""
+    """Recursively collect distinct skill relative paths that contain ``SKILL.md`` under each root."""
     names: List[str] = []
     seen: Set[str] = set()
     truncated = False
 
-    def allow_name(name: str) -> bool:
-        if disabled_skill_names and name in disabled_skill_names:
+    def allow_name(basename: str) -> bool:
+        if disabled_skill_names and basename in disabled_skill_names:
             return False
         if enabled_skill_names is not None and len(enabled_skill_names) > 0:
-            return name in enabled_skill_names
+            return basename in enabled_skill_names
         return True
 
-    def visit(directory: Path) -> None:
+    def visit(directory: Path, base: Path) -> None:
         nonlocal truncated
         if len(names) >= max_names:
             truncated = True
@@ -213,15 +261,16 @@ def _collect_discovered_skill_names(
                 continue
             if child.name in _TREE_SKIP_DIR_NAMES or child.name.startswith("."):
                 continue
-            if (child / "SKILL.md").is_file() and child.name not in seen:
-                if allow_name(child.name):
-                    names.append(child.name)
-                    seen.add(child.name)
-            visit(child)
+            if (child / "SKILL.md").is_file():
+                rel_path = str(child.relative_to(base)).replace("\\", "/")
+                if rel_path not in seen and allow_name(child.name):
+                    names.append(rel_path)
+                    seen.add(rel_path)
+            visit(child, base)
 
     for base in roots:
         if base.exists() and base.is_dir():
-            visit(base)
+            visit(base, base)
 
     names.sort()
     return names, truncated
@@ -335,9 +384,9 @@ class SkillTool(Tool):
         )
 
         try:
-            skill = self._resolve_skill(skill_name)
-            if not skill:
-                err = f"Skill not found: {skill_name}"
+            skill, resolve_err = self._resolve_skill(skill_name)
+            if resolve_err or not skill:
+                err = resolve_err or f"Skill not found: {skill_name}"
                 if self._skill_search_roots and include_discovered:
                     discovered, _ = _collect_discovered_skill_names(
                         self._skill_search_roots,
@@ -348,7 +397,7 @@ class SkillTool(Tool):
                     if discovered:
                         err = f"{err}. Discovered skill names (sample): {', '.join(discovered[:30])}"
                 return ToolOutput(success=False, error=err)
-            
+
             file_path = str(Path(skill.directory) / relative_file_path)
             read_file_result = await self.operation.fs().read_file(file_path)
             if read_file_result.code != 0:
@@ -414,31 +463,84 @@ class SkillTool(Tool):
         skill_map = {skill.name: skill for skill in skills}
         return skill_map.get(skill_name)
 
-    def _resolve_skill(self, skill_name: str) -> Optional[Skill]:
-        """Registry first, then recursive filesystem search under ``skill_search_roots``."""
+    def _reject_leaf_lookup(self, skill_name: str, leaf: str) -> Optional[str]:
+        """Return not-found message when ``leaf`` fails lookup preconditions."""
+        not_found = f"Skill not found: {skill_name}"
+        if not leaf:
+            return not_found
+        if self._disabled_skill_names and leaf in self._disabled_skill_names:
+            return not_found
+        if self._enabled_skill_names is not None and len(self._enabled_skill_names) > 0:
+            if leaf not in self._enabled_skill_names:
+                return not_found
+        return None
+
+    def _resolve_skill(self, skill_name: str) -> Tuple[Optional[Skill], Optional[str]]:
+        """Resolve skill by namespaced path or bare name with ambiguity detection."""
+        parent_rel, leaf, is_namespaced = _parse_skill_name(skill_name)
+        rejection = self._reject_leaf_lookup(skill_name, leaf)
+        if rejection:
+            return None, rejection
+        not_found = f"Skill not found: {skill_name}"
+        if is_namespaced:
+            if not self._skill_search_roots:
+                return None, not_found
+            found = _resolve_namespaced_skill_directory(
+                self._skill_search_roots,
+                parent_rel,
+                leaf,
+            )
+            if found is None:
+                return None, not_found
+            rel_path = f"{parent_rel}/{leaf}".strip("/")
+            return Skill(
+                name=found.name,
+                description=f"Filesystem-discovered skill at {rel_path}",
+                directory=found,
+            ), None
         reg = self._get_skill_by_name(skill_name)
         if reg is not None:
-            return reg
+            return reg, None
         if not self._skill_search_roots:
-            return None
-        key = _normalize_skill_lookup_key(skill_name)
-        if not key:
-            return None
-        if self._disabled_skill_names and key in self._disabled_skill_names:
-            return None
-        if self._enabled_skill_names is not None and len(self._enabled_skill_names) > 0:
-            if key not in self._enabled_skill_names:
-                return None
+            return None, not_found
+        all_matches: List[Path] = []
         for root in self._skill_search_roots:
-            found = _recursive_find_skill_directory(root, key)
-            if found is not None:
-                try:
-                    resolved = found.resolve()
-                except OSError:
-                    resolved = found
-                return Skill(
-                    name=resolved.name,
-                    description=f"Filesystem-discovered skill under {root.name}",
-                    directory=resolved,
-                )
-        return None
+            all_matches.extend(_recursive_find_skill_directory(root, leaf))
+        deduped_matches: List[Path] = []
+        seen_paths: Set[str] = set()
+        for match in all_matches:
+            try:
+                key = str(match.resolve())
+            except OSError:
+                key = str(match)
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            deduped_matches.append(match)
+        if not deduped_matches:
+            return None, not_found
+        if len(deduped_matches) == 1:
+            found = deduped_matches[0]
+            try:
+                resolved = found.resolve()
+            except OSError:
+                resolved = found
+            rel_path = _relative_skill_path_from_roots(resolved, self._skill_search_roots)
+            return Skill(
+                name=resolved.name,
+                description=f"Filesystem-discovered skill at {rel_path}",
+                directory=resolved,
+            ), None
+        candidates = sorted(
+            {
+                _relative_skill_path_from_roots(match, self._skill_search_roots)
+                for match in deduped_matches
+            }
+        )
+        example = candidates[0] if candidates else f"parent/{leaf}"
+        err = (
+            f"Skill name {leaf!r} is ambiguous; multiple skills match. "
+            f"Retry with a namespaced path (parent/subskill), e.g. {example!r}. "
+            f"Candidates: {', '.join(candidates)}"
+        )
+        return None, err

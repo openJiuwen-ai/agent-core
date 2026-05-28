@@ -10,10 +10,20 @@ from openjiuwen.harness.prompts.sections.tools.base import (
 )
 
 DESCRIPTION: Dict[str, str] = {
-    "cn": "使用此工具查看特定技能的 SKILL.md 正文；可在注册表未收录时按 skills 根目录递归定位同名 skill。"
+    "cn": "使用此工具查看特定技能的 SKILL.md 正文。子skill必须使用含命名空间的目录（ parentskill/subskill ）。"
+         "skill_name 含命名空间时，直接查询该目录下的 SKILL.md；"
+         "skill_name 裸名时先查注册表，"
+         "未匹配时按 skills 根目录递归查找全部同名 skill，"
+         "skill_name 裸名时匹配多个 skill 返回 ambiguous 错误和冲突目录列表，"
+         "从 error 中的冲突目录列表中选择一个目录重试。"
          "仅支持读取技能根目录下的 SKILL.md。默认返回目录树与已发现 skill 名列表；"
          "若不需要可显式传 include_directory_tree / include_discovered_skill_names 为 false。",
-    "en": "View a skill's SKILL.md body; can resolve skills by recursive directory search when not in the registry. "
+    "en": "View a skill's SKILL.md body. Sub-skills must use a namespaced directory path (parentskill/subskill). "
+         "when skill_name includes a namespace, resolve SKILL.md directly under that directory; "
+         "when skill_name is a bare name, check the registry first, "
+         "then recursively find all same-name skills under skill roots if unmatched, "
+         "when a bare name matches multiple skills, return an ambiguous error with a conflicting directory list,"
+         "pick one directory from the conflicting directory list in the error and retry. "
          "Only SKILL.md at the skill root is readable. "
          "By default includes a directory tree and discovered skill names; "
          "pass those flags as false to disable.",
@@ -21,8 +31,11 @@ DESCRIPTION: Dict[str, str] = {
 
 SKILL_TOOL_PARAMS: Dict[str, Dict[str, str]] = {
     "skill_name": {
-        "cn": "技能的名称",
-        "en": "Name of the skill",
+        "cn": "技能名称。必须使用包含命名空间的目录（ parentskill/subskill ），"
+              "裸名可从 error 里的冲突目录列表中选择一个目录，立即用该目录重调 skill_tool。",
+        "en": "Skill name. Must use a namespaced directory path (parentskill/subskill), "
+              "For a bare name, pick one directory from the conflicting directory list in the error "
+              "and immediately re-call skill_tool with that path.",
     },
     "relative_file_path": {
         "cn": "可选。仅支持读取技能根目录下的 SKILL.md（留空或传 SKILL / SKILL.md 均可）。其他路径会被拒绝。",
@@ -44,8 +57,8 @@ SKILL_TOOL_PARAMS: Dict[str, Dict[str, str]] = {
               "default 200; 20–800.",
     },
     "include_discovered_skill_names": {
-        "cn": "默认 true。为 false 时不返回 discovered_skill_names。为 true 时在返回中附带各 skill 根下递归找到的、含 SKILL.md 的目录名（有上限）。",
-        "en": "Defaults to true; set false to omit discovered_skill_names. When true, lists directory names under "
+        "cn": "默认 true。为 false 时不返回 discovered_skill_names。为 true 时在返回中附带各 skill 根下递归找到的、含 SKILL.md 的目录名。",
+        "en": "Defaults to true; set false to omit discovered_skill_names. When true, lists relative paths under "
               "skill roots that contain SKILL.md (bounded).",
     },
     "max_discovered_skill_names": {
