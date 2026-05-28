@@ -1379,6 +1379,16 @@ class ReActAgent(BaseAgent):
                     for iteration in range(start_iteration, self._config.max_iterations):
                         logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
 
+                        # Honor force_finish requests set at iteration boundary
+                        # (e.g. by rails on AFTER_REACT_ITERATION). This lets a
+                        # graceful abort take effect at the top of the next
+                        # iteration, after the previous one fully completes.
+                        boundary_finish = ctx.consume_force_finish()
+                        if boundary_finish:
+                            await self.context_engine.save_contexts(session)
+                            invoke_inputs.result = boundary_finish.result
+                            break
+
                         # Inject pending steering messages
                         # before the next model call.
                         steering = ctx.drain_steering()
@@ -1454,6 +1464,11 @@ class ReActAgent(BaseAgent):
                         if workflow_interrupt:
                             await self._commit_interrupt(workflow_interrupt, context, session, invoke_inputs)
                             break
+
+                        # Iteration fully succeeded (LLM + all tools + ToolMessages
+                        # all written). Fire AFTER_REACT_ITERATION so rails (e.g.
+                        # SnapshotRail) can capture a safe-state snapshot.
+                        await ctx.fire(AgentCallbackEvent.AFTER_REACT_ITERATION)
                     else:
                         await self.context_engine.save_contexts(session)
                         result = {"output": "Max iterations reached without completion", "result_type": "error"}
