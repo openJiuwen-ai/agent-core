@@ -207,7 +207,7 @@ Evolution metadata is carried in `OutputSchema.payload["_evolution_meta"]`:
 | Field | Meaning |
 |---|---|
 | `event_kind` | `approval`, `progress`, or `outcome`. |
-| `rail_kind` | Producing rail kind, usually `team-skill` for this rail. |
+| `rail_kind` | Producing rail kind, usually `team` for this rail. |
 | `stage` | Lifecycle stage for progress or outcome events. |
 | `skill_name` | Target team skill name. |
 | `request_id` | Approval or governance request id. |
@@ -216,6 +216,8 @@ Evolution metadata is carried in `OutputSchema.payload["_evolution_meta"]`:
 | `status` | Outcome status when available. |
 
 Approval events use `type="chat.ask_user_question"` and include `payload["request_id"]`. Progress events use `type="llm_reasoning"`. Background failures are reported as outcome events and do not fail the main invoke.
+
+`outcome` events are terminal machine-readable events. A normal no-op evolution run emits `status="no_evolution_no_records"` when the orchestrator completes successfully but produces no records. Hosts should not parse progress text to infer terminal state.
 
 ### Snapshot and signal boundaries
 
@@ -241,19 +243,19 @@ Trigger skill evolution (when all tasks complete).
 
 ---
 
-### async request_user_evolution(skill_name, user_intent, *, auto_approve=False) -> Optional[str]
+### async request_user_evolution(skill_name, user_intent="", *, auto_approve=False) -> EvolutionRequestResult
 
-User-initiated evolution request.
+User-initiated evolution request. The method trusts the provided `skill_name` as the evolution subject and uses the current rail trajectory, or the aggregated team trajectory from `trajectory_source`, as the evidence window; `user_intent` only adds direction.
 
 **Parameters**:
 
 * **skill_name** (str): Target skill name.
-* **user_intent** (str): User improvement intent description.
+* **user_intent** (str): User improvement intent description. Defaults to `""`; when empty, team trajectory evidence can still trigger evolution if it contains actionable signals.
 * **auto_approve** (bool): Whether to auto-approve, defaults to `False`.
 
 **Returns**:
 
-* `str`: request_id or `None` (when skill not found or no records generated).
+* `EvolutionRequestResult`: `request_id` is set when records were generated; otherwise an empty result object is returned.
 
 ---
 
@@ -401,18 +403,14 @@ agent = create_deep_agent(
 )
 
 # User requests evolution
-request_id = await team_rail.request_user_evolution(
+result = await team_rail.request_user_evolution(
     skill_name="research-team",
     user_intent="Add reviewer role, limit research time to 10 minutes",
 )
 
-# Get approval events
-events = await team_rail.drain_pending_approval_events(wait=True)
-for event in events:
-    if event.type == "chat.ask_user_question":
-        request_id = event.payload["request_id"]
-        # User approval
-        await team_rail.approve_record(request_id)
+# User approval
+if result.approval_event is not None:
+    await team_rail.approve_record(result.request_id)
 
 # Request simplify
 simplify_request_id = await team_rail.request_simplify("research-team")

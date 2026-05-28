@@ -24,8 +24,8 @@ from typing import AsyncIterator
 
 from dotenv import load_dotenv
 
-from openjiuwen.agent_teams.messager.base import MessagerTransportConfig, create_messager
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
+from openjiuwen.agent_teams.messager.base import MessagerTransportConfig, create_messager
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType, TeamDatabase
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import create_team_tools
@@ -276,11 +276,12 @@ async def main() -> None:
             print("final output:", result.get("output", result))
             print("requesting evolution record with user intent:", args.user_intent)
 
-            request_id = await team_rail.request_user_evolution(
+            evolution_result = await team_rail.request_user_evolution(
                 "research-team",
                 args.user_intent,
                 auto_approve=False,
             )
+            request_id = evolution_result.request_id
             if not request_id:
                 print("No experience record was generated from the user intent.")
                 return

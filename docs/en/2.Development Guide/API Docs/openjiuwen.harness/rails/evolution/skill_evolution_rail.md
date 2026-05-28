@@ -18,7 +18,7 @@ from openjiuwen.harness.rails import SkillEvolutionRail
 
 - Passive evolution runs after `DeepAgent.invoke()` completes.
 - `auto_scan=False` disables passive signal scanning and async snapshot creation for passive evolution.
-- Active evolution is available through `request_user_evolution()`.
+- Active evolution is available through `request_user_evolution()`; the current rail's collected execution/conversation trajectory is used as default evidence, and `user_intent` only adds optimization direction.
 - Regular skill evolution ignores `kind: team-skill` skills; team skills use `TeamSkillEvolutionRail` / `TeamSkillRail`.
 
 ```text
@@ -103,7 +103,7 @@ Known metadata fields:
 | Field | Meaning |
 |---|---|
 | `event_kind` | `approval`, `progress`, or `outcome`. |
-| `rail_kind` | Producing rail kind when available, such as `skill` or `team-skill`. |
+| `rail_kind` | Producing rail kind when available, such as `regular` or `team`. |
 | `stage` | Lifecycle stage for progress or outcome events. |
 | `skill_name` | Target skill name. |
 | `request_id` | Approval or governance request id. |
@@ -112,6 +112,8 @@ Known metadata fields:
 | `status` | Outcome status when available. |
 
 Approval events use `type="chat.ask_user_question"` and include `payload["request_id"]`. Progress events use `type="llm_reasoning"`. Background failures are reported as outcome events and do not fail the main invoke.
+
+`outcome` events are terminal machine-readable events. A normal no-op evolution run emits `status="no_evolution_no_records"` when the orchestrator completes successfully but produces no records. Hosts should not parse progress text to infer terminal state.
 
 ---
 
@@ -155,19 +157,19 @@ Effective LLM policies, timeout, `auto_scan`, `auto_save`, and `eval_interval`.
 
 ## Methods
 
-### async request_user_evolution(skill_name, user_intent, *, auto_approve=False) -> Optional[str]
+### async request_user_evolution(skill_name, user_intent="", *, auto_approve=False) -> EvolutionRequestResult
 
-Stage active evolution for a regular skill.
+Stage active evolution for a regular skill. The method first uses the current rail's bounded trajectory evidence window to detect execution signals and user feedback; a non-empty `user_intent` is appended as an explicit request signal instead of replacing trajectory evidence.
 
 **Parameters**:
 
 * **skill_name** (str): Target regular skill name.
-* **user_intent** (str): User improvement intent.
+* **user_intent** (str): User improvement intent. Defaults to `""`; when empty, current trajectory evidence can still trigger evolution if it contains actionable signals.
 * **auto_approve** (bool): Whether to auto-approve the generated request. Defaults to `False`.
 
 **Returns**:
 
-* `str`: request id when records were generated, otherwise `None`.
+* `EvolutionRequestResult`: `request_id` is set when records were generated; otherwise an empty result object is returned.
 
 ### async approve_record(request_id) -> None
 
@@ -226,13 +228,11 @@ agent = create_deep_agent(
     rails=[skill_rail],
 )
 
-request_id = await skill_rail.request_user_evolution(
+result = await skill_rail.request_user_evolution(
     "code-review",
     "Prefer behavior-level findings before style comments",
 )
 
-events = await skill_rail.drain_pending_host_events(wait=True)
-for event in events:
-    if event.payload.get("_evolution_meta", {}).get("event_kind") == "approval":
-        await skill_rail.approve_record(event.payload["request_id"])
+if result.approval_event is not None:
+    await skill_rail.approve_record(result.request_id)
 ```

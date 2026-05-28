@@ -7,7 +7,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
 from openjiuwen.agent_evolving.experience.lifecycle import HostFacingExperienceResult
@@ -119,6 +119,25 @@ class ExperienceApprovalRequest:
             change_type=change_type,
             pending_count=pending_count,
         )
+
+
+OnlineEvolutionStatus = Literal[
+    "staged",
+    "auto_approved",
+    "no_evolution_no_records",
+    "skipped_no_input",
+    "skipped_skill_not_found",
+]
+
+
+@dataclass
+class OnlineEvolutionResult:
+    """Structured outcome returned by the online evolution orchestrator."""
+
+    skill_name: str
+    status: OnlineEvolutionStatus
+    request: Optional[ExperienceApprovalRequest] = None
+    message: str = ""
 
 
 @dataclass

@@ -712,10 +712,15 @@ class EvolutionRail(DeepAgentRail):
         return events
 
     def _emit_background_outcome_event(self, outcome: dict[str, str]) -> None:
-        """Expose background evolution failures through the host-event buffer."""
+        """Expose background evolution outcomes through the host-event buffer."""
         meta = EvolutionHostEventMeta(
             event_kind="outcome",
-            rail_kind="base",
+            rail_kind=outcome.get("rail_kind", "base"),
+            stage=outcome.get("stage"),
+            skill_name=outcome.get("skill_name"),
+            request_id=outcome.get("request_id"),
+            signal_type=outcome.get("signal_type"),
+            source=outcome.get("source"),
             status=outcome["status"],
         )
         self.emit_host_event(

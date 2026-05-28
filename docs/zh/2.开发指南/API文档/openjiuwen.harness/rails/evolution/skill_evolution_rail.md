@@ -18,7 +18,7 @@ from openjiuwen.harness.rails import SkillEvolutionRail
 
 - 被动演进在 `DeepAgent.invoke()` 完成后运行。
 - `auto_scan=False` 会关闭被动信号扫描，也会跳过被动演进的 async snapshot。
-- 主动演进通过 `request_user_evolution()` 触发。
+- 主动演进通过 `request_user_evolution()` 触发；当前 rail 已采集到的执行/对话轨迹会作为默认证据，`user_intent` 只补充优化方向。
 - 普通 skill 演进会忽略 `kind: team-skill`；team skill 使用 `TeamSkillEvolutionRail` / `TeamSkillRail`。
 
 ```text
@@ -103,7 +103,7 @@ event.payload["_evolution_meta"]
 | 字段 | 含义 |
 |---|---|
 | `event_kind` | `approval`、`progress` 或 `outcome`。 |
-| `rail_kind` | 产生事件的 rail kind，如 `skill` 或 `team-skill`。 |
+| `rail_kind` | 产生事件的 rail kind，如 `regular` 或 `team`。 |
 | `stage` | progress 或 outcome 的生命周期阶段。 |
 | `skill_name` | 目标 skill 名称。 |
 | `request_id` | 审批或治理请求 ID。 |
@@ -112,6 +112,8 @@ event.payload["_evolution_meta"]
 | `status` | outcome 状态。 |
 
 审批事件使用 `type="chat.ask_user_question"`，并包含 `payload["request_id"]`。进度事件使用 `type="llm_reasoning"`。后台失败会以 outcome 事件暴露，不会让主 invoke 失败。
+
+`outcome` 事件是调用方可依赖的结构化终态事件。演进流程正常完成但没有生成记录时，SDK 会发出 `status="no_evolution_no_records"`。调用方不应解析 progress 文案来判断终态。
 
 ---
 
@@ -155,19 +157,19 @@ skill 数据的演进存储，与 `trajectory_store` 不同。
 
 ## 方法
 
-### async request_user_evolution(skill_name, user_intent, *, auto_approve=False) -> Optional[str]
+### async request_user_evolution(skill_name, user_intent="", *, auto_approve=False) -> EvolutionRequestResult
 
-为普通 skill 暂存一次主动演进请求。
+为普通 skill 暂存一次主动演进请求。该方法优先使用当前 rail 的有界轨迹证据窗口检测执行信号和用户反馈；`user_intent` 非空时会作为显式请求信号追加，而不会覆盖轨迹证据。
 
 **参数**：
 
 * **skill_name** (str): 目标普通 skill 名称。
-* **user_intent** (str): 用户改进意图。
+* **user_intent** (str): 用户改进意图，默认 `""`。为空时，若当前轨迹证据中存在可演进信号，仍可生成请求。
 * **auto_approve** (bool): 是否自动审批生成的请求，默认 `False`。
 
 **返回**：
 
-* `str`: 生成记录时返回 request id，否则返回 `None`。
+* `EvolutionRequestResult`: 生成记录时 `request_id` 有值，否则返回空结果对象。
 
 ### async approve_record(request_id) -> None
 
@@ -226,13 +228,11 @@ agent = create_deep_agent(
     rails=[skill_rail],
 )
 
-request_id = await skill_rail.request_user_evolution(
+result = await skill_rail.request_user_evolution(
     "code-review",
     "优先输出行为级问题，再输出风格建议",
 )
 
-events = await skill_rail.drain_pending_host_events(wait=True)
-for event in events:
-    if event.payload.get("_evolution_meta", {}).get("event_kind") == "approval":
-        await skill_rail.approve_record(event.payload["request_id"])
+if result.approval_event is not None:
+    await skill_rail.approve_record(result.request_id)
 ```

@@ -31,6 +31,7 @@ from openjiuwen.agent_evolving.experience.skill_experience_manager import Experi
 from openjiuwen.agent_evolving.experience.types import (
     ExperienceApprovalRequest,
     ExperienceProposal,
+    OnlineEvolutionResult,
     PendingChange,
 )
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
@@ -44,6 +45,7 @@ from openjiuwen.agent_evolving.signal import (
     TrajectoryIssue,
     UserIntent,
     get_team_trajectory_issues,
+    make_signal_fingerprint,
     make_team_user_intent_signal,
 )
 from openjiuwen.agent_evolving.trajectory import (
@@ -347,9 +349,6 @@ class TeamSkillEvolutionRail(EvolutionRail):
             "evolution_total_timeout_secs": self.evolution_total_timeout_secs,
             "max_concurrent_evolution": self._max_concurrent_evolution,
         }
-
-    def _get_evolution_total_timeout_secs(self) -> Optional[float]:
-        return self._evolution_total_timeout_secs
 
     @property
     def auto_scan(self) -> bool:
@@ -826,7 +825,7 @@ class TeamSkillEvolutionRail(EvolutionRail):
     async def request_user_evolution(
         self,
         skill_name: str,
-        user_intent: str,
+        user_intent: str = "",
         *,
         auto_approve: bool = False,
     ) -> EvolutionRequestResult:
@@ -850,8 +849,11 @@ class TeamSkillEvolutionRail(EvolutionRail):
                 "增加 reviewer 角色，限制 research 时间不超过 10 分钟"
             )
         """
+        if not self._is_active_request_subject(skill_name):
+            return EvolutionRequestResult(skill_name=skill_name)
+
         # Get current trajectory (from builder or use minimal placeholder)
-        trajectory = self._builder.build() if self._builder else None
+        trajectory = self._build_trajectory()
         if trajectory is None:
             trajectory = Trajectory(
                 execution_id="user_triggered",
@@ -860,18 +862,40 @@ class TeamSkillEvolutionRail(EvolutionRail):
                 steps=[],
             )
         trajectory = self._aggregate_team_trajectory(trajectory)
+        messages = self._collect_messages_from_trajectory(trajectory) if trajectory.steps else []
 
-        user_signal = make_team_user_intent_signal(
-            skill_name=skill_name,
-            user_intent=user_intent,
+        signals = (
+            await self._detect_active_request_signals(skill_name=skill_name, trajectory=trajectory)
+            if trajectory.steps
+            else []
         )
+
+        if user_intent:
+            self._append_unique_signal(
+                signals,
+                make_team_user_intent_signal(
+                    skill_name=skill_name,
+                    user_intent=user_intent,
+                ),
+            )
+
+        if not signals:
+            logger.info(
+                "[TeamSkillEvolutionRail] request_user_evolution: no evidence or user intent for '%s'",
+                skill_name,
+            )
+            return EvolutionRequestResult(skill_name=skill_name)
+
+        if not messages and user_intent:
+            messages = [{"role": "user", "content": user_intent}]
+
         request = await self._handle_evolution_from_signals(
             skill_name=skill_name,
             trajectory=trajectory,
-            signals=[user_signal],
+            signals=signals,
             auto_approve=auto_approve,
             user_query=user_intent,
-            messages=[{"role": "user", "content": user_intent}],
+            messages=messages,
             emit_host_events=False,
         )
         if request is None:
@@ -897,6 +921,59 @@ class TeamSkillEvolutionRail(EvolutionRail):
             records=records,
             auto_approved=auto_approve,
         )
+
+    async def _detect_active_request_signals(
+        self,
+        *,
+        skill_name: str,
+        trajectory: Trajectory,
+    ) -> list[EvolutionSignal]:
+        """Detect team trajectory signals for an explicit active request."""
+        current_content = await self._store.read_skill_content(skill_name)
+        try:
+            detected = await self.team_signal_detector.detect_trajectory_signals(
+                trajectory=trajectory,
+                skill_name=skill_name,
+                skill_content=current_content,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[TeamSkillEvolutionRail] active request trajectory detection failed for '%s': %s",
+                skill_name,
+                exc,
+            )
+            return []
+
+        signals: list[EvolutionSignal] = []
+        for signal in detected:
+            if signal.skill_name and signal.skill_name != skill_name:
+                continue
+            self._append_unique_signal(signals, signal)
+        return signals
+
+    @staticmethod
+    def _append_unique_signal(signals: list[EvolutionSignal], signal: EvolutionSignal) -> None:
+        fingerprint = make_signal_fingerprint(signal)
+        if any(make_signal_fingerprint(existing) == fingerprint for existing in signals):
+            return
+        signals.append(signal)
+
+    def _is_active_request_subject(self, skill_name: str) -> bool:
+        """Return whether a requested team-skill subject is eligible for active evolution."""
+        try:
+            if not self._store.skill_exists(skill_name):
+                return False
+        except Exception:
+            logger.debug("[TeamSkillEvolutionRail] could not validate skill existence for '%s'", skill_name)
+            return False
+
+        try:
+            skill_dir = self._store.resolve_skill_dir(skill_name)
+        except Exception:
+            return True
+        if isinstance(skill_dir, (str, Path)):
+            return self._is_team_skill(skill_name)
+        return True
 
     # ===== Private helpers =====
 
@@ -1087,7 +1164,7 @@ class TeamSkillEvolutionRail(EvolutionRail):
                 f"generating evolution records for '{skill_name}'",
                 skill_name=skill_name,
             )
-        request = await self._stage_evolution_from_signals(
+        result = await self._stage_evolution_from_signals(
             skill_name=skill_name,
             trajectory=trajectory,
             signals=signals,
@@ -1095,6 +1172,20 @@ class TeamSkillEvolutionRail(EvolutionRail):
             user_query=user_query,
             messages=messages,
         )
+        request = result.request
+        if request is None:
+            if emit_host_events and result.status == "no_evolution_no_records":
+                self._emit_background_outcome_event(
+                    {
+                        "status": result.status,
+                        "message": result.message or f"online evolution finished with status={result.status}",
+                        "rail_kind": "team",
+                        "skill_name": result.skill_name,
+                        "stage": "completed",
+                        "source": "team_skill_experience_updater",
+                    }
+                )
+            return None
 
         def _emit_approval_request(staged_request: ExperienceApprovalRequest) -> None:
             pending = staged_request.pending_change
@@ -1145,10 +1236,10 @@ class TeamSkillEvolutionRail(EvolutionRail):
         auto_approve: bool,
         user_query: str = "",
         messages: Optional[list[dict]] = None,
-    ) -> Optional[ExperienceApprovalRequest]:
+    ) -> OnlineEvolutionResult:
         """Stage team-skill evolution from normalized signals through the shared orchestrator."""
         self._emit_progress("staging", f"staging evolution request for '{skill_name}'", skill_name=skill_name)
-        request = await self._online_orchestrator.evolve(
+        return await self._online_orchestrator.evolve(
             skill_name=skill_name,
             signals=signals,
             messages=messages or [],
@@ -1158,9 +1249,6 @@ class TeamSkillEvolutionRail(EvolutionRail):
             metadata={},
             source="team_skill_experience_updater",
         )
-        if request is None:
-            return None
-        return request
 
     def _is_team_skill(self, name: str) -> bool:
         """Check whether a skill's SKILL.md declares a team/swarm skill kind."""

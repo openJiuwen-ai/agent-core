@@ -23,7 +23,12 @@ from openjiuwen.agent_evolving.experience.scorer import (
     ExperienceScorer,
 )
 from openjiuwen.agent_evolving.experience.skill_experience_manager import ExperienceManager
-from openjiuwen.agent_evolving.experience.types import ExperienceApprovalRequest, ExperienceProposal, PendingChange
+from openjiuwen.agent_evolving.experience.types import (
+    ExperienceApprovalRequest,
+    ExperienceProposal,
+    OnlineEvolutionResult,
+    PendingChange,
+)
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.optimizer.skill_call import SkillExperienceOptimizer
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
@@ -566,22 +571,44 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
     async def request_user_evolution(
         self,
         skill_name: str,
-        user_intent: str,
+        user_intent: str = "",
         *,
         auto_approve: bool = False,
     ) -> EvolutionRequestResult:
         """User-triggered evolution entry point for regular skills."""
-        signal = make_evolution_signal(
-            signal_type=USER_INTENT_SIGNAL,
-            section="Instructions",
-            excerpt=user_intent,
-            skill_name=skill_name,
-            source="explicit_request",
-        )
+        trajectory = self._build_trajectory()
+        messages: List[dict] = []
+        signals: List[EvolutionSignal] = []
+        if trajectory is not None and trajectory.steps:
+            messages = self._collect_messages_from_trajectory(trajectory)
+            signals = await self._detect_active_request_signals(
+                skill_name=skill_name,
+                trajectory=trajectory,
+                messages=messages,
+            )
+
+        if user_intent:
+            self._append_unique_signal(
+                signals,
+                make_evolution_signal(
+                    signal_type=USER_INTENT_SIGNAL,
+                    section="Instructions",
+                    excerpt=user_intent,
+                    skill_name=skill_name,
+                    source="explicit_request",
+                ),
+            )
+
+        if not signals:
+            return EvolutionRequestResult(skill_name=skill_name)
+
+        if not messages and user_intent:
+            messages = [{"role": "user", "content": user_intent}]
+
         request = await self._handle_evolution_from_signals(
             skill_name=skill_name,
-            signals=[signal],
-            messages=[{"role": "user", "content": user_intent}],
+            signals=signals,
+            messages=messages,
             ctx=None,
             user_query=user_intent,
             requires_approval=not auto_approve,
@@ -601,6 +628,53 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             records=records,
             auto_approved=auto_approve,
         )
+
+    async def _detect_active_request_signals(
+        self,
+        *,
+        skill_name: str,
+        trajectory: Trajectory,
+        messages: List[dict],
+    ) -> List[EvolutionSignal]:
+        """Detect evidence-window signals for an explicit regular-skill request."""
+        detector = SignalDetector(existing_skills=self._active_request_regular_skill_names(skill_name)).bind_llm(
+            llm=self._evolver.llm,
+            model=self._evolver.model,
+            language=self._language,
+        )
+        detected: List[EvolutionSignal] = []
+        try:
+            detected.extend(detector.detect_trajectory_signals(trajectory, messages=messages))
+        except Exception as exc:
+            logger.warning("[SkillEvolutionRail] active request trajectory detection failed: %s", exc)
+        try:
+            detected.extend(await detector.detect_user_intent(messages))
+        except Exception as exc:
+            logger.warning("[SkillEvolutionRail] active request user-feedback detection failed: %s", exc)
+
+        signals: List[EvolutionSignal] = []
+        for signal in detected:
+            if signal.skill_name and signal.skill_name != skill_name:
+                continue
+            self._append_unique_signal(signals, signal)
+        return signals
+
+    def _active_request_regular_skill_names(self, skill_name: str) -> set[str]:
+        """Return known regular skills for active-request attribution."""
+        try:
+            all_skill_names = list(self._evolution_store.list_skill_names())
+        except Exception:
+            return {skill_name}
+        skill_names = {name for name in all_skill_names if self._is_regular_skill(name)}
+        skill_names.add(skill_name)
+        return skill_names
+
+    @staticmethod
+    def _append_unique_signal(signals: List[EvolutionSignal], signal: EvolutionSignal) -> None:
+        fingerprint = make_signal_fingerprint(signal)
+        if any(make_signal_fingerprint(existing) == fingerprint for existing in signals):
+            return
+        signals.append(signal)
 
     def _emit_progress(
         self,
@@ -783,10 +857,10 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         *,
         user_query: str = "",
         requires_approval: bool,
-    ) -> Optional[ExperienceApprovalRequest]:
+    ) -> OnlineEvolutionResult:
         """Generate and stage skill experiences through the unified updater flow.
 
-        Returns the staged request if records were produced.
+        Returns the structured orchestration result.
         """
         return await self._online_orchestrator.evolve(
             skill_name=skill_name,
@@ -814,14 +888,26 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             self._emit_progress(
                 "generating_updates", f"generating evolution records for '{skill_name}'", skill_name=skill_name
             )
-        request = await self._stage_evolution_from_signals(
+        result = await self._stage_evolution_from_signals(
             skill_name=skill_name,
             signals=signals,
             messages=messages,
             user_query=user_query,
             requires_approval=requires_approval,
         )
+        request = result.request
         if request is None:
+            if emit_host_events and result.status == "no_evolution_no_records":
+                self._emit_background_outcome_event(
+                    {
+                        "status": result.status,
+                        "message": result.message or f"online evolution finished with status={result.status}",
+                        "rail_kind": "regular",
+                        "skill_name": result.skill_name,
+                        "stage": "completed",
+                        "source": "experience_updater",
+                    }
+                )
             return None
 
         async def _on_auto_approved(staged_request: ExperienceApprovalRequest) -> None:
