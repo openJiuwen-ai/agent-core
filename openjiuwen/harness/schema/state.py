@@ -23,8 +23,8 @@ class PlanModeState:
         plan_slug: Short identifier for the active plan file
             (e.g. ``"gleaming-brewing-phoenix"``).  The absolute path is
             derived at runtime via ``resolve_plan_file_path()``.
-        prompt_context: Optional prompt specialization for plan mode.
-            ``"team"`` means the active plan is a team-level leader plan.
+        prompt_context: Legacy prompt-specialization marker retained for
+            older checkpoints. New prompt overlays are owned by rails.
     """
 
     mode: str = "normal"

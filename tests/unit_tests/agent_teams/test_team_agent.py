@@ -8,7 +8,7 @@ import pytest
 
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 from openjiuwen.agent_teams.prompts import TeamSectionName
-from openjiuwen.agent_teams.rails import TeamPolicyRail
+from openjiuwen.agent_teams.rails import TeamPlanModeRail, TeamPolicyRail
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
     TeamAgentSpec,
@@ -47,6 +47,28 @@ def test_team_agent_leader_policy() -> None:
         s for s in policy_rail._static_sections if s.name == TeamSectionName.ROLE
     )
     assert "TeamLeader" in role_section.render("cn")
+
+
+@pytest.mark.level0
+def test_team_plan_leader_mounts_team_plan_mode_rail() -> None:
+    leader = TeamAgentSpec(
+        agents=_dummy_agents(),
+        team_name="delivery",
+        enable_team_plan=True,
+    ).build()
+
+    assert isinstance(leader.harness.rails.team_plan_mode, TeamPlanModeRail)
+
+
+@pytest.mark.level0
+def test_team_normal_leader_does_not_mount_team_plan_mode_rail() -> None:
+    leader = TeamAgentSpec(
+        agents=_dummy_agents(),
+        team_name="delivery",
+        enable_team_plan=False,
+    ).build()
+
+    assert leader.harness.rails.team_plan_mode is None
 
 
 @pytest.mark.level0

@@ -5,6 +5,7 @@
 Provides bilingual MODE_INSTRUCTIONS injected into the system prompt while
 the agent operates in plan mode.
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -215,10 +216,7 @@ def _build_enter_plan_mode_status(
     plan_path = agent.get_plan_file_path(session)
     if plan_path:
         if language == "en":
-            return (
-                "enter_plan_mode has been called. "
-                "Proceed with the workflow."
-            )
+            return "enter_plan_mode has been called. Proceed with the workflow."
         return "enter_plan_mode 已调用完成。请继续工作流。"
     if language == "en":
         return "You have NOT called enter_plan_mode yet. Call it NOW as your first action."
@@ -253,37 +251,16 @@ def _build_plan_file_info(
                 f"A plan file already exists at {path_str}. "
                 "You can read it and make incremental edits using the edit_file tool."
             )
-        return (
-            f"No plan file exists yet. You should create your plan at {path_str} "
-            "using the write_file tool."
-        )
+        return f"No plan file exists yet. You should create your plan at {path_str} using the write_file tool."
     if plan_exists:
-        return (
-            f"计划文件已存在于 {path_str}。"
-            "你可以使用 edit_file 工具读取并增量编辑它。"
-        )
-    return (
-        f"计划文件尚不存在。你应该使用 write_file 工具在 {path_str} 创建计划。"
-    )
-
-
-def _is_team_plan_context(
-    agent: "DeepAgent | None",
-    session: "Session | None",
-) -> bool:
-    """Return whether the active plan mode should use team planning prompts."""
-    if agent is None or session is None:
-        return False
-    try:
-        state = agent.load_state(session)
-    except Exception:
-        return False
-    return getattr(state.plan_mode, "prompt_context", None) == "team"
+        return f"计划文件已存在于 {path_str}。你可以使用 edit_file 工具读取并增量编辑它。"
+    return f"计划文件尚不存在。你应该使用 write_file 工具在 {path_str} 创建计划。"
 
 
 # ---------------------------------------------------------------------------
 # Public factory
 # ---------------------------------------------------------------------------
+
 
 def build_plan_mode_section(
     language: str,
@@ -312,7 +289,8 @@ def build_plan_mode_section(
     else:
         if language == "en":
             enter_status = (
-                "enter_plan_mode has been called." if plan_file_path
+                "enter_plan_mode has been called."
+                if plan_file_path
                 else "You have NOT called enter_plan_mode yet. Call it NOW as your first action."
             )
             file_info = (
@@ -342,12 +320,7 @@ def build_plan_mode_section(
                 )
             )
 
-    if _is_team_plan_context(agent, session):
-        from openjiuwen.agent_teams.prompts import get_team_plan_mode_prompt
-
-        template = get_team_plan_mode_prompt(language)
-    else:
-        template = PLAN_MODE_PROMPT_EN if language == "en" else PLAN_MODE_PROMPT_CN
+    template = PLAN_MODE_PROMPT_EN if language == "en" else PLAN_MODE_PROMPT_CN
     content = template.format(
         enter_plan_mode_status=enter_status,
         plan_file_info=file_info,

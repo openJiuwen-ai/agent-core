@@ -394,7 +394,7 @@ async def test_team_harness_seeds_team_plan_mode_before_streaming(
         state = deep_agent.load_state(session)
         assert state.plan_mode.mode == "plan"
         assert state.plan_mode.plan_slug is None
-        assert state.plan_mode.prompt_context == "team"
+        assert state.plan_mode.prompt_context is None
         yield OutputSchema(type="message", index=1, payload={"event_type": "seeded"})
 
     with patch.object(Runner, "run_agent_streaming", side_effect=fake_run_agent_streaming):
@@ -409,46 +409,6 @@ async def test_team_harness_seeds_team_plan_mode_before_streaming(
 
     assert [chunk.payload["event_type"] for chunk in chunks] == ["seeded"]
     await isolated_checkpointer.release(session_id)
-
-
-def test_team_harness_specializes_builtin_plan_agent_prompt(tmp_path):
-    from openjiuwen.agent_teams.harness import TeamHarness
-    from openjiuwen.agent_teams.prompts.team_plan_agent import (
-        TEAM_PLAN_AGENT_DESC,
-        TEAM_PLAN_AGENT_SYSTEM_PROMPT_EN,
-    )
-    from openjiuwen.agent_teams.schema.team import TeamRole
-    from openjiuwen.harness.factory import create_deep_agent
-    from openjiuwen.harness.schema.config import SubAgentConfig
-    from openjiuwen.harness.subagents.plan_agent import (
-        build_plan_agent_config,
-    )
-
-    deep_agent = create_deep_agent(
-        SimpleNamespace(model_client_config=None, model_config=None),
-        card=AgentCard(name="team_leader", description="leader persona"),
-        system_prompt="leader system prompt",
-        workspace=str(tmp_path),
-        subagents=[build_plan_agent_config(language="en")],
-        language="en",
-        enable_task_loop=True,
-    )
-
-    TeamHarness(
-        deep_agent,
-        SimpleNamespace(),
-        role=TeamRole.LEADER,
-        member_name="team_leader",
-        initial_plan_mode=True,
-    )
-
-    plan_spec = next(
-        spec
-        for spec in deep_agent.deep_config.subagents
-        if isinstance(spec, SubAgentConfig) and spec.agent_card.name == "plan_agent"
-    )
-    assert plan_spec.agent_card.description == TEAM_PLAN_AGENT_DESC["en"]
-    assert plan_spec.system_prompt == TEAM_PLAN_AGENT_SYSTEM_PROMPT_EN
 
 
 def test_team_harness_keeps_code_plan_prompt_when_not_team_plan(tmp_path):
@@ -571,7 +531,7 @@ async def test_team_harness_reenters_team_plan_mode_with_existing_plan_slug():
         )
 
     assert deep_agent.switch_modes == ["plan"]
-    assert state.plan_mode.prompt_context == "team"
+    assert not hasattr(state.plan_mode, "prompt_context") or state.plan_mode.prompt_context is None
     assert [chunk.payload["event_type"] for chunk in chunks] == ["seeded", "continued"]
 
 

@@ -157,6 +157,29 @@ def test_build_skips_optional_rails_when_none() -> None:
     assert mounted == [team_tool, team_policy]
 
 
+def test_build_mounts_team_plan_mode_rail_when_provided() -> None:
+    deep_agent = _stub_deep_agent()
+    spec = MagicMock(name="DeepAgentSpec")
+    spec.build.return_value = deep_agent
+
+    team_tool = MagicMock(name="TeamToolRail")
+    team_policy = MagicMock(name="TeamPolicyRail")
+    team_plan_mode = MagicMock(name="TeamPlanModeRail")
+
+    harness = TeamHarness.build(
+        agent_spec=spec,
+        role=TeamRole.LEADER,
+        member_name="leader",
+        team_tool_rail=team_tool,
+        team_policy_rail=team_policy,
+        team_plan_mode_rail=team_plan_mode,
+    )
+
+    mounted = [call.args[0] for call in deep_agent.add_rail.call_args_list]
+    assert mounted == [team_tool, team_policy, team_plan_mode]
+    assert harness.rails.team_plan_mode is team_plan_mode
+
+
 def test_run_agent_customizer_invokes_with_inner_agent() -> None:
     """Customizer must receive (deep_agent, member_name, role.value)."""
     deep_agent = _stub_deep_agent()

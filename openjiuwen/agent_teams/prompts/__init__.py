@@ -48,6 +48,9 @@ from openjiuwen.agent_teams.prompts.team_plan_agent import (
 from openjiuwen.agent_teams.prompts.team_plan_mode import (
     TEAM_PLAN_MODE_PROMPT_CN,
     TEAM_PLAN_MODE_PROMPT_EN,
+    build_team_plan_mode_prompt,
+    build_team_plan_mode_prompt_template,
+    build_team_plan_mode_section,
     get_team_plan_mode_prompt,
 )
 
@@ -69,6 +72,9 @@ __all__ = [
     "build_team_lifecycle_section",
     "build_team_members_section",
     "build_team_persona_section",
+    "build_team_plan_mode_prompt",
+    "build_team_plan_mode_prompt_template",
+    "build_team_plan_mode_section",
     "build_team_role_section",
     "build_team_workflow_section",
     "get_team_plan_mode_prompt",

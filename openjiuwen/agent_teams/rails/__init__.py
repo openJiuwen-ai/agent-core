@@ -13,12 +13,15 @@ Layout:
   unblocks once the agent enters its first task-loop iteration.
 - ``tool_approval_rail``: ``TeamToolApprovalRail`` — leader-mediated
   approval gate for teammate tool calls.
+- ``team_plan_mode_rail``: ``TeamPlanModeRail`` — team.plan leader
+  prompt overlay for the generic plan-mode mechanics.
 """
 
 from __future__ import annotations
 
 from openjiuwen.agent_teams.rails.first_iteration_gate import FirstIterationGate
 from openjiuwen.agent_teams.rails.team_policy_rail import TeamPolicyRail
+from openjiuwen.agent_teams.rails.team_plan_mode_rail import TeamPlanModeRail
 from openjiuwen.agent_teams.rails.team_tool_rail import (
     TeamToolRail,
     qualify_team_tool_ids,
@@ -28,6 +31,7 @@ from openjiuwen.agent_teams.rails.tool_approval_rail import TeamToolApprovalRail
 __all__ = [
     "FirstIterationGate",
     "TeamPolicyRail",
+    "TeamPlanModeRail",
     "TeamToolApprovalRail",
     "TeamToolRail",
     "qualify_team_tool_ids",

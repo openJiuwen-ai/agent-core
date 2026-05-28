@@ -417,6 +417,13 @@ class AgentConfigurator:
                     tool_names=approval_tools,
                 )
 
+        team_plan_mode_rail = None
+        is_team_plan_leader = ctx.role == TeamRole.LEADER and is_team_plan_enabled(spec)
+        if is_team_plan_leader:
+            from openjiuwen.agent_teams.rails import TeamPlanModeRail
+
+            team_plan_mode_rail = TeamPlanModeRail(language=resolved_language)
+
         self.harness = TeamHarness.build(
             agent_spec=build_spec,
             role=ctx.role,
@@ -426,7 +433,8 @@ class AgentConfigurator:
             first_iter_gate=first_iter_gate,
             team_workspace_rail=team_workspace_rail,
             tool_approval_rail=tool_approval_rail,
-            initial_plan_mode=ctx.role == TeamRole.LEADER and is_team_plan_enabled(spec),
+            team_plan_mode_rail=team_plan_mode_rail,
+            initial_plan_mode=is_team_plan_leader,
         )
 
         # Team memory manager (only when explicitly enabled in the spec).
