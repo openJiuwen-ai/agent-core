@@ -84,6 +84,38 @@ def test_sys_operation_rail_registers_base_tools(tmp_path):
     asyncio.run(_run())
 
 
+def test_sys_operation_rail_read_only(tmp_path):
+    async def _run():
+        await Runner.start()
+        try:
+            card = SysOperationCard(
+                id="test_sys_operation_rail_read_only",
+                mode=OperationMode.LOCAL,
+                work_config=LocalWorkConfig(work_dir=str(tmp_path)),
+            )
+            Runner.resource_mgr.add_sys_operation(card)
+            sys_operation = Runner.resource_mgr.get_sys_operation(card.id)
+
+            rail = SysOperationRail(read_only=True)
+            rail.set_sys_operation(sys_operation)
+            agent = _Agent()
+
+            rail.init(agent)
+
+            assert {"read_file", "glob", "list_files", "grep", "bash"}.issubset(
+                set(agent.ability_manager.cards)
+            )
+            assert "write_file" not in agent.ability_manager.cards
+            assert "edit_file" not in agent.ability_manager.cards
+            assert "code" not in agent.ability_manager.cards
+        finally:
+            rail.uninit(agent)
+            Runner.resource_mgr.remove_sys_operation(sys_operation_id=card.id)
+            await Runner.stop()
+
+    asyncio.run(_run())
+
+
 def test_sys_operation_rail_with_code_tool(tmp_path):
     async def _run():
         await Runner.start()

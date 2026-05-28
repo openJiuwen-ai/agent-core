@@ -32,7 +32,9 @@ def test_build_explore_agent_config_defaults():
     assert spec.system_prompt
     assert isinstance(spec.rails, list)
     assert len(spec.rails) == 1
-    assert isinstance(spec.rails[0], SysOperationRail)
+    rail = spec.rails[0]
+    assert isinstance(rail, SysOperationRail)
+    assert rail._read_only is True
 
 
 def test_create_subagent_explore_initializes_tools(tmp_path):
@@ -56,8 +58,8 @@ def test_create_subagent_explore_initializes_tools(tmp_path):
             assert subagent.ability_manager.get("list_files") is not None
             assert subagent.ability_manager.get("grep") is not None
             assert subagent.ability_manager.get("bash") is not None
-            assert subagent.ability_manager.get("write_file") is not None
-            assert subagent.ability_manager.get("edit_file") is not None
+            assert subagent.ability_manager.get("write_file") is None
+            assert subagent.ability_manager.get("edit_file") is None
         finally:
             await Runner.stop()
 

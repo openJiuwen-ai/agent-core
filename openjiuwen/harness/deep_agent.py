@@ -136,6 +136,7 @@ class DeepAgent(BaseAgent):
         self._initialized = False
         self.system_prompt_builder: Optional[SystemPromptBuilder] = None
         self._invoke_active: bool = False
+        self._stream_process_task: Optional[asyncio.Task] = None
         self._auto_invoke_scheduled: bool = False
         self._bound_session_id: Optional[str] = None
         self._session_toolkit: SessionToolkit | None = None
@@ -2164,24 +2165,22 @@ class DeepAgent(BaseAgent):
                 await session.close_stream()
 
         task = asyncio.create_task(_stream_process())
-
-        _stream_task = task
+        self._stream_process_task = task
         try:
             async for chunk in session.stream_iterator():
                 yield chunk
 
             # Normal completion: wait for background task
-            await _stream_task
+            await task
         except asyncio.CancelledError:
             # Cancel background task explicitly to speed up cleanup.
-            # Without this, await _stream_task could wait for a long-running
+            # Without this, await task could wait for a long-running
             # operation (e.g., wait_round_completion with 600s timeout).
-            _stream_task.cancel()
-            try:
-                await _stream_task
-            except asyncio.CancelledError:
-                pass  # Expected when we cancelled it
+            await self._cancel_stream_process_task()
             raise
+        finally:
+            if self._stream_process_task is task:
+                self._stream_process_task = None
 
     async def _write_round_result_to_stream(
         self,
@@ -2381,6 +2380,22 @@ class DeepAgent(BaseAgent):
             self.card.id, sess, event
         )
 
+    async def _cancel_stream_process_task(self) -> None:
+        """Cancel the in-flight task-loop stream background task, if any."""
+        task = self._stream_process_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug(
+                "stream process task raised during cancel",
+                exc_info=True,
+            )
+
     async def abort(
         self,
         session: Optional[Session] = None,
@@ -2389,7 +2404,10 @@ class DeepAgent(BaseAgent):
 
         Sets the abort flag on the coordinator and
         calls on_abort() on the event handler so the
-        outer loop can exit promptly.
+        outer loop can exit promptly. Also cancels the
+        background ``_stream_process`` task when streaming,
+        so consumer disconnect / interrupt stops promptly
+        instead of leaving a zombie ReAct loop running.
 
         Args:
             session: Current session (unused).
@@ -2397,14 +2415,14 @@ class DeepAgent(BaseAgent):
         _ = session
         coordinator = self._loop_coordinator
         controller = self._loop_controller
-        if coordinator is None or controller is None:
-            return
-        coordinator.request_abort()
-        handler = cast(
-            TaskLoopEventHandler,
-            controller.event_handler,
-        )
-        await handler.on_abort()
+        if coordinator is not None and controller is not None:
+            coordinator.request_abort()
+            handler = cast(
+                TaskLoopEventHandler,
+                controller.event_handler,
+            )
+            await handler.on_abort()
+        await self._cancel_stream_process_task()
 
 
 __all__ = [

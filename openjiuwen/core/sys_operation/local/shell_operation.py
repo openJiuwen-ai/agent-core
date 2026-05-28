@@ -24,6 +24,11 @@ from openjiuwen.core.sys_operation.result import (
     ExecuteCmdResult, ExecuteCmdStreamResult, ExecuteCmdData, ExecuteCmdChunkData,
     ExecuteCmdBackgroundData, ExecuteCmdBackgroundResult
 )
+from openjiuwen.core.sys_operation.shell_process_registry import (
+    register_shell_process,
+    resolve_shell_session_id,
+    unregister_shell_process,
+)
 
 
 _POWERSHELL_TOKENS = (
@@ -45,6 +50,18 @@ _POSIX_COMMANDS = frozenset({
 })
 _QUOTED_WINDOWS_PATH_PATTERN = re.compile(r"(?P<quote>['\"])(?P<path>[A-Za-z]:\\[^'\"]+)(?P=quote)")
 _UNQUOTED_WINDOWS_PATH_PATTERN = re.compile(r"(?<![\w/])(?P<path>[A-Za-z]:\\[^\s|&;]+)")
+
+
+def _track_shell_process(proc: asyncio.subprocess.Process) -> str | None:
+    sid = resolve_shell_session_id()
+    if sid:
+        register_shell_process(sid, proc)
+    return sid
+
+
+def _untrack_shell_process(session_id: str | None, proc: asyncio.subprocess.Process) -> None:
+    if session_id:
+        unregister_shell_process(session_id, proc)
 
 
 def _looks_like_powershell(command: str) -> bool:
@@ -246,6 +263,22 @@ class ShellOperation(BaseShellOperation):
         (re.compile(r"\bmkfs\b", re.IGNORECASE), "mkfs"),
         (re.compile(r"\breg\s+delete\b", re.IGNORECASE), "reg delete"),
         (re.compile(r"\bremove-item\b[^\n\r]*-recurse[^\n\r]*-force", re.IGNORECASE), "Remove-Item -Recurse -Force"),
+        (
+            re.compile(r"\bpkill\b[^\n\r;|&]*jiuwenswarm(?!-tui)", re.IGNORECASE),
+            "pkill targeting jiuwenswarm backend",
+        ),
+        (
+            re.compile(r"\bkillall\b[^\n\r;|&]*jiuwenswarm(?!-tui)", re.IGNORECASE),
+            "killall targeting jiuwenswarm backend",
+        ),
+        (
+            re.compile(r"\bpkill\b[^\n\r;|&]*jiuwenclaw", re.IGNORECASE),
+            "pkill targeting jiuwenclaw backend",
+        ),
+        (
+            re.compile(r"\bkillall\b[^\n\r;|&]*jiuwenclaw", re.IGNORECASE),
+            "killall targeting jiuwenclaw backend",
+        ),
     ]
 
     _BUFFERING_WRAPPERS: Dict[str, Callable[[str], str]] = {
@@ -475,10 +508,14 @@ class ShellOperation(BaseShellOperation):
                     lang_encoding = self._get_lang_encoding(system_encoding)
                     exec_env["LANG"] = f"C.{lang_encoding}"
             proc = await self._create_subprocess(command, actual_cwd, exec_env, shell_type=shell_type_enum)
+            track_sid = _track_shell_process(proc)
 
             encoding = (options or {}).get("encoding", self._detect_shell_encoding())
             process_handler = OperationUtils.create_handler(process=proc, encoding=encoding, timeout=timeout)
-            invoke_data = await process_handler.invoke()
+            try:
+                invoke_data = await process_handler.invoke()
+            finally:
+                _untrack_shell_process(track_sid, proc)
             invoke_exception = getattr(invoke_data, "exception", None)
             if isinstance(invoke_exception, asyncio.TimeoutError):
                 return _create_exec_cmd_err(f"execution timeout after {timeout} seconds",
@@ -612,6 +649,7 @@ class ShellOperation(BaseShellOperation):
             process = await self._create_subprocess(
                 command, actual_cwd, exec_env, shell_type=shell_type_enum, stream=True,
             )
+            track_sid = _track_shell_process(process)
 
             chunk_size = (options or {}).get("chunk_size", 1024)
             encoding = (options or {}).get("encoding", self._detect_shell_encoding())
@@ -679,13 +717,16 @@ class ShellOperation(BaseShellOperation):
                 else:
                     return handler(stream_event_data, data_idx)
 
-            async for chunk in process_handler.stream():
-                modify_data = _stream_event_trans(chunk, chunk_index)
-                if modify_data:
-                    yield modify_data
-                    chunk_index += 1
-                if chunk.type in (StreamEventType.ERROR, StreamEventType.EXIT):
-                    return
+            try:
+                async for chunk in process_handler.stream():
+                    modify_data = _stream_event_trans(chunk, chunk_index)
+                    if modify_data:
+                        yield modify_data
+                        chunk_index += 1
+                    if chunk.type in (StreamEventType.ERROR, StreamEventType.EXIT):
+                        return
+            finally:
+                _untrack_shell_process(track_sid, process)
 
         except Exception as e:
             yield _create_exec_cmd_stream_err(error_msg=f"unexpected error: {str(e)}",
@@ -765,10 +806,12 @@ class ShellOperation(BaseShellOperation):
             process = await self._create_subprocess(
                 command, actual_cwd, exec_env, shell_type=shell_type_enum, background=True
             )
+            track_sid = _track_shell_process(process)
 
             process_handler = OperationUtils.create_handler(process=process)
             pid, err = await process_handler.background(grace=grace)
             if err:
+                _untrack_shell_process(track_sid, process)
                 return _create_exec_cmd_background_err(
                     error_msg=f"background command failed: {err}",
                     data=ExecuteCmdBackgroundData(command=command, cwd=str(actual_cwd)))

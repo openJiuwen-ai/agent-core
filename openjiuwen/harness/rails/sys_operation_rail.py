@@ -30,11 +30,13 @@ class SysOperationRail(DeepAgentRail):
         self,
         *,
         with_code_tool: bool = False,
+        read_only: bool = False,
         enable_read_image_multimodal: Optional[bool] = None,
     ) -> None:
         super().__init__()
         self.tools = None
         self._with_code_tool = with_code_tool
+        self._read_only = read_only
         self._enable_read_image_multimodal = enable_read_image_multimodal
 
     def init(self, agent) -> None:
@@ -64,19 +66,15 @@ class SysOperationRail(DeepAgentRail):
             else None
         )
 
-        self.tools = [
-            read_tool,
-            write_tool,
-            edit_tool,
-            glob_tool,
-            list_dir_tool,
-            grep_tool,
-            bash_tool,
-        ]
+        shared = [glob_tool, list_dir_tool, grep_tool, bash_tool]
+        if self._read_only:
+            self.tools = [read_tool, *shared]
+        else:
+            self.tools = [read_tool, write_tool, edit_tool, *shared]
         if powershell_tool is not None:
             self.tools.append(powershell_tool)
 
-        if self._with_code_tool:
+        if self._with_code_tool and not self._read_only:
             self.tools.append(CodeTool(self.sys_operation, lang, agent_id))
 
         # 工具 id 形如 "WriteFileTool_<agent_id>" 与 SysOperation 实例无关; 若上一次 agent
