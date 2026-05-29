@@ -717,14 +717,16 @@ class ReActAgent(BaseAgent):
         ctx.inputs.messages = context_window.get_messages()
         ctx.inputs.tools = context_window.get_tools()
 
-        # Append system-reminder messages injected by rails via ctx.extra.
-        # These are placed at the tail of the messages list (after context
-        # engine trimming) to ensure recency weight and guaranteed delivery.
-        system_reminders = ctx.extra.get("_system_reminders")
-        if system_reminders:
-            reminder_parts = [r["content"] for r in system_reminders]
+        # Append environment-context messages injected by rails via ctx.extra.
+        # Using UserMessage with <environment_context> tag because many LLM
+        # providers merge SystemMessage into the system parameter, breaking
+        # KV cache prefix stability. pop() clears after each model call to
+        # prevent multi-turn accumulation.
+        environment_context = ctx.extra.pop("environment_context", None)
+        if environment_context:
+            context_parts = [r["content"] for r in environment_context]
             ctx.inputs.messages.append(
-                SystemMessage(content="\n\n".join(reminder_parts))
+                UserMessage(content="<environment_context>\n" + "\n\n".join(context_parts) + "\n</environment_context>")
             )
 
         try:

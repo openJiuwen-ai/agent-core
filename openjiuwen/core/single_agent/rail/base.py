@@ -234,10 +234,14 @@ class AgentCallbackContext:
         extra: Cross-rail communication dict (persists
             across events within a single invoke).
             Recognised keys:
-              - ``_system_reminders``: list of dicts ``[{content: str,
-                source: str}]`` injected by rails; consumed by
+              - ``environment_context``: list of dicts ``[{content: str,
+                source: str}]`` injected by rails; consumed (popped) by
                 ``_railed_model_call`` and appended as a tail
-                ``SystemMessage`` after context-window trimming.
+                ``UserMessage`` wrapped in ``<environment_context>`` XML
+                tags after context-window trimming. Using UserMessage
+                instead of SystemMessage because many LLM providers
+                merge SystemMessage into the system parameter, breaking
+                KV cache prefix stability.
         exception: Exception object (set on error events)
         retry_attempt: Current failed-attempt index
     """
