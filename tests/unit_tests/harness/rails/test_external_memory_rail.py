@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+from openjiuwen.core.single_agent.rail.base import RunKind
 from openjiuwen.harness.rails.memory.external_memory_rail import ExternalMemoryRail
 from openjiuwen.core.memory.external.provider import MemoryProvider
 
@@ -197,3 +200,57 @@ class TestBuildMemoryContextBlock:
         assert "Previous conversation context" in result
         assert "</memory-context>" in result
         assert "NOT new user input" in result
+
+
+@pytest.mark.asyncio
+async def test_after_invoke_skips_heartbeat_runs():
+    provider = MockMemoryProvider()
+    rail = ExternalMemoryRail(provider)
+    rail._initialized = True
+    inputs = MockInputs(
+        query="health check",
+        result={"output": "healthy", "result_type": "answer"},
+        run_kind=RunKind.HEARTBEAT,
+    )
+
+    await rail.after_invoke(MockCallbackContext(inputs))
+    if rail._sync_task is not None:
+        await rail._sync_task
+
+    assert provider.sync_turn_calls == []
+
+
+@pytest.mark.asyncio
+async def test_after_invoke_skips_cron_runs():
+    provider = MockMemoryProvider()
+    rail = ExternalMemoryRail(provider)
+    rail._initialized = True
+    inputs = MockInputs(
+        query="scheduled check",
+        result={"output": "ok", "result_type": "answer"},
+        run_kind=RunKind.CRON,
+    )
+
+    await rail.after_invoke(MockCallbackContext(inputs))
+    if rail._sync_task is not None:
+        await rail._sync_task
+
+    assert provider.sync_turn_calls == []
+
+
+@pytest.mark.asyncio
+async def test_after_invoke_skips_empty_assistant_output():
+    provider = MockMemoryProvider()
+    rail = ExternalMemoryRail(provider)
+    rail._initialized = True
+    inputs = MockInputs(
+        query="remember this",
+        result={"unknown": "value"},
+        run_kind=RunKind.NORMAL,
+    )
+
+    await rail.after_invoke(MockCallbackContext(inputs))
+    if rail._sync_task is not None:
+        await rail._sync_task
+
+    assert provider.sync_turn_calls == []

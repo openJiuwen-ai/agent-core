@@ -24,7 +24,7 @@ from openjiuwen.core.foundation.llm import (
 from openjiuwen.core.foundation.tool import Tool, ToolCard, McpServerConfig
 from openjiuwen.core.foundation.tool.schema import ToolInfo
 from openjiuwen.core.runner.resources_manager.base import Ok
-from openjiuwen.core.session.stream.base import StreamMode
+from openjiuwen.core.session.stream.base import OutputSchema, StreamMode
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgentConfig
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -149,6 +149,7 @@ class CountingRail(AgentRail):
         self.before_invoke_count = 0
         self.after_invoke_count = 0
         self.before_tool_call_count = 0
+        self.after_invoke_result: Optional[Dict[str, Any]] = None
 
     def init(self, agent):
         rail_tool = _build_tool_card("rail_tool")
@@ -162,8 +163,8 @@ class CountingRail(AgentRail):
         self.before_invoke_count += 1
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
-        _ = ctx
         self.after_invoke_count += 1
+        self.after_invoke_result = getattr(ctx.inputs, "result", None)
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         _ = ctx
@@ -340,6 +341,57 @@ async def test_stream_single_round_branch() -> None:
 
     assert [chunk["chunk"] for chunk in chunks] == [1, 2]
     assert fake_react.stream_calls[0]["inputs"] == {"query": "stream_input"}
+
+
+@pytest.mark.asyncio
+async def test_stream_sets_result_before_after_invoke() -> None:
+    class AnswerStreamingReactAgent(FakeReactAgent):
+        async def stream(
+            self,
+            inputs: Dict[str, Any],
+            session: Optional[Any] = None,
+            stream_modes: Optional[List[StreamMode]] = None,
+        ) -> AsyncIterator[OutputSchema]:
+            self.stream_calls.append(
+                {
+                    "inputs": inputs,
+                    "session": session,
+                    "stream_modes": stream_modes,
+                }
+            )
+            yield OutputSchema(
+                type="llm_output",
+                index=0,
+                payload={"content": "hello ", "result_type": "answer"},
+            )
+            yield OutputSchema(
+                type="llm_output",
+                index=1,
+                payload={"content": "world", "result_type": "answer"},
+            )
+            yield OutputSchema(
+                type="answer",
+                index=0,
+                payload={"output": "hello world", "result_type": "answer"},
+            )
+
+    agent = DeepAgent(
+        AgentCard(name="deep", description="test")
+    ).configure(
+        DeepAgentConfig(enable_task_loop=False)
+    )
+    rail = CountingRail()
+    agent.add_rail(rail)
+    agent.set_react_agent(AnswerStreamingReactAgent(), initialized=False)
+
+    chunks = [chunk async for chunk in agent.stream("stream_input")]
+
+    assert [chunk.type for chunk in chunks] == ["llm_output", "llm_output", "answer"]
+    assert rail.after_invoke_count == 1
+    assert rail.after_invoke_result == {
+        "output": "hello world",
+        "result_type": "answer",
+    }
 
 
 @pytest.mark.asyncio

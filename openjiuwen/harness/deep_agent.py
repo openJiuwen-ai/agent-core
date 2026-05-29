@@ -1107,6 +1107,35 @@ class DeepAgent(BaseAgent):
         """Return True if the query is an InteractiveInput (interrupt resume)."""
         return isinstance(invoke_inputs.query, InteractiveInput)
 
+    @staticmethod
+    def _result_from_stream_chunk(chunk: Any, output_parts: List[str]) -> Optional[Dict[str, Any]]:
+        """Build an invoke-style result from emitted stream chunks."""
+        chunk_type = getattr(chunk, "type", None)
+        payload = getattr(chunk, "payload", None)
+        if isinstance(chunk, dict):
+            chunk_type = chunk.get("type", chunk_type)
+            payload = chunk.get("payload", payload)
+
+        if not isinstance(payload, dict):
+            return None
+
+        result: Optional[Dict[str, Any]] = None
+        if chunk_type == "llm_output":
+            content = payload.get("content")
+            if isinstance(content, str):
+                output_parts.append(content)
+        elif chunk_type == "answer":
+            result = dict(payload)
+            result.setdefault("result_type", "answer")
+            if "output" not in result:
+                content = result.get("content")
+                if isinstance(content, str):
+                    output_parts.append(content)
+                    result["output"] = content
+                else:
+                    result = None
+        return result
+
     def add_rail(self, rail: AgentRail) -> "DeepAgent":
         """Synchronously queue a rail for registration.
 
@@ -2291,6 +2320,8 @@ class DeepAgent(BaseAgent):
 
         self._invoke_active = True
         try:
+            stream_result: Optional[Dict[str, Any]] = None
+            stream_output_parts: List[str] = []
             async with ctx.lifecycle(
                 AgentCallbackEvent.BEFORE_INVOKE,
                 AgentCallbackEvent.AFTER_INVOKE,
@@ -2303,12 +2334,30 @@ class DeepAgent(BaseAgent):
                     async for chunk in self._run_task_loop_stream(
                         ctx, session, stream_modes
                     ):
+                        chunk_result = self._result_from_stream_chunk(
+                            chunk, stream_output_parts
+                        )
+                        if chunk_result is not None:
+                            stream_result = chunk_result
                         yield chunk
                 else:
                     async for chunk in self._run_single_round_stream(
                         ctx, session, stream_modes
                     ):
+                        chunk_result = self._result_from_stream_chunk(
+                            chunk, stream_output_parts
+                        )
+                        if chunk_result is not None:
+                            stream_result = chunk_result
                         yield chunk
+
+                if stream_result is None and stream_output_parts:
+                    stream_result = {
+                        "output": "".join(stream_output_parts),
+                        "result_type": "answer",
+                    }
+                if stream_result is not None:
+                    invoke_inputs.result = stream_result
 
             if session is not None:
                 self.save_state(session)

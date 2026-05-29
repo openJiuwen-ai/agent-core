@@ -5,13 +5,13 @@
 import asyncio
 import json
 import time
-from typing import Any, Optional, Set
+from typing import Optional, Set
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.foundation.tool.function.function import LocalFunction
 from openjiuwen.core.runner.runner import Runner
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunKind
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.core.memory.external.provider import MemoryProvider
 from openjiuwen.harness.prompts.sections import SectionName
@@ -182,6 +182,8 @@ class ExternalMemoryRail(DeepAgentRail):
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         if not self._initialized:
             return
+        if self._is_background_run(ctx):
+            return
         
         if self._sync_consecutive_failures >= _SYNC_BREAKER_THRESHOLD:
             if time.monotonic() < self._sync_breaker_until:
@@ -192,8 +194,7 @@ class ExternalMemoryRail(DeepAgentRail):
         query = self._resolve_user_text_for_memory(ctx)
         output = self._extract_assistant_output(ctx)
         
-        # if not query or not output:
-        if not query:
+        if not query or not output:
             return
         
         # Serialize: wait for previous sync_turn to complete
@@ -278,6 +279,21 @@ class ExternalMemoryRail(DeepAgentRail):
             logger.error(f"[ExternalMemoryRail] Failed to register provider tools: {e}")
     
     # ---- Helper methods ----
+
+    @staticmethod
+    def _is_background_run(ctx: AgentCallbackContext) -> bool:
+        inputs = ctx.inputs
+        for method_name in ("is_heartbeat", "is_cron"):
+            method = getattr(inputs, method_name, None)
+            if callable(method) and method():
+                return True
+
+        run_kind = getattr(inputs, "run_kind", None)
+        if run_kind in (RunKind.HEARTBEAT, RunKind.CRON):
+            return True
+        if isinstance(run_kind, str):
+            return run_kind in {RunKind.HEARTBEAT.value, RunKind.CRON.value}
+        return False
     
     @staticmethod
     def _resolve_user_text_for_memory(ctx: AgentCallbackContext) -> str:
