@@ -9,9 +9,11 @@ import pytest
 from openjiuwen.harness.tools.worktree.models import WorktreeSession
 from openjiuwen.harness.tools.worktree.session import (
     get_current_session,
+    get_default_worktree_name,
     init_session_state,
     require_current_session,
     set_current_session,
+    set_default_worktree_name,
 )
 from tests.test_logger import logger
 
@@ -29,6 +31,7 @@ class TestGetCurrentSession:
     def test_default_none(self):
         # Reset to clean state
         set_current_session(None)
+        set_default_worktree_name(None)
         assert get_current_session() is None
         logger.info("get_current_session default None verified")
 
@@ -42,6 +45,43 @@ class TestSetCurrentSession:
         logger.info("set_current_session + get verified")
         # Cleanup
         set_current_session(None)
+
+
+class TestDefaultWorktreeName:
+    @pytest.mark.level0
+    def test_set_get_and_clear(self):
+        set_default_worktree_name(None)
+        assert get_default_worktree_name() is None
+
+        set_default_worktree_name("bold-elm-1732")
+        assert get_default_worktree_name() == "bold-elm-1732"
+
+        set_default_worktree_name(None)
+        assert get_default_worktree_name() is None
+
+    @pytest.mark.level1
+    def test_clearing_active_session_keeps_default_name(self):
+        set_default_worktree_name("bold-elm-1732")
+        set_current_session(_make_session("bold-elm-1732"))
+
+        set_current_session(None)
+
+        assert get_current_session() is None
+        assert get_default_worktree_name() == "bold-elm-1732"
+        set_default_worktree_name(None)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_parent_initialized_holder_observes_child_default_mutation(self):
+        init_session_state()
+
+        async def task():
+            set_default_worktree_name("shared-default")
+
+        await asyncio.gather(task())
+
+        assert get_default_worktree_name() == "shared-default"
+        set_default_worktree_name(None)
 
     @pytest.mark.asyncio
     @pytest.mark.level1

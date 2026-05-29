@@ -25,6 +25,7 @@ from openjiuwen.harness.tools.worktree import (
     ExitWorktreeTool,
     WorktreeConfig,
     WorktreeManager,
+    set_default_worktree_name,
     set_current_session,
 )
 
@@ -75,9 +76,11 @@ class WorktreeBed:
 def _isolate_context_state() -> Iterator[None]:
     """Reset worktree session and cwd ContextVar before/after each test."""
     set_current_session(None)
+    set_default_worktree_name(None)
     _cwd_state.set(CwdState())
     yield
     set_current_session(None)
+    set_default_worktree_name(None)
     _cwd_state.set(CwdState())
 
 

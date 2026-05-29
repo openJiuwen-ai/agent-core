@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class WorktreeSessionState:
-    """Mutable container for the active worktree session.
+    """Mutable container for worktree state in the current agent session.
 
     asyncio.gather copies the ContextVar binding (the *reference*
     to this object), not the object itself -- so tool calls within
@@ -28,6 +28,7 @@ class WorktreeSessionState:
     """
 
     session: "WorktreeSession | None" = None
+    default_worktree_name: str | None = None
 
 
 _state: ContextVar[WorktreeSessionState | None] = ContextVar(
@@ -60,6 +61,21 @@ def set_current_session(session: "WorktreeSession | None") -> None:
         session: The WorktreeSession to set, or None to clear.
     """
     _get_state().session = session
+
+
+def get_default_worktree_name() -> str | None:
+    """Get the session-scoped default worktree name.
+
+    This mirrors Claude Code's plan-slug behaviour: the first unnamed
+    enter_worktree call chooses a name, and later unnamed calls in the
+    same conversation reuse it.
+    """
+    return _get_state().default_worktree_name
+
+
+def set_default_worktree_name(name: str | None) -> None:
+    """Set or clear the session-scoped default worktree name."""
+    _get_state().default_worktree_name = name
 
 
 def init_session_state() -> None:

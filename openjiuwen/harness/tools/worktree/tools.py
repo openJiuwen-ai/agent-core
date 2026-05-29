@@ -18,11 +18,16 @@ from typing import Any, AsyncIterator, Dict, TYPE_CHECKING
 
 from openjiuwen.core.common.exception.errors import ValidationError
 from openjiuwen.core.foundation.tool.base import Tool
+from openjiuwen.core.sys_operation.cwd import get_workspace
 from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.worktree.git import GitError
-from openjiuwen.harness.tools.worktree.session import get_current_session
-from openjiuwen.harness.tools.worktree.slug import validate_slug
+from openjiuwen.harness.tools.worktree.session import (
+    get_current_session,
+    get_default_worktree_name,
+    set_default_worktree_name,
+)
+from openjiuwen.harness.tools.worktree.slug import validate_slug, worktree_path_for
 
 if TYPE_CHECKING:
     from openjiuwen.harness.tools.worktree.manager import WorktreeManager
@@ -67,6 +72,17 @@ def _resolve_owner(kwargs: Dict[str, Any]) -> tuple[str | None, str | None]:
     return owner_id, tag
 
 
+def _resolve_workspace_worktree_path(slug: str) -> str:
+    workspace = get_workspace()
+    if workspace is None:
+        raise RuntimeError(
+            "Cannot resolve worktree path: DeepAgent workspace is not set. "
+            "Worktrees must be created from an agent that has a workspace "
+            "configured (init_cwd was called with workspace=...)."
+        )
+    return worktree_path_for(workspace, slug)
+
+
 class EnterWorktreeTool(_WorktreeToolBase):
     """Create or enter an isolated git worktree.
 
@@ -106,15 +122,14 @@ class EnterWorktreeTool(_WorktreeToolBase):
         if existing:
             return ToolOutput(
                 success=False,
-                error=(f"Already in worktree '{existing.worktree_name}'. Exit first with exit_worktree."),
+                error=(
+                    f"Already in worktree '{existing.worktree_name}'. "
+                    "Exit first with exit_worktree."
+                ),
             )
 
-        slug = inputs.get("name")
-        if not slug:
-            slug = _generate_random_slug()
-
         try:
-            validate_slug(slug)
+            slug, existed = await self._resolve_slug(inputs)
         except ValueError as e:
             return ToolOutput(success=False, error=str(e))
 
@@ -138,7 +153,7 @@ class EnterWorktreeTool(_WorktreeToolBase):
         set_original_cwd(session.worktree_path)
         # project_root stays unchanged
 
-        return ToolOutput(
+        output = ToolOutput(
             success=True,
             data={
                 "worktree_path": session.worktree_path,
@@ -150,6 +165,44 @@ class EnterWorktreeTool(_WorktreeToolBase):
                 ),
             },
         )
+
+        if existed:
+            output.data["existed"] = True
+            output.data["message"] = (
+                f"Entered existing worktree at {session.worktree_path} "
+                f"on branch {session.worktree_branch}. CWD switched to worktree."
+            )
+        return output
+
+    async def _resolve_slug(self, inputs: Dict[str, Any]) -> tuple[str, bool]:
+        requested = inputs.get("name")
+        if requested is None:
+            slug = get_default_worktree_name()
+            if slug is None:
+                slug = _generate_random_slug()
+                validate_slug(slug)
+                set_default_worktree_name(slug)
+            else:
+                validate_slug(slug)
+
+            return slug, await self._slug_exists(slug)
+
+        if not isinstance(requested, str):
+            raise ValueError("'name' must be a string")
+
+        selected = requested.strip()
+        if not selected:
+            raise ValueError("'name' must not be empty")
+
+        validate_slug(selected)
+        return selected, await self._slug_exists(selected)
+
+    async def _slug_exists(self, slug: str) -> bool:
+        try:
+            target_path = _resolve_workspace_worktree_path(slug)
+            return await self._manager.backend.exists(target_path)
+        except (AttributeError, RuntimeError):
+            return False
 
 
 class ExitWorktreeTool(_WorktreeToolBase):
@@ -235,12 +288,21 @@ class ExitWorktreeTool(_WorktreeToolBase):
         # Build human-readable message.
         branch = result.get("worktree_branch") or "unknown"
         if action == "keep":
-            message = f"Kept worktree (branch {branch}). Returned to {original_cwd}"
+            message = (
+                f"Kept worktree '{session.worktree_name}' (branch {branch}). "
+                "In this session, enter_worktree without a name will re-enter it; "
+                f"from another session, pass name='{session.worktree_name}'. "
+                f"Returned to {original_cwd}"
+            )
         else:
-            message = f"Removed worktree (branch {branch}). Returned to {original_cwd}"
+            message = (
+                f"Removed worktree '{session.worktree_name}' "
+                f"(branch {branch}). Returned to {original_cwd}"
+            )
 
         data = {
             **result,
+            "worktree_name": session.worktree_name,
             "message": message,
         }
         if discarded_files is not None:

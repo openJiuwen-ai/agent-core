@@ -38,8 +38,10 @@ from openjiuwen.harness.tools.worktree.rails import (
 )
 from openjiuwen.harness.tools.worktree.session import (
     get_current_session,
+    get_default_worktree_name,
     init_session_state,
     require_current_session,
+    set_default_worktree_name,
     set_current_session,
 )
 from openjiuwen.harness.tools.worktree.slug import (
@@ -75,6 +77,8 @@ __all__ = [
     # Session
     "get_current_session",
     "set_current_session",
+    "get_default_worktree_name",
+    "set_default_worktree_name",
     "init_session_state",
     "require_current_session",
     # Cleanup
