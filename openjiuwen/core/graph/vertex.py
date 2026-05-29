@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import asyncio
+import math
 from asyncio import CancelledError
 from datetime import datetime, timezone
 from typing import Any, Optional, AsyncIterator, AsyncGenerator, Literal
@@ -238,14 +239,39 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
     async def _run_executable_with_retry(self, ability: ComponentAbility, is_subgraph: bool = False,
                                          config: Any = None, event: asyncio.Event = None) -> bool:
         max_retries = self._node_config.max_retries if self._node_config else 0
-        if max_retries <= 0:
+        timeout = getattr(self._node_config, 'timeout', -1.0)
+
+        if max_retries <= 0 and (timeout < 0 or math.isclose(timeout, 0.0, abs_tol=1e-9)):
             return await self._run_executable(ability, is_subgraph, config, event)
 
         for attempt in range(max_retries + 1):
             try:
-                return await self._run_executable(ability, is_subgraph, config, event)
+                if timeout < 0 or math.isclose(timeout, 0.0, abs_tol=1e-9):
+                    return await self._run_executable(ability, is_subgraph, config, event)
+                return await asyncio.wait_for(
+                    self._run_executable(ability, is_subgraph, config, event),
+                    timeout=timeout,
+                )
             except GraphInterrupt:
                 raise
+            except asyncio.TimeoutError as e:
+                # Wrap as BaseError to prevent capture by workflow-level timeout handler
+                wrapped = build_error(
+                    StatusCode.WORKFLOW_EXECUTION_TIMEOUT,
+                    cause=e, timeout=timeout, node_id=self._node_id,
+                )
+                if attempt < max_retries:
+                    logger.warning(
+                        f"Node [{self._node_id}] ability [{ability.name}] "
+                        f"timed out on attempt {attempt + 1}/{max_retries + 1}, will retry",
+                        event_type=LogEventType.GRAPH_VERTEX_ABILITY_ERROR,
+                        exception=e,
+                        **self._log_message
+                    )
+                    await self.__trace_inner_error__(e)
+                    continue
+                # All retries exhausted → error recovery
+                return await self._run_error_recovery(ability, wrapped)
             except (BaseError, Exception) as e:
                 if attempt < max_retries:
                     logger.warning(
@@ -257,7 +283,42 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                     )
                     await self.__trace_inner_error__(e)
                     continue
-                raise
+                # All retries exhausted → error recovery
+                return await self._run_error_recovery(ability, e)
+
+        return False
+
+    async def _run_error_recovery(self, ability: ComponentAbility, error: Exception) -> bool:
+        """Error recovery after all retries exhausted. Decoupled via CallbackFramework trigger."""
+
+        # STREAM / TRANSFORM: streaming output is not recoverable
+        if ability not in (ComponentAbility.INVOKE, ComponentAbility.COLLECT):
+            raise error
+
+        # Read exception config from node spec (set at workflow build time)
+        exception_config = self._node_config.exception_config if self._node_config else None
+
+        # Trigger event via CallbackFramework; registered handlers process recovery
+        try:
+            from openjiuwen.core.runner.runner import Runner
+            _fw = Runner.callback_framework
+            if _fw is not None:
+                result = await _fw.trigger_until(
+                    "component_error_recovery",
+                    lambda r: r is not None,  # First non-None result is the recovery data
+                    error=error,
+                    session=self._session,
+                    node_id=self._node_id,
+                    ability=ability,
+                    exception_config=exception_config,  # config per node, no global state
+                )
+                if result is not None:
+                    await self._post_invoke(result)
+                    return True
+        except Exception:
+            pass  # Handler exception → treat as interrupt
+
+        raise error  # No framework / no handler / handler returned None → interrupt
 
     async def __call__(self, state: GraphState, config) -> Output:
         logger.info(f"Begin to call batch-in node [{self._node_id}]", event_type=LogEventType.GRAPH_VERTEX_CALL_START,

@@ -29,7 +29,7 @@ from openjiuwen.core.session import BaseSession
 from openjiuwen.core.session import WorkflowSession
 
 from openjiuwen.core.graph.stream_actor.base import StreamGraph
-from openjiuwen.core.workflow.workflow_config import WorkflowConfig, CompIOConfig, NodeSpec
+from openjiuwen.core.workflow.workflow_config import WorkflowConfig, CompIOConfig, NodeSpec, ExceptionConfig
 from openjiuwen.core.workflow.components.base import ComponentAbility
 from openjiuwen.core.graph.graph import PregelGraph
 
@@ -172,7 +172,9 @@ class BaseWorkflow:
             stream_inputs_schema: dict | Transformer = None,
             stream_outputs_schema: dict | Transformer = None,
             comp_ability: list[ComponentAbility] = None,
-            max_retries: int = 0
+            max_retries: int = 0,
+            timeout: float = -1.0,
+            exception_config: "ExceptionConfig" = None,
     ) -> Self:
         self._validate_comp_id(comp_id)
         self._validate_schemas(comp_id, inputs_schema, outputs_schema, stream_inputs_schema, stream_outputs_schema)
@@ -181,7 +183,9 @@ class BaseWorkflow:
             io_configs=CompIOConfig(inputs_schema=inputs_schema, outputs_schema=outputs_schema),
             stream_io_configs=CompIOConfig(inputs_schema=stream_inputs_schema, outputs_schema=stream_outputs_schema),
             abilities=comp_ability if comp_ability is not None else [],
-            max_retries=max_retries)
+            max_retries=max_retries,
+            timeout=timeout,
+            exception_config=exception_config)
         self._workflow_spec.comp_configs[comp_id] = node_spec
         if wait_for_all is None:
             wait_for_all = False

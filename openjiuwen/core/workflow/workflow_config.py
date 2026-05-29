@@ -19,6 +19,17 @@ class CompIOConfig(BaseModel):
     outputs_schema: Optional[Dict | Transformer] = None
 
 
+class ExceptionConfig(BaseModel):
+    """
+    Per-node exception handling configuration.
+
+    Only ``handle_type`` is recognized by the framework. Users may attach
+    arbitrary extra fields for their ``component_error_recovery`` handler.
+    """
+    model_config = {"extra": "allow"}
+    handle_type: str = Field(default="interrupt")
+
+
 class NodeSpec(BaseModel):
     """
     Specification for a workflow node/component.
@@ -30,6 +41,8 @@ class NodeSpec(BaseModel):
     stream_io_configs: CompIOConfig = None  # Configuration for streaming I/O
     abilities: List[ComponentAbility] = Field(default_factory=list)  # List of component abilities supported
     max_retries: int = Field(default=0, ge=0)
+    timeout: float = Field(default=-1.0)  # Per-node execution timeout in seconds; <=0 means no timeout
+    exception_config: Optional[ExceptionConfig] = None  # Exception handling configuration for error recovery
 
 
 class WorkflowSpec(BaseModel):

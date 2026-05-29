@@ -13,6 +13,7 @@ from openjiuwen.core.workflow.workflow import Workflow
 
 from openjiuwen.core.workflow.workflow_config import (
     WorkflowConfig,
+    ExceptionConfig,
 )
 
 from openjiuwen.core.workflow.components.component import (
