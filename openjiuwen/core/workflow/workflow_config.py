@@ -50,6 +50,10 @@ class WorkflowSpec(BaseModel):
         default_factory=dict,
         description="Configuration for each component in the workflow"
     )
+    stream_source_groups: Dict[str, List[List[str]]] = Field(
+        default_factory=dict,
+        description="CNF source groups for streaming consumers, using producer_id-ABILITY keys"
+    )
     start_nodes: list[str] = Field(default_factory=list)
 
 

@@ -32,6 +32,7 @@ class ActorManager:
         self._active_producer_ids: dict[str, set[ComponentAbility]] = {}
         self._consumer_dict = _build_reverse_graph(self._stream_edges)
         self._producer_abilities: dict[str, set[ComponentAbility]] = {}
+        self._stream_source_groups: dict[str, list[set[str]]] = {}
         self._workflow_session = session
         for consumer_id, producer_ids in self._consumer_dict.items():
             consumer_stream_ability = [ability for ability in workflow_spec.comp_configs[consumer_id].abilities if
@@ -45,8 +46,12 @@ class ActorManager:
                         sources.add(f"{producer_id}-{ability.name}")
                 self._producer_abilities[producer_id] = abilities
 
+            source_groups = workflow_spec.stream_source_groups.get(consumer_id)
+            if not source_groups:
+                source_groups = [[source] for source in sorted(sources)]
+            self._stream_source_groups[consumer_id] = [set(group) for group in source_groups if group]
             self._streams[consumer_id] = StreamActor(consumer_id, graph.get_node(consumer_id),
-                                                     consumer_stream_ability, list(sources),
+                                                     consumer_stream_ability, source_groups,
                                                      stream_generator_timeout=session.config().get_env(
                                                          STREAM_INPUT_GEN_TIMEOUT_KEY))
         self._sub_graph = sub_graph
@@ -69,6 +74,27 @@ class ActorManager:
             finished_stream_nodes.append(producer_id)
         self._workflow_session.state().update_and_commit_workflow_state(
             {"finished_stream_nodes": finished_stream_nodes})
+
+    def should_sanitize_stream_source(self, consumer_id: str, producer_id: str) -> bool:
+        """Return True when a stream source is known to be inactive for this run."""
+        source_groups = self._stream_source_groups.get(consumer_id, [])
+        matched_groups = [
+            group for group in source_groups
+            if any(self._source_key_matches_producer(source_key, producer_id) for source_key in group)
+        ]
+        if not matched_groups:
+            return True
+
+        for group in matched_groups:
+            # A single-source group is an AND dependency. It may simply be late,
+            # so it must stay open until that producer sends its end frame.
+            if len(group) == 1:
+                return False
+
+            if self._group_has_active_alternative(group, producer_id):
+                return True
+
+        return False
 
     def _get_actor(self, consumer_id: str) -> StreamActor:
         return self._streams[consumer_id]
@@ -99,6 +125,8 @@ class ActorManager:
 
     async def consume(self, consumer_id: str, ability: ComponentAbility, schema: dict,
                       stream_callback: Callable[[dict], Awaitable[None]] = None) -> dict:
+        actor = self._get_actor(consumer_id)
+        consume_iter = await actor.generator(ability, schema, stream_callback)
         producer_ids = self._consumer_dict.get(consumer_id, [])
         finished_stream_nodes = self._workflow_session.state().get_workflow_state("finished_stream_nodes") or []
 
@@ -111,9 +139,28 @@ class ActorManager:
                 for ab in all_abilities:
                     await self.end_message(producer_id, ab)
                     self.active_produce_ability(producer_id, ab)
-        actor = self._get_actor(consumer_id)
-        consume_iter = await actor.generator(ability, schema, stream_callback)
         return consume_iter
+
+    def _group_has_active_alternative(self, group: set[str], producer_id: str) -> bool:
+        for source_key in group:
+            group_producer_id, ability = self._split_source_key(source_key)
+            if group_producer_id == producer_id:
+                continue
+            if ability in self._active_producer_ids.get(group_producer_id, set()):
+                return True
+        return False
+
+    @staticmethod
+    def _source_key_matches_producer(source_key: str, producer_id: str) -> bool:
+        return ActorManager._split_source_key(source_key)[0] == producer_id
+
+    @staticmethod
+    def _split_source_key(source_key: str) -> tuple[str, ComponentAbility]:
+        producer_id, ability_name = source_key.rsplit("-", 1)
+        for ability in ComponentAbility:
+            if ability.name == ability_name:
+                return producer_id, ability
+        raise ValueError(f"Unknown component ability: {ability_name}")
 
     async def shutdown(self):
         for actor in self._streams.values():

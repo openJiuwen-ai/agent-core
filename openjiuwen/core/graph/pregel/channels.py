@@ -127,12 +127,22 @@ class TriggerChannel(Channel):
 
 
 class BarrierChannel(Channel):
-    def __init__(self, node_name: str, expected: Set[str]):
-        # node_name = "collect" (Node Name)
+    """Barrier channel with CNF (AND-of-OR) expression support.
+
+    expected_groups is a list of sets, where each set represents an OR-group.
+    The channel is ready when every OR-group has at least one sender completed.
+
+    Examples:
+        [{"a"}, {"b"}]           -> a AND b (backward compatible)
+        [{"a", "b"}]             -> a OR b
+        [{"a", "b"}, {"c"}]      -> (a OR b) AND c
+    """
+
+    def __init__(self, node_name: str, expected_groups: List[Set[str]]):
         super().__init__(node_name)
-        self.expected = expected
+        self.expected_groups = expected_groups
         self.received: Set[str] = set()
-        self._router_key = self._make_router_key(node_name, expected)
+        self._router_key = self._make_router_key(node_name, expected_groups)
 
     @property
     def key(self) -> str:
@@ -143,12 +153,23 @@ class BarrierChannel(Channel):
         return self.name
 
     @staticmethod
-    def _make_router_key(name: str, expected: Set[str]) -> str:
-        senders = "|".join(sorted(list(expected)))
+    def _make_router_key(name: str, expected_groups: List[Set[str]]) -> str:
+        parts = []
+        for group in expected_groups:
+            if len(group) == 1:
+                parts.append(next(iter(group)))
+            else:
+                parts.append(f"({'|'.join(sorted(group))})")
+        senders = "&".join(parts)
         return f"barrier:{senders}->{name}"
 
     def is_ready(self) -> bool:
-        return self.received == self.expected
+        if not self.received:
+            return False
+        for group in self.expected_groups:
+            if not (group & self.received):
+                return False
+        return True
 
     def accept(self, msg: Message) -> bool:
         if isinstance(msg, BarrierMessage):

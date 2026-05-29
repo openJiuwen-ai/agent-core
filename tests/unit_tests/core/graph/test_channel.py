@@ -67,9 +67,9 @@ class TestChannelManager:
 
         # Setup: Create a barrier waiting for "A" and "B", belonging to node "collect"
         barrier_target_node = "collect"
-        expected_senders = {"A", "B"}
+        expected_groups = [{"A"}, {"B"}]
 
-        barrier_ch = BarrierChannel(barrier_target_node, expected_senders)
+        barrier_ch = BarrierChannel(barrier_target_node, expected_groups=expected_groups)
         barrier_key = barrier_ch.key
 
         manager = ChannelManager([barrier_ch])
@@ -129,7 +129,7 @@ class TestChannelManager:
     @classmethod
     def test_barrier_duplicate_signals(cls):
         """Test that the same sender sending signals multiple times in one superstep (idempotency)"""
-        barrier_ch = BarrierChannel("collect", {"A", "B"})
+        barrier_ch = BarrierChannel("collect", expected_groups=[{"A"}, {"B"}])
         manager = ChannelManager([barrier_ch])
         key = barrier_ch.key
 

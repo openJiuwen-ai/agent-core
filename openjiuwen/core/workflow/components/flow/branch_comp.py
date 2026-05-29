@@ -42,6 +42,11 @@ class BranchComponent(WorkflowComponent):
     def add_component(self, graph: Graph, node_id: str, wait_for_all: bool = False):
         graph.add_node(node_id, self.to_executable(), wait_for_all=wait_for_all)
         graph.add_conditional_edges(node_id, self.router())
+        # Register branch targets for CNF barrier resolution at compile time
+        if hasattr(graph, 'register_branch_targets'):
+            all_targets = self._router.all_targets
+            if len(all_targets) > 1:
+                graph.register_branch_targets(node_id, all_targets)
 
     def skip_trace(self) -> bool:
         return True
