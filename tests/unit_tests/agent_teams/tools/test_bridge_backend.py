@@ -37,7 +37,7 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
-from openjiuwen.agent_teams.tools.team import TeamBackend
+from openjiuwen.agent_teams.tools.team import CapabilityOverrides, TeamBackend
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -322,7 +322,7 @@ async def test_build_team_skips_predefined_bridge_when_disabled(db, messager):
         desc="goal",
         leader_display_name="L",
         leader_desc="leader persona",
-        enable_bridge=False,
+        overrides=CapabilityOverrides(enable_bridge=False),
     )
     # No member row.
     member = await db.member.get_member("codex", "bridge_team")
@@ -345,5 +345,5 @@ async def test_build_team_enable_bridge_above_ceiling_raises(db, messager):
             desc="goal",
             leader_display_name="L",
             leader_desc="leader persona",
-            enable_bridge=True,
+            overrides=CapabilityOverrides(enable_bridge=True),
         )
