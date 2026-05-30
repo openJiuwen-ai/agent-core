@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
 
@@ -708,8 +709,31 @@ class ReActAgent(BaseAgent):
         if enable_kv_release and supports_kv_release:
             context_window_kwargs["model"] = llm
 
+        _session_id = ""
+        if ctx.session is not None:
+            _sid_getter = getattr(ctx.session, "get_session_id", None)
+            if callable(_sid_getter):
+                try:
+                    _session_id = str(_sid_getter() or "")
+                except Exception:
+                    _session_id = ""
+        _gw_start = time.perf_counter()
+        logger.debug(
+            "[ReActAgent] get_context_window start session_id=%s",
+            _session_id,
+        )
         context_window = await ctx.context.get_context_window(
             **context_window_kwargs
+        )
+        _out_messages = context_window.get_messages()
+        _out_tools = context_window.get_tools() or []
+        logger.debug(
+            "[ReActAgent] get_context_window done session_id=%s elapsed_ms=%.1f "
+            "messages_out=%s tools_out=%s",
+            _session_id,
+            (time.perf_counter() - _gw_start) * 1000,
+            len(_out_messages),
+            len(_out_tools),
         )
         # Update ctx.inputs: after_model_call hooks inspect these to see
         # what was actually sent. (LLM call uses them too, but could
@@ -781,6 +805,12 @@ class ReActAgent(BaseAgent):
             ))
 
         if not ctx.extra.get("_streaming"):
+            logger.debug(
+                "[ReActAgent] llm.invoke start session_id=%s message_count=%s tool_count=%s",
+                _session_id,
+                len(ctx.inputs.messages or []),
+                len(ctx.inputs.tools or []),
+            )
             ai_message = await llm.invoke(
                 model=self._config.model_name,
                 messages=ctx.inputs.messages,
@@ -794,6 +824,12 @@ class ReActAgent(BaseAgent):
         accumulated_chunk = None
         chunk_index = 0
 
+        logger.debug(
+            "[ReActAgent] llm.stream start session_id=%s message_count=%s tool_count=%s",
+            _session_id,
+            len(ctx.inputs.messages or []),
+            len(ctx.inputs.tools or []),
+        )
         async for chunk in llm.stream(
                 model=self._config.model_name,
                 messages=ctx.inputs.messages,
@@ -1403,7 +1439,21 @@ class ReActAgent(BaseAgent):
 
                 if invoke_inputs.result is None:
                     for iteration in range(start_iteration, self._config.max_iterations):
-                        logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
+                        _session_id = ""
+                        if session is not None:
+                            _sid_getter = getattr(session, "get_session_id", None)
+                            if callable(_sid_getter):
+                                try:
+                                    _session_id = str(_sid_getter() or "")
+                                except Exception:
+                                    _session_id = ""
+                        logger.info(
+                            f"ReAct iteration {iteration + 1}/{self._config.max_iterations}"
+                        )
+                        logger.debug(
+                            "[ReActAgent] iteration session_id=%s",
+                            _session_id,
+                        )
 
                         # Inject pending steering messages
                         # before the next model call.
@@ -1419,10 +1469,24 @@ class ReActAgent(BaseAgent):
                                 )
                             )
 
+                        _model_start = time.perf_counter()
+                        logger.debug(
+                            "[ReActAgent] model_call start session_id=%s iteration=%s",
+                            _session_id,
+                            iteration + 1,
+                        )
                         ai_message = await self._call_model(
                             ctx,
                             context,
                             tools,
+                        )
+                        logger.debug(
+                            "[ReActAgent] model_call done session_id=%s iteration=%s "
+                            "elapsed_ms=%.1f has_tool_calls=%s",
+                            _session_id,
+                            iteration + 1,
+                            (time.perf_counter() - _model_start) * 1000,
+                            bool(ai_message and getattr(ai_message, "tool_calls", None)),
                         )
 
                         finish = ctx.consume_force_finish()
@@ -1451,7 +1515,25 @@ class ReActAgent(BaseAgent):
                             invoke_inputs.result = result
                             break
 
+                        _tool_names = [
+                            getattr(tc, "name", "") for tc in ai_message.tool_calls
+                        ]
+                        _tools_start = time.perf_counter()
+                        logger.debug(
+                            "[ReActAgent] tool_call start session_id=%s iteration=%s tools=%s",
+                            _session_id,
+                            iteration + 1,
+                            _tool_names,
+                        )
                         results = await self._execute_tool_call(ctx, ai_message.tool_calls, session, context)
+                        logger.debug(
+                            "[ReActAgent] tool_call done session_id=%s iteration=%s tools=%s "
+                            "elapsed_ms=%.1f continuing_loop",
+                            _session_id,
+                            iteration + 1,
+                            _tool_names,
+                            (time.perf_counter() - _tools_start) * 1000,
+                        )
 
                         finish = ctx.consume_force_finish()
                         if finish:
