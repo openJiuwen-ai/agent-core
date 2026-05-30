@@ -147,6 +147,13 @@ class SubagentRail(DeepAgentRail):
                 "[SubagentRail] session_tools prompt section not available, skipping"
             )
 
+    # Well-known tool sets for built-in agent types whose tools are resolved
+    # at runtime (i.e. ``SubAgentConfig.tools`` is empty).
+    _KNOWN_AGENT_TOOLS: dict[str, str] = {
+        "explore_agent": "bash, glob, grep, list_files, read_file",
+        "plan_agent": "bash, glob, grep, list_files, read_file",
+    }
+
     def _build_available_agents_description(self, subagents: List[SubAgentConfig | "DeepAgent"]) -> str:
         """Build description of available subagents for tool registration.
 
@@ -161,7 +168,8 @@ class SubagentRail(DeepAgentRail):
 
         for spec in subagents:
             agent_name, agent_desc = self._extract_agent_meta(spec)
-            lines.append(f'"{agent_name}": {agent_desc}')
+            tools_str = self._extract_agent_tools(spec, agent_name)
+            lines.append(f"- {agent_name}: {agent_desc} (Tools: {tools_str})")
 
         return "\n".join(lines)
 
@@ -173,6 +181,51 @@ class SubagentRail(DeepAgentRail):
         name = getattr(card, "name", None) or "general-purpose"
         description = getattr(card, "description", None) or "DeepAgent instance"
         return name, description
+
+    def _extract_agent_tools(self, spec: SubAgentConfig | "DeepAgent", agent_name: str) -> str:
+        """Extract a human-readable tool list for a subagent spec.
+
+        Resolution order:
+        1. Explicit ``tools`` on SubAgentConfig — extract card names.
+        2. DeepAgent instance — read registered tool names from ability_manager.
+        3. Well-known defaults for built-in agent types.
+        4. Fallback to ``"All tools"``.
+        """
+        # 1. SubAgentConfig with explicit tools
+        if isinstance(spec, SubAgentConfig) and spec.tools:
+            names = []
+            for t in spec.tools:
+                name = getattr(t, "name", None) or getattr(getattr(t, "card", None), "name", None)
+                if name:
+                    names.append(name)
+            if names:
+                return ", ".join(names)
+
+        # 2. DeepAgent instance with registered tools
+        if not isinstance(spec, SubAgentConfig):
+            ability_mgr = getattr(spec, "ability_manager", None)
+            if ability_mgr is not None:
+                try:
+                    tool_names: list[str] = []
+                    for c in getattr(ability_mgr, "cards", []):
+                        n = getattr(c, "name", None)
+                        if isinstance(n, str):
+                            tool_names.append(n)
+                    if tool_names:
+                        return ", ".join(tool_names)
+                except (AttributeError, TypeError) as e:
+                    logger.debug(
+                        "[SubagentRail] Failed to extract tool names from agent %s: %s",
+                        agent_name,
+                        e,
+                    )
+
+        # 3. Well-known defaults
+        if agent_name in self._KNOWN_AGENT_TOOLS:
+            return self._KNOWN_AGENT_TOOLS[agent_name]
+
+        # 4. Fallback
+        return "All tools"
 
 
 __all__ = [

@@ -155,8 +155,8 @@ class TestSubagentRail:
         call_args = mock_create.call_args
         assert "available_agents" in call_args.kwargs
         available_agents = call_args.kwargs["available_agents"]
-        assert '"research_agent": Research specialist' in available_agents
-        assert '"code_agent": Code specialist' in available_agents
+        assert '- research_agent: Research specialist (Tools: All tools)' in available_agents
+        assert '- code_agent: Code specialist (Tools: All tools)' in available_agents
 
     @staticmethod
     @patch("openjiuwen.harness.rails.subagent.subagent_rail.Runner")
@@ -220,7 +220,7 @@ class TestSubagentRail:
         call_args = mock_create.call_args
         assert "available_agents" in call_args.kwargs
         available_agents = call_args.kwargs["available_agents"]
-        assert '"test_agent": Test description' in available_agents
+        assert '- test_agent: Test description (Tools: All tools)' in available_agents
 
     @staticmethod
     @patch("openjiuwen.harness.rails.subagent.subagent_rail.Runner")
@@ -249,7 +249,7 @@ class TestSubagentRail:
         call_args = mock_create.call_args
         assert "available_agents" in call_args.kwargs
         available_agents = call_args.kwargs["available_agents"]
-        assert '"agent_name": agent description" in available_agents'
+        assert '- agent_name: agent description (Tools: All tools)' in available_agents
 
     @staticmethod
     @patch("openjiuwen.harness.rails.subagent.subagent_rail.Runner")
@@ -276,7 +276,7 @@ class TestSubagentRail:
         call_args = mock_create.call_args
         assert "available_agents" in call_args.kwargs
         available_agents = call_args.kwargs["available_agents"]
-        assert '"general-purpose": DeepAgent instance' in available_agents
+        assert '- general-purpose: DeepAgent instance (Tools: All tools)' in available_agents
 
     @staticmethod
     @pytest.mark.asyncio
