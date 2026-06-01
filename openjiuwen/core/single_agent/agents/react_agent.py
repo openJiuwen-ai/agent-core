@@ -937,15 +937,19 @@ class ReActAgent(BaseAgent):
 
         results = await self.ability_manager.execute(ctx=ctx, tool_call=tool_calls, session=session)
 
+        add_kwargs = {
+            "system_messages": ctx.extra.get("_active_system_messages") or [],
+            "tools": ctx.extra.get("_active_tools") or [],
+        }
         for tool_result, tool_message in results:
             if tool_message is not None:
-                await context.add_messages(tool_message)
+                await context.add_messages(tool_message, **add_kwargs)
 
         multimodal_message = self._build_multimodal_tool_results_message(
             tool_result for tool_result, _ in results
         )
         if multimodal_message is not None:
-            await context.add_messages(multimodal_message)
+            await context.add_messages(multimodal_message, **add_kwargs)
 
         return results
 
@@ -1216,7 +1220,11 @@ class ReActAgent(BaseAgent):
 
         # Step 3: all feedbacks collected — write ai_message and concurrently resume all workflows
         resume_ai_message = copy.deepcopy(interruption_state.ai_message)
-        await context.add_messages(resume_ai_message)
+        await context.add_messages(
+            resume_ai_message,
+            system_messages=ctx.extra.get("_active_system_messages") or [],
+            tools=ctx.extra.get("_active_tools") or [],
+        )
 
         all_tool_calls = []
         for entry in interruption_state.interrupted_workflows.values():
@@ -1395,11 +1403,6 @@ class ReActAgent(BaseAgent):
 
                 context = await self._init_context(session)
                 ctx.context = context
-                
-                # Get background messages from session state
-                background_messages = session.get_state("background_messages")
-                if background_messages:
-                    await context.add_messages(background_messages)
 
                 rendered_system_prompt = self._build_rendered_system_prompt(
                     inputs,
@@ -1411,8 +1414,21 @@ class ReActAgent(BaseAgent):
                     priority=_IDENTITY_SECTION_PRIORITY,
                 )
                 await self._update_skill_prompt_builder_section(rendered_system_prompt)
-
                 tools = await self.ability_manager.list_tool_info()
+
+                ctx.extra["_active_system_messages"] = [
+                    SystemMessage(content=rendered_system_prompt)
+                ]
+                ctx.extra["_active_tools"] = tools
+
+                # Get background messages from session state
+                background_messages = session.get_state("background_messages")
+                if background_messages:
+                    await context.add_messages(
+                        background_messages,
+                        system_messages=ctx.extra.get("_active_system_messages") or [],
+                        tools=ctx.extra.get("_active_tools") or [],
+                    )
 
                 start_iteration = 0
                 if interruption_state is not None:
@@ -1426,7 +1442,11 @@ class ReActAgent(BaseAgent):
                         start_iteration = ctx.extra.pop(RESUME_START_ITERATION_KEY, 0)
                     else:
                         # Workflow Interrupt
-                        await context.add_messages(UserMessage(content=self._extract_user_text(user_input)))
+                        await context.add_messages(
+                            UserMessage(content=self._extract_user_text(user_input)),
+                            system_messages=ctx.extra.get("_active_system_messages") or [],
+                            tools=ctx.extra.get("_active_tools") or [],
+                        )
                         resume_result = await self._handle_resume(
                             interruption_state, user_input, ctx, context, session, invoke_inputs=invoke_inputs
                         )
@@ -1435,7 +1455,11 @@ class ReActAgent(BaseAgent):
                         else:
                             start_iteration = ctx.extra.pop(RESUME_START_ITERATION_KEY, 0)
                 else:
-                    await context.add_messages(UserMessage(content=self._extract_user_text(user_input)))
+                    await context.add_messages(
+                        UserMessage(content=self._extract_user_text(user_input)),
+                        system_messages=ctx.extra.get("_active_system_messages") or [],
+                        tools=ctx.extra.get("_active_tools") or [],
+                    )
 
                 if invoke_inputs.result is None:
                     for iteration in range(start_iteration, self._config.max_iterations):
@@ -1466,7 +1490,9 @@ class ReActAgent(BaseAgent):
                                         f"[STEERING] "
                                         f"{combined}"
                                     )
-                                )
+                                ),
+                                system_messages=ctx.extra.get("_active_system_messages") or [],
+                                tools=ctx.extra.get("_active_tools") or [],
                             )
 
                         _model_start = time.perf_counter()
@@ -1500,7 +1526,10 @@ class ReActAgent(BaseAgent):
                                 content=ai_message.content,
                                 tool_calls=ai_message.tool_calls,
                                 reasoning_content=getattr(ai_message, "reasoning_content", None),
-                            )
+                                usage_metadata=ai_message.usage_metadata,
+                            ),
+                            system_messages=ctx.extra.get("_active_system_messages") or [],
+                            tools=ctx.extra.get("_active_tools") or [],
                         )
 
                         if not ai_message.tool_calls:
