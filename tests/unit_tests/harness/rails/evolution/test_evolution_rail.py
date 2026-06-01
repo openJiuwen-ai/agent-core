@@ -291,9 +291,9 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
         events = await self.rail.drain_pending_approval_events()
 
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].payload["_evolution_meta"]["event_kind"], "outcome")
-        self.assertEqual(events[0].payload["_evolution_meta"]["rail_kind"], "base")
-        self.assertEqual(events[0].payload["_evolution_meta"]["status"], "failed")
+        self.assertEqual(events[0].payload["evolution_meta"]["event_kind"], "outcome")
+        self.assertEqual(events[0].payload["evolution_meta"]["rail_kind"], "base")
+        self.assertEqual(events[0].payload["evolution_meta"]["status"], "failed")
 
     async def test_background_outcome_event_includes_optional_structured_fields(self):
         self.rail._emit_background_outcome_event(
@@ -309,7 +309,7 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
 
         events = await self.rail.drain_pending_host_events()
 
-        meta = events[0].payload["_evolution_meta"]
+        meta = events[0].payload["evolution_meta"]
         self.assertEqual(meta["event_kind"], "outcome")
         self.assertEqual(meta["status"], "no_evolution_no_records")
         self.assertEqual(meta["rail_kind"], "regular")
@@ -875,8 +875,8 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
         self.assertFalse(rail.completed)
         events = await rail.drain_pending_approval_events()
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].payload["_evolution_meta"]["event_kind"], "outcome")
-        self.assertEqual(events[0].payload["_evolution_meta"]["status"], "timed_out")
+        self.assertEqual(events[0].payload["evolution_meta"]["event_kind"], "outcome")
+        self.assertEqual(events[0].payload["evolution_meta"]["status"], "timed_out")
         self.assertIn("background evolution timed out after 0.01s", events[0].payload["content"])
 
     async def test_safe_run_evolution_records_failure_outcome(self):
@@ -893,8 +893,8 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
 
         events = await rail.drain_pending_approval_events()
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].payload["_evolution_meta"]["event_kind"], "outcome")
-        self.assertEqual(events[0].payload["_evolution_meta"]["status"], "failed")
+        self.assertEqual(events[0].payload["evolution_meta"]["event_kind"], "outcome")
+        self.assertEqual(events[0].payload["evolution_meta"]["status"], "failed")
         self.assertIn("evolution failed", events[0].payload["content"])
 
     async def test_safe_run_evolution_does_not_buffer_completed_outcomes(self):
@@ -935,7 +935,7 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
         events = await rail.drain_pending_approval_events()
         self.assertEqual(len(events), 3)
         self.assertEqual(
-            [event.payload["_evolution_meta"]["status"] for event in events],
+            [event.payload["evolution_meta"]["status"] for event in events],
             ["failed", "failed", "failed"],
         )
         self.assertIn("failed-0", events[0].payload["content"])

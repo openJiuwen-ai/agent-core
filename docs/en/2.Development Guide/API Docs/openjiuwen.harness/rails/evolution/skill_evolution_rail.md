@@ -95,7 +95,7 @@ Use `drain_pending_host_events()` as the canonical API to consume buffered evolu
 Evolution events are `OutputSchema` objects. Evolution-specific metadata is carried in:
 
 ```python
-event.payload["_evolution_meta"]
+event.payload["evolution_meta"]
 ```
 
 Known metadata fields:

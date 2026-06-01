@@ -24,10 +24,12 @@ from openjiuwen.agent_evolving.experience.scorer import (
 )
 from openjiuwen.agent_evolving.experience.skill_experience_manager import ExperienceManager
 from openjiuwen.agent_evolving.experience.types import (
+    ONLINE_EVOLUTION_OUTCOME_STATUSES,
     ExperienceApprovalRequest,
     ExperienceProposal,
     OnlineEvolutionResult,
     PendingChange,
+    request_for_online_evolution_result,
 )
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.optimizer.skill_call import SkillExperienceOptimizer
@@ -60,7 +62,10 @@ from openjiuwen.harness.rails.evolution.approval_events import (
     build_skill_approval_event,
 )
 from openjiuwen.harness.rails.evolution.approval_runtime import EvolutionApprovalRuntime
-from openjiuwen.harness.rails.evolution.contracts import EvolutionRequestResult, SimplifyRequestResult
+from openjiuwen.harness.rails.evolution.contracts import (
+    EvolutionRequestResult,
+    SimplifyRequestResult,
+)
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail
 from openjiuwen.harness.rails.evolution.skill_evolution_sharing import SkillEvolutionSharingMixin
 
@@ -560,10 +565,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 return signal.excerpt
         for message in reversed(messages):
             # Handle both dict and Pydantic model objects (SystemMessage, AssistantMessage, etc.)
-            if isinstance(message, dict):
-                content = message.get("content")
-            else:
-                content = getattr(message, "content", "")
+            content = message.get("content") if isinstance(message, dict) else getattr(message, "content", "")
             if isinstance(content, str) and content:
                 return content
         return ""
@@ -605,7 +607,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         if not messages and user_intent:
             messages = [{"role": "user", "content": user_intent}]
 
-        request = await self._handle_evolution_from_signals(
+        online_result = await self._handle_evolution_from_signals_with_result(
             skill_name=skill_name,
             signals=signals,
             messages=messages,
@@ -614,9 +616,14 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             requires_approval=not auto_approve,
             emit_host_events=False,
         )
+        request = request_for_online_evolution_result(online_result)
 
         if request is None:
-            return EvolutionRequestResult(skill_name=skill_name)
+            return EvolutionRequestResult(
+                skill_name=skill_name,
+                status=online_result.status,
+                message=online_result.message,
+            )
 
         proposal = getattr(request, "proposal", None)
         records = list(getattr(proposal, "records", []) or [])
@@ -627,6 +634,8 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             approval_event=approval_event,
             records=records,
             auto_approved=auto_approve,
+            status=online_result.status,
+            message=online_result.message,
         )
 
     async def _detect_active_request_signals(
@@ -712,10 +721,12 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             records=pending.payload,
             language=self._language,
             is_shared_records=bool(getattr(pending, "is_shared_records", False)),
+            rail_kind="regular",
         )
         proposal = getattr(approval_request, "proposal", None)
         attach_evolution_meta(
             event,
+            rail_kind="regular",
             signal_type=getattr(proposal, "signal_type", None),
             signal_source=getattr(proposal, "signal_source", None),
         )
@@ -831,9 +842,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         if skill_dir is None:
             return True
 
-        if isinstance(skill_dir, str):
-            skill_dir = Path(skill_dir)
-        elif isinstance(skill_dir, os.PathLike):
+        if isinstance(skill_dir, (str, os.PathLike)):
             skill_dir = Path(skill_dir)
         elif not isinstance(skill_dir, Path):
             return True
@@ -884,6 +893,29 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         emit_host_events: bool = True,
     ) -> Optional[ExperienceApprovalRequest]:
         """Shared downstream handler for both passive and explicit skill evolution."""
+        result = await self._handle_evolution_from_signals_with_result(
+            skill_name=skill_name,
+            signals=signals,
+            messages=messages,
+            ctx=ctx,
+            user_query=user_query,
+            requires_approval=requires_approval,
+            emit_host_events=emit_host_events,
+        )
+        return request_for_online_evolution_result(result)
+
+    async def _handle_evolution_from_signals_with_result(
+        self,
+        *,
+        skill_name: str,
+        signals: List[EvolutionSignal],
+        messages: List[dict],
+        ctx: Optional[AgentCallbackContext],
+        user_query: str = "",
+        requires_approval: bool,
+        emit_host_events: bool = True,
+    ) -> OnlineEvolutionResult:
+        """Handle evolution and retain the orchestrator status for active APIs."""
         if emit_host_events:
             self._emit_progress(
                 "generating_updates", f"generating evolution records for '{skill_name}'", skill_name=skill_name
@@ -896,19 +928,23 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             requires_approval=requires_approval,
         )
         request = result.request
-        if request is None:
-            if emit_host_events and result.status == "no_evolution_no_records":
+        if result.status in ONLINE_EVOLUTION_OUTCOME_STATUSES:
+            if emit_host_events:
                 self._emit_background_outcome_event(
                     {
                         "status": result.status,
                         "message": result.message or f"online evolution finished with status={result.status}",
                         "rail_kind": "regular",
                         "skill_name": result.skill_name,
-                        "stage": "completed",
+                        "request_id": getattr(request, "request_id", None),
+                        "stage": "completed" if result.status == "no_evolution_no_records" else "failed",
                         "source": "experience_updater",
                     }
                 )
-            return None
+            return result
+
+        if request is None:
+            return result
 
         async def _on_auto_approved(staged_request: ExperienceApprovalRequest) -> None:
             logger.info(
@@ -928,7 +964,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 staged_request=staged_request,
             )
 
-        return await self.approval_runtime.finalize_staged_evolution_request(
+        await self.approval_runtime.finalize_staged_evolution_request(
             request,
             requires_approval=requires_approval,
             emit_approval_request=(
@@ -938,15 +974,18 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             ),
             on_auto_approved=_on_auto_approved,
         )
+        return result
 
-    async def approve_record(self, request_id: str) -> None:
+    async def approve_record(
+        self,
+        request_id: str,
+        *,
+        approved_record_ids: Optional[List[str]] = None,
+    ) -> None:
         """Approve staged evolution records.
 
         The ``request_id`` matches ``payload["request_id"]`` from the approval event.
-        Only the records captured in this approval snapshot are written. On
-        partial failure the unwritten tail is preserved in the same
-        ``PendingChange`` so the host can retry by calling ``approve_record``
-        again with the same id.
+        When ``approved_record_ids`` is provided, only those records are written.
         """
         snapshot_pending = self._pending_approval_snapshots.get(request_id)
         approved_records: List[EvolutionRecord] = []
@@ -958,11 +997,18 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 approved_records = list(payload)
             approval_messages = getattr(snapshot_pending, "messages", None)
             is_shared = bool(getattr(snapshot_pending, "is_shared_records", False))
+        if approved_record_ids is not None and approved_records:
+            approved_id_set = set(approved_record_ids)
+            approved_records = [record for record in approved_records if record.id in approved_id_set]
 
+        approve_kwargs: Dict[str, List[str]] = {}
+        if approved_record_ids is not None:
+            approve_kwargs["approved_record_ids"] = approved_record_ids
         pending, result = await self.approval_runtime.approve_pending_request(
             request_id,
             rail_name="SkillEvolutionRail",
             action_name="approve_record",
+            **approve_kwargs,
         )
         if pending is None:
             return
@@ -1204,6 +1250,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             request_id=request_id,
             actions=actions,
             language=self._language,
+            rail_kind="regular",
         )
         return SimplifyRequestResult(
             skill_name=skill_name,

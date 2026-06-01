@@ -202,7 +202,7 @@ Stable ownership boundaries:
 
 Use `drain_pending_host_events()` as the canonical API to consume evolution events. `drain_pending_approval_events()` is a compatibility wrapper over the same buffer.
 
-Evolution metadata is carried in `OutputSchema.payload["_evolution_meta"]`:
+Evolution metadata is carried in `OutputSchema.payload["evolution_meta"]`:
 
 | Field | Meaning |
 |---|---|

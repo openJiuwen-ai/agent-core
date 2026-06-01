@@ -29,10 +29,12 @@ from openjiuwen.agent_evolving.experience.scorer import (
 )
 from openjiuwen.agent_evolving.experience.skill_experience_manager import ExperienceManager
 from openjiuwen.agent_evolving.experience.types import (
+    ONLINE_EVOLUTION_OUTCOME_STATUSES,
     ExperienceApprovalRequest,
     ExperienceProposal,
     OnlineEvolutionResult,
     PendingChange,
+    request_for_online_evolution_result,
 )
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.optimizer.skill_call.team_skill_experience_optimizer import (
@@ -642,7 +644,7 @@ class TeamSkillEvolutionRail(EvolutionRail):
                 f"evolution signals detected: {issue_count} trajectory issues, "
                 f"{len(signals) - len(trajectory_issue_signals)} user intents",
             )
-            request = await self._handle_evolution_from_signals(
+            online_result = await self._handle_evolution_from_signals_with_result(
                 skill_name=used_skill,
                 trajectory=trajectory,
                 signals=signals,
@@ -650,7 +652,11 @@ class TeamSkillEvolutionRail(EvolutionRail):
                 user_query=user_intent.intent if user_intent is not None else "",
                 messages=messages,
             )
-            if request is None:
+            request = request_for_online_evolution_result(online_result)
+            if online_result.status in ONLINE_EVOLUTION_OUTCOME_STATUSES:
+                if online_result.status == "no_evolution_no_records":
+                    self._emit_progress("completed", "no evolution records generated")
+            elif request is None:
                 self._emit_progress("completed", "no evolution records generated")
             else:
                 self._emit_progress(
@@ -709,12 +715,21 @@ class TeamSkillEvolutionRail(EvolutionRail):
             return
         await tracker.evaluate_presented(presented_entries)
 
-    async def approve_record(self, request_id: str) -> None:
+    async def approve_record(
+        self,
+        request_id: str,
+        *,
+        approved_record_ids: Optional[list[str]] = None,
+    ) -> None:
         """Handle approval of staged evolution records."""
+        approve_kwargs: dict[str, list[str]] = {}
+        if approved_record_ids is not None:
+            approve_kwargs["approved_record_ids"] = approved_record_ids
         pending, result = await self.approval_runtime.approve_pending_request(
             request_id,
             rail_name="TeamSkillEvolutionRail",
             action_name="approve_record",
+            **approve_kwargs,
         )
         if pending is None:
             return
@@ -770,6 +785,7 @@ class TeamSkillEvolutionRail(EvolutionRail):
             request_id=request_id,
             actions=actions,
             language=getattr(self._manager, "_language", "cn"),
+            rail_kind="team",
         )
         logger.info("[TeamSkillEvolutionRail] simplify staged for '%s' (request=%s)", skill_name, request_id)
         return SimplifyRequestResult(
@@ -889,7 +905,7 @@ class TeamSkillEvolutionRail(EvolutionRail):
         if not messages and user_intent:
             messages = [{"role": "user", "content": user_intent}]
 
-        request = await self._handle_evolution_from_signals(
+        online_result = await self._handle_evolution_from_signals_with_result(
             skill_name=skill_name,
             trajectory=trajectory,
             signals=signals,
@@ -898,12 +914,18 @@ class TeamSkillEvolutionRail(EvolutionRail):
             messages=messages,
             emit_host_events=False,
         )
+        request = request_for_online_evolution_result(online_result)
+
         if request is None:
             logger.info(
                 "[TeamSkillEvolutionRail] request_user_evolution: no records generated for '%s'",
                 skill_name,
             )
-            return EvolutionRequestResult(skill_name=skill_name)
+            return EvolutionRequestResult(
+                skill_name=skill_name,
+                status=online_result.status,
+                message=online_result.message,
+            )
 
         proposal = getattr(request, "proposal", None)
         records = list(getattr(proposal, "records", []) or [])
@@ -920,6 +942,8 @@ class TeamSkillEvolutionRail(EvolutionRail):
             approval_event=approval_event,
             records=records,
             auto_approved=auto_approve,
+            status=online_result.status,
+            message=online_result.message,
         )
 
     async def _detect_active_request_signals(
@@ -1146,7 +1170,7 @@ class TeamSkillEvolutionRail(EvolutionRail):
         )
         return team_traj
 
-    async def _handle_evolution_from_signals(
+    async def _handle_evolution_from_signals_with_result(
         self,
         *,
         skill_name: str,
@@ -1156,8 +1180,8 @@ class TeamSkillEvolutionRail(EvolutionRail):
         user_query: str = "",
         messages: Optional[list[dict]] = None,
         emit_host_events: bool = True,
-    ) -> Optional[ExperienceApprovalRequest]:
-        """Shared downstream handler for both passive and explicit team-skill evolution."""
+    ) -> OnlineEvolutionResult:
+        """Handle evolution and retain the orchestrator status for active APIs."""
         if emit_host_events:
             self._emit_progress(
                 "generating_updates",
@@ -1173,19 +1197,23 @@ class TeamSkillEvolutionRail(EvolutionRail):
             messages=messages,
         )
         request = result.request
-        if request is None:
-            if emit_host_events and result.status == "no_evolution_no_records":
+        if result.status in ONLINE_EVOLUTION_OUTCOME_STATUSES:
+            if emit_host_events:
                 self._emit_background_outcome_event(
                     {
                         "status": result.status,
                         "message": result.message or f"online evolution finished with status={result.status}",
                         "rail_kind": "team",
                         "skill_name": result.skill_name,
-                        "stage": "completed",
+                        "request_id": getattr(request, "request_id", None),
+                        "stage": "completed" if result.status == "no_evolution_no_records" else "failed",
                         "source": "team_skill_experience_updater",
                     }
                 )
-            return None
+            return result
+
+        if request is None:
+            return result
 
         def _emit_approval_request(staged_request: ExperienceApprovalRequest) -> None:
             pending = staged_request.pending_change
@@ -1220,12 +1248,13 @@ class TeamSkillEvolutionRail(EvolutionRail):
                     request_id=staged_request.request_id,
                 )
 
-        return await self.approval_runtime.finalize_staged_evolution_request(
+        await self.approval_runtime.finalize_staged_evolution_request(
             request,
             requires_approval=not auto_approve,
             emit_approval_request=_emit_approval_request if emit_host_events else (lambda staged_request: None),
             on_auto_approved=_on_auto_approved,
         )
+        return result
 
     async def _stage_evolution_from_signals(
         self,
@@ -1344,9 +1373,11 @@ class TeamSkillEvolutionRail(EvolutionRail):
             request_id=request_id,
             records=records,
             language=getattr(getattr(self, "_generator", None), "language", "en"),
+            rail_kind="team",
         )
         attach_evolution_meta(
             event,
+            rail_kind="team",
             signal_type=getattr(proposal, "signal_type", None),
             signal_source=getattr(proposal, "signal_source", None),
         )

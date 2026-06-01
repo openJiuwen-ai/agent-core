@@ -45,6 +45,7 @@ class EvolutionApprovalRuntime:
         *,
         rail_name: str,
         action_name: str,
+        approved_record_ids: Optional[list[str]] = None,
     ) -> tuple[Any, Any]:
         """Approve one staged request through the shared manager lifecycle."""
         pending = self.lookup_pending_approval_snapshot(
@@ -55,13 +56,16 @@ class EvolutionApprovalRuntime:
         if pending is None:
             return None, None
 
-        result = await self._manager.approve_request(request_id)
+        approve_kwargs: dict[str, list[str]] = {}
+        if approved_record_ids is not None:
+            approve_kwargs["approved_record_ids"] = approved_record_ids
+        result = await self._manager.approve_request(request_id, **approve_kwargs)
+
         pending_count = getattr(result, "pending_count", 0)
         if pending_count:
             applied_count = getattr(result, "applied_count", 0)
             logger.warning(
-                "[%s] %s partial failure: %d/%d record(s) written for '%s' "
-                "(request=%s); retry %s to complete",
+                "[%s] %s partial failure: %d/%d record(s) written for '%s' (request=%s); retry %s to complete",
                 rail_name,
                 action_name,
                 applied_count,

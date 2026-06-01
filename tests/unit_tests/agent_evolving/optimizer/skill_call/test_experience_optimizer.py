@@ -40,6 +40,7 @@ from openjiuwen.agent_evolving.signal.base import (
     EvolutionTarget,
     make_evolution_signal,
 )
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
 
 
@@ -124,7 +125,7 @@ class TestSkillExperienceOptimizerGenerate:
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_generate_returns_empty_on_llm_exception():
+    async def test_generate_reraises_llm_invoke_exception_as_base_error():
         llm = MagicMock()
         llm.invoke = AsyncMock(side_effect=RuntimeError("network failed"))
         optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
@@ -136,7 +137,27 @@ class TestSkillExperienceOptimizerGenerate:
             existing_desc_records=[],
             existing_body_records=[],
         )
-        assert await optimizer.generate_records(ctx) == []
+        with pytest.raises(BaseError):
+            await optimizer.generate_records(ctx)
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_generate_reraises_llm_base_error():
+        optimizer = SkillExperienceOptimizer(llm=MagicMock(), model="dummy", language="cn")
+        optimizer._generate_drafts_with_retries = AsyncMock(
+            side_effect=BaseError(StatusCode.COMPONENT_LLM_INVOKE_CALL_FAILED, error_msg="network failed")
+        )
+        ctx = EvolutionContext(
+            skill_name="skill-a",
+            signals=[make_signal()],
+            skill_content="# skill",
+            messages=[{"role": "user", "content": "hello"}],
+            existing_desc_records=[],
+            existing_body_records=[],
+        )
+
+        with pytest.raises(BaseError):
+            await optimizer.generate_records(ctx)
 
     @staticmethod
     @pytest.mark.asyncio

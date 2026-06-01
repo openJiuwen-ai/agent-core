@@ -44,8 +44,14 @@ async def commit_pending_change(
     change_id: str,
     *,
     store: Any,
+    approved_record_ids: Optional[List[str]] = None,
 ) -> PendingCommitResult:
-    """Persist one staged pending change, retaining the unwritten tail on failure."""
+    """Persist one staged pending change one record at a time.
+
+    Each individual record write is atomic at the store layer. The approval
+    batch may be partially applied; on failure the unwritten approved tail is
+    retained for retry.
+    """
     pending = pending_by_id.get(change_id)
     if pending is None:
         raise KeyError(change_id)
@@ -53,15 +59,39 @@ async def commit_pending_change(
     if pending.change_type not in {SKILL_EXPERIENCE_ENTRY, EXPERIENCE_ENTRY}:
         raise KeyError(pending.change_type)
 
-    applied_count = 0
-    remaining_records = list(pending.payload)
+    all_records = list(pending.payload)
+    if approved_record_ids is None:
+        records = all_records
+        rejected_records: List[EvolutionRecord] = []
+    else:
+        approved_ids = set(approved_record_ids)
+        records = [record for record in all_records if record.id in approved_ids]
+        rejected_records = [record for record in all_records if record.id not in approved_ids]
 
-    for index, record in enumerate(list(pending.payload)):
+    if not records:
+        pending.payload[:] = []
+        pending_by_id.pop(change_id, None)
+        return PendingCommitResult(
+            applied_count=0,
+            pending_count=0,
+            rejected_count=len(rejected_records),
+        )
+
+    applied_count = 0
+    remaining_records = list(records)
+
+    for index, record in enumerate(records):
         try:
             await store.append_record(pending.skill_name, record)
-        except Exception:
-            remaining_records = list(pending.payload[index:])
-            break
+        except Exception as exc:
+            remaining_records = list(records[index:])
+            pending.payload[:] = remaining_records
+            return PendingCommitResult(
+                applied_count=applied_count,
+                pending_count=len(remaining_records),
+                rejected_count=len(rejected_records),
+                errors=[str(exc)],
+            )
         applied_count += 1
     else:
         remaining_records = []
@@ -73,6 +103,7 @@ async def commit_pending_change(
     return PendingCommitResult(
         applied_count=applied_count,
         pending_count=len(remaining_records),
+        rejected_count=len(rejected_records),
     )
 
 

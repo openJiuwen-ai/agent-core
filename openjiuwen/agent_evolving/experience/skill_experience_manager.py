@@ -294,9 +294,18 @@ class ExperienceManager:
             apply_results=preview.apply_results,
         )
 
-    async def approve_request(self, request_id: str) -> ExperienceApplyResult:
+    async def approve_request(
+        self,
+        request_id: str,
+        *,
+        approved_record_ids: Optional[List[str]] = None,
+    ) -> ExperienceApplyResult:
         """Apply a staged approval batch to persistent storage."""
-        return await self._apply_request(request_id, action=APPROVE_ACTION)
+        return await self._apply_request(
+            request_id,
+            action=APPROVE_ACTION,
+            approved_record_ids=approved_record_ids,
+        )
 
     async def reject_request(self, request_id: str) -> ExperienceApplyResult:
         """Reject and discard a staged approval batch."""
@@ -311,6 +320,7 @@ class ExperienceManager:
         request_id: str,
         *,
         action: Literal["approve", "reject", "retry"],
+        approved_record_ids: Optional[List[str]] = None,
     ) -> ExperienceApplyResult:
         """Shared request lifecycle for approve / reject / retry."""
         pending = self._pending_approval_snapshots.get(request_id)
@@ -322,7 +332,10 @@ class ExperienceManager:
             self._reject_pending_change(request_id)
             return reject_pending_change(pending)
 
-        commit_result = await self._commit_pending_change(request_id)
+        commit_result = await self._commit_pending_change(
+            request_id,
+            approved_record_ids=approved_record_ids if action == APPROVE_ACTION else None,
+        )
         return self._to_apply_result(pending.skill_name, commit_result)
 
     async def commit_proposal(self, proposal: ExperienceProposal) -> ExperienceApplyResult:
@@ -432,12 +445,18 @@ class ExperienceManager:
             raise KeyError(change_id)
         return pending
 
-    async def _commit_pending_change(self, change_id: str) -> PendingCommitResult:
+    async def _commit_pending_change(
+        self,
+        change_id: str,
+        *,
+        approved_record_ids: Optional[List[str]] = None,
+    ) -> PendingCommitResult:
         """Persist a staged pending change, retaining the unwritten tail on partial failure."""
         return await commit_pending_change(
             self._pending_approval_snapshots,
             change_id,
             store=self._store,
+            approved_record_ids=approved_record_ids,
         )
 
     async def request_simplify(
@@ -454,6 +473,13 @@ class ExperienceManager:
                 skill_name,
             )
             return None
+        if not self._store.skill_definition_exists(skill_name):
+            logger.info(
+                "[ExperienceManager] request_simplify skipped: kind=%s skill=%s reason=skill_definition_not_found",
+                self._kind,
+                skill_name,
+            )
+            return None
 
         evo_log = await self._store.load_full_evolution_log(skill_name)
         records = evo_log.entries
@@ -465,7 +491,7 @@ class ExperienceManager:
             )
             return None
 
-        content = await self._store.read_skill_content(skill_name)
+        content = await self._store.read_skill_content(skill_name, strict=True)
         summary = self._store.extract_description_from_skill_md(content)
         logger.info(
             "[ExperienceManager] request_simplify loaded records: kind=%s skill=%s records=%d",
@@ -554,7 +580,9 @@ class ExperienceManager:
         return ExperienceApplyResult(
             skill_name=skill_name,
             applied_count=result.applied_count,
+            rejected_count=result.rejected_count,
             pending_count=result.pending_count,
+            errors=list(result.errors),
         )
 
     @staticmethod

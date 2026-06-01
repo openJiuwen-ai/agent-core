@@ -202,7 +202,7 @@ Rail 在 invoke 结束后发布 `MemberTrajectorySnapshot`。snapshot 包含 `te
 
 消费演进事件的 canonical API 是 `drain_pending_host_events()`。`drain_pending_approval_events()` 是同一 buffer 的兼容 wrapper。
 
-演进 metadata 位于 `OutputSchema.payload["_evolution_meta"]`：
+演进 metadata 位于 `OutputSchema.payload["evolution_meta"]`：
 
 | 字段 | 含义 |
 |---|---|

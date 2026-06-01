@@ -181,7 +181,7 @@ class _DummyToolMsg:
 
 
 def _progress_events(events):
-    return [event for event in events if event.payload.get("_evolution_meta", {}).get("event_kind") == "progress"]
+    return [event for event in events if event.payload.get("evolution_meta", {}).get("event_kind") == "progress"]
 
 
 def _make_record(skill_name: str, *, content: str = "experience content") -> EvolutionRecord:
@@ -203,6 +203,21 @@ def _no_records_result(skill_name: str = "team-skill-a") -> OnlineEvolutionResul
         status="no_evolution_no_records",
         message=f"no applied updates for skill={skill_name}",
     )
+
+
+def _handle_result(
+    request: Any,
+    *,
+    online_result: OnlineEvolutionResult | None = None,
+    skill_name: str = "research-team",
+) -> OnlineEvolutionResult:
+    if online_result is None:
+        online_result = OnlineEvolutionResult(
+            skill_name=skill_name,
+            status="staged" if request is not None else "no_evolution_no_records",
+            request=request,
+        )
+    return online_result
 
 
 # ============================================================
@@ -380,7 +395,16 @@ def _make_request_user_evolution_rail(
     rail._pending_record_snapshots = {}
     rail._pending_host_events = []
     rail._emit_progress = MagicMock()
-    rail._handle_evolution_from_signals = handle or AsyncMock(return_value=None)
+    handle = handle or AsyncMock(return_value=None)
+
+    async def _handle_with_result(**kwargs):
+        result = await handle(**kwargs)
+        if isinstance(result, tuple):
+            request, online_result = result
+            return online_result
+        return _handle_result(result, skill_name=kwargs["skill_name"])
+
+    rail._handle_evolution_from_signals_with_result = _handle_with_result
     rail._team_signal_detector = MagicMock(detect_trajectory_signals=detect_trajectory_signals)
     return rail
 
@@ -519,7 +543,12 @@ async def test_run_evolution_passes_current_skill_content_to_trajectory_patch():
             detect_trajectory_signals=AsyncMock(side_effect=_detect_trajectory_signals),
             detect_user_intent=AsyncMock(return_value=None),
         )
-        rail._handle_evolution_from_signals = _consume_signal
+
+        async def _consume_signal_with_result(**kwargs):
+            await _consume_signal(**kwargs)
+            return _handle_result(None, skill_name=kwargs["skill_name"])
+
+        rail._handle_evolution_from_signals_with_result = _consume_signal_with_result
 
         await rail.run_evolution(build_patch_trajectory("deep-research-to-ppt"), _MockCtx())
 
@@ -687,7 +716,12 @@ async def test_async_snapshot_messages_are_preserved_for_team_evolution():
             detect_trajectory_signals=AsyncMock(side_effect=_detect_trajectory_signals),
             detect_user_intent=AsyncMock(return_value=None),
         )
-        rail._handle_evolution_from_signals = _consume_signal
+
+        async def _consume_signal_with_result(**kwargs):
+            await _consume_signal(**kwargs)
+            return _handle_result(None, skill_name=kwargs["skill_name"])
+
+        rail._handle_evolution_from_signals_with_result = _consume_signal_with_result
 
         await rail.run_evolution(trajectory, ctx=None, snapshot=snapshot)
 
@@ -1241,7 +1275,7 @@ async def test_team_run_evolution_evaluates_presented_entries_when_no_skill_dete
 
         rail._experience_tracker.evaluate_presented.assert_awaited_once_with(presented_entries)
         events = _progress_events(await rail.drain_pending_host_events())
-        stages = [event.payload["_evolution_meta"]["stage"] for event in events]
+        stages = [event.payload["evolution_meta"]["stage"] for event in events]
         contents = [event.payload["content"] for event in events]
         assert stages == ["started", "cancelled"]
         assert "team/swarm skill" in contents[-1]
@@ -1256,7 +1290,7 @@ async def test_team_handle_evolution_from_signals_emits_no_records_outcome():
         rail._pending_host_events = []
         rail._stage_evolution_from_signals = AsyncMock(return_value=_no_records_result())
 
-        await rail._handle_evolution_from_signals(
+        result = await rail._handle_evolution_from_signals_with_result(
             skill_name="team-skill-a",
             trajectory=Trajectory(execution_id="e1", session_id="s1", source="online", steps=[]),
             signals=[
@@ -1271,14 +1305,121 @@ async def test_team_handle_evolution_from_signals_emits_no_records_outcome():
             emit_host_events=True,
         )
 
+        assert result.status == "no_evolution_no_records"
         events = await rail.drain_pending_host_events()
         outcomes = [
-            event for event in events if event.payload.get("_evolution_meta", {}).get("event_kind") == "outcome"
+            event for event in events if event.payload.get("evolution_meta", {}).get("event_kind") == "outcome"
         ]
         assert outcomes
-        assert outcomes[-1].payload["_evolution_meta"]["status"] == "no_evolution_no_records"
-        assert outcomes[-1].payload["_evolution_meta"]["rail_kind"] == "team"
-        assert outcomes[-1].payload["_evolution_meta"]["skill_name"] == "team-skill-a"
+        assert outcomes[-1].payload["evolution_meta"]["status"] == "no_evolution_no_records"
+        assert outcomes[-1].payload["evolution_meta"]["rail_kind"] == "team"
+        assert outcomes[-1].payload["evolution_meta"]["skill_name"] == "team-skill-a"
+
+
+@pytest.mark.asyncio
+async def test_team_handle_evolution_emits_persistence_failed_without_auto_approved_finalize():
+    with patch.object(TeamSkillRail, "__init__", lambda self, *args, **kwargs: None):
+        rail = TeamSkillRail.__new__(TeamSkillRail)
+        rail._pending_host_events = []
+        rail._pending_approval_snapshots = {}
+        rail._manager = SimpleNamespace()
+        failed_request = SimpleNamespace(request_id="req-failed")
+        rail._stage_evolution_from_signals = AsyncMock(
+            return_value=OnlineEvolutionResult(
+                skill_name="team-skill-a",
+                status="persistence_failed",
+                request=failed_request,
+                message="disk full",
+            )
+        )
+        rail._approval_runtime = SimpleNamespace(
+            _manager=rail._manager,
+            _pending_approval_snapshots=rail._pending_approval_snapshots,
+            finalize_staged_evolution_request=AsyncMock(return_value=failed_request),
+        )
+
+        result = await rail._handle_evolution_from_signals_with_result(
+            skill_name="team-skill-a",
+            trajectory=Trajectory(execution_id="e1", session_id="s1", source="online", steps=[]),
+            signals=[
+                EvolutionSignal(
+                    signal_type="trajectory_issue",
+                    section="",
+                    excerpt="issue",
+                    skill_name="team-skill-a",
+                )
+            ],
+            auto_approve=True,
+            emit_host_events=True,
+        )
+
+        assert result.request is failed_request
+        rail._approval_runtime.finalize_staged_evolution_request.assert_not_awaited()
+        events = await rail.drain_pending_host_events()
+        outcomes = [
+            event for event in events if event.payload.get("evolution_meta", {}).get("event_kind") == "outcome"
+        ]
+        assert outcomes
+        assert outcomes[-1].payload["evolution_meta"]["status"] == "persistence_failed"
+        assert outcomes[-1].payload["evolution_meta"]["stage"] == "failed"
+        assert outcomes[-1].payload["evolution_meta"]["request_id"] == "req-failed"
+        assert "disk full" in outcomes[-1].payload["content"]
+
+
+@pytest.mark.asyncio
+async def test_team_run_evolution_does_not_report_persistence_failed_as_ready():
+    with patch.object(TeamSkillRail, "__init__", lambda self, *args, **kwargs: None):
+        rail = TeamSkillRail.__new__(TeamSkillRail)
+        rail._auto_scan = True
+        rail._auto_save = True
+        rail._pending_host_events = []
+        rail._trajectory_source = None
+        rail._detect_used_team_skill = Mock(return_value="team-skill-a")
+        rail._store = MagicMock()
+        rail._store.read_skill_content = AsyncMock(return_value="team skill content")
+        rail._team_signal_detector = MagicMock(
+            detect_trajectory_signals=AsyncMock(
+                return_value=[
+                    EvolutionSignal(
+                        signal_type=TeamSignalType.TRAJECTORY_ISSUE.value,
+                        section="",
+                        excerpt="issue",
+                        skill_name="team-skill-a",
+                    )
+                ]
+            ),
+        )
+        rail._detect_user_request = AsyncMock(return_value=None)
+        rail._experience_tracker = MagicMock()
+        rail._experience_tracker.evaluate_presented = AsyncMock()
+        failed_request = SimpleNamespace(request_id="team-req-failed")
+        rail._stage_evolution_from_signals = AsyncMock(
+            return_value=OnlineEvolutionResult(
+                skill_name="team-skill-a",
+                status="persistence_failed",
+                request=failed_request,
+                message="disk full",
+            )
+        )
+
+        await rail.run_evolution(
+            Trajectory(execution_id="e1", session_id="s1", source="online", steps=[]),
+            snapshot={"messages": [], "presented_entries": []},
+        )
+
+        events = await rail.drain_pending_host_events()
+        outcomes = [
+            event for event in events if event.payload.get("evolution_meta", {}).get("event_kind") == "outcome"
+        ]
+        progress_contents = [
+            event.payload["content"]
+            for event in events
+            if event.payload.get("evolution_meta", {}).get("event_kind") == "progress"
+        ]
+        assert outcomes
+        assert outcomes[-1].payload["evolution_meta"]["status"] == "persistence_failed"
+        assert outcomes[-1].payload["evolution_meta"]["request_id"] == "team-req-failed"
+        assert not any("evolution request ready" in content for content in progress_contents)
 
 
 @pytest.mark.asyncio
@@ -1360,13 +1501,13 @@ async def test_async_evolution_failure_is_buffered_and_visible():
         await rail.after_invoke(_MockCtx(inputs=InvokeInputs(query="round 1", conversation_id="test-session")))
         events = await rail.drain_pending_approval_events(wait=True, timeout=5.0)
         outcome_events = [
-            event for event in events if event.payload.get("_evolution_meta", {}).get("event_kind") == "outcome"
+            event for event in events if event.payload.get("evolution_meta", {}).get("event_kind") == "outcome"
         ]
 
         assert result is True
         assert rail._host_completion_pending_session_id is None
         assert outcome_events
-        assert outcome_events[-1].payload["_evolution_meta"]["status"] == "failed"
+        assert outcome_events[-1].payload["evolution_meta"]["status"] == "failed"
         assert "team skill evolution failed" in outcome_events[-1].payload["content"]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -2090,8 +2231,11 @@ async def test_run_evolution_signal_combination(
                 else AsyncMock(return_value=user_intent_return)
             ),
         )
-        rail._handle_evolution_from_signals = AsyncMock(return_value=MagicMock())
+        rail._handle_evolution_from_signals_with_result = AsyncMock(
+            return_value=_handle_result(MagicMock(request_id="team_skill_evolve_req"), skill_name="team-skill-a")
+        )
         rail._emit_progress = MagicMock()
+        rail._pending_host_events = []
 
         await rail.run_evolution(
             Trajectory(execution_id="e1", session_id="s1", source="online", steps=[]),
@@ -2103,10 +2247,10 @@ async def test_run_evolution_signal_combination(
             messages=[{"role": "user", "content": "please improve"}],
             team_skill_content="team skill content",
         )
-        rail._handle_evolution_from_signals.assert_awaited_once()
-        signals = rail._handle_evolution_from_signals.await_args.kwargs["signals"]
+        rail._handle_evolution_from_signals_with_result.assert_awaited_once()
+        signals = rail._handle_evolution_from_signals_with_result.await_args.kwargs["signals"]
         assert [signal.signal_type for signal in signals] == expected_signal_types
-        assert rail._handle_evolution_from_signals.await_args.kwargs["user_query"] == expected_user_query
+        assert rail._handle_evolution_from_signals_with_result.await_args.kwargs["user_query"] == expected_user_query
 
 
 @pytest.mark.asyncio
@@ -2337,6 +2481,8 @@ async def test_request_simplify_stages_governance_and_returns_approval():
         assert result.approval_event.type == "chat.ask_user_question"
         assert rail._pending_host_events == []
         assert result.approval_event.payload["request_id"] == result.request_id
+        assert result.approval_event.payload["evolution_meta"]["rail_kind"] == "team"
+        assert result.approval_event.payload["evolution_meta"]["skill_name"] == "test-team-skill"
 
 
 @pytest.mark.asyncio
@@ -2680,6 +2826,48 @@ class TestRequestUserEvolution:
         assert result.auto_approved is True
         assert rail._pending_host_events == []
         handle.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_returns_no_records_status_when_generation_runs(self):
+        """生成流程执行但没有产出经验时，应给 host 可区分的状态。"""
+        mock_store = MagicMock()
+        mock_store.skill_exists.return_value = True
+        handle = AsyncMock(return_value=(None, _no_records_result("research-team")))
+        rail = _make_request_user_evolution_rail(store=mock_store, handle=handle)
+
+        result = await rail.request_user_evolution("research-team", "优化协作流程")
+
+        assert result.request_id is None
+        assert result.status == "no_evolution_no_records"
+        assert "no applied updates" in result.message
+        assert rail._pending_host_events == []
+
+    @pytest.mark.asyncio
+    async def test_auto_approve_true_returns_persistence_failed_request_status(self):
+        """auto_approve 持久化失败时，应返回可重试 request_id 和失败状态。"""
+        mock_store = MagicMock()
+        mock_store.skill_exists.return_value = True
+        failed_request = MagicMock(request_id="team_skill_evolve_failed", pending_change=None)
+        failed_result = OnlineEvolutionResult(
+            skill_name="research-team",
+            status="persistence_failed",
+            request=failed_request,
+            message="disk full",
+        )
+        handle = AsyncMock(return_value=(failed_request, failed_result))
+        rail = _make_request_user_evolution_rail(store=mock_store, handle=handle)
+
+        result = await rail.request_user_evolution(
+            "research-team",
+            "优化协作流程",
+            auto_approve=True,
+        )
+
+        assert result.request_id == "team_skill_evolve_failed"
+        assert result.status == "persistence_failed"
+        assert result.message == "disk full"
+        assert result.auto_approved is True
+        assert rail._pending_host_events == []
 
     @pytest.mark.asyncio
     async def test_stage_evolution_from_signals_auto_approve_preserves_staged_request_id(self):
@@ -3048,6 +3236,10 @@ async def test_run_evolution_and_request_user_evolution_share_signal_consumer():
             captured.append(kwargs)
             return None
 
+        async def _consume_signal_with_result(**kwargs):
+            captured.append(kwargs)
+            return _handle_result(None, skill_name=kwargs["skill_name"])
+
         rail._detect_used_team_skill = Mock(return_value="research-team")
         rail._generator = MagicMock(llm=MagicMock(), model="test-model", language="cn")
         rail._team_signal_detector = MagicMock(
@@ -3075,7 +3267,7 @@ async def test_run_evolution_and_request_user_evolution_share_signal_consumer():
             ),
             detect_user_intent=AsyncMock(return_value=None),
         )
-        rail._handle_evolution_from_signals = AsyncMock(side_effect=_consume_signal)
+        rail._handle_evolution_from_signals_with_result = AsyncMock(side_effect=_consume_signal_with_result)
 
         await rail.request_user_evolution("research-team", "add reviewer")
         await rail.run_evolution(
@@ -3083,7 +3275,7 @@ async def test_run_evolution_and_request_user_evolution_share_signal_consumer():
             _MockCtx(),
         )
 
-        assert rail._handle_evolution_from_signals.await_count == 2
+        assert rail._handle_evolution_from_signals_with_result.await_count == 2
         explicit_call = captured[0]
         passive_call = captured[1]
         assert explicit_call["skill_name"] == "research-team"
@@ -3113,7 +3305,7 @@ async def test_emit_record_approval_event_preserves_signal_metadata(
 ):
     pending = MagicMock(change_id="team_skill_evolve_req", payload=[])
     event = MagicMock(
-        payload={"_evolution_meta": {"skill_name": "research-team", "request_id": "team_skill_evolve_req"}}
+        payload={"evolution_meta": {"skill_name": "research-team", "request_id": "team_skill_evolve_req"}}
     )
 
     with patch.object(TeamSkillRail, "__init__", lambda self, *args, **kwargs: None):
@@ -3135,8 +3327,9 @@ async def test_emit_record_approval_event_preserves_signal_metadata(
                 ),
             )
 
-        assert rail._pending_host_events[-1].payload["_evolution_meta"] == {
+        assert rail._pending_host_events[-1].payload["evolution_meta"] == {
             "event_kind": "approval",
+            "rail_kind": "team",
             "skill_name": "research-team",
             "request_id": "team_skill_evolve_req",
             "signal_type": signal_type,

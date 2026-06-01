@@ -729,7 +729,7 @@ class EvolutionRail(DeepAgentRail):
                 index=0,
                 payload={
                     "content": f"[Evolution] {outcome['message']}\n",
-                    "_evolution_meta": meta.to_payload(),
+                    "evolution_meta": meta.to_payload(),
                 },
             )
         )

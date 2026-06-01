@@ -417,7 +417,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
             )
         except BaseError as exc:
             logger.error("[SkillExperienceOptimizer] LLM call failed: %s", exc)
-            return []
+            raise
         except ValueError:
             logger.warning("[SkillExperienceOptimizer] all retries exhausted, returning no records")
             return []

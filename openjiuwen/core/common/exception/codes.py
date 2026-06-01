@@ -784,6 +784,12 @@ class StatusCode(Enum):
     TOOLCHAIN_EVOLVING_TOOL_CALL_RESULT_PERSIST_EXECUTION_ERROR = (
         174036, "toolchain optimizer tool_call result persist execution error, reason: {error_msg}"
     )
+    TOOLCHAIN_EVOLVING_SKILL_DEFINITION_NOT_FOUND = (
+        174037, "toolchain evolving skill definition not found, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_SKILL_STORE_EXECUTION_ERROR = (
+        174038, "toolchain evolving skill store execution error, reason: {error_msg}"
+    )
 
     # =========================
     # Foundation 180000 – 189999

@@ -321,7 +321,7 @@ class TeamSkillExperienceOptimizer(BaseOptimizer):
             )
         except BaseError as exc:
             logger.error("[TeamSkillOptimizer] aggregated LLM call failed: %s", exc)
-            return []
+            raise
         except ValueError:
             logger.warning("[TeamSkillOptimizer] all aggregated retries exhausted, returning no records")
             return []

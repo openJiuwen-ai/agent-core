@@ -95,7 +95,7 @@ class SkillEvolutionRail(
 演进事件是 `OutputSchema` 对象，演进相关 metadata 位于：
 
 ```python
-event.payload["_evolution_meta"]
+event.payload["evolution_meta"]
 ```
 
 已知 metadata 字段：

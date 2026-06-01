@@ -51,6 +51,7 @@ def _make_rail(tmp_path, *, auto_scan: bool = True, auto_save: bool = True, disa
     rail._evolution_store = Mock()
     rail._evolution_store.read_skill_content = AsyncMock(return_value="# skill")
     rail._evolution_store.get_pending_records = AsyncMock(return_value=[])
+    rail._evolution_store.append_record = AsyncMock()
     rail._evolver = Mock()
     rail._online_updater = Mock()
     rail._manager = ExperienceManager(
@@ -117,6 +118,24 @@ def _no_records_result(skill_name: str = "skill-a") -> OnlineEvolutionResult:
     )
 
 
+def _failed_result(status: str, skill_name: str = "skill-a") -> OnlineEvolutionResult:
+    return OnlineEvolutionResult(
+        skill_name=skill_name,
+        status=status,
+        message=f"{status} for skill={skill_name}",
+    )
+
+
+def _handle_result(request: Any, *, online_result: OnlineEvolutionResult | None = None) -> OnlineEvolutionResult:
+    if online_result is None:
+        online_result = OnlineEvolutionResult(
+            skill_name="skill-a",
+            status="staged" if request is not None else "no_evolution_no_records",
+            request=request,
+        )
+    return online_result
+
+
 def _staged_result(request: Any, skill_name: str = "skill-a") -> OnlineEvolutionResult:
     return OnlineEvolutionResult(
         skill_name=skill_name,
@@ -169,7 +188,7 @@ def _approval_events(events):
 
 
 def _progress_events(events):
-    return [event for event in events if event.payload.get("_evolution_meta", {}).get("event_kind") == "progress"]
+    return [event for event in events if event.payload.get("evolution_meta", {}).get("event_kind") == "progress"]
 
 
 class _MsgContext:
@@ -275,6 +294,8 @@ async def test_request_simplify_returns_approval_event(tmp_path):
     assert result.request_id == "req-1"
     rail._manager.request_simplify.assert_awaited_once_with("skill-a", user_intent="trim duplicates")
     assert result.approval_event.payload["request_id"] == "req-1"
+    assert result.approval_event.payload["evolution_meta"]["rail_kind"] == "regular"
+    assert result.approval_event.payload["evolution_meta"]["skill_name"] == "skill-a"
     assert rail._pending_host_events == []
 
 
@@ -431,7 +452,7 @@ async def test_run_evolution_auto_save_false_emits_real_approval_event(tmp_path)
     )
     events = _approval_events(await rail.drain_pending_approval_events())
     assert len(events) == 1
-    assert events[0].payload["_evolution_meta"]["skill_name"] == "skill-a"
+    assert events[0].payload["evolution_meta"]["skill_name"] == "skill-a"
 
 
 @pytest.mark.asyncio
@@ -458,17 +479,75 @@ async def test_run_evolution_emits_completed_when_signals_generate_no_records(tm
     rail._online_updater.process.assert_awaited_once()
     drained_events = await rail.drain_pending_host_events()
     events = _progress_events(drained_events)
-    stages = [event.payload["_evolution_meta"]["stage"] for event in events]
+    stages = [event.payload["evolution_meta"]["stage"] for event in events]
     assert "generating_updates" in stages
     assert stages[-1] == "completed"
-    assert events[-1].payload["_evolution_meta"]["skill_name"] == "skill-a"
+    assert events[-1].payload["evolution_meta"]["skill_name"] == "skill-a"
     assert "no evolution records generated" in events[-1].payload["content"]
     outcomes = [
-        event for event in drained_events if event.payload.get("_evolution_meta", {}).get("event_kind") == "outcome"
+        event for event in drained_events if event.payload.get("evolution_meta", {}).get("event_kind") == "outcome"
     ]
     assert outcomes
-    assert outcomes[-1].payload["_evolution_meta"]["status"] == "no_evolution_no_records"
-    assert outcomes[-1].payload["_evolution_meta"]["skill_name"] == "skill-a"
+    assert outcomes[-1].payload["evolution_meta"]["status"] == "no_evolution_no_records"
+    assert outcomes[-1].payload["evolution_meta"]["skill_name"] == "skill-a"
+
+
+@pytest.mark.asyncio
+async def test_handle_evolution_emits_outcome_for_generation_failed(tmp_path):
+    rail = _make_rail(tmp_path, auto_scan=True, auto_save=False)
+    rail._stage_evolution_from_signals = AsyncMock(return_value=_failed_result("generation_failed"))
+
+    result = await rail._handle_evolution_from_signals(
+        skill_name="skill-a",
+        signals=[_make_signal("skill-a")],
+        messages=[],
+        ctx=None,
+        requires_approval=True,
+    )
+
+    assert result is None
+    drained_events = await rail.drain_pending_host_events()
+    outcomes = [
+        event for event in drained_events if event.payload.get("evolution_meta", {}).get("event_kind") == "outcome"
+    ]
+    assert outcomes
+    assert outcomes[-1].payload["evolution_meta"]["status"] == "generation_failed"
+    assert outcomes[-1].payload["evolution_meta"]["skill_name"] == "skill-a"
+
+
+@pytest.mark.asyncio
+async def test_handle_evolution_emits_persistence_failed_without_auto_approved_finalize(tmp_path):
+    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    failed_request = SimpleNamespace(request_id="req-failed")
+    rail._stage_evolution_from_signals = AsyncMock(
+        return_value=OnlineEvolutionResult(
+            skill_name="skill-a",
+            status="persistence_failed",
+            request=failed_request,
+            message="disk full",
+        )
+    )
+    rail.approval_runtime.finalize_staged_evolution_request = AsyncMock(return_value=failed_request)
+
+    result = await rail._handle_evolution_from_signals(
+        skill_name="skill-a",
+        signals=[_make_signal("skill-a")],
+        messages=[],
+        ctx=None,
+        requires_approval=False,
+    )
+
+    assert result is failed_request
+    rail.approval_runtime.finalize_staged_evolution_request.assert_not_awaited()
+    drained_events = await rail.drain_pending_host_events()
+    outcomes = [
+        event for event in drained_events if event.payload.get("evolution_meta", {}).get("event_kind") == "outcome"
+    ]
+    assert outcomes
+    assert outcomes[-1].payload["evolution_meta"]["status"] == "persistence_failed"
+    assert outcomes[-1].payload["evolution_meta"]["stage"] == "failed"
+    assert outcomes[-1].payload["evolution_meta"]["request_id"] == "req-failed"
+    assert "disk full" in outcomes[-1].payload["content"]
 
 
 @pytest.mark.asyncio
@@ -620,8 +699,9 @@ async def test_emit_generated_records_and_drain_pending_events(tmp_path):
     # request_id uses the "skill_evolve_" prefix (PendingChange.change_id)
     assert request_id.startswith("skill_evolve_")
     assert event.payload["questions"][0]["header"] == "技能演进审批"
-    assert event.payload["_evolution_meta"]["skill_name"] == "skill-a"
-    assert event.payload["_evolution_meta"]["request_id"] == request_id
+    assert event.payload["evolution_meta"]["rail_kind"] == "regular"
+    assert event.payload["evolution_meta"]["skill_name"] == "skill-a"
+    assert event.payload["evolution_meta"]["request_id"] == request_id
     assert request_id in rail._pending_approval_snapshots
     assert await rail.drain_pending_approval_events() == []
 
@@ -672,13 +752,12 @@ async def test_on_reject_discards_snapshot_records(tmp_path):
 
 @pytest.mark.asyncio
 async def test_on_approve_partial_failure_retains_pending_change(tmp_path):
-    """If append_record fails mid-batch, PendingChange must be kept for retry."""
+    """If one record fails, the unwritten tail stays pending for retry."""
     rail = _make_rail(tmp_path, auto_save=False)
     record_1 = _make_record("skill-a", content="first")
     record_2 = _make_record("skill-a", content="second")
     ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
 
-    # First call succeeds, second raises → partial failure
     rail._evolution_store.append_record = AsyncMock(side_effect=[None, OSError("disk full")])
     request = _stage_approval_request(rail, "skill-a", [record_1, record_2])
 
@@ -688,14 +767,12 @@ async def test_on_approve_partial_failure_retains_pending_change(tmp_path):
 
     await rail.on_approve(request_id)
 
-    # Only first record was written; second is still pending
     assert rail._evolution_store.append_record.await_count == 2
-    # PendingChange must be retained so host can retry
     assert request_id in rail._pending_approval_snapshots
     pending = rail._pending_approval_snapshots[request_id]
-    assert len(pending.payload) == 1  # one record still remaining
+    assert pending.payload == [record_2]
 
-    # Host retries: now second record succeeds
+    # Host retries: now the remaining record succeeds
     rail._evolution_store.append_record = AsyncMock()
     await rail.on_approve(request_id)
     rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_2)
@@ -704,12 +781,11 @@ async def test_on_approve_partial_failure_retains_pending_change(tmp_path):
 
 @pytest.mark.asyncio
 async def test_on_approve_full_failure_then_retry_succeeds(tmp_path):
-    """If append_record fails for all records, PendingChange is kept; retry succeeds."""
+    """If the first record fails, PendingChange is kept; retry succeeds."""
     rail = _make_rail(tmp_path, auto_save=False)
     record = _make_record("skill-a", content="important")
     ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
 
-    # First call fails entirely
     rail._evolution_store.append_record = AsyncMock(side_effect=OSError("disk full"))
     request = _stage_approval_request(rail, "skill-a", [record])
 
@@ -1126,7 +1202,7 @@ async def test_run_evolution_emits_started_and_cancelled_when_no_skill_used(tmp_
     )
 
     events = _progress_events(await rail.drain_pending_host_events())
-    stages = [event.payload["_evolution_meta"]["stage"] for event in events]
+    stages = [event.payload["evolution_meta"]["stage"] for event in events]
     contents = [event.payload["content"] for event in events]
 
     assert stages[0] == "started"
@@ -1770,9 +1846,9 @@ async def test_request_user_evolution_returns_request_id_when_records_staged(tmp
 
     async def fake_handle(**kwargs):
         captured.update(kwargs)
-        return request
+        return _handle_result(request)
 
-    rail._handle_evolution_from_signals = fake_handle
+    rail._handle_evolution_from_signals_with_result = fake_handle
 
     result = await rail.request_user_evolution("skill-a", "add troubleshooting guidance")
 
@@ -1810,9 +1886,10 @@ async def test_request_user_evolution_uses_current_trajectory_evidence(tmp_path)
 
     async def fake_handle(**kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(request_id="skill_evolve_with_evidence", pending_change=SimpleNamespace(payload=[]))
+        request = SimpleNamespace(request_id="skill_evolve_with_evidence", pending_change=SimpleNamespace(payload=[]))
+        return _handle_result(request)
 
-    rail._handle_evolution_from_signals = fake_handle
+    rail._handle_evolution_from_signals_with_result = fake_handle
 
     with patch(
         "openjiuwen.harness.rails.evolution.skill_evolution_rail.SignalDetector",
@@ -1847,9 +1924,9 @@ async def test_request_user_evolution_empty_intent_uses_trajectory_signals(tmp_p
 
     async def fake_handle(**kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(request_id="skill_evolve_empty_intent", pending_change=None)
+        return _handle_result(SimpleNamespace(request_id="skill_evolve_empty_intent", pending_change=None))
 
-    rail._handle_evolution_from_signals = fake_handle
+    rail._handle_evolution_from_signals_with_result = fake_handle
 
     with patch(
         "openjiuwen.harness.rails.evolution.skill_evolution_rail.SignalDetector",
@@ -1877,9 +1954,9 @@ async def test_request_user_evolution_filters_other_skill_signals(tmp_path):
 
     async def fake_handle(**kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(request_id="skill_evolve_filtered", pending_change=None)
+        return _handle_result(SimpleNamespace(request_id="skill_evolve_filtered", pending_change=None))
 
-    rail._handle_evolution_from_signals = fake_handle
+    rail._handle_evolution_from_signals_with_result = fake_handle
 
     with patch(
         "openjiuwen.harness.rails.evolution.skill_evolution_rail.SignalDetector",
@@ -1895,12 +1972,12 @@ async def test_request_user_evolution_filters_other_skill_signals(tmp_path):
 async def test_request_user_evolution_empty_intent_without_evidence_returns_empty(tmp_path):
     rail = _make_rail(tmp_path, auto_save=False)
     rail._builder = None
-    rail._handle_evolution_from_signals = AsyncMock()
+    rail._handle_evolution_from_signals_with_result = AsyncMock()
 
     result = await rail.request_user_evolution("skill-a")
 
     assert result.request_id is None
-    rail._handle_evolution_from_signals.assert_not_awaited()
+    rail._handle_evolution_from_signals_with_result.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1913,9 +1990,9 @@ async def test_request_user_evolution_continues_when_evidence_detection_fails(tm
 
     async def fake_handle(**kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(request_id="skill_evolve_fallback", pending_change=None)
+        return _handle_result(SimpleNamespace(request_id="skill_evolve_fallback", pending_change=None))
 
-    rail._handle_evolution_from_signals = fake_handle
+    rail._handle_evolution_from_signals_with_result = fake_handle
 
     with patch(
         "openjiuwen.harness.rails.evolution.skill_evolution_rail.SignalDetector",
@@ -1935,9 +2012,9 @@ async def test_request_user_evolution_auto_approve_disables_approval_requirement
 
     async def fake_handle(**kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(request_id="skill_evolve_auto")
+        return _handle_result(SimpleNamespace(request_id="skill_evolve_auto"))
 
-    rail._handle_evolution_from_signals = fake_handle
+    rail._handle_evolution_from_signals_with_result = fake_handle
 
     result = await rail.request_user_evolution("skill-a", "save directly", auto_approve=True)
 
@@ -1950,11 +2027,47 @@ async def test_request_user_evolution_auto_approve_disables_approval_requirement
 @pytest.mark.asyncio
 async def test_request_user_evolution_returns_empty_result_when_no_records(tmp_path):
     rail = _make_rail(tmp_path, auto_save=False)
-    rail._handle_evolution_from_signals = AsyncMock(return_value=None)
+    rail._handle_evolution_from_signals_with_result = AsyncMock(return_value=_handle_result(None))
 
     result = await rail.request_user_evolution("skill-a", "nothing useful")
 
     assert result.request_id is None
+    assert rail._pending_host_events == []
+
+
+@pytest.mark.asyncio
+async def test_request_user_evolution_returns_no_records_status_when_generation_runs(tmp_path):
+    rail = _make_rail(tmp_path, auto_save=False)
+    rail._stage_evolution_from_signals = AsyncMock(return_value=_no_records_result())
+
+    result = await rail.request_user_evolution("skill-a", "nothing useful")
+
+    assert result.request_id is None
+    assert result.status == "no_evolution_no_records"
+    assert "no applied updates" in result.message
+    assert rail._pending_host_events == []
+
+
+@pytest.mark.asyncio
+async def test_request_user_evolution_auto_approve_returns_persistence_failed_request_status(tmp_path):
+    rail = _make_rail(tmp_path, auto_save=True)
+    failed_request = SimpleNamespace(request_id="skill_evolve_failed")
+    rail._stage_evolution_from_signals = AsyncMock(
+        return_value=OnlineEvolutionResult(
+            skill_name="skill-a",
+            status="persistence_failed",
+            request=failed_request,
+            message="disk full",
+        )
+    )
+    rail.approval_runtime.finalize_staged_evolution_request = AsyncMock(return_value=failed_request)
+
+    result = await rail.request_user_evolution("skill-a", "save directly", auto_approve=True)
+
+    assert result.request_id == "skill_evolve_failed"
+    assert result.status == "persistence_failed"
+    assert result.message == "disk full"
+    rail.approval_runtime.finalize_staged_evolution_request.assert_not_awaited()
     assert rail._pending_host_events == []
 
 
@@ -2150,8 +2263,9 @@ async def test_emit_generated_records_preserves_signal_metadata_in_event(tmp_pat
     await rail._emit_generated_records(None, "skill-a", approval_request)
 
     event = _approval_events(rail._pending_host_events)[-1]
-    assert event.payload["_evolution_meta"] == {
+    assert event.payload["evolution_meta"] == {
         "event_kind": "approval",
+        "rail_kind": "regular",
         "skill_name": "skill-a",
         "request_id": "req-1",
         "signal_type": "user_intent",
@@ -2311,6 +2425,36 @@ async def test_on_approve_runs_qc_after_approval(tmp_path):
     stager.screen_and_stage.assert_awaited_once_with(
         skill_name="skill-a",
         records=[record],
+        messages=None,
+    )
+    sharer.flush_pending_uploads.assert_awaited_once_with("skill-a")
+
+
+@pytest.mark.asyncio
+async def test_approve_record_stages_only_approved_records_for_share(tmp_path):
+    rail = _make_rail(tmp_path, auto_save=False)
+    record_1 = _make_record("skill-a", content="approved")
+    record_2 = _make_record("skill-a", content="rejected")
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+
+    sharer = Mock()
+    sharer.has_pending = Mock(return_value=True)
+    sharer.flush_pending_uploads = AsyncMock()
+    rail._experience_sharer = sharer
+
+    stager = Mock()
+    stager.screen_and_stage = AsyncMock()
+    rail._share_stager = stager
+    rail._keyword_extractor = Mock()
+
+    request = _stage_approval_request(rail, "skill-a", [record_1, record_2])
+    await rail._emit_generated_records(ctx, "skill-a", request)
+
+    await rail.approve_record(request.request_id, approved_record_ids=[record_1.id])
+
+    stager.screen_and_stage.assert_awaited_once_with(
+        skill_name="skill-a",
+        records=[record_1],
         messages=None,
     )
     sharer.flush_pending_uploads.assert_awaited_once_with("skill-a")

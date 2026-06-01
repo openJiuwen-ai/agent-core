@@ -127,7 +127,19 @@ OnlineEvolutionStatus = Literal[
     "no_evolution_no_records",
     "skipped_no_input",
     "skipped_skill_not_found",
+    "skipped_skill_definition_not_found",
+    "persistence_failed",
+    "generation_failed",
 ]
+
+ONLINE_EVOLUTION_OUTCOME_STATUSES = frozenset(
+    {
+        "no_evolution_no_records",
+        "generation_failed",
+        "persistence_failed",
+        "skipped_skill_definition_not_found",
+    }
+)
 
 
 @dataclass
@@ -138,6 +150,15 @@ class OnlineEvolutionResult:
     status: OnlineEvolutionStatus
     request: Optional[ExperienceApprovalRequest] = None
     message: str = ""
+
+
+def request_for_online_evolution_result(
+    result: OnlineEvolutionResult,
+) -> Optional[ExperienceApprovalRequest]:
+    """Return the staged request that callers should expose for an online outcome."""
+    if result.status in ONLINE_EVOLUTION_OUTCOME_STATUSES and result.status != "persistence_failed":
+        return None
+    return result.request
 
 
 @dataclass
@@ -162,7 +183,10 @@ class ExperienceApplyResult:
         change_type: str = SKILL_EXPERIENCE_ENTRY,
     ) -> HostFacingExperienceResult:
         """Return the stable host-facing shape for an apply/reject result."""
-        if self.rejected_count:
+        pure_rejection = (
+            self.rejected_count > 0 and self.applied_count == 0 and self.pending_count == 0 and not self.errors
+        )
+        if pure_rejection:
             return HostFacingExperienceResult.rejected(
                 skill_name=self.skill_name,
                 request_id=request_id,
@@ -174,6 +198,7 @@ class ExperienceApplyResult:
             request_id=request_id,
             change_type=change_type,
             applied_count=self.applied_count,
+            rejected_count=self.rejected_count,
             pending_count=self.pending_count,
             errors=self.errors,
         )

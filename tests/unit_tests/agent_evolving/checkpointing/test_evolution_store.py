@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import io
 import tarfile
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -17,10 +18,13 @@ import pytest
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.agent_evolving.checkpointing.store_records import StoreRecordsHelper
 from openjiuwen.agent_evolving.checkpointing.types import (
+    EvolutionLog,
     EvolutionPatch,
     EvolutionRecord,
     EvolutionTarget,
 )
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 
 
 def make_record(
@@ -57,6 +61,22 @@ def prepare_skill(root: Path, name: str, content: str = "# Skill\n\n## Troublesh
     return skill_dir
 
 
+def write_invalid_evolution_log(
+    fallback_write: Callable[[Path, str], Awaitable[None]],
+) -> Callable[[Path, str], Awaitable[None]]:
+    async def write_file(path: Path, content: str) -> None:
+        if "evolutions.json" in path.name:
+            path.write_text("{not-json", encoding="utf-8")
+            return
+        await fallback_write(path, content)
+
+    return write_file
+
+
+def assert_no_files(path: Path, pattern: str = "*") -> None:
+    assert not path.exists() or not any(path.glob(pattern))
+
+
 class TestEvolutionStoreBasics:
     @staticmethod
     def test_init_path_parse_and_deduplicate(tmp_path: Path):
@@ -88,6 +108,23 @@ class TestEvolutionStoreBasics:
         assert store.skill_exists("skill-a") is True
         assert await store.read_skill_content("skill-a") == "# A"
         assert await store.read_skill_content("missing") == ""
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_strict_read_requires_skill_md_definition(tmp_path: Path):
+        root = tmp_path / "skills"
+        skill_dir = root / "skill-a"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "README.md").write_text("# fallback", encoding="utf-8")
+
+        store = EvolutionStore(str(root))
+
+        assert store.skill_exists("skill-a") is True
+        assert store.skill_definition_exists("skill-a") is False
+        assert await store.read_skill_content("skill-a") == "# fallback"
+        with pytest.raises(BaseError) as exc_info:
+            await store.read_skill_content("skill-a", strict=True)
+        assert exc_info.value.status == StatusCode.TOOLCHAIN_EVOLVING_SKILL_DEFINITION_NOT_FOUND
 
 
 class TestEvolutionStoreLogCRUD:
@@ -161,6 +198,90 @@ class TestEvolutionStoreLogCRUD:
         evo_log = await store.load_evolution_log("skill-a")
         assert [item.id for item in evo_log.entries] == ["ev_new"]
         assert evo_log.entries[0].change.content == "new"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_append_record_rolls_back_log_on_failure(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(root, "skill-a")
+        store = EvolutionStore(str(root))
+        store.write_file_text = write_invalid_evolution_log(store.write_file_text)
+
+        with pytest.raises(BaseError) as exc_info:
+            await store.append_record("skill-a", make_record("ev_1"))
+        assert exc_info.value.status == StatusCode.TOOLCHAIN_EVOLVING_SKILL_STORE_EXECUTION_ERROR
+
+        evo_log = await store.load_evolution_log("skill-a")
+        assert evo_log.entries == []
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_append_record_rolls_back_script_file_and_keeps_payload(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(root, "skill-a")
+        store = EvolutionStore(str(root))
+        record = make_record(
+            "ev_script",
+            target=EvolutionTarget.SCRIPT,
+            section="Scripts",
+            content="print('new')",
+        )
+        record.change.script_language = "python"
+        original_content = record.change.content
+        store.write_file_text = write_invalid_evolution_log(store.write_file_text)
+
+        with pytest.raises(BaseError) as exc_info:
+            await store.append_record("skill-a", record)
+        assert exc_info.value.status == StatusCode.TOOLCHAIN_EVOLVING_SKILL_STORE_EXECUTION_ERROR
+
+        scripts_dir = root / "skill-a" / "evolution" / "scripts"
+        assert_no_files(scripts_dir, "*.py")
+        assert record.change.content == original_content
+        assert record.change.script_filename is None
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_append_record_rolls_back_projection_on_failure(tmp_path: Path):
+        root = tmp_path / "skills"
+        skill_dir = prepare_skill(root, "skill-a")
+        original_skill_md = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+        store = EvolutionStore(str(root))
+        original_write_file_text = store.write_file_text
+
+        async def fail_skill_md_projection(path: Path, content: str) -> None:
+            if path.name == "SKILL.md":
+                raise build_error(
+                    StatusCode.TOOLCHAIN_EVOLVING_SKILL_STORE_EXECUTION_ERROR,
+                    error_msg="projection failed",
+                )
+            await original_write_file_text(path, content)
+
+        store.write_file_text = fail_skill_md_projection
+
+        with pytest.raises(BaseError) as exc_info:
+            await store.append_record("skill-a", make_record("ev_1"))
+        assert exc_info.value.status == StatusCode.TOOLCHAIN_EVOLVING_SKILL_STORE_EXECUTION_ERROR
+
+        evo_log = await store.load_evolution_log("skill-a")
+        assert evo_log.entries == []
+        assert (skill_dir / "SKILL.md").read_text(encoding="utf-8") == original_skill_md
+        assert_no_files(skill_dir / "evolution", "*.md")
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_save_evolution_log_raises_when_readback_is_invalid_json(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(root, "skill-a")
+        store = EvolutionStore(str(root))
+
+        async def write_invalid_json(path: Path, content: str) -> None:
+            path.write_text("{not-json", encoding="utf-8")
+
+        store.write_file_text = write_invalid_json
+
+        with pytest.raises(BaseError, match="read back") as exc_info:
+            await store.save_evolution_log("skill-a", EvolutionLog.empty("skill-a"))
+        assert exc_info.value.status == StatusCode.TOOLCHAIN_EVOLVING_SKILL_STORE_EXECUTION_ERROR
 
 
 class TestEvolutionStoreFormatting:
@@ -240,6 +361,18 @@ class TestEvolutionStoreSysOperationPath:
 
         await store.write_file_text(tmp_path / "x.txt", "hello")
         fs_mock.write_file.assert_awaited_once()
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_write_file_text_raises_on_sys_operation_failure(tmp_path: Path):
+        store = EvolutionStore(str(tmp_path))
+        fs_mock = MagicMock()
+        fs_mock.write_file = AsyncMock(return_value=SimpleNamespace(code=1, message="disk full"))
+        store.sys_operation = SimpleNamespace(fs=lambda: fs_mock)
+
+        with pytest.raises(BaseError, match="disk full") as exc_info:
+            await store.write_file_text(tmp_path / "x.txt", "hello")
+        assert exc_info.value.status == StatusCode.TOOLCHAIN_EVOLVING_SKILL_STORE_EXECUTION_ERROR
 
     @staticmethod
     @pytest.mark.asyncio
