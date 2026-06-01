@@ -1470,9 +1470,17 @@ class ReActAgent(BaseAgent):
                         # SnapshotRail) can capture a safe-state snapshot.
                         await ctx.fire(AgentCallbackEvent.AFTER_REACT_ITERATION)
                     else:
+                        # The loop exhausted its iteration budget. Honor a
+                        # force_finish requested by the final iteration's
+                        # AFTER_REACT_ITERATION hook (e.g. graceful abort),
+                        # which has no next iteration-top to consume it.
+                        boundary_finish = ctx.consume_force_finish()
                         await self.context_engine.save_contexts(session)
-                        result = {"output": "Max iterations reached without completion", "result_type": "error"}
-                        invoke_inputs.result = result
+                        if boundary_finish is not None:
+                            invoke_inputs.result = boundary_finish.result
+                        else:
+                            result = {"output": "Max iterations reached without completion", "result_type": "error"}
+                            invoke_inputs.result = result
 
             # after_invoke rails have fired; return result (possibly adapted by rails via ctx.extra)
             return ctx.extra.get("invoke_result", invoke_inputs.result)
