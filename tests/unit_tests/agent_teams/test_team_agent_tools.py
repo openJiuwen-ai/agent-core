@@ -52,7 +52,7 @@ def test_leader_gets_management_tools():
     names = _tool_names(leader)
     assert "create_task" in names
     assert "build_team" in names
-    assert "spawn_member" in names
+    assert "spawn_teammate" in names
     assert "send_message" in names
     assert "view_task" in names
 
@@ -97,7 +97,7 @@ def test_teammate_gets_execution_tools():
     # Leader-only tools absent
     assert "create_task" not in names
     assert "build_team" not in names
-    assert "spawn_member" not in names
+    assert "spawn_teammate" not in names
 
 
 # === Manager instances are stored ===

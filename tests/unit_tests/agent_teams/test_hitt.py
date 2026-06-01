@@ -366,7 +366,7 @@ async def test_human_agent_role_tool_set(team_backend):
     assert "view_task" in names
     assert "claim_task" not in names
     assert "update_task" not in names
-    assert "spawn_member" not in names
+    assert "spawn_teammate" not in names
 
 
 @pytest.mark.asyncio
