@@ -2,9 +2,23 @@
 
 ## Module Map
 
+### Tool implementation (domain split)
+
 | File | Owns |
 |---|---|
-| `team_tools.py` | `TeamTool` base, `MappedToolOutput`, every `TeamTool` subclass, `create_team_tools` factory, permission sets (`LEADER_*`, `MEMBER_*`, `SHARED_TOOLS`) |
+| `tool_base.py` | `TeamTool` ABC, `MappedToolOutput` |
+| `tool_permissions.py` | Permission sets (`LEADER_*`, `MEMBER_*`, `SHARED_TOOLS`, `HUMAN_AGENT_TOOLS`), `_MEMBER_NAME_PATTERN` |
+| `tool_team.py` | `BuildTeamTool`, `CleanTeamTool` |
+| `tool_member.py` | `_SpawnToolBase`, `SpawnTeammateTool`, `SpawnHumanAgentTool`, `SpawnBridgeAgentTool`, `SpawnExternalCliTool`, `ShutdownMemberTool`, `ApprovePlanTool`, `ApproveToolCallTool`, `ListMembersTool` |
+| `tool_task.py` | `TaskCreateTool`, `ViewTaskToolV2`, `UpdateTaskTool`, `SubmitPlanTool`, `ClaimTaskTool`, `MemberCompleteTaskTool` |
+| `tool_message.py` | `SendMessageTool` (point-to-point, multicast, broadcast) |
+| `tool_factory.py` | `create_team_tools` factory, `_wrap_invoke_with_logging` |
+| `team_tools.py` | Backward-compat re-export shim — re-exports all public symbols from the domain files above; existing `from ... team_tools import ...` call sites continue to work unchanged |
+
+### Infrastructure
+
+| File | Owns |
+|---|---|
 | `team.py` | `TeamBackend` — the backend object every tool talks to (spawn/shutdown/clean/approve, roster queries, cleanup-path registry). `startup_member` (single UNSTARTED→STARTING CAS + spawn), `startup` (batch via `startup_member`), `_spawn_and_publish` (shared helper) |
 | `task_manager.py` | `TeamTaskManager` — add/claim/complete/reset/cancel/approve_plan, event publishing, dependency refresh |
 | `message_manager.py` | `TeamMessageManager` — point-to-point + broadcast send, read-state queries |
