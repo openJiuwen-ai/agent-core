@@ -3,7 +3,7 @@
 
 """Task management tools: create, view, update, submit, claim, and complete."""
 
-from typing import Any, Dict
+from typing import Any
 
 from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.timefmt import format_time_context
@@ -90,7 +90,7 @@ class TaskCreateTool(TeamTool):
     def _spec_label(spec: dict) -> str:
         return spec.get("task_id") or spec.get("title") or "<unnamed>"
 
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         tasks = inputs.get("tasks", [])
         if not tasks:
             return ToolOutput(success=False, error="'tasks' is required")
@@ -197,7 +197,7 @@ class ViewTaskToolV2(TeamTool):
             "required": [],
         }
 
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         action = inputs.get("action", "list")
 
         if action == "get":
@@ -344,7 +344,7 @@ class UpdateTaskTool(TeamTool):
         """
         return await self.agent_team.is_human_agent(task.assignee) and task.status == TaskStatus.CLAIMED.value
 
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         task_id = inputs.get("task_id")
         if not task_id:
             return ToolOutput(success=False, error="'task_id' is required")
@@ -490,7 +490,7 @@ class SubmitPlanTool(TeamTool):
             "required": ["task_id", "plan_path"],
         }
 
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         result = await self.task_manager.submit_plan(
             task_id=inputs.get("task_id"),
             plan_id=inputs.get("plan_id"),
@@ -538,7 +538,7 @@ class ClaimTaskTool(TeamTool):
             "required": ["task_id", "status"],
         }
 
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         task_id = inputs.get("task_id")
         status = inputs.get("status")
 
@@ -618,7 +618,7 @@ class MemberCompleteTaskTool(TeamTool):
             "required": ["task_id"],
         }
 
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         task_id = (inputs.get("task_id") or "").strip()
         if not task_id:
             return ToolOutput(success=False, error="'task_id' is required")

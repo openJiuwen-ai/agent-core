@@ -4,7 +4,7 @@
 """Factory function that assembles role-filtered tool lists for team agents."""
 
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import MappedToolOutput, TeamTool
@@ -49,11 +49,11 @@ def create_team_tools(
     agent_team: TeamBackend,
     teammate_mode: str = "build_mode",
     lifecycle: str = "temporary",
-    on_teammate_created: Optional[Callable[[str], Awaitable[None]]] = None,
-    model_config_allocator: Optional[Callable[[Optional[str]], Optional["Allocation"]]] = None,
-    exclude_tools: Optional[Set[str]] = None,
+    on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
+    model_config_allocator: Callable[[str | None], "Allocation | None"] | None = None,
+    exclude_tools: set[str] | None = None,
     lang: str = "cn",
-) -> List[Tool]:
+) -> list[Tool]:
     """Create role-appropriate tool instances filtered by permission sets.
 
     Args:
@@ -168,7 +168,7 @@ def _wrap_invoke_with_logging(tool: Tool) -> None:
     is_team_tool = isinstance(tool, TeamTool)
 
     @wraps(original_invoke)
-    async def logged_invoke(inputs: Dict[str, Any], **kwargs: Any) -> ToolOutput:
+    async def logged_invoke(inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
         team_logger.debug(f"[{tool_name}] invoke start, inputs={inputs}")
         result = await original_invoke(inputs, **kwargs)
         team_logger.debug(f"[{tool_name}] invoke end, output={result}")

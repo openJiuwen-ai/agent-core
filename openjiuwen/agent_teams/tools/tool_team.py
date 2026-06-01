@@ -3,7 +3,7 @@
 
 """Team lifecycle tools: build_team and clean_team."""
 
-from typing import Any, Dict
+from typing import Any
 
 from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.team import CapabilityOverrides, TeamBackend
@@ -48,7 +48,7 @@ class BuildTeamTool(TeamTool):
             "required": ["display_name", "team_desc", "leader_display_name", "leader_desc"],
         }
 
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         display_name = inputs.get("display_name")
         leader_display_name = inputs["leader_display_name"]
         # None when LLM omits the field — backend.build_team inherits the
@@ -100,7 +100,7 @@ class CleanTeamTool(TeamTool):
         self.team = team
         self.card.input_params = {"type": "object", "properties": {}, "required": []}
 
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         try:
             team_name = self.team.team_name
             success = await self.team.clean_team()

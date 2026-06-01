@@ -4,7 +4,7 @@
 """Member management tools: spawn, shutdown, approve, and list."""
 
 from abc import ABC
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable
 
 from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.team import TeamBackend
@@ -42,7 +42,7 @@ class _SpawnToolBase(TeamTool, ABC):
         self.team = team
 
     @staticmethod
-    def _validate_member_name(member_name: Optional[str]) -> Optional[str]:
+    def _validate_member_name(member_name: str | None) -> str | None:
         """Validate ``member_name`` at the tool boundary.
 
         Returns:
@@ -61,7 +61,7 @@ class _SpawnToolBase(TeamTool, ABC):
         )
 
     @staticmethod
-    def _resolve_persona(inputs: Dict[str, Any]) -> str:
+    def _resolve_persona(inputs: dict[str, Any]) -> str:
         """Resolve the persona surface: ``desc`` first, then ``prompt``."""
         return inputs.get("desc") or inputs.get("prompt") or ""
 
@@ -116,7 +116,7 @@ class SpawnTeammateTool(_SpawnToolBase):
         team: TeamBackend,
         t: Translator,
         *,
-        model_config_allocator: Optional[Callable[[Optional[str]], Optional["Allocation"]]] = None,
+        model_config_allocator: Callable[[str | None], "Allocation | None"] | None = None,
     ):
         super().__init__(team, t, "spawn_teammate")
         self._allocate_model_config = model_config_allocator
@@ -141,7 +141,7 @@ class SpawnTeammateTool(_SpawnToolBase):
             "required": ["member_name", "display_name", "desc"],
         }
 
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         from openjiuwen.agent_teams.schema.status import MemberMode
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
@@ -204,7 +204,7 @@ class SpawnHumanAgentTool(_SpawnToolBase):
             "required": ["member_name", "display_name", "desc"],
         }
 
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         err = self._validate_member_name(inputs.get("member_name"))
         if err:
             return self._fail(err)
@@ -277,7 +277,7 @@ class SpawnBridgeAgentTool(_SpawnToolBase):
             "required": ["member_name", "display_name", "desc"],
         }
 
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         from openjiuwen.agent_teams.schema.team import BridgeMailboxInjectMode
 
         err = self._validate_member_name(inputs.get("member_name"))
@@ -366,7 +366,7 @@ class SpawnExternalCliTool(_SpawnToolBase):
             "required": ["member_name", "display_name", "desc", "cli_agent"],
         }
 
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         err = self._validate_member_name(inputs.get("member_name"))
         if err:
             return self._fail(err)
@@ -424,7 +424,7 @@ class ShutdownMemberTool(TeamTool):
             "required": ["member_name"],
         }
 
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         member_name = inputs.get("member_name")
         result = await self.team.shutdown_member(
             member_name=member_name,
@@ -467,7 +467,7 @@ class ApprovePlanTool(TeamTool):
             "required": ["plan_id", "approved"],
         }
 
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         approved = inputs.get("approved")
         plan_id = inputs.get("plan_id")
         success = await self.team.approve_plan(
@@ -519,7 +519,7 @@ class ApproveToolCallTool(TeamTool):
             "required": ["member_name", "tool_call_id", "approved"],
         }
 
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         member_name = inputs.get("member_name")
         tool_call_id = inputs.get("tool_call_id")
         approved = inputs.get("approved")
@@ -560,7 +560,7 @@ class ListMembersTool(TeamTool):
         self.team = team
         self.card.input_params = {"type": "object", "properties": {}, "required": []}
 
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         members = await self.team.list_members()
         return ToolOutput(
             success=True, data={"members": [member.model_dump() for member in members], "count": len(members)}

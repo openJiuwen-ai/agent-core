@@ -3,7 +3,7 @@
 
 """Messaging tool: send_message (point-to-point, multicast, and broadcast)."""
 
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable
 
 from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
@@ -53,7 +53,7 @@ class SendMessageTool(TeamTool):
             "required": ["to", "content"],
         }
 
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         to_raw = inputs.get("to")
         content = inputs.get("content", "").strip()
         summary = inputs.get("summary", "").strip()
@@ -220,7 +220,7 @@ class SendMessageTool(TeamTool):
         return f"Message sent from {d['from']} to {d['to']}"
 
     @staticmethod
-    def _format_multicast_text(error: str | None, d: Dict[str, Any]) -> str:
+    def _format_multicast_text(error: str | None, d: dict[str, Any]) -> str:
         """Render multicast outcome including delivered/failed lists when present."""
         delivered: list[str] = d.get("delivered", []) or []
         failed: list[dict[str, str]] = d.get("failed", []) or []

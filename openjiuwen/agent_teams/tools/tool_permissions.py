@@ -4,13 +4,12 @@
 """Permission sets and member-name validation pattern for team tools."""
 
 import re
-from typing import Set
 
 
 # ========== Tool Permission Sets ==========
 
 # Tools that only the leader can use
-LEADER_ONLY_TOOLS: Set[str] = {
+LEADER_ONLY_TOOLS: set[str] = {
     "build_team",         # Create a new team
     "clean_team",         # Clean up a team
     "spawn_teammate",     # Spawn an ordinary LLM teammate
@@ -26,7 +25,7 @@ LEADER_ONLY_TOOLS: Set[str] = {
 }
 
 # Tools that only members can use
-MEMBER_ONLY_TOOLS: Set[str] = {
+MEMBER_ONLY_TOOLS: set[str] = {
     "claim_task",  # Claim or complete a task
     "submit_plan", # Submit a plan before executing in plan_mode
     # Worktree tools — members work in isolated worktrees
@@ -35,7 +34,7 @@ MEMBER_ONLY_TOOLS: Set[str] = {
 }
 
 # Tools that both leader and members can use
-SHARED_TOOLS: Set[str] = {
+SHARED_TOOLS: set[str] = {
     # Query tools
     # "get_team_info",           # Get team information
     # "get_member",              # Get member information
@@ -46,10 +45,10 @@ SHARED_TOOLS: Set[str] = {
 }
 
 # All tools available to leader
-LEADER_TOOLS: Set[str] = LEADER_ONLY_TOOLS | SHARED_TOOLS
+LEADER_TOOLS: set[str] = LEADER_ONLY_TOOLS | SHARED_TOOLS
 
 # All tools available to members
-MEMBER_TOOLS: Set[str] = MEMBER_ONLY_TOOLS | SHARED_TOOLS
+MEMBER_TOOLS: set[str] = MEMBER_ONLY_TOOLS | SHARED_TOOLS
 
 # Tools available to the reserved ``human_agent`` role. The human
 # agent acts on its corresponding external user's behalf, so it gets
@@ -70,7 +69,7 @@ MEMBER_TOOLS: Set[str] = MEMBER_ONLY_TOOLS | SHARED_TOOLS
 # Workspace lock/version (``workspace_meta``) is attached separately
 # by ``TeamToolRail`` whenever a workspace_manager is configured —
 # same path leader/teammate use — so this set doesn't list it.
-HUMAN_AGENT_TOOLS: Set[str] = {
+HUMAN_AGENT_TOOLS: set[str] = {
     "view_task",
     "member_complete_task",
     "send_message",

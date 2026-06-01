@@ -5,7 +5,7 @@
 
 import json
 from abc import ABC
-from typing import Any, AsyncIterator, Dict
+from typing import Any, AsyncIterator
 
 from pydantic import PrivateAttr
 
@@ -53,5 +53,5 @@ class TeamTool(Tool, ABC):
             return "OK"
         return json.dumps(output.data, ensure_ascii=False)
 
-    async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
+    async def stream(self, inputs: dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         raise NotImplementedError("TeamTool does not support streaming")
