@@ -23,7 +23,7 @@ Tools never reach into `TeamDatabase` directly — they go through `TeamBackend`
 |---|---|---|---|
 | `build_team` | ✓ | | entry point — description carries the full workflow |
 | `clean_team` | ✓ (temporary only) | | requires every teammate shutdown first; not wired for `lifecycle="persistent"` (operator tears those down via SDK facades) |
-| `spawn_member` | ✓ | | takes optional `model_config_allocator` callback; `role_type ∈ {teammate (default), human_agent}`; `human_agent` rejects `model_name`/`prompt` and requires HITT to be engaged on the backend |
+| `spawn_member` | ✓ | | takes optional `model_config_allocator` callback; `role_type ∈ {teammate (default), human_agent, bridge_agent, external_cli}`; `human_agent` rejects `model_name`/`prompt` and requires HITT; `external_cli` requires `cli_agent` (a kind declared in `TeamAgentSpec.external_cli_agents`) + `desc`, dispatches to `spawn_external_cli_agent` |
 | `shutdown_member` | ✓ | | `force=True` skips the normal shutdown sequence |
 | `approve_plan` | ✓ (plan_mode only) | | wired only when `teammate_mode == "plan_mode"` |
 | `approve_tool` | ✓ (plan_mode only) | | same gating as `approve_plan` |
@@ -166,6 +166,7 @@ The ability layer renders tool results with `str(result)` — `MappedToolOutput.
 | **Pure text** | `build_team`, `clean_team`, `spawn_member`, `shutdown_member`, `approve_*` | Confirmation sentence — minimal tokens |
 | **Structured text lines** | `list_members`, `view_task` (list), `create_task` (batch) | One entity per line, dense format |
 | **Detail text** | `view_task` (get) | Full fields with labeled lines |
+| **Time context** | `view_task` (list + get) | Both tiers render `updated_at` via `timefmt.format_time_context` as `<absolute local time> (<relative diff>)`. `map_result` can't take args, so it calls `get_current_time()` internally and guards on `updated_at is not None` |
 | **Text + behavior guidance** | `claim_task` (completed) | Append `Call view_task now…` after task completion to sustain the autonomous task loop |
 | **Default JSON** | `TeamTool` base | `json.dumps(output.data)` fallback for anything that forgot to override |
 
@@ -209,7 +210,7 @@ Rule: **don't duplicate content across layers**. If the workflow lives in the to
 
 When merging multiple read-only tools into one (e.g. `TaskList` + `TaskGet` → `view_task`), use an `action` enum to dispatch, and **tier the output by action**:
 
-- **list action** — summary view: return only routing/identity fields (id, title, status, assignee) plus dependency edges (`blocked_by`). Omit heavyweight fields like `content` and internal fields like `team_id`. This keeps token cost low for the common "scan all tasks" call.
+- **list action** — summary view: return only routing/identity fields (id, title, status, assignee, `updated_at`) plus dependency edges (`blocked_by`). `updated_at` is a lightweight routing field (one int) the list view renders as a relative time so a member can spot a stalled task; omit heavyweight fields like `content` and internal fields like `team_id`. This keeps token cost low for the common "scan all tasks" call.
 - **get action** — detail view: return full content plus bidirectional dependency info (`blocked_by` + `blocks`). This is the only path that returns `content`.
 - **Default action** — choose the most common zero-parameter use case as the default. `view_task` defaults to `list`.
 

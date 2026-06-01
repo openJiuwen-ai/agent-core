@@ -725,6 +725,7 @@ async def test_task_claimed_for_other_member_falls_through_to_board_nudge():
     incomplete_task.content = "Reproduce and root-cause"
     incomplete_task.status = "claimed"
     incomplete_task.assignee = "dev-1"
+    incomplete_task.updated_at = 1_700_000_000_000
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[incomplete_task])
@@ -766,6 +767,7 @@ async def test_task_claimed_for_other_member_nudges_leader_via_steer_when_busy()
     incomplete_task.content = "Working"
     incomplete_task.status = "claimed"
     incomplete_task.assignee = "dev-1"
+    incomplete_task.updated_at = 1_700_000_000_000
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[incomplete_task])
@@ -933,8 +935,9 @@ def test_format_message_uses_teammate_template_when_not_human():
     msg.from_member_name = "dev-1"
     msg.content = "ping"
     msg.broadcast = False
+    msg.timestamp = 1_700_000_000_000
 
-    text = handler._format_message(msg, is_human_agent=False)
+    text = handler._format_message(msg, is_human_agent=False, now_ms=1_700_000_000_000)
     assert "msg-1" in text
     assert "dev-1" in text
     assert "ping" in text
@@ -960,8 +963,9 @@ def test_format_message_uses_human_template_when_human_agent():
     direct.from_member_name = "leader"
     direct.content = "are you around?"
     direct.broadcast = False
+    direct.timestamp = 1_700_000_000_000
 
-    direct_text = handler._format_message(direct, is_human_agent=True)
+    direct_text = handler._format_message(direct, is_human_agent=True, now_ms=1_700_000_000_000)
     assert "[转发给控制者的单播消息]" in direct_text
     assert "msg-direct" in direct_text
     assert "are you around?" in direct_text
@@ -978,8 +982,9 @@ def test_format_message_uses_human_template_when_human_agent():
     bcast.from_member_name = "leader"
     bcast.content = "stand-up in 5"
     bcast.broadcast = True
+    bcast.timestamp = 1_700_000_000_000
 
-    bcast_text = handler._format_message(bcast, is_human_agent=True)
+    bcast_text = handler._format_message(bcast, is_human_agent=True, now_ms=1_700_000_000_000)
     assert "[转发给控制者的广播消息]" in bcast_text
     assert "严格禁止" in bcast_text
     assert "保持静默" in bcast_text
@@ -1672,6 +1677,7 @@ async def test_task_completed_with_incomplete_tasks_nudges_leader_board():
     incomplete_task.content = "In progress"
     incomplete_task.status = "claimed"
     incomplete_task.assignee = "member-2"
+    incomplete_task.updated_at = 1_700_000_000_000
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(

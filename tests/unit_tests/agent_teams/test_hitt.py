@@ -57,7 +57,7 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
-from openjiuwen.agent_teams.tools.team import TeamBackend
+from openjiuwen.agent_teams.tools.team import CapabilityOverrides, TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import (
     HUMAN_AGENT_TOOLS,
     create_team_tools,
@@ -297,7 +297,7 @@ async def test_build_team_arg_enable_hitt_true_with_spec_false_raises(team_backe
             desc="y",
             leader_display_name="Leader",
             leader_desc="z",
-            enable_hitt=True,
+            overrides=CapabilityOverrides(enable_hitt=True),
         )
 
 
@@ -310,7 +310,7 @@ async def test_build_team_arg_enable_hitt_false_overrides_spec_true(hitt_team_ba
         desc="test",
         leader_display_name="Leader",
         leader_desc="Leader persona",
-        enable_hitt=False,
+        overrides=CapabilityOverrides(enable_hitt=False),
     )
     member = await db.member.get_member(HUMAN_AGENT_MEMBER_NAME, "hitt_team")
     assert member is None
@@ -499,7 +499,7 @@ async def test_direct_message_to_regular_member_is_unread(team_backend, db):
         desc="t",
         leader_display_name="Leader",
         leader_desc="p",
-        enable_hitt=False,
+        overrides=CapabilityOverrides(enable_hitt=False),
     )
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
@@ -591,7 +591,7 @@ async def test_human_agent_inbox_raises_when_hitt_off(team_backend, db):
         desc="t",
         leader_display_name="Leader",
         leader_desc="p",
-        enable_hitt=False,
+        overrides=CapabilityOverrides(enable_hitt=False),
     )
     inbox = HumanAgentInbox(team_backend, team_backend.message_manager)
     with pytest.raises(HumanAgentNotEnabledError):

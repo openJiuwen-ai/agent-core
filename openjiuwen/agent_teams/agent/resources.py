@@ -18,7 +18,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
-    from openjiuwen.agent_teams.harness import TeamHarness
+    from openjiuwen.agent_teams.agent.member_runtime import MemberRuntime
     from openjiuwen.agent_teams.models.allocator import ModelAllocator
     from openjiuwen.agent_teams.rails import FirstIterationGate
     from openjiuwen.core.memory.team.manager import TeamMemoryManager
@@ -31,11 +31,12 @@ class PrivateAgentResources:
 
     These objects are not shared across team members and are constructed
     by AgentBuilder based on the assembly blueprint. ``harness`` is the
-    sole accessor for the underlying DeepAgent runtime; do not introduce
-    a separate DeepAgent reference here.
+    sole accessor for the underlying member runtime (a ``TeamHarness`` over
+    DeepAgent by default, or an ``ExternalCliRuntime`` for external CLI
+    members); do not introduce a separate DeepAgent reference here.
     """
 
-    harness: Optional["TeamHarness"] = None
+    harness: Optional["MemberRuntime"] = None
     worktree_manager: Optional["WorktreeManager"] = None
     memory_manager: Optional["TeamMemoryManager"] = None
     first_iter_gate: Optional["FirstIterationGate"] = None

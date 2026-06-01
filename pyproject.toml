@@ -149,6 +149,8 @@ A2A = "openjiuwen.extensions.a2a.a2a_server_adapter:A2AServerAdapter"
 
 [project.scripts]
 openjiuwen = "openjiuwen.harness.cli.cli:cli"
+team-member = "openjiuwen.agent_teams.skill.cli:run"
+openjiuwen-team-mcp = "openjiuwen.agent_teams.mcp.server:main"
 
 [project.urls]
 Homepage = "https://openjiuwen.com"

@@ -44,7 +44,7 @@ from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.rail.base import AgentRail
 
 if TYPE_CHECKING:
-    from openjiuwen.agent_teams.harness import TeamHarness
+    from openjiuwen.agent_teams.agent.member_runtime import MemberRuntime
     from openjiuwen.agent_teams.interaction.payload import DeliverResult
     from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
     from openjiuwen.agent_teams.models.pool import ModelPoolEntry
@@ -116,12 +116,13 @@ class TeamAgent(BaseAgent):
         return self._configurator.resources
 
     @property
-    def harness(self) -> Optional["TeamHarness"]:
-        """Return the harness owning the underlying DeepAgent runtime.
+    def harness(self) -> Optional["MemberRuntime"]:
+        """Return the member runtime driving this agent.
 
-        All access to the DeepAgent runtime — config, model, workspace,
-        rails, streaming — must go through this object. New code should
-        not seek out the DeepAgent instance directly.
+        Default is a ``TeamHarness`` over DeepAgent; an external CLI member
+        carries an ``ExternalCliRuntime``. All round/runtime access goes
+        through this :class:`MemberRuntime` surface — new code should not
+        seek out the DeepAgent instance directly.
         """
         return self._configurator.harness
 
@@ -279,6 +280,20 @@ class TeamAgent(BaseAgent):
             return None
         return self._spawn_manager.lookup_inprocess_agent(member_name)
 
+    def lookup_bridge_agent_runtime(self, member_name: str) -> Optional["TeamAgent"]:
+        """Resolve an inprocess-spawned bridge agent's live ``TeamAgent``.
+
+        Symmetric to ``lookup_human_agent_runtime``. The coordination
+        message handler uses this when it needs to deliver a composed
+        ``original_body + remote_reply`` payload directly into the
+        bridge avatar's DeepAgent. Returns ``None`` for subprocess
+        spawns or when the avatar has not been spawned yet.
+        """
+        backend = self._configurator.team_backend
+        if backend is None or not backend.is_bridge_agent(member_name):
+            return None
+        return self._spawn_manager.lookup_inprocess_agent(member_name)
+
     def is_agent_ready(self) -> bool:
         return self._configurator.harness is not None
 
@@ -403,9 +418,15 @@ class TeamAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     # pylint: disable=arguments-differ
-    def configure(self, spec: TeamAgentSpec, context: TeamRuntimeContext) -> "TeamAgent":
+    def configure(
+        self,
+        spec: TeamAgentSpec,
+        context: TeamRuntimeContext,
+        *,
+        member_runtime: Optional["MemberRuntime"] = None,
+    ) -> "TeamAgent":
         self._setup_infra(spec, context)
-        self._setup_agent(spec, context)
+        self._setup_agent(spec, context, member_runtime=member_runtime)
         return self
 
     # ------------------------------------------------------------------
@@ -421,8 +442,14 @@ class TeamAgent(BaseAgent):
             on_team_built=self._mark_team_built,
         )
 
-    def _setup_agent(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> None:
-        self._configurator.setup_agent(spec, ctx)
+    def _setup_agent(
+        self,
+        spec: TeamAgentSpec,
+        ctx: TeamRuntimeContext,
+        *,
+        member_runtime: Optional["MemberRuntime"] = None,
+    ) -> None:
+        self._configurator.setup_agent(spec, ctx, member_runtime=member_runtime)
 
         # Build the member handle once for every role. ``create_member_handle``
         # is a pure constructor: it only needs the bound ``team_backend``

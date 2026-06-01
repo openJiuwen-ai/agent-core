@@ -474,6 +474,7 @@ class TeamTaskManager:
                     status=task.status,
                     assignee=task.assignee,
                     blocked_by=unresolved,
+                    updated_at=task.updated_at,
                 )
             )
         return TaskListResult(tasks=summaries, count=len(summaries))

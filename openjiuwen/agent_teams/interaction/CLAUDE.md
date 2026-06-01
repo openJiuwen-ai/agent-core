@@ -10,12 +10,25 @@
 | `router.py` | `parse_interact_str(body)` 纯语法解析(`# / $ / @member` 前缀 → typed payloads，不查 roster)；`parse_mention(raw) -> (target, body) \| None` 纯函数；`resolve_targets(payloads, *, member_exists)` async 后处理：严格匹配 `@member` recipient，未知 mention 折回为"无 @ 消息"投给 leader/avatar(保留原文，见 F_23)；`is_reserved_name(name)` 校验保留名 |
 | `user_inbox.py` | `UserInbox`：user 侧显式 API。`broadcast` / `direct` / `deliver_to_leader`，全部返回 `DeliverResult` |
 | `human_agent_inbox.py` | `HumanAgentInbox`：human_agent 对外发声，仅在 HITT 启用时可用。`send` 成功返 `DeliverResult`；HITT 关闭抛 `HumanAgentNotEnabledError`，未知 sender 抛 `UnknownHumanAgentError`（manager 层捕获转 `DeliverResult.failure(reason)`） |
+| `bridge_protocol.py` | `BridgeProtocolAdapter` Protocol（纯文本 connect / relay / close）+ `REMOTE_UNAVAILABLE_SENTINEL` + `BridgeAgentNotEnabledError` / `UnknownBridgeAgentError`。本期只定义协议骨架，不实现任何 adapter——bridge agent 模块的协议适配扩展点统一在这里 |
 
 ## 调用链
 
 - `Runner.interact_agent_team(payload, *, team_name, session_id)` 接收 `InteractPayload`，bare `str` 作为 `GodViewMessage` 的便捷形式。
 - 三视角到 inbox 的 dispatch 统一在 `runtime/manager.py:_dispatch_payload`：GodView → `deliver_to_leader`，Operator(target=None/x) → `UserInbox.broadcast/direct`，HumanAgent → `HumanAgentInbox.send`。
 - 旧的 `@xxx body` 解析从 `agent/dispatcher.py` 移到这里——dispatcher 只保留调用点。`TeamAgent.broadcast()` 和 `TeamAgent.human_agent_say()` 也走这一层。
+
+## Bridge Agent（桥接外部独立 Agent）
+
+把一个 jiuwen 之外的独立 agent（claudecode / codex / openclaw / hermes 等）以"团队成员"形式接入：
+
+- **角色定位**：bridge_agent 是完整 teammate，按 teammate 走 mention / 任务 / mailbox / send_message 一切路径。差别只在它的**内容产出**由外部独立 agent 经协议执行。
+- **本地 LLM 做调度，远程做执行**：bridge avatar 本地 DeepAgent 跑 jiuwen LLM 决定调度动作（claim_task / member_complete_task / send_message 给谁），但工作内容（代码 / 分析 / 答案）由远程返回，bridge 原样转发回团队，**禁止改写**。
+- **协议层**：`bridge_protocol.py` 定义纯文本 `BridgeProtocolAdapter`（connect 一次 → relay 单 turn → close）。本期不实现任何具体 adapter；缺省时 mailbox 自动转发用 `REMOTE_UNAVAILABLE_SENTINEL` 占位，bridge 退化为普通 teammate。
+- **mailbox 自动转发**：`agent/coordination/handlers/message.py:_bridge_deliverable_for` 把入站团队消息按 `mailbox_inject_mode`（`PASSTHROUGH` / `REPHRASE`）包装后调 `adapter.relay`，把"原消息 + 远程回复"组合后 deliver 进 avatar context。bridge avatar 自身无任何"咨询远程"工具——通信通道唯一就是自动转发。
+- **spec 层**：`BridgeMemberSpec(TeamMemberSpec)` 子类，`enable_bridge` 是 capability ceiling（与 `enable_hitt` 平行），dynamic spawn 走 `SpawnMemberTool(role_type='bridge_agent')` → `TeamBackend.spawn_bridge_agent`。
+
+详见 `agent_teams/docs/features/F_07_bridge-agent.md`。
 
 ## HITT（Human in the Team）
 

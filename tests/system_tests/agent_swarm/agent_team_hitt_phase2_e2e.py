@@ -34,6 +34,7 @@ import asyncio
 from unittest.mock import AsyncMock
 
 from openjiuwen.agent_teams.constants import HUMAN_AGENT_MEMBER_NAME
+from openjiuwen.agent_teams.tools.team import CapabilityOverrides
 from openjiuwen.agent_teams.interaction import (
     HumanAgentInboundEvent,
     HumanAgentInbox,
@@ -110,7 +111,7 @@ async def main() -> None:
         desc="Showcasing the inbox routing API",
         leader_display_name="Leader",
         leader_desc="Coordinator",
-        enable_hitt=True,
+        overrides=CapabilityOverrides(enable_hitt=True),
     )
 
     # Stub the avatar runtime so the LLM-driven inbox path is observable

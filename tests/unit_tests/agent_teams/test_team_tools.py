@@ -25,6 +25,7 @@ from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
 )
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
+from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import (
     ApprovePlanTool,
@@ -250,8 +251,10 @@ class TestSpawnMemberTool:
         # role_type is exposed to the LLM with a default of teammate.
         props = tool.card.input_params["properties"]
         assert "role_type" in props
-        assert props["role_type"]["enum"] == ["teammate", "human_agent"]
+        assert props["role_type"]["enum"] == ["teammate", "human_agent", "bridge_agent", "external_cli"]
         assert props["role_type"]["default"] == "teammate"
+        # external_cli members reference a static spec config by name.
+        assert "cli_agent" in props
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -297,6 +300,71 @@ class TestSpawnMemberTool:
         )
         assert result.success is False
         assert "HITT capability is disabled" in (result.error or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_role_type_external_cli_requires_cli_agent(self, agent_team, t):
+        """role_type='external_cli' without cli_agent fails at the tool layer."""
+        tool = SpawnMemberTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "cli-1",
+                "display_name": "CLI One",
+                "desc": "external cli worker",
+                "role_type": "external_cli",
+            }
+        )
+        assert result.success is False
+        assert "cli_agent" in (result.error or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_role_type_external_cli_undeclared_fails(self, agent_team, t):
+        """A cli_agent absent from external_cli_agents is rejected (capability ceiling)."""
+        tool = SpawnMemberTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "cli-2",
+                "display_name": "CLI Two",
+                "desc": "external cli worker",
+                "role_type": "external_cli",
+                "cli_agent": "claude",
+            }
+        )
+        assert result.success is False
+        assert "not declared" in (result.error or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_role_type_external_cli_success(self, db, message_bus, t):
+        """role_type='external_cli' with a declared cli_agent registers the member."""
+        await db.team.create_team(
+            team_name="ext_cli_tools_team",
+            display_name="Ext",
+            leader_member_name="leader1",
+        )
+        team = TeamBackend(
+            team_name="ext_cli_tools_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")],
+        )
+        tool = SpawnMemberTool(team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "claude-1",
+                "display_name": "Claude One",
+                "desc": "external cli reviewer",
+                "role_type": "external_cli",
+                "cli_agent": "claude",
+            }
+        )
+        assert result.success is True, result.error
+        assert result.data["role_type"] == "external_cli"
+        assert result.data["cli_agent"] == "claude"
+        assert team.is_external_cli_agent("claude-1")
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -1218,6 +1286,7 @@ class TestMappedToolOutput:
                         "status": "claimed",
                         "assignee": "dev-1",
                         "blocked_by": ["t1"],
+                        "updated_at": 1_700_000_000_000,
                     },
                 ],
                 "count": 2,
@@ -1227,6 +1296,9 @@ class TestMappedToolOutput:
         assert "#t1 [pending] Fix bug" in result
         assert "(dev-1)" in result
         assert "[blocked by #t1]" in result
+        # t2 carries updated_at → its line shows the absolute local time;
+        # t1 has no updated_at → the None guard skips time rendering.
+        assert "2023-11-" in result
 
     @pytest.mark.level1
     def test_view_task_map_result_get(self, agent_team, t):
@@ -1242,12 +1314,14 @@ class TestMappedToolOutput:
                 "assignee": "dev-1",
                 "blocked_by": [],
                 "blocks": ["t2", "t3"],
+                "updated_at": 1_700_000_000_000,
             },
         )
         result = tool.map_result(output)
         assert "Task #t1: Fix bug" in result
         assert "Content: Fix the login bug" in result
         assert "Blocks: #t2, #t3" in result
+        assert "Updated:" in result
 
     @pytest.mark.level1
     def test_send_message_map_result(self, agent_team, t):

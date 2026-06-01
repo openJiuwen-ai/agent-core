@@ -54,9 +54,56 @@ class SpawnManager:
         self._get_team_agent = team_agent_getter
 
         self.spawned_handles: dict[str, SpawnedProcessHandle] = {}
+        # Member names whose spawn is in flight (latched synchronously at the
+        # top of ``spawn_teammate`` before its first await). Guards against a
+        # duplicate spawn of the same member when several auto-start triggers
+        # (e.g. repeated leader ``send_message`` calls firing ``startup()``)
+        # land before the member's status flips — a second in-process shell
+        # would re-bind the member's transport address and crash.
+        self._spawning: set[str] = set()
         self.recovery_tasks: set[asyncio.Task] = set()
 
     async def spawn_teammate(
+        self,
+        ctx: TeamRuntimeContext,
+        *,
+        initial_message: Optional[str] = None,
+        session: Optional[Any] = None,
+        spawn_config: Optional[SpawnConfig] = None,
+    ) -> Optional[SpawnedProcessHandle]:
+        member_name = ctx.member_name
+        # Idempotency: skip a duplicate spawn of an already-spawned or
+        # in-flight member. ``startup()`` re-reads UNSTARTED rows on every
+        # auto-start trigger, so the same member can be requested several
+        # times before its status flips; spawning twice would create a second
+        # shell that re-binds the member's transport address.
+        existing = self.spawned_handles.get(member_name)
+        if existing is not None:
+            team_logger.debug(
+                "[{}] teammate {} already spawned; skip duplicate",
+                self._configurator.member_name or "?",
+                member_name,
+            )
+            return existing
+        if member_name in self._spawning:
+            team_logger.debug(
+                "[{}] teammate {} spawn already in flight; skip duplicate",
+                self._configurator.member_name or "?",
+                member_name,
+            )
+            return None
+        self._spawning.add(member_name)
+        try:
+            return await self._spawn_teammate_inner(
+                ctx,
+                initial_message=initial_message,
+                session=session,
+                spawn_config=spawn_config,
+            )
+        finally:
+            self._spawning.discard(member_name)
+
+    async def _spawn_teammate_inner(
         self,
         ctx: TeamRuntimeContext,
         *,
@@ -68,7 +115,19 @@ class SpawnManager:
         team_logger.info("[{}] spawning teammate: {}", self._configurator.member_name or "?", member_name)
 
         spec = self._configurator.spec
-        if spec and spec.spawn_mode == "inprocess":
+        if ctx.cli_agent:
+            # External CLI member: TeamAgent shell runs in-process while the
+            # third-party CLI binary is the subprocess driven via stdin.
+            from openjiuwen.agent_teams.spawn.external_cli_spawn import external_cli_spawn
+
+            handle = await external_cli_spawn(
+                team_agent=self._get_team_agent(),
+                ctx=ctx,
+                initial_message=initial_message,
+                session_id=get_session_id() or session,
+            )
+            self._wire_inprocess_chunk_forward(handle)
+        elif spec and spec.spawn_mode == "inprocess":
             from openjiuwen.agent_teams.spawn.inprocess_spawn import inprocess_spawn
 
             handle = await inprocess_spawn(
@@ -253,10 +312,15 @@ class SpawnManager:
 
         ctx = self._configurator.ctx
         # Role is persisted on the member row (``TeamMember.role``) so
-        # cold recovery picks up dynamically-spawned humans too. Legacy
-        # DB files without the column get a backfilled ``teammate``
-        # default via ``database.engine._ensure_team_member_role_column``.
+        # cold recovery picks up dynamically-spawned avatars (human and
+        # bridge) too — both spawn paths write their ``TeamRole`` through
+        # ``spawn_member(role=...)``. Legacy DB files without the column
+        # get a backfilled ``teammate`` default via
+        # ``database.engine._ensure_team_member_role_column``.
         role = TeamRole(teammate.role)
+        # External-CLI members carry no DeepAgent: the backend registry says
+        # which CLI adapter drives them, routing spawn to external_cli_spawn.
+        cli_agent = team_backend.get_external_cli_agent(teammate.member_name)
         return TeamRuntimeContext(
             role=role,
             member_name=teammate.member_name,
@@ -265,6 +329,7 @@ class SpawnManager:
             messager_config=self._configurator.build_member_messager_config(teammate.member_name),
             db_config=ctx.db_config if ctx else None,
             member_model=member_model,
+            cli_agent=cli_agent,
         )
 
     async def publish_restart_event(self, member_name: str, restart_count: int) -> None:

@@ -30,10 +30,13 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
 
 from openjiuwen.agent_teams.schema.status import TaskStatus
+from openjiuwen.agent_teams.timefmt import format_time_context
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.agent_teams.tools.team import (
+    CapabilityOverrides,
     TeamBackend,
 )
 from openjiuwen.core.common.logging import team_logger
@@ -214,7 +217,7 @@ class BuildTeamTool(TeamTool):
             desc=inputs.get("team_desc"),
             leader_display_name=leader_display_name,
             leader_desc=inputs["leader_desc"],
-            enable_hitt=enable_hitt_arg,
+            overrides=CapabilityOverrides(enable_hitt=enable_hitt_arg),
         )
         return ToolOutput(
             success=True,
@@ -310,14 +313,32 @@ class SpawnMemberTool(TeamTool):
                 "desc": {"type": "string", "description": t("spawn_member", "desc")},
                 "role_type": {
                     "type": "string",
-                    "enum": ["teammate", "human_agent"],
+                    "enum": ["teammate", "human_agent", "bridge_agent", "external_cli"],
                     "default": "teammate",
                     "description": t("spawn_member", "role_type"),
+                },
+                "cli_agent": {
+                    "type": "string",
+                    "description": t("spawn_member", "cli_agent"),
                 },
                 "prompt": {"type": "string", "description": t("spawn_member", "prompt")},
                 "model_name": {
                     "type": "string",
                     "description": t("spawn_member", "model_name"),
+                },
+                "mailbox_inject_mode": {
+                    "type": "string",
+                    "enum": ["passthrough", "rephrase"],
+                    "default": "passthrough",
+                    "description": t("spawn_member", "mailbox_inject_mode"),
+                },
+                "protocol": {
+                    "type": "string",
+                    "description": t("spawn_member", "protocol"),
+                },
+                "adapter_config": {
+                    "type": "object",
+                    "description": t("spawn_member", "adapter_config"),
                 },
             },
             "required": ["member_name", "display_name", "desc"],
@@ -345,11 +366,20 @@ class SpawnMemberTool(TeamTool):
                 ),
             )
 
-        if role_type not in {"teammate", "human_agent"}:
+        if role_type not in {"teammate", "human_agent", "bridge_agent", "external_cli"}:
             return ToolOutput(
                 success=False,
-                error=f"Invalid role_type '{role_type}'; expected 'teammate' or 'human_agent'",
+                error=(
+                    f"Invalid role_type '{role_type}'; expected 'teammate', "
+                    "'human_agent', 'bridge_agent', or 'external_cli'"
+                ),
             )
+
+        if role_type == "bridge_agent":
+            return await self._spawn_bridge(inputs)
+
+        if role_type == "external_cli":
+            return await self._spawn_external_cli(inputs)
 
         if role_type == "human_agent":
             # Capability gate: fail fast to LLM before touching backend.
@@ -411,12 +441,139 @@ class SpawnMemberTool(TeamTool):
             error=None if result.ok else result.reason,
         )
 
+    async def _spawn_bridge(self, inputs: Dict[str, Any]) -> ToolOutput:
+        """Dispatch path for ``role_type='bridge_agent'``.
+
+        Bridge agents are full local teammates paired with a remote
+        independent agent reachable through a pure-text protocol.
+        Persona is required because it is sent to the remote agent
+        via ``adapter.connect`` as the briefing the remote adopts.
+        ``model_name`` is optional (falls back to framework default).
+        """
+        from openjiuwen.agent_teams.schema.team import BridgeMailboxInjectMode
+
+        if not self.team.bridge_enabled():
+            return ToolOutput(
+                success=False,
+                error=(
+                    "Cannot spawn bridge agent: Bridge capability is "
+                    "disabled (enable_bridge=False on TeamAgentSpec or "
+                    "build_team). Either enable Bridge in the team "
+                    "spec or use role_type='teammate'."
+                ),
+            )
+
+        member_name = inputs.get("member_name")
+        display_name = inputs.get("display_name")
+        # ``desc`` is the per-tool persona surface; ``prompt`` is a
+        # plain hint (optional). For bridge agents the persona MUST
+        # be non-empty because it doubles as the remote's briefing.
+        persona = inputs.get("desc") or inputs.get("prompt") or ""
+        if not persona:
+            return ToolOutput(
+                success=False,
+                error=(
+                    "role_type='bridge_agent' requires a non-empty "
+                    "'desc' (or 'prompt') — it is the persona/briefing "
+                    "the remote agent adopts via adapter.connect"
+                ),
+            )
+
+        mode_raw = (inputs.get("mailbox_inject_mode") or "passthrough").lower()
+        try:
+            inject_mode = BridgeMailboxInjectMode(mode_raw)
+        except ValueError:
+            return ToolOutput(
+                success=False,
+                error=(f"Invalid mailbox_inject_mode '{mode_raw}'; expected 'passthrough' or 'rephrase'"),
+            )
+
+        adapter_config = inputs.get("adapter_config") or {}
+        if not isinstance(adapter_config, dict):
+            return ToolOutput(
+                success=False,
+                error="adapter_config must be an object/dict",
+            )
+
+        result = await self.team.spawn_bridge_agent(
+            member_name=member_name,
+            display_name=display_name,
+            persona=persona,
+            desc=inputs.get("desc"),
+            model_name=inputs.get("model_name"),
+            mailbox_inject_mode=inject_mode,
+            protocol=inputs.get("protocol") or "",
+            adapter_config=adapter_config,
+        )
+        return ToolOutput(
+            success=result.ok,
+            data={
+                "member_name": member_name,
+                "display_name": display_name,
+                "role_type": "bridge_agent",
+                "mailbox_inject_mode": inject_mode.value,
+                "protocol": inputs.get("protocol") or "",
+            },
+            error=None if result.ok else result.reason,
+        )
+
+    async def _spawn_external_cli(self, inputs: Dict[str, Any]) -> ToolOutput:
+        """Dispatch path for ``role_type='external_cli'``.
+
+        Spawns a teammate whose brain is a third-party CLI subprocess
+        (claudecode / codex / ...) driven by an ``ExternalCliRuntime``. The
+        CLI kind is named by ``cli_agent`` and must match a static config
+        declared in ``TeamAgentSpec.external_cli_agents`` — all launch
+        knowledge (command, cwd, MCP injection, env) lives there, so this
+        call carries only the role type and the CLI identifier. ``desc`` is
+        the persona stored on the member row.
+        """
+        member_name = inputs.get("member_name")
+        display_name = inputs.get("display_name")
+        cli_agent = (inputs.get("cli_agent") or "").strip()
+        persona = inputs.get("desc") or inputs.get("prompt") or ""
+
+        if not cli_agent:
+            return ToolOutput(
+                success=False,
+                error=(
+                    "role_type='external_cli' requires 'cli_agent' naming a CLI "
+                    "kind declared in TeamAgentSpec.external_cli_agents "
+                    "(e.g. 'claude' or 'codex')"
+                ),
+            )
+        if not persona:
+            return ToolOutput(
+                success=False,
+                error="role_type='external_cli' requires a non-empty 'desc' (the member persona)",
+            )
+
+        result = await self.team.spawn_external_cli_agent(
+            member_name=member_name,
+            display_name=display_name,
+            cli_agent=cli_agent,
+            persona=persona,
+            desc=inputs.get("desc"),
+        )
+        return ToolOutput(
+            success=result.ok,
+            data={
+                "member_name": member_name,
+                "display_name": display_name,
+                "role_type": "external_cli",
+                "cli_agent": cli_agent,
+            },
+            error=None if result.ok else result.reason,
+        )
+
     def map_result(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Failed to spawn member"
         d = output.data
         role = d.get("role_type", "teammate")
-        return f"Member spawned: member_name={d['member_name']} display_name={d['display_name']} role={role}"
+        cli_agent = d.get("cli_agent")
+        suffix = f" cli_agent={cli_agent}" if cli_agent else ""
+        return f"Member spawned: member_name={d['member_name']} display_name={d['display_name']} role={role}{suffix}"
 
 
 class ShutdownMemberTool(TeamTool):
@@ -801,10 +958,16 @@ class ViewTaskToolV2(TeamTool):
         return ToolOutput(success=True, data=result.model_dump())
 
     def map_result(self, output: ToolOutput) -> str:
-        """Map view_task result — tiered output by action."""
+        """Map view_task result — tiered output by action.
+
+        Both tiers render the task's last-transition time as ``<absolute
+        local time> (<relative diff>)`` so the model can tell how long a
+        task has been sitting in its current status.
+        """
         if not output.success:
             return output.error or "Task not found"
         d = output.data
+        now_ms = get_current_time()
         # Detail view (get action) — mirrors TaskGetTool
         if "content" in d:
             lines = [
@@ -814,6 +977,8 @@ class ViewTaskToolV2(TeamTool):
             ]
             if d.get("assignee"):
                 lines.append(f"Assignee: {d['assignee']}")
+            if d.get("updated_at") is not None:
+                lines.append(f"Updated: {format_time_context(d['updated_at'], now_ms)}")
             if d.get("blocked_by"):
                 lines.append(f"Blocked by: {', '.join(f'#{tid}' for tid in d['blocked_by'])}")
             if d.get("blocks"):
@@ -824,12 +989,14 @@ class ViewTaskToolV2(TeamTool):
         if not tasks:
             return "No tasks found"
         lines = []
-        for t in tasks:
-            parts = [f"#{t['task_id']} [{t['status']}] {t['title']}"]
-            if t.get("assignee"):
-                parts.append(f"({t['assignee']})")
-            if t.get("blocked_by"):
-                parts.append(f"[blocked by {', '.join(f'#{tid}' for tid in t['blocked_by'])}]")
+        for task in tasks:
+            parts = [f"#{task['task_id']} [{task['status']}] {task['title']}"]
+            if task.get("assignee"):
+                parts.append(f"({task['assignee']})")
+            if task.get("updated_at") is not None:
+                parts.append(f"({format_time_context(task['updated_at'], now_ms)})")
+            if task.get("blocked_by"):
+                parts.append(f"[blocked by {', '.join(f'#{tid}' for tid in task['blocked_by'])}]")
             lines.append(" ".join(parts))
         return "\n".join(lines)
 

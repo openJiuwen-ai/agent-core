@@ -26,6 +26,8 @@ from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.timefmt import format_time_context
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
@@ -99,7 +101,11 @@ class StaleTaskHandler(BaseCoordinationHandler):
         if not relevant:
             return
 
+        # Throttle stays in seconds (time.time); the millisecond now is only
+        # for rendering the relative-time string and is kept separate so the
+        # two units never get mixed.
         now = time.time()
+        now_ms = get_current_time()
         threshold_ms = self._STALE_CLAIM_SECONDS * 1000
         for task in relevant:
             if task.updated_at is None:
@@ -111,28 +117,29 @@ class StaleTaskHandler(BaseCoordinationHandler):
             if now - last_nudge < self._STALE_CLAIM_SECONDS:
                 continue
             self._last_stale_nudge[task.task_id] = now
-            await self._nudge_stale_claim(task)
+            await self._nudge_stale_claim(task, now_ms)
 
-    async def _nudge_stale_claim(self, task: Any) -> None:
+    async def _nudge_stale_claim(self, task: Any, now_ms: int) -> None:
         """Dispatch a stale-claim nudge to self or to the assigned member."""
         assignee = task.assignee
         if assignee and assignee == self._blueprint.member_name:
-            await self._self_nudge_stale_claim(task)
+            await self._self_nudge_stale_claim(task, now_ms)
         elif self._blueprint.role == TeamRole.LEADER and assignee:
-            await self._leader_nudge_stale_claim(task)
+            await self._leader_nudge_stale_claim(task, now_ms)
 
     @staticmethod
-    def _format_stale_claim_nudge(task: Any) -> str:
+    def _format_stale_claim_nudge(task: Any, now_ms: int) -> str:
         return t(
             "dispatcher.stale_claim_self",
             task_id=task.task_id,
             title=task.title,
             content=task.content,
+            time_info=format_time_context(task.updated_at, now_ms),
         )
 
-    async def _self_nudge_stale_claim(self, task: Any) -> None:
+    async def _self_nudge_stale_claim(self, task: Any, now_ms: int) -> None:
         """Feed a nudge input into the local agent loop."""
-        content = self._format_stale_claim_nudge(task)
+        content = self._format_stale_claim_nudge(task, now_ms)
         await self._round.deliver_input(content)
         team_logger.info(
             "[{}] self-nudged stale claimed task {}",
@@ -140,11 +147,11 @@ class StaleTaskHandler(BaseCoordinationHandler):
             task.task_id,
         )
 
-    async def _leader_nudge_stale_claim(self, task: Any) -> None:
+    async def _leader_nudge_stale_claim(self, task: Any, now_ms: int) -> None:
         """Send a direct reminder to the member holding a stale claim."""
         if self._infra.message_manager is None:
             return
-        content = self._format_stale_claim_nudge(task)
+        content = self._format_stale_claim_nudge(task, now_ms)
         await self._infra.message_manager.send_message(content, task.assignee)
         team_logger.info(
             "[leader] nudged {} about stale claimed task {}",
@@ -197,9 +204,11 @@ class StaleTaskHandler(BaseCoordinationHandler):
         for task in fresh:
             self._last_pending_nudge[task.task_id] = now
 
+        now_ms = get_current_time()
         lines = [t("dispatcher.stale_pending_header")]
         for task in fresh:
-            lines.append(f"- [{task.task_id}] {task.title}: {task.content}")
+            time_info = format_time_context(task.updated_at, now_ms)
+            lines.append(f"- [{task.task_id}] {task.title}: {task.content} ({time_info})")
         content = "\n".join(lines)
 
         await self._round.deliver_input(content)

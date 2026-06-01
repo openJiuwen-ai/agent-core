@@ -14,9 +14,11 @@ from __future__ import annotations
 from typing import ClassVar
 
 from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordinationHandler
+from openjiuwen.agent_teams.external.format import render_task_line
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
 
 
@@ -187,8 +189,8 @@ class TaskBoardHandler(BaseCoordinationHandler):
                 return
             lines = [t("dispatcher.teammate_task_list")]
 
+        now_ms = get_current_time()
         for task in incomplete:
-            assignee = f" → {task.assignee}" if task.assignee else t("dispatcher.task_unassigned_marker")
-            lines.append(f"- [{task.task_id}] [{task.status}] {task.title}: {task.content}{assignee}")
+            lines.append(render_task_line(task, now_ms=now_ms))
 
         await self._round.deliver_input("\n".join(lines))

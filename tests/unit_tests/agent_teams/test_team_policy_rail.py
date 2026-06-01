@@ -350,6 +350,10 @@ class _FakeTeamBackend:
         """TeamPolicyRail snapshots the roster here; fake teams are empty."""
         return frozenset()
 
+    def bridge_agent_names(self) -> frozenset[str]:
+        """TeamPolicyRail snapshots the bridge roster too; empty for fakes."""
+        return frozenset()
+
     # -- Mutators used by tests ----------------------------------------------
 
     def set_team(self, team: _StubTeam | None, mtime: int) -> None:
