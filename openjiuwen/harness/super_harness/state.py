@@ -80,8 +80,13 @@ class ActiveRound:
         graceful_abort: When True, SnapshotRail.after_react_iteration will
             ``request_force_finish`` so the next iteration top-of-loop check
             breaks the inner loop cleanly.
-        last_safe_snapshot: Most recent snapshot captured by SnapshotRail.
-            None until the first iteration completes.
+        pre_round_snapshot: Snapshot of context+state taken just before the
+            round's query was added. pause (which discards the whole round to
+            restart with a merged query) and immediate abort with no completed
+            iteration roll back to this.
+        last_safe_snapshot: Most recent snapshot captured by SnapshotRail at
+            the end of a fully successful iteration. None until the first
+            iteration completes. immediate abort rolls back to this.
     """
 
     round_id: int
@@ -90,6 +95,7 @@ class ActiveRound:
     task: asyncio.Task
     steering_queue: asyncio.Queue
     graceful_abort: bool = False
+    pre_round_snapshot: SafeStateSnapshot | None = None
     last_safe_snapshot: SafeStateSnapshot | None = None
 
 

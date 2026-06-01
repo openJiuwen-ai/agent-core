@@ -100,6 +100,10 @@ _BRIDGE_EVENTS = frozenset(
         AgentCallbackEvent.BEFORE_TOOL_CALL,
         AgentCallbackEvent.AFTER_TOOL_CALL,
         AgentCallbackEvent.ON_TOOL_EXCEPTION,
+        # Fired by the inner ReActAgent at each successful iteration end, so a
+        # rail registered via DeepAgent.register_rail must bridge to the inner
+        # agent (same callback-manager namespace) rather than the outer one.
+        AgentCallbackEvent.AFTER_REACT_ITERATION,
     }
 )
 

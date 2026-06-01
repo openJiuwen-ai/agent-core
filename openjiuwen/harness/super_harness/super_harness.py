@@ -5,18 +5,26 @@
 Replaces the dual ``steer / follow_up / abort`` + ``runner.run_agent_streaming``
 contract with a single-coroutine state machine driven by a control channel.
 
-Public API surface (all methods are concurrent-safe):
-- ``start(session=None)``: lazily initialize DeepAgent + supervisor.
-- ``stop()``: cancel any active round, close output, transition to TERMINATED.
-- ``outputs()``: queue-backed AsyncIterator of OutputSchema chunks.
+Round execution model (mirrors DeepAgent's task-loop streaming, not its
+one-shot ``stream()``): the whole harness shares ONE stream lifecycle. Each
+round drives ``react_agent.invoke(_streaming=True)`` as a task SuperHarness
+owns — so cancellation actually stops the LLM/tool work, and because the
+session is passed in (``need_cleanup=False``) invoke does not close the shared
+stream emitter between rounds. A single forwarder coroutine pumps
+``session.stream_iterator()`` into the output queue for the harness's entire
+life; the stream is closed only by ``stop()``.
+
+Public API surface (all methods are concurrent-safe — each just enqueues a
+ControlEvent and awaits an ack resolved solely by the supervisor coroutine):
+- ``start(session=None)``: lazily initialize DeepAgent + supervisor + forwarder.
+- ``stop()``: cancel any active round, close the stream, transition TERMINATED.
+- ``outputs()``: queue-backed AsyncIterator of OutputSchema chunks (single
+  consumer).
 - ``send(content, immediate=False)``: queue inbound content.
 - ``abort(immediate=False)``: graceful (iteration-granular) or immediate
-  (task cancel + rollback) abort of the current round.
-- ``pause()``: cancel current round, cache its query for the next send to
-  concatenate onto.
-
-State transitions and intermediate-state behavior are documented in the
-plan at ``/Users/alan/.claude/plans/openjiuwen-harness-deep-agent-py-deepag-eager-whale.md``.
+  (task cancel + rollback to last safe snapshot) abort of the current round.
+- ``pause()``: cancel the current round, roll back to its pre-round baseline,
+  and cache its query so the next send concatenates and restarts it.
 """
 from __future__ import annotations
 
@@ -24,13 +32,12 @@ import asyncio
 from typing import Any, AsyncIterator, Callable, TYPE_CHECKING
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import raise_error
+from openjiuwen.core.common.exception.errors import build_error, raise_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session.agent import Session
-from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
+from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.harness.schema.state import DeepAgentState
 from openjiuwen.harness.super_harness.control import (
-    ControlEvent,
     _Cmd_Abort,
     _Cmd_Pause,
     _Cmd_RoundFinished,
@@ -41,6 +48,7 @@ from openjiuwen.harness.super_harness.outputs import _END, _OutputIterator
 from openjiuwen.harness.super_harness.snapshot_rail import (
     _ACTIVE_ROUND,
     SnapshotRail,
+    capture_snapshot,
 )
 from openjiuwen.harness.super_harness.state import (
     ActiveRound,
@@ -59,14 +67,13 @@ class SuperHarness:
 
     The DeepAgent instance is produced lazily by ``deep_agent_provider`` on
     the first ``start()`` call and cached for the harness's lifetime. The
-    harness owns one ``Session`` (auto-created or injected) which it reuses
-    across all rounds.
+    harness owns one ``Session`` (auto-created or injected) reused across all
+    rounds.
 
     All external API methods push a ``ControlEvent`` onto an internal channel;
     the supervisor coroutine consumes events serially, mutating
-    ``HarnessInternalState`` as the sole writer. This is how concurrency
-    safety is achieved without locks: external callers cannot observe a
-    half-transitioned state.
+    ``HarnessInternalState`` as the sole writer. Concurrency safety is by
+    construction: external callers never observe a half-transitioned state.
     """
 
     __slots__ = (
@@ -78,8 +85,9 @@ class SuperHarness:
         "_control",
         "_snapshot_rail",
         "_rail_registered",
+        "_forwarder_task",
         "_started_event",
-        "_terminate_event",
+        "_starting",
     )
 
     def __init__(self, deep_agent_provider: Callable[[], "DeepAgent"]) -> None:
@@ -95,11 +103,12 @@ class SuperHarness:
         self._session: Session | None = None
         self._owns_session: bool = False
         self._st = HarnessInternalState()
-        self._control: asyncio.Queue[ControlEvent] = asyncio.Queue()
+        self._control: asyncio.Queue = asyncio.Queue()
         self._snapshot_rail = SnapshotRail()
         self._rail_registered: bool = False
+        self._forwarder_task: asyncio.Task | None = None
         self._started_event = asyncio.Event()
-        self._terminate_event = asyncio.Event()
+        self._starting: bool = False
 
     # ------------------------------------------------------------------
     # Read-only accessors
@@ -120,65 +129,85 @@ class SuperHarness:
     # ------------------------------------------------------------------
 
     async def start(self, *, session: Session | None = None) -> None:
-        """Lazily initialize the DeepAgent and start the supervisor coroutine.
+        """Lazily initialize the DeepAgent and start the supervisor + forwarder.
 
-        Idempotent: calling ``start()`` a second time is a no-op.
+        Idempotent and safe against concurrent calls: a ``_starting`` guard
+        plus the post-init ``supervisor_task`` check ensure only one caller
+        performs initialization.
 
         Args:
             session: Optional externally-managed session to reuse across
-                rounds. When omitted, the harness creates its own session
-                and is responsible for ``post_run`` at ``stop()``.
+                rounds. When omitted, the harness creates its own session and
+                runs ``post_run`` on it at ``stop()``.
         """
-        if self._st.supervisor_task is not None:
+        if self._st.supervisor_task is not None or self._starting:
             return
+        self._starting = True
+        try:
+            self._agent = self._provider()
+            if self._agent is None:
+                raise_error(
+                    StatusCode.DEEPAGENT_RUNTIME_ERROR,
+                    error_msg="deep_agent_provider returned None.",
+                )
 
-        self._agent = self._provider()
-        if self._agent is None:
-            raise_error(
-                StatusCode.DEEPAGENT_RUNTIME_ERROR,
-                error_msg="deep_agent_provider returned None.",
+            if session is None:
+                self._session = Session(card=self._agent.card)
+                self._owns_session = True
+                await self._session.pre_run()
+            else:
+                self._session = session
+                self._owns_session = False
+
+            await self._agent.ensure_initialized()
+            await self._register_snapshot_rail()
+
+            self._st.supervisor_task = asyncio.create_task(
+                self._supervisor(),
+                name=f"super_harness_supervisor[{self.session_id}]",
             )
-
-        if session is None:
-            self._session = Session(card=self._agent.card)
-            self._owns_session = True
-            await self._session.pre_run()
-        else:
-            self._session = session
-            self._owns_session = False
-
-        # Ensure DeepAgent's lazy init has run (MCPs, workspace, rails, ...).
-        await self._agent.ensure_initialized()
-
-        # Register SnapshotRail's callbacks directly onto the inner ReActAgent.
-        # We bypass DeepAgent.register_rail to avoid touching _BRIDGE_EVENTS:
-        # SuperHarness drives react_agent.stream() directly, so rail bridging
-        # routes (outer DeepAgent vs inner ReActAgent) don't apply here.
-        await self._register_snapshot_rail()
-
-        self._st.supervisor_task = asyncio.create_task(
-            self._supervisor(),
-            name=f"super_harness_supervisor[{self.session_id}]",
-        )
-        await self._started_event.wait()
-        logger.info("[SuperHarness] started session=%s", self.session_id)
+            self._forwarder_task = asyncio.create_task(
+                self._forward_outputs(),
+                name=f"super_harness_forwarder[{self.session_id}]",
+            )
+            await self._started_event.wait()
+            logger.info("[SuperHarness] started session=%s", self.session_id)
+        finally:
+            self._starting = False
 
     async def stop(self) -> None:
         """Cancel any active round, close outputs, transition to TERMINATED.
 
-        Safe to call multiple times. Blocks until the supervisor has finished
-        cleanup.
+        Safe to call multiple times. Blocks until the supervisor and forwarder
+        have finished and the owned session (if any) is torn down.
         """
         if self._st.supervisor_task is None or self._st.phase is HarnessState.TERMINATED:
             return
-        ack: asyncio.Future = asyncio.get_event_loop().create_future()
+        ack: asyncio.Future = asyncio.get_running_loop().create_future()
         await self._control.put(_Cmd_Stop(ack=ack))
-        await ack
+        try:
+            await ack
+        except Exception:
+            # Supervisor crashed before acking; proceed with teardown anyway.
+            logger.debug("[SuperHarness] stop ack rejected", exc_info=True)
 
-        # Wait for supervisor to finish, then release the owned session.
-        if self._st.supervisor_task is not None:
+        supervisor = self._st.supervisor_task
+        if supervisor is not None:
             try:
-                await self._st.supervisor_task
+                await supervisor
+            except asyncio.CancelledError:
+                pass
+
+        # Closing the stream sends END_FRAME, which lets the forwarder's
+        # stream_iterator terminate and push the _END sentinel.
+        if self._session is not None:
+            try:
+                await self._session.close_stream()
+            except Exception:
+                logger.exception("[SuperHarness] close_stream failed during stop")
+        if self._forwarder_task is not None:
+            try:
+                await self._forwarder_task
             except asyncio.CancelledError:
                 pass
 
@@ -192,9 +221,10 @@ class SuperHarness:
     def outputs(self) -> AsyncIterator[Any]:
         """Return an AsyncIterator over output chunks.
 
-        Single-consumer contract: multiple concurrent iterators steal items
-        from each other. Wrap externally if broadcast semantics are needed.
-        Iterator terminates cleanly when ``stop()`` is called.
+        Single-consumer contract: the terminating ``_END`` sentinel is emitted
+        exactly once, so only one iterator can drain to completion. Wrap
+        externally if broadcast or reconnect semantics are needed. The iterator
+        ends cleanly after ``stop()`` closes the stream.
         """
         return _OutputIterator(self._st.output_queue)
 
@@ -205,14 +235,13 @@ class SuperHarness:
     async def send(self, content: str, *, immediate: bool = False) -> str:
         """Push an inbound message to the supervisor.
 
-        Behavior depends on current phase:
+        Behavior by phase:
         - IDLE: starts a new round with ``content``.
-        - RUNNING + immediate=True: injected into the active round's
-          steering channel; takes effect at the next ReAct iteration top.
-        - RUNNING + immediate=False: buffered in pending_queue; consumed
-          after the active round finishes.
-        - PAUSED: ``immediate`` is ignored. ``content`` is concatenated onto
-          ``paused_query`` and the resulting query starts a new round.
+        - RUNNING + immediate=True: injected into the active round's steering
+          channel; takes effect at the next ReAct iteration top.
+        - RUNNING + immediate=False: buffered; consumed when the round finishes.
+        - PAUSED: ``immediate`` is ignored. ``content`` is concatenated onto the
+          cached query and the merged query starts a new round.
         - TERMINATED: raises.
 
         Args:
@@ -223,8 +252,7 @@ class SuperHarness:
             The monotonic sequence id of this message.
         """
         self._require_alive()
-        ack: asyncio.Future = asyncio.get_event_loop().create_future()
-        # seq is assigned by the supervisor under the single-writer invariant.
+        ack: asyncio.Future = asyncio.get_running_loop().create_future()
         msg = InboxMessage(seq=0, content=content, immediate=immediate)
         await self._control.put(_Cmd_Send(msg=msg, ack=ack))
         return await ack
@@ -232,31 +260,34 @@ class SuperHarness:
     async def abort(self, *, immediate: bool = False) -> None:
         """Abort the current round.
 
-        - immediate=False (graceful): set the active round's graceful_abort
-          flag. The current iteration runs to completion (LLM + all tools +
-          ToolMessage writes); the next iteration top breaks the loop.
-        - immediate=True: cancel the active round task, drop the pending
-          queue, roll context state back to ``last_safe_snapshot``.
+        - immediate=False (graceful): the current iteration runs to completion
+          (LLM + all tools + ToolMessage writes); the next iteration top breaks
+          the loop. No rollback.
+        - immediate=True: cancel the round task, drop the pending queue, roll
+          context+state back to the last safe snapshot (or the pre-round
+          baseline if no iteration completed). Tool side effects already
+          performed are NOT undone.
 
         Args:
-            immediate: Whether to cancel immediately (True) or let the
-                current iteration finish (False).
+            immediate: Cancel immediately (True) or let the current iteration
+                finish (False).
         """
         self._require_alive()
-        ack: asyncio.Future = asyncio.get_event_loop().create_future()
+        ack: asyncio.Future = asyncio.get_running_loop().create_future()
         await self._control.put(_Cmd_Abort(immediate=immediate, ack=ack))
         await ack
 
     async def pause(self) -> None:
         """Stop the current round and cache its query for the next send.
 
-        After pause(), the harness enters PAUSED. The next send() — regardless
-        of ``immediate`` — concatenates onto the cached query and restarts
-        the same round with the combined content. Tool side effects from the
-        cancelled iteration are not rolled back.
+        Cancels the round, rolls context+state back to the round's pre-round
+        baseline (discarding the whole round), and enters PAUSED. The next
+        send() — regardless of ``immediate`` — concatenates onto the cached
+        query and restarts the round with the combined content. Tool side
+        effects already performed are NOT undone.
         """
         self._require_alive()
-        ack: asyncio.Future = asyncio.get_event_loop().create_future()
+        ack: asyncio.Future = asyncio.get_running_loop().create_future()
         await self._control.put(_Cmd_Pause(ack=ack))
         await ack
 
@@ -265,7 +296,7 @@ class SuperHarness:
     # ------------------------------------------------------------------
 
     def _require_alive(self) -> None:
-        """Raise if the harness has been stopped."""
+        """Raise if the harness is stopped or not started."""
         if self._st.phase is HarnessState.TERMINATED:
             raise_error(
                 StatusCode.DEEPAGENT_RUNTIME_ERROR,
@@ -278,9 +309,11 @@ class SuperHarness:
             )
 
     async def _register_snapshot_rail(self) -> None:
-        """Register SnapshotRail callbacks onto the inner ReActAgent.
+        """Register SnapshotRail's callbacks directly onto the inner ReActAgent.
 
-        Called once on the first ``start()``. Idempotent for safety.
+        Bypasses DeepAgent.register_rail because SuperHarness drives
+        react_agent.invoke directly; the inner/outer bridging routes do not
+        apply here. Idempotent.
         """
         if self._rail_registered:
             return
@@ -292,11 +325,7 @@ class SuperHarness:
             )
         callbacks = self._snapshot_rail.get_callbacks()
         for event, callback in callbacks.items():
-            await react.register_callback(
-                event,
-                callback,
-                self._snapshot_rail.priority,
-            )
+            await react.register_callback(event, callback, self._snapshot_rail.priority)
         self._rail_registered = True
 
     # ------------------------------------------------------------------
@@ -304,28 +333,74 @@ class SuperHarness:
     # ------------------------------------------------------------------
 
     async def _supervisor(self) -> None:
-        """Main supervisor coroutine; single writer to HarnessInternalState."""
+        """Main supervisor coroutine; sole writer of HarnessInternalState."""
         self._started_event.set()
+        crashed_cmd: Any = None
+        crash_exc: BaseException | None = None
         try:
             while self._st.phase is not HarnessState.TERMINATED:
                 cmd = await self._control.get()
-                if isinstance(cmd, _Cmd_Send):
-                    await self._on_send(cmd)
-                elif isinstance(cmd, _Cmd_Abort):
-                    await self._on_abort(cmd)
-                elif isinstance(cmd, _Cmd_Pause):
-                    await self._on_pause(cmd)
-                elif isinstance(cmd, _Cmd_RoundFinished):
-                    await self._on_round_done(cmd)
-                elif isinstance(cmd, _Cmd_Stop):
+                if isinstance(cmd, _Cmd_Stop):
                     await self._on_stop(cmd)
                     break
-                else:  # pragma: no cover - defensive
-                    logger.warning("[SuperHarness] unknown control event: %r", cmd)
+                try:
+                    await self._dispatch(cmd)
+                except Exception as exc:  # noqa: BLE001 - handler crash is terminal
+                    crashed_cmd = cmd
+                    crash_exc = exc
+                    raise
         except Exception:
-            logger.exception("[SuperHarness] supervisor crashed")
+            logger.exception("[SuperHarness] supervisor crashed; terminating")
             self._st.phase = HarnessState.TERMINATED
-            await self._st.output_queue.put(_END)
+        finally:
+            # Resolve every ack that will otherwise never be answered, so no
+            # external caller hangs forever. Covers the crashed command and
+            # anything queued behind it (including commands queued after Stop).
+            self._fail_remaining_commands(crashed_cmd, crash_exc)
+            if crash_exc is not None:
+                # close_stream won't run on the crash path; unblock outputs().
+                await self._st.output_queue.put(_END)
+
+    async def _dispatch(self, cmd: Any) -> None:
+        """Route a non-Stop control event to its handler."""
+        if isinstance(cmd, _Cmd_Send):
+            await self._on_send(cmd)
+        elif isinstance(cmd, _Cmd_Abort):
+            await self._on_abort(cmd)
+        elif isinstance(cmd, _Cmd_Pause):
+            await self._on_pause(cmd)
+        elif isinstance(cmd, _Cmd_RoundFinished):
+            await self._on_round_done(cmd)
+        else:  # pragma: no cover - defensive
+            logger.warning("[SuperHarness] unknown control event: %r", cmd)
+
+    def _fail_remaining_commands(
+        self,
+        crashed_cmd: Any,
+        crash_exc: BaseException | None,
+    ) -> None:
+        """Reject the acks of the crashed command and all queued commands.
+
+        Without this, a supervisor that crashed (or stopped with commands still
+        queued behind ``_Cmd_Stop``) would leave callers blocked on
+        ``await ack`` forever.
+        """
+        err = crash_exc if crash_exc is not None else build_error(
+            StatusCode.DEEPAGENT_RUNTIME_ERROR,
+            error_msg="SuperHarness stopped before this command was handled.",
+        )
+        pending = []
+        if crashed_cmd is not None:
+            pending.append(crashed_cmd)
+        while True:
+            try:
+                pending.append(self._control.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        for cmd in pending:
+            ack = getattr(cmd, "ack", None)
+            if ack is not None and not ack.done():
+                ack.set_exception(err)
 
     # ------------------------------------------------------------------
     # Event handlers (single-writer, serialized by supervisor)
@@ -334,7 +409,6 @@ class SuperHarness:
     async def _on_send(self, cmd: _Cmd_Send) -> None:
         """Route a send according to current phase."""
         seq = self._st.next_seq()
-        # Replace the placeholder with the assigned seq.
         msg = InboxMessage(seq=seq, content=cmd.msg.content, immediate=cmd.msg.immediate)
 
         phase = self._st.phase
@@ -342,46 +416,32 @@ class SuperHarness:
             self._start_round(msg.content)
             self._transition(HarnessState.RUNNING)
         elif phase is HarnessState.RUNNING:
-            if msg.immediate:
-                active = self._st.active
-                if active is not None:
-                    active.steering_queue.put_nowait(msg.content)
-                else:
-                    # Race: round just finished. Fall back to next_round.
-                    self._st.pending_queue.append(msg)
+            active = self._st.active
+            if msg.immediate and active is not None:
+                active.steering_queue.put_nowait(msg.content)
             else:
                 self._st.pending_queue.append(msg)
         elif phase is HarnessState.PAUSED:
-            # PAUSED: ignore immediate flag; concatenate onto paused_query
-            # and resume by starting a new round.
             base = self._st.paused_query or ""
             merged = f"{base}\n{msg.content}" if base else msg.content
             self._st.paused_query = None
             self._start_round(merged)
             self._transition(HarnessState.RUNNING)
-        elif phase is HarnessState.TERMINATED:
-            cmd.ack.set_exception(
-                RuntimeError("SuperHarness already stopped."),
-            )
-            return
         cmd.ack.set_result(seq)
 
     async def _on_abort(self, cmd: _Cmd_Abort) -> None:
         """Handle graceful or immediate abort."""
         phase = self._st.phase
         if phase is HarnessState.IDLE:
-            # Nothing to abort.
             cmd.ack.set_result(None)
             return
         if phase is HarnessState.PAUSED:
-            # Drop cached query + pending queue.
             self._st.paused_query = None
             self._st.pending_queue.clear()
             self._transition(HarnessState.IDLE)
             cmd.ack.set_result(None)
             return
 
-        # phase is RUNNING
         active = self._st.active
         if active is None:
             self._transition(HarnessState.IDLE)
@@ -390,20 +450,23 @@ class SuperHarness:
 
         if cmd.immediate:
             await self._cancel_round(active)
-            await self._rollback_to_snapshot(active.last_safe_snapshot)
+            await self._rollback_to_snapshot(
+                active.last_safe_snapshot or active.pre_round_snapshot,
+            )
+            await self._emit_round_aborted(active.round_id, "abort")
             self._st.active = None
             self._st.pending_queue.clear()
             self._transition(HarnessState.IDLE)
         else:
+            # Graceful: let the current iteration finish; the round will end
+            # itself and _on_round_done must not auto-start a next round.
             active.graceful_abort = True
-            # Drop pending so we don't auto-start a next round after this one.
             self._st.pending_queue.clear()
         cmd.ack.set_result(None)
 
     async def _on_pause(self, cmd: _Cmd_Pause) -> None:
-        """Cancel current round and cache its query for the next send."""
-        phase = self._st.phase
-        if phase is not HarnessState.RUNNING:
+        """Cancel current round, roll back to its pre-round baseline, cache query."""
+        if self._st.phase is not HarnessState.RUNNING:
             cmd.ack.set_result(None)
             return
 
@@ -415,11 +478,13 @@ class SuperHarness:
 
         cached_query = active.original_query
         await self._cancel_round(active)
-        await self._rollback_to_snapshot(active.last_safe_snapshot)
+        # pause discards the whole round (it will restart with a merged query),
+        # so roll back to the pre-round baseline, not the mid-round snapshot —
+        # otherwise the restarted round's query duplicates the original.
+        await self._rollback_to_snapshot(active.pre_round_snapshot)
+        await self._emit_round_aborted(active.round_id, "pause")
         self._st.active = None
         self._st.paused_query = cached_query
-        # Keep pending_queue intact across pause: items will be consumed
-        # whenever the next send re-enters RUNNING.
         self._transition(HarnessState.PAUSED)
         cmd.ack.set_result(None)
 
@@ -427,30 +492,38 @@ class SuperHarness:
         """Round finished naturally (success or graceful break)."""
         active = self._st.active
         if active is None or active.round_id != cmd.round_id:
-            # Already handled by abort/pause path.
+            # Already superseded by an abort/pause that cancelled this round.
             return
+        was_graceful = active.graceful_abort
         self._st.active = None
 
-        if cmd.error is not None and not isinstance(
-            cmd.error, asyncio.CancelledError,
-        ):
+        if cmd.error is not None:
             logger.error(
                 "[SuperHarness] round_id=%s ended with error: %r",
                 cmd.round_id,
                 cmd.error,
             )
 
-        # Drain pending queue: pop FIFO, start next round.
+        # Graceful abort: the round finished its final iteration; do not pull
+        # the next pending message — the user asked to stop.
+        if was_graceful:
+            self._st.pending_queue.clear()
+            self._transition(HarnessState.IDLE)
+            return
+
         if self._st.phase is HarnessState.RUNNING and self._st.pending_queue:
             next_msg = self._st.pending_queue.popleft()
             self._start_round(next_msg.content)
             return
 
-        # Nothing pending: back to IDLE.
         self._transition(HarnessState.IDLE)
 
     async def _on_stop(self, cmd: _Cmd_Stop) -> None:
-        """Terminal cleanup: cancel active round, close outputs."""
+        """Terminal cleanup: cancel active round, transition TERMINATED.
+
+        The output stream is closed by ``stop()`` after the supervisor exits;
+        the forwarder then emits the ``_END`` sentinel.
+        """
         active = self._st.active
         if active is not None:
             await self._cancel_round(active)
@@ -458,7 +531,6 @@ class SuperHarness:
         self._st.pending_queue.clear()
         self._st.paused_query = None
         self._transition(HarnessState.TERMINATED)
-        await self._st.output_queue.put(_END)
         cmd.ack.set_result(None)
 
     # ------------------------------------------------------------------
@@ -466,36 +538,29 @@ class SuperHarness:
     # ------------------------------------------------------------------
 
     def _start_round(self, query: str) -> ActiveRound:
-        """Create an ActiveRound and schedule its asyncio.Task.
+        """Create an ActiveRound (with a pre-round baseline snapshot) and schedule it.
 
-        The task runs in a copied context where ``_ACTIVE_ROUND`` is set to
-        the new round, so SnapshotRail can locate the round during ReAct
-        hook callbacks without explicit threading.
+        The round task sets ``_ACTIVE_ROUND`` to this round in its own context
+        before driving invoke, so SnapshotRail locates it during ReAct hooks.
         """
         round_id = self._st.next_round_id()
-        steering_queue: asyncio.Queue[str] = asyncio.Queue()
+        steering_queue: asyncio.Queue = asyncio.Queue()
+        pre_round = capture_snapshot(self._agent, self._session, index=0)
 
-        # Build the ActiveRound shell before the task starts so we can refer
-        # to it from inside the task. The task field is set right after.
-        # Use a sentinel future-like placeholder for task until create_task.
-        # We construct ActiveRound first, then assign .task once the Task is
-        # created.
         active = ActiveRound(
             round_id=round_id,
             original_query=query,
             deep_agent=self._agent,
-            task=None,  # type: ignore[arg-type]  # filled in below
+            task=None,  # type: ignore[arg-type]  # assigned right after create_task
             steering_queue=steering_queue,
+            pre_round_snapshot=pre_round,
         )
 
         async def _runner() -> None:
             _ACTIVE_ROUND.set(active)
             await self._run_round(active)
 
-        task = asyncio.create_task(
-            _runner(),
-            name=f"super_harness_round[{round_id}]",
-        )
+        task = asyncio.create_task(_runner(), name=f"super_harness_round[{round_id}]")
         active.task = task
         self._st.active = active
         logger.info(
@@ -506,66 +571,110 @@ class SuperHarness:
         return active
 
     async def _run_round(self, active: ActiveRound) -> None:
-        """Drive the inner ReActAgent.stream() and forward chunks.
+        """Drive react_agent.invoke(_streaming=True) for one round.
 
-        Pushes a _Cmd_RoundFinished to the control channel on completion or
-        on any exception (including CancelledError for immediate abort/pause).
+        invoke streams llm chunks into the session as it runs; the final result
+        is written to the session afterward. Both reach the output queue via the
+        forwarder. On cancellation (immediate abort / pause) the CancelledError
+        propagates so invoke's own cleanup runs; a _Cmd_RoundFinished is always
+        posted so the supervisor can transition.
         """
         error: BaseException | None = None
         try:
-            inputs = {"query": active.original_query}
-            async for chunk in self._agent.react_agent.stream(
+            inputs = {
+                "query": active.original_query,
+                "_steering_queue": active.steering_queue,
+            }
+            final_result = await self._agent.react_agent.invoke(
                 inputs,
                 self._session,
-            ):
-                await self._st.output_queue.put(chunk)
-        except asyncio.CancelledError:
-            # Immediate abort or pause path. Do not re-raise into supervisor:
-            # we still want to deliver the RoundFinished signal so the
-            # supervisor can transition cleanly.
-            logger.info(
-                "[SuperHarness] round_id=%s cancelled",
-                active.round_id,
+                _streaming=True,
             )
+            # Stream the final result (llm token chunks were already streamed).
+            if isinstance(final_result, list):
+                for schema in final_result:
+                    await self._session.write_stream(schema)
+            else:
+                await self._agent.react_agent.write_invoke_result_to_stream(
+                    final_result,
+                    self._session,
+                )
+        except asyncio.CancelledError:
+            logger.info("[SuperHarness] round_id=%s cancelled", active.round_id)
             raise
         except Exception as exc:  # noqa: BLE001 - reported via control channel
-            logger.exception(
-                "[SuperHarness] round_id=%s crashed",
-                active.round_id,
-            )
+            logger.exception("[SuperHarness] round_id=%s crashed", active.round_id)
             error = exc
         finally:
-            # Always notify the supervisor. For CancelledError this runs in
-            # the finally block before the exception re-raises.
             await self._control.put(
                 _Cmd_RoundFinished(round_id=active.round_id, error=error),
             )
 
     async def _cancel_round(self, active: ActiveRound) -> None:
-        """Cancel the given round's task and await its termination."""
-        if active.task is None or active.task.done():
+        """Cancel a round task and await its termination.
+
+        Swallows the round task's own CancelledError, but re-raises if the
+        supervisor itself is being cancelled (so shutdown propagates and the
+        supervisor never becomes un-cancellable).
+        """
+        task = active.task
+        if task is None or task.done():
             return
-        active.task.cancel()
+        task.cancel()
         try:
-            await active.task
-        except (asyncio.CancelledError, Exception):
-            # Already logged in _run_round; swallow here so the supervisor
-            # continues without escalating cancellation upstream.
-            pass
+            await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling() > 0:
+                raise
+        except Exception:
+            logger.debug(
+                "[SuperHarness] round task raised during cancel",
+                exc_info=True,
+            )
+
+    async def _forward_outputs(self) -> None:
+        """Pump session stream chunks into the output queue for the harness life.
+
+        Runs until ``stop()`` closes the session stream (END_FRAME ends the
+        iterator), then emits the ``_END`` sentinel so ``outputs()`` terminates.
+        """
+        try:
+            async for chunk in self._session.stream_iterator():
+                await self._st.output_queue.put(chunk)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("[SuperHarness] output forwarder crashed")
+        finally:
+            await self._st.output_queue.put(_END)
+
+    async def _emit_round_aborted(self, round_id: int, kind: str) -> None:
+        """Emit a marker chunk so consumers know prior chunks of this round are void.
+
+        immediate abort / pause roll back internal state, but chunks already
+        forwarded to the consumer cannot be recalled. This marker lets a
+        consumer discard the aborted round's output.
+        """
+        await self._st.output_queue.put(
+            OutputSchema(
+                type="round_aborted",
+                index=0,
+                payload={"round_id": round_id, "kind": kind},
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Rollback
     # ------------------------------------------------------------------
 
-    async def _rollback_to_snapshot(
-        self,
-        snapshot: SafeStateSnapshot | None,
-    ) -> None:
+    async def _rollback_to_snapshot(self, snapshot: SafeStateSnapshot | None) -> None:
         """Restore context messages + DeepAgentState to the given snapshot.
 
-        When ``snapshot`` is None (first iteration aborted before any
-        snapshot was captured), fall back to ``clear_context_messages``
-        which preserves chat history but drops the in-progress round.
+        Both capture and restore use ``with_history=False`` so only the
+        current-round message segment is rewound; the persisted history segment
+        is preserved. When ``snapshot`` is None, fall back to
+        ``clear_context_messages`` (drops the in-progress round, keeps history).
         """
         if self._session is None or self._agent is None:
             return
@@ -599,9 +708,7 @@ class SuperHarness:
                 logger.exception(
                     "[SuperHarness] clear_context_messages failed during rollback",
                 )
-            logger.info(
-                "[SuperHarness] no safe snapshot; cleared current-round messages",
-            )
+            logger.info("[SuperHarness] no snapshot; cleared current-round messages")
 
     # ------------------------------------------------------------------
     # State helpers
