@@ -56,6 +56,9 @@ from openjiuwen.core.common.logging import (
 )
 
 if TYPE_CHECKING:
+    from openjiuwen.auto_harness.rails.cancellation_rail import (
+        CancellationRail,
+    )
     from openjiuwen.core.single_agent.rail.base import (
         AgentRail,
     )
@@ -111,6 +114,7 @@ class AutoHarnessOrchestrator:
         stream_rails: Optional[List["AgentRail"]] = None,
     ) -> None:
         self.config = config
+        self._cancellation_rail: Optional["CancellationRail"] = None
         self.stream_rails: List["AgentRail"] = (
             list(stream_rails) if stream_rails else []
         )
@@ -189,6 +193,45 @@ class AutoHarnessOrchestrator:
         self._pending_interactions: dict[
             str, asyncio.Future[Any]
         ] = {}
+        self._cancelled: bool = False
+
+        # Create and bind CancellationRail for agent-level cancellation
+        self._setup_cancellation_rail()
+
+    def _setup_cancellation_rail(self) -> None:
+        """Create CancellationRail and add it to stream_rails."""
+        # Import here to avoid circular dependency at module level
+        from openjiuwen.auto_harness.rails.cancellation_rail import (
+            CancellationRail,
+        )
+
+        self._cancellation_rail = CancellationRail()
+        self._cancellation_rail.bind(self)
+        self.stream_rails.append(self._cancellation_rail)
+        logger.info(
+            "[AutoHarnessOrchestrator] CancellationRail bound and added to stream_rails"
+        )
+
+    def cancel(self) -> None:
+        """Request the orchestrator to stop execution.
+
+        Called by the service when a cancellation request is received.
+        Pipelines check should_cancel at iteration boundaries.
+        CancellationRail (in stream_rails) checks at agent callbacks.
+        """
+        self._cancelled = True
+        logger.info(
+            "[AutoHarnessOrchestrator] cancellation requested"
+        )
+
+    @property
+    def should_cancel(self) -> bool:
+        """Return True if cancellation was requested.
+
+        Pipelines should check this property at task iteration boundaries,
+        similar to budget.should_stop checks.
+        """
+        return self._cancelled
 
     @staticmethod
     def _msg(text: str) -> OutputSchema:
@@ -290,6 +333,7 @@ class AutoHarnessOrchestrator:
         self._results = []
         self._last_cycle_result = CycleResult()
         self.artifacts = ArtifactStore()
+        self._cancelled = False  # Reset cancellation state for new session
         self.budget.start()
         yield self._msg("会话启动")
         logger.info(

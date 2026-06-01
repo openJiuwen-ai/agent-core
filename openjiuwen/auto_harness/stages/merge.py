@@ -60,6 +60,7 @@ class MergeActivationBlock:
         self,
         orchestrator: Any,
         verified_tasks: list[VerifiedExtensionTask],
+        package_name: str = "",
     ) -> AsyncIterator[Any]:
         from openjiuwen.auto_harness.agents.factory import (
             create_merge_ext_agent,
@@ -68,10 +69,20 @@ class MergeActivationBlock:
         session_root = Path(orchestrator.ensure_session_runtime_dir())
         runtime_exts = [t.ctx.require_artifact("runtime_extension") for t in verified_tasks]
         designs = [t.design for t in verified_tasks]
-        merged_name = await _derive_merged_name(
-            orchestrator.config,
-            designs,
-        )
+
+        # Use pre-generated package_name if available
+        if package_name:
+            merged_name = package_name
+            logger.info(
+                "[MergeActivate] using pre-generated package_name: %s",
+                merged_name
+            )
+        else:
+            # Fallback: derive from designs (legacy behavior)
+            merged_name = await _derive_merged_name(
+                orchestrator.config,
+                designs,
+            )
 
         yield _merge_event("running", merged_name=merged_name, repair_rounds=0)
 

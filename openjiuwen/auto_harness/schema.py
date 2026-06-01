@@ -261,6 +261,7 @@ class ExtensionDesign:
     harness_config_patch: Dict[str, Any] = field(
         default_factory=dict
     )
+    skill_source: str = ""
 
 
 @dataclass
@@ -270,6 +271,7 @@ class ExtensionDesignArtifact:
     designs: List["ExtensionDesign"] = field(
         default_factory=list
     )
+    package_name: str = ""  # Final package name
 
 
 @dataclass
@@ -507,6 +509,13 @@ class AutoHarnessConfig:
     skills_dirs: List[str] = field(
         default_factory=list
     )
+    community_skill_repos: List[str] = field(
+        default_factory=lambda: [
+            "https://github.com/anthropics/skills.git",
+            "https://github.com/JimLiu/baoyu-skills.git",
+        ]
+    )
+    community_skill_cache_dir: str = ""
     stage_registrars: List[str] = field(
         default_factory=list
     )
@@ -625,6 +634,17 @@ class AutoHarnessConfig:
                 / "runtime_extensions"
             )
         return ".auto_harness/runtime_extensions/"
+
+    @property
+    def resolved_community_skill_cache_dir(self) -> str:
+        """Community skill repo cache directory."""
+        if self.community_skill_cache_dir:
+            return self.community_skill_cache_dir
+        if self.data_dir:
+            return str(
+                Path(self.data_dir) / "skills-cache"
+            )
+        return ".auto_harness/skills-cache/"
 
     def resolve_repo_name(self) -> str:
         """Resolve the repository directory name used for local cache paths."""
@@ -752,6 +772,16 @@ class AutoHarnessConfig:
             cfg.skills_dirs = [
                 str(v) for v in data["skills_dirs"]
             ]
+        if "community_skill_repos" in data and isinstance(
+            data["community_skill_repos"], list
+        ):
+            cfg.community_skill_repos = [
+                str(v) for v in data["community_skill_repos"]
+            ]
+        if "community_skill_cache_dir" in data:
+            cfg.community_skill_cache_dir = str(
+                data["community_skill_cache_dir"]
+            )
         if "stage_registrars" in data and isinstance(
             data["stage_registrars"], list
         ):

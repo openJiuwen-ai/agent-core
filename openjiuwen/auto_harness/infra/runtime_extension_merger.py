@@ -205,6 +205,9 @@ def _do_merge(
     _copy_source_files(all_files, merged_root, rename_map)
     _copy_skill_directories(artifacts, merged_root, skill_rename_map)
 
+    # ---- Step 5.5: merge requirements.txt files ----
+    _merge_requirements_files(merged_root)
+
     # ---- Step 6: write empty __init__.py for all package dirs ----
     _write_empty_inits(merged_root)
 
@@ -237,6 +240,56 @@ def _copy_source_files(
         dest_path = merged_root / dest_rel
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(info.abs_path, dest_path)
+
+
+def _merge_requirements_files(merged_root: Path) -> None:
+    """Merge all requirements*.txt files into a single requirements.txt.
+
+    After _copy_source_files, multiple extensions' requirements.txt files
+    may be renamed to requirements__<ext_name>.txt due to conflicts.
+    This function merges them into one deduplicated requirements.txt.
+    """
+    # Find all requirements files (including renamed ones)
+    req_files = list(merged_root.glob("requirements*.txt"))
+    if not req_files:
+        return
+
+    # If only one file and it's named requirements.txt, nothing to do
+    if len(req_files) == 1 and req_files[0].name == "requirements.txt":
+        return
+
+    # Collect all dependencies, deduplicate while preserving order
+    all_deps: list[str] = []
+    seen_deps: set[str] = set()
+
+    for req_file in sorted(req_files):
+        try:
+            content = req_file.read_text(encoding="utf-8").strip()
+        except UnicodeDecodeError:
+            # Try other encodings for robustness
+            content = req_file.read_text(encoding="utf-8", errors="replace").strip()
+
+        for line in content.splitlines():
+            line = line.strip()
+            # Skip empty lines and comments
+            if not line or line.startswith("#"):
+                continue
+            # Normalize: remove version specifiers for dedup check
+            # but keep original line for output
+            pkg_name = line.split("==")[0].split(">=")[0].split("<=")[0].split("~=")[0].split("[")[0].strip()
+            if pkg_name and pkg_name not in seen_deps:
+                seen_deps.add(pkg_name)
+                all_deps.append(line)
+
+    # Write merged requirements.txt
+    merged_content = "\n".join(all_deps) + "\n" if all_deps else ""
+    merged_req = merged_root / "requirements.txt"
+    merged_req.write_text(merged_content, encoding="utf-8")
+
+    # Remove original requirements files
+    for req_file in req_files:
+        if req_file != merged_req:
+            req_file.unlink()
 
 
 def _copy_skill_directories(

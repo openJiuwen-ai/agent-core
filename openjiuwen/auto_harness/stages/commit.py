@@ -37,6 +37,7 @@ from openjiuwen.auto_harness.schema import (
     StageResult,
     TaskStatus,
 )
+from openjiuwen.harness.deep_agent import DeepAgent
 
 if TYPE_CHECKING:
     from openjiuwen.auto_harness.infra.git_operations import (

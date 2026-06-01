@@ -836,6 +836,10 @@ class CIGateRunner:
             self._prepared = True
             return
 
+        # Pre-install uv if command requires it but uv is not available
+        if "uv" in self._install_command:
+            await self._ensure_uv_available()
+
         proc = await self._run_shell_command(self._install_command)
         stdout, _ = await proc.communicate()
         output = decode_stdout(stdout)
@@ -845,6 +849,45 @@ class CIGateRunner:
                 f"{output.strip()[-1000:]}"
             )
         self._prepared = True
+
+    async def _ensure_uv_available(self) -> None:
+        """Ensure uv is installed before running uv-based commands."""
+        env = self._command_env()
+
+        # Check if uv is already available
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "uv",
+                "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            await proc.communicate()
+            if proc.returncode == 0:
+                return  # uv is available
+        except FileNotFoundError:
+            pass  # uv not found, need to install
+
+        # Install uv via pip
+        logger.info("[CIGateRunner] uv not found, installing via pip")
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "uv",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            error = stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                f"Failed to install uv: {error[:500]}"
+            )
+        logger.info("[CIGateRunner] uv installed successfully")
 
     @staticmethod
     def _sanitize_failure_output(output: str) -> str:

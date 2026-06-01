@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
 
+from openjiuwen.auto_harness.schema import AutoHarnessConfig
+from openjiuwen.auto_harness.pipelines import EXTENDED_EVOLVE_PIPELINE
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.single_agent.schema.agent_card import (
     AgentCard,
@@ -18,6 +20,7 @@ from openjiuwen.core.sys_operation import (
     SysOperation,
     SysOperationCard,
 )
+from openjiuwen.harness.deep_agent import AgentRail, DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.auto_harness.prompts.sections import (
@@ -30,7 +33,6 @@ if TYPE_CHECKING:
 _PACKAGE_DIR = Path(__file__).resolve().parent.parent
 _SKILLS_DIR = str(_PACKAGE_DIR / "skills")
 _PROMPTS_DIR = _PACKAGE_DIR / "prompts"
-logger = logging.getLogger(__name__)
 
 
 def _build_trusted_local_sys_operation(
@@ -325,8 +327,20 @@ def _build_skill_rail(
     from openjiuwen.harness.rails.skills.skill_use_rail import (
         SkillUseRail,
     )
+    from openjiuwen.auto_harness.infra.skill_source_manager import (
+        community_skill_cache_skill_dirs,
+    )
 
-    roots = [_SKILLS_DIR, *config.skills_dirs]
+    # Community skills only apply to extended evolve pipeline
+    is_extended = (
+        config.pipeline_preference == EXTENDED_EVOLVE_PIPELINE
+    )
+    community_dirs = (
+        community_skill_cache_skill_dirs(config)
+        if is_extended
+        else []
+    )
+    roots = [_SKILLS_DIR, *config.skills_dirs, *community_dirs]
     skills_dir: list[str] = []
     enabled_skills: list[str] = []
     for root in roots:

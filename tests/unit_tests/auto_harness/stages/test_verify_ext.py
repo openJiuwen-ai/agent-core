@@ -188,6 +188,11 @@ async def test_verify_ext_loads_generated_runtime_extension(
 
     with patch(
         "openjiuwen.auto_harness.stages.verify."
+        "_install_extension_dependencies",
+        new_callable=AsyncMock,
+        return_value=(True, ""),
+    ), patch(
+        "openjiuwen.auto_harness.stages.verify."
         "_check_ruff",
         new_callable=AsyncMock,
         return_value=[],
@@ -216,21 +221,34 @@ async def test_verify_ext_loads_generated_runtime_extension(
 async def test_verify_ext_fails_when_manifest_missing(
     tmp_path: Path,
 ):
+    from openjiuwen.auto_harness.infra.runtime_extension_static_checks import (
+        ExtStaticCheckResult,
+    )
+
     ctx = _make_task_context(tmp_path)
     wt_path = tmp_path / "wt"
     build = _write_scaffold(wt_path)
     Path(build.config_path).unlink()
     ctx.put_artifact("extension_build", build)
 
+    static_result = ExtStaticCheckResult(
+        errors=["manifest_missing: harness_config.yaml"],
+        rails_count=0,
+        tools_count=0,
+        skills_count=0,
+        skill_dirs_count=0,
+    )
+
     with patch(
         "openjiuwen.auto_harness.stages.verify."
-        "_check_ruff",
+        "_install_extension_dependencies",
         new_callable=AsyncMock,
-        return_value=[],
+        return_value=(True, ""),
     ), patch(
         "openjiuwen.auto_harness.stages.verify."
-        "_check_imports",
-        return_value=[],
+        "run_static_checks_against_runtime",
+        new_callable=AsyncMock,
+        return_value=static_result,
     ):
         result = await _collect_last_result(
             ExtendVerifyStage(),
@@ -299,6 +317,11 @@ async def test_verify_ext_repairs_manifest_schema_failure(
 
     with patch(
         "openjiuwen.auto_harness.stages.verify."
+        "_install_extension_dependencies",
+        new_callable=AsyncMock,
+        return_value=(True, ""),
+    ), patch(
+        "openjiuwen.auto_harness.stages.verify."
         "_check_ruff",
         new_callable=AsyncMock,
         return_value=[],
@@ -339,18 +362,17 @@ def test_verify_ext_prompt_requires_artifact_level_acceptance(
         rails_count=0,
         tools_count=1,
         skills_count=1,
-        skill_dirs_count=1,
         previous_error="",
     )
 
-    assert "文件/产物生成类 Tool 必须验证真实产物" in prompt
+    assert "文件产物验收 (仅文件生成类 Tool)" in prompt
     assert "tmp_path" in prompt
     assert "zipfile" in prompt
     assert "ppt/presentation.xml" in prompt
-    assert "ppt/slides/slide*.xml" in prompt
-    assert "不得接受 JSON/Markdown/" in prompt
-    assert "harness_config.yaml 中实际声明的 module/class" in prompt
-    assert "openjiuwen.extensions.harness.<extension_name>." in prompt
+    assert "slide*.xml" in prompt
+    assert "禁止 JSON/Markdown 冒充" in prompt
+    assert "必须从 harness_config.yaml 实际声明的 module/class 获取" in prompt
+    assert "openjiuwen.extensions.harness.<extension_name>" in prompt
 
 
 def test_verify_ext_fix_prompt_rejects_placeholder_artifacts(
@@ -373,9 +395,9 @@ def test_verify_ext_fix_prompt_rejects_placeholder_artifacts(
         python_executable="/usr/bin/python3",
     )
 
-    assert "必须修复 Tool 生成真实目标格式" in prompt
-    assert "不得用 JSON/Markdown/纯文本占位" in prompt
-    assert "返回 success=true" in prompt
+    assert "禁止返回 JSON/Markdown 占位" in prompt
+    assert "禁止 JSON/Markdown 冒充" in prompt
+    assert "success=true" in prompt
 
 
 def test_verify_ext_static_fix_prompt_uses_manifest_modules(
@@ -436,7 +458,7 @@ async def test_verify_ext_reuses_generated_test_after_fix(
                 )
             else:
                 prompt_kinds.append("fix")
-                assert "复跑同一个测试文件" in query
+                assert "verify_ext 验收测试失败" in query
             yield OutputSchema(
                 type="message",
                 index=0,
@@ -475,7 +497,6 @@ async def test_verify_ext_reuses_generated_test_after_fix(
                 rails_count=1,
                 tools_count=1,
                 skills_count=0,
-                skill_dirs_count=0,
             )
         ]
 

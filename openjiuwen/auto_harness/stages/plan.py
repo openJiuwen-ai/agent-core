@@ -5,8 +5,8 @@
 from __future__ import annotations
 
 import json
-import logging
 import re
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import (
@@ -15,6 +15,7 @@ from typing import (
     AsyncIterator,
 )
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.auto_harness.contexts import (
     SessionContext,
 )
@@ -43,8 +44,6 @@ if TYPE_CHECKING:
     from openjiuwen.auto_harness.experience.experience_store import (
         ExperienceStore,
     )
-
-logger = logging.getLogger(__name__)
 
 
 # ------------------------------------------------------------------
@@ -171,13 +170,23 @@ class ExtendPlanStage(PlanStage):
 
         # Stream agent-based design
         designs: list[ExtensionDesign] = []
+        package_name_raw: str | None = None
         if analysis.gaps:
             output = ""
             try:
                 from openjiuwen.auto_harness.agents import (
                     create_design_ext_agent,
                 )
+                from openjiuwen.auto_harness.infra.skill_source_manager import (
+                    format_community_skill_list,
+                )
 
+                # Get available community skills for reuse
+                community_skill_list = format_community_skill_list(
+                    ctx.orchestrator.config,
+                )
+
+                # Run design_ext agent
                 agent = create_design_ext_agent(
                     ctx.orchestrator.config,
                     extra_rails=ctx.orchestrator.stream_rails or None,
@@ -188,6 +197,7 @@ class ExtendPlanStage(PlanStage):
                         ctx.orchestrator.config
                         .max_tasks_per_session
                     ),
+                    community_skill_list=community_skill_list,
                 )
                 async for chunk in agent.stream(
                     {"query": query}
@@ -196,7 +206,7 @@ class ExtendPlanStage(PlanStage):
                     if text:
                         output += text
                     yield chunk
-                designs = parse_extension_designs(output)
+                package_name_raw, designs = parse_extension_designs(output)
             except Exception:
                 logger.exception(
                     "Agent extension design failed"
@@ -220,7 +230,20 @@ class ExtendPlanStage(PlanStage):
             designs,
             ctx.orchestrator.config.max_tasks_per_session,
         )
-        artifact = ExtensionDesignArtifact(designs=designs)
+
+        timestamp = int(time.time())
+        package_name = ""
+        if package_name_raw:
+            package_name = f"{package_name_raw}_{timestamp}"
+            logger.info(
+                "[ExtendPlanStage] using parsed package_name: %s",
+                package_name,
+            )
+
+        artifact = ExtensionDesignArtifact(
+            designs=designs,
+            package_name=package_name,
+        )
         messages = [
             "Extension design complete: "
             f"{len(designs)} design(s)"
@@ -264,6 +287,7 @@ def _persist_extension_designs(
             asdict(design)
             for design in artifact.designs
         ],
+        "package_name": artifact.package_name,
     }
     runs_path = Path(runs_dir)
     runs_path.mkdir(parents=True, exist_ok=True)
@@ -389,6 +413,7 @@ def _build_design_query(
     analysis: GapAnalysisArtifact,
     *,
     max_designs: int = 10,
+    community_skill_list: str = "",
 ) -> str:
     """Build the query prompt for the design_ext agent."""
     gap_lines: list[str] = []
@@ -407,7 +432,7 @@ def _build_design_query(
         )
     gap_summary = "\n".join(gap_lines)
 
-    return (
+    query = (
         "根据以下 runtime extension 能力缺口分析结果，"
         "为每个独立 gap 设计一个 harness 运行时扩展方案，"
         f"最多输出 {max(0, max_designs)} 个 ExtensionDesign。\n\n"
@@ -434,15 +459,22 @@ def _build_design_query(
         "设计拆分标准：每个可独立实现和验证的 gap 输出一个 design。"
         "全局硬约束必须输出为独立 constraint design，普通新增能力"
         "输出为 capability design。必须保留用户目标中的"
-        "关键实体和产物类型，例如“华为风格”“PPT”“办公拓展”，"
+        "关键实体和产物类型，例如“PPT”“办公拓展”，"
         "不要泛化成需求收集、需求报告或普通办公扩展。\n\n"
         f"差距列表:\n{gap_summary}\n\n"
         "命名规则：extension_name 必须是能表达用户能力的"
         "snake_case 名称。若 gap 来自明确竞品，可使用竞品名前缀；"
         "若来源是用户需求或领域范式，应按能力命名，例如 "
-        "`huawei_ppt_generator`、`office_ppt_generator`。"
+        "`excel_financial_generator`、`office_ppt_generator`。"
         "不要使用 `user_demand_*` 这类丢失具体产物和场景的泛名。\n\n"
-        "输出 JSON 数组，可包含多个元素，包含:\n"
+        "首先输出 session 级别的扩展包名称：\n"
+        "- package_name: snake_case，表达本轮优化的核心能力\n"
+        "- 保留用户目标关键实体（如品牌、产物类型）\n"
+        "- 不超过 30 字符（不含 timestamp 后缀）\n"
+        "- 不要泛化名称（如 office_tools、user_demand）\n\n"
+        "输出 JSON 对象格式：\n"
+        '{"package_name": "...", "designs": [...]}\n\n'
+        "designs 数组元素包含:\n"
         "- gap_id: 对应的 gap ID\n"
         "- extension_name: 扩展名称 "
         "(snake_case，保留用户目标关键实体)\n"
@@ -455,10 +487,18 @@ def _build_design_query(
         "全局适用时可为空数组\n"
         "- components: 组件列表 "
         "(按需选择 rail/tool/skill；不要强制包含 rail)\n"
+        "- skill_source: 空字符串表示从零生成 skill；"
+        "'community:<skill_name>' 表示复用社区 skill(匹配时优先使用)\n"
         "- file_plan: 文件规划 "
         '{"root": "...", "manifest": "..."}\n'
         "- harness_config_patch: harness 配置补丁\n"
     )
+
+    # Append community skill list for reuse reference
+    if community_skill_list:
+        query += "\n\n" + community_skill_list + "\n"
+
+    return query
 
 
 def _cap_extension_designs(
@@ -614,7 +654,12 @@ def _source_name_prefix(source: str) -> str:
 
 
 def _build_design(gap: Gap) -> ExtensionDesign:
-    """Heuristic fallback: convert a gap to an extension design."""
+    """Heuristic fallback: convert a gap to an extension design.
+
+    Note: skill_source is intentionally left empty in fallback mode.
+    Skill matching is handled by the primary agent path via model-based
+    pre-filtering, not by heuristic keyword matching.
+    """
     feature_slug = _slugify(gap.feature or "")
     competitor_slug = _source_name_prefix(gap.competitor)
     if competitor_slug and feature_slug:
@@ -704,7 +749,6 @@ def _build_fallback_designs(
         if design.kind != "constraint"
     ][:max(0, max_capabilities)]
     return constraints + capabilities
-
 
 __all__ = [
     "PlanStage",
