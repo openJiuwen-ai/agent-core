@@ -23,7 +23,10 @@ Tools never reach into `TeamDatabase` directly — they go through `TeamBackend`
 |---|---|---|---|
 | `build_team` | ✓ | | entry point — description carries the full workflow |
 | `clean_team` | ✓ (temporary only) | | requires every teammate shutdown first; not wired for `lifecycle="persistent"` (operator tears those down via SDK facades) |
-| `spawn_member` | ✓ | | takes optional `model_config_allocator` callback; `role_type ∈ {teammate (default), human_agent, bridge_agent, external_cli}`; `human_agent` rejects `model_name`/`prompt` and requires HITT; `external_cli` requires `cli_agent` (a kind declared in `TeamAgentSpec.external_cli_agents`) + `desc`, dispatches to `spawn_external_cli_agent` |
+| `spawn_teammate` | ✓ | | spawn an ordinary LLM teammate; optional `model_config_allocator` callback; flat schema `member_name`/`display_name`/`desc`/`prompt?`/`model_name?`. Always wired |
+| `spawn_human_agent` | ✓ | | spawn a HITT human member; schema is `member_name`/`display_name`/`desc` only (no `model_name`/`prompt`); wired only when `hitt_enabled()` |
+| `spawn_bridge_agent` | ✓ | | spawn a bridge to a remote agent; `desc` doubles as the connect briefing; optional `mailbox_inject_mode`/`protocol`/`adapter_config`/`model_name`; wired only when `bridge_enabled()` |
+| `spawn_external_cli` | ✓ | | spawn a third-party CLI teammate; requires `cli_agent` (a kind declared in `TeamAgentSpec.external_cli_agents`) + `desc`; wired only when `external_cli_kinds()` is non-empty |
 | `shutdown_member` | ✓ | | `force=True` skips the normal shutdown sequence |
 | `approve_plan` | ✓ (plan_mode only) | | wired only when `teammate_mode == "plan_mode"` |
 | `approve_tool` | ✓ (plan_mode only) | | same gating as `approve_plan` |
@@ -99,7 +102,7 @@ Concrete sections for an entry-point tool description:
 
 | Section | Purpose |
 |---|---|
-| Call order | Prevent wrong sequencing (e.g. "build_team before create_task before spawn_member") |
+| Call order | Prevent wrong sequencing (e.g. "build_team before create_task before spawn_teammate") |
 | Design principles | Constrain how the LLM designs tasks (goal-oriented, single-owner, coarse-grained) |
 | Workflow steps | Full numbered procedure from start to shutdown |
 | Notification semantics | "Messages auto-delivered, don't poll" — kill the LLM's urge to busy-wait |
@@ -163,7 +166,7 @@ The ability layer renders tool results with `str(result)` — `MappedToolOutput.
 
 | Pattern | Tools | Strategy |
 |---|---|---|
-| **Pure text** | `build_team`, `clean_team`, `spawn_member`, `shutdown_member`, `approve_*` | Confirmation sentence — minimal tokens |
+| **Pure text** | `build_team`, `clean_team`, the four `spawn_*` tools, `shutdown_member`, `approve_*` | Confirmation sentence — minimal tokens |
 | **Structured text lines** | `list_members`, `view_task` (list), `create_task` (batch) | One entity per line, dense format |
 | **Detail text** | `view_task` (get) | Full fields with labeled lines |
 | **Time context** | `view_task` (list + get) | Both tiers render `updated_at` via `timefmt.format_time_context` as `<absolute local time> (<relative diff>)`. `map_result` can't take args, so it calls `get_current_time()` internally and guards on `updated_at is not None` |
@@ -195,7 +198,7 @@ Long `_desc` entries can live in Markdown files under `locales/descs/<lang>/<too
 - Supports `{{placeholder}}` interpolation — pass keyword arguments through `t("tool", param="value")`.
 - When migrating a `_desc` from `STRINGS` to a `.md` file, delete the dict entry and leave a comment.
 
-Current `descs/` population: `approve_plan`, `approve_tool`, `build_team`, `claim_task`, `clean_team`, `create_task`, `enter_worktree`, `exit_worktree`, `list_members`, `send_message`, `shutdown_member`, `spawn_member`, `update_task`, `view_task`, `workspace_meta`.
+Current `descs/` population: `approve_plan`, `approve_tool`, `build_team`, `claim_task`, `clean_team`, `create_task`, `enter_worktree`, `exit_worktree`, `list_members`, `send_message`, `shutdown_member`, `spawn_bridge_agent`, `spawn_external_cli`, `spawn_human_agent`, `spawn_teammate`, `update_task`, `view_task`, `workspace_meta`.
 
 ## Prompt Layering: Tool Description vs System Prompt
 
@@ -241,7 +244,7 @@ Backend methods (`task_manager.py`) return typed models. Tool `invoke()` calls `
 
 `TeamBackend` / `TeamTaskManager` methods don't return raw `bool` — they return result wrappers:
 
-- `MemberOpResult` — `ok`, `reason`; used by `spawn_member`, `shutdown_member`.
+- `MemberOpResult` — `ok`, `reason`; used by the four `spawn_*` tools and `shutdown_member`.
 - `TaskCreateResult` — `ok`, `reason`, plus `task` which proxies attribute access via `__getattr__` so old `result.task_id` call sites still work.
 - `TaskOpResult` — `ok`, `reason`; used by `claim`, `complete`, `reset`, `assign`, `update_task`, `approve_plan`, `add_dependencies`.
 
