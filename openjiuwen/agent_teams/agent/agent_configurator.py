@@ -63,7 +63,7 @@ def _resolve_team_mode(spec: TeamAgentSpec) -> str:
     # BRIDGE_AGENT entries are bridge-to-remote declarations — neither
     # is a signal to flip the team away from "default". A roster of
     # ordinary predefined teammates derives "hybrid": the leader keeps
-    # its spawn_member tool so the roster can still grow at runtime.
+    # its spawn_* tools so the roster can still grow at runtime.
     # Lock it down by setting an explicit "predefined" team_mode.
     avatar_roles = {TeamRole.HUMAN_AGENT, TeamRole.BRIDGE_AGENT}
     non_avatar_predefined = [m for m in spec.predefined_members if m.role_type not in avatar_roles]
@@ -374,7 +374,13 @@ class AgentConfigurator:
 
         from openjiuwen.agent_teams.rails import TeamPolicyRail, TeamToolRail
 
-        exclude = {"spawn_member"} if _resolve_team_mode(spec) == "predefined" else None
+        # Predefined teams pin their roster — strip every dynamic spawn tool
+        # (one per role_type) from the leader's tool set.
+        exclude = (
+            {"spawn_teammate", "spawn_human_agent", "spawn_bridge_agent", "spawn_external_cli"}
+            if _resolve_team_mode(spec) == "predefined"
+            else None
+        )
         team_tool_rail = TeamToolRail(
             team_backend=self.team_backend,
             role=ctx.role.value,

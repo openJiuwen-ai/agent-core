@@ -28,6 +28,7 @@ from pydantic import PrivateAttr
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
+    from openjiuwen.agent_teams.schema.team import MemberOpResult
 
 from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.timefmt import format_time_context
@@ -97,7 +98,10 @@ class TeamTool(Tool, ABC):
 LEADER_ONLY_TOOLS: Set[str] = {
     "build_team",  # Create a new team
     "clean_team",  # Clean up a team
-    "spawn_member",  # Create a new team member
+    "spawn_teammate",  # Spawn an ordinary LLM teammate
+    "spawn_human_agent",  # Spawn a human member (HITT)
+    "spawn_bridge_agent",  # Spawn a bridge to a remote agent
+    "spawn_external_cli",  # Spawn a third-party CLI agent teammate
     "shutdown_member",  # Shutdown a team member
     "approve_plan",  # Approve or reject a member's plan
     "approve_tool",  # Approve or reject a teammate tool call
@@ -280,288 +284,76 @@ class CleanTeamTool(TeamTool):
 # ========== Member Management ==========
 
 
-class SpawnMemberTool(TeamTool):
-    """Create a new team member"""
+class _SpawnToolBase(TeamTool, ABC):
+    """Shared scaffolding for the role-specific spawn tools.
 
-    def __init__(
-        self,
-        team: TeamBackend,
-        t: Translator,
-        *,
-        model_config_allocator: Optional[Callable[[Optional[str]], Optional["Allocation"]]] = None,
-    ):
+    Each concrete subclass owns exactly one ``role_type``: it declares its
+    own flat ``input_params`` schema and implements a single straight-line
+    ``invoke`` — no role branching anywhere. The cross-cutting concerns every
+    spawn tool shares live here: ``member_name`` validation, the persona
+    fallback, ToolOutput construction, and model-facing result mapping.
+    """
+
+    def __init__(self, team: TeamBackend, t: Translator, tool_name: str):
         super().__init__(
             ToolCard(
-                id="team.spawn_member",
-                name="spawn_member",
-                description=t("spawn_member"),
+                id=f"team.{tool_name}",
+                name=tool_name,
+                description=t(tool_name),
             )
         )
         self.team = team
-        self._allocate_model_config = model_config_allocator
-        self.card.input_params = {
-            "type": "object",
-            "properties": {
-                "member_name": {
-                    "type": "string",
-                    "description": t("spawn_member", "member_name"),
-                },
-                "display_name": {
-                    "type": "string",
-                    "description": t("spawn_member", "display_name"),
-                },
-                "desc": {"type": "string", "description": t("spawn_member", "desc")},
-                "role_type": {
-                    "type": "string",
-                    "enum": ["teammate", "human_agent", "bridge_agent", "external_cli"],
-                    "default": "teammate",
-                    "description": t("spawn_member", "role_type"),
-                },
-                "cli_agent": {
-                    "type": "string",
-                    "description": t("spawn_member", "cli_agent"),
-                },
-                "prompt": {"type": "string", "description": t("spawn_member", "prompt")},
-                "model_name": {
-                    "type": "string",
-                    "description": t("spawn_member", "model_name"),
-                },
-                "mailbox_inject_mode": {
-                    "type": "string",
-                    "enum": ["passthrough", "rephrase"],
-                    "default": "passthrough",
-                    "description": t("spawn_member", "mailbox_inject_mode"),
-                },
-                "protocol": {
-                    "type": "string",
-                    "description": t("spawn_member", "protocol"),
-                },
-                "adapter_config": {
-                    "type": "object",
-                    "description": t("spawn_member", "adapter_config"),
-                },
-            },
-            "required": ["member_name", "display_name", "desc"],
-        }
 
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
-        from openjiuwen.agent_teams.schema.status import MemberMode
-        from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+    @staticmethod
+    def _validate_member_name(member_name: Optional[str]) -> Optional[str]:
+        """Validate ``member_name`` at the tool boundary.
 
-        member_name = inputs.get("member_name")
-        display_name = inputs.get("display_name")
-        desc = inputs.get("desc", "")
-        role_type = (inputs.get("role_type") or "teammate").lower()
-
-        if not member_name or not _MEMBER_NAME_PATTERN.match(member_name):
-            return ToolOutput(
-                success=False,
-                error=(
-                    f"Invalid member_name {member_name!r}: must start with a "
-                    "lowercase ASCII letter (a-z), followed by lowercase "
-                    "letters, digits (0-9) or hyphen (-); no uppercase, "
-                    "underscore, whitespace, or non-ASCII characters "
-                    "(including CJK) — member_name is reused as a routing "
-                    "token and a filesystem path segment"
-                ),
-            )
-
-        if role_type not in {"teammate", "human_agent", "bridge_agent", "external_cli"}:
-            return ToolOutput(
-                success=False,
-                error=(
-                    f"Invalid role_type '{role_type}'; expected 'teammate', "
-                    "'human_agent', 'bridge_agent', or 'external_cli'"
-                ),
-            )
-
-        if role_type == "bridge_agent":
-            return await self._spawn_bridge(inputs)
-
-        if role_type == "external_cli":
-            return await self._spawn_external_cli(inputs)
-
-        if role_type == "human_agent":
-            # Capability gate: fail fast to LLM before touching backend.
-            if not self.team.hitt_enabled():
-                return ToolOutput(
-                    success=False,
-                    error=(
-                        "Cannot spawn human agent: HITT capability is disabled "
-                        "(enable_hitt=False on TeamAgentSpec or build_team). "
-                        "Either enable HITT in the team spec or use role_type='teammate'."
-                    ),
-                )
-            if inputs.get("model_name") or inputs.get("prompt"):
-                return ToolOutput(
-                    success=False,
-                    error=(
-                        "role_type='human_agent' does not accept 'model_name' or 'prompt'; "
-                        "human members use the framework template — remove these fields"
-                    ),
-                )
-            result = await self.team.spawn_human_agent(
-                member_name=member_name,
-                display_name=display_name,
-                desc=desc,
-            )
-            return ToolOutput(
-                success=result.ok,
-                data={
-                    "member_name": member_name,
-                    "display_name": display_name,
-                    "role_type": "human_agent",
-                },
-                error=None if result.ok else result.reason,
-            )
-
-        # teammate path (default)
-        mode_str = self.team.teammate_mode.value
-        mode = MemberMode(mode_str)
-        model_name = inputs.get("model_name")
-        allocation = self._allocate_model_config(model_name) if self._allocate_model_config else None
-        card_id = f"{self.team.team_name}_{member_name}"
-        agent_card = AgentCard(id=card_id, name=display_name, description=desc)
-        result = await self.team.spawn_member(
-            member_name=member_name,
-            display_name=display_name,
-            agent_card=agent_card,
-            desc=desc,
-            prompt=inputs.get("prompt"),
-            mode=mode,
-            allocation=allocation,
-        )
-        return ToolOutput(
-            success=result.ok,
-            data={
-                "member_name": member_name,
-                "display_name": display_name,
-                "role_type": "teammate",
-            },
-            error=None if result.ok else result.reason,
-        )
-
-    async def _spawn_bridge(self, inputs: Dict[str, Any]) -> ToolOutput:
-        """Dispatch path for ``role_type='bridge_agent'``.
-
-        Bridge agents are full local teammates paired with a remote
-        independent agent reachable through a pure-text protocol.
-        Persona is required because it is sent to the remote agent
-        via ``adapter.connect`` as the briefing the remote adopts.
-        ``model_name`` is optional (falls back to framework default).
+        Returns:
+            An error message when the name is missing or malformed,
+            otherwise ``None``.
         """
-        from openjiuwen.agent_teams.schema.team import BridgeMailboxInjectMode
-
-        if not self.team.bridge_enabled():
-            return ToolOutput(
-                success=False,
-                error=(
-                    "Cannot spawn bridge agent: Bridge capability is "
-                    "disabled (enable_bridge=False on TeamAgentSpec or "
-                    "build_team). Either enable Bridge in the team "
-                    "spec or use role_type='teammate'."
-                ),
-            )
-
-        member_name = inputs.get("member_name")
-        display_name = inputs.get("display_name")
-        # ``desc`` is the per-tool persona surface; ``prompt`` is a
-        # plain hint (optional). For bridge agents the persona MUST
-        # be non-empty because it doubles as the remote's briefing.
-        persona = inputs.get("desc") or inputs.get("prompt") or ""
-        if not persona:
-            return ToolOutput(
-                success=False,
-                error=(
-                    "role_type='bridge_agent' requires a non-empty "
-                    "'desc' (or 'prompt') — it is the persona/briefing "
-                    "the remote agent adopts via adapter.connect"
-                ),
-            )
-
-        mode_raw = (inputs.get("mailbox_inject_mode") or "passthrough").lower()
-        try:
-            inject_mode = BridgeMailboxInjectMode(mode_raw)
-        except ValueError:
-            return ToolOutput(
-                success=False,
-                error=(f"Invalid mailbox_inject_mode '{mode_raw}'; expected 'passthrough' or 'rephrase'"),
-            )
-
-        adapter_config = inputs.get("adapter_config") or {}
-        if not isinstance(adapter_config, dict):
-            return ToolOutput(
-                success=False,
-                error="adapter_config must be an object/dict",
-            )
-
-        result = await self.team.spawn_bridge_agent(
-            member_name=member_name,
-            display_name=display_name,
-            persona=persona,
-            desc=inputs.get("desc"),
-            model_name=inputs.get("model_name"),
-            mailbox_inject_mode=inject_mode,
-            protocol=inputs.get("protocol") or "",
-            adapter_config=adapter_config,
-        )
-        return ToolOutput(
-            success=result.ok,
-            data={
-                "member_name": member_name,
-                "display_name": display_name,
-                "role_type": "bridge_agent",
-                "mailbox_inject_mode": inject_mode.value,
-                "protocol": inputs.get("protocol") or "",
-            },
-            error=None if result.ok else result.reason,
+        if member_name and _MEMBER_NAME_PATTERN.match(member_name):
+            return None
+        return (
+            f"Invalid member_name {member_name!r}: must start with a "
+            "lowercase ASCII letter (a-z), followed by lowercase letters, "
+            "digits (0-9) or hyphen (-); no uppercase, underscore, "
+            "whitespace, or non-ASCII characters (including CJK) — "
+            "member_name is reused as a routing token and a filesystem "
+            "path segment"
         )
 
-    async def _spawn_external_cli(self, inputs: Dict[str, Any]) -> ToolOutput:
-        """Dispatch path for ``role_type='external_cli'``.
+    @staticmethod
+    def _resolve_persona(inputs: Dict[str, Any]) -> str:
+        """Resolve the persona surface: ``desc`` first, then ``prompt``."""
+        return inputs.get("desc") or inputs.get("prompt") or ""
 
-        Spawns a teammate whose brain is a third-party CLI subprocess
-        (claudecode / codex / ...) driven by an ``ExternalCliRuntime``. The
-        CLI kind is named by ``cli_agent`` and must match a static config
-        declared in ``TeamAgentSpec.external_cli_agents`` — all launch
-        knowledge (command, cwd, MCP injection, env) lives there, so this
-        call carries only the role type and the CLI identifier. ``desc`` is
-        the persona stored on the member row.
+    @staticmethod
+    def _fail(reason: str) -> ToolOutput:
+        """Build a failed ToolOutput carrying a diagnostic reason."""
+        return ToolOutput(success=False, error=reason)
+
+    @staticmethod
+    def _from_result(
+        result: "MemberOpResult",
+        *,
+        member_name: str,
+        display_name: str,
+        role_type: str,
+        **extra: Any,
+    ) -> ToolOutput:
+        """Wrap a backend ``MemberOpResult`` into a ToolOutput.
+
+        Propagates ``result.reason`` into ``error`` on failure so the LLM
+        can diagnose what the backend rejected.
         """
-        member_name = inputs.get("member_name")
-        display_name = inputs.get("display_name")
-        cli_agent = (inputs.get("cli_agent") or "").strip()
-        persona = inputs.get("desc") or inputs.get("prompt") or ""
-
-        if not cli_agent:
-            return ToolOutput(
-                success=False,
-                error=(
-                    "role_type='external_cli' requires 'cli_agent' naming a CLI "
-                    "kind declared in TeamAgentSpec.external_cli_agents "
-                    "(e.g. 'claude' or 'codex')"
-                ),
-            )
-        if not persona:
-            return ToolOutput(
-                success=False,
-                error="role_type='external_cli' requires a non-empty 'desc' (the member persona)",
-            )
-
-        result = await self.team.spawn_external_cli_agent(
-            member_name=member_name,
-            display_name=display_name,
-            cli_agent=cli_agent,
-            persona=persona,
-            desc=inputs.get("desc"),
-        )
         return ToolOutput(
             success=result.ok,
             data={
                 "member_name": member_name,
                 "display_name": display_name,
-                "role_type": "external_cli",
-                "cli_agent": cli_agent,
+                "role_type": role_type,
+                **extra,
             },
             error=None if result.ok else result.reason,
         )
@@ -573,7 +365,302 @@ class SpawnMemberTool(TeamTool):
         role = d.get("role_type", "teammate")
         cli_agent = d.get("cli_agent")
         suffix = f" cli_agent={cli_agent}" if cli_agent else ""
-        return f"Member spawned: member_name={d['member_name']} display_name={d['display_name']} role={role}{suffix}"
+        return (
+            f"Member spawned: member_name={d['member_name']} "
+            f"display_name={d['display_name']} role={role}{suffix}"
+        )
+
+
+class SpawnTeammateTool(_SpawnToolBase):
+    """Spawn an ordinary LLM teammate (``role_type='teammate'``)."""
+
+    def __init__(
+        self,
+        team: TeamBackend,
+        t: Translator,
+        *,
+        model_config_allocator: Optional[Callable[[Optional[str]], Optional["Allocation"]]] = None,
+    ):
+        super().__init__(team, t, "spawn_teammate")
+        self._allocate_model_config = model_config_allocator
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "member_name": {
+                    "type": "string",
+                    "description": t("spawn_teammate", "member_name"),
+                },
+                "display_name": {
+                    "type": "string",
+                    "description": t("spawn_teammate", "display_name"),
+                },
+                "desc": {"type": "string", "description": t("spawn_teammate", "desc")},
+                "prompt": {"type": "string", "description": t("spawn_teammate", "prompt")},
+                "model_name": {
+                    "type": "string",
+                    "description": t("spawn_teammate", "model_name"),
+                },
+            },
+            "required": ["member_name", "display_name", "desc"],
+        }
+
+    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+        from openjiuwen.agent_teams.schema.status import MemberMode
+        from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+        err = self._validate_member_name(inputs.get("member_name"))
+        if err:
+            return self._fail(err)
+
+        member_name = inputs["member_name"]
+        display_name = inputs.get("display_name")
+        desc = inputs.get("desc", "")
+        allocation = (
+            self._allocate_model_config(inputs.get("model_name")) if self._allocate_model_config else None
+        )
+        agent_card = AgentCard(
+            id=f"{self.team.team_name}_{member_name}",
+            name=display_name,
+            description=desc,
+        )
+        result = await self.team.spawn_member(
+            member_name=member_name,
+            display_name=display_name,
+            agent_card=agent_card,
+            desc=desc,
+            prompt=inputs.get("prompt"),
+            mode=MemberMode(self.team.teammate_mode.value),
+            allocation=allocation,
+        )
+        return self._from_result(
+            result,
+            member_name=member_name,
+            display_name=display_name,
+            role_type="teammate",
+        )
+
+
+class SpawnHumanAgentTool(_SpawnToolBase):
+    """Spawn a human member driven by the real user (``role_type='human_agent'``).
+
+    The schema deliberately omits ``model_name`` / ``prompt`` — human members
+    run on the framework template, so there is no field to reject at runtime.
+    The HITT capability check below is a defensive backstop; the tool is not
+    even wired when HITT is disabled (see ``create_team_tools``).
+    """
+
+    def __init__(self, team: TeamBackend, t: Translator):
+        super().__init__(team, t, "spawn_human_agent")
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "member_name": {
+                    "type": "string",
+                    "description": t("spawn_human_agent", "member_name"),
+                },
+                "display_name": {
+                    "type": "string",
+                    "description": t("spawn_human_agent", "display_name"),
+                },
+                "desc": {"type": "string", "description": t("spawn_human_agent", "desc")},
+            },
+            "required": ["member_name", "display_name", "desc"],
+        }
+
+    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+        err = self._validate_member_name(inputs.get("member_name"))
+        if err:
+            return self._fail(err)
+
+        if not self.team.hitt_enabled():
+            return self._fail(
+                "Cannot spawn human agent: HITT capability is disabled "
+                "(enable_hitt=False on TeamAgentSpec or build_team). "
+                "Enable HITT in the team spec or use spawn_teammate instead."
+            )
+
+        member_name = inputs["member_name"]
+        display_name = inputs.get("display_name")
+        result = await self.team.spawn_human_agent(
+            member_name=member_name,
+            display_name=display_name,
+            desc=inputs.get("desc", ""),
+        )
+        return self._from_result(
+            result,
+            member_name=member_name,
+            display_name=display_name,
+            role_type="human_agent",
+        )
+
+
+class SpawnBridgeAgentTool(_SpawnToolBase):
+    """Spawn a bridge agent to a remote independent agent (``role_type='bridge_agent'``).
+
+    A bridge agent is a full local teammate paired with a remote agent reached
+    over a pure-text protocol. ``desc`` is required: it doubles as the local
+    persona and the briefing the remote adopts via ``adapter.connect``. The
+    Bridge capability check is a defensive backstop; the tool is not wired when
+    Bridge is disabled (see ``create_team_tools``).
+    """
+
+    def __init__(self, team: TeamBackend, t: Translator):
+        super().__init__(team, t, "spawn_bridge_agent")
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "member_name": {
+                    "type": "string",
+                    "description": t("spawn_bridge_agent", "member_name"),
+                },
+                "display_name": {
+                    "type": "string",
+                    "description": t("spawn_bridge_agent", "display_name"),
+                },
+                "desc": {"type": "string", "description": t("spawn_bridge_agent", "desc")},
+                "mailbox_inject_mode": {
+                    "type": "string",
+                    "enum": ["passthrough", "rephrase"],
+                    "default": "passthrough",
+                    "description": t("spawn_bridge_agent", "mailbox_inject_mode"),
+                },
+                "protocol": {
+                    "type": "string",
+                    "description": t("spawn_bridge_agent", "protocol"),
+                },
+                "adapter_config": {
+                    "type": "object",
+                    "description": t("spawn_bridge_agent", "adapter_config"),
+                },
+                "model_name": {
+                    "type": "string",
+                    "description": t("spawn_bridge_agent", "model_name"),
+                },
+            },
+            "required": ["member_name", "display_name", "desc"],
+        }
+
+    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+        from openjiuwen.agent_teams.schema.team import BridgeMailboxInjectMode
+
+        err = self._validate_member_name(inputs.get("member_name"))
+        if err:
+            return self._fail(err)
+
+        if not self.team.bridge_enabled():
+            return self._fail(
+                "Cannot spawn bridge agent: Bridge capability is disabled "
+                "(enable_bridge=False on TeamAgentSpec or build_team). "
+                "Enable Bridge in the team spec or use spawn_teammate instead."
+            )
+
+        persona = self._resolve_persona(inputs)
+        if not persona:
+            return self._fail(
+                "spawn_bridge_agent requires a non-empty 'desc' — it is the "
+                "persona/briefing the remote agent adopts via adapter.connect"
+            )
+
+        mode_raw = (inputs.get("mailbox_inject_mode") or "passthrough").lower()
+        try:
+            inject_mode = BridgeMailboxInjectMode(mode_raw)
+        except ValueError:
+            return self._fail(
+                f"Invalid mailbox_inject_mode '{mode_raw}'; expected 'passthrough' or 'rephrase'"
+            )
+
+        adapter_config = inputs.get("adapter_config") or {}
+        if not isinstance(adapter_config, dict):
+            return self._fail("adapter_config must be an object/dict")
+
+        member_name = inputs["member_name"]
+        display_name = inputs.get("display_name")
+        protocol = inputs.get("protocol") or ""
+        result = await self.team.spawn_bridge_agent(
+            member_name=member_name,
+            display_name=display_name,
+            persona=persona,
+            desc=inputs.get("desc"),
+            model_name=inputs.get("model_name"),
+            mailbox_inject_mode=inject_mode,
+            protocol=protocol,
+            adapter_config=adapter_config,
+        )
+        return self._from_result(
+            result,
+            member_name=member_name,
+            display_name=display_name,
+            role_type="bridge_agent",
+            mailbox_inject_mode=inject_mode.value,
+            protocol=protocol,
+        )
+
+
+class SpawnExternalCliTool(_SpawnToolBase):
+    """Spawn a third-party CLI agent as a teammate (``role_type='external_cli'``).
+
+    The teammate's brain is a CLI subprocess (claudecode / codex / ...) driven
+    by an ``ExternalCliRuntime``. ``cli_agent`` names a CLI kind pre-declared in
+    ``TeamAgentSpec.external_cli_agents`` — all launch knowledge lives there, so
+    this call carries only the identifier. ``desc`` is the persona stored on the
+    member row. The tool is not wired when no CLI kinds are declared (see
+    ``create_team_tools``).
+    """
+
+    def __init__(self, team: TeamBackend, t: Translator):
+        super().__init__(team, t, "spawn_external_cli")
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "member_name": {
+                    "type": "string",
+                    "description": t("spawn_external_cli", "member_name"),
+                },
+                "display_name": {
+                    "type": "string",
+                    "description": t("spawn_external_cli", "display_name"),
+                },
+                "desc": {"type": "string", "description": t("spawn_external_cli", "desc")},
+                "cli_agent": {
+                    "type": "string",
+                    "description": t("spawn_external_cli", "cli_agent"),
+                },
+            },
+            "required": ["member_name", "display_name", "desc", "cli_agent"],
+        }
+
+    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+        err = self._validate_member_name(inputs.get("member_name"))
+        if err:
+            return self._fail(err)
+
+        cli_agent = (inputs.get("cli_agent") or "").strip()
+        if not cli_agent:
+            return self._fail(
+                "spawn_external_cli requires 'cli_agent' naming a CLI kind "
+                "declared in TeamAgentSpec.external_cli_agents (e.g. 'claude' or 'codex')"
+            )
+
+        persona = self._resolve_persona(inputs)
+        if not persona:
+            return self._fail("spawn_external_cli requires a non-empty 'desc' (the member persona)")
+
+        member_name = inputs["member_name"]
+        display_name = inputs.get("display_name")
+        result = await self.team.spawn_external_cli_agent(
+            member_name=member_name,
+            display_name=display_name,
+            cli_agent=cli_agent,
+            persona=persona,
+            desc=inputs.get("desc"),
+        )
+        return self._from_result(
+            result,
+            member_name=member_name,
+            display_name=display_name,
+            role_type="external_cli",
+            cli_agent=cli_agent,
+        )
 
 
 class ShutdownMemberTool(TeamTool):
@@ -1683,8 +1770,11 @@ def create_team_tools(
         # Team management
         "build_team": BuildTeamTool(agent_team, t),
         "clean_team": CleanTeamTool(agent_team, t),
-        # Member management
-        "spawn_member": SpawnMemberTool(agent_team, t, model_config_allocator=model_config_allocator),
+        # Member management — one tool per role_type (flat schema, no role branching)
+        "spawn_teammate": SpawnTeammateTool(agent_team, t, model_config_allocator=model_config_allocator),
+        "spawn_human_agent": SpawnHumanAgentTool(agent_team, t),
+        "spawn_bridge_agent": SpawnBridgeAgentTool(agent_team, t),
+        "spawn_external_cli": SpawnExternalCliTool(agent_team, t),
         "shutdown_member": ShutdownMemberTool(agent_team, t),
         "approve_plan": ApprovePlanTool(agent_team, t),
         "approve_tool": ApproveToolCallTool(agent_team, t),
@@ -1724,6 +1814,17 @@ def create_team_tools(
     # pool invariants, so the tool is simply not wired in that lifecycle.
     if lifecycle == "persistent":
         allowed = allowed - {"clean_team"}
+    # Capability gating for the non-teammate spawn tools: a spawn tool the
+    # backend would reject is simply never shown to the LLM. spawn_teammate is
+    # always available. Symmetric to the plan_mode / persistent gates above.
+    # Unconditional set subtraction is idempotent — teammate / human_agent
+    # ``allowed`` sets don't contain these leader-only tools anyway.
+    if not agent_team.hitt_enabled():
+        allowed = allowed - {"spawn_human_agent"}
+    if not agent_team.bridge_enabled():
+        allowed = allowed - {"spawn_bridge_agent"}
+    if not agent_team.external_cli_kinds():
+        allowed = allowed - {"spawn_external_cli"}
     if exclude_tools:
         allowed = allowed - exclude_tools
     tools = [tool for name, tool in all_tools.items() if name in allowed]

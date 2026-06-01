@@ -373,7 +373,7 @@ def _hitt_section_leader_cn(names: list[str]) -> str:
         "assignee=<他人>），即使团队因人类没及时响应而停滞也必须保持停滞，"
         "只能用 `send_message` 催促对应人类成员。\n"
         "4. 每个人类成员始终是 ready 状态，不会进入 busy 或 shutdown，"
-        "所以不要对它们调用 `shutdown_member` / `spawn_member`。\n"
+        "所以不要对它们调用 `shutdown_member` / `spawn_human_agent`。\n"
         "5. 如果 user 表达了“我也要加入团队”之类的加入意图，且团队尚未"
         "创建，请在 `build_team` 时把 `enable_hitt=true`；若需要多个不同"
         "人类成员，通过 `predefined_members` 传入 role=human_agent 的 spec。\n"
@@ -497,7 +497,7 @@ def _hitt_section_leader_en(names: list[str]) -> str:
         "if the team stalls waiting for that human, it must stall — only "
         "`send_message` nudges to the specific human are allowed.\n"
         "4. Every human member stays READY forever; never call "
-        "`shutdown_member` or `spawn_member` on them.\n"
+        "`shutdown_member` or `spawn_human_agent` on them.\n"
         '5. If the user signals intent to join the team (e.g. "I want '
         'to join") and the team has not been created yet, call '
         "`build_team` with `enable_hitt=true`. If multiple distinct "
