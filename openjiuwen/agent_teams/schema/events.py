@@ -83,6 +83,9 @@ class TeamEvent:
     TASK_UNBLOCKED = "task_unblocked"
     TASK_LIST_DRAINED = "task_list_drained"
 
+    # Swarmflow orchestration progress (a swarmflow run feeding the spectator leader)
+    WORKFLOW_PROGRESS = "workflow_progress"
+
     # Worktree events
     WORKTREE_CREATED = "worktree_created"
     WORKTREE_REMOVED = "worktree_removed"
@@ -253,6 +256,24 @@ class TaskListDrainedEvent(BaseEventMessage):
     task_count: int = Field(..., description="Total number of tasks in the all-terminal task list")
 
 
+class WorkflowProgressTeamEvent(BaseEventMessage):
+    """Published as a swarmflow run emits progress; consumed by the leader.
+
+    A single event type carries every progress kind (discriminated by ``kind``,
+    the engine's ``ProgressKind`` string value) so one handler method renders
+    all of them. The spectator leader narrates these to the user — it does not
+    drive the workflow. ``team_name`` routes the event on the team topic;
+    ``member_name`` stays None (the run is team-scoped, not member-scoped).
+    """
+
+    kind: str = Field(..., description="Progress kind: phase / agent_started / agent_completed / ...")
+    workflow_name: Optional[str] = Field(default=None, description="The swarmflow script's META name")
+    phase: Optional[str] = Field(default=None, description="Current phase title, when applicable")
+    label: Optional[str] = Field(default=None, description="Agent call label, on agent_* kinds")
+    outcome: Optional[str] = Field(default=None, description="Short result preview, on agent_completed")
+    text: Optional[str] = Field(default=None, description="Free narration text, on log kind")
+
+
 class WorktreeCreatedEvent(BaseEventMessage):
     """Published when a worktree is created or recovered."""
     worktree_name: str = Field(..., description="Worktree slug name")
@@ -334,6 +355,7 @@ _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model cl
     TeamEvent.TASK_CANCELLED: TaskCancelledEvent,
     TeamEvent.TASK_UNBLOCKED: TaskUnblockedEvent,
     TeamEvent.TASK_LIST_DRAINED: TaskListDrainedEvent,
+    TeamEvent.WORKFLOW_PROGRESS: WorkflowProgressTeamEvent,
     TeamEvent.WORKTREE_CREATED: WorktreeCreatedEvent,
     TeamEvent.WORKTREE_REMOVED: WorktreeRemovedEvent,
     TeamEvent.WORKSPACE_ARTIFACT_UPDATED: WorkspaceArtifactEvent,

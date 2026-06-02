@@ -442,7 +442,20 @@ class TeamAgent(BaseAgent):
         *,
         member_runtime: Optional["MemberRuntime"] = None,
     ) -> None:
-        self._configurator.setup_agent(spec, ctx, member_runtime=member_runtime)
+        # The leader-only ``swarmflow()`` tool is wired only when the spec opts
+        # into the capability; the launcher is the leader's sync background-run
+        # entry. Non-leaders / disabled spec get None, which gates the tool out.
+        swarmflow_launcher = (
+            self._launch_swarmflow
+            if ctx.role == TeamRole.LEADER and spec.enable_swarmflow
+            else None
+        )
+        self._configurator.setup_agent(
+            spec,
+            ctx,
+            member_runtime=member_runtime,
+            swarmflow_launcher=swarmflow_launcher,
+        )
 
         # Build the member handle once for every role. ``create_member_handle``
         # is a pure constructor: it only needs the bound ``team_backend``
@@ -933,6 +946,101 @@ class TeamAgent(BaseAgent):
         except Exception as exc:
             team_logger.error("auto_start_all failed: {}", exc)
             return []
+
+    # ------------------------------------------------------------------
+    # Swarmflow orchestration (spectator leader)
+    # ------------------------------------------------------------------
+
+    def _launch_swarmflow(self, script_path: str, args: Any = None) -> None:
+        """Synchronous launcher handed to the ``swarmflow()`` tool.
+
+        Schedules the background run as a tracked task so it is not garbage
+        collected mid-flight and can be cancelled on teardown. Refuses a second
+        concurrent launch while one is already active (one swarmflow per leader
+        at a time); the active flag is also read by ``TeamPolicyRail`` callers.
+        """
+        if self._state.swarmflow_active:
+            team_logger.warning(
+                "[{}] swarmflow already running; ignoring re-launch of {}",
+                self._member_name() or "?",
+                script_path,
+            )
+            return
+        task = asyncio.create_task(self.run_swarmflow_background(script_path, args))
+        self._state.swarmflow_tasks.add(task)
+        task.add_done_callback(self._state.swarmflow_tasks.discard)
+
+    async def run_swarmflow_background(self, script_path: str, args: Any = None) -> None:
+        """Run a swarmflow script, narrating phase progress to this leader.
+
+        Launched fire-and-forget by the ``swarmflow()`` tool. Wires a
+        ``WorkflowObserver`` whose progress events are republished on the team
+        topic with a non-leader ``sender_id`` so this leader's own coordination
+        loop receives them (``kernel`` only self-filters events whose
+        ``sender_id`` equals the local member name) and the ``WorkflowHandler``
+        narrates each phase. The leader stays a spectator — it creates no tasks,
+        so the team never auto-completes while the workflow runs (an empty task
+        board is never "completed"), keeping the leader's stream open to report.
+
+        The engine ``progress_sink`` is synchronous; republishing is scheduled
+        as a fire-and-forget task on the running loop (best-effort narration).
+        """
+        from openjiuwen.agent_teams.context import get_session_id
+        from openjiuwen.agent_teams.schema.events import (
+            EventMessage,
+            TeamEvent,
+            TeamTopic,
+            WorkflowProgressTeamEvent,
+        )
+        from openjiuwen.agent_teams.workflow import WorkflowObserver, run_swarmflow
+
+        messager = self.infra.messager
+        team_name = self.team_name or "swarmflow"
+        language = self.team_spec.language if self.team_spec and self.team_spec.language else "cn"
+        model = self.harness.model if self.harness else None
+        name_box: dict[str, Any] = {"name": None}
+
+        def _publish(progress: Any) -> None:
+            if messager is None:
+                return
+            if progress.kind == "workflow_started":
+                name_box["name"] = progress.message
+            team_event = WorkflowProgressTeamEvent(
+                team_name=team_name,
+                kind=progress.kind,
+                workflow_name=name_box["name"],
+                phase=progress.phase,
+                label=progress.label,
+                outcome=progress.outcome,
+                text=progress.message,
+            )
+            message = EventMessage(
+                event_type=TeamEvent.WORKFLOW_PROGRESS,
+                payload=team_event.model_dump(),
+                sender_id="swarmflow",  # non-leader sender so kernel does not self-filter
+            )
+            topic = TeamTopic.TEAM.build(get_session_id(), team_name)
+            try:
+                asyncio.create_task(messager.publish(topic_id=topic, message=message))
+            except RuntimeError:
+                team_logger.debug("[{}] no running loop to publish workflow progress", self._member_name() or "?")
+
+        observer = WorkflowObserver(on_event=_publish)
+        self._state.swarmflow_active = True
+        try:
+            await run_swarmflow(
+                script_path,
+                model=model,
+                observer=observer,
+                args=args,
+                team_backend=self.team_backend,
+                team_name=team_name,
+                language=language,
+            )
+        except Exception as exc:
+            team_logger.error("[{}] swarmflow run failed: {}", self._member_name() or "?", exc, exc_info=True)
+        finally:
+            self._state.swarmflow_active = False
 
     # ------------------------------------------------------------------
     # Fault tolerance: cleanup, restart, recover

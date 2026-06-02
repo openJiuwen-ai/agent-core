@@ -9,6 +9,7 @@ import os
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     Optional,
 )
 
@@ -300,6 +301,7 @@ class AgentConfigurator:
         ctx: TeamRuntimeContext,
         *,
         member_runtime: Optional["MemberRuntime"] = None,
+        swarmflow_launcher: Optional[Callable[[str, Any], None]] = None,
     ) -> "MemberRuntime":
         """Phase 2: build the member runtime and set up coordination.
 
@@ -386,6 +388,7 @@ class AgentConfigurator:
             qualify_ids=spec.spawn_mode == "inprocess",
             team_name=resolved_team_name,
             member_name=member_name or "",
+            swarmflow_launcher=swarmflow_launcher,
         )
 
         team_policy_rail = TeamPolicyRail(
@@ -401,6 +404,7 @@ class AgentConfigurator:
             team_workspace_path=team_workspace_path,
             team_backend=self.team_backend,
             expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
+            enable_swarmflow=spec.enable_swarmflow,
         )
 
         team_workspace_rail = None

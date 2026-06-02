@@ -12,6 +12,7 @@ operator boundaries.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import (
     dataclass,
     field,
@@ -24,6 +25,11 @@ from typing import (
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.member import TeamMember
     from openjiuwen.core.session.agent_team import Session as AgentTeamSession
+
+
+def _empty_task_set() -> "set[asyncio.Task]":
+    """Default factory for the swarmflow background-task registry."""
+    return set()
 
 
 def _empty_listener_list() -> list:
@@ -56,6 +62,16 @@ class TeamAgentState:
     # tool/clean path, read from the stream round-end path), so it belongs
     # in TeamAgentState per the four-quadrant rule.
     team_cleaned: bool = False
+
+    # Swarmflow spectator sub-mode. ``swarmflow_active`` is raised by the
+    # ``swarmflow()`` tool while a workflow runs and read by ``TeamPolicyRail``
+    # to inject the spectator prompt section (the leader narrates phase
+    # progress instead of coordinating). ``swarmflow_tasks`` holds the
+    # in-flight background run task(s) so they are not garbage-collected mid
+    # run and can be cancelled on teardown. Cross-operator (written from the
+    # tool path, read from the rail / teardown path), so both belong here.
+    swarmflow_active: bool = False
+    swarmflow_tasks: "set[asyncio.Task]" = field(default_factory=_empty_task_set)
 
 
 __all__ = ["TeamAgentState"]

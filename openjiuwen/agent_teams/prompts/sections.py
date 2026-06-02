@@ -50,6 +50,7 @@ class TeamSectionName:
     HITT = "team_hitt"
     BRIDGE = "team_bridge"
     WORKFLOW = "team_workflow"
+    SWARMFLOW = "team_swarmflow"
     LIFECYCLE = "team_lifecycle"
     PERSONA = "team_persona"
     EXTRA = "team_extra"
@@ -215,6 +216,35 @@ def build_team_workflow_section(
     body = f"{labels['workflow_heading']}\n\n{workflow_text}\n"
     return PromptSection(
         name=TeamSectionName.WORKFLOW,
+        content={language: body},
+        priority=13,
+    )
+
+
+def build_team_swarmflow_section(
+    *,
+    role: TeamRole,
+    enable_swarmflow: bool = False,
+    language: str = "cn",
+) -> Optional[PromptSection]:
+    """Build the swarmflow orchestration section (LEADER + enable_swarmflow).
+
+    Tells the leader it can drive a multi-agent workflow via the
+    ``swarmflow(script_path, args)`` tool when the user asks for swarmflow /
+    workflow orchestration, and that it then acts as a spectator — narrating
+    phase progress rather than coordinating members itself.
+
+    Returns:
+        PromptSection wrapping ``leader_swarmflow.md``; ``None`` for non-leader
+        roles or when ``enable_swarmflow`` is False.
+    """
+    if role != TeamRole.LEADER or not enable_swarmflow:
+        return None
+    heading = "# Swarmflow 编排模式" if language == "cn" else "# Swarmflow Orchestration Mode"
+    swarmflow_text = load_template("leader_swarmflow", language).content.strip()
+    body = f"{heading}\n\n{swarmflow_text}\n"
+    return PromptSection(
+        name=TeamSectionName.SWARMFLOW,
         content={language: body},
         priority=13,
     )
@@ -953,6 +983,7 @@ def build_team_static_sections(
     human_agent_names: list[str] | None = None,
     expose_human_agents_to_teammates: bool = False,
     bridge_agent_names: list[str] | None = None,
+    enable_swarmflow: bool = False,
 ) -> list[PromptSection]:
     """Build the never-changing team sections for one member.
 
@@ -1004,6 +1035,11 @@ def build_team_static_sections(
         build_team_workflow_section(
             role=role,
             team_mode=team_mode,
+            language=language,
+        ),
+        build_team_swarmflow_section(
+            role=role,
+            enable_swarmflow=enable_swarmflow,
             language=language,
         ),
         build_team_lifecycle_section(
@@ -1081,5 +1117,6 @@ __all__ = [
     "build_team_persona_section",
     "build_team_role_section",
     "build_team_static_sections",
+    "build_team_swarmflow_section",
     "build_team_workflow_section",
 ]

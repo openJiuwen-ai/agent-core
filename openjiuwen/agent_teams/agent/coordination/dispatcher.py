@@ -38,6 +38,7 @@ from openjiuwen.agent_teams.agent.coordination.handlers import (
     StaleTaskHandler,
     TaskBoardHandler,
     TeamCompletionHandler,
+    WorkflowHandler,
 )
 from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.schema.events import TeamEvent
@@ -149,9 +150,10 @@ class EventDispatcher:
     dispatcher so coordination events never enter the global
     ``Runner.callback_framework``.
 
-    The six scenario handlers are exposed as public attributes
+    The seven scenario handlers are exposed as public attributes
     (``lifecycle`` / ``member`` / ``message`` / ``task_board`` /
-    ``stale_task`` / ``team_completion``) for direct access in tests.
+    ``stale_task`` / ``team_completion`` / ``workflow``) for direct
+    access in tests.
     """
 
     def __init__(
@@ -179,6 +181,10 @@ class EventDispatcher:
         self.task_board = TaskBoardHandler(host, blueprint, infra, poll_ctrl)
         self.stale_task = StaleTaskHandler(host, blueprint, infra, poll_ctrl, stale_claim_throttle)
         self.team_completion = TeamCompletionHandler(host, blueprint, infra, poll_ctrl)
+        # Swarmflow spectator narration. Listens only for WORKFLOW_PROGRESS
+        # (a dedicated event_key, no fan-out overlap), so its registration
+        # position is not load-bearing.
+        self.workflow = WorkflowHandler(host, blueprint, infra, poll_ctrl)
 
         self._framework = AsyncCallbackFramework(
             enable_metrics=False,
@@ -201,6 +207,7 @@ class EventDispatcher:
             self.task_board,
             self.stale_task,
             self.team_completion,
+            self.workflow,
         ]
         # The reliability handler (leader-side remediation + team-level
         # ping-pong) mounts only when the team opts into the reliability

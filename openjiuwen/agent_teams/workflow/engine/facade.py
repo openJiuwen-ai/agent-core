@@ -1,0 +1,185 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+"""The SwarmFlow facade — the stable surface workflow scripts bind to.
+
+This module lives **inside the engine package** and is the canonical home of
+the public primitives. There is no physical ``swarmflow`` package: the bare
+name ``swarmflow`` is a *runtime mapping* onto this module, installed in
+``sys.modules`` by :func:`workflow.engine.runner.run_workflow` for the duration
+of a run (``run_workflow(import_as=...)`` maps additional names too).
+
+A workflow file imports the primitives by whatever name is mapped::
+
+    from swarmflow import agent, parallel, pipeline, map_parallel, phase, log
+
+These are a *contract*, not an implementation: each primitive forwards to the
+**current provider** (see :mod:`workflow.engine.seam`). The reference engine
+installs its :class:`~workflow.engine.provider.EngineProvider` for the duration
+of a run, so the entire primitive implementation can be swapped (real vs.
+simulated, local vs. distributed) without touching script code.
+"""
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Sequence, TypeVar, overload
+
+from .seam import (
+    BudgetView,
+    Provider,
+    current_provider,
+    reset_provider,
+    use_provider,
+)
+
+# Harness re-exports (engine internals exposed under the public name). These are
+# eager because importing this module already imports the engine package.
+from .backends import AgentBackend, AgentResult, MockBackend
+from .errors import LintError, MetaError, SchemaError, WorkflowError
+from .journal import Journal
+from .loader import LoadedWorkflow, load_workflow_source
+from .runner import run_workflow
+from .runtime import Runtime
+
+if TYPE_CHECKING:
+    from pydantic import BaseModel
+
+# For typing overloads: `schema=MyModel` narrows the return to `MyModel | None`.
+M = TypeVar("M", bound="BaseModel")
+
+
+# ─────────────────────────── agent ───────────────────────────
+# Return type follows the schema kind:
+#   schema=MyModel (pydantic) -> MyModel | None   (attribute access, static types)
+#   schema=<JSON Schema dict>  -> dict | None      (interop default)
+#   schema=None                -> str | None
+@overload
+async def agent(
+    prompt: str, *, schema: type[M],
+    label: str | None = ..., phase: str | None = ...,
+    model: str | None = ..., timeout: float | None = ...,
+) -> "M | None": ...
+@overload
+async def agent(
+    prompt: str, *, schema: dict,
+    label: str | None = ..., phase: str | None = ...,
+    model: str | None = ..., timeout: float | None = ...,
+) -> "dict | None": ...
+@overload
+async def agent(
+    prompt: str, *, schema: None = ...,
+    label: str | None = ..., phase: str | None = ...,
+    model: str | None = ..., timeout: float | None = ...,
+) -> "str | None": ...
+
+
+async def agent(
+    prompt: str,
+    *,
+    label: str | None = None,
+    phase: str | None = None,
+    schema: Any = None,
+    model: str | None = None,
+    timeout: float | None = None,
+) -> Any:
+    """Spawn a sub-agent. Delegates to the current provider's ``agent``."""
+    return await current_provider().agent(
+        prompt, label=label, phase=phase, schema=schema, model=model, timeout=timeout
+    )
+
+
+async def parallel(thunks: Sequence[Callable[[], Awaitable]]) -> list:
+    """Fork-join barrier over lazy thunks. Delegates to the current provider."""
+    return await current_provider().parallel(thunks)
+
+
+async def pipeline(items: Sequence, *stages: Callable) -> list:
+    """No-barrier streaming pipeline. Delegates to the current provider."""
+    return await current_provider().pipeline(items, *stages)
+
+
+async def map_parallel(items: Sequence, fn: Callable) -> list:
+    """Footgun-free fan-out. Delegates to the current provider."""
+    return await current_provider().map_parallel(items, fn)
+
+
+pmap = map_parallel  # alias
+
+
+def phase(title: str) -> None:
+    """Mark the current phase (observability). Delegates to the current provider."""
+    current_provider().phase(title)
+
+
+def log(message: Any) -> None:
+    """Emit a progress line. Delegates to the current provider."""
+    current_provider().log(message)
+
+
+async def workflow(name_or_path: str, args: Any = None) -> Any:
+    """Run another workflow inline (one level). Delegates to the current provider."""
+    return await current_provider().workflow(name_or_path, args)
+
+
+class _BudgetProxy:
+    """Public ``budget``: proxies to ``current_provider().budget`` per access."""
+
+    @property
+    def total(self) -> int | None:
+        return current_provider().budget.total
+
+    def spent(self) -> int:
+        return current_provider().budget.spent()
+
+    def remaining(self) -> int | None:
+        return current_provider().budget.remaining()
+
+
+#: Importable singleton: a script does `from swarmflow import budget` (name mapped
+#: at runtime), then `budget.spent()`.
+budget = _BudgetProxy()
+
+
+# ─────────────────── pure list helpers (no provider seam) ───────────────────
+def compact(xs: Sequence) -> list:
+    """``xs.filter(Boolean)`` — drops every falsy element (None, '', 0, [])."""
+    return [x for x in xs if x]
+
+
+def flatten_filter(xs: Sequence) -> list:
+    """``xs.flat().filter(Boolean)`` — one level, None sublists tolerated."""
+    return [x for sub in xs for x in (sub or []) if x]
+
+
+__all__ = [
+    # script-facing primitives (the contract)
+    "agent",
+    "parallel",
+    "pipeline",
+    "map_parallel",
+    "pmap",
+    "phase",
+    "log",
+    "workflow",
+    "budget",
+    "compact",
+    "flatten_filter",
+    # provider seam (custom engines / tests)
+    "Provider",
+    "BudgetView",
+    "use_provider",
+    "reset_provider",
+    "current_provider",
+    # harness
+    "run_workflow",
+    "Runtime",
+    "Journal",
+    "load_workflow_source",
+    "LoadedWorkflow",
+    "AgentBackend",
+    "AgentResult",
+    "MockBackend",
+    "WorkflowError",
+    "MetaError",
+    "LintError",
+    "SchemaError",
+]

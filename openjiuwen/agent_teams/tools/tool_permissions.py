@@ -22,6 +22,7 @@ LEADER_ONLY_TOOLS: set[str] = {
     "create_task",        # Create tasks (batch / with deps)
     "update_task",        # Update task content / cancel tasks
     "list_members",       # List all members
+    "swarmflow",          # Run a swarmflow orchestration script (gated by enable_swarmflow)
 }
 
 # Tools that only members can use

@@ -148,6 +148,10 @@ STRINGS: dict[str, dict[str, str]] = {
             "禁止用纯文本输出表达意图或承诺。\n"
             "**保持静默**，等控制者在 Inbox 里明确指示你转告或回复时再调 send_message。"
         ),
+        # agent/coordination/handlers/workflow.py — swarmflow spectator broadcast
+        "workflow.started": "[工作流] 「{name}」编排已启动，我将在每个阶段向你汇报进展。",
+        "workflow.phase": "[工作流] 进入阶段：{phase}",
+        "workflow.completed": "[工作流] 「{name}」编排已全部完成。",
     },
     "en": {
         # timefmt.py — relative-time buckets ({value} is the bucket count)
@@ -294,6 +298,10 @@ STRINGS: dict[str, dict[str, str]] = {
             "controller explicitly instructs you via the Inbox to relay "
             "or reply."
         ),
+        # agent/coordination/handlers/workflow.py — swarmflow spectator broadcast
+        "workflow.started": "[Workflow] Orchestration of '{name}' has started; I will report progress to you at each phase.",
+        "workflow.phase": "[Workflow] Entering phase: {phase}",
+        "workflow.completed": "[Workflow] Orchestration of '{name}' is complete.",
     },
 }
 

@@ -336,6 +336,17 @@ class TeamAgentSpec(BaseModel):
     - ``enable_bridge=True`` with no BRIDGE_AGENT predefined → allowed
       (dynamic spawn path).
     """
+    enable_swarmflow: bool = False
+    """Spec-level capability gate for swarmflow orchestration.
+
+    True wires the leader-only ``swarmflow(script_path, args)`` tool, which
+    runs a swarmflow script (a multi-agent workflow) in the background. The
+    script's ``agent()`` calls execute as single-shot ``WORKER`` members via
+    the team worker backend, and phase progress is streamed back to the leader
+    (a spectator) which narrates it to the user. False (default) hides the
+    tool. Workers reuse the leader's model; no separate worker spec is required
+    for the MVP. See ``openjiuwen/agent_teams/workflow``.
+    """
     language: Optional[str] = None
     """Preferred language for prompts and tool descriptions ("cn" or "en").
 
