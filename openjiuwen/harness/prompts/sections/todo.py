@@ -30,8 +30,10 @@ Identify the planning need and call todo_create BEFORE starting execution.
 **Task management rules:**
 - Update status in real-time: call todo_modify the moment a task status changes
 - Only one task can be in_progress at a time; complete it before starting the next
-- Batch updates: consolidate multiple status changes into a single todo_modify call
-- Cancel tasks that are no longer needed
+- **Follow list order**: do not skip pending earlier tasks; the tool rejects out-of-order updates
+- Batch updates: consolidate status changes in one todo_modify when order is valid (e.g. complete current, then in_progress next)
+- Cancel tasks that are no longer needed to explicitly skip a step
+- Call todo_list before cross-stage or batch status changes when IDs/order are uncertain
 - Can understand the current task planning progress by calling todo_list.
 
 **Before marking a task completed:**
@@ -54,8 +56,10 @@ TODO_SYSTEM_PROMPT_CN = """
 **任务管理规则：**
 - 实时更新状态：任务状态变化时立即调用 todo_modify
 - 同一时间只能有一个任务处于 in_progress，完成后再开始下一个
-- 批量更新：将多个状态变更合并为一次 todo_modify 调用
-- 不再需要的任务用 todo_modify 标记为 cancelled
+- **按列表顺序推进**：不得跳过 pending 的前序任务；工具会拒绝跨档 update
+- 批量更新：将多个状态变更合并为一次 todo_modify 调用（须满足顺序：例如先 completed 当前项，再 in_progress 下一项）
+- 不再需要的任务用 todo_modify 标记为 cancelled（明确跳过）
+- 跨 Stage 或批量改状态前，先 todo_list 核对 ID 与顺序
 - 可通过调用 todo_list 了解当前任务规划进展
 
 **将任务标记为已完成前：**

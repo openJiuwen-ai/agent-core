@@ -181,6 +181,14 @@ insert_before：在指定任务之前插入新任务（目标任务状态须为 
 - update 操作：id 字段不可修改，其他字段支持部分更新
 - insert_after：目标任务状态必须为 in_progress 或 pending
 - insert_before：目标任务状态必须为 pending
+
+## 顺序（强制，update 时由工具校验）
+
+任务列表有固定顺序（与 todo_create 创建顺序一致）。
+
+1. **按序更新**：不得跳过仍为 pending 的前序任务将后项标为 in_progress/completed；in_progress 只能落在第一个非终态任务上；若当前项为 in_progress，须在同批先标 completed 再开下一项；跳过步骤须同批将前序标为 cancelled。
+2. **批量更新前**：跨多个 Stage/步骤变更状态时，或不确定 UUID 时，先 todo_list 再 modify。
+3. **仅改当前 in_progress 的 content/activeForm**（不改 status）时，可直接 update；其余跨任务状态变更适用上述规则。
 """
 
 TODO_MODIFY_DESCRIPTION_EN = """
@@ -240,6 +248,14 @@ Core rules:
 - update action: id field cannot be modified; other fields support partial updates
 - insert_after: target task status must be in_progress or pending
 - insert_before: target task status must be pending
+
+## Sequential order (enforced on update)
+
+The todo list has a fixed order (same as todo_create).
+
+1. **Update in order**: Do not skip pending earlier tasks when setting later tasks to in_progress/completed; in_progress may only be on the first non-terminal task; if the current task is in_progress, complete it in the same batch before starting the next; to skip a step, cancel the earlier task in the same batch.
+2. **Before batch status changes** across stages or when UUIDs are uncertain, call todo_list first.
+3. **Content-only updates** to the current in_progress task (no status change) may use update directly; cross-task status changes follow the rules above.
 """
 
 TODO_MODIFY_DESCRIPTION: Dict[str, str] = {

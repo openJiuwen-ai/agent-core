@@ -522,6 +522,12 @@ class TodoListTool(TodoTool):
         return formatted_list
 
 
+_SEQUENTIAL_UPDATE_RETRY_HINT = (
+    "\nNext: Call todo_list to verify task IDs and list order, "
+    "then retry todo_modify with corrections. Do not ignore this error and continue."
+)
+
+
 class TodoModifyTool(TodoTool):
     """
     Todo Modify Tool
@@ -721,6 +727,118 @@ class TodoModifyTool(TodoTool):
                 reason=f"More than one task is marked as 'in_progress' (only one allowed)"
             )
 
+    @staticmethod
+    def _is_terminal_status(status: TodoStatus) -> bool:
+        return status in (TodoStatus.COMPLETED, TodoStatus.CANCELLED)
+
+    def _simulate_todo_updates(
+        self,
+        current_todos: List[TodoItem],
+        todos_data: List[Dict],
+    ) -> List[TodoItem]:
+        """Build the post-update todo list without mutating *current_todos*."""
+        updates_by_id: Dict[str, Dict] = {}
+        for item in todos_data:
+            todo_id = item.get("id")
+            if not todo_id:
+                continue
+            bucket = updates_by_id.setdefault(todo_id, {})
+            for key, value in item.items():
+                if key != "id" and value is not None:
+                    bucket[key] = value
+
+        simulated: List[TodoItem] = []
+        for todo in current_todos:
+            patch = updates_by_id.get(todo.id, {})
+            if "status" in patch:
+                status = TodoStatus(patch["status"])
+            else:
+                status = todo.status
+            simulated.append(
+                TodoItem(
+                    id=todo.id,
+                    content=patch.get("content", todo.content),
+                    activeForm=patch.get("activeForm", todo.activeForm),
+                    status=status,
+                    createdAt=todo.createdAt,
+                    updatedAt=todo.updatedAt,
+                )
+            )
+        return simulated
+
+    def _validate_sequential_update(self, simulated_todos: List[TodoItem]) -> None:
+        """Enforce list-order progression (R1, R2) before persisting batch updates."""
+        pending_blockers: List[str] = []
+        for i, todo in enumerate(simulated_todos):
+            if todo.status != TodoStatus.PENDING:
+                continue
+            for j in range(i + 1, len(simulated_todos)):
+                later = simulated_todos[j]
+                if later.status in (TodoStatus.IN_PROGRESS, TodoStatus.COMPLETED):
+                    pending_blockers.append(
+                        f"  - [{i + 1}] id={todo.id} content={todo.content!r} "
+                        f"(blocked by [{j + 1}] id={later.id} -> {later.status.value})"
+                    )
+                    break
+
+        if pending_blockers:
+            tool_logger.warning(
+                "Todo sequential update rejected (R1): "
+                + "; ".join(line.strip() for line in pending_blockers),
+                event_type=LogEventType.TOOL_CALL_ERROR,
+            )
+            raise build_error(
+                StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                reason=(
+                    "Todo sequential update rejected. Cannot advance later tasks while "
+                    "earlier tasks are still pending. Mark earlier tasks completed, "
+                    "cancelled, or in_progress (one at a time) first.\n"
+                    "Blocked pending tasks:\n"
+                    + "\n".join(pending_blockers)
+                    + _SEQUENTIAL_UPDATE_RETRY_HINT
+                ),
+            )
+
+        in_progress_indices = [
+            i for i, todo in enumerate(simulated_todos)
+            if todo.status == TodoStatus.IN_PROGRESS
+        ]
+        if not in_progress_indices:
+            return
+
+        try:
+            first_non_terminal = next(
+                i
+                for i, todo in enumerate(simulated_todos)
+                if not self._is_terminal_status(todo.status)
+            )
+        except StopIteration:
+            return
+
+        for idx in in_progress_indices:
+            if idx != first_non_terminal:
+                target = simulated_todos[idx]
+                first_task = simulated_todos[first_non_terminal]
+                tool_logger.warning(
+                    "Todo sequential update rejected (R2): in_progress at "
+                    f"[{idx + 1}] id={target.id}, expected first non-terminal at "
+                    f"[{first_non_terminal + 1}] id={first_task.id} "
+                    f"status={first_task.status.value}",
+                    event_type=LogEventType.TOOL_CALL_ERROR,
+                )
+                raise build_error(
+                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                    reason=(
+                        "Todo sequential update rejected. Only the first non-terminal "
+                        f"task ([{first_non_terminal + 1}] id={first_task.id} "
+                        f"status={first_task.status.value}) may be in_progress, but "
+                        f"update would set [{idx + 1}] id={target.id} to in_progress. "
+                        "Complete or cancel earlier tasks first, or include them in "
+                        "the same batch update."
+                        + _SEQUENTIAL_UPDATE_RETRY_HINT
+                    ),
+                )
+
     def _validate_single_todo_item(self, todo_data: Dict):
         """Validate single todo item dictionary
 
@@ -868,6 +986,13 @@ class TodoModifyTool(TodoTool):
         Raises:
             ToolError: If no todos exist or invalid data provided
         """
+        tool_logger.debug(
+            f"TodoModify update: sequential validation, patch_count={len(todos_data)}",
+            event_type=LogEventType.TOOL_CALL_START,
+        )
+        simulated_todos = self._simulate_todo_updates(current_todos, todos_data)
+        self._validate_sequential_update(simulated_todos)
+
         todo_map = {todo.id: todo for todo in current_todos}
         updated_count = 0
         now = datetime.now(timezone.utc).isoformat()
