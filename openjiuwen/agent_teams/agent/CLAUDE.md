@@ -31,7 +31,7 @@
 
 ## coordination/ — 唤醒循环
 
-事件驱动的 wake-up 层：`EventBus` 收事件 → `EventDispatcher` 粗筛 → `AsyncCallbackFramework` 分发到 6 个固定场景 handler（lifecycle / member / message / task_board / stale_task / team_completion）+ 可选的 `ReliabilityHandler`（opt-in，见 [`coordination/CLAUDE.md`](coordination/CLAUDE.md)）。**自身不做决策**，handler 走三类 narrow protocol 触发行为：`AgentRoundController` 驱动 TeamHarness（round 控制），`TeamLifecycleController` 触发 TeamAgent 级生命周期（shutdown），`PollController` 直达 EventBus（poll 暂停/恢复）。详见 [`coordination/CLAUDE.md`](coordination/CLAUDE.md)。
+事件驱动的 wake-up 层：`EventBus` 收事件 → `EventDispatcher` 粗筛 → `AsyncCallbackFramework` 分发到 7 个固定场景 handler（lifecycle / member / message / task_board / stale_task / team_completion / workflow）+ 可选的 `ReliabilityHandler`（opt-in，见 [`coordination/CLAUDE.md`](coordination/CLAUDE.md)）。**自身不做决策**，handler 走三类 narrow protocol 触发行为：`AgentRoundController` 驱动 TeamHarness（round 控制），`TeamLifecycleController` 触发 TeamAgent 级生命周期（shutdown），`PollController` 直达 EventBus（poll 暂停/恢复）。详见 [`coordination/CLAUDE.md`](coordination/CLAUDE.md)。
 
 ## 跨文件协作的几个关键点
 

@@ -53,6 +53,7 @@ agent_teams/
 ├── external/            # 外部 agent 接入核心（ExternalTeamClient + 连接 descriptor + inbound 渲染）
 ├── skill/               # 外部 agent 的非交互 CLI + SKILL.md（skill+cli 封装）
 ├── mcp/                 # 外部 agent 的 stdio MCP server（FastMCP，仓库首个 MCP server）
+├── workflow/            # Swarmflow 多 agent 工作流编排（dw 引擎移植 + worker backend + 4 层表示）
 └── worktree_remote.py   # 跨机器 worktree 后端（团队专属，generic 实现见 harness/tools/worktree）
 ```
 
