@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""NativeHarness state-machine transitions (invoke-based architecture)."""
+"""NativeHarness state-machine transitions over the real task-loop kernel."""
 from __future__ import annotations
 
 import asyncio
@@ -10,108 +10,114 @@ import pytest
 from openjiuwen.core.runner import Runner
 from openjiuwen.agent_teams.harness import HarnessState, NativeHarness
 from tests.unit_tests.agent_teams.harness.fixtures import (
-    IterationStep,
-    MockDeepAgent,
+    FakeReactAgent,
+    answer_outputs,
     drain_outputs,
+    make_provider,
     mock_chunks,
+    start_harness,
+    wait_for_state,
 )
 
 
 @pytest.mark.asyncio
 async def test_idle_to_running_to_idle_single_round() -> None:
-    """send() in IDLE runs a round; round completion returns to IDLE."""
+    """send() in IDLE runs one real round; completion returns to IDLE."""
     await Runner.start()
-    agent = MockDeepAgent()
-    agent.react_agent.iteration_script = [
-        IterationStep(chunks=[{"value": "hi"}], is_answer=True, answer_output="hi"),
-    ]
-    harness = NativeHarness(lambda: agent)
-    await harness.start()
-
-    collected: list = []
-    consumer = asyncio.create_task(drain_outputs(harness, collected))
     try:
-        assert harness.state is HarnessState.IDLE
-        seq = await harness.send("hello")
-        assert seq == 1
-        await asyncio.sleep(0.05)
-        assert harness.state is HarnessState.IDLE  # round finished
-    finally:
-        await harness.stop()
-        await consumer
+        harness = NativeHarness(make_provider())
+        fake = await start_harness(harness, answer_output="hi")
 
-    assert mock_chunks(collected) == [{"value": "hi"}]
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            assert harness.state is HarnessState.IDLE
+            seq = await harness.send("hello")
+            assert seq == 1
+            assert await wait_for_state(harness, HarnessState.IDLE)
+        finally:
+            await harness.stop()
+            await consumer
+
+        assert mock_chunks(collected) == [{"query": "hello"}]
+        assert answer_outputs(collected) == ["hi"]
+        assert [inv["query"] for inv in fake.invocations] == ["hello"]
+    finally:
+        await Runner.stop()
 
 
 @pytest.mark.asyncio
 async def test_followup_runs_in_fifo_order_after_first_round() -> None:
-    """send(immediate=False) while RUNNING buffers; next round picks it up in order."""
+    """send(immediate=False) while RUNNING buffers; the next round picks it up."""
     await Runner.start()
-    agent = MockDeepAgent()
-    agent.react_agent.iteration_script = [
-        IterationStep(is_answer=True, answer_output="r", sleep_before=0.03),
-    ]
-    harness = NativeHarness(lambda: agent)
-    await harness.start()
-
-    collected: list = []
-    consumer = asyncio.create_task(drain_outputs(harness, collected))
     try:
-        await harness.send("q1")
-        await harness.send("q2", immediate=False)  # queued while q1 runs
-        await asyncio.sleep(0.15)
-    finally:
-        await harness.stop()
-        await consumer
+        harness = NativeHarness(make_provider())
+        # Slow first round so q2 enqueues as a follow-up while q1 is RUNNING.
+        fake = await start_harness(harness, sleep_seconds=0.05)
 
-    queries = [inv["inputs"]["query"] for inv in agent.react_agent.invocations]
-    assert queries == ["q1", "q2"]
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send("q1")
+            assert await wait_for_state(harness, HarnessState.RUNNING)
+            await harness.send("q2", immediate=False)
+            # First round finishes, then the follow-up round runs; back to IDLE.
+            assert await wait_for_state(harness, HarnessState.IDLE)
+        finally:
+            await harness.stop()
+            await consumer
+
+        assert [inv["query"] for inv in fake.invocations] == ["q1", "q2"]
+    finally:
+        await Runner.stop()
 
 
 @pytest.mark.asyncio
 async def test_stop_terminates_output_iterator() -> None:
-    """stop() closes the stream; outputs() iterator ends cleanly."""
+    """stop() closes the stream; the outputs() iterator ends cleanly."""
     await Runner.start()
-    agent = MockDeepAgent()
-    agent.react_agent.iteration_script = [
-        IterationStep(is_answer=True, answer_output="x"),
-    ]
-    harness = NativeHarness(lambda: agent)
-    await harness.start()
+    try:
+        harness = NativeHarness(make_provider())
+        await start_harness(harness, answer_output="x")
 
-    collected: list = []
-    consumer = asyncio.create_task(drain_outputs(harness, collected))
-    await harness.stop()
-    await consumer  # ends because _END was emitted
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        await harness.stop()
+        await consumer  # ends because _END was emitted
 
-    assert harness.state is HarnessState.TERMINATED
+        assert harness.state is HarnessState.TERMINATED
+    finally:
+        await Runner.stop()
 
 
 @pytest.mark.asyncio
 async def test_send_after_stop_raises() -> None:
     """send() on a terminated harness raises rather than hanging."""
     await Runner.start()
-    agent = MockDeepAgent()
-    agent.react_agent.iteration_script = [IterationStep(is_answer=True)]
-    harness = NativeHarness(lambda: agent)
-    await harness.start()
-    await harness.stop()
+    try:
+        harness = NativeHarness(make_provider())
+        await start_harness(harness)
+        await harness.stop()
 
-    with pytest.raises(Exception):  # noqa: B017 - BaseError subclass
-        await harness.send("after-stop")
+        with pytest.raises(Exception):  # noqa: B017 - BaseError subclass
+            await harness.send("after-stop")
+    finally:
+        await Runner.stop()
 
 
 @pytest.mark.asyncio
 async def test_concurrent_start_initializes_once() -> None:
     """Concurrent start() calls do not double-initialize the supervisor."""
     await Runner.start()
-    agent = MockDeepAgent()
-    agent.react_agent.iteration_script = [IterationStep(is_answer=True)]
-    harness = NativeHarness(lambda: agent)
-
-    await asyncio.gather(harness.start(), harness.start(), harness.start())
     try:
-        assert harness.state in (HarnessState.IDLE, HarnessState.RUNNING)
-        assert harness._st.supervisor_task is not None
+        harness = NativeHarness(make_provider())
+
+        await asyncio.gather(harness.start(), harness.start(), harness.start())
+        harness.set_react_agent(FakeReactAgent(harness.card), initialized=True)
+        try:
+            assert harness.state in (HarnessState.IDLE, HarnessState.RUNNING)
+            assert harness._st.supervisor_task is not None
+        finally:
+            await harness.stop()
     finally:
-        await harness.stop()
+        await Runner.stop()

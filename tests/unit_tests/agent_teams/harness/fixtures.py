@@ -1,60 +1,48 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Mock DeepAgent / ReActAgent for NativeHarness unit tests.
+"""Test fixtures for NativeHarness against the real task-loop kernel.
 
-The mock mirrors the real ReActAgent contract NativeHarness depends on:
-- ``invoke(inputs, session, _streaming=True)`` drives a scripted ReAct loop,
-  writing chunks to ``session.write_stream`` (so a real Session's stream
-  emitter / iterator behavior — including close_stream semantics — is
-  exercised), honoring ``ctx.consume_force_finish`` at each iteration top,
-  draining the steering queue passed via ``inputs["_steering_queue"]``, and
-  firing AFTER_REACT_ITERATION only on tool-steps (never on the answer break).
-- ``write_invoke_result_to_stream`` writes the final result.
+The NativeHarness now *is* a DeepAgent and drives the full task-loop kernel
+(TaskLoopController / TaskScheduler / TaskLoopEventHandler / LoopCoordinator),
+all real. The only fake is the inner ``react_agent``: ``start()`` builds the
+real kernel and a real react_agent, and tests then call
+``set_react_agent(FakeReactAgent(...), initialized=True)`` so the real
+TaskLoopEventExecutor drives the fake.
 
-MockContext reproduces the real ContextMessageBuffer's history/current
-segmentation so ``with_history`` (de)symmetry is testable.
+Wiring contract the fake must honor (mirrors ``TaskLoopEventExecutor``):
+- The executor calls ``invoke(effective, session, _streaming=True)`` where
+  ``effective`` is a dict containing ``query``, ``conversation_id`` and a
+  ``_steering_queue`` (the shared LoopQueues.steering ``asyncio.Queue``).
+- The executor — not the fake — fires BEFORE/AFTER_TASK_ITERATION on the outer
+  DeepAgent, so SnapshotRail's per-round boundary snapshot fires automatically.
+  The fake therefore only implements ``invoke`` behavior; it must NOT fire
+  task-iteration events itself.
+- ``write_invoke_result_to_stream`` writes the final round answer (called by
+  ``DeepAgent._write_round_result_to_stream``).
+- ``context_engine.get_context(session_id).get_messages/set_messages`` back the
+  snapshot/rollback machinery; ``clear_context_messages`` is the no-snapshot
+  rollback fallback.
+
+The fake's ``invoke`` is scriptable: a per-call ``sleep_seconds`` makes it a
+cancellation point (for abort/pause), it drains the steering queue (to verify
+immediate steer injection), records each call's inputs, and counts how many
+times it observed a ``CancelledError`` (the cancel-chain assertion).
 """
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
-from openjiuwen.core.foundation.llm import AssistantMessage, UserMessage
+from openjiuwen.core.foundation.llm import UserMessage
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.agent_callback_manager import (
     AgentCallbackManager,
 )
-from openjiuwen.core.single_agent.rail.base import (
-    AgentCallbackContext,
-    AgentCallbackEvent,
-)
+from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.harness.schema.state import DeepAgentState
-
-
-@dataclass
-class IterationStep:
-    """One scripted ReAct iteration of the mock.
-
-    Attributes:
-        chunks: Stream chunks to write to the session this iteration.
-        is_answer: When True, this is the terminating answer iteration — no
-            AFTER_REACT_ITERATION fires and the loop stops (mirrors the real
-            no-tool-call break). When False, it is a tool-step: a tool
-            AssistantMessage is added and AFTER_REACT_ITERATION fires.
-        answer_output: Result ``output`` for an answer step.
-        sleep_before: Seconds to sleep before emitting chunks (a cancellation
-            point for abort/pause tests).
-        sleep_after: Seconds to sleep after emitting chunks.
-    """
-
-    chunks: list = field(default_factory=list)
-    is_answer: bool = False
-    answer_output: str = ""
-    sleep_before: float = 0.0
-    sleep_after: float = 0.0
+from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.schema.config import DeepAgentConfig
 
 
 class MockContext:
@@ -62,7 +50,8 @@ class MockContext:
 
     Mirrors ContextMessageBuffer: messages live in one list split at
     ``_history_size``; ``with_history=False`` operates only on the current
-    segment.
+    segment, so snapshot capture (``with_history=False``) and rollback rewind
+    only the in-progress round, never the persisted history.
     """
 
     def __init__(self) -> None:
@@ -108,28 +97,49 @@ class MockContextEngine:
         return self._contexts[session_id]
 
 
-class MockReActAgent:
-    """invoke-based scripted mock mirroring the real ReActAgent contract."""
+class FakeReactAgent:
+    """Scriptable inner react_agent driven by the real TaskLoopEventExecutor.
+
+    Attributes:
+        card: Owning agent card (the harness's card).
+        context_engine: Backs snapshot capture / rollback.
+        invocations: One entry per ``invoke`` call (the ``effective`` dict).
+        cancelled_count: Times ``invoke`` observed a CancelledError mid-run.
+        seen_steers: Steering messages drained from ``_steering_queue`` across
+            all invocations.
+        sleep_seconds: Seconds ``invoke`` sleeps before emitting its chunk; a
+            cancellation point for abort/pause tests (set high to model a
+            long-running LLM call).
+        answer_output: ``output`` field of the result this fake returns; when
+            empty it echoes the query.
+    """
 
     def __init__(self, card: AgentCard) -> None:
         self.card = card
         self.context_engine = MockContextEngine()
         self._agent_callback_manager = AgentCallbackManager(card.id)
-        self.iteration_script: list[IterationStep] = []
-        self.invocations: list[dict] = []
-        self.steps_executed: int = 0  # counts tool/answer steps actually run
+        self.invocations: list[dict[str, Any]] = []
+        self.cancelled_count: int = 0
+        self.seen_steers: list[str] = []
+        self.sleep_seconds: float = 0.0
+        self.answer_output: str = ""
+        # Set the moment ``invoke`` enters its sleep window; lets tests wait for
+        # the real inner work to actually be in-flight before aborting/pausing,
+        # instead of racing the phase transition (RUNNING is set when the round
+        # task is created, before the executor reaches ``invoke``).
+        self.invoke_running: asyncio.Event = asyncio.Event()
 
     @property
     def agent_callback_manager(self) -> AgentCallbackManager:
-        """Expose the callback manager (NativeHarness registers SnapshotRail here)."""
+        """Expose the callback manager (SnapshotRail registers onto the outer agent)."""
         return self._agent_callback_manager
 
     async def register_callback(
         self,
         event: AgentCallbackEvent,
-        callback: Callable,
+        callback: Any,
         priority: int = 100,
-    ) -> "MockReActAgent":
+    ) -> "FakeReactAgent":
         """Register a callback, mirroring BaseAgent.register_callback."""
         await self._agent_callback_manager.register_callback(event, callback, priority)
         return self
@@ -145,54 +155,41 @@ class MockReActAgent:
         ctx.set_messages([], with_history=False)
 
     async def invoke(self, inputs: Any, session: Session, **kwargs: Any) -> dict:
-        """Drive the scripted ReAct loop, streaming to the session."""
-        self.invocations.append({"inputs": inputs, "session": session, "kwargs": kwargs})
+        """Run one outer round's inner work, streaming to the session.
+
+        Mirrors the real react_agent contract the executor depends on: read the
+        query + steering queue from ``effective``, append a user message to the
+        context (so a snapshot has something to capture), optionally sleep (a
+        cancellation point), emit a chunk, and return an answer result.
+        """
+        self.invocations.append(inputs if isinstance(inputs, dict) else {"query": inputs})
         query = inputs["query"] if isinstance(inputs, dict) else inputs
         steering_q = inputs.get("_steering_queue") if isinstance(inputs, dict) else None
-
-        ctx = AgentCallbackContext(agent=self, inputs={"query": query}, session=session)
         if steering_q is not None:
-            ctx.bind_steering_queue(steering_q)
+            while not steering_q.empty():
+                self.seen_steers.append(steering_q.get_nowait())
 
         context = self.context_engine.get_context(session_id=session.get_session_id())
-        await ctx.fire(AgentCallbackEvent.BEFORE_INVOKE)
         context.add_message(UserMessage(content=str(query)))
 
-        result: dict = {"output": "max_steps", "result_type": "answer"}
-        for step in self.iteration_script:
-            # Iteration-top force_finish check (mirrors react_agent.py).
-            boundary = ctx.consume_force_finish()
-            if boundary is not None:
-                result = boundary.result
-                break
+        self.invoke_running.set()
+        try:
+            if self.sleep_seconds > 0:
+                await asyncio.sleep(self.sleep_seconds)
+        except asyncio.CancelledError:
+            self.cancelled_count += 1
+            raise
+        finally:
+            self.invoke_running.clear()
 
-            steered = ctx.drain_steering()
-            if steered:
-                context.add_message(UserMessage(content="[STEERING] " + "\n".join(steered)))
-
-            if step.sleep_before > 0:
-                await asyncio.sleep(step.sleep_before)
-            for chunk in step.chunks:
-                await session.write_stream(
-                    OutputSchema(type="mock_chunk", index=0, payload=dict(chunk)),
-                )
-            if step.sleep_after > 0:
-                await asyncio.sleep(step.sleep_after)
-
-            self.steps_executed += 1
-            context.add_message(AssistantMessage(content=str(step.chunks)))
-
-            if step.is_answer:
-                result = {"output": step.answer_output, "result_type": "answer"}
-                break
-            # Tool-step: snapshot boundary.
-            await ctx.fire(AgentCallbackEvent.AFTER_REACT_ITERATION)
-
-        await ctx.fire(AgentCallbackEvent.AFTER_INVOKE)
-        return result
+        await session.write_stream(
+            OutputSchema(type="mock_chunk", index=0, payload={"query": str(query)}),
+        )
+        output = self.answer_output or f"echo:{query}"
+        return {"output": output, "result_type": "answer"}
 
     async def write_invoke_result_to_stream(self, result: dict, session: Session) -> None:
-        """Write the final result to the session stream (mirrors the real method)."""
+        """Write the final round result to the session stream (mirrors the real method)."""
         await session.write_stream(
             OutputSchema(
                 type="answer",
@@ -205,36 +202,58 @@ class MockReActAgent:
         )
 
 
-class MockDeepAgent:
-    """Minimal DeepAgent stand-in for NativeHarness unit tests."""
-
-    def __init__(self, card: AgentCard | None = None) -> None:
-        self.card = card or AgentCard(name="mock_deep_agent", description="test")
-        self.react_agent = MockReActAgent(self.card)
-        self._initialized = False
-        self._state_by_session: dict[str, DeepAgentState] = {}
-
-    async def ensure_initialized(self) -> None:
-        """Mark initialized (no MCP/workspace setup in the mock)."""
-        self._initialized = True
-
-    def load_state(self, session: Session) -> DeepAgentState:
-        """Return (creating if needed) the per-session DeepAgentState."""
-        sid = session.get_session_id()
-        if sid not in self._state_by_session:
-            self._state_by_session[sid] = DeepAgentState()
-        return self._state_by_session[sid]
-
-    def save_state(self, session: Session, state: DeepAgentState | None = None) -> None:
-        """Persist the per-session DeepAgentState."""
-        sid = session.get_session_id()
-        if state is not None:
-            self._state_by_session[sid] = state
-
-
-def make_card(name: str = "test_agent") -> AgentCard:
+def make_card(name: str = "native_harness_test") -> AgentCard:
     """Build a minimal AgentCard for tests."""
     return AgentCard(name=name, description="native-harness-test")
+
+
+def make_provider(card: AgentCard | None = None) -> Any:
+    """Build a zero-arg provider yielding a task-loop-enabled DeepAgent template.
+
+    The harness copies the template's config + rails onto itself, builds the
+    real task-loop kernel, then the test injects a FakeReactAgent. The template
+    needs no model: the real react_agent built by ``ensure_initialized`` is
+    immediately replaced by ``set_react_agent``.
+
+    Args:
+        card: Optional card for the template (and thus the harness).
+
+    Returns:
+        A zero-arg callable returning a configured DeepAgent.
+    """
+    agent_card = card or make_card()
+
+    def _provider() -> DeepAgent:
+        return DeepAgent(agent_card).configure(DeepAgentConfig(enable_task_loop=True))
+
+    return _provider
+
+
+async def start_harness(
+    harness: Any,
+    *,
+    sleep_seconds: float = 0.0,
+    answer_output: str = "",
+) -> FakeReactAgent:
+    """Start a harness and inject a freshly-scripted FakeReactAgent.
+
+    Builds the real task-loop kernel via ``start()`` then swaps in the fake so
+    the real executor drives it.
+
+    Args:
+        harness: The NativeHarness to start.
+        sleep_seconds: Initial ``invoke`` sleep (cancellation-point length).
+        answer_output: Initial answer output for the fake.
+
+    Returns:
+        The injected FakeReactAgent (tests mutate its script between rounds).
+    """
+    await harness.start()
+    fake = FakeReactAgent(harness.card)
+    fake.sleep_seconds = sleep_seconds
+    fake.answer_output = answer_output
+    harness.set_react_agent(fake, initialized=True)
+    return fake
 
 
 async def drain_outputs(harness: Any, sink: list) -> None:
@@ -253,6 +272,43 @@ def mock_chunks(collected: list) -> list:
     return [c.payload for c in collected if getattr(c, "type", None) == "mock_chunk"]
 
 
+def answers(collected: list) -> list:
+    """Filter collected chunks to ``answer`` payloads."""
+    return [c.payload for c in collected if getattr(c, "type", None) == "answer"]
+
+
+def answer_outputs(collected: list) -> list:
+    """Extract the ``output`` of each collected ``answer`` chunk."""
+    return [a["output"] for a in answers(collected)]
+
+
 def aborted_markers(collected: list) -> list:
     """Filter collected chunks to ``round_aborted`` marker payloads."""
     return [c.payload for c in collected if getattr(c, "type", None) == "round_aborted"]
+
+
+async def wait_for_state(harness: Any, state: Any, timeout: float = 3.0) -> bool:
+    """Poll until the harness reaches ``state`` or the timeout elapses.
+
+    Returns True if the state was reached, False on timeout. Avoids fixed
+    ``sleep`` guesses so tests stay deterministic under load.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if harness.state is state:
+            return True
+        await asyncio.sleep(0.01)
+    return harness.state is state
+
+
+async def wait_invoke_running(fake: FakeReactAgent, timeout: float = 3.0) -> None:
+    """Block until the fake's ``invoke`` is actually in its sleep window.
+
+    The harness sets RUNNING when it creates the round task, which is before the
+    executor reaches ``react_agent.invoke``. Aborting on RUNNING alone races the
+    inner work; waiting on this event guarantees the CancelledError lands inside
+    ``invoke`` (the cancel-chain contract). Clears the event so the next round
+    can wait on it again.
+    """
+    await asyncio.wait_for(fake.invoke_running.wait(), timeout=timeout)
+    fake.invoke_running.clear()
