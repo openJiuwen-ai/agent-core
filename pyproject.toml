@@ -185,6 +185,10 @@ asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["jiuwen"]
 addopts = ["-v", "--html=report/index.html", "--self-contained-html"]
+markers = [
+    "level0: smoke / happy-path coverage; PR gate must stay green",
+    "level1: feature branches, error paths, and lifecycle edges",
+]
 
 # Formatting & Linting
 [tool.ruff]
