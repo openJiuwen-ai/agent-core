@@ -1,0 +1,68 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""HarnessProtocol: the concurrent-safe interaction contract for a harness.
+
+Defines the external interaction surface independent of how a harness drives
+the underlying agent. NativeHarness (which drives a DeepAgent's task loop)
+implements it today; a future StreamController-backed harness implements the
+same Protocol, so callers program against the contract rather than a concrete
+class.
+"""
+from __future__ import annotations
+
+from typing import AsyncIterator, Protocol, runtime_checkable
+
+from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.stream import OutputSchema
+from openjiuwen.agent_teams.harness.state import HarnessState
+
+
+@runtime_checkable
+class HarnessProtocol(Protocol):
+    """Concurrent-safe multi-round interaction contract for a harness.
+
+    All methods are concurrent-safe by contract: callers may invoke them from
+    any coroutine without external locking. The two send/abort knobs
+    (``immediate``) and ``pause`` form the full interaction vocabulary;
+    ``outputs`` is the single streaming channel.
+    """
+
+    @property
+    def state(self) -> HarnessState:
+        """Return the current lifecycle phase."""
+        ...
+
+    @property
+    def session_id(self) -> str | None:
+        """Return the owned/injected session id, or None before ``start``."""
+        ...
+
+    async def start(self, *, session: Session | None = None) -> None:
+        """Initialize the harness and start its supervisor."""
+        ...
+
+    async def stop(self) -> None:
+        """Stop the harness, cancel in-flight work, and close outputs."""
+        ...
+
+    def outputs(self) -> AsyncIterator[OutputSchema]:
+        """Return a queue-backed async iterator over output chunks."""
+        ...
+
+    async def send(self, content: str, *, immediate: bool = False) -> str:
+        """Submit input; ``immediate=True`` injects into the current round.
+
+        Returns the monotonic sequence id assigned to the message.
+        """
+        ...
+
+    async def abort(self, *, immediate: bool = False) -> None:
+        """Abort the current round: graceful (False) or hard+rollback (True)."""
+        ...
+
+    async def pause(self) -> None:
+        """Pause the current round; the next send concatenates and restarts it."""
+        ...
+
+
+__all__ = ["HarnessProtocol"]

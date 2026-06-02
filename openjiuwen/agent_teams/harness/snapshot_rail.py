@@ -1,23 +1,27 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Rail that bridges NativeHarness into the inner ReActAgent.
+"""Rail that snapshots round boundaries for NativeHarness rollback.
 
-On AFTER_REACT_ITERATION (fired at the end of a fully successful ReAct
-iteration) this rail:
-1. Captures a SafeStateSnapshot of the current-round context messages +
-   DeepAgentState, for potential rollback by immediate abort / pause.
-2. If the active round's graceful_abort flag is set, requests a force_finish
-   so the next iteration top-of-loop check breaks the inner loop cleanly.
+On AFTER_TASK_ITERATION (fired by the task-loop executor at the end of a
+fully completed outer round, after ``react_agent.invoke`` returns) this rail
+captures a SafeStateSnapshot of the current-round context messages +
+DeepAgentState, so an immediate abort can roll back to the last completed
+round boundary.
 
 The active round is located via the ``_ACTIVE_ROUND`` ContextVar that
-NativeHarness sets inside the round task before driving ``invoke``; ContextVar
-values are copied per asyncio.Task, so concurrent rounds do not leak into
-each other.
+NativeHarness sets inside the round task before submitting the round;
+ContextVar values are copied per asyncio.Task, so concurrent rounds do not
+leak into each other.
 
-Steering injection is NOT handled here: NativeHarness passes the round's
-steering queue directly through ``invoke`` inputs (``_steering_queue``), which
-ReActAgent binds into the ctx natively. This rail therefore only needs the
-single AFTER_REACT_ITERATION hook.
+This rail only captures snapshots. Graceful abort is handled at the
+supervisor layer (it sets ``graceful_abort`` + ``coordinator.request_abort``
+so the next round is gated), not by requesting a force-finish here — keeping
+the rail a pure observer with no control-flow side effects.
+
+Because AFTER_TASK_ITERATION is a deep (outer) event, NativeHarness registers
+this rail through ``DeepAgent.add_rail`` / ``register_rail`` (which routes deep
+events onto the outer DeepAgent's callback manager), not by patching the inner
+ReActAgent.
 """
 from __future__ import annotations
 
@@ -40,8 +44,8 @@ if TYPE_CHECKING:
 
 
 # Per-task storage for the currently active round. NativeHarness sets this
-# inside the round task before driving invoke; the rail reads it during the
-# AFTER_REACT_ITERATION hook (which runs in the same task context).
+# inside the round task before submitting the round; the rail reads it during
+# the AFTER_TASK_ITERATION hook (which runs in the same task context).
 _ACTIVE_ROUND: ContextVar[ActiveRound | None] = ContextVar(
     "native_harness_active_round",
     default=None,
@@ -62,7 +66,7 @@ def capture_snapshot(
     ``with_history=False``. Using the default (with_history=True) here would
     let rollback duplicate the persisted history segment on every abort/pause.
 
-    Shared by SnapshotRail (per-iteration) and NativeHarness (pre-round
+    Shared by SnapshotRail (per-round boundary) and NativeHarness (pre-round
     baseline) so both produce identical snapshot shapes.
 
     Args:
@@ -96,17 +100,17 @@ def capture_snapshot(
 
 
 class SnapshotRail(AgentRail):
-    """Bridge rail registered onto the inner ReActAgent by NativeHarness.
+    """Round-boundary snapshot rail registered onto the outer DeepAgent.
 
     Priority 1000 ensures this rail's hook runs after any other rail's
-    same-event hook, so the snapshot reflects the fully settled iteration
-    state (including any context mutations performed by other rails).
+    same-event hook, so the snapshot reflects the fully settled round state
+    (including any context mutations performed by other rails).
     """
 
     priority: int = 1000
 
-    async def after_react_iteration(self, ctx: AgentCallbackContext) -> None:
-        """Capture a SafeStateSnapshot; honor graceful_abort if set."""
+    async def after_task_iteration(self, ctx: AgentCallbackContext) -> None:
+        """Capture a SafeStateSnapshot at the completed round boundary."""
         active = _ACTIVE_ROUND.get()
         if active is None:
             return
@@ -131,15 +135,3 @@ class SnapshotRail(AgentRail):
             active.last_safe_snapshot.iteration_index,
             len(active.last_safe_snapshot.context_messages),
         )
-
-        if active.graceful_abort:
-            ctx.request_force_finish(
-                {
-                    "output": "<graceful_abort>",
-                    "result_type": "aborted_graceful",
-                },
-            )
-            logger.info(
-                "[NativeHarness.SnapshotRail] graceful_abort honored round_id=%s",
-                active.round_id,
-            )

@@ -57,16 +57,20 @@ class _Cmd_Pause:
 
 @dataclass(frozen=True, slots=True)
 class _Cmd_RoundFinished:
-    """Internal notification emitted by the round forwarder when a round
-    finishes (success, cancellation, or error).
+    """Internal notification emitted by the round task when it finishes
+    (success, cancellation, or error).
 
     Attributes:
         round_id: Id of the finished round.
         error: Exception raised by the round, or None on success.
+        result: The round result dict from ``wait_round_completion``, used by
+            ``_on_round_done`` to drive coordinator + multi-round decisions.
+            None on cancellation / error.
     """
 
     round_id: int
     error: BaseException | None
+    result: dict | None = None
 
 
 @dataclass(frozen=True, slots=True)

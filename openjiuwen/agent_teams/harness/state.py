@@ -33,12 +33,17 @@ class HarnessState(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class SafeStateSnapshot:
-    """Snapshot captured at the end of a fully successful ReAct iteration.
+    """Snapshot captured at a task-loop round boundary (AFTER_TASK_ITERATION),
+    or the pre-round baseline taken before a round starts.
 
     Attributes:
-        context_messages: Immutable copy of the ReActAgent context messages.
-        deep_agent_state: Result of ``DeepAgentState.to_session_dict()``.
-        iteration_index: 1-based index of the iteration just completed.
+        context_messages: Immutable copy of the current-round context messages
+            (``with_history=False`` segment).
+        deep_agent_state: Result of ``DeepAgentState.to_session_dict()``
+            (task_plan / iteration / stop_condition_state / pending_follow_ups
+            / plan_mode).
+        iteration_index: 0 for the pre-round baseline; 1-based index of the
+            round just completed otherwise.
     """
 
     context_messages: tuple["BaseMessage", ...]
@@ -64,32 +69,37 @@ class InboxMessage:
 
 @dataclass(slots=True)
 class ActiveRound:
-    """An in-flight ReActAgent.stream() invocation.
+    """An in-flight task-loop outer round driven by the supervisor.
+
+    The round task runs ``NativeHarness._run_round``, which submits the round
+    to the TaskLoopController and awaits its completion; the real
+    ``react_agent.invoke`` runs inside the controller's TaskScheduler under
+    ``task_id``.
 
     Attributes:
-        round_id: Monotonically increasing round identifier.
+        round_id: Monotonically increasing round identifier (harness-internal).
+        task_id: Scheduler task id passed into ``submit_round`` so immediate
+            abort/pause can target it via ``task_scheduler.cancel_task``.
         original_query: The query that started this round (used by pause to
             cache and by send-while-paused to concatenate).
-        deep_agent: Reference to the owning DeepAgent. SnapshotRail reads
-            this when the AFTER_REACT_ITERATION ctx points at the inner
-            ReActAgent (ctx.agent != DeepAgent in that hook).
+        deep_agent: Reference to the owning DeepAgent (the harness itself; the
+            SnapshotRail reads context/state through it).
         task: The asyncio.Task running ``NativeHarness._run_round``.
-        steering_queue: Bound into the ReActAgent ctx via
-            ``ctx.bind_steering_queue``; NativeHarness pushes here for
-            immediate=True sends.
-        graceful_abort: When True, SnapshotRail.after_react_iteration will
-            ``request_force_finish`` so the next iteration top-of-loop check
-            breaks the inner loop cleanly.
-        pre_round_snapshot: Snapshot of context+state taken just before the
-            round's query was added. pause (which discards the whole round to
-            restart with a merged query) and immediate abort with no completed
-            iteration roll back to this.
-        last_safe_snapshot: Most recent snapshot captured by SnapshotRail at
-            the end of a fully successful iteration. None until the first
-            iteration completes. immediate abort rolls back to this.
+        steering_queue: Pushed by ``send(immediate=True)``; reaches the inner
+            ReAct loop via the round's ``submit_round`` steering wiring.
+        graceful_abort: When True, the round is finishing under a graceful
+            abort; ``_on_round_done`` must not auto-start a next round.
+        pre_round_snapshot: Snapshot taken just before the round started
+            (index 0). pause (which discards the whole round to restart with a
+            merged query) and immediate abort with no completed round roll back
+            to this.
+        last_safe_snapshot: Most recent snapshot captured by SnapshotRail at a
+            completed round iteration (AFTER_TASK_ITERATION). None until the
+            first completes. immediate abort rolls back to this.
     """
 
     round_id: int
+    task_id: str
     original_query: str
     deep_agent: "DeepAgent"
     task: asyncio.Task
