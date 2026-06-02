@@ -20,7 +20,8 @@ from openjiuwen.agent_teams.agent import stream_controller as stream_controller_
 from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
 from openjiuwen.agent_teams.agent.state import TeamAgentState
 from openjiuwen.agent_teams.agent.stream_controller import StreamController
-from openjiuwen.agent_teams.harness import TeamHarness, _MountedRails
+from openjiuwen.agent_teams.harness import TeamHarness
+from openjiuwen.agent_teams.harness.team_harness import _MountedRails
 from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberStatus
 from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
 from openjiuwen.agent_teams.schema.team import TeamRole

@@ -21,7 +21,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.agent_teams.harness import TeamHarness, _MountedRails
+from openjiuwen.agent_teams.harness import TeamHarness
+from openjiuwen.agent_teams.harness.team_harness import _MountedRails
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
@@ -286,7 +287,7 @@ async def test_run_streaming_delegates_to_runner(monkeypatch: pytest.MonkeyPatch
     """``run_streaming`` is the seam where a remote runtime would replace
     ``Runner.run_agent_streaming``. Tests confirm the call site is here.
     """
-    from openjiuwen.agent_teams import harness as harness_module
+    from openjiuwen.agent_teams.harness import team_harness as harness_module
 
     deep_agent = _stub_deep_agent()
     harness = _make_harness(deep_agent)
@@ -339,7 +340,7 @@ def test_has_pending_interrupt_returns_true_when_state_present() -> None:
 @pytest.mark.asyncio
 async def test_pending_interrupt_survives_loop_session_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
     """ask_user interrupts can outlive DeepAgent.loop_session cleanup."""
-    from openjiuwen.agent_teams import harness as harness_module
+    from openjiuwen.agent_teams.harness import team_harness as harness_module
 
     class FakeAgentSession:
         def __init__(self, state: Any) -> None:
