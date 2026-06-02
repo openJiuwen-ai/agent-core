@@ -230,10 +230,6 @@ class DeepAgentConfig:
     permissions: PermissionsSection | None = None
     permission_host: Any = None
 
-    # Filesystem sandbox: when True, file ops are restricted to workspace/project root.
-    # Subagents inherit the stricter of their own spec and this value.
-    restrict_to_work_dir: bool = True
-
 
 @dataclass
 class SubAgentConfig:

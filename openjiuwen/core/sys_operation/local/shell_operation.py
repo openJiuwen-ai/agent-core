@@ -50,9 +50,6 @@ _POSIX_COMMANDS = frozenset({
 })
 _QUOTED_WINDOWS_PATH_PATTERN = re.compile(r"(?P<quote>['\"])(?P<path>[A-Za-z]:\\[^'\"]+)(?P=quote)")
 _UNQUOTED_WINDOWS_PATH_PATTERN = re.compile(r"(?<![\w/])(?P<path>[A-Za-z]:\\[^\s|&;]+)")
-# Unix-style absolute paths (/some/path). Requires ≥1 non-separator char after '/' so bare '/'
-# and short escape sequences (/n, /t …) are excluded.
-_UNIX_ABS_PATH_PATTERN = re.compile(r"(?:^|[\s\"'(=,])(/[a-zA-Z0-9_.][^\s\"'|&;()*?]*)")
 
 
 def _track_shell_process(proc: asyncio.subprocess.Process) -> str | None:
@@ -493,13 +490,6 @@ class ShellOperation(BaseShellOperation):
                 return _create_exec_cmd_err(error_msg="command not allowed by allowlist",
                                             data=ExecuteCmdData(command=command, cwd=str(actual_cwd)))
 
-            sandbox_err = self._check_shell_sandbox(command, actual_cwd)
-            if sandbox_err:
-                return _create_exec_cmd_err(
-                    error_msg=f"Access denied: {sandbox_err}",
-                    data=ExecuteCmdData(command=command, cwd=str(actual_cwd)),
-                )
-
             # 框架层超时上限，防止 LLM 设置过长 timeout 导致 agent 长时间无响应
             _max_exec_cmd_timeout = int(os.getenv("JW_EXECUTE_CMD_MAX_TIMEOUT", "600"))
             timeout = min(timeout or 300, _max_exec_cmd_timeout)
@@ -637,14 +627,6 @@ class ShellOperation(BaseShellOperation):
                 yield _create_exec_cmd_stream_err(
                     error_msg="command not allowed by allowlist",
                     data=ExecuteCmdChunkData(chunk_index=chunk_index, exit_code=-1))
-                return
-
-            sandbox_err = self._check_shell_sandbox(command, actual_cwd)
-            if sandbox_err:
-                yield _create_exec_cmd_stream_err(
-                    error_msg=f"Access denied: {sandbox_err}",
-                    data=ExecuteCmdChunkData(chunk_index=chunk_index, exit_code=-1),
-                )
                 return
 
             # 框架层超时上限，防止 LLM 设置过长 timeout 导致 agent 长时间无响应
@@ -820,13 +802,6 @@ class ShellOperation(BaseShellOperation):
                     error_msg="command not allowed by allowlist",
                     data=ExecuteCmdBackgroundData(command=command, cwd=str(actual_cwd)))
 
-            sandbox_err = self._check_shell_sandbox(command, actual_cwd)
-            if sandbox_err:
-                return _create_exec_cmd_background_err(
-                    error_msg=f"Access denied: {sandbox_err}",
-                    data=ExecuteCmdBackgroundData(command=command, cwd=str(actual_cwd)),
-                )
-
             exec_env = OperationUtils.prepare_environment(environment)
             process = await self._create_subprocess(
                 command, actual_cwd, exec_env, shell_type=shell_type_enum, background=True
@@ -914,81 +889,6 @@ class ShellOperation(BaseShellOperation):
                             exec_env[key] = value
                 return True, f"TUI command detected: {description} (auto-mitigated)"
         return False, None
-
-    # ── sandbox helpers ───────────────────────────────────────
-
-    @staticmethod
-    def _is_within(path: pathlib.Path, root: pathlib.Path) -> bool:
-        """Return True when path is equal to or nested under root."""
-        try:
-            path.relative_to(root)
-            return True
-        except ValueError:
-            return False
-
-    def _get_sandbox_roots(self) -> list[pathlib.Path] | None:
-        """Return resolved sandbox roots when restrict_to_sandbox is active, else None."""
-        if not getattr(self._run_config, "restrict_to_sandbox", False):
-            return None
-        from openjiuwen.core.sys_operation.cwd import get_project_root, get_workspace
-
-        configured = getattr(self._run_config, "sandbox_root", None)
-        if configured:
-            raw_roots = list(configured)
-        else:
-            raw_roots = [p for p in (get_workspace(), get_project_root()) if p]
-        resolved = [pathlib.Path(r).expanduser().resolve() for r in raw_roots]
-        return resolved or None
-
-    def _extract_abs_paths(self, command: str) -> list[pathlib.Path]:
-        """Extract absolute filesystem paths explicitly referenced in a shell command string.
-
-        Covers Windows-style (``D:\\…``) and, on non-Windows hosts, Unix-style (``/…``)
-        absolute paths.  Variable-interpolated paths (``$var``) are not detected by
-        design — static analysis of shell variables is out of scope.
-        """
-        results: list[pathlib.Path] = []
-        for m in _QUOTED_WINDOWS_PATH_PATTERN.finditer(command):
-            results.append(pathlib.Path(m.group("path")))
-        for m in _UNQUOTED_WINDOWS_PATH_PATTERN.finditer(command):
-            results.append(pathlib.Path(m.group("path")))
-        if os.name != "nt":
-            # Skip well-known virtual/system paths that are never real data dirs.
-            system_prefixes = ("/dev/", "/proc/", "/sys/")
-            for m in _UNIX_ABS_PATH_PATTERN.finditer(command):
-                raw = m.group(1)
-                if not any(raw.startswith(pfx) for pfx in system_prefixes):
-                    results.append(pathlib.Path(raw))
-        return results
-
-    def _check_shell_sandbox(self, command: str, actual_cwd: pathlib.Path) -> str | None:
-        """Return an error string when the command or cwd violates the sandbox, else None.
-
-        Checks two things:
-        1. The working directory (``actual_cwd``) must be within a sandbox root.
-        2. Every absolute path explicitly referenced in ``command`` must also be within
-           a sandbox root.
-        """
-        roots = self._get_sandbox_roots()
-        if not roots:
-            return None
-
-        cwd_resolved = pathlib.Path(os.path.normpath(actual_cwd)).resolve(strict=False)
-        if not any(self._is_within(cwd_resolved, root) for root in roots):
-            return (
-                f"shell workdir {actual_cwd} is outside sandbox "
-                f"{[str(r) for r in roots]}"
-            )
-
-        for abs_path in self._extract_abs_paths(command):
-            resolved = pathlib.Path(os.path.normpath(abs_path)).resolve(strict=False)
-            if not any(self._is_within(resolved, root) for root in roots):
-                return (
-                    f"command references path {abs_path} outside sandbox "
-                    f"{[str(r) for r in roots]}"
-                )
-
-        return None
 
     def _wrap_command_with_buffering(self, command: str) -> str:
         """"Wraps a command string with OS-specific buffering wrapper if available."""
