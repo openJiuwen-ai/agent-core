@@ -1314,10 +1314,12 @@ class DeepAgent(BaseAgent):
                     for d in resources.skills.dirs
                 ]
             # Try appending to existing SkillUseRail
+            # Check both _registered_rails (already initialized) and
+            # _pending_rails (queued during configure() but not yet initialized)
             existing_skill_rail: (
                 SkillUseRail | None
             ) = None
-            for r in self._registered_rails:
+            for r in (*self._registered_rails, *self._pending_rails):
                 if isinstance(r, SkillUseRail):
                     existing_skill_rail = r
                     break
