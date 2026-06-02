@@ -44,12 +44,10 @@ class TokenTrackingRail(AgentRail):
         usage = getattr(response, "usage", None) or getattr(response, "usage_metadata", None)
         if usage is None:
             return
-        self.total_input_tokens += getattr(
-            usage, "prompt_tokens", 0
-        ) or 0
-        self.total_output_tokens += getattr(
-            usage, "completion_tokens", 0
-        ) or 0
+        self.total_input_tokens += getattr(usage, "prompt_tokens",
+                                           getattr(usage, "input_tokens", 0)) or 0
+        self.total_output_tokens += getattr(usage, "completion_tokens",
+                                            getattr(usage, "output_tokens", 0)) or 0
 
     def get_summary(self) -> Dict[str, Any]:
         """Return a dict suitable for ``/status`` and ``/cost``."""
