@@ -1,1060 +1,876 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+from __future__ import annotations
+
+import argparse
 import asyncio
 import json
-import re
-import sys
+import shutil
+import hashlib
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from openjiuwen.core.common.logging import logger
 
-from .benchmark_adapter.config import PipelineConfig, IterationResult, PipelineResult
-from .benchmark_adapter import ContainerManager, SkillEvolutionManager, extract_specific_errors, Verifier
-from .agent_adapter import JiuWenSwarmAdapter
+from .base import (
+    BaseAgentAdapter,
+    BaseBenchAdapter,
+    create_agent,
+    create_benchmark,
+)
+from .config import BuildConfigArgs, PipelineConfig
+from .docker_env import DockerEnvironment
+from .models import (
+    AgentContext,
+    EvalResult,
+    IterationResult,
+    PipelineResult,
+    SkillDelta,
+    Task,
+)
+from .skill_manager import SkillManager
 
 
-class SkillEvolutionPipeline:
-    """Main pipeline orchestrator with base image support"""
+def create_bench(name: str, config: dict[str, Any]) -> BaseBenchAdapter:
+    return create_benchmark(name, config)
 
+
+
+
+
+
+
+
+class EvolutionPipeline:
     def __init__(self, config: PipelineConfig):
         self.config = config
-        self.container_manager = ContainerManager(config)
-        self.skill_manager = SkillEvolutionManager(config)
-        self.agent_adapter = JiuWenSwarmAdapter(config)
-        self.agent_adapter.set_resolved_skill_name(self.skill_manager.resolved_skill_name)
-        self.agent_adapter.set_all_skill_names(self.skill_manager.get_all_skill_names())
-        self.verifier = Verifier(config)
-
-        self.results: list[IterationResult] = []
-        self.output_dir = config.results_dir / config.task_id
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-
-    @classmethod
-    def from_config(cls, config_path: str | Path) -> "SkillEvolutionPipeline":
-        config = PipelineConfig.from_yaml(Path(config_path))
-        return cls(config)
-
-    async def run(self) -> PipelineResult:
-        logger.info("\n%s", "=" * 60)
-        logger.info("Evaluator Pipeline: %s", self.config.name)
-        logger.info("Task: %s", self.config.task_id)
-        logger.info("Max Iterations: %d", self.config.max_iterations)
-        logger.info("Base Image: %s", self.config.base_image)
-        logger.info("Auto-rewrite Dockerfile: %s", self.config.auto_rewrite_dockerfile)
-        logger.info("%s\n", "=" * 60)
-
-        if not self.config.api_key:
-            logger.warning("WARNING: No API key configured!")
-            logger.warning("  Please set one of the following environment variables:")
-            logger.warning("    - DASHSCOPE_API_KEY (for DashScope API)")
-            logger.warning("    - OPENAI_API_KEY (for OpenAI API)")
-            logger.warning("  Or set 'api_key' in a YAML configuration file.")
-            logger.warning("  Without an API key, JiuWenSwarm will not work properly.\n")
-        else:
-            logger.info("✓ API key configured: %s...", self.config.api_key[:10])
-            logger.info("  API base: %s", self.config.api_base or "default")
-            logger.info("  Model: %s\n", self.config.model_name)
-
-        await self._init_stage()
-
-        previous_result = None
-        for iteration in range(1, self.config.max_iterations + 1):
-            logger.info("\n%s", "=" * 60)
-            logger.info("Iteration %d/%d", iteration, self.config.max_iterations)
-            logger.info("%s\n", "=" * 60)
-
-            iteration_result, raw_output, stderr = await self._run_iteration(
-                iteration,
-                previous_result=previous_result
-            )
-            self.results.append(iteration_result)
-
-            await self._save_iteration_result(iteration_result, iteration, raw_output, stderr)
-
-            previous_result = iteration_result
-
-            if self._check_convergence():
-                if all(r.test_passed for r in self.results[-self.config.convergence_threshold:]):
-                    logger.info("\n✓ Convergence achieved at iteration %d (all tests passing)", iteration)
-                else:
-                    stagnation_window = self.results[-self.config.stagnation_patience:]
-                    logger.warning(
-                        "\nDeadlock stagnation at iteration %d: "
-                        "pass rate stuck at %.0f%% "
-                        "with no skill changes for %d iterations",
-                        iteration,
-                        stagnation_window[0].test_pass_rate * 100,
-                        self.config.stagnation_patience
-                    )
-                break
-
-        metrics = self._calculate_metrics()
-        report_path = await self._generate_report(metrics)
-
-        return PipelineResult(
-            task_id=self.config.task_id,
-            agent=self.config.agent,
-            total_iterations=len(self.results),
-            convergence_achieved=self._check_convergence(),
-            results=self.results,
-            metrics=metrics,
-            skill_history=self.skill_manager.skill_history,
-            output_dir=self.output_dir,
-            report_path=report_path
-        )
-
-    async def _init_stage(self) -> None:
-        logger.info("Stage 1: Initialization")
-
-        logger.info("  - Ensuring base image exists...")
-        base_ok = await self.container_manager.ensure_base_image()
-        if not base_ok:
-            raise RuntimeError("Failed to ensure base image exists")
-
-        logger.info("  - Building Docker image (with auto-rewrite if needed)...")
-        success = await self.container_manager.build_image()
-        if not success:
-            raise RuntimeError("Failed to build Docker image")
-
-        logger.info("  - Creating output directories...")
-        (self.output_dir / "iterations").mkdir(parents=True, exist_ok=True)
-        (self.output_dir / "skill_history").mkdir(parents=True, exist_ok=True)
-
-        logger.info("  - Loading initial skills (if exist)...")
-        initial_skills = self.skill_manager.load_all_skills()
-        if initial_skills:
-            logger.info("    Found %d existing skill(s): %s", len(initial_skills), list(initial_skills.keys()))
-            for sn, sc in initial_skills.items():
-                logger.info("      - %s: %d chars", sn, len(sc))
-        else:
-            logger.info("    No existing skills found, will create from scratch")
-
-        logger.info("✓ Initialization complete\n")
-
-    async def _run_iteration(
-        self,
-        iteration: int,
-        previous_result: IterationResult | None = None
-    ) -> tuple[IterationResult, str, str]:
-        started_at = datetime.now(timezone.utc)
-
-        skip_evolution = (
-            previous_result is not None
-            and previous_result.test_pass_rate >= 1.0
-        )
-        if skip_evolution:
-            logger.info("  ✓ Previous iteration passed 100%%, skipping evolution")
-
-        logger.info("  1. Starting container...")
-        container_id = await self.container_manager.start_container()
-        if not container_id:
-            raise RuntimeError(f"Failed to start container for iteration {iteration}")
-
-        try:
-            logger.info("  2. Setting up JiuWenSwarm (verifying from base image)...")
-            setup_ok = await self.agent_adapter.setup(self.container_manager)
-            if not setup_ok:
-                logger.warning("  JiuWenSwarm setup verification failed")
-
-            logger.info("  3. Copying task files to container...")
-            await self._copy_task_files_to_container()
-
-            logger.info("  4. Loading skills to container...")
-            all_skills = self.skill_manager.load_all_skills()
-            all_evolutions = self.skill_manager.all_evolutions
-            all_evolution_files = self.skill_manager.all_evolution_files
-            has_skill = len(all_skills) > 0
-
-            if has_skill:
-                loaded_count = await self.agent_adapter.load_all_skills(
-                    self.container_manager, all_skills,
-                    all_evolutions=all_evolutions,
-                    all_evolution_files=all_evolution_files,
-                )
-                logger.info("    %d skills loaded", loaded_count)
-                for sn, sc in all_skills.items():
-                    logger.info("      - %s: %d chars", sn, len(sc))
-                    if sn in all_evolutions:
-                        logger.info("        evolutions: %d chars", len(all_evolutions[sn]))
-                    if sn in all_evolution_files:
-                        logger.info("        evolution files: %s", list(all_evolution_files[sn].keys()))
-            else:
-                logger.info("    No existing skills found")
-
-            self.agent_adapter.set_all_skill_names(self.skill_manager.get_all_skill_names())
-
-            evolution_suggestions = None
-            if previous_result and has_skill and not skip_evolution:
-                evolution_suggestions = self._generate_evolution_suggestions(previous_result)
-                if evolution_suggestions:
-                    logger.info("  4.5. Evolution suggestions from previous iteration:")
-                    logger.info("    %s...", evolution_suggestions[:200])
-
-            logger.info("  5. Running JiuWenSwarm agent...")
-            instruction = self._load_instruction()
-
-            from .agent_adapter.adapter import RunContext
-            run_context = RunContext(
-                container=self.container_manager,
-                instruction=instruction,
-                iteration=iteration,
-                has_skill=has_skill,
-                evolution_suggestions=evolution_suggestions,
-                previous_result=previous_result if not skip_evolution else None,
-                evolution_files=None
-            )
-            agent_result = await self.agent_adapter.run(run_context)
-
-            logger.info("  6. Running tests...")
-            test_result = await self.verifier.run_tests(self.container_manager)
-            logger.info("    Test passed: %s", test_result.get("passed", False))
-            logger.info("    Test pass rate: %.2f%%", test_result.get("pass_rate", 0) * 100)
-            if not test_result.get("passed", False):
-                logger.info("    Test output (last 200 chars): %s", test_result.get("output", "")[-200:])
-
-            logger.info("  7. Capturing created/updated skills...")
-            created_skills, evolution_contents, captured_evolution_files = \
-                await self.agent_adapter.capture_created_skills(self.container_manager)
-
-            skill_changed = False
-            evolution_suggestions = None
-
-            logger.info("    Created skills: %s", list(created_skills.keys()))
-            logger.info("    Previously known skills: %s", self.skill_manager.get_all_skill_names())
-
-            if created_skills:
-                resolved_name = self.skill_manager.resolved_skill_name
-                if resolved_name not in created_skills and self.config.task_id not in created_skills:
-                    available = list(created_skills.keys())
-                    new_names = [n for n in available if n not in self.skill_manager.all_skills]
-                    if new_names:
-                        self.skill_manager.resolved_skill_name = new_names[0]
-                        self.agent_adapter.set_resolved_skill_name(new_names[0])
-                        self.skill_manager.save_resolved_skill_name()
-                        logger.info("    Resolved skill name set to first new skill: '%s'", new_names[0])
-
-                for sn in created_skills:
-                    if sn not in self.skill_manager.all_skills:
-                        logger.info("    ✓ New skill discovered: %s", sn)
-
-                self.agent_adapter.set_all_skill_names(list(created_skills.keys()))
-
-                any_skill_changed = False
-                for sn, sc in created_skills.items():
-                    old_content = self.skill_manager.all_skills.get(sn)
-                    if (old_content is None or 
-                        self.skill_manager.compute_skill_hash(old_content) != 
-                        self.skill_manager.compute_skill_hash(sc)):
-                        any_skill_changed = True
-                        break
-
-                has_new_evolutions = any(
-                    sn in evolution_contents and evolution_contents[sn]
-                    for sn in created_skills
-                )
-                has_new_evolution_files = any(
-                    sn in captured_evolution_files and captured_evolution_files[sn]
-                    for sn in created_skills
-                )
-
-                if any_skill_changed or has_new_evolutions or has_new_evolution_files:
-                    self.skill_manager.save_all_skills(
-                        created_skills, iteration,
-                        evolutions=evolution_contents,
-                        evolution_files=captured_evolution_files,
-                    )
-                    logger.info("    ✓ All %d skills saved to iteration_%03d", len(created_skills), iteration)
-                    for sn in created_skills:
-                        if (self.skill_manager.skill_dir / sn / "SKILL.md").exists():
-                            await self.skill_manager.render_evolution_to_skill_md_for(sn)
-                else:
-                    logger.warning("    No skill content changed from previous version")
-                skill_changed = any_skill_changed or has_new_evolutions or has_new_evolution_files
-            else:
-                if iteration == 1:
-                    logger.warning("    No skill created in first iteration")
-                    logger.warning("    Agent should create skill at: %s/<skill-name>/SKILL.md", 
-                                    self.agent_adapter.JIUWENSWARM_SKILL_DIR)
-                else:
-                    logger.warning("    No skill captured in iteration %d", iteration)
-
-            completed_at = datetime.now(timezone.utc)
-
-            main_skill_content = self.skill_manager.current_skill
-
-            return IterationResult(
-                iteration=iteration,
-                skill_content=main_skill_content,
-                skill_hash=self.skill_manager.compute_skill_hash(main_skill_content),
-                agent_output=agent_result.get("final_response") or "",
-                agent_trajectory=agent_result["trajectory"],
-                agent_execution_time=agent_result["execution_time"],
-                agent_tokens_used=agent_result["tokens_used"],
-                test_passed=test_result["passed"],
-                test_pass_rate=test_result["pass_rate"],
-                test_details=test_result,
-                skill_changed=skill_changed,
-                evolution_suggestions=evolution_suggestions,
-                started_at=started_at,
-                completed_at=completed_at,
-                evolution_events=agent_result.get("evolution_events", [])
-            ), agent_result.get("raw_output", ""), agent_result.get("stderr", "")
-
-        finally:
-            logger.info("  7. Saving JiuWenSwarm logs (evolution wait already done in runner)...")
-            await self._save_jiuwenswarm_logs(iteration)
-            logger.info("  9. Stopping container...")
-            await self.container_manager.stop_container()
-
-    async def _save_jiuwenswarm_logs(self, iteration: int) -> None:
-        try:
-            log_dir = self.output_dir / f"iterations/iteration_{iteration:03d}/logs"
-            log_dir.mkdir(parents=True, exist_ok=True)
-
-            agent_logs_dir = log_dir / "agent_logs"
-            agent_logs_dir.mkdir(parents=True, exist_ok=True)
-
-            list_result = await self.container_manager.exec_in_container(
-                "find ~/.jiuwenswarm/agent/.logs -type f 2>/dev/null",
-                timeout=10
-            )
-
-            saved_count = 0
-            if list_result.get("returncode") == 0 and list_result.get("stdout"):
-                log_files_list = list_result["stdout"].strip().split("\n")
-                for log_path in log_files_list:
-                    if log_path:
-                        log_name = log_path.split("/")[-1]
-                        try:
-                            result = await self.container_manager.exec_in_container(
-                                f"cat {log_path} 2>/dev/null | tail -1000",
-                                timeout=10
-                            )
-
-                            if result.get("returncode") == 0 and result.get("stdout"):
-                                log_content = result["stdout"]
-                                log_file = agent_logs_dir / log_name
-                                log_file.write_text(log_content, encoding="utf-8")
-                                saved_count += 1
-                                logger.info("    ✓ Saved agent_logs/%s (%d chars)", log_name, len(log_content))
-                        except Exception as e:
-                            logger.warning("    Failed to save agent_logs/%s: %s", log_name, e)
-
-            logs_dir = log_dir / "logs"
-            logs_dir.mkdir(parents=True, exist_ok=True)
-
-            list_result = await self.container_manager.exec_in_container(
-                "find ~/.jiuwenswarm/logs/logs -type f 2>/dev/null",
-                timeout=10
-            )
-
-            if list_result.get("returncode") == 0 and list_result.get("stdout"):
-                log_files_list = list_result["stdout"].strip().split("\n")
-                for log_path in log_files_list:
-                    if log_path:
-                        log_name = log_path.split("/")[-1]
-                        try:
-                            result = await self.container_manager.exec_in_container(
-                                f"cat {log_path} 2>/dev/null | tail -1000",
-                                timeout=10
-                            )
-
-                            if result.get("returncode") == 0 and result.get("stdout"):
-                                log_content = result["stdout"]
-                                log_file = logs_dir / log_name
-                                log_file.write_text(log_content, encoding="utf-8")
-                                saved_count += 1
-                                logger.info("    ✓ Saved logs/%s (%d chars)", log_name, len(log_content))
-                        except Exception as e:
-                            logger.warning("    Failed to save logs/%s: %s", log_name, e)
-
-            config_files = [
-                (".env", "~/.jiuwenswarm/config/.env"),
-                ("config.yaml", "~/.jiuwenswarm/config/config.yaml"),
-            ]
-
-            for config_name, container_path in config_files:
-                try:
-                    result = await self.container_manager.exec_in_container(
-                        f"cat {container_path} 2>/dev/null",
-                        timeout=10
-                    )
-
-                    if result.get("returncode") == 0 and result.get("stdout"):
-                        config_content = result["stdout"]
-                        config_file = log_dir / config_name
-                        config_file.write_text(config_content, encoding="utf-8")
-                        saved_count += 1
-                        logger.info("    ✓ Saved %s (%d chars)", config_name, len(config_content))
-                except Exception as e:
-                    logger.warning("    Failed to save %s: %s", config_name, e)
-
-            llm_log_saved = False
-            workspace = self.config.workspace_dir
-            llm_search_paths = [
-                "./logs/llm.log",
-                f"{workspace}/logs/llm.log",
-                "/root/logs/llm.log",
-                "/app/logs/llm.log",
-                "/workspace/logs/llm.log",
-                "/home/logs/llm.log",
-                "~/.jiuwenswarm/logs/logs/llm.log",
-                "~/.jiuwenswarm/agent/.logs/llm.log",
-                "~/.jiuwenswarm/llm.log",
-            ]
-            for llm_path in llm_search_paths:
-                try:
-                    result = await self.container_manager.exec_in_container(
-                        f"cat {llm_path} 2>/dev/null | tail -2000",
-                        timeout=10
-                    )
-                    if result.get("returncode") == 0 and result.get("stdout"):
-                        llm_content = result["stdout"]
-                        llm_file = log_dir / "llm.log"
-                        llm_file.write_text(llm_content, encoding="utf-8")
-                        saved_count += 1
-                        llm_log_saved = True
-                        logger.info("    ✓ Saved llm.log from %s (%d chars)", llm_path, len(llm_content))
-                        break
-                except Exception as e:
-                    logger.debug("    Failed to check llm.log at %s: %s", llm_path, e)
-
-            if not llm_log_saved:
-                search_result = await self.container_manager.exec_in_container(
-                    "find ~/.jiuwenswarm -name 'llm.log' -type f 2>/dev/null",
-                    timeout=15
-                )
-                if search_result.get("returncode") == 0 and search_result.get("stdout"):
-                    found_paths = [p for p in search_result["stdout"].strip().split("\n") if p]
-                    if found_paths:
-                        for found_path in found_paths:
-                            try:
-                                result = await self.container_manager.exec_in_container(
-                                    f"cat {found_path} 2>/dev/null | tail -2000",
-                                    timeout=10
-                                )
-                                if result.get("returncode") == 0 and result.get("stdout"):
-                                    llm_content = result["stdout"]
-                                    rel_parts = found_path.replace("/root/.jiuwenswarm/", "")\
-                                        .replace("/home/", "").split("/")
-                                    safe_name = "_".join(p for p in rel_parts if p) \
-                                        if len(found_paths) > 1 else "llm.log"
-                                    llm_file = log_dir / safe_name
-                                    llm_file.write_text(llm_content, encoding="utf-8")
-                                    saved_count += 1
-                                    llm_log_saved = True
-                                    logger.info("  ✓ Saved llm.log from %s (%d chars)", found_path, len(llm_content))
-                            except Exception as e:
-                                logger.debug("    Failed to save llm.log from %s: %s", found_path, e)
-
-            if not llm_log_saved:
-                logger.info("    llm.log not found in .jiuwenswarm, searching workspace directory...")
-                ws_search_result = await self.container_manager.exec_in_container(
-                    f"find {workspace} -name 'llm.log' -type f 2>/dev/null",
-                    timeout=15
-                )
-                if ws_search_result.get("returncode") == 0 and ws_search_result.get("stdout"):
-                    found_paths = [p for p in ws_search_result["stdout"].strip().split("\n") if p]
-                    for found_path in found_paths:
-                        try:
-                            result = await self.container_manager.exec_in_container(
-                                f"cat {found_path} 2>/dev/null | tail -2000",
-                                timeout=10
-                            )
-                            if result.get("returncode") == 0 and result.get("stdout"):
-                                llm_content = result["stdout"]
-                                llm_file = log_dir / "llm.log"
-                                llm_file.write_text(llm_content, encoding="utf-8")
-                                saved_count += 1
-                                llm_log_saved = True
-                                logger.info("    ✓ Saved llm.log from %s (%d chars)", found_path, len(llm_content))
-                        except Exception as e:
-                            logger.debug("    Failed to save llm.log from %s: %s", found_path, e)
-
-            if not llm_log_saved:
-                logger.info("    Searching for openjiuwen-style LLM logs (jiuwen.log / jiuwen.jsonl)...")
-                oj_search_paths = [
-                    f"{workspace}/logs/run/jiuwen.log",
-                    f"{workspace}/logs/run/jiuwen.jsonl",
-                    "./logs/run/jiuwen.log",
-                    "./logs/run/jiuwen.jsonl",
-                    "/root/logs/run/jiuwen.log",
-                    "/root/logs/run/jiuwen.jsonl",
-                    "/app/logs/run/jiuwen.log",
-                    "/app/logs/run/jiuwen.jsonl",
-                ]
-                for oj_path in oj_search_paths:
-                    try:
-                        result = await self.container_manager.exec_in_container(
-                            f"cat {oj_path} 2>/dev/null | tail -2000",
-                            timeout=10
-                        )
-                        if result.get("returncode") == 0 and result.get("stdout"):
-                            oj_content = result["stdout"]
-                            oj_name = oj_path.split("/")[-1]
-                            oj_file = log_dir / f"llm_{oj_name}"
-                            oj_file.write_text(oj_content, encoding="utf-8")
-                            saved_count += 1
-                            llm_log_saved = True
-                            logger.info(
-                                "  ✓ Saved LLM log from %s as llm_%s (%d chars)", oj_path, oj_name, len(oj_content))
-                            break
-                    except Exception as e:
-                        logger.debug("    Failed to check %s: %s", oj_path, e)
-
-                if not llm_log_saved:
-                    logger.info("    No openjiuwen-style logs found, doing broad search...")
-                    broad_search_dirs = [workspace, "/root", "."]
-                    for search_dir in broad_search_dirs:
-                        if llm_log_saved:
-                            break
-                        broad_result = await self.container_manager.exec_in_container(
-                            f"find {search_dir} -path '*/logs/*' -name '*.log' -type f 2>/dev/null | head -20",
-                            timeout=15
-                        )
-                        if broad_result.get("returncode") == 0 and broad_result.get("stdout"):
-                            found_logs = [p for p in broad_result["stdout"].strip().split("\n") if p]
-                            for found_log in found_logs:
-                                log_basename = found_log.split("/")[-1]
-                                if any(kw in log_basename.lower() for kw in ["llm", "jiuwen", "agent", "model"]):
-                                    try:
-                                        result = await self.container_manager.exec_in_container(
-                                            f"cat {found_log} 2>/dev/null | tail -2000",
-                                            timeout=10
-                                        )
-                                        if result.get("returncode") == 0 and result.get("stdout"):
-                                            log_content = result["stdout"]
-                                            save_name = f"llm_{log_basename}" \
-                                            if "llm" not in log_basename else log_basename
-                                            save_file = log_dir / save_name
-                                            save_file.write_text(log_content, encoding="utf-8")
-                                            saved_count += 1
-                                            llm_log_saved = True
-                                            logger.info("    ✓ Saved LLM-related log from %s as %s (%d chars)", 
-                                                        found_log, save_name, len(log_content))
-                                    except Exception as e:
-                                        logger.debug("    Failed to save log from %s: %s", found_log, e)
-
-            if not llm_log_saved:
-                logger.warning("    llm.log not found anywhere in container")
-
-            skills_log_dir = log_dir / "skills"
-            evo_find_result = await self.container_manager.exec_in_container(
-                f"find {self.agent_adapter.JIUWENSWARM_SKILL_DIR} "
-                f"-type f \\( -name 'evolutions.json' -o -name '*.md' \\) 2>/dev/null",
-                timeout=15
-            )
-            if evo_find_result.get("returncode") == 0 and evo_find_result.get("stdout", "").strip():
-                evo_files = [f.strip() for f in evo_find_result["stdout"].strip().split("\n") if f.strip()]
-                for evo_file in evo_files:
-                    try:
-                        rel_path = evo_file.replace(self.agent_adapter.JIUWENSWARM_SKILL_DIR + "/", "")
-                        save_path = skills_log_dir / rel_path
-                        save_path.parent.mkdir(parents=True, exist_ok=True)
-                        cat_result = await self.container_manager.exec_in_container(
-                            f"cat {evo_file} 2>/dev/null", timeout=10
-                        )
-                        if cat_result.get("returncode") == 0 and cat_result.get("stdout"):
-                            save_path.write_text(cat_result["stdout"], encoding="utf-8")
-                            saved_count += 1
-                            logger.info("    ✓ Saved skills/%s (%d chars)", rel_path, len(cat_result["stdout"]))
-                    except Exception as e:
-                        logger.debug("    Failed to save skill file %s: %s", evo_file, e)
-
-            if saved_count > 0:
-                logger.info("    ✓ Saved %d files to %s", saved_count, log_dir)
-            else:
-                logger.warning("    No files found in container")
-
-        except Exception as e:
-            logger.error("    Error saving JiuWenSwarm logs: %s", e)
-
-    async def _copy_task_files_to_container(self) -> None:
-        workspace = self.config.workspace_dir
-
-        tests_src = self.config.task_path / "tests"
-        if tests_src.exists() and tests_src.is_dir():
-            success = await self.container_manager.copy_to_container(
-                tests_src,
-                f"{workspace}/tests"
-            )
-            if success:
-                logger.info("    ✓ Tests copied to %s/tests", workspace)
-            else:
-                logger.error("    Failed to copy tests")
-        else:
-            logger.warning("    Tests directory not found: %s", tests_src)
-
-        workspace_src = self.config.task_path / "workspace"
-        if workspace_src.exists() and workspace_src.is_dir():
-            for item in workspace_src.iterdir():
-                if item.is_file():
-                    success = await self.container_manager.copy_to_container(
-                        item,
-                        f"{workspace}/{item.name}"
-                    )
-                    if not success:
-                        logger.error("    Failed to copy %s", item.name)
-                elif item.is_dir():
-                    success = await self.container_manager.copy_to_container(
-                        item,
-                        f"{workspace}/{item.name}"
-                    )
-                    if not success:
-                        logger.error("    Failed to copy %s", item.name)
-            logger.info("    ✓ Workspace files copied")
-
-        instruction_src = self.config.task_path / "instruction.md"
-        if instruction_src.exists():
-            success = await self.container_manager.copy_to_container(
-                instruction_src,
-                f"{workspace}/instruction.md"
-            )
-            if success:
-                logger.info("    ✓ Instruction copied")
-
-    def _load_instruction(self) -> str:
-        instruction_path = self.config.task_path / "instruction.md"
-        if instruction_path.exists():
-            return instruction_path.read_text(encoding="utf-8")
-        return "Please complete the task."
-
-    async def _save_iteration_result(
-        self,
-        result: IterationResult,
-        iteration: int,
-        raw_output: str = "",
-        stderr: str = ""
-    ) -> None:
-        iter_dir = self.output_dir / "iterations" / f"iteration_{iteration:03d}"
-        iter_dir.mkdir(parents=True, exist_ok=True)
-
-        if self.config.save_trajectory:
-            trajectory_path = iter_dir / "trajectory.json"
-            trajectory_path.write_text(
-                json.dumps(result.agent_trajectory, indent=2, ensure_ascii=False),
-                encoding="utf-8"
-            )
-
-        output_path = iter_dir / "agent_output.txt"
-        output_path.write_text(result.agent_output or "", encoding="utf-8")
-
-        if raw_output:
-            raw_output_path = iter_dir / "raw_output.txt"
-            raw_output_path.write_text(raw_output, encoding="utf-8")
-
-        if stderr:
-            stderr_path = iter_dir / "stderr.txt"
-            stderr_path.write_text(stderr, encoding="utf-8")
-
-        test_path = iter_dir / "test_results.json"
-        test_path.write_text(
-            json.dumps(result.test_details, indent=2, ensure_ascii=False),
+        self.agent = create_agent(config.agent, config.agent_config)
+        self.bench = create_bench(config.benchmark, config.bench_config)
+        self.skill_manager: SkillManager | None = None
+        if config.evolution_mode:
+            self.skill_manager = SkillManager(config)
+        self._base_image_tag: str | None = None  
+
+    async def run(self) -> list[PipelineResult]:
+        logger.info(f"{'='*60}")
+        logger.info(f"Initializing benchmark: {self.config.benchmark}")
+        logger.info(f"{'='*60}")
+        
+        if not self.bench.clone_repo():
+            logger.error("❌ Failed to clone benchmark repository")
+            return []
+
+        tasks = self.bench.load_tasks()
+
+        if self.config.task_ids:
+            tasks = [t for t in tasks if t.task_id in self.config.task_ids]
+
+        if not tasks:
+            logger.info("No tasks to run")
+            return []
+
+        logger.info(f"{'='*60}")
+        mode_str = "EVOLUTION" if self.config.evolution_mode else "SINGLE-RUN"
+        logger.info(f"Pipeline: {mode_str} mode | {len(tasks)} tasks")
+        logger.info(f"Agent: {self.config.agent} | Benchmark: {self.config.benchmark}")
+        
+        if self.config.evolution_mode:
+            logger.info(f"Max iterations: {self.config.max_iterations}")
+            logger.info(f"Convergence: {'enabled' if self.config.convergence_check else 'disabled'}")
+        logger.info(f"{'='*60}")
+
+        results: list[PipelineResult] = []
+        for idx, task in enumerate(tasks, 1):
+            logger.info(f"[{idx}/{len(tasks)}] Task: {task.task_id}")
+            try:
+                result = await self.run_task(task)
+                results.append(result)
+            except Exception as e:
+                logger.error(f"  ✗ Task failed: {e}")
+                results.append(PipelineResult(
+                    task_id=task.task_id,
+                    agent_name=self.config.agent,
+                    benchmark_name=self.config.benchmark,
+                    total_iterations=0,
+                    convergence_achieved=False,
+                    convergence_type="error",
+                    metrics={"error": str(e)},
+                ))
+
+        self._print_summary(results)
+        self._save_results_summary(results)
+        return results
+
+    def _save_results_summary(self, results: list[PipelineResult]) -> None:
+        """Save the final summary of all task results."""
+        summary_dir = self.config.results_dir
+        summary_dir.mkdir(parents=True, exist_ok=True)
+        
+        summary_data = {
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "agent": self.config.agent,
+            "benchmark": self.config.benchmark,
+            "evolution_mode": self.config.evolution_mode,
+            "max_iterations": self.config.max_iterations,
+            "total_tasks": len(results),
+            "passed_tasks": sum(1 for r in results if r.convergence_achieved),
+            "failed_tasks": sum(1 for r in results if not r.convergence_achieved),
+            "tasks": [r.to_dict() for r in results],
+        }
+        
+        summary_path = summary_dir / "summary.json"
+        summary_path.write_text(
+            json.dumps(summary_data, indent=2, ensure_ascii=False),
             encoding="utf-8"
         )
+        logger.info(f"✓ Results summary saved to: {summary_path}")
 
-        test_output = result.test_details.get("output", "")
-        if test_output:
-            test_output_path = iter_dir / "test_output.txt"
-            test_output_path.write_text(test_output, encoding="utf-8")
+    async def run_task(self, task: Task) -> PipelineResult:
+        if self.config.evolution_mode:
+            return await self._run_evolution(task)
+        else:
+            return await self._run_single(task)
 
-        if result.skill_content:
-            skill_path = iter_dir / "skill.md"
-            skill_path.write_text(result.skill_content, encoding="utf-8")
+    async def _run_single(self, task: Task) -> PipelineResult:
+        env = await self._create_and_start_env(task)
+
+        try:
+            await self.bench.prepare_environment(task, env)
+
+            setup_ok = await self.agent.setup(env)
+            if not setup_ok:
+                raise RuntimeError("Agent setup failed")
+
+            if task.has_skills:
+                await self._load_task_skills(env, task)
+
+            logs_dir = self.config.results_dir / task.task_id
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            self.agent.set_logs_dir(logs_dir)
+
+            context = AgentContext(iteration=1, has_skill=task.has_skills)
+            agent_result = await self.agent.run(env, task, context)
+
+            # 立即保存 agent 输出，即使后续步骤失败也能保留轨迹
+            if self.config.save_trajectory:
+                (logs_dir / "agent_output.txt").write_text(
+                    agent_result.raw_output or "", encoding="utf-8"
+                )
+                if agent_result.trajectory:
+                    (logs_dir / "trajectory.json").write_text(
+                        json.dumps(agent_result.trajectory, indent=2, ensure_ascii=False, default=str),
+                        encoding="utf-8",
+                    )
+
+            eval_result = await self.bench.evaluate(env, task)
+
+            iteration_result = IterationResult(
+                iteration=1,
+                agent_result=agent_result,
+                eval_result=eval_result,
+                skill_delta=SkillDelta(),
+            )
+
+            if self.config.save_trajectory:
+                self._save_iteration_result(logs_dir, iteration_result)
+
+            return PipelineResult(
+                task_id=task.task_id,
+                agent_name=self.config.agent,
+                benchmark_name=self.config.benchmark,
+                total_iterations=1,
+                convergence_achieved=eval_result.passed,
+                convergence_type="single_pass" if eval_result.passed else "single_fail",
+                results=[iteration_result],
+                metrics={"pass_rate": eval_result.pass_rate, "passed": eval_result.passed},
+                output_dir=logs_dir,
+            )
+        finally:
+            await env.stop()
+
+    async def _run_evolution(self, task: Task) -> PipelineResult:
+        if self.skill_manager is None:
+            raise RuntimeError("skill_manager has not been initialized")
+        self.skill_manager.init_for_task(task.task_id)
+
+        env = await self._create_and_start_env(task)
+
+        try:
+            await self.bench.prepare_environment(task, env)
+
+            setup_ok = await self.agent.setup(env)
+            if not setup_ok:
+                raise RuntimeError("Agent setup failed")
+
+            logs_dir = self.config.results_dir / task.task_id
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            self.agent.set_logs_dir(logs_dir)
+
+            # In evolution mode, we don't load pre-defined skills initially.
+            # The agent should create its own skill and evolve it.
+            # We only load skills if they were captured from previous iterations.
+            # Use verbose=False to suppress "Loaded X skills" message in evolution mode
+            all_skills = self.skill_manager.load_all_skills(verbose=False)
+            has_skill = bool(all_skills)
+
+            if has_skill:
+                # Check if skills are from previous iterations (have evolutions)
+                has_evolutions = len(self.skill_manager.all_evolutions) > 0
+                
+                if has_evolutions:
+                    # Load evolved skills from previous iterations
+                    self.agent.set_skill_context(
+                        self.skill_manager.resolved_skill_name,
+                        self.skill_manager.get_all_skill_names(),
+                    )
+                    await self.agent.load_skills(
+                        env, all_skills,
+                        self.skill_manager.all_evolutions,
+                        self.skill_manager.all_evolution_files,
+                    )
+                    logger.info(f"  ✓ Loaded {len(all_skills)} evolved skill(s) from previous iterations")
+                else:
+                    # First evolution run - let agent create skill from scratch
+                    logger.info(f"  Evolution mode: Agent will create skill from scratch")
+
+            iteration_results: list[IterationResult] = []
+            convergence_achieved = False
+            convergence_type = ""
+            consecutive_no_change = 0
+
+            for iteration in range(1, self.config.max_iterations + 1):
+                logger.info(f"  --- Iteration {iteration}/{self.config.max_iterations} ---")
+
+                evolution_suggestions = None
+                if iteration > 1 and iteration_results:
+                    prev = iteration_results[-1]
+                    if not prev.eval_result.passed:
+                        evolution_suggestions = self._build_evolution_suggestions(prev)
+
+                context = AgentContext(
+                    iteration=iteration,
+                    has_skill=has_skill,
+                    previous_result=iteration_results[-1] if iteration_results else None,
+                    evolution_suggestions=evolution_suggestions,
+                )
+
+                agent_result = await self.agent.run(env, task, context)
+                eval_result = await self.bench.evaluate(env, task)
+
+                skill_delta = SkillDelta()
+                skill_changed = False
+
+                captured = await self.agent.capture_skills(env)
+                if captured.changed:
+                    skill_delta = captured
+                    skill_changed = self.skill_manager.has_skill_changed(
+                        captured.skills.get(
+                            self.skill_manager.resolved_skill_name, ""
+                        )
+                    )
+
+                    self.skill_manager.save_all_skills(
+                        captured.skills,
+                        iteration,
+                        captured.evolutions,
+                        captured.evolution_files,
+                    )
+
+                    for skill_name in captured.skills:
+                        await self.skill_manager.render_evolution_to_skill_md_for(skill_name)
+
+                    all_skills = self.skill_manager.load_all_skills()
+                    has_skill = True
+
+                    self.agent.set_skill_context(
+                        self.skill_manager.resolved_skill_name,
+                        self.skill_manager.get_all_skill_names(),
+                    )
+                    await self.agent.load_skills(
+                        env, all_skills,
+                        self.skill_manager.all_evolutions,
+                        self.skill_manager.all_evolution_files,
+                    )
+
+                iter_result = IterationResult(
+                    iteration=iteration,
+                    agent_result=agent_result,
+                    eval_result=eval_result,
+                    skill_delta=skill_delta,
+                    skill_changed=skill_changed,
+                    started_at=datetime.now(tz=timezone.utc),
+                    completed_at=datetime.now(tz=timezone.utc),
+                )
+                iteration_results.append(iter_result)
+
+                if self.config.save_trajectory:
+                    self._save_iteration_result(logs_dir, iter_result)
+
+                logger.info(f"  Result: pass_rate={eval_result.pass_rate:.1%}, "
+                      f"skill_changed={skill_changed}")
+
+                if eval_result.passed:
+                    convergence_achieved = True
+                    convergence_type = "all_tests_pass"
+                    logger.info(f"  ✓ All tests passed!")
+                    break
+
+                if self.config.convergence_check and not skill_changed:
+                    consecutive_no_change += 1
+                    if consecutive_no_change >= self.config.convergence_threshold:
+                        convergence_achieved = False
+                        convergence_type = "convergence_no_change"
+                        logger.info(f"  Convergence: no skill change for {consecutive_no_change} iterations")
+                        break
+                else:
+                    consecutive_no_change = 0
+
+                if iteration >= self.config.stagnation_patience and not any(
+                    r.eval_result.pass_rate > iteration_results[0].eval_result.pass_rate
+                    for r in iteration_results[1:]
+                ):
+                    if iteration >= self.config.max_iterations:
+                        convergence_type = "max_iterations"
+                        logger.info(f"  Stagnation detected, stopping")
+                        break
+
+            if not convergence_type:
+                convergence_type = "max_iterations"
+
+            # Save agent-generated evolution.json file if captured
+            if self.config.save_trajectory and self.agent.captured_evolution_json:
+                for filename, content in self.agent.captured_evolution_json.items():
+                    (logs_dir / filename).write_text(content, encoding="utf-8")
+                    logger.info(f"  ✓ Saved {filename} from agent")
+
+            return PipelineResult(
+                task_id=task.task_id,
+                agent_name=self.config.agent,
+                benchmark_name=self.config.benchmark,
+                total_iterations=len(iteration_results),
+                convergence_achieved=convergence_achieved,
+                convergence_type=convergence_type,
+                results=iteration_results,
+                metrics=self._compute_evolution_metrics(iteration_results),
+                output_dir=logs_dir,
+            )
+        finally:
+            await env.stop()
+
+    async def _create_and_start_env(self, task: Task) -> DockerEnvironment:
+        env_spec = task.environment_spec
+        dockerfile = Path(env_spec.get("dockerfile", ""))
+        build_context = Path(env_spec.get("build_context", ""))
+
+        if not dockerfile.exists():
+            raise FileNotFoundError(f"Dockerfile not found: {dockerfile}")
+
+        source_config = self.agent.get_source_files()
+        install_mode = source_config.get("mode") if source_config else None
+        
+        import tempfile
+        temp_ctx = Path(tempfile.mkdtemp(prefix="evpipeline_ctx_"))
+        
+        for item in build_context.iterdir():
+            if item.is_dir():
+                shutil.copytree(item, temp_ctx / item.name, dirs_exist_ok=True)
+            else:
+                shutil.copy(item, temp_ctx / item.name)
+        
+        original_dockerfile_content = dockerfile.read_text(encoding="utf-8")
+        
+        # Debug: Check original Dockerfile content
+        logger.info(f"  Original Dockerfile length: {len(original_dockerfile_content)} chars")
+        if original_dockerfile_content:
+            first_line = original_dockerfile_content.split("\n")[0][:50]
+            logger.info(f"  Original Dockerfile first line: {repr(first_line)}")
+        else:
+            logger.warning(f"  ⚠️ Warning: Original Dockerfile is empty!")
+        
+        # Build base image with agent installed (cached)
+        if install_mode in ("git", "pypi", "local") and not self._base_image_tag:
+            await self._build_base_image(temp_ctx, original_dockerfile_content, source_config)
+        
+        # Build task-specific image (fast, based on cached base image)
+        actual_dockerfile = await self._build_task_image(task, temp_ctx, original_dockerfile_content)
+        
+        image_tag = f"evpipeline_{task.task_id}:latest"
+        env = DockerEnvironment(
+            image_tag=image_tag,
+            cpus=env_spec.get("cpus", 1),
+            memory_mb=env_spec.get("memory_mb", 2048),
+            timeout=env_spec.get("timeout", 900),
+        )
+
+        logger.info(f"  Building image: {image_tag}")
+        build_timeout = 300  # Fast build since we're just copying task files
+        
+        # Use no_cache=True to ensure fresh build every time (for debugging)
+        env.build(actual_dockerfile, temp_ctx, build_timeout=build_timeout, no_cache=True)
+
+        logger.info(f"  Starting container...")
+        await env.start()
+
+        return env
+    
+    async def _build_base_image(self, temp_ctx: Path, original_dockerfile_content: str, source_config: dict):
+        """Build a cached base image with agent installed"""
+        install_mode = source_config.get("mode")
+        packages = source_config.get("packages", [])
+        
+        # Copy local source code to build context for local mode
+        if install_mode == "local":
+            sources = source_config.get("sources", {})
+            for pkg_name, src_path in sources.items():
+                src_path = Path(src_path)
+                if src_path.exists():
+                    dest_path = temp_ctx / pkg_name
+                    if dest_path.exists():
+                        shutil.rmtree(dest_path)
+                    shutil.copytree(src_path, dest_path)
+                    logger.info(f"  Copied local source: {src_path} -> {dest_path}")
+                else:
+                    logger.warning(f"  ⚠️ Warning: Local source not found: {src_path}")
+        
+        pip_install_lines = []
+        
+        pip_install_lines.append('ARG PIP_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple')
+        pip_install_lines.append('ENV PIP_INDEX_URL=${PIP_MIRROR}')
+        pip_install_lines.append('ENV PIP_TIMEOUT=120')
+        pip_install_lines.append('ENV PIP_DEFAULT_TIMEOUT=120')
+        
+        pip_install_lines.append(
+            'RUN if [ -f /etc/apt/sources.list ]; then '
+            'sed -i "s|http://deb.debian.org|http://mirrors.aliyun.com|g" '
+            '/etc/apt/sources.list; fi'
+        )
+        pip_install_lines.append(
+            'RUN if [ -f /etc/apt/sources.list ]; then '
+            'sed -i "s|http://security.debian.org|http://mirrors.aliyun.com|g" '
+            '/etc/apt/sources.list; fi'
+        )
+        pip_install_lines.append(
+            'RUN if [ -d /etc/apt/sources.list.d ]; then '
+            'find /etc/apt/sources.list.d -type f -exec sed -i '
+            '"s|http://deb.debian.org|http://mirrors.aliyun.com|g" {} \\;; fi'
+        )
+        pip_install_lines.append(
+            'RUN if [ -d /etc/apt/sources.list.d ]; then '
+            'find /etc/apt/sources.list.d -type f -exec sed -i '
+            '"s|http://security.debian.org|http://mirrors.aliyun.com|g" {} \\;; fi'
+        )
+        
+        pip_install_lines.append(
+            'RUN apt-get update && apt-get install -y curl python3-pip '
+            '&& rm -rf /var/lib/apt/lists/*'
+        )
+        pip_install_lines.append(
+            'RUN python3 -m pip install --break-system-packages '
+            '-i ${PIP_MIRROR} pytest==8.4.1 pytest-json-ctrf==0.3.5'
+        )
+        
+        if install_mode == "git":
+            pip_install_lines.append('RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*')
+        
+        for pkg in packages:
+            pip_install_lines.append(f'RUN python3 -m pip install --break-system-packages -i ${{PIP_MIRROR}} "{pkg}"')
+        
+        # Handle local mode - copy source code and install
+        if install_mode == "local":
+            sources = source_config.get("sources", {})
+            for pkg_name, src_path in sources.items():
+                pip_install_lines.append(f'COPY {pkg_name}/ /opt/{pkg_name}/')
+                pip_install_lines.append(f'RUN python3 -m pip install --break-system-packages -e /opt/{pkg_name}')
+        
+        # Install uv (modern Python package manager) using pip to leverage mirror
+        pip_install_lines.append('RUN python3 -m pip install --break-system-packages -i ${PIP_MIRROR} uv==0.9.7')
+        pip_install_lines.append('ENV EVOLUTION_AUTO_SCAN=true')
+        
+        logger.info(f"  Using {install_mode} mode, packages: {packages}")
+        
+        lines = original_dockerfile_content.split('\n')
+        if lines:
+            # Find the FROM line (ignore syntax directives and comments)
+            insert_idx = -1
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped.startswith('FROM '):
+                    insert_idx = i + 1  # Insert AFTER FROM line
+                    break
+            
+            if insert_idx == -1:
+                # No FROM found, prepend our content with a FROM statement
+                logger.warning(f"  ⚠️ Warning: No FROM directive found in original Dockerfile")
+                base_content = (
+                    f"FROM python:3.11-slim\n\n"
+                    f"# === Auto-generated base image enhancements ===\n"
+                    + "\n".join(pip_install_lines) + "\n\n"
+                    + original_dockerfile_content
+                )
+            else:
+                # Insert AFTER the FROM line
+                lines.insert(
+                    insert_idx,
+                    '\n# === Auto-generated base image enhancements ===\n'
+                    + '\n'.join(pip_install_lines)
+                )
+                base_content = '\n'.join(lines)
+        else:
+            base_content = (
+                f"FROM python:3.11-slim\n\n"
+                f"# === Auto-generated base image enhancements ===\n"
+                + "\n".join(pip_install_lines)
+            )
+        
+        base_content += '\n\n# === Base image setup complete ==='
+        
+        # Debug: Check if FROM is present
+        if not base_content.strip().startswith('FROM'):
+            logger.warning(f"  ⚠️ Warning: Generated base Dockerfile doesn't start with FROM!")
+            logger.debug(f"  First 100 chars: {repr(base_content[:100])}")
+        
+        # Generate unique base image tag based on agent name, install mode, and packages
+        # Note: Added timestamp for debugging - remove in production
+        hash_content = f"{self.agent.name()}:{install_mode}:{','.join(sorted(packages))}:{int(time.time())}"
+        pkg_hash = hashlib.md5(hash_content.encode()).hexdigest()[:8]
+        self._base_image_tag = f"evpipeline_base:{pkg_hash}"
+        
+        logger.info(f"  Building base image ({self.agent.name()} cache): {self._base_image_tag}")
+        
+        (temp_ctx / "Dockerfile.base").write_text(base_content, encoding="utf-8")
+        
+        # Save Dockerfile for debugging
+        debug_dockerfile = Path("debug_Dockerfile.base")
+        debug_dockerfile.write_text(base_content, encoding="utf-8")
+        logger.info(f"  Saved Dockerfile for debugging: {debug_dockerfile.absolute()}")
+        
+        base_env = DockerEnvironment(image_tag=self._base_image_tag)
+        build_timeout = 1800
+        
+        pip_mirror = self.config.agent_config.get("pip_mirror", "https://pypi.tuna.tsinghua.edu.cn/simple")
+        build_args = {"PIP_MIRROR": pip_mirror}
+        
+        base_env.build(temp_ctx / "Dockerfile.base", temp_ctx, build_timeout=build_timeout, build_args=build_args)
+        logger.info(f"  ✅ Base image cached: {self._base_image_tag}")
+    
+    async def _build_task_image(self, task: Task, temp_ctx: Path, original_dockerfile_content: str) -> Path:
+        """Build a task-specific image based on the cached base image"""
+        pip_mirror = self.config.agent_config.get("pip_mirror", "https://pypi.tuna.tsinghua.edu.cn/simple")
+        
+        if self._base_image_tag:
+            # Use cached base image as base - already has jiuwenswarm installed
+            task_dockerfile = f"""FROM {self._base_image_tag}
+
+# === Task-specific setup ===
+ARG PIP_MIRROR={pip_mirror}
+ENV PIP_INDEX_URL=${{PIP_MIRROR}}
+ENV PIP_TIMEOUT=120
+ENV PIP_DEFAULT_TIMEOUT=120
+"""
+        else:
+            # Fallback: use original FROM line
+            lines = original_dockerfile_content.split('\n')
+            from_line = next((line for line in lines if line.startswith('FROM')), 'FROM python:3.12-slim')
+            task_dockerfile = f"""{from_line}
+
+# === Task-specific setup ===
+ARG PIP_MIRROR={pip_mirror}
+ENV PIP_INDEX_URL=${{PIP_MIRROR}}
+ENV PIP_TIMEOUT=120
+ENV PIP_DEFAULT_TIMEOUT=120
+
+# Replace apt sources with Aliyun mirror
+RUN if [ -f /etc/apt/sources.list ]; then \\
+    sed -i "s|http://deb.debian.org|http://mirrors.aliyun.com|g" \\
+    /etc/apt/sources.list; fi
+RUN if [ -f /etc/apt/sources.list ]; then \\
+    sed -i "s|http://security.debian.org|http://mirrors.aliyun.com|g" \\
+    /etc/apt/sources.list; fi
+RUN apt-get update && apt-get install -y curl python3-pip && \\
+    rm -rf /var/lib/apt/lists/*
+RUN python3 -m pip install --break-system-packages \\
+    pytest==8.4.1 pytest-json-ctrf==0.3.5
+"""
+        
+        # Add task-specific content from original Dockerfile (excluding FROM)
+        # Keep pip install commands - they will use the mirror from ENV
+        for line in original_dockerfile_content.split('\n'):
+            if line.startswith('FROM'):
+                continue
+            if line.strip():
+                task_dockerfile += line + '\n'
+        
+        # Ensure skills directory exists in build context to avoid COPY failure
+        skills_ctx_dir = temp_ctx / "skills"
+        if not skills_ctx_dir.exists():
+            skills_ctx_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Add jiuwenswarm setup
+        task_dockerfile += '''
+# === Jiuwenswarm workspace setup ===
+RUN mkdir -p /root/.jiuwenswarm/agent/workspace/skills /workspace/tests /workspace/logs/verifier
+COPY skills /root/.jiuwenswarm/agent/workspace/skills
+'''
+        
+        task_dockerfile_path = temp_ctx / "Dockerfile.task"
+        task_dockerfile_path.write_text(task_dockerfile, encoding="utf-8")
+        
+        return task_dockerfile_path
+
+    async def _load_task_skills(self, env: DockerEnvironment, task: Task) -> None:
+        skills_dir = Path(task.environment_spec.get("skills_dir", ""))
+        if not skills_dir.exists():
+            return
+
+        loaded = await self.agent.load_skills_from_dir(env, skills_dir)
+        if loaded:
+            self.agent.set_skill_context(loaded[0], loaded)
+            logger.info(f"  ✓ Loaded {len(loaded)} task skills")
+
+    @staticmethod
+    def _build_evolution_suggestions(prev_result: IterationResult) -> str:
+        eval_r = prev_result.eval_result
+        parts: list[str] = []
+
+        if eval_r.passed:
+            return "All tests passed in the previous iteration. No changes needed."
+
+        parts.append(f"Previous iteration pass rate: {eval_r.pass_rate:.1%}")
+
+        if eval_r.failed_tests:
+            parts.append(f"Failed tests ({len(eval_r.failed_tests)}):")
+            for t in eval_r.failed_tests[:5]:
+                parts.append(f"  - {t}")
+
+        if prev_result.skill_delta.changed:
+            parts.append("Skills were modified in the previous iteration.")
+            for skill_name in prev_result.skill_delta.skills:
+                parts.append(f"  - Modified: {skill_name}")
+
+        if prev_result.skill_changed:
+            parts.append(
+                "The skill content changed but tests still fail. "
+                "Consider reviewing the skill for accuracy and completeness."
+            )
+        else:
+            parts.append(
+                "The skill was NOT modified in the previous iteration. "
+                "Consider whether the skill needs updates to address the failing tests."
+            )
+
+        return "\n".join(parts)
+
+    @staticmethod
+    def _compute_evolution_metrics(results: list[IterationResult]) -> dict[str, Any]:
+        if not results:
+            return {}
+
+        pass_rates = [r.eval_result.pass_rate for r in results]
+        skill_changes = sum(1 for r in results if r.skill_changed)
+
+        return {
+            "final_pass_rate": pass_rates[-1],
+            "best_pass_rate": max(pass_rates),
+            "first_pass_rate": pass_rates[0],
+            "improvement": pass_rates[-1] - pass_rates[0],
+            "skill_changes": skill_changes,
+            "total_iterations": len(results),
+            "converged": results[-1].eval_result.passed,
+        }
+
+    @staticmethod
+    def _save_iteration_result(logs_dir: Path, result: IterationResult) -> None:
+        iter_dir = logs_dir / f"iteration_{result.iteration:03d}"
+        iter_dir.mkdir(parents=True, exist_ok=True)
 
         summary = {
             "iteration": result.iteration,
-            "skill_hash": result.skill_hash,
-            "execution_time": result.agent_execution_time,
-            "tokens_used": result.agent_tokens_used,
-            "test_passed": result.test_passed,
-            "test_pass_rate": result.test_pass_rate,
+            "pass_rate": result.eval_result.pass_rate,
+            "passed": result.eval_result.passed,
             "skill_changed": result.skill_changed,
-            "has_skill": result.skill_content is not None,
-            "started_at": result.started_at.isoformat(),
-            "completed_at": result.completed_at.isoformat(),
-            "evolution_events": result.evolution_events
+            "execution_time": result.agent_result.execution_time,
+            "tokens_used": result.agent_result.tokens_used,
+            "failed_tests": result.eval_result.failed_tests,
+            "started_at": result.started_at.isoformat() if result.started_at else None,
+            "completed_at": result.completed_at.isoformat() if result.completed_at else None,
         }
-
-        summary_path = iter_dir / "summary.json"
-        summary_path.write_text(
-            json.dumps(summary, indent=2),
-            encoding="utf-8"
+        (iter_dir / "summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
-        logger.info("  ✓ Results saved to %s", iter_dir)
+        # Save agent raw output
+        if result.agent_result.raw_output:
+            (iter_dir / "agent_output.txt").write_text(
+                result.agent_result.raw_output, encoding="utf-8"
+            )
+
+        # Save agent stderr
+        if result.agent_result.stderr:
+            (iter_dir / "agent_stderr.txt").write_text(
+                result.agent_result.stderr, encoding="utf-8"
+            )
+
+        # Save test output
+        if result.eval_result.test_output:
+            (iter_dir / "test_output.txt").write_text(
+                result.eval_result.test_output, encoding="utf-8"
+            )
+
+        # Save agent trajectory (detailed steps)
+        if result.agent_result.trajectory:
+            (iter_dir / "trajectory.json").write_text(
+                json.dumps(result.agent_result.trajectory, indent=2, ensure_ascii=False, default=str),
+                encoding="utf-8",
+            )
+
+        # Save evolution events (LLM interactions, skill changes, etc.)
+        if result.agent_result.evolution_events:
+            (iter_dir / "evolution_events.json").write_text(
+                json.dumps(result.agent_result.evolution_events, indent=2, ensure_ascii=False, default=str),
+                encoding="utf-8",
+            )
+
+        # Save agent metadata (LLM logs, API calls, etc.)
+        if result.agent_result.metadata:
+            (iter_dir / "agent_metadata.json").write_text(
+                json.dumps(result.agent_result.metadata, indent=2, ensure_ascii=False, default=str),
+                encoding="utf-8",
+            )
+
+        # Save LLM logs as separate files (direct file format, not nested in JSON)
+        if result.agent_result.llm_logs:
+            for log_name, log_content in result.agent_result.llm_logs.items():
+                (iter_dir / log_name).write_text(log_content, encoding="utf-8")
+                logger.info(f"  ✓ Saved LLM log: {log_name} ({len(log_content)} chars)")
+
+        # Save skill delta (captured skills)
+        if result.skill_delta.changed and result.skill_delta.skills:
+            skills_dir = iter_dir / "skills"
+            skills_dir.mkdir(parents=True, exist_ok=True)
+            for skill_name, skill_content in result.skill_delta.skills.items():
+                (skills_dir / f"{skill_name}.md").write_text(skill_content, encoding="utf-8")
+
+        # Save evolution files if any
+        if result.skill_delta.evolution_files:
+            evo_dir = iter_dir / "evolution"
+            evo_dir.mkdir(parents=True, exist_ok=True)
+            for skill_name, files in result.skill_delta.evolution_files.items():
+                skill_evo_dir = evo_dir / skill_name
+                skill_evo_dir.mkdir(parents=True, exist_ok=True)
+                for filename, content in files.items():
+                    (skill_evo_dir / filename).write_text(content, encoding="utf-8")
 
     @staticmethod
-    def _generate_evolution_suggestions(previous_result: IterationResult) -> str | None:
-        suggestions = []
-        pass_rate = previous_result.test_pass_rate
+    def _print_summary(results: list[PipelineResult]) -> None:
+        logger.info(f"\n{'='*60}")
+        logger.info("SUMMARY")
+        logger.info(f"{'='*60}")
 
-        if not previous_result.test_passed:
-            test_details = previous_result.test_details
-            failed_tests = test_details.get("failed_tests", [])
-            test_output = test_details.get("output", "")
+        for r in results:
+            status = "✓ PASS" if r.convergence_achieved else "✗ FAIL"
+            mode = f"({r.convergence_type})" if r.convergence_type else ""
+            logger.info(f"  {r.task_id}: {status} {mode} "
+                  f"iterations={r.total_iterations} "
+                  f"pass_rate={r.metrics.get('final_pass_rate', r.metrics.get('pass_rate', 0)):.1%}")
 
-            specific_errors = extract_specific_errors(test_output)
-
-            if specific_errors:
-                suggestions.append("The following tests failed in the previous iteration:")
-                for test_name, _error_detail in list(specific_errors.items())[:5]:
-                    clean_name = test_name.split("::")[-1] if "::" in test_name else test_name
-                    suggestions.append(f"  - {clean_name}")
-            elif failed_tests:
-                suggestions.append(f"Failed tests: {', '.join(failed_tests[:5])}")
-
-            if test_output:
-                assert_matches = re.findall(r"assert\s+.{1,200}", test_output)
-                if assert_matches:
-                    unique_asserts = list(dict.fromkeys(assert_matches))[:3]
-                    suggestions.append("Key assertions that failed:")
-                    for a in unique_asserts:
-                        suggestions.append(f"  - `{a}`")
-
-            suggestions.append("")
-            suggestions.append("To fix these failures, you MUST:")
-            suggestions.append("  1. Read the SKILL.md file for domain knowledge and code examples")
-            suggestions.append("  2. Read the evolution/*.md files for troubleshooting tips from previous iterations")
-            suggestions.append("  3. Check if any evolution experience directly addresses the failing test")
-
-        if pass_rate < 0.5:
-            suggestions.append(
-                "- Major skill revision needed: less than 50% tests passing. "
-                "Re-read the skill carefully and check all evolution experiences."
-            )
-        elif pass_rate < 0.8:
-            suggestions.append(
-                "- Some tests still failing. Check evolution experiences for targeted fixes."
-            )
-        elif pass_rate < 1.0:
-            suggestions.append(
-                "- Almost there. Check evolution experiences for fine-tuning tips."
-            )
-
-        if not previous_result.skill_changed:
-            suggestions.append(
-                "- Skill was not updated in previous iteration. "
-                "Consider updating the skill based on what you learn from the evolution experiences."
-            )
-
-        if not suggestions:
-            return None
-
-        return "\n".join(suggestions)
-
-    def _check_convergence(self) -> bool:
-        if len(self.results) < self.config.convergence_threshold:
-            return False
-
-        recent_results = self.results[-self.config.convergence_threshold:]
-
-        all_passed = all(r.test_passed for r in recent_results)
-        if all_passed:
-            return True
-
-        if len(self.results) >= self.config.stagnation_patience:
-            stagnation_window = self.results[-self.config.stagnation_patience:]
-            pass_rates = [r.test_pass_rate for r in stagnation_window]
-            if all(pr == pass_rates[0] for pr in pass_rates):
-                any_skill_changed = any(r.skill_changed for r in stagnation_window)
-                if not any_skill_changed:
-                    return True
-
-        return False
-
-    def _calculate_metrics(self) -> dict[str, Any]:
-        if not self.results:
-            return {}
-
-        initial_pass_rate = self.results[0].test_pass_rate
-        final_pass_rate = self.results[-1].test_pass_rate
-
-        total_tokens = sum(r.agent_tokens_used for r in self.results)
-        total_time = sum(r.agent_execution_time for r in self.results)
-
-        iterations_to_converge = len(self.results)
-        convergence_type = "none"
-        for i, result in enumerate(self.results):
-            if result.test_passed:
-                iterations_to_converge = i + 1
-                convergence_type = "convergence"
-                break
-
-        if convergence_type == "none" and self._check_convergence():
-            convergence_type = "deadlock_stagnation"
-
-        return {
-            "initial_pass_rate": initial_pass_rate,
-            "final_pass_rate": final_pass_rate,
-            "evolution_gain": final_pass_rate - initial_pass_rate,
-            "total_iterations": len(self.results),
-            "iterations_to_converge": iterations_to_converge,
-            "convergence_type": convergence_type,
-            "convergence_speed": iterations_to_converge / self.config.max_iterations,
-            "total_tokens": total_tokens,
-            "total_execution_time": total_time,
-            "avg_pass_rate": sum(r.test_pass_rate for r in self.results) / len(self.results)
-        }
-
-    async def _generate_report(self, metrics: dict[str, Any]) -> Path:
-        report_path = self.output_dir / "evolution_report.md"
-
-        report_datetime = datetime.now(timezone.utc).astimezone()
-        lines = [
-            f"# Skill Evolution Report: {self.config.task_id}",
-            "",
-            f"**Agent**: {self.config.agent}",
-            f"**Date**: {report_datetime.strftime('%Y-%m-%d %H:%M:%S %Z')}",
-            f"**Total Iterations**: {len(self.results)}",
-            f"**Base Image**: {self.config.base_image}",
-            "",
-            "## Summary",
-            "",
-            f"- **Initial Pass Rate**: {metrics.get('initial_pass_rate', 0):.2%}",
-            f"- **Final Pass Rate**: {metrics.get('final_pass_rate', 0):.2%}",
-            f"- **Evolution Gain**: {metrics.get('evolution_gain', 0):+.2%}",
-            f"- **Convergence**: {metrics.get('convergence_type', 'none')}",
-            "",
-            "## Iteration Details",
-            ""
-        ]
-
-        for result in self.results:
-            status = "✓ PASS" if result.test_passed else "✗ FAIL"
-            lines.append(f"### Iteration {result.iteration}")
-            lines.append("")
-            lines.append(f"- **Status**: {status}")
-            lines.append(f"- **Pass Rate**: {result.test_pass_rate:.2%}")
-            lines.append(f"- **Execution Time**: {result.agent_execution_time:.2f}s")
-            lines.append(f"- **Tokens Used**: {result.agent_tokens_used:,}")
-            lines.append(f"- **Skill Changed**: {'Yes' if result.skill_changed else 'No'}")
-            lines.append("")
-
-        lines.extend([
-            "## Metrics",
-            "",
-            f"- **Total Tokens**: {metrics.get('total_tokens', 0):,}",
-            f"- **Total Execution Time**: {metrics.get('total_execution_time', 0):.2f}s",
-            f"- **Average Pass Rate**: {metrics.get('avg_pass_rate', 0):.2%}",
-            f"- **Convergence Type**: {metrics.get('convergence_type', 'none')}",
-            f"- **Convergence Speed**: {metrics.get('convergence_speed', 0):.2%}",
-            ""
-        ])
-
-        report_path.write_text("\n".join(lines), encoding="utf-8")
-        logger.info("\n✓ Report generated: %s", report_path)
-
-        metrics_path = self.output_dir / "metrics.json"
-        metrics_path.write_text(
-            json.dumps(metrics, indent=2),
-            encoding="utf-8"
-        )
-
-        return report_path
+        total = len(results)
+        passed = sum(1 for r in results if r.convergence_achieved)
+        logger.info(f"Total: {passed}/{total} tasks passed")
 
 
-def _discover_tasks_by_category(tasks_dir: str, category_filter: str) -> list[str]:
-    import tomllib
-
-    tasks_path = Path(tasks_dir)
-    if not tasks_path.exists():
-        logger.error("Error: Tasks directory not found: %s", tasks_path)
-        return []
-
-    matched: list[str] = []
-    for task_dir in sorted(tasks_path.iterdir()):
-        if not task_dir.is_dir():
-            continue
-        toml_path = task_dir / "task.toml"
-        if not toml_path.exists():
-            continue
-        try:
-            with open(toml_path, "rb") as f:
-                toml_data = tomllib.load(f)
-            task_category = toml_data.get("category", "")
-            if category_filter.lower() in task_category.lower():
-                matched.append(task_dir.name)
-        except Exception as e:
-            logger.debug("Failed to parse %s: %s", toml_path, e)
-
-    if not matched:
-        logger.warning("No tasks found matching category '%s'", category_filter)
-    else:
-        logger.info("Found %d tasks matching '%s': %s", len(matched), category_filter, matched)
-
-    return matched
-
-
-async def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Evaluator Pipeline")
-    parser.add_argument(
-        "--config",
-        type=str,
-        help="Path to YAML configuration file (optional)"
+def build_default_config(args: BuildConfigArgs) -> PipelineConfig:
+    results_dir = args.results_dir
+    if results_dir is None:
+        results_dir = "./evolution_results" if args.evolution_mode else "./single_run_results"
+    return PipelineConfig(
+        evolution_mode=args.evolution_mode,
+        max_iterations=args.max_iterations if args.evolution_mode else 1,
+        results_dir=Path(results_dir),
+        task_ids=args.task_ids or [],
+        agent_config={
+            "api_key": args.api_key or "",
+            "api_base": args.api_base or "",
+            "model_name": args.model_name,
+            "evolution_enabled": args.evolution_mode,
+            "evolution_wait_time": args.evolution_wait_time,
+            "agent_timeout": args.agent_timeout,
+            "skill_persistence_dir": args.skill_persistence_dir,
+        },
+        bench_config={
+            "tasks_dir": args.tasks_dir,
+            "workspace_dir": args.workspace_dir,
+        },
     )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Evolution Pipeline v4")
+    parser.add_argument("--config", type=str, help="Path to YAML config file")
+    parser.add_argument("--agent", type=str, default=None, help="Agent adapter name")
+    parser.add_argument("--benchmark", type=str, default=None, help="Benchmark adapter name")
+    parser.add_argument("--tasks-dir", type=str, default="tasks", help="Tasks directory")
+    parser.add_argument("--task-ids", type=str, nargs="+", default=[], help="Specific task IDs to run")
+    parser.add_argument("--evolution", action="store_true", help="Enable evolution mode")
+    parser.add_argument("--max-iterations", type=int, default=5, help="Max iterations (evolution mode)")
+    parser.add_argument("--convergence-threshold", type=int, default=2, help="Convergence threshold")
+    parser.add_argument("--stagnation-patience", type=int, default=3, help="Stagnation patience")
     parser.add_argument(
-        "--output-dir",
-        type=str,
-        help="Override output directory"
+        "--results-dir", type=str, default=None,
+        help="Results directory (default: ./evolution_results for evolution mode, "
+             "./single_run_results for single run mode)"
     )
-    parser.add_argument(
-        "--max-iterations",
-        type=int,
-        help="Override max iterations"
-    )
-    parser.add_argument(
-        "--task-id",
-        type=str,
-        help="Task ID (single task)"
-    )
-    parser.add_argument(
-        "--task-ids",
-        type=str,
-        help="Batch: comma-separated task IDs, e.g. 'citation-check,court-form-filling'"
-    )
-    parser.add_argument(
-        "--tasks-dir",
-        type=str,
-        default="./tasks",
-        help="Directory containing task folders (used with --task-ids), default: ./tasks"
-    )
-    parser.add_argument(
-        "--tasks-filter",
-        type=str,
-        help="Batch: run all tasks whose task.toml category matches this filter, e.g. 'Office & White Collar'"
-    )
+    parser.add_argument("--api-key", type=str, help="API key for LLM")
+    parser.add_argument("--api-base", type=str, help="API base URL")
+    parser.add_argument("--model", type=str, default="glm-5", help="Model name")
+    parser.add_argument("--workspace-dir", type=str, default="/workspace", help="Container workspace dir")
+    parser.add_argument("--evolution-wait", type=int, default=60, help="Evolution wait time (seconds)")
+    parser.add_argument("--agent-timeout", type=int, default=880, help="Agent timeout (seconds)")
+    parser.add_argument("--skill-dir", type=str, default="~/.jiuwenswarm/agent/workspace/skills",
+                        help="Skill persistence directory")
 
     args = parser.parse_args()
 
-    if args.config and Path(args.config).exists():
-        base_config = PipelineConfig.from_yaml(Path(args.config))
-    elif args.task_id or args.task_ids:
-        overrides: dict = {}
-        if args.output_dir:
-            overrides["results_dir"] = Path(args.output_dir)
+    if args.config:
+        config = PipelineConfig.from_yaml(Path(args.config))
+        if args.task_ids:
+            config.task_ids = args.task_ids
+        if args.agent:
+            config.agent = args.agent
+        if args.benchmark:
+            config.benchmark = args.benchmark
+        # Always set evolution_enabled based on --evolution flag
+        config.evolution_mode = args.evolution
+        config.agent_config["evolution_enabled"] = args.evolution
         if args.max_iterations:
-            overrides["max_iterations"] = args.max_iterations
-        base_config = PipelineConfig.from_args("__placeholder__", **overrides)
+            config.max_iterations = args.max_iterations
+        if args.results_dir:
+            config.results_dir = Path(args.results_dir)
     else:
-        logger.error("Error: No task specified. Use --task-id or --task-ids to run")
-        logger.error("  Optionally use --config to load a YAML configuration file")
-        sys.exit(1)
-
-    if args.output_dir:
-        base_config.results_dir = Path(args.output_dir)
-    if args.max_iterations:
-        base_config.max_iterations = args.max_iterations
-
-    task_ids: list[str] = []
-
-    if args.task_ids:
-        task_ids = [t.strip() for t in args.task_ids.split(",") if t.strip()]
-    elif args.tasks_filter:
-        task_ids = _discover_tasks_by_category(args.tasks_dir, args.tasks_filter)
-    elif args.task_id:
-        task_ids = [args.task_id]
-    elif base_config.task_id != "__placeholder__":
-        task_ids = [base_config.task_id]
-    else:
-        logger.error("Error: No task specified. Use --task-id or --task-ids")
-        sys.exit(1)
-
-    if not task_ids:
-        logger.error("Error: No tasks to run")
-        sys.exit(1)
-
-    logger.info("\n%s", "#" * 60)
-    logger.info("  Evaluator Pipeline - Batch Mode")
-    logger.info("  Tasks to run: %d", len(task_ids))
-    for i, tid in enumerate(task_ids, 1):
-        logger.info("    %d. %s", i, tid)
-    logger.info("%s\n", "#" * 60)
-
-    results_summary: list[dict] = []
-    failed_tasks: list[str] = []
-
-    for idx, task_id in enumerate(task_ids, 1):
-        logger.info("\n%s", "=" * 60)
-        logger.info("  Task [%d/%d]: %s", idx, len(task_ids), task_id)
-        logger.info("%s\n", "=" * 60)
-
-        config = base_config.with_task_id(task_id)
-        pipeline = SkillEvolutionPipeline(config)
-
-        try:
-            result = await pipeline.run()
-
-            summary = {
-                "task_id": task_id,
-                "iterations": result.total_iterations,
-                "convergence": result.convergence_achieved,
-                "convergence_type": result.metrics.get("convergence_type", "none"),
-                "final_pass_rate": result.metrics.get("final_pass_rate", 0),
-                "report": str(result.report_path),
-            }
-            results_summary.append(summary)
-
-            conv_type = result.metrics.get("convergence_type", "none")
-            conv_label = {
-                "convergence": "✓ Converged", 
-                "deadlock_stagnation": "⚠ Deadlock", 
-                "none": "✗ No"
-            }.get(conv_type, conv_type)
-            logger.info("\n%s", "=" * 60)
-            logger.info("  Task %s Complete!", task_id)
-            logger.info("%s", "=" * 60)
-            logger.info("  Iterations: %d", result.total_iterations)
-            logger.info("  Convergence: %s", conv_label)
-            logger.info("  Final Pass Rate: %.2f%%", result.metrics.get("final_pass_rate", 0) * 100)
-            logger.info("  Report: %s", result.report_path)
-            logger.info("%s\n", "=" * 60)
-
-        except Exception as e:
-            logger.error("\n  ✗ Task %s FAILED: %s", task_id, e)
-            import traceback
-            logger.error(traceback.format_exc())
-            failed_tasks.append(task_id)
-            results_summary.append({
-                "task_id": task_id,
-                "error": str(e),
-            })
-
-    if len(task_ids) > 1:
-        logger.info("\n%s", "#" * 60)
-        logger.info("  Batch Summary")
-        logger.info("%s", "#" * 60)
-        logger.info("  Total tasks: %d", len(task_ids))
-        logger.info("  Succeeded: %d", len(task_ids) - len(failed_tasks))
-        logger.info("  Failed: %d", len(failed_tasks))
-        if failed_tasks:
-            logger.info("  Failed tasks: %s", ", ".join(failed_tasks))
-        logger.info("")
-        for s in results_summary:
-            if "error" in s:
-                logger.error("  ✗ %s: ERROR - %s", s['task_id'], s['error'])
-            else:
-                rate = s['final_pass_rate']
-                conv_type = s.get('convergence_type', 'none')
-                conv_label = {"convergence": "✓", "deadlock_stagnation": "⚠", "none": "✗"}.get(conv_type, "?")
-                logger.info(
-                    "  %s %s: %.2f%% pass rate, %d iterations, %s", conv_label, s['task_id'], 
-                    rate * 100, s['iterations'], conv_type)
-        logger.info("%s\n", "#" * 60)
-
-        summary_path = Path(base_config.results_dir) / "batch_summary.json"
-        summary_path.parent.mkdir(parents=True, exist_ok=True)
-        summary_path.write_text(
-            json.dumps(results_summary, indent=2, ensure_ascii=False, default=str),
-            encoding="utf-8",
+        build_args = BuildConfigArgs(
+            tasks_dir=args.tasks_dir,
+            api_key=args.api_key,
+            api_base=args.api_base,
+            model_name=args.model,
+            evolution_mode=args.evolution,
+            max_iterations=args.max_iterations,
+            task_ids=args.task_ids,
+            results_dir=args.results_dir,
+            workspace_dir=args.workspace_dir,
+            evolution_wait_time=args.evolution_wait,
+            agent_timeout=args.agent_timeout,
+            skill_persistence_dir=args.skill_dir,
         )
-        logger.info("  Batch summary saved to: %s\n", summary_path)
+        config = build_default_config(build_args)
+        config.agent = args.agent or "jiuwenswarm"
+        config.benchmark = args.benchmark or "skillsbench"
+        config.convergence_threshold = args.convergence_threshold
+        config.stagnation_patience = args.stagnation_patience
 
-    if failed_tasks:
-        sys.exit(1)
+    pipeline = EvolutionPipeline(config)
+    asyncio.run(pipeline.run())
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
