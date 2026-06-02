@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Internal state types for SuperHarness.
+"""Internal state types for NativeHarness.
 
 All mutable state lives in HarnessInternalState; the supervisor coroutine
 is the sole writer. External API methods only push ControlEvent objects.
@@ -19,9 +19,9 @@ if TYPE_CHECKING:
 
 
 class HarnessState(str, Enum):
-    """High-level lifecycle phase for SuperHarness.
+    """High-level lifecycle phase for NativeHarness.
 
-    Transitions are documented in the SuperHarness state-transition table.
+    Transitions are documented in the NativeHarness state-transition table.
     Only the supervisor coroutine mutates ``HarnessInternalState.phase``.
     """
 
@@ -73,9 +73,9 @@ class ActiveRound:
         deep_agent: Reference to the owning DeepAgent. SnapshotRail reads
             this when the AFTER_REACT_ITERATION ctx points at the inner
             ReActAgent (ctx.agent != DeepAgent in that hook).
-        task: The asyncio.Task running ``SuperHarness._run_round``.
+        task: The asyncio.Task running ``NativeHarness._run_round``.
         steering_queue: Bound into the ReActAgent ctx via
-            ``ctx.bind_steering_queue``; SuperHarness pushes here for
+            ``ctx.bind_steering_queue``; NativeHarness pushes here for
             immediate=True sends.
         graceful_abort: When True, SnapshotRail.after_react_iteration will
             ``request_force_finish`` so the next iteration top-of-loop check

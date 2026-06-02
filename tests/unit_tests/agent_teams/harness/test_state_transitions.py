@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""SuperHarness state-machine transitions (invoke-based architecture)."""
+"""NativeHarness state-machine transitions (invoke-based architecture)."""
 from __future__ import annotations
 
 import asyncio
@@ -8,8 +8,8 @@ import asyncio
 import pytest
 
 from openjiuwen.core.runner import Runner
-from openjiuwen.harness.super_harness import HarnessState, SuperHarness
-from tests.unit_tests.harness.super_harness.fixtures import (
+from openjiuwen.agent_teams.harness import HarnessState, NativeHarness
+from tests.unit_tests.agent_teams.harness.fixtures import (
     IterationStep,
     MockDeepAgent,
     drain_outputs,
@@ -25,7 +25,7 @@ async def test_idle_to_running_to_idle_single_round() -> None:
     agent.react_agent.iteration_script = [
         IterationStep(chunks=[{"value": "hi"}], is_answer=True, answer_output="hi"),
     ]
-    harness = SuperHarness(lambda: agent)
+    harness = NativeHarness(lambda: agent)
     await harness.start()
 
     collected: list = []
@@ -51,7 +51,7 @@ async def test_followup_runs_in_fifo_order_after_first_round() -> None:
     agent.react_agent.iteration_script = [
         IterationStep(is_answer=True, answer_output="r", sleep_before=0.03),
     ]
-    harness = SuperHarness(lambda: agent)
+    harness = NativeHarness(lambda: agent)
     await harness.start()
 
     collected: list = []
@@ -76,7 +76,7 @@ async def test_stop_terminates_output_iterator() -> None:
     agent.react_agent.iteration_script = [
         IterationStep(is_answer=True, answer_output="x"),
     ]
-    harness = SuperHarness(lambda: agent)
+    harness = NativeHarness(lambda: agent)
     await harness.start()
 
     collected: list = []
@@ -93,7 +93,7 @@ async def test_send_after_stop_raises() -> None:
     await Runner.start()
     agent = MockDeepAgent()
     agent.react_agent.iteration_script = [IterationStep(is_answer=True)]
-    harness = SuperHarness(lambda: agent)
+    harness = NativeHarness(lambda: agent)
     await harness.start()
     await harness.stop()
 
@@ -107,7 +107,7 @@ async def test_concurrent_start_initializes_once() -> None:
     await Runner.start()
     agent = MockDeepAgent()
     agent.react_agent.iteration_script = [IterationStep(is_answer=True)]
-    harness = SuperHarness(lambda: agent)
+    harness = NativeHarness(lambda: agent)
 
     await asyncio.gather(harness.start(), harness.start(), harness.start())
     try:

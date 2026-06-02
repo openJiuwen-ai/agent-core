@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""SuperHarness abort semantics: graceful (iteration-granular) vs immediate."""
+"""NativeHarness abort semantics: graceful (iteration-granular) vs immediate."""
 from __future__ import annotations
 
 import asyncio
@@ -8,8 +8,8 @@ import asyncio
 import pytest
 
 from openjiuwen.core.runner import Runner
-from openjiuwen.harness.super_harness import HarnessState, SuperHarness
-from tests.unit_tests.harness.super_harness.fixtures import (
+from openjiuwen.agent_teams.harness import HarnessState, NativeHarness
+from tests.unit_tests.agent_teams.harness.fixtures import (
     IterationStep,
     MockDeepAgent,
     aborted_markers,
@@ -26,7 +26,7 @@ async def test_graceful_abort_finishes_current_iteration_then_stops() -> None:
         IterationStep(chunks=[{"v": "iter1"}], sleep_after=0.05),
         IterationStep(chunks=[{"v": "iter2_never"}]),
     ]
-    harness = SuperHarness(lambda: agent)
+    harness = NativeHarness(lambda: agent)
     await harness.start()
 
     collected: list = []
@@ -56,7 +56,7 @@ async def test_immediate_abort_cancels_and_returns_to_idle() -> None:
     agent.react_agent.iteration_script = [
         IterationStep(chunks=[], sleep_before=5.0),  # long-running
     ]
-    harness = SuperHarness(lambda: agent)
+    harness = NativeHarness(lambda: agent)
     await harness.start()
 
     collected: list = []
@@ -85,7 +85,7 @@ async def test_immediate_abort_rolls_back_to_last_safe_snapshot() -> None:
         IterationStep(chunks=[{"v": "t1"}]),          # completes -> snapshot
         IterationStep(chunks=[], sleep_before=5.0),    # cancelled here
     ]
-    harness = SuperHarness(lambda: agent)
+    harness = NativeHarness(lambda: agent)
     await harness.start()
 
     ctx = agent.react_agent.context_engine.get_context(session_id=harness.session_id)

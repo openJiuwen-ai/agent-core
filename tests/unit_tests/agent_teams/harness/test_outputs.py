@@ -1,13 +1,13 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Verify the queue-backed AsyncIterator contract of SuperHarness.outputs()."""
+"""Verify the queue-backed AsyncIterator contract of NativeHarness.outputs()."""
 from __future__ import annotations
 
 import asyncio
 
 import pytest
 
-from openjiuwen.harness.super_harness.outputs import _END, _OutputIterator
+from openjiuwen.agent_teams.harness.outputs import _END, _OutputIterator
 
 
 @pytest.mark.asyncio

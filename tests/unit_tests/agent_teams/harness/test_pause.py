@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""SuperHarness pause + resume behavior."""
+"""NativeHarness pause + resume behavior."""
 from __future__ import annotations
 
 import asyncio
@@ -8,8 +8,8 @@ import asyncio
 import pytest
 
 from openjiuwen.core.runner import Runner
-from openjiuwen.harness.super_harness import HarnessState, SuperHarness
-from tests.unit_tests.harness.super_harness.fixtures import (
+from openjiuwen.agent_teams.harness import HarnessState, NativeHarness
+from tests.unit_tests.agent_teams.harness.fixtures import (
     IterationStep,
     MockDeepAgent,
     drain_outputs,
@@ -24,7 +24,7 @@ async def test_pause_caches_query_and_resume_merges() -> None:
     agent.react_agent.iteration_script = [
         IterationStep(chunks=[], sleep_before=5.0),
     ]
-    harness = SuperHarness(lambda: agent)
+    harness = NativeHarness(lambda: agent)
     await harness.start()
 
     collected: list = []
@@ -56,7 +56,7 @@ async def test_paused_send_immediate_behaves_same_as_next_round() -> None:
     agent.react_agent.iteration_script = [
         IterationStep(chunks=[], sleep_before=5.0),
     ]
-    harness = SuperHarness(lambda: agent)
+    harness = NativeHarness(lambda: agent)
     await harness.start()
 
     collected: list = []

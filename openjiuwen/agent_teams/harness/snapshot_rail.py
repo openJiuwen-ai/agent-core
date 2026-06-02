@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Rail that bridges SuperHarness into the inner ReActAgent.
+"""Rail that bridges NativeHarness into the inner ReActAgent.
 
 On AFTER_REACT_ITERATION (fired at the end of a fully successful ReAct
 iteration) this rail:
@@ -10,11 +10,11 @@ iteration) this rail:
    so the next iteration top-of-loop check breaks the inner loop cleanly.
 
 The active round is located via the ``_ACTIVE_ROUND`` ContextVar that
-SuperHarness sets inside the round task before driving ``invoke``; ContextVar
+NativeHarness sets inside the round task before driving ``invoke``; ContextVar
 values are copied per asyncio.Task, so concurrent rounds do not leak into
 each other.
 
-Steering injection is NOT handled here: SuperHarness passes the round's
+Steering injection is NOT handled here: NativeHarness passes the round's
 steering queue directly through ``invoke`` inputs (``_steering_queue``), which
 ReActAgent binds into the ctx natively. This rail therefore only needs the
 single AFTER_REACT_ITERATION hook.
@@ -30,7 +30,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentRail,
 )
-from openjiuwen.harness.super_harness.state import (
+from openjiuwen.agent_teams.harness.state import (
     ActiveRound,
     SafeStateSnapshot,
 )
@@ -39,11 +39,11 @@ if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
 
 
-# Per-task storage for the currently active round. SuperHarness sets this
+# Per-task storage for the currently active round. NativeHarness sets this
 # inside the round task before driving invoke; the rail reads it during the
 # AFTER_REACT_ITERATION hook (which runs in the same task context).
 _ACTIVE_ROUND: ContextVar[ActiveRound | None] = ContextVar(
-    "super_harness_active_round",
+    "native_harness_active_round",
     default=None,
 )
 
@@ -58,11 +58,11 @@ def capture_snapshot(
     """Capture current-round context messages + DeepAgentState.
 
     ``with_history=False`` captures only the current-round message segment —
-    the same segment ``SuperHarness._rollback_to_snapshot`` restores with
+    the same segment ``NativeHarness._rollback_to_snapshot`` restores with
     ``with_history=False``. Using the default (with_history=True) here would
     let rollback duplicate the persisted history segment on every abort/pause.
 
-    Shared by SnapshotRail (per-iteration) and SuperHarness (pre-round
+    Shared by SnapshotRail (per-iteration) and NativeHarness (pre-round
     baseline) so both produce identical snapshot shapes.
 
     Args:
@@ -70,7 +70,7 @@ def capture_snapshot(
         session: Current session, used for context routing + state.
         previous: Prior snapshot whose iteration_index is incremented to label
             this one. Ignored when ``index`` is given.
-        index: Explicit iteration_index. SuperHarness passes 0 for the
+        index: Explicit iteration_index. NativeHarness passes 0 for the
             pre-round baseline; SnapshotRail leaves it None to chain off
             ``previous``.
 
@@ -96,7 +96,7 @@ def capture_snapshot(
 
 
 class SnapshotRail(AgentRail):
-    """Bridge rail registered onto the inner ReActAgent by SuperHarness.
+    """Bridge rail registered onto the inner ReActAgent by NativeHarness.
 
     Priority 1000 ensures this rail's hook runs after any other rail's
     same-event hook, so the snapshot reflects the fully settled iteration
@@ -114,7 +114,7 @@ class SnapshotRail(AgentRail):
         session = ctx.session
         if session is None:
             logger.warning(
-                "[SuperHarness.SnapshotRail] no session on ctx; "
+                "[NativeHarness.SnapshotRail] no session on ctx; "
                 "skipping snapshot for round_id=%s",
                 active.round_id,
             )
@@ -126,7 +126,7 @@ class SnapshotRail(AgentRail):
             previous=active.last_safe_snapshot,
         )
         logger.debug(
-            "[SuperHarness.SnapshotRail] snapshot captured round_id=%s iteration=%s msgs=%s",
+            "[NativeHarness.SnapshotRail] snapshot captured round_id=%s iteration=%s msgs=%s",
             active.round_id,
             active.last_safe_snapshot.iteration_index,
             len(active.last_safe_snapshot.context_messages),
@@ -140,6 +140,6 @@ class SnapshotRail(AgentRail):
                 },
             )
             logger.info(
-                "[SuperHarness.SnapshotRail] graceful_abort honored round_id=%s",
+                "[NativeHarness.SnapshotRail] graceful_abort honored round_id=%s",
                 active.round_id,
             )

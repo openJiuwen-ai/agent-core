@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Control events for SuperHarness supervisor.
+"""Control events for NativeHarness supervisor.
 
 External API methods push ControlEvent instances onto an asyncio.Queue;
 the supervisor coroutine consumes them serially. Acks are returned via
@@ -12,7 +12,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Union
 
-from openjiuwen.harness.super_harness.state import InboxMessage
+from openjiuwen.agent_teams.harness.state import InboxMessage
 
 
 @dataclass(frozen=True, slots=True)

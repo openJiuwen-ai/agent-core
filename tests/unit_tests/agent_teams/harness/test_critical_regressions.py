@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Regression tests for the critical bugs found in the SuperHarness review.
+"""Regression tests for the critical bugs found in the NativeHarness review.
 
 Each test would FAIL against the pre-fix implementation and passes after the
 invoke-based rewrite + targeted fixes.
@@ -13,8 +13,8 @@ import pytest
 
 from openjiuwen.core.foundation.llm import UserMessage
 from openjiuwen.core.runner import Runner
-from openjiuwen.harness.super_harness import HarnessState, SuperHarness
-from tests.unit_tests.harness.super_harness.fixtures import (
+from openjiuwen.agent_teams.harness import HarnessState, NativeHarness
+from tests.unit_tests.agent_teams.harness.fixtures import (
     IterationStep,
     MockDeepAgent,
     drain_outputs,
@@ -29,7 +29,7 @@ async def test_multi_round_second_round_receives_chunks() -> None:
     agent.react_agent.iteration_script = [
         IterationStep(is_answer=True, answer_output="r1"),
     ]
-    harness = SuperHarness(lambda: agent)
+    harness = NativeHarness(lambda: agent)
     await harness.start()
 
     collected: list = []
@@ -63,7 +63,7 @@ async def test_immediate_abort_actually_stops_invoke() -> None:
         IterationStep(chunks=[], sleep_before=0.2),
         IterationStep(chunks=[{"v": "should_never_run"}]),
     ]
-    harness = SuperHarness(lambda: agent)
+    harness = NativeHarness(lambda: agent)
     await harness.start()
 
     collected: list = []
@@ -91,7 +91,7 @@ async def test_rollback_preserves_history_without_duplication() -> None:
         IterationStep(chunks=[{"v": "t1"}]),         # completes -> snapshot
         IterationStep(chunks=[], sleep_before=5.0),   # cancelled here
     ]
-    harness = SuperHarness(lambda: agent)
+    harness = NativeHarness(lambda: agent)
     await harness.start()
 
     ctx = agent.react_agent.context_engine.get_context(session_id=harness.session_id)
@@ -129,7 +129,7 @@ async def test_supervisor_handler_crash_does_not_hang_caller() -> None:
     # _start_round -> capture_snapshot -> load_state; make it explode.
     agent.load_state = boom
 
-    harness = SuperHarness(lambda: agent)
+    harness = NativeHarness(lambda: agent)
     await harness.start()
     try:
         # send triggers _on_send -> _start_round -> crash; ack must be rejected.
@@ -149,7 +149,7 @@ async def test_graceful_abort_then_send_does_not_restart() -> None:
         IterationStep(chunks=[{"v": "t1"}], sleep_after=0.1),
         IterationStep(is_answer=True, answer_output="done"),
     ]
-    harness = SuperHarness(lambda: agent)
+    harness = NativeHarness(lambda: agent)
     await harness.start()
 
     collected: list = []
@@ -180,7 +180,7 @@ async def test_pause_resume_does_not_duplicate_query() -> None:
         IterationStep(chunks=[{"v": "t1"}]),          # completes (context holds "first")
         IterationStep(chunks=[], sleep_before=5.0),    # paused here
     ]
-    harness = SuperHarness(lambda: agent)
+    harness = NativeHarness(lambda: agent)
     await harness.start()
 
     ctx = agent.react_agent.context_engine.get_context(session_id=harness.session_id)

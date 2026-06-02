@@ -19,7 +19,6 @@ if TYPE_CHECKING:
         DeepAgentConfig,
         VisionModelConfig,
     )
-    from openjiuwen.harness.super_harness import HarnessState, SuperHarness
     from openjiuwen.harness.workspace.workspace import Workspace
 
 __all__ = [
@@ -30,8 +29,6 @@ __all__ = [
     "AudioModelConfig",
     "VisionModelConfig",
     "create_deep_agent",
-    "SuperHarness",
-    "HarnessState",
     "Workspace",
 ]
 
@@ -78,16 +75,6 @@ def __getattr__(name: str) -> Any:
             Workspace,
         )
         return Workspace
-    if name == "SuperHarness":
-        from openjiuwen.harness.super_harness import (
-            SuperHarness,
-        )
-        return SuperHarness
-    if name == "HarnessState":
-        from openjiuwen.harness.super_harness import (
-            HarnessState,
-        )
-        return HarnessState
     raise AttributeError(
         f"module {__name__!r} has no attribute {name!r}"
     )

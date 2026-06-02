@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Output channel for SuperHarness.
+"""Output channel for NativeHarness.
 
 The supervisor pushes OutputSchema chunks into ``HarnessInternalState.output_queue``
 and pushes ``_END`` when the harness stops. ``_OutputIterator`` wraps the queue

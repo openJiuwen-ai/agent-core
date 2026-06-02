@@ -1,8 +1,8 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Mock DeepAgent / ReActAgent for SuperHarness unit tests.
+"""Mock DeepAgent / ReActAgent for NativeHarness unit tests.
 
-The mock mirrors the real ReActAgent contract SuperHarness depends on:
+The mock mirrors the real ReActAgent contract NativeHarness depends on:
 - ``invoke(inputs, session, _streaming=True)`` drives a scripted ReAct loop,
   writing chunks to ``session.write_stream`` (so a real Session's stream
   emitter / iterator behavior — including close_stream semantics — is
@@ -121,7 +121,7 @@ class MockReActAgent:
 
     @property
     def agent_callback_manager(self) -> AgentCallbackManager:
-        """Expose the callback manager (SuperHarness registers SnapshotRail here)."""
+        """Expose the callback manager (NativeHarness registers SnapshotRail here)."""
         return self._agent_callback_manager
 
     async def register_callback(
@@ -206,7 +206,7 @@ class MockReActAgent:
 
 
 class MockDeepAgent:
-    """Minimal DeepAgent stand-in for SuperHarness unit tests."""
+    """Minimal DeepAgent stand-in for NativeHarness unit tests."""
 
     def __init__(self, card: AgentCard | None = None) -> None:
         self.card = card or AgentCard(name="mock_deep_agent", description="test")
@@ -234,7 +234,7 @@ class MockDeepAgent:
 
 def make_card(name: str = "test_agent") -> AgentCard:
     """Build a minimal AgentCard for tests."""
-    return AgentCard(name=name, description="super-harness-test")
+    return AgentCard(name=name, description="native-harness-test")
 
 
 async def drain_outputs(harness: Any, sink: list) -> None:

@@ -1,13 +1,13 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""SuperHarness: concurrent-safe external interaction layer over DeepAgent.
+"""NativeHarness: concurrent-safe external interaction layer over DeepAgent.
 
 Replaces the dual ``steer / follow_up / abort`` + ``runner.run_agent_streaming``
 contract with a single-coroutine state machine driven by a control channel.
 
 Round execution model (mirrors DeepAgent's task-loop streaming, not its
 one-shot ``stream()``): the whole harness shares ONE stream lifecycle. Each
-round drives ``react_agent.invoke(_streaming=True)`` as a task SuperHarness
+round drives ``react_agent.invoke(_streaming=True)`` as a task NativeHarness
 owns — so cancellation actually stops the LLM/tool work, and because the
 session is passed in (``need_cleanup=False``) invoke does not close the shared
 stream emitter between rounds. A single forwarder coroutine pumps
@@ -37,20 +37,20 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.harness.schema.state import DeepAgentState
-from openjiuwen.harness.super_harness.control import (
+from openjiuwen.agent_teams.harness.control import (
     _Cmd_Abort,
     _Cmd_Pause,
     _Cmd_RoundFinished,
     _Cmd_Send,
     _Cmd_Stop,
 )
-from openjiuwen.harness.super_harness.outputs import _END, _OutputIterator
-from openjiuwen.harness.super_harness.snapshot_rail import (
+from openjiuwen.agent_teams.harness.outputs import _END, _OutputIterator
+from openjiuwen.agent_teams.harness.snapshot_rail import (
     _ACTIVE_ROUND,
     SnapshotRail,
     capture_snapshot,
 )
-from openjiuwen.harness.super_harness.state import (
+from openjiuwen.agent_teams.harness.state import (
     ActiveRound,
     HarnessInternalState,
     HarnessState,
@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
 
 
-class SuperHarness:
+class NativeHarness:
     """Concurrent-safe multi-round interaction wrapper over a DeepAgent.
 
     The DeepAgent instance is produced lazily by ``deep_agent_provider`` on
@@ -91,7 +91,7 @@ class SuperHarness:
     )
 
     def __init__(self, deep_agent_provider: Callable[[], "DeepAgent"]) -> None:
-        """Initialize a SuperHarness over a DeepAgent provider.
+        """Initialize a NativeHarness over a DeepAgent provider.
 
         Args:
             deep_agent_provider: Zero-arg callable producing a configured
@@ -164,14 +164,14 @@ class SuperHarness:
 
             self._st.supervisor_task = asyncio.create_task(
                 self._supervisor(),
-                name=f"super_harness_supervisor[{self.session_id}]",
+                name=f"native_harness_supervisor[{self.session_id}]",
             )
             self._forwarder_task = asyncio.create_task(
                 self._forward_outputs(),
-                name=f"super_harness_forwarder[{self.session_id}]",
+                name=f"native_harness_forwarder[{self.session_id}]",
             )
             await self._started_event.wait()
-            logger.info("[SuperHarness] started session=%s", self.session_id)
+            logger.info("[NativeHarness] started session=%s", self.session_id)
         finally:
             self._starting = False
 
@@ -189,7 +189,7 @@ class SuperHarness:
             await ack
         except Exception:
             # Supervisor crashed before acking; proceed with teardown anyway.
-            logger.debug("[SuperHarness] stop ack rejected", exc_info=True)
+            logger.debug("[NativeHarness] stop ack rejected", exc_info=True)
 
         supervisor = self._st.supervisor_task
         if supervisor is not None:
@@ -204,7 +204,7 @@ class SuperHarness:
             try:
                 await self._session.close_stream()
             except Exception:
-                logger.exception("[SuperHarness] close_stream failed during stop")
+                logger.exception("[NativeHarness] close_stream failed during stop")
         if self._forwarder_task is not None:
             try:
                 await self._forwarder_task
@@ -215,8 +215,8 @@ class SuperHarness:
             try:
                 await self._session.post_run()
             except Exception:
-                logger.exception("[SuperHarness] session.post_run failed")
-        logger.info("[SuperHarness] stopped session=%s", self.session_id)
+                logger.exception("[NativeHarness] session.post_run failed")
+        logger.info("[NativeHarness] stopped session=%s", self.session_id)
 
     def outputs(self) -> AsyncIterator[Any]:
         """Return an AsyncIterator over output chunks.
@@ -300,18 +300,18 @@ class SuperHarness:
         if self._st.phase is HarnessState.TERMINATED:
             raise_error(
                 StatusCode.DEEPAGENT_RUNTIME_ERROR,
-                error_msg="SuperHarness already stopped.",
+                error_msg="NativeHarness already stopped.",
             )
         if self._st.supervisor_task is None:
             raise_error(
                 StatusCode.DEEPAGENT_RUNTIME_ERROR,
-                error_msg="SuperHarness not started. Call start() first.",
+                error_msg="NativeHarness not started. Call start() first.",
             )
 
     async def _register_snapshot_rail(self) -> None:
         """Register SnapshotRail's callbacks directly onto the inner ReActAgent.
 
-        Bypasses DeepAgent.register_rail because SuperHarness drives
+        Bypasses DeepAgent.register_rail because NativeHarness drives
         react_agent.invoke directly; the inner/outer bridging routes do not
         apply here. Idempotent.
         """
@@ -350,7 +350,7 @@ class SuperHarness:
                     crash_exc = exc
                     raise
         except Exception:
-            logger.exception("[SuperHarness] supervisor crashed; terminating")
+            logger.exception("[NativeHarness] supervisor crashed; terminating")
             self._st.phase = HarnessState.TERMINATED
         finally:
             # Resolve every ack that will otherwise never be answered, so no
@@ -372,7 +372,7 @@ class SuperHarness:
         elif isinstance(cmd, _Cmd_RoundFinished):
             await self._on_round_done(cmd)
         else:  # pragma: no cover - defensive
-            logger.warning("[SuperHarness] unknown control event: %r", cmd)
+            logger.warning("[NativeHarness] unknown control event: %r", cmd)
 
     def _fail_remaining_commands(
         self,
@@ -387,7 +387,7 @@ class SuperHarness:
         """
         err = crash_exc if crash_exc is not None else build_error(
             StatusCode.DEEPAGENT_RUNTIME_ERROR,
-            error_msg="SuperHarness stopped before this command was handled.",
+            error_msg="NativeHarness stopped before this command was handled.",
         )
         pending = []
         if crashed_cmd is not None:
@@ -499,7 +499,7 @@ class SuperHarness:
 
         if cmd.error is not None:
             logger.error(
-                "[SuperHarness] round_id=%s ended with error: %r",
+                "[NativeHarness] round_id=%s ended with error: %r",
                 cmd.round_id,
                 cmd.error,
             )
@@ -560,11 +560,11 @@ class SuperHarness:
             _ACTIVE_ROUND.set(active)
             await self._run_round(active)
 
-        task = asyncio.create_task(_runner(), name=f"super_harness_round[{round_id}]")
+        task = asyncio.create_task(_runner(), name=f"native_harness_round[{round_id}]")
         active.task = task
         self._st.active = active
         logger.info(
-            "[SuperHarness] round_id=%s started query=%r",
+            "[NativeHarness] round_id=%s started query=%r",
             round_id,
             query[:120],
         )
@@ -600,10 +600,10 @@ class SuperHarness:
                     self._session,
                 )
         except asyncio.CancelledError:
-            logger.info("[SuperHarness] round_id=%s cancelled", active.round_id)
+            logger.info("[NativeHarness] round_id=%s cancelled", active.round_id)
             raise
         except Exception as exc:  # noqa: BLE001 - reported via control channel
-            logger.exception("[SuperHarness] round_id=%s crashed", active.round_id)
+            logger.exception("[NativeHarness] round_id=%s crashed", active.round_id)
             error = exc
         finally:
             await self._control.put(
@@ -629,7 +629,7 @@ class SuperHarness:
                 raise
         except Exception:
             logger.debug(
-                "[SuperHarness] round task raised during cancel",
+                "[NativeHarness] round task raised during cancel",
                 exc_info=True,
             )
 
@@ -645,7 +645,7 @@ class SuperHarness:
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("[SuperHarness] output forwarder crashed")
+            logger.exception("[NativeHarness] output forwarder crashed")
         finally:
             await self._st.output_queue.put(_END)
 
@@ -689,13 +689,13 @@ class SuperHarness:
                 restored_state = DeepAgentState.from_session_dict(snapshot.deep_agent_state)
             except Exception:
                 logger.exception(
-                    "[SuperHarness] failed to deserialize DeepAgentState; "
+                    "[NativeHarness] failed to deserialize DeepAgentState; "
                     "skipping state rollback",
                 )
             else:
                 self._agent.save_state(self._session, restored_state)
             logger.info(
-                "[SuperHarness] rolled back to iteration=%s msgs=%s",
+                "[NativeHarness] rolled back to iteration=%s msgs=%s",
                 snapshot.iteration_index,
                 len(snapshot.context_messages),
             )
@@ -706,9 +706,9 @@ class SuperHarness:
                 )
             except Exception:
                 logger.exception(
-                    "[SuperHarness] clear_context_messages failed during rollback",
+                    "[NativeHarness] clear_context_messages failed during rollback",
                 )
-            logger.info("[SuperHarness] no snapshot; cleared current-round messages")
+            logger.info("[NativeHarness] no snapshot; cleared current-round messages")
 
     # ------------------------------------------------------------------
     # State helpers
@@ -719,7 +719,7 @@ class SuperHarness:
         if self._st.phase is new_phase:
             return
         logger.info(
-            "[SuperHarness] phase %s -> %s",
+            "[NativeHarness] phase %s -> %s",
             self._st.phase.value,
             new_phase.value,
         )
