@@ -10,11 +10,14 @@ class.
 """
 from __future__ import annotations
 
-from typing import AsyncIterator, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, AsyncIterator, Protocol, runtime_checkable
 
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.agent_teams.harness.state import HarnessState
+
+if TYPE_CHECKING:
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 
 
 @runtime_checkable
@@ -49,10 +52,13 @@ class HarnessProtocol(Protocol):
         """Return a queue-backed async iterator over output chunks."""
         ...
 
-    async def send(self, content: str, *, immediate: bool = False) -> str:
+    async def send(self, content: "str | InteractiveInput", *, immediate: bool = False) -> str:
         """Submit input; ``immediate=True`` injects into the current round.
 
-        Returns the monotonic sequence id assigned to the message.
+        ``content`` may be an ``InteractiveInput`` to resume a pending
+        interrupt; the harness starts a single-round resume for it (``immediate``
+        is ignored for a resume payload). Returns the monotonic sequence id
+        assigned to the message.
         """
         ...
 

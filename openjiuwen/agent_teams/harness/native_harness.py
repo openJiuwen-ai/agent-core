@@ -50,7 +50,9 @@ from typing import Any, AsyncIterator, Callable
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error, raise_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.deep_agent import DeepAgent
@@ -75,6 +77,18 @@ from openjiuwen.agent_teams.harness.state import (
     InboxMessage,
     SafeStateSnapshot,
 )
+
+# Events fired on the harness-private callback framework so a consumer (e.g. the
+# team StreamController) can map harness lifecycle onto its own status machines
+# without polling. Both fire inside the supervisor coroutine, so their ordering
+# matches the phase/round transitions exactly — no observer sees a torn state.
+#   harness.state -> kwargs: old (HarnessState), new (HarnessState), session_id
+#   harness.round -> kwargs: kind (str), round_id (int), result (dict | None)
+# ``kind`` is one of: started / finished / aborted / paused / failed.
+# (Payload keys avoid ``event`` because that is ``trigger``'s own topic arg.)
+_EVENT_STATE = "harness.state"
+_EVENT_ROUND = "harness.round"
+_EVENT_NAMESPACE = "native_harness"
 
 
 class NativeHarness(DeepAgent):
@@ -109,6 +123,9 @@ class NativeHarness(DeepAgent):
         self._timeout: float = 600.0
         self._st = HarnessInternalState()
         self._control: asyncio.Queue = asyncio.Queue()
+        # Harness-private event bus; consumers subscribe via on_state_changed /
+        # on_round. Metrics/logging off — these fire on the supervisor hot path.
+        self._events = AsyncCallbackFramework(enable_metrics=False, enable_logging=False)
         self._snapshot_rail = SnapshotRail()
         self._forwarder_task: asyncio.Task | None = None
         self._started_event = asyncio.Event()
@@ -249,6 +266,9 @@ class NativeHarness(DeepAgent):
                 await self._session.post_run()
             except Exception:
                 logger.exception("[NativeHarness] session.post_run failed")
+        # Drop all subscriber callbacks so a stopped harness holds no references
+        # to consumer closures (the supervisor no longer fires events).
+        await self._events.unregister_namespace(_EVENT_NAMESPACE)
         logger.info("[NativeHarness] stopped session=%s", self.session_id)
 
     def outputs(self) -> AsyncIterator[Any]:
@@ -262,11 +282,46 @@ class NativeHarness(DeepAgent):
         return _OutputIterator(self._st.output_queue)
 
     # ------------------------------------------------------------------
+    # Event subscription
+    # ------------------------------------------------------------------
+
+    async def on_state_changed(self, callback: Callable[..., Any]) -> None:
+        """Register a callback fired on every phase transition.
+
+        The callback is invoked with ``old`` / ``new`` (``HarnessState``) and
+        ``session_id``; the framework narrows kwargs to the callback's declared
+        parameters, so a consumer may accept only the subset it needs. Callbacks
+        run inside the supervisor coroutine and must be cheap and non-blocking.
+
+        Args:
+            callback: Async callable receiving the ``harness.state`` payload.
+        """
+        await self._events.register(_EVENT_STATE, callback, namespace=_EVENT_NAMESPACE)
+
+    async def on_round(self, callback: Callable[..., Any]) -> None:
+        """Register a callback fired on every round lifecycle transition.
+
+        The callback is invoked with ``kind`` (str) / ``round_id`` (int) /
+        ``result`` (dict | None); kwargs are narrowed to the callback's declared
+        parameters. Callbacks run inside the supervisor coroutine.
+
+        Args:
+            callback: Async callable receiving the ``harness.round`` payload.
+        """
+        await self._events.register(_EVENT_ROUND, callback, namespace=_EVENT_NAMESPACE)
+
+    # ------------------------------------------------------------------
     # External API: send / abort / pause
     # ------------------------------------------------------------------
 
-    async def send(self, content: str, *, immediate: bool = False) -> str:
+    async def send(self, content: "str | InteractiveInput", *, immediate: bool = False) -> str:
         """Push an inbound message to the supervisor.
+
+        ``content`` may be an ``InteractiveInput`` carrying an interrupt resume.
+        It still starts a round via ``submit_round``; the task-loop executor
+        extracts the InteractiveInput and the inner ReAct agent resumes the
+        interrupted turn instead of starting fresh. A resume round settles to
+        IDLE on completion rather than continuing the task plan.
 
         Behavior by phase:
         - IDLE: starts a new round with ``content``.
@@ -468,8 +523,9 @@ class NativeHarness(DeepAgent):
 
         phase = self._st.phase
         if phase is HarnessState.IDLE:
-            self._start_round(msg.content)
-            self._transition(HarnessState.RUNNING)
+            active = self._start_round(msg.content)
+            await self._transition(HarnessState.RUNNING)
+            await self._emit_round("started", active.round_id)
         elif phase is HarnessState.RUNNING:
             active = self._st.active
             if msg.immediate and active is not None:
@@ -482,10 +538,16 @@ class NativeHarness(DeepAgent):
                 self.loop_controller.enqueue_follow_up(msg.content)
         elif phase is HarnessState.PAUSED:
             base = self._st.paused_query or ""
-            merged = f"{base}\n{msg.content}" if base else msg.content
+            if isinstance(msg.content, str):
+                merged: "str | InteractiveInput" = f"{base}\n{msg.content}" if base else msg.content
+            else:
+                # An InteractiveInput resume cannot be concatenated onto cached
+                # text; start the resume round directly and drop the cache.
+                merged = msg.content
             self._st.paused_query = None
-            self._start_round(merged)
-            self._transition(HarnessState.RUNNING)
+            active = self._start_round(merged)
+            await self._transition(HarnessState.RUNNING)
+            await self._emit_round("started", active.round_id)
         cmd.ack.set_result(seq)
 
     async def _on_abort(self, cmd: _Cmd_Abort) -> None:
@@ -496,13 +558,13 @@ class NativeHarness(DeepAgent):
             return
         if phase is HarnessState.PAUSED:
             self._st.paused_query = None
-            self._transition(HarnessState.IDLE)
+            await self._transition(HarnessState.IDLE)
             cmd.ack.set_result(None)
             return
 
         active = self._st.active
         if active is None:
-            self._transition(HarnessState.IDLE)
+            await self._transition(HarnessState.IDLE)
             cmd.ack.set_result(None)
             return
 
@@ -513,8 +575,9 @@ class NativeHarness(DeepAgent):
             )
             self._reset_coordinator()
             await self._emit_round_aborted(active.round_id, "abort")
+            await self._emit_round("aborted", active.round_id)
             self._st.active = None
-            self._transition(HarnessState.IDLE)
+            await self._transition(HarnessState.IDLE)
         else:
             # Graceful: let the current round finish; mark it so _on_round_done
             # does not start a continuation, and gate the coordinator so any
@@ -533,11 +596,13 @@ class NativeHarness(DeepAgent):
 
         active = self._st.active
         if active is None:
-            self._transition(HarnessState.PAUSED)
+            await self._transition(HarnessState.PAUSED)
             cmd.ack.set_result(None)
             return
 
-        cached_query = active.original_query
+        # A resume round (InteractiveInput query) cannot be re-merged onto cached
+        # text, so do not cache it; the next send simply starts fresh.
+        cached_query = active.original_query if isinstance(active.original_query, str) else None
         await self._hard_cancel_round(active)
         # pause discards the whole round (it will restart with a merged query),
         # so roll back to the pre-round baseline, not the mid-round snapshot —
@@ -545,9 +610,10 @@ class NativeHarness(DeepAgent):
         await self._rollback_to_snapshot(active.pre_round_snapshot)
         self._reset_coordinator()
         await self._emit_round_aborted(active.round_id, "pause")
+        await self._emit_round("paused", active.round_id)
         self._st.active = None
         self._st.paused_query = cached_query
-        self._transition(HarnessState.PAUSED)
+        await self._transition(HarnessState.PAUSED)
         cmd.ack.set_result(None)
 
     async def _on_round_done(self, cmd: _Cmd_RoundFinished) -> None:
@@ -563,6 +629,7 @@ class NativeHarness(DeepAgent):
             # Already superseded by an abort/pause that cancelled this round.
             return
         was_graceful = active.graceful_abort
+        is_resume = isinstance(active.original_query, InteractiveInput)
         self._st.active = None
 
         if cmd.error is not None:
@@ -571,11 +638,14 @@ class NativeHarness(DeepAgent):
                 cmd.round_id,
                 cmd.error,
             )
+            await self._emit_round("failed", cmd.round_id, cmd.result)
+        else:
+            await self._emit_round("finished", cmd.round_id, cmd.result)
 
         session = self._session
         coordinator = self.loop_coordinator
         if session is None or coordinator is None:
-            self._transition(HarnessState.IDLE)
+            await self._transition(HarnessState.IDLE)
             return
 
         # Advance coordinator + persist stop-condition state (as _run_task_loop).
@@ -590,26 +660,36 @@ class NativeHarness(DeepAgent):
         # queued follow-ups and go IDLE.
         if was_graceful:
             self._drain_follow_ups_discard(session)
-            self._transition(HarnessState.IDLE)
+            await self._transition(HarnessState.IDLE)
             return
 
         result_type = (cmd.result or {}).get("result_type")
         if result_type == "interrupt" or coordinator.is_aborted:
-            self._transition(HarnessState.IDLE)
+            await self._transition(HarnessState.IDLE)
             return
 
         # Decision priority (matches _run_task_loop):
         #   follow-up (external immediate=False sends) > remaining task-plan task.
         next_follow_up = self._drain_next_follow_up(session)
         if next_follow_up is not None:
-            self._start_round(next_follow_up, is_follow_up=True)
+            nxt = self._start_round(next_follow_up, is_follow_up=True)
+            await self._emit_round("started", nxt.round_id)
+            return
+
+        # A resume round has single-round semantics: it must not continue the
+        # task plan using its InteractiveInput query (that would re-resume an
+        # already-cleared interrupt). Settle to IDLE; any follow-up queued above
+        # still ran first.
+        if is_resume:
+            await self._transition(HarnessState.IDLE)
             return
 
         if self._has_remaining_tasks(session):
-            self._start_round(active.original_query)
+            nxt = self._start_round(active.original_query)
+            await self._emit_round("started", nxt.round_id)
             return
 
-        self._transition(HarnessState.IDLE)
+        await self._transition(HarnessState.IDLE)
 
     async def _on_stop(self, cmd: _Cmd_Stop) -> None:
         """Terminal cleanup: cancel active round, transition TERMINATED.
@@ -623,7 +703,7 @@ class NativeHarness(DeepAgent):
             await self._hard_cancel_round(active)
             self._st.active = None
         self._st.paused_query = None
-        self._transition(HarnessState.TERMINATED)
+        await self._transition(HarnessState.TERMINATED)
         cmd.ack.set_result(None)
 
     # ------------------------------------------------------------------
@@ -637,7 +717,7 @@ class NativeHarness(DeepAgent):
     # separate class for now to avoid speculative abstraction; the seam is
     # documented so stage 2 can lift them out without reshaping callers.
 
-    def _start_round(self, query: str, is_follow_up: bool = False) -> ActiveRound:
+    def _start_round(self, query: "str | InteractiveInput", is_follow_up: bool = False) -> ActiveRound:
         """Create an ActiveRound (with a pre-round baseline snapshot) and schedule it.
 
         The round task sets ``_ACTIVE_ROUND`` to this round in its own context
@@ -673,7 +753,7 @@ class NativeHarness(DeepAgent):
         logger.info(
             "[NativeHarness] round_id=%s started query=%r follow_up=%s",
             round_id,
-            query[:120],
+            str(query)[:120],
             is_follow_up,
         )
         return active
@@ -906,13 +986,49 @@ class NativeHarness(DeepAgent):
     # State helpers
     # ------------------------------------------------------------------
 
-    def _transition(self, new_phase: HarnessState) -> None:
-        """Update phase with logging; single-writer invariant assumed."""
-        if self._st.phase is new_phase:
+    async def _transition(self, new_phase: HarnessState) -> None:
+        """Update phase, log, and fire ``harness.state``; single-writer invariant.
+
+        Fired inside the supervisor coroutine so observers see transitions in the
+        exact order they happen. ``trigger`` swallows callback exceptions, so a
+        misbehaving subscriber cannot crash the supervisor.
+
+        Args:
+            new_phase: The phase to transition into; a no-op when unchanged.
+        """
+        old_phase = self._st.phase
+        if old_phase is new_phase:
             return
         logger.info(
             "[NativeHarness] phase %s -> %s",
-            self._st.phase.value,
+            old_phase.value,
             new_phase.value,
         )
         self._st.phase = new_phase
+        await self._events.trigger(
+            _EVENT_STATE,
+            old=old_phase,
+            new=new_phase,
+            session_id=self.session_id,
+        )
+
+    async def _emit_round(
+        self,
+        event: str,
+        round_id: int,
+        result: dict | None = None,
+    ) -> None:
+        """Fire ``harness.round`` for a round lifecycle transition.
+
+        Args:
+            event: One of ``started`` / ``finished`` / ``aborted`` / ``paused`` /
+                ``failed``.
+            round_id: The round this event concerns.
+            result: The round result dict for ``finished``; None otherwise.
+        """
+        await self._events.trigger(
+            _EVENT_ROUND,
+            kind=event,
+            round_id=round_id,
+            result=result,
+        )

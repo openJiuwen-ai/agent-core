@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from openjiuwen.core.foundation.llm import BaseMessage
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
     from openjiuwen.harness.deep_agent import DeepAgent
 
 
@@ -57,13 +58,14 @@ class InboxMessage:
 
     Attributes:
         seq: Monotonically increasing sequence number; defines global FIFO.
-        content: Raw user content.
+        content: Raw user content. An ``InteractiveInput`` carries an interrupt
+            resume; the supervisor starts a single-round resume for it.
         immediate: When True, inject into the active round's steering channel;
             when False, buffer until the active round finishes.
     """
 
     seq: int
-    content: str
+    content: "str | InteractiveInput"
     immediate: bool
 
 
@@ -81,7 +83,10 @@ class ActiveRound:
         task_id: Scheduler task id passed into ``submit_round`` so immediate
             abort/pause can target it via ``task_scheduler.cancel_task``.
         original_query: The query that started this round (used by pause to
-            cache and by send-while-paused to concatenate).
+            cache and by send-while-paused to concatenate). An
+            ``InteractiveInput`` marks a single-round interrupt resume, which
+            ``_on_round_done`` settles to IDLE rather than continuing the task
+            plan with the resume payload.
         deep_agent: Reference to the owning DeepAgent (the harness itself; the
             SnapshotRail reads context/state through it).
         task: The asyncio.Task running ``NativeHarness._run_round``.
@@ -100,7 +105,7 @@ class ActiveRound:
 
     round_id: int
     task_id: str
-    original_query: str
+    original_query: "str | InteractiveInput"
     deep_agent: "DeepAgent"
     task: asyncio.Task
     steering_queue: asyncio.Queue
