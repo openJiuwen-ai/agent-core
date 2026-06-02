@@ -301,6 +301,7 @@ def create_deep_agent(
         enable_async_subagent=enable_async_subagent,
         add_general_purpose_agent=add_general_purpose_agent,
         default_mode=default_mode,
+        restrict_to_work_dir=restrict_to_work_dir,
     )
 
     # Forward extra kwargs to config fields
