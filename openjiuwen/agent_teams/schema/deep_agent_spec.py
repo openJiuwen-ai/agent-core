@@ -594,6 +594,11 @@ class DeepAgentSpec(BaseModel):
                 rails.extend(
                     _as_built_list(rail_spec.build(language=language, workspace=workspace, context=build_ctx)),
                 )
+        # Publish the resolved parent model on the build context so sub-agent
+        # providers (which only receive params + context) can reuse the exact
+        # member model; mirrors how rail providers share instances via extras.
+        if build_ctx is not None:
+            build_ctx.extras["_parent_model"] = llm_model
         subagents = None
         if self.subagents:
             subagents = []
