@@ -835,6 +835,12 @@ class TeamAgent(BaseAgent):
         spec = TeamAgentSpec.model_validate(payload["spec"])
         context = TeamRuntimeContext.model_validate(payload["context"])
 
+        # Rebuild the provider-based build context from its serializable seed:
+        # ``build_context`` is excluded from JSON and is None after validation,
+        # so without this a spawned member loses every provider-assembled
+        # capability. No-op for the legacy customizer path (no seed).
+        spec.materialize_build_context()
+
         agent_spec = spec.agents.get(context.role.value) or spec.agents["leader"]
         team_name = (context.team_spec.team_name if context.team_spec else None) or spec.team_name
         card_id = f"{team_name}_{context.member_name}" if context.member_name else "unknown"
@@ -1133,6 +1139,13 @@ class TeamAgent(BaseAgent):
         # silently disabled across process restarts.
         if runtime_spec is not None and runtime_spec.agent_customizer is not None:
             spec.agent_customizer = runtime_spec.agent_customizer
+        # build_context is likewise Field(exclude=True) and dropped on the
+        # checkpoint round-trip. Prefer the live runtime spec's context on warm
+        # recovery; otherwise rebuild it from the serializable seed so
+        # provider-based members survive a cold restart. No-op for legacy.
+        if runtime_spec is not None and runtime_spec.build_context is not None:
+            spec.build_context = runtime_spec.build_context
+        spec.materialize_build_context()
         context = TeamRuntimeContext.model_validate(bucket["context"])
 
         agent_spec = spec.agents.get(context.role.value) or spec.agents["leader"]

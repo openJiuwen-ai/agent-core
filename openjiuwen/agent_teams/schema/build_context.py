@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
     from openjiuwen.harness.workspace.workspace import Workspace
@@ -58,4 +58,53 @@ class BuildContext:
         return clone
 
 
-__all__ = ["BuildContext"]
+# Process-wide factory that rebuilds a ``BuildContext`` from a serializable
+# seed. ``build_context`` is non-serializable and excluded from JSON, so a
+# member rebuilt across a serialization boundary (spawned teammate process,
+# distributed remote, cold recovery) loses it. The platform registers a factory
+# here; the spec carries a serializable seed; the receiving side rebuilds a
+# live context from the seed using local handles (config, registries).
+_BUILD_CONTEXT_FACTORY: Optional[Callable[[dict[str, Any]], Optional["BuildContext"]]] = None
+
+
+def register_build_context_factory(
+    factory: Callable[[dict[str, Any]], Optional["BuildContext"]],
+) -> None:
+    """Register the platform factory that rebuilds a context from a seed.
+
+    The factory maps the serializable seed carried on
+    ``TeamAgentSpec.build_context_seed`` back into a live ``BuildContext`` on
+    the receiving side of a serialization boundary. Only one factory is active
+    per process; the last registration wins. Registration is expected to be
+    idempotent.
+
+    Args:
+        factory: Callable mapping a seed mapping to a ``BuildContext`` (or None
+            when it cannot rebuild from the given seed).
+    """
+    global _BUILD_CONTEXT_FACTORY
+    _BUILD_CONTEXT_FACTORY = factory
+
+
+def build_context_from_seed(seed: Optional[dict[str, Any]]) -> Optional["BuildContext"]:
+    """Rebuild a context from a serializable seed via the registered factory.
+
+    Returns None when no factory is registered or the seed is empty, so callers
+    fall back to the live / legacy path unchanged.
+
+    Args:
+        seed: The serializable seed mapping (from ``build_context_seed``).
+
+    Returns:
+        A live ``BuildContext`` subclass instance, or None.
+    """
+    if _BUILD_CONTEXT_FACTORY is None or not seed:
+        return None
+    return _BUILD_CONTEXT_FACTORY(seed)
+
+
+__all__ = [
+    "BuildContext",
+    "register_build_context_factory",
+    "build_context_from_seed",
+]
