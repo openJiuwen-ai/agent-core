@@ -34,7 +34,6 @@ from openjiuwen.agent_teams.context import (
 )
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.rails import (
-    FirstIterationGate,
     TeamPolicyRail,
     TeamToolApprovalRail,
     TeamToolRail,
@@ -238,17 +237,6 @@ def _build_human_agent_runtime() -> TeamAgent:
     avatar = TeamAgent(card)
     avatar.configure(spec, ctx)
     return avatar
-
-
-@pytest.mark.level0
-def test_human_agent_skips_first_iteration_gate() -> None:
-    """Human agents must not hold a FirstIterationGate — they have no
-    task loop the gate would open."""
-    avatar = _build_human_agent_runtime()
-    rails = list(avatar.harness.inner_agent._pending_rails)
-
-    assert not any(isinstance(r, FirstIterationGate) for r in rails)
-    assert avatar.resources.first_iter_gate is None
 
 
 @pytest.mark.level0

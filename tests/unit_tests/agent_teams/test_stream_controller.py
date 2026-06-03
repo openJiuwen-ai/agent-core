@@ -1,435 +1,130 @@
 # coding: utf-8
-"""Tests for ``openjiuwen.agent_teams.agent.stream_controller`` cancel paths.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-Cooperative cancel is the seam where the team-side asks a DeepAgent task
-loop to wind down: harness.abort first, fall back to ``Task.cancel`` when
-the loop ignores the request. These tests cover that two-phase contract
-without spinning up a real DeepAgent.
+"""Tests for the forward-layer ``StreamController`` over a ``MemberRuntime``.
+
+The runtime (NativeHarness/TeamHarness, or a CLI runtime) owns round driving
+and input delivery; the StreamController only forwards + tags the runtime's
+output chunks, maps its phase/round events onto MemberStatus / ExecutionStatus,
+and forwards cancel/abort. These tests drive a lightweight fake runtime so the
+mapping/forwarding contract is exercised without a real DeepAgent.
 """
 
 from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from typing import Any, AsyncIterator, Callable
 
 import pytest
 
-from openjiuwen.agent_teams.agent import stream_controller as stream_controller_module
 from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
 from openjiuwen.agent_teams.agent.state import TeamAgentState
-from openjiuwen.agent_teams.agent.stream_controller import StreamController
-from openjiuwen.agent_teams.harness import TeamHarness
-from openjiuwen.agent_teams.harness.team_harness import _MountedRails
+from openjiuwen.agent_teams.agent.stream_controller import _RETRY_QUERY, StreamController
+from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberStatus
 from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.session.stream.base import OutputSchema
 
 
-def _make_controller(harness: TeamHarness) -> StreamController:
-    """Wire a StreamController against a fake harness, no team_member needed."""
-    state = TeamAgentState()
-    blueprint = SimpleNamespace(member_name="m", role=TeamRole.LEADER)
+class _FakeRuntime:
+    """Duck-typed ``MemberRuntime`` exposing only what the controller drives.
+
+    Holds a fixed list of output chunks for ``outputs``, records abort/send
+    calls, and lets a test fire phase/round callbacks the way a real runtime's
+    supervisor would (kwargs narrowed to the callback's declared parameters,
+    so the controller's ``_map_state(new)`` / ``_map_round(kind, result)`` are
+    invoked positionally).
+    """
+
+    def __init__(self, chunks: list[Any] | None = None) -> None:
+        self._chunks = chunks or []
+        self.state = HarnessState.IDLE
+        self.abort_calls: list[bool] = []
+        self.sent: list[tuple[Any, bool]] = []
+        self._state_cbs: list[Callable[..., Any]] = []
+        self._round_cbs: list[Callable[..., Any]] = []
+        self._pending_interrupt = False
+
+    def outputs(self) -> AsyncIterator[Any]:
+        async def _gen() -> AsyncIterator[Any]:
+            for chunk in self._chunks:
+                yield chunk
+
+        return _gen()
+
+    async def on_state_changed(self, callback: Callable[..., Any]) -> None:
+        self._state_cbs.append(callback)
+
+    async def on_round(self, callback: Callable[..., Any]) -> None:
+        self._round_cbs.append(callback)
+
+    async def send(self, content: Any, *, immediate: bool = False) -> Any:
+        self.sent.append((content, immediate))
+        return None
+
+    async def abort(self, *, immediate: bool = False) -> None:
+        self.abort_calls.append(immediate)
+
+    def has_pending_interrupt(self) -> bool:
+        return self._pending_interrupt
+
+    def is_pending_interrupt_resume_valid(self, user_input: Any) -> bool:
+        return False
+
+    async def fire_state(self, new: HarnessState) -> None:
+        for cb in self._state_cbs:
+            await cb(new)
+
+    async def fire_round(self, kind: str, result: dict | None = None) -> None:
+        for cb in self._round_cbs:
+            await cb(kind, result)
+
+
+def _make_controller(
+    runtime: _FakeRuntime,
+    *,
+    member_name: str = "m",
+    role: TeamRole = TeamRole.LEADER,
+    state: TeamAgentState | None = None,
+    status_updater: Callable[[MemberStatus], Any] | None = None,
+    execution_updater: Callable[[ExecutionStatus], Any] | None = None,
+    wake_mailbox_callback: Callable[[], Any] | None = None,
+    request_completion_poll_callback: Callable[[], Any] | None = None,
+) -> StreamController:
+    """Wire a StreamController against a fake runtime with overridable hooks."""
+    blueprint = SimpleNamespace(member_name=member_name, role=role)
 
     async def _noop(_: Any) -> None:
         return None
 
     return StreamController(
         blueprint_getter=lambda: blueprint,
-        state=state,
-        resources=PrivateAgentResources(harness=harness),
-        status_updater=_noop,
-        execution_updater=_noop,
+        state=state or TeamAgentState(),
+        resources=PrivateAgentResources(harness=runtime),
+        status_updater=status_updater or _noop,
+        execution_updater=execution_updater or _noop,
+        wake_mailbox_callback=wake_mailbox_callback,
+        request_completion_poll_callback=request_completion_poll_callback,
     )
 
 
-def _make_harness_with_abort(abort_calls: list[None]) -> TeamHarness:
-    deep_agent = MagicMock(name="DeepAgent")
-    deep_agent.deep_config = SimpleNamespace(workspace=None, sys_operation=None, model=None)
-    deep_agent.loop_session = None
-
-    async def _abort() -> None:
-        abort_calls.append(None)
-
-    deep_agent.abort = _abort
-    rails = _MountedRails(team_tool=MagicMock(), team_policy=MagicMock())
-    return TeamHarness(deep_agent, rails, role=TeamRole.LEADER, member_name="m")
-
-
-@pytest.mark.asyncio
-async def test_cooperative_cancel_no_op_when_no_task() -> None:
-    abort_calls: list[None] = []
-    harness = _make_harness_with_abort(abort_calls)
-    sc = _make_controller(harness)
-
-    await sc.cooperative_cancel()
-
-    assert abort_calls == []
-    assert sc._cancel_requested is False
-
-
-@pytest.mark.asyncio
-async def test_cooperative_cancel_finishes_when_task_responds_to_abort() -> None:
-    """If the task naturally completes within the timeout (simulating a
-    cooperative abort handler), no hard cancel is required.
-    """
-    abort_calls: list[None] = []
-    harness = _make_harness_with_abort(abort_calls)
-    sc = _make_controller(harness)
-
-    finished = asyncio.Event()
-
-    async def _round() -> None:
-        # Simulate the task loop noticing the abort flag and exiting
-        # promptly. The timing is well below the cancel timeout.
-        await asyncio.sleep(0.01)
-        finished.set()
-
-    sc.agent_task = asyncio.create_task(_round())
-
-    await sc.cooperative_cancel()
-
-    assert abort_calls == [None]
-    assert finished.is_set(), "cooperative round must run to completion"
-    assert sc.agent_task.done()
-    assert not sc.agent_task.cancelled(), "cancel must NOT fire when abort succeeds"
-    assert sc._cancel_requested is True
-
-
-@pytest.mark.asyncio
-async def test_cooperative_cancel_falls_back_to_hard_cancel_on_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A task loop that ignores the abort signal must still be terminated."""
-    abort_calls: list[None] = []
-    harness = _make_harness_with_abort(abort_calls)
-    sc = _make_controller(harness)
-
-    async def _stuck() -> None:
-        await asyncio.sleep(60)
-
-    sc.agent_task = asyncio.create_task(_stuck())
-
-    monkeypatch.setattr(stream_controller_module, "_COOPERATIVE_ABORT_TIMEOUT_SECONDS", 0.05)
-
-    await sc.cooperative_cancel()
-
-    assert abort_calls == [None]
-    assert sc.agent_task.done()
-    assert sc.agent_task.cancelled(), "stuck task must be hard-cancelled"
-
-
-@pytest.mark.asyncio
-async def test_cancel_agent_records_execution_transitions(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """cancel_agent must walk CANCEL_REQUESTED -> CANCELLING regardless of
-    whether the cooperative path succeeds or falls back.
-    """
-    abort_calls: list[None] = []
-    harness = _make_harness_with_abort(abort_calls)
-
-    state = TeamAgentState()
-    blueprint = SimpleNamespace(member_name="m", role=TeamRole.LEADER)
-    transitions: list[ExecutionStatus] = []
-
-    async def _record_exec(status: ExecutionStatus) -> None:
-        transitions.append(status)
-
-    async def _noop_status(_: MemberStatus) -> None:
-        return None
-
-    sc = StreamController(
-        blueprint_getter=lambda: blueprint,
-        state=state,
-        resources=PrivateAgentResources(harness=harness),
-        status_updater=_noop_status,
-        execution_updater=_record_exec,
-    )
-
-    async def _round() -> None:
-        await asyncio.sleep(0.01)
-
-    sc.agent_task = asyncio.create_task(_round())
-    monkeypatch.setattr(stream_controller_module, "_COOPERATIVE_ABORT_TIMEOUT_SECONDS", 0.5)
-
-    await sc.cancel_agent()
-
-    assert ExecutionStatus.CANCEL_REQUESTED in transitions
-    assert ExecutionStatus.CANCELLING in transitions
-    assert abort_calls == [None]
-
-
-@pytest.mark.asyncio
-async def test_cancel_agent_no_in_flight_round_is_silent() -> None:
-    """cancel_agent with no live round must not write the state machine.
-
-    Previously ``cancel_agent`` unconditionally wrote
-    CANCEL_REQUESTED, which fails the IDLE -> CANCEL_REQUESTED guard
-    and surfaces as an ``Invalid state transition`` ERROR log even
-    though nothing was actually wrong.
-    """
-    abort_calls: list[None] = []
-    harness = _make_harness_with_abort(abort_calls)
-
-    state = TeamAgentState()
-    blueprint = SimpleNamespace(member_name="m", role=TeamRole.LEADER)
-    transitions: list[ExecutionStatus] = []
-
-    async def _record_exec(status: ExecutionStatus) -> None:
-        transitions.append(status)
-
-    async def _noop_status(_: MemberStatus) -> None:
-        return None
-
-    sc = StreamController(
-        blueprint_getter=lambda: blueprint,
-        state=state,
-        resources=PrivateAgentResources(harness=harness),
-        status_updater=_noop_status,
-        execution_updater=_record_exec,
-    )
-
-    await sc.cancel_agent()
-
-    assert transitions == []
-    assert abort_calls == []
-
-
-@pytest.mark.asyncio
-async def test_drain_agent_task_clears_pending_inputs_and_cancels() -> None:
-    """drain wipes queued user input AND uses the cooperative cancel path."""
-    abort_calls: list[None] = []
-    harness = _make_harness_with_abort(abort_calls)
-    sc = _make_controller(harness)
-
-    sc.pending_inputs = ["queued"]
-    sc.pending_interrupt_resumes = [MagicMock()]
-
-    async def _round() -> None:
-        await asyncio.sleep(0.01)
-
-    sc.agent_task = asyncio.create_task(_round())
-
-    await sc.drain_agent_task()
-
-    assert sc.pending_inputs == []
-    assert sc.pending_interrupt_resumes == []
-    assert abort_calls == [None]
-
-
-@pytest.mark.asyncio
-async def test_drain_agent_task_advances_state_machine() -> None:
-    """drain must walk RUNNING -> CANCEL_REQUESTED -> CANCELLING.
-
-    Regression guard for the ``Invalid state transition`` errors caused
-    by kernel pause/stop bypassing ``cancel_agent`` and writing
-    ``CANCELLED`` / ``IDLE`` directly from ``RUNNING``.
-    """
-    abort_calls: list[None] = []
-    harness = _make_harness_with_abort(abort_calls)
-
-    state = TeamAgentState()
-    blueprint = SimpleNamespace(member_name="m", role=TeamRole.LEADER)
-    transitions: list[ExecutionStatus] = []
-
-    async def _record_exec(status: ExecutionStatus) -> None:
-        transitions.append(status)
-
-    async def _noop_status(_: MemberStatus) -> None:
-        return None
-
-    sc = StreamController(
-        blueprint_getter=lambda: blueprint,
-        state=state,
-        resources=PrivateAgentResources(harness=harness),
-        status_updater=_noop_status,
-        execution_updater=_record_exec,
-    )
-
-    async def _round() -> None:
-        await asyncio.sleep(0.01)
-
-    sc.agent_task = asyncio.create_task(_round())
-
-    await sc.drain_agent_task()
-
-    assert transitions == [ExecutionStatus.CANCEL_REQUESTED, ExecutionStatus.CANCELLING]
-    assert abort_calls == [None]
-
-
-@pytest.mark.asyncio
-async def test_drain_agent_task_no_in_flight_round_is_silent() -> None:
-    """drain with no live round must not poke the execution state machine.
-
-    Without an in-flight task the state is typically IDLE — writing
-    CANCEL_REQUESTED would fail validation. Pending queues are still
-    cleared so teardown leaves no dangling references.
-    """
-    abort_calls: list[None] = []
-    harness = _make_harness_with_abort(abort_calls)
-
-    state = TeamAgentState()
-    blueprint = SimpleNamespace(member_name="m", role=TeamRole.LEADER)
-    transitions: list[ExecutionStatus] = []
-
-    async def _record_exec(status: ExecutionStatus) -> None:
-        transitions.append(status)
-
-    async def _noop_status(_: MemberStatus) -> None:
-        return None
-
-    sc = StreamController(
-        blueprint_getter=lambda: blueprint,
-        state=state,
-        resources=PrivateAgentResources(harness=harness),
-        status_updater=_noop_status,
-        execution_updater=_record_exec,
-    )
-    sc.pending_inputs = ["queued"]
-    sc.pending_interrupt_resumes = [MagicMock()]
-
-    await sc.drain_agent_task()
-
-    assert transitions == []
-    assert abort_calls == []
-    assert sc.pending_inputs == []
-    assert sc.pending_interrupt_resumes == []
-
-
-@pytest.mark.asyncio
-async def test_execute_round_emits_cancelled_on_cooperative_abort_success() -> None:
-    """Even when the inner stream finishes without raising, the
-    ExecutionStatus must surface CANCELLED whenever the round was
-    cancel-requested. Otherwise the state machine reports COMPLETED for
-    a user-cancelled round.
-    """
-    abort_calls: list[None] = []
-    harness = _make_harness_with_abort(abort_calls)
-
-    state = TeamAgentState()
-    blueprint = SimpleNamespace(member_name="m", role=TeamRole.LEADER)
-    transitions: list[ExecutionStatus] = []
-
-    async def _record_exec(status: ExecutionStatus) -> None:
-        transitions.append(status)
-
-    async def _noop_status(_: MemberStatus) -> None:
-        return None
-
-    sc = StreamController(
-        blueprint_getter=lambda: blueprint,
-        state=state,
-        resources=PrivateAgentResources(harness=harness),
-        status_updater=_noop_status,
-        execution_updater=_record_exec,
-    )
-
-    sc._run_retrying_stream = AsyncMock()
-    sc._cancel_requested = True
-
-    await sc._execute_round("query")
-
-    assert ExecutionStatus.CANCELLED in transitions
-    assert ExecutionStatus.COMPLETED not in transitions
-
-
-@pytest.mark.asyncio
-async def test_execute_round_emits_completed_on_normal_finish() -> None:
-    """The non-cancel happy path still walks COMPLETING -> COMPLETED."""
-    abort_calls: list[None] = []
-    harness = _make_harness_with_abort(abort_calls)
-
-    state = TeamAgentState()
-    blueprint = SimpleNamespace(member_name="m", role=TeamRole.LEADER)
-    transitions: list[ExecutionStatus] = []
-
-    async def _record_exec(status: ExecutionStatus) -> None:
-        transitions.append(status)
-
-    async def _noop_status(_: MemberStatus) -> None:
-        return None
-
-    sc = StreamController(
-        blueprint_getter=lambda: blueprint,
-        state=state,
-        resources=PrivateAgentResources(harness=harness),
-        status_updater=_noop_status,
-        execution_updater=_record_exec,
-    )
-
-    sc._run_retrying_stream = AsyncMock()
-    sc._cancel_requested = False
-
-    await sc._execute_round("query")
-
-    assert ExecutionStatus.COMPLETING in transitions
-    assert ExecutionStatus.COMPLETED in transitions
-    assert ExecutionStatus.CANCELLED not in transitions
-
-
-@pytest.mark.asyncio
-async def test_run_one_round_sets_member_id_contextvar() -> None:
-    """A round started from a foreign task context must run under its own
-    member identity.
-
-    Human-agent rounds are driven by ``HumanAgentInbox`` from the leader's
-    interact path, which never ran the coordination kernel's
-    ``set_member_id``. ``_run_one_round`` must re-assert the ``member_id``
-    contextvar so status updates, event publishing and logs inside the
-    round are attributed to the right member instead of an empty id.
-    """
-    from openjiuwen.core.common.logging import get_member_id, set_member_id
-
-    harness = _make_harness_with_abort([])
-    sc = _make_controller_with(member_name="human-member-beta", harness=harness)
-
-    seen_member_id: list[str] = []
-
-    async def _capture_round(_message: Any) -> None:
-        seen_member_id.append(get_member_id())
-
-    sc._execute_round = _capture_round  # type: ignore[assignment]
-
-    # Simulate the foreign-context entry point: no member_id set.
-    set_member_id("")
-    await sc._run_one_round("hi")
-
-    assert seen_member_id == ["human-member-beta"]
+def _task_failed_chunk(text: str) -> Any:
+    """Build a chunk shaped like a DeepAgent ``task_failed`` frame."""
+    payload = SimpleNamespace(type="task_failed", data=[SimpleNamespace(text=text)])
+    return SimpleNamespace(payload=payload)
 
 
 # ----------------------------------------------------------------------
-# Chunk observer + source_member tagging
+# Chunk tagging
 # ----------------------------------------------------------------------
 
 
-def _harness_yielding(chunks: list[Any]) -> TeamHarness:
-    """Build a minimal TeamHarness whose run_streaming yields *chunks*."""
-    deep_agent = MagicMock(name="DeepAgent")
-    deep_agent.deep_config = SimpleNamespace(workspace=None, sys_operation=None, model=None)
-    deep_agent.loop_session = None
-
-    async def _abort() -> None:
-        return None
-
-    deep_agent.abort = _abort
-    rails = _MountedRails(team_tool=MagicMock(), team_policy=MagicMock())
-    harness = TeamHarness(deep_agent, rails, role=TeamRole.LEADER, member_name="m")
-
-    async def _run_streaming(_inputs: Any, *, session_id: Any = None) -> Any:
-        for ch in chunks:
-            yield ch
-
-    harness.run_streaming = _run_streaming  # type: ignore[assignment]
-    return harness
-
-
+@pytest.mark.level0
 def test_tag_chunk_upgrades_plain_outputschema() -> None:
     """Plain OutputSchema gets upgraded to TeamOutputSchema with source_member + role."""
-    harness = _make_harness_with_abort([])
-    sc = _make_controller(harness)
+    sc = _make_controller(_FakeRuntime())
 
     raw = OutputSchema(type="message", index=0, payload={"text": "hi"})
     tagged = sc._tag_chunk(raw)
@@ -439,14 +134,14 @@ def test_tag_chunk_upgrades_plain_outputschema() -> None:
     assert tagged.role == TeamRole.LEADER
     assert tagged.type == "message"
     assert tagged.payload == {"text": "hi"}
-    # Original chunk must not be mutated — DeepAgent internals may keep a ref.
+    # Original chunk must not be mutated — runtime internals may keep a ref.
     assert not isinstance(raw, TeamOutputSchema)
 
 
+@pytest.mark.level1
 def test_tag_chunk_passes_through_team_output_with_matching_identity() -> None:
     """An already-tagged chunk with matching member + role is returned unchanged."""
-    harness = _make_harness_with_abort([])
-    sc = _make_controller(harness)
+    sc = _make_controller(_FakeRuntime())
 
     pre_tagged = TeamOutputSchema(type="message", index=0, payload={}, source_member="m", role=TeamRole.LEADER)
     out = sc._tag_chunk(pre_tagged)
@@ -454,10 +149,10 @@ def test_tag_chunk_passes_through_team_output_with_matching_identity() -> None:
     assert out is pre_tagged
 
 
+@pytest.mark.level1
 def test_tag_chunk_rewrites_team_output_with_mismatched_member() -> None:
     """An already-tagged chunk with a different member is re-tagged."""
-    harness = _make_harness_with_abort([])
-    sc = _make_controller(harness)
+    sc = _make_controller(_FakeRuntime())
 
     pre_tagged = TeamOutputSchema(type="message", index=0, payload={}, source_member="other", role=TeamRole.TEAMMATE)
     out = sc._tag_chunk(pre_tagged)
@@ -469,10 +164,10 @@ def test_tag_chunk_rewrites_team_output_with_mismatched_member() -> None:
     assert pre_tagged.role == TeamRole.TEAMMATE
 
 
+@pytest.mark.level1
 def test_tag_chunk_passes_through_non_outputschema() -> None:
     """Non-OutputSchema chunks (custom payloads) survive tagging untouched."""
-    harness = _make_harness_with_abort([])
-    sc = _make_controller(harness)
+    sc = _make_controller(_FakeRuntime())
 
     custom = SimpleNamespace(type="custom", payload={"x": 1})
     out = sc._tag_chunk(custom)
@@ -480,15 +175,20 @@ def test_tag_chunk_passes_through_non_outputschema() -> None:
     assert out is custom
 
 
+# ----------------------------------------------------------------------
+# Output forwarding + observers
+# ----------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
-async def test_stream_one_round_tags_and_fans_out_to_observers() -> None:
-    """_stream_one_round must tag every chunk and broadcast to observers."""
+@pytest.mark.level0
+async def test_forward_outputs_tags_and_fans_out_to_observers() -> None:
+    """_forward_outputs must tag every chunk and broadcast to observers."""
     raw_chunks = [
         OutputSchema(type="message", index=0, payload={"step": 1}),
         OutputSchema(type="message", index=1, payload={"step": 2}),
     ]
-    harness = _harness_yielding(raw_chunks)
-    sc = _make_controller(harness)
+    sc = _make_controller(_FakeRuntime(raw_chunks))
     sc.stream_queue = asyncio.Queue()
 
     received: list[Any] = []
@@ -498,9 +198,8 @@ async def test_stream_one_round_tags_and_fans_out_to_observers() -> None:
 
     sc.add_chunk_observer(_observer)
 
-    await sc._stream_one_round("hi")
+    await sc._forward_outputs()
 
-    # Local queue saw tagged chunks.
     queued: list[Any] = []
     while not sc.stream_queue.empty():
         queued.append(sc.stream_queue.get_nowait())
@@ -511,14 +210,14 @@ async def test_stream_one_round_tags_and_fans_out_to_observers() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_observer_exception_auto_detaches_and_does_not_block_stream() -> None:
     """A misbehaving observer is detached and never blocks the producer."""
     raw_chunks = [
         OutputSchema(type="message", index=0, payload={"step": 1}),
         OutputSchema(type="message", index=1, payload={"step": 2}),
     ]
-    harness = _harness_yielding(raw_chunks)
-    sc = _make_controller(harness)
+    sc = _make_controller(_FakeRuntime(raw_chunks))
     sc.stream_queue = asyncio.Queue()
 
     bad_calls: list[int] = []
@@ -534,7 +233,7 @@ async def test_observer_exception_auto_detaches_and_does_not_block_stream() -> N
     sc.add_chunk_observer(_bad)
     sc.add_chunk_observer(_good)
 
-    await sc._stream_one_round("hi")
+    await sc._forward_outputs()
 
     # Bad observer ran exactly once before being detached.
     assert bad_calls == [0]
@@ -544,10 +243,10 @@ async def test_observer_exception_auto_detaches_and_does_not_block_stream() -> N
     assert sc.stream_queue.qsize() == 2
 
 
+@pytest.mark.level1
 def test_remove_chunk_observer_is_idempotent() -> None:
     """Removing an observer that was never registered must not raise."""
-    harness = _make_harness_with_abort([])
-    sc = _make_controller(harness)
+    sc = _make_controller(_FakeRuntime())
 
     async def _observer(_: Any) -> None:
         return None
@@ -559,26 +258,8 @@ def test_remove_chunk_observer_is_idempotent() -> None:
     assert sc._chunk_observers == []
 
 
-def _make_controller_with(
-    *, member_name: str, harness: TeamHarness, role: TeamRole = TeamRole.TEAMMATE
-) -> StreamController:
-    """Variant of _make_controller that lets the test fix member identity."""
-    state = TeamAgentState()
-    blueprint = SimpleNamespace(member_name=member_name, role=role)
-
-    async def _noop(_: Any) -> None:
-        return None
-
-    return StreamController(
-        blueprint_getter=lambda: blueprint,
-        state=state,
-        resources=PrivateAgentResources(harness=harness),
-        status_updater=_noop,
-        execution_updater=_noop,
-    )
-
-
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_teammate_chunks_reach_leader_queue_via_forward_observer() -> None:
     """End-to-end: teammate chunks flow into leader's stream_queue tagged
     with the teammate's member name — same data path SpawnManager wires
@@ -588,15 +269,10 @@ async def test_teammate_chunks_reach_leader_queue_via_forward_observer() -> None
         OutputSchema(type="message", index=0, payload={"step": 1}),
         OutputSchema(type="message", index=1, payload={"step": 2}),
     ]
-
-    leader_sc = _make_controller_with(
-        member_name="leader_m", harness=_make_harness_with_abort([]), role=TeamRole.LEADER
-    )
+    leader_sc = _make_controller(_FakeRuntime(), member_name="leader_m", role=TeamRole.LEADER)
     leader_sc.stream_queue = asyncio.Queue()
 
-    teammate_sc = _make_controller_with(
-        member_name="teammate_m", harness=_harness_yielding(raw_chunks), role=TeamRole.TEAMMATE
-    )
+    teammate_sc = _make_controller(_FakeRuntime(raw_chunks), member_name="teammate_m", role=TeamRole.TEAMMATE)
     teammate_sc.stream_queue = asyncio.Queue()
 
     # Mimic SpawnManager._wire_inprocess_chunk_forward.
@@ -608,7 +284,7 @@ async def test_teammate_chunks_reach_leader_queue_via_forward_observer() -> None
 
     teammate_sc.add_chunk_observer(_forward)
 
-    await teammate_sc._stream_one_round("any-query")
+    await teammate_sc._forward_outputs()
 
     leader_seen: list[Any] = []
     while not leader_sc.stream_queue.empty():
@@ -622,21 +298,16 @@ async def test_teammate_chunks_reach_leader_queue_via_forward_observer() -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
 async def test_forward_observer_drops_when_leader_queue_unset() -> None:
     """If leader's stream_queue is None (leader not streaming yet / already
     closed), the forward observer must drop chunks rather than buffer.
-    Buffering would invert ownership of the data flow.
     """
     raw_chunks = [OutputSchema(type="message", index=0, payload={"step": 1})]
-
-    leader_sc = _make_controller_with(
-        member_name="leader_m", harness=_make_harness_with_abort([]), role=TeamRole.LEADER
-    )
+    leader_sc = _make_controller(_FakeRuntime(), member_name="leader_m", role=TeamRole.LEADER)
     # Intentionally leave leader_sc.stream_queue as None.
 
-    teammate_sc = _make_controller_with(
-        member_name="teammate_m", harness=_harness_yielding(raw_chunks), role=TeamRole.TEAMMATE
-    )
+    teammate_sc = _make_controller(_FakeRuntime(raw_chunks), member_name="teammate_m", role=TeamRole.TEAMMATE)
     teammate_sc.stream_queue = asyncio.Queue()
 
     forwarded: list[Any] = []
@@ -650,115 +321,303 @@ async def test_forward_observer_drops_when_leader_queue_unset() -> None:
 
     teammate_sc.add_chunk_observer(_forward)
 
-    # Must not raise even though leader queue is None.
-    await teammate_sc._stream_one_round("any-query")
+    await teammate_sc._forward_outputs()
 
     assert forwarded == []
     assert teammate_sc.stream_queue.qsize() == 1  # teammate's own queue unaffected
 
 
 # ----------------------------------------------------------------------
-# Round-end teardown: state.team_cleaned latch
+# Transient-retry on the forward layer
 # ----------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_round_end_closes_stream_when_team_cleaned() -> None:
-    """A round that latched state.team_cleaned must close the stream so the
-    leader's invoke/stream loop breaks on the None sentinel.
-    """
-    harness = _make_harness_with_abort([])
-    sc = _make_controller(harness)
+@pytest.mark.level0
+async def test_handle_retry_swallows_and_redrives_retryable_failure() -> None:
+    """A retryable task_failed within the budget swallows the round and re-drives."""
+    runtime = _FakeRuntime()
+    sc = _make_controller(runtime)
+
+    consumed = await sc._handle_retry(_task_failed_chunk("[181001] transient blip"))
+
+    assert consumed is True
+    assert sc._swallow_failed_round is True
+    assert sc._retry_attempt == 1
+    assert runtime.sent == [(_RETRY_QUERY, False)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_handle_retry_forwards_non_retryable_failure() -> None:
+    """A non-retryable task_failed falls through so the consumer sees the error."""
+    runtime = _FakeRuntime()
+    sc = _make_controller(runtime)
+
+    consumed = await sc._handle_retry(_task_failed_chunk("[999999] fatal"))
+
+    assert consumed is False
+    assert sc._swallow_failed_round is False
+    assert runtime.sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_handle_retry_ignores_normal_chunk() -> None:
+    """A normal (non task_failed) chunk is never consumed by retry handling."""
+    sc = _make_controller(_FakeRuntime())
+
+    consumed = await sc._handle_retry(OutputSchema(type="message", index=0, payload={"text": "hi"}))
+
+    assert consumed is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_handle_retry_stops_after_attempt_budget_exhausted() -> None:
+    """Past the attempt budget a retryable failure stops being swallowed."""
+    from openjiuwen.agent_teams.agent.stream_controller import _MAX_RETRY_ATTEMPTS
+
+    runtime = _FakeRuntime()
+    sc = _make_controller(runtime)
+    sc._retry_attempt = _MAX_RETRY_ATTEMPTS
+
+    consumed = await sc._handle_retry(_task_failed_chunk("[181001] transient"))
+
+    assert consumed is False
+    assert runtime.sent == []
+
+
+# ----------------------------------------------------------------------
+# Phase → MemberStatus mapping
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_map_state_running_sets_busy() -> None:
+    """A RUNNING phase transition marks the member BUSY."""
+    statuses: list[MemberStatus] = []
+
+    async def _record(status: MemberStatus) -> None:
+        statuses.append(status)
+
+    sc = _make_controller(_FakeRuntime(), status_updater=_record)
+
+    await sc._map_state(HarnessState.RUNNING)
+
+    assert statuses == [MemberStatus.BUSY]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_map_state_idle_sets_ready_and_settles() -> None:
+    """An IDLE phase transition marks READY and runs the idle-settled hook."""
+    statuses: list[MemberStatus] = []
+    polls: list[None] = []
+
+    async def _record(status: MemberStatus) -> None:
+        statuses.append(status)
+
+    async def _poll() -> None:
+        polls.append(None)
+
+    sc = _make_controller(_FakeRuntime(), status_updater=_record, request_completion_poll_callback=_poll)
     sc.stream_queue = asyncio.Queue()
-    sc._state.team_cleaned = True
 
-    async def _noop_round(_message: Any) -> None:
-        return None
+    await sc._map_state(HarnessState.IDLE)
 
-    sc._execute_round = _noop_round  # type: ignore[assignment]
+    assert statuses == [MemberStatus.READY]
+    assert polls == [None]  # idle-settled fired the completion poll
 
-    await sc._run_one_round("hi")
+
+# ----------------------------------------------------------------------
+# Round → ExecutionStatus mapping
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_map_round_started_walks_starting_running() -> None:
+    transitions: list[ExecutionStatus] = []
+
+    async def _record(status: ExecutionStatus) -> None:
+        transitions.append(status)
+
+    sc = _make_controller(_FakeRuntime(), execution_updater=_record)
+    sc._swallow_failed_round = True  # started must reset the swallow latch
+
+    await sc._map_round("started")
+
+    assert transitions == [ExecutionStatus.STARTING, ExecutionStatus.RUNNING]
+    assert sc._swallow_failed_round is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_map_round_finished_walks_completing_completed_idle() -> None:
+    transitions: list[ExecutionStatus] = []
+
+    async def _record(status: ExecutionStatus) -> None:
+        transitions.append(status)
+
+    sc = _make_controller(_FakeRuntime(), execution_updater=_record)
+
+    await sc._map_round("finished")
+
+    assert transitions == [ExecutionStatus.COMPLETING, ExecutionStatus.COMPLETED, ExecutionStatus.IDLE]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_map_round_aborted_walks_cancel_path() -> None:
+    transitions: list[ExecutionStatus] = []
+
+    async def _record(status: ExecutionStatus) -> None:
+        transitions.append(status)
+
+    sc = _make_controller(_FakeRuntime(), execution_updater=_record)
+
+    await sc._map_round("aborted")
+
+    assert transitions == [
+        ExecutionStatus.CANCEL_REQUESTED,
+        ExecutionStatus.CANCELLING,
+        ExecutionStatus.CANCELLED,
+        ExecutionStatus.IDLE,
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_map_round_failed_walks_failed_idle() -> None:
+    transitions: list[ExecutionStatus] = []
+
+    async def _record(status: ExecutionStatus) -> None:
+        transitions.append(status)
+
+    sc = _make_controller(_FakeRuntime(), execution_updater=_record)
+
+    await sc._map_round("failed")
+
+    assert transitions == [ExecutionStatus.FAILED, ExecutionStatus.IDLE]
+
+
+# ----------------------------------------------------------------------
+# Cancel / abort forwarding
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_cancel_agent_forwards_immediate_abort() -> None:
+    runtime = _FakeRuntime()
+    sc = _make_controller(runtime)
+
+    await sc.cancel_agent()
+
+    assert runtime.abort_calls == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_cooperative_cancel_forwards_graceful_abort() -> None:
+    runtime = _FakeRuntime()
+    sc = _make_controller(runtime)
+
+    await sc.cooperative_cancel()
+
+    assert runtime.abort_calls == [False]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_drain_agent_task_forwards_immediate_abort() -> None:
+    runtime = _FakeRuntime()
+    sc = _make_controller(runtime)
+
+    await sc.drain_agent_task()
+
+    assert runtime.abort_calls == [True]
+
+
+@pytest.mark.level1
+def test_is_agent_running_reflects_runtime_phase() -> None:
+    runtime = _FakeRuntime()
+    sc = _make_controller(runtime)
+
+    assert sc.is_agent_running() is False
+    runtime.state = HarnessState.RUNNING
+    assert sc.is_agent_running() is True
+    assert sc.has_in_flight_round() is True
+
+
+# ----------------------------------------------------------------------
+# Idle-settled teardown: state.team_cleaned latch + completion poll
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_idle_settled_closes_stream_when_team_cleaned() -> None:
+    """An idle-settle on a cleaned team closes the stream (None sentinel)."""
+    state = TeamAgentState()
+    state.team_cleaned = True
+    sc = _make_controller(_FakeRuntime(), state=state)
+    sc.stream_queue = asyncio.Queue()
+
+    await sc._map_state(HarnessState.IDLE)
 
     assert sc.stream_queue.get_nowait() is None
     assert sc.stream_queue.empty()
-    assert sc.agent_task is None
 
 
 @pytest.mark.asyncio
-async def test_round_end_no_close_when_not_cleaned() -> None:
-    """A normal round end with team_cleaned False must NOT enqueue None."""
-    harness = _make_harness_with_abort([])
-    sc = _make_controller(harness)
+@pytest.mark.level1
+async def test_idle_settled_no_close_when_not_cleaned() -> None:
+    """A normal idle-settle with team_cleaned False must NOT enqueue None."""
+    sc = _make_controller(_FakeRuntime())
     sc.stream_queue = asyncio.Queue()
-    # team_cleaned defaults to False; no pending inputs / resumes; team_member None.
 
-    async def _noop_round(_message: Any) -> None:
-        return None
-
-    sc._execute_round = _noop_round  # type: ignore[assignment]
-
-    await sc._run_one_round("hi")
+    await sc._map_state(HarnessState.IDLE)
 
     assert sc.stream_queue.empty()
 
 
 @pytest.mark.asyncio
-async def test_team_cleaned_takes_priority_over_pending_inputs() -> None:
-    """team_cleaned is the highest-priority terminal condition: the round
-    must close the stream and NOT restart to drain pending inputs.
-    """
-    harness = _make_harness_with_abort([])
-    sc = _make_controller(harness)
+@pytest.mark.level1
+async def test_idle_settled_wakes_mailbox_and_polls() -> None:
+    """Idle-settle on a live team wakes the mailbox then fires completion poll."""
+    order: list[str] = []
+
+    def _wake() -> None:
+        order.append("wake")
+
+    async def _poll() -> None:
+        order.append("poll")
+
+    sc = _make_controller(
+        _FakeRuntime(),
+        wake_mailbox_callback=_wake,
+        request_completion_poll_callback=_poll,
+    )
     sc.stream_queue = asyncio.Queue()
-    sc._state.team_cleaned = True
-    sc.pending_inputs = ["queued-after-clean"]
 
-    restart_calls: list[Any] = []
+    await sc._map_state(HarnessState.IDLE)
 
-    async def _track_start_round(content: Any) -> None:
-        restart_calls.append(content)
-
-    sc.start_round = _track_start_round  # type: ignore[assignment]
-
-    async def _noop_round(_message: Any) -> None:
-        return None
-
-    sc._execute_round = _noop_round  # type: ignore[assignment]
-
-    await sc._run_one_round("hi")
-
-    assert sc.stream_queue.get_nowait() is None
-    assert restart_calls == []
-    assert sc.pending_inputs == ["queued-after-clean"]
+    assert order == ["wake", "poll"]
 
 
-@pytest.mark.asyncio
-async def test_team_cleaned_closes_even_when_cancel_requested() -> None:
-    """team_cleaned is checked before the cancel guard, so a cancelled round
-    on a cleaned team still closes the stream.
-    """
-    harness = _make_harness_with_abort([])
-    sc = _make_controller(harness)
-    sc.stream_queue = asyncio.Queue()
-    sc._state.team_cleaned = True
-
-    async def _cancel_mid_round(_message: Any) -> None:
-        # Simulate a cooperative cancel landing during the round.
-        sc._cancel_requested = True
-
-    sc._execute_round = _cancel_mid_round  # type: ignore[assignment]
-
-    await sc._run_one_round("hi")
-
-    assert sc.stream_queue.get_nowait() is None
+# ----------------------------------------------------------------------
+# Completion marker
+# ----------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_emit_completion_and_close_marker_precedes_sentinel() -> None:
     """The completion marker lands on the queue strictly before the None sentinel."""
-    harness = _make_harness_with_abort([])
-    sc = _make_controller(harness)
+    sc = _make_controller(_FakeRuntime())
     sc.stream_queue = asyncio.Queue()
 
     sc.emit_completion_and_close(member_count=2, task_count=3)
@@ -773,64 +632,63 @@ async def test_emit_completion_and_close_marker_precedes_sentinel() -> None:
     assert sc.stream_queue.get_nowait() is None
 
 
+@pytest.mark.level1
 def test_emit_completion_and_close_noop_without_queue() -> None:
     """No queue means the round already tore down — emit is a silent no-op."""
-    harness = _make_harness_with_abort([])
-    sc = _make_controller(harness)
+    sc = _make_controller(_FakeRuntime())
     sc.stream_queue = None
 
     sc.emit_completion_and_close(member_count=1, task_count=1)
 
 
-@pytest.mark.asyncio
-@pytest.mark.level1
-async def test_round_end_triggers_completion_poll_callback() -> None:
-    """A clean round end with no pending work fires the completion-poll callback."""
-    calls: list[None] = []
-
-    async def _on_poll() -> None:
-        calls.append(None)
-
-    harness = _make_harness_with_abort([])
-    state = TeamAgentState()
-    blueprint = SimpleNamespace(member_name="leader", role=TeamRole.LEADER)
-
-    async def _noop(_: Any) -> None:
-        return None
-
-    sc = StreamController(
-        blueprint_getter=lambda: blueprint,
-        state=state,
-        resources=PrivateAgentResources(harness=harness),
-        status_updater=_noop,
-        execution_updater=_noop,
-        request_completion_poll_callback=_on_poll,
-    )
-    sc.stream_queue = asyncio.Queue()
-
-    async def _ok_round(_message: Any) -> None:
-        return None
-
-    sc._execute_round = _ok_round  # type: ignore[assignment]
-
-    await sc._run_one_round("hi")
-
-    assert len(calls) == 1
+# ----------------------------------------------------------------------
+# start / stop lifecycle: attach + detach the forwarder
+# ----------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_round_end_without_callback_is_silent() -> None:
-    """A teammate (no completion-poll callback) ends a round without enqueuing markers."""
-    harness = _make_harness_with_abort([])
-    sc = _make_controller(harness)
+async def test_start_registers_events_and_pumps_outputs() -> None:
+    """start registers the phase/round mappers and pumps outputs into the queue."""
+    raw_chunks = [OutputSchema(type="message", index=0, payload={"step": 1})]
+    runtime = _FakeRuntime(raw_chunks)
+    sc = _make_controller(runtime)
     sc.stream_queue = asyncio.Queue()
 
-    async def _ok_round(_message: Any) -> None:
-        return None
+    await sc.start()
+    # The forwarder drains the fake runtime's finite outputs; await it.
+    assert sc._forward_task is not None
+    await sc._forward_task
+    await sc.stop()
 
-    sc._execute_round = _ok_round  # type: ignore[assignment]
+    assert len(runtime._state_cbs) == 1
+    assert len(runtime._round_cbs) == 1
+    chunk = sc.stream_queue.get_nowait()
+    assert isinstance(chunk, TeamOutputSchema)
+    assert chunk.payload == {"step": 1}
 
-    await sc._run_one_round("hi")
 
-    assert sc.stream_queue.empty()
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stop_cancels_a_running_forwarder() -> None:
+    """stop cancels a forwarder still blocked on a long-lived output stream."""
+
+    class _BlockingRuntime(_FakeRuntime):
+        def outputs(self) -> AsyncIterator[Any]:
+            async def _gen() -> AsyncIterator[Any]:
+                await asyncio.Event().wait()  # never completes
+                yield  # pragma: no cover
+
+            return _gen()
+
+    sc = _make_controller(_BlockingRuntime())
+    sc.stream_queue = asyncio.Queue()
+
+    await sc.start()
+    forward_task = sc._forward_task
+    assert forward_task is not None
+    await asyncio.sleep(0.01)  # let the forwarder block on outputs()
+    await sc.stop()
+
+    assert forward_task.done()
+    assert sc._forward_task is None

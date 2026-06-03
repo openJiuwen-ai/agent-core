@@ -1,28 +1,33 @@
 # coding: utf-8
-"""Tests for StreamController._execute_round streaming error retry.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-The retry logic lives in ``StreamController._execute_round`` and relies on the
-task-loop executor emitting ``ControllerOutputChunk(payload.type='task_failed',
-data=[TextDataFrame(text='[code] ...')])`` frames into the streaming chunk
-flow. These tests inject a fake ``Runner.run_agent_streaming`` and drive
-``_execute_round`` directly without spinning up a real DeepAgent.
+"""Tests for the forward-layer transient retry in ``StreamController``.
+
+Retry now lives on the output-forwarding path: ``_forward_outputs`` inspects
+each chunk with ``_handle_retry``. A retryable ``task_failed`` frame (code
+181001, within the attempt budget) swallows the rest of the failed round and
+re-drives it via ``harness.send(_RETRY_QUERY)`` — a follow-up round whose chunks
+arrive on the same ``outputs()`` stream once it starts. An exhausted /
+non-retryable failure is *forwarded* to the consumer (the single-supervisor
+model removed the old raise-based exhaustion). These tests drive
+``_forward_outputs`` over a fake runtime so the swallow / re-drive / forward
+contract is exercised without a real DeepAgent.
 """
 
 from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any, List
+from typing import Any, AsyncIterator, Callable
 
 import pytest
 
-from openjiuwen.agent_teams import harness as harness_module
 from openjiuwen.agent_teams.agent import stream_controller as stream_controller_module
+from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
+from openjiuwen.agent_teams.agent.state import TeamAgentState
 from openjiuwen.agent_teams.agent.stream_controller import StreamController
-from openjiuwen.agent_teams.schema.status import ExecutionStatus
-from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import BaseError
-from tests.test_logger import logger
+from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.agent_teams.schema.team import TeamRole
 
 
 def _make_failed_chunk(code: int, message: str) -> SimpleNamespace:
@@ -55,178 +60,77 @@ def _make_answer_chunk(text: str) -> SimpleNamespace:
     )
 
 
-def _make_stream_controller_stub() -> StreamController:
-    """Return a minimal StreamController wired to record execution events.
+class _RetryRuntime:
+    """Duck-typed runtime whose ``outputs`` yields a controllable chunk list."""
 
-    Uses real status/execution callbacks (no-op or recorder) and synthetic
-    blueprint / state / resources so that ``_execute_round`` can drive
-    the retry loop end to end without requiring a fully bootstrapped
-    TeamAgent.
-    """
-    from unittest.mock import MagicMock
+    def __init__(self, chunks: list[Any]) -> None:
+        self._chunks = chunks
+        self.sent: list[tuple[Any, bool]] = []
+        self.state = HarnessState.IDLE
 
-    from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
-    from openjiuwen.agent_teams.agent.state import TeamAgentState
-    from openjiuwen.agent_teams.harness import TeamHarness, _MountedRails
-    from openjiuwen.agent_teams.schema.team import TeamRole
+    def set_chunks(self, chunks: list[Any]) -> None:
+        self._chunks = chunks
 
-    execution_log: list[ExecutionStatus] = []
+    def outputs(self) -> AsyncIterator[Any]:
+        async def _gen() -> AsyncIterator[Any]:
+            for chunk in self._chunks:
+                yield chunk
 
-    async def _record_execution(status: ExecutionStatus) -> None:
-        execution_log.append(status)
+        return _gen()
 
-    async def _noop_status(_: Any) -> None:
+    async def on_state_changed(self, callback: Callable[..., Any]) -> None:
         return None
 
-    state = TeamAgentState()
-    fake_rails = _MountedRails(team_tool=MagicMock(), team_policy=MagicMock())
-    fake_harness = TeamHarness(
-        SimpleNamespace(deep_config=None),
-        fake_rails,
-        role=TeamRole.LEADER,
-        member_name="stub",
-    )
-    resources = PrivateAgentResources(harness=fake_harness)
-    fake_blueprint = SimpleNamespace(member_name="stub", role=TeamRole.LEADER)
+    async def on_round(self, callback: Callable[..., Any]) -> None:
+        return None
+
+    async def send(self, content: Any, *, immediate: bool = False) -> Any:
+        self.sent.append((content, immediate))
+        return None
+
+    async def abort(self, *, immediate: bool = False) -> None:
+        return None
+
+    def has_pending_interrupt(self) -> bool:
+        return False
+
+    def is_pending_interrupt_resume_valid(self, user_input: Any) -> bool:
+        return False
+
+
+def _make_controller(runtime: _RetryRuntime) -> StreamController:
+    """Wire a StreamController over a fake runtime with a live stream_queue."""
+    blueprint = SimpleNamespace(member_name="stub", role=TeamRole.LEADER)
+
+    async def _noop(_: Any) -> None:
+        return None
 
     sc = StreamController(
-        blueprint_getter=lambda: fake_blueprint,
-        state=state,
-        resources=resources,
-        status_updater=_noop_status,
-        execution_updater=_record_execution,
+        blueprint_getter=lambda: blueprint,
+        state=TeamAgentState(),
+        resources=PrivateAgentResources(harness=runtime),
+        status_updater=_noop,
+        execution_updater=_noop,
     )
     sc.stream_queue = asyncio.Queue()
-    sc._execution_log = execution_log  # type: ignore[attr-defined]
     return sc
 
 
-def _install_fake_runner(
-    monkeypatch: pytest.MonkeyPatch,
-    rounds: List[List[Any]],
-) -> List[Any]:
-    """Patch Runner.run_agent_streaming to iterate ``rounds`` one list per call."""
-    call_inputs: List[Any] = []
-    rounds_iter = iter(rounds)
-
-    async def fake_run_agent_streaming(agent, inputs, *, session=None, **kwargs):
-        call_inputs.append(inputs)
-        try:
-            chunks = next(rounds_iter)
-        except StopIteration:
-            chunks = []
-        for chunk in chunks:
-            yield chunk
-
-    monkeypatch.setattr(
-        harness_module.Runner,
-        "run_agent_streaming",
-        fake_run_agent_streaming,
-    )
-    return call_inputs
-
-
-async def _drain_queue(queue: asyncio.Queue) -> List[Any]:
-    out = []
+async def _drain_queue(queue: asyncio.Queue) -> list[Any]:
+    out: list[Any] = []
     while not queue.empty():
         out.append(queue.get_nowait())
     return out
 
 
 @pytest.mark.asyncio
-async def test_retry_on_181001_then_succeed(monkeypatch: pytest.MonkeyPatch) -> None:
-    sc = _make_stream_controller_stub()
-    call_inputs = _install_fake_runner(
-        monkeypatch,
-        rounds=[
-            [_make_failed_chunk(181001, "model call failed, reason: timeout")],
-            [_make_failed_chunk(181001, "model call failed, reason: timeout")],
-            [_make_failed_chunk(181001, "model call failed, reason: timeout")],
-            [_make_answer_chunk("final answer")],
-        ],
-    )
+@pytest.mark.level0
+async def test_retryable_failure_swallows_round_and_redrives(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A retryable task_failed is swallowed (not forwarded) and re-drives the round.
 
-    warnings: list[tuple] = []
-    errors: list[tuple] = []
-    monkeypatch.setattr(
-        stream_controller_module.team_logger,
-        "warning",
-        lambda *args, **kwargs: warnings.append((args, kwargs)),
-    )
-    monkeypatch.setattr(
-        stream_controller_module.team_logger,
-        "error",
-        lambda *args, **kwargs: errors.append((args, kwargs)),
-    )
-
-    await sc._execute_round("initial query")
-
-    logger.info("call_inputs=%s, queue=%s", call_inputs, sc.stream_queue.qsize())
-
-    assert len(call_inputs) == 4
-    assert call_inputs[0] == {"query": "initial query"}
-    for retry_call in call_inputs[1:]:
-        assert retry_call == {"query": stream_controller_module._RETRY_QUERY}
-
-    assert len(warnings) == 3
-    assert not errors
-
-    chunks = await _drain_queue(sc.stream_queue)
-    assert len(chunks) == 1
-    assert chunks[0].type == "answer"
-    assert chunks[0].payload["output"] == "final answer"
-
-    assert ExecutionStatus.COMPLETED in sc._execution_log  # type: ignore[attr-defined]
-    assert ExecutionStatus.FAILED not in sc._execution_log  # type: ignore[attr-defined]
-
-
-@pytest.mark.asyncio
-async def test_retries_exhausted_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    sc = _make_stream_controller_stub()
-    failing_rounds = [
-        [_make_failed_chunk(181001, f"timeout #{i}")] for i in range(stream_controller_module._MAX_RETRY_ATTEMPTS + 1)
-    ]
-    call_inputs = _install_fake_runner(monkeypatch, rounds=failing_rounds)
-
-    warnings: list[tuple] = []
-    errors: list[tuple] = []
-    monkeypatch.setattr(
-        stream_controller_module.team_logger,
-        "warning",
-        lambda *args, **kwargs: warnings.append((args, kwargs)),
-    )
-    monkeypatch.setattr(
-        stream_controller_module.team_logger,
-        "error",
-        lambda *args, **kwargs: errors.append((args, kwargs)),
-    )
-
-    with pytest.raises(BaseError) as exc_info:
-        await sc._execute_round("initial query")
-
-    assert exc_info.value.status == StatusCode.AGENT_TEAM_EXECUTION_ERROR
-    assert "181001" in str(exc_info.value)
-
-    assert len(call_inputs) == stream_controller_module._MAX_RETRY_ATTEMPTS + 1
-    assert len(warnings) == stream_controller_module._MAX_RETRY_ATTEMPTS
-    assert len(errors) == 2
-
-    assert ExecutionStatus.FAILED in sc._execution_log  # type: ignore[attr-defined]
-    assert ExecutionStatus.COMPLETED not in sc._execution_log  # type: ignore[attr-defined]
-
-
-@pytest.mark.asyncio
-async def test_non_retryable_code_raises_immediately(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sc = _make_stream_controller_stub()
-    call_inputs = _install_fake_runner(
-        monkeypatch,
-        rounds=[
-            [_make_failed_chunk(182012, "tool execution error, card=X, reason=Y")],
-        ],
-    )
-
+    Trailing frames after the failure stay swallowed for the rest of the round —
+    they belong to the doomed attempt and must not reach the consumer.
+    """
     warnings: list[tuple] = []
     monkeypatch.setattr(
         stream_controller_module.team_logger,
@@ -234,70 +138,109 @@ async def test_non_retryable_code_raises_immediately(
         lambda *args, **kwargs: warnings.append((args, kwargs)),
     )
 
-    with pytest.raises(BaseError) as exc_info:
-        await sc._execute_round("initial query")
+    runtime = _RetryRuntime(
+        [
+            _make_failed_chunk(181001, "model call failed, reason: timeout"),
+            _make_answer_chunk("trailing-1"),
+            _make_answer_chunk("trailing-2"),
+        ],
+    )
+    sc = _make_controller(runtime)
 
-    assert "182012" in str(exc_info.value)
-    assert len(call_inputs) == 1
-    assert not warnings
-    assert ExecutionStatus.FAILED in sc._execution_log  # type: ignore[attr-defined]
+    await sc._forward_outputs()
+
+    # Failure + trailing frames all swallowed; one retry re-drive sent.
+    assert await _drain_queue(sc.stream_queue) == []
+    assert runtime.sent == [(stream_controller_module._RETRY_QUERY, False)]
+    assert sc._retry_attempt == 1
+    assert sc._swallow_failed_round is True
+    assert len(warnings) == 1
 
 
 @pytest.mark.asyncio
-async def test_missing_code_prefix_is_non_retryable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sc = _make_stream_controller_stub()
-    call_inputs = _install_fake_runner(
-        monkeypatch,
-        rounds=[
-            [_make_failed_chunk_raw("unexpected error without code")],
-        ],
-    )
+@pytest.mark.level0
+async def test_retry_round_forwards_after_started_resets_swallow(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The re-driven round's chunks forward once a ``started`` event clears the latch.
 
-    warnings: list[tuple] = []
-    monkeypatch.setattr(
-        stream_controller_module.team_logger,
-        "warning",
-        lambda *args, **kwargs: warnings.append((args, kwargs)),
-    )
+    Models the real flow: the retry ``send`` starts a follow-up round; its
+    ``started`` round event resets ``_swallow_failed_round`` so the round's
+    chunks reach the consumer again.
+    """
+    monkeypatch.setattr(stream_controller_module.team_logger, "warning", lambda *a, **k: None)
 
-    with pytest.raises(BaseError):
-        await sc._execute_round("initial query")
+    runtime = _RetryRuntime([_make_failed_chunk(181001, "timeout")])
+    sc = _make_controller(runtime)
 
-    assert len(call_inputs) == 1
-    assert not warnings
+    await sc._forward_outputs()  # swallow latched, retry sent
+    assert sc._swallow_failed_round is True
 
+    await sc._map_round("started")  # the retry round begins → latch cleared
+    assert sc._swallow_failed_round is False
 
-@pytest.mark.asyncio
-async def test_trailing_frames_after_error_are_swallowed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sc = _make_stream_controller_stub()
-    call_inputs = _install_fake_runner(
-        monkeypatch,
-        rounds=[
-            [
-                _make_failed_chunk(181001, "model call failed, reason: boom"),
-                _make_answer_chunk("should NOT reach downstream"),
-                _make_answer_chunk("also should NOT reach downstream"),
-            ],
-            [_make_answer_chunk("final")],
-        ],
-    )
+    runtime.set_chunks([_make_answer_chunk("final")])
+    await sc._forward_outputs()  # the retry round's answer now forwards
 
-    monkeypatch.setattr(
-        stream_controller_module.team_logger,
-        "warning",
-        lambda *args, **kwargs: None,
-    )
-
-    await sc._execute_round("initial query")
-
-    assert len(call_inputs) == 2
     chunks = await _drain_queue(sc.stream_queue)
     assert len(chunks) == 1
     assert chunks[0].payload["output"] == "final"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_exhausted_retries_forward_failure_without_raising(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Past the attempt budget the task_failed chunk is forwarded, not raised."""
+    errors: list[tuple] = []
+    monkeypatch.setattr(stream_controller_module.team_logger, "warning", lambda *a, **k: None)
+    monkeypatch.setattr(
+        stream_controller_module.team_logger,
+        "error",
+        lambda *args, **kwargs: errors.append((args, kwargs)),
+    )
+
+    failed = _make_failed_chunk(181001, "still timing out")
+    runtime = _RetryRuntime([failed])
+    sc = _make_controller(runtime)
+    sc._retry_attempt = stream_controller_module._MAX_RETRY_ATTEMPTS  # budget already spent
+
+    await sc._forward_outputs()  # must not raise
+
+    forwarded = await _drain_queue(sc.stream_queue)
+    assert forwarded == [failed]  # the failure reaches the consumer
+    assert runtime.sent == []  # no further re-drive
+    assert len(errors) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_non_retryable_code_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-retryable code is forwarded to the consumer (no swallow, no re-drive)."""
+    monkeypatch.setattr(stream_controller_module.team_logger, "error", lambda *a, **k: None)
+
+    failed = _make_failed_chunk(182012, "tool execution error, card=X, reason=Y")
+    runtime = _RetryRuntime([failed])
+    sc = _make_controller(runtime)
+
+    await sc._forward_outputs()
+
+    assert await _drain_queue(sc.stream_queue) == [failed]
+    assert runtime.sent == []
+    assert sc._swallow_failed_round is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_missing_code_prefix_is_non_retryable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failure with no ``[code]`` prefix is non-retryable and forwarded."""
+    monkeypatch.setattr(stream_controller_module.team_logger, "error", lambda *a, **k: None)
+
+    failed = _make_failed_chunk_raw("unexpected error without code")
+    runtime = _RetryRuntime([failed])
+    sc = _make_controller(runtime)
+
+    await sc._forward_outputs()
+
+    assert await _drain_queue(sc.stream_queue) == [failed]
+    assert runtime.sent == []
 
 
 def test_detect_task_failed_parses_code_and_text() -> None:

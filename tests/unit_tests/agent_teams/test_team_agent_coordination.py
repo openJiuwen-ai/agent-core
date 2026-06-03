@@ -162,7 +162,6 @@ async def test_wake_feeds_messages_to_agent():
     """When loop wakes, unread messages are fed
     to the DeepAgent via follow_up or Runner."""
     agent = _make_leader()
-    agent._configurator.harness.inner_agent.follow_up = AsyncMock()
     fake_msg = MagicMock()
     fake_msg.message_id = "msg-1"
     fake_msg.from_member_name = "dev-1"
@@ -175,7 +174,8 @@ async def test_wake_feeds_messages_to_agent():
         side_effect=[[fake_msg], []],
     )
     agent._is_agent_running = lambda: False
-    agent._start_agent = AsyncMock()
+    # The message handler feeds unread messages to the runtime via deliver_input.
+    agent.deliver_input = AsyncMock()
 
     await agent._start_coordination(session=None)
 
@@ -191,7 +191,7 @@ async def test_wake_feeds_messages_to_agent():
     await asyncio.sleep(0.1)
 
     await agent._stop_coordination()
-    agent._start_agent.assert_called_once()
+    agent.deliver_input.assert_called_once()
 
 
 def _make_teammate() -> TeamAgent:
@@ -591,26 +591,25 @@ async def test_mailbox_messages_deferred_while_interrupt_pending():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_resume_interrupt_queues_while_agent_running():
-    """Approval resume should queue when teammate is already running another round."""
+async def test_resume_interrupt_forwards_to_runtime_send():
+    """A valid interrupt resume is forwarded to the runtime via send.
+
+    The single-supervisor runtime serialises the resume — starting the resume
+    round when idle, or steering it into the active one — so there is no
+    controller-side pending queue. The controller only validates the resume
+    against the pending interrupt and forwards it.
+    """
     agent = _make_leader()
-    fake_entry = MagicMock()
-    fake_entry.interrupt_requests = {"call-1": MagicMock()}
-    fake_state = MagicMock()
-    fake_state.interrupted_tools = {"call-1": fake_entry}
-    agent._configurator.harness.inner_agent._loop_session = MagicMock()
-    agent._configurator.harness.inner_agent._loop_session.get_state = MagicMock(return_value=fake_state)
-    agent._stream_controller.agent_task = MagicMock()
-    agent._stream_controller.agent_task.done.return_value = False
-    agent._start_agent = AsyncMock()
+    # Make the resume validate against a pending interrupt.
+    agent._stream_controller.is_valid_interrupt_resume = lambda _: True
+    agent._configurator.harness.send = AsyncMock()
 
     interactive_input = InteractiveInput()
     interactive_input.update("call-1", {"approved": True, "feedback": "ok", "auto_confirm": False})
 
     await agent.resume_interrupt(interactive_input)
 
-    assert agent._stream_controller.pending_interrupt_resumes == [interactive_input]
-    agent._start_agent.assert_not_called()
+    agent._configurator.harness.send.assert_awaited_once_with(interactive_input)
 
 
 @pytest.mark.asyncio
@@ -748,8 +747,9 @@ async def test_task_claimed_for_other_member_falls_through_to_board_nudge():
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[incomplete_task])
     agent._is_agent_running = lambda: False
-    agent._start_agent = AsyncMock()
-    agent.steer = AsyncMock()
+    # The handler always routes through deliver_input; the supervisor decides
+    # steer-vs-new-round by phase, so the test asserts on the delivery seam.
+    agent.deliver_input = AsyncMock()
 
     event = EventMessage.from_event(
         TaskClaimedEvent(
@@ -761,9 +761,8 @@ async def test_task_claimed_for_other_member_falls_through_to_board_nudge():
     await agent._coordination.dispatcher.task_board.on_task_claimed(event)
 
     agent._configurator.task_manager.list_tasks.assert_awaited_once_with()
-    agent._start_agent.assert_awaited_once()
-    agent.steer.assert_not_called()
-    content = agent._start_agent.await_args.args[0]
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
     assert "task-7" in content
     assert "Investigate crash" in content
 
@@ -790,12 +789,10 @@ async def test_task_claimed_for_other_member_nudges_leader_via_steer_when_busy()
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[incomplete_task])
 
-    in_flight = MagicMock()
-    in_flight.done = MagicMock(return_value=False)
-    agent._stream_controller.agent_task = in_flight
     agent._is_agent_running = lambda: True
-    agent._start_agent = AsyncMock()
-    agent.steer = AsyncMock()
+    # Busy or idle, the handler delivers the board context the same way; the
+    # supervisor steers it into the running round instead of dropping it.
+    agent.deliver_input = AsyncMock()
 
     event = EventMessage.from_event(
         TaskClaimedEvent(
@@ -806,12 +803,11 @@ async def test_task_claimed_for_other_member_nudges_leader_via_steer_when_busy()
     )
     await agent._coordination.dispatcher.task_board.on_task_claimed(event)
 
-    # Leader is busy → steer receives the board context (not silently dropped)
+    # Leader is busy → board context still delivered (not silently dropped).
     agent._configurator.task_manager.list_tasks.assert_awaited_once()
-    agent.steer.assert_awaited_once()
-    content = agent.steer.await_args.args[0]
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
     assert "task-8" in content
-    agent._start_agent.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -833,8 +829,7 @@ async def test_task_claimed_for_self_uses_teammate_template():
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.get = AsyncMock(return_value=MagicMock(title="Fix bug"))
     agent._is_agent_running = lambda: False
-    agent._start_agent = AsyncMock()
-    agent.steer = AsyncMock()
+    agent.deliver_input = AsyncMock()
 
     event = EventMessage.from_event(
         TaskClaimedEvent(
@@ -845,8 +840,8 @@ async def test_task_claimed_for_self_uses_teammate_template():
     )
     await agent._coordination.dispatcher.task_board.on_task_claimed(event)
 
-    agent._start_agent.assert_awaited_once()
-    content = agent._start_agent.await_args.args[0]
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
     assert "[任务指派]" in content
     assert "task-42" in content
     # Teammate prompt steers toward autonomous execution via view_task.
@@ -885,8 +880,7 @@ async def test_task_claimed_for_self_uses_human_template_when_human_agent():
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.get = AsyncMock(return_value=task_row)
     agent._is_agent_running = lambda: False
-    agent._start_agent = AsyncMock()
-    agent.steer = AsyncMock()
+    agent.deliver_input = AsyncMock()
 
     event = EventMessage.from_event(
         TaskClaimedEvent(
@@ -898,8 +892,8 @@ async def test_task_claimed_for_self_uses_human_template_when_human_agent():
     await agent._coordination.dispatcher.task_board.on_task_claimed(event)
 
     agent._configurator.task_manager.get.assert_awaited_once_with("task-7")
-    agent._start_agent.assert_awaited_once()
-    content = agent._start_agent.await_args.args[0]
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
     # Controller-facing HITT prefix and inlined title.
     assert "[任务指派给控制者]" in content
     assert "task-7" in content
@@ -937,7 +931,7 @@ async def test_task_claimed_for_human_self_swallows_title_lookup_error():
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.get = AsyncMock(side_effect=RuntimeError("db down"))
     agent._is_agent_running = lambda: False
-    agent._start_agent = AsyncMock()
+    agent.deliver_input = AsyncMock()
 
     event = EventMessage.from_event(
         TaskClaimedEvent(
@@ -948,8 +942,8 @@ async def test_task_claimed_for_human_self_swallows_title_lookup_error():
     )
     await agent._coordination.dispatcher.task_board.on_task_claimed(event)
 
-    agent._start_agent.assert_awaited_once()
-    content = agent._start_agent.await_args.args[0]
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
     assert "[任务指派给控制者]" in content
     assert "task-9" in content
 
@@ -1124,14 +1118,12 @@ async def test_stale_claim_self_nudge_when_idle():
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[own_task])
     agent._is_agent_running = lambda: False
-    agent._start_agent = AsyncMock()
-    agent.steer = AsyncMock()
+    agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
 
-    agent._start_agent.assert_awaited_once()
-    agent.steer.assert_not_called()
-    content = agent._start_agent.await_args.args[0]
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
     assert "task-3" in content
 
 
@@ -1145,16 +1137,16 @@ async def test_stale_claim_self_nudge_steers_when_running():
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[own_task])
-    # deliver_input dispatches on the ``_streaming_active`` flag, not on
-    # ``_is_agent_running()`` — set the flag directly so steer is chosen.
-    agent._stream_controller.streaming_active = True
-    agent._start_agent = AsyncMock()
-    agent.steer = AsyncMock()
+    # The handler always delivers; the running round receives it as a steer
+    # inside the supervisor, so the test asserts on the delivery seam.
+    agent._is_agent_running = lambda: True
+    agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_claimed_tasks()
 
-    agent.steer.assert_awaited_once()
-    agent._start_agent.assert_not_called()
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
+    assert "task-4" in content
 
 
 @pytest.mark.asyncio
@@ -1188,15 +1180,13 @@ async def test_stale_pending_leader_self_nudges_with_hint():
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
     agent._is_agent_running = lambda: False
-    agent._start_agent = AsyncMock()
-    agent.steer = AsyncMock()
+    agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
 
     agent._configurator.task_manager.list_tasks.assert_awaited_once_with(status="pending")
-    agent._start_agent.assert_awaited_once()
-    agent.steer.assert_not_called()
-    content = agent._start_agent.await_args.args[0]
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
     assert "p-1" in content
     assert "send_message" in content
     assert "claim_task" in content
@@ -1212,16 +1202,16 @@ async def test_stale_pending_leader_steers_when_running():
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
-    # deliver_input dispatches on the ``_streaming_active`` flag, not on
-    # ``_is_agent_running()`` — set the flag directly so steer is chosen.
-    agent._stream_controller.streaming_active = True
-    agent._start_agent = AsyncMock()
-    agent.steer = AsyncMock()
+    # The handler always delivers; a running leader receives it as a steer
+    # inside the supervisor, so the test asserts on the delivery seam.
+    agent._is_agent_running = lambda: True
+    agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
 
-    agent.steer.assert_awaited_once()
-    agent._start_agent.assert_not_called()
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
+    assert "p-2" in content
 
 
 @pytest.mark.asyncio
@@ -1252,12 +1242,12 @@ async def test_stale_pending_throttled_after_first_nudge():
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[stale])
     agent._is_agent_running = lambda: False
-    agent._start_agent = AsyncMock()
+    agent.deliver_input = AsyncMock()
 
     await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
     await agent._coordination.dispatcher.stale_task._check_stale_pending_tasks()
 
-    agent._start_agent.assert_awaited_once()
+    agent.deliver_input.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1316,39 +1306,25 @@ async def test_team_cleaned_event_ignored_by_leader():
 async def test_shutdown_self_cancels_running_round_and_closes_stream():
     """shutdown_self drives the cooperative cancel path and unblocks stream().
 
-    The task loop should receive an abort signal first; if the round is
-    stuck (here, an indefinite ``asyncio.sleep``), the fallback hard
-    cancel must still terminate it so stream() can drain its sentinel.
+    The controller's ``cooperative_cancel`` forwards a graceful abort to the
+    runtime; shutdown then closes the stream so the member's stream loop breaks
+    on the None sentinel. (The abort→native forwarding is covered in
+    test_stream_controller.)
     """
     agent = _make_teammate()
     agent._state.team_member = None
     agent._stream_controller.stream_queue = asyncio.Queue()
 
-    abort_calls: list[None] = []
+    cancel_calls: list[None] = []
 
-    async def _fake_abort() -> None:
-        abort_calls.append(None)
+    async def _coop_cancel() -> None:
+        cancel_calls.append(None)
 
-    agent.harness._deep_agent.abort = _fake_abort
+    agent._stream_controller.cooperative_cancel = _coop_cancel
 
-    async def _stuck_round() -> None:
-        await asyncio.sleep(60)
+    await agent.shutdown_self()
 
-    real_task = asyncio.create_task(_stuck_round())
-    agent._stream_controller.agent_task = real_task
-
-    # Patch the timeout so the test does not block for the production value.
-    import openjiuwen.agent_teams.agent.stream_controller as stream_controller_module
-
-    original_timeout = stream_controller_module._COOPERATIVE_ABORT_TIMEOUT_SECONDS
-    stream_controller_module._COOPERATIVE_ABORT_TIMEOUT_SECONDS = 0.05
-    try:
-        await agent.shutdown_self()
-    finally:
-        stream_controller_module._COOPERATIVE_ABORT_TIMEOUT_SECONDS = original_timeout
-
-    assert len(abort_calls) == 1, "harness.abort must be called exactly once"
-    assert real_task.done(), "stuck task must be terminated by the fallback cancel"
+    assert cancel_calls == [None], "shutdown must drive the cooperative cancel path"
     sentinel = await agent._stream_controller.stream_queue.get()
     assert sentinel is None
 
@@ -1364,30 +1340,16 @@ async def test_teammate_round_completion_wakes_mailbox_after_interrupt_clears():
     # test, which is scoped to the mailbox-wake behavior in _run_one_round.
     agent._state.team_member = None
     agent.coordination_loop.enqueue = AsyncMock()
-    agent._stream_controller._execute_round = AsyncMock(return_value=None)
     agent._stream_controller.has_pending_interrupt = lambda: False
 
-    await agent._stream_controller._run_one_round("continue work")
+    # Round chain settled to IDLE: the controller's idle-settle hook wakes the
+    # mailbox (re-poll) once the interrupt is cleared. Drive it directly rather
+    # than the obsolete _run_one_round loop.
+    await agent._stream_controller._on_idle_settled()
 
     agent.coordination_loop.enqueue.assert_awaited_once()
     event = agent.coordination_loop.enqueue.await_args.args[0]
     assert event.event_type == InnerEventType.POLL_MAILBOX
-
-
-@pytest.mark.level0
-def test_first_iter_gate_single_instance_registered_on_deep_agent():
-    """Regression: gate awaited by coordination must be the same instance
-    registered as a rail on the underlying agent. A previous refactor
-    created two gates -- registered one, awaited the other -- causing
-    teammates to hang on the initial mailbox poll forever.
-    """
-    agent = _make_leader()
-    gate = agent._configurator.first_iter_gate
-    assert gate is not None
-    assert agent.harness is not None
-    inner = agent.harness.inner_agent
-    all_rails = list(inner._pending_rails) + list(inner._registered_rails)
-    assert gate in all_rails
 
 
 @pytest.mark.level0
@@ -1525,9 +1487,9 @@ async def test_team_completion_skipped_when_round_in_flight():
     snapshot = TeamCompletionSnapshot(member_count=1, task_count=1)
     messager = _wire_completion_handler(agent, snapshot)
 
-    in_flight = MagicMock()
-    in_flight.done = MagicMock(return_value=False)
-    agent._stream_controller.agent_task = in_flight
+    # A live round is signalled by the runtime phase (RUNNING) surfaced through
+    # is_agent_running; the handler short-circuits before any completion check.
+    agent._is_agent_running = lambda: True
 
     event = InnerEventMessage(event_type=InnerEventType.POLL_TASK, payload={})
     await agent._coordination.dispatcher.team_completion.on_poll_task(event)
@@ -1625,8 +1587,7 @@ async def test_task_completed_nudges_leader_with_all_done_when_idle():
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[completed_task])
     agent._is_agent_running = lambda: False
-    agent._start_agent = AsyncMock()
-    agent.steer = AsyncMock()
+    agent.deliver_input = AsyncMock()
 
     event = EventMessage.from_event(
         TaskCompletedEvent(
@@ -1636,11 +1597,10 @@ async def test_task_completed_nudges_leader_with_all_done_when_idle():
     )
     await agent._coordination.dispatcher.task_board.on_task_board_event(event)
 
-    # Leader is idle → _start_agent receives the "all done" summary prompt
-    agent._start_agent.assert_awaited_once()
-    content = agent._start_agent.await_args.args[0]
+    # Leader idle → the "all done" summary prompt is delivered.
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
     assert "完成" in content or "complete" in content.lower()
-    agent.steer.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1669,8 +1629,7 @@ async def test_task_completed_nudges_leader_via_steer_when_busy():
     # Simulate leader busy (agent running)
     agent._is_agent_running = lambda: True
     agent._has_in_flight_round = lambda: True
-    agent._start_agent = AsyncMock()
-    agent.steer = AsyncMock()
+    agent.deliver_input = AsyncMock()
 
     event = EventMessage.from_event(
         TaskCompletedEvent(
@@ -1680,12 +1639,11 @@ async def test_task_completed_nudges_leader_via_steer_when_busy():
     )
     await agent._coordination.dispatcher.task_board.on_task_board_event(event)
 
-    # Leader is busy → steer receives the "all done" summary prompt
-    # (previously this was silently dropped)
-    agent.steer.assert_awaited_once()
-    content = agent.steer.await_args.args[0]
+    # Leader busy → the "all done" summary prompt is still delivered (the
+    # supervisor steers it into the running round, not silently dropped).
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
     assert "完成" in content or "complete" in content.lower()
-    agent._start_agent.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1714,8 +1672,7 @@ async def test_task_completed_with_incomplete_tasks_nudges_leader_board():
         return_value=[completed_task, incomplete_task]
     )
     agent._is_agent_running = lambda: False
-    agent._start_agent = AsyncMock()
-    agent.steer = AsyncMock()
+    agent.deliver_input = AsyncMock()
 
     event = EventMessage.from_event(
         TaskCompletedEvent(
@@ -1726,8 +1683,8 @@ async def test_task_completed_with_incomplete_tasks_nudges_leader_board():
     await agent._coordination.dispatcher.task_board.on_task_board_event(event)
 
     # Not all done → leader gets the task board overview
-    agent._start_agent.assert_awaited_once()
-    content = agent._start_agent.await_args.args[0]
+    agent.deliver_input.assert_awaited_once()
+    content = agent.deliver_input.await_args.args[0]
     assert "task-2" in content
     # Should NOT contain the "all done" summary prompt
     assert "完成" not in content or "task" in content.lower()
