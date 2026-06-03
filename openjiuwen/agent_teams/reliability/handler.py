@@ -17,7 +17,7 @@ from typing import ClassVar
 
 from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordinationHandler
 from openjiuwen.agent_teams.i18n import t
-from openjiuwen.agent_teams.reliability.anomaly import Severity
+from openjiuwen.agent_teams.reliability.anomaly import Anomaly, Severity
 from openjiuwen.agent_teams.reliability.detectors.pingpong import PingPongDetector
 from openjiuwen.agent_teams.reliability.remediation.action import RemediationAction
 from openjiuwen.agent_teams.reliability.remediation.policy import RemediationPolicy
@@ -90,7 +90,23 @@ class ReliabilityHandler(BaseCoordinationHandler):
         elif RemediationAction.REPORT_LEADER in actions:
             await self._round.deliver_input(t("reliability.report_leader", summary=summary))
 
+    async def handle_local_anomaly(self, anomaly: Anomaly) -> None:
+        """Route a leader-local anomaly straight into the leader loop.
+
+        Used by leader self-monitoring: the leader's own rail feeds anomalies
+        here in-process (bypassing the messager self-filter), and they go
+        through the same policy routing as cross-process anomaly events.
+        """
+        if self._blueprint.role != TeamRole.LEADER:
+            return
+        await self._route(anomaly.severity, self._format_anomaly(anomaly))
+
     @staticmethod
     def _format(payload: AnomalyDetectedEvent) -> str:
         """Render an anomaly event into a one-line summary for the leader."""
         return f"[{payload.severity}] {payload.member_name}: {payload.summary} (detector={payload.detector})"
+
+    @staticmethod
+    def _format_anomaly(anomaly: Anomaly) -> str:
+        """Render a local anomaly into a one-line summary for the leader."""
+        return f"[{anomaly.severity.value}] {anomaly.member_name}: {anomaly.summary} (detector={anomaly.detector})"

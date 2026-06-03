@@ -434,8 +434,12 @@ class AgentConfigurator:
 
         reliability_rail = None
         reliability_cfg = spec.reliability
-        if reliability_cfg and reliability_cfg.enabled and self.messager and member_name:
-            if ctx.role.value in reliability_cfg.monitor_roles:
+        if reliability_cfg and reliability_cfg.enabled and member_name:
+            role_value = ctx.role.value
+            is_leader = role_value == "leader"
+            # Leader uses a LocalAnomalyReporter (no messager needed); teammates
+            # need one for the cross-process EventAnomalyReporter.
+            if role_value in reliability_cfg.monitor_roles and (is_leader or self.messager):
                 from openjiuwen.agent_teams.reliability.factory import build_reliability_rail
 
                 reliability_rail = build_reliability_rail(
@@ -444,6 +448,7 @@ class AgentConfigurator:
                     messager=self.messager,
                     team_name=resolved_team_name,
                     sender_id=member_name,
+                    is_leader=is_leader,
                 )
 
         self.harness = TeamHarness.build(

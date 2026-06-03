@@ -20,7 +20,7 @@ from openjiuwen.agent_teams.reliability.monitor import ReliabilityMonitor
 from openjiuwen.agent_teams.reliability.rail import ReliabilityRail
 from openjiuwen.agent_teams.reliability.remediation.local import LocalAutoRemediator
 from openjiuwen.agent_teams.reliability.remediation.policy import RemediationPolicy
-from openjiuwen.agent_teams.reliability.reporter import EventAnomalyReporter
+from openjiuwen.agent_teams.reliability.reporter import EventAnomalyReporter, LocalAnomalyReporter
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.messager.messager import Messager
@@ -85,21 +85,33 @@ def build_reliability_rail(
     config: ReliabilityConfig,
     *,
     member_name: str,
-    messager: "Messager",
+    messager: "Messager | None",
     team_name: str,
     sender_id: str,
+    is_leader: bool = False,
 ) -> ReliabilityRail:
-    """Assemble the per-member reliability rail (detectors + reporter + local remediator)."""
+    """Assemble the per-member reliability rail (detectors + reporter + local remediator).
+
+    The leader gets a ``LocalAnomalyReporter`` — its own anomalies route
+    in-process, bypassing the messager self-filter — while other roles get an
+    ``EventAnomalyReporter`` that publishes across processes to the leader.
+    """
     policy = build_remediation_policy(config)
     detectors = build_member_detectors(config.detectors)
-    reporter = EventAnomalyReporter(messager=messager, team_name=team_name, sender_id=sender_id)
+    local_reporter = LocalAnomalyReporter() if is_leader else None
+    reporter = local_reporter or EventAnomalyReporter(messager=messager, team_name=team_name, sender_id=sender_id)
     monitor = ReliabilityMonitor(detectors, reporter, policy)
     auto = LocalAutoRemediator(
         policy,
         intensity=config.restart_intensity.intensity,
         period_seconds=config.restart_intensity.period_seconds,
     )
-    return ReliabilityRail(monitor=monitor, member_name=member_name, auto_remediator=auto)
+    return ReliabilityRail(
+        monitor=monitor,
+        member_name=member_name,
+        auto_remediator=auto,
+        local_reporter=local_reporter,
+    )
 
 
 def build_pingpong_detector(config: ReliabilityConfig) -> PingPongDetector:

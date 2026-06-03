@@ -463,6 +463,7 @@ class TeamAgent(BaseAgent):
 
         self._coordination.setup(role=ctx.role)
         self._register_team_completion_callbacks()
+        self._register_reliability_local_sink()
 
     def _register_team_completion_callbacks(self) -> None:
         """Wire optional team-completion callbacks into the coordination layer.
@@ -485,6 +486,28 @@ class TeamAgent(BaseAgent):
                 notify_team_completed = getattr(rail, "notify_team_completed", None)
                 if notify_team_completed is not None:
                     dispatcher.team_completion.register_completion_callback(notify_team_completed)
+
+    def _register_reliability_local_sink(self) -> None:
+        """Wire the leader's reliability rail to its in-process anomaly sink.
+
+        Leader self-monitoring routes the leader's own anomalies straight to
+        the ReliabilityHandler instead of publishing an event the leader's
+        messager self-filter would drop. Runs after the dispatcher is built,
+        mirroring ``_register_team_completion_callbacks``. No-op when the
+        harness, dispatcher, or reliability handler is absent (reliability
+        disabled, or a non-leader member whose rail has no local reporter).
+        """
+        harness = self._configurator.harness
+        dispatcher = self._coordination.dispatcher
+        if harness is None or dispatcher is None:
+            return
+        handler = getattr(dispatcher, "reliability", None)
+        if handler is None:
+            return
+        from openjiuwen.agent_teams.reliability.rail import ReliabilityRail
+
+        for rail in harness.find_rails(ReliabilityRail):
+            rail.bind_local_sink(handler.handle_local_anomaly)
 
     def _resolve_agent_spec(
         self,

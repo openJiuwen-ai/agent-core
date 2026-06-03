@@ -9,7 +9,7 @@ from collections import deque
 
 from openjiuwen.agent_teams.reliability.anomaly import Anomaly, AnomalyKind, Severity
 from openjiuwen.agent_teams.reliability.signals import Signal, SignalKind
-from openjiuwen.agent_teams.reliability.window import stable_call_hash
+from openjiuwen.agent_teams.reliability.window import stable_call_hash, stable_result_hash
 
 
 class RepeatToolCallDetector:
@@ -18,14 +18,16 @@ class RepeatToolCallDetector:
     Records ``(call_key, outcome_key)`` pairs for the last ``history_size``
     completed calls. ``call_key`` is a stable hash of the tool name plus its
     recursively key-sorted args (computed at BEFORE_TOOL_CALL and held until
-    the call completes); ``outcome_key`` is ``"ok"`` on success or the error
-    text on failure.
+    the call completes); ``outcome_key`` is a stable hash of the result on
+    success (so identical results count as a loop and changing results do not)
+    or the error text on failure.
 
     Four tiers, edge-triggered to avoid spam (only emits when severity rises):
       - generic repeat: same ``call_key`` appears >= ``repeat_warn`` times -> LOW
-      - alternation (A-B-A-B with stable outcomes) >= ``pingpong_warn`` -> MEDIUM.
-        Capped at MEDIUM: without sampling result content, normal "ok"
-        iteration could be misjudged, so this is left for the leader to assess.
+      - alternation (A-B-A-B with stable result outcomes) >= ``pingpong_warn`` -> MEDIUM.
+        Capped at MEDIUM: result hashing cuts false positives, but
+        non-deterministic content (timestamps, ids) can still skew it, so the
+        leader makes the final call.
       - no-progress: trailing identical ``(call_key, outcome)`` >= ``loop_block`` -> HIGH
       - global circuit: trailing identical >= ``global_stop`` -> CRITICAL
     """
@@ -58,7 +60,7 @@ class RepeatToolCallDetector:
             self._pending_call_key = stable_call_hash(signal.tool_name or "", signal.tool_args)
             return None
         if signal.kind == SignalKind.AFTER_TOOL_CALL:
-            return self._record_and_classify(signal.member_name, "ok")
+            return self._record_and_classify(signal.member_name, stable_result_hash(signal.tool_result))
         if signal.kind == SignalKind.TOOL_EXCEPTION:
             return self._record_and_classify(signal.member_name, signal.error or "error")
         return None

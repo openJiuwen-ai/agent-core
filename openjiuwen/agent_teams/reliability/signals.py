@@ -48,6 +48,8 @@ class Signal:
         thinking_len: Reasoning/thinking length in characters (AFTER_MODEL_CALL).
         message_count: Context message count (BEFORE_MODEL_CALL); compaction hint.
         peer_member: The conversation peer (MESSAGE), for pingpong tracking.
+        tool_result: Tool execution result (AFTER_TOOL_CALL); fed to
+            result-aware repeat detection to tell real loops from progress.
     """
 
     kind: SignalKind
@@ -59,3 +61,4 @@ class Signal:
     thinking_len: int | None = None
     message_count: int | None = None
     peer_member: str | None = None
+    tool_result: Any | None = None

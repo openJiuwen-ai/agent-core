@@ -12,7 +12,7 @@ cross-process path member/task events already use.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Awaitable, Callable, Protocol
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.reliability.anomaly import Anomaly
@@ -65,3 +65,30 @@ class EventAnomalyReporter:
             )
         except Exception:
             team_logger.error("failed to publish anomaly from member %s", anomaly.member_name, exc_info=True)
+
+
+class LocalAnomalyReporter:
+    """In-process anomaly sink for leader self-monitoring.
+
+    The leader's own anomalies must not be published — its messager
+    self-filter (``kernel`` drops events whose ``sender_id`` equals the local
+    member) would discard them. Instead this reporter routes them straight to a
+    local sink (the leader's ``ReliabilityHandler``), bound once after the
+    dispatcher is built (see ``TeamAgent._register_reliability_local_sink``).
+    Until bound it is a no-op so anomalies emitted before wiring are dropped
+    with a warning rather than lost silently.
+    """
+
+    def __init__(self) -> None:
+        self._sink: Callable[[Anomaly], Awaitable[None]] | None = None
+
+    def bind(self, sink: Callable[[Anomaly], Awaitable[None]]) -> None:
+        """Bind the local sink that routes anomalies to the handler."""
+        self._sink = sink
+
+    async def report(self, anomaly: Anomaly) -> None:
+        """Route the anomaly to the bound local sink, if any."""
+        if self._sink is None:
+            team_logger.warning("local anomaly sink not bound; dropping anomaly from %s", anomaly.member_name)
+            return
+        await self._sink(anomaly)

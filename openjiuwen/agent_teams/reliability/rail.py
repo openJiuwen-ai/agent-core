@@ -14,10 +14,12 @@ after the behavior-shaping rails.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Awaitable, Callable
 
+from openjiuwen.agent_teams.reliability.anomaly import Anomaly
 from openjiuwen.agent_teams.reliability.monitor import ReliabilityMonitor
 from openjiuwen.agent_teams.reliability.remediation.local import LocalAutoRemediator
+from openjiuwen.agent_teams.reliability.reporter import LocalAnomalyReporter
 from openjiuwen.agent_teams.reliability.signals import Signal, SignalKind
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
@@ -60,11 +62,24 @@ class ReliabilityRail(DeepAgentRail):
         monitor: ReliabilityMonitor,
         member_name: str,
         auto_remediator: LocalAutoRemediator | None = None,
+        local_reporter: LocalAnomalyReporter | None = None,
     ) -> None:
         super().__init__()
         self._monitor = monitor
         self._member = member_name
         self._auto = auto_remediator
+        self._local_reporter = local_reporter
+
+    def bind_local_sink(self, sink: Callable[[Anomaly], Awaitable[None]]) -> None:
+        """Bind the leader's in-process anomaly sink (no-op for non-leader rails).
+
+        Leader self-monitoring routes anomalies straight to the in-process
+        handler instead of publishing an event the leader's own messager
+        self-filter would drop. Called once after the dispatcher is built (see
+        ``TeamAgent._register_reliability_local_sink``).
+        """
+        if self._local_reporter is not None:
+            self._local_reporter.bind(sink)
 
     async def _emit(self, signal: Signal, ctx: AgentCallbackContext) -> None:
         """Feed the signal, then steer locally for any returned anomaly."""
@@ -97,6 +112,7 @@ class ReliabilityRail(DeepAgentRail):
                 kind=SignalKind.AFTER_TOOL_CALL,
                 member_name=self._member,
                 tool_name=getattr(inputs, "tool_name", "") or "",
+                tool_result=getattr(inputs, "tool_result", None),
             ),
             ctx,
         )

@@ -100,13 +100,14 @@ class ReliabilityConfig(BaseModel):
     """Per-team reliability framework configuration.
 
     Opt-in: ``enabled`` defaults to False. ``monitor_roles`` selects which
-    roles get a ReliabilityRail attached (default: teammates only; the leader
-    self-monitor path is a future extension because the leader's own anomaly
-    events would be filtered by its self-message guard).
+    roles get a ReliabilityRail attached (default: leader + teammates). The
+    leader self-monitors via an in-process local sink that bypasses the
+    messager self-filter (see ``LocalAnomalyReporter`` and
+    ``TeamAgent._register_reliability_local_sink``).
     """
 
     enabled: bool = False
-    monitor_roles: list[str] = Field(default_factory=lambda: ["teammate"])
+    monitor_roles: list[str] = Field(default_factory=lambda: ["leader", "teammate"])
     detectors: DetectorsConfig = Field(default_factory=DetectorsConfig)
     policy: RemediationPolicyConfig = Field(default_factory=RemediationPolicyConfig)
     restart_intensity: RestartIntensityConfig = Field(default_factory=RestartIntensityConfig)
