@@ -34,12 +34,14 @@ async def run_swarmflow(
     team_name: str = "swarmflow",
     language: str = "cn",
     log_sink: Callable[[str], None] | None = None,
+    model_resolver: Callable[[str], Any] | None = None,
 ) -> Any:
     """Execute a swarmflow script with real LLM workers.
 
     Args:
         script_path: Path to the ``.py`` swarmflow script (``META`` + ``run``).
-        model: LLM ``Model`` each worker DeepAgent runs on.
+        model: Default LLM ``Model`` each worker DeepAgent runs on when a call
+            carries no ``model`` hint (or the hint can't be resolved).
         observer: Receives the progress-event stream; the caller reads
             ``observer.run`` afterwards for the 4-layer structure.
         args: Value passed to the script's ``run(args)``.
@@ -47,6 +49,9 @@ async def run_swarmflow(
         team_name: Namespacing for worker member ids.
         language: Prompt language hint.
         log_sink: Optional plain-text diagnostics sink.
+        model_resolver: Optional callback resolving an ``agent(model=...)`` name
+            hint to a concrete ``Model``; ``None`` (default) means every worker
+            uses ``model``.
 
     Returns:
         Whatever the script's ``run(args)`` returned.
@@ -56,6 +61,7 @@ async def run_swarmflow(
         team_backend=team_backend,
         team_name=team_name,
         language=language,
+        model_resolver=model_resolver,
     )
     return await run_workflow(
         script_path,

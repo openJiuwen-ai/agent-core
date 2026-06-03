@@ -986,6 +986,7 @@ class TeamAgent(BaseAgent):
         as a fire-and-forget task on the running loop (best-effort narration).
         """
         from openjiuwen.agent_teams.context import get_session_id
+        from openjiuwen.agent_teams.models.allocator import resolve_member_model
         from openjiuwen.agent_teams.schema.events import (
             EventMessage,
             TeamEvent,
@@ -999,6 +1000,19 @@ class TeamAgent(BaseAgent):
         language = self.team_spec.language if self.team_spec and self.team_spec.language else "cn"
         model = self.harness.model if self.harness else None
         name_box: dict[str, Any] = {"name": None}
+
+        def _resolve_worker_model(model_name: str) -> Any:
+            """Map a per-call ``agent(model=...)`` name to a pool ``Model``.
+
+            Positional lookup against the team model pool (no allocator counter,
+            no rotation). Returns ``None`` when the pool is unset or the name is
+            absent, letting the worker fall back to the leader's model.
+            """
+            team_spec = self.team_spec
+            if team_spec is None:
+                return None
+            config = resolve_member_model(team_spec, model_name=model_name, model_index=None)
+            return config.build() if config is not None else None
 
         def _publish(progress: Any) -> None:
             if messager is None:
@@ -1036,6 +1050,7 @@ class TeamAgent(BaseAgent):
                 team_backend=self.team_backend,
                 team_name=team_name,
                 language=language,
+                model_resolver=_resolve_worker_model,
             )
         except Exception as exc:
             team_logger.error("[{}] swarmflow run failed: {}", self._member_name() or "?", exc, exc_info=True)
