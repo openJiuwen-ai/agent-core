@@ -455,6 +455,18 @@ class AgentConfigurator:
                     is_leader=is_leader,
                 )
 
+        # Derive a per-member view of the platform-supplied build context
+        # (provider-based assembly). None when no platform attached one, so
+        # the customizer path is unaffected.
+        member_build_context = None
+        if spec.build_context is not None:
+            member_build_context = spec.build_context.derive(
+                member_name=member_name,
+                role=ctx.role.value,
+                language=resolved_language,
+                member_card_id=self._card.id,
+            )
+
         self.harness = TeamHarness.build(
             agent_spec=build_spec,
             role=ctx.role,
@@ -466,6 +478,7 @@ class AgentConfigurator:
             team_plan_mode_rail=team_plan_mode_rail,
             reliability_rail=reliability_rail,
             initial_plan_mode=is_team_plan_leader,
+            build_context=member_build_context,
         )
 
         # Team memory manager (only when explicitly enabled in the spec).

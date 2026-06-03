@@ -362,6 +362,19 @@ class TeamAgentSpec(BaseModel):
     )
     """Optional callback invoked on each member's DeepAgent after creation."""
 
+    build_context: Optional[Any] = Field(
+        default=None,
+        exclude=True,
+    )
+    """Optional runtime carrier for provider-based capability assembly.
+
+    Holds a ``BuildContext`` subclass with live, non-serializable handles
+    (excluded from JSON, in-process spawn only — same caveat as
+    ``agent_customizer``). ``setup_agent`` derives a per-member view from it
+    to thread into ``DeepAgentSpec.build``. Typed as ``Any`` so Pydantic does
+    not attempt to build a schema for the opaque carrier.
+    """
+
     memory: Optional[TeamMemoryConfig] = None
     """Optional team memory configuration. When enabled, TeamMemoryManager
     replaces default MemoryRail/CodingMemoryRail with per-member isolated instances."""

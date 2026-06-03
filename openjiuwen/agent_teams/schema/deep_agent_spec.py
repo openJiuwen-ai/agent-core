@@ -13,12 +13,14 @@ import inspect
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     Optional,
 )
 
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.schema.build_context import BuildContext
     from openjiuwen.harness.deep_agent import DeepAgent
 
 from openjiuwen.core.foundation.llm import (
@@ -150,6 +152,66 @@ def _ensure_builtin_tools_registered() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Capability provider registries
+# ---------------------------------------------------------------------------
+
+# A provider is a factory that resolves ``(params, context)`` into a live
+# instance (or a list of instances). Unlike the class registries above, a
+# provider receives the runtime ``BuildContext`` and can therefore build
+# capabilities that depend on live, non-serializable handles. Providers take
+# precedence over the same-named class registry, so platforms can override or
+# extend built-ins without touching this module.
+_RAIL_PROVIDER_REGISTRY: dict[str, Callable[..., Any]] = {}
+_TOOL_PROVIDER_REGISTRY: dict[str, Callable[..., Any]] = {}
+_SUBAGENT_PROVIDER_REGISTRY: dict[str, Callable[..., Any]] = {}
+
+
+def register_rail_provider(name: str, factory: Callable[..., Any]) -> None:
+    """Register a rail provider factory referenced by name in ``RailSpec``.
+
+    The factory is invoked as ``factory(params, context)`` and may return a
+    single rail or a list of rails. Takes precedence over ``register_rail_type``
+    for the same name.
+    """
+    _RAIL_PROVIDER_REGISTRY[name] = factory
+
+
+def register_tool_provider(name: str, factory: Callable[..., Any]) -> None:
+    """Register a tool provider factory referenced by name in ``BuiltinToolSpec``.
+
+    The factory is invoked as ``factory(params, context)`` and may return a
+    single tool or a list of tools. Takes precedence over ``register_tool_type``
+    for the same name.
+    """
+    _TOOL_PROVIDER_REGISTRY[name] = factory
+
+
+def register_subagent_provider(name: str, factory: Callable[..., Any]) -> None:
+    """Register a sub-agent provider factory keyed by ``SubAgentSpec.factory_name``.
+
+    The factory is invoked as ``factory(factory_kwargs, context)`` and returns a
+    ``SubAgentConfig`` (or a list). Resolution is opt-in: a ``SubAgentSpec`` only
+    uses it when its ``factory_name`` matches a registered provider, so existing
+    factory names are unaffected.
+    """
+    _SUBAGENT_PROVIDER_REGISTRY[name] = factory
+
+
+def _as_built_list(built: Any) -> list:
+    """Normalize a build result into a flat list, dropping ``None`` entries.
+
+    Providers may return a single instance or a list; class-based builds return
+    a single instance. Callers use this to uniformly flatten and to treat an
+    empty list as "skip this capability".
+    """
+    if built is None:
+        return []
+    if isinstance(built, list):
+        return [item for item in built if item is not None]
+    return [built]
+
+
+# ---------------------------------------------------------------------------
 # TeamModelConfig (must precede specs that reference it)
 # ---------------------------------------------------------------------------
 
@@ -259,15 +321,28 @@ class RailSpec(BaseModel):
     type: str
     params: dict[str, Any] = {}
 
-    def build(self, *, language: str, workspace: Optional[Workspace] = None) -> AgentRail:
-        """Build a rail instance.
+    def build(
+        self,
+        *,
+        language: str,
+        workspace: Optional[Workspace] = None,
+        context: "BuildContext | None" = None,
+    ) -> Any:
+        """Build a rail instance (or a list of rails).
 
         Args:
             language: Auto-injected if the constructor accepts it.
             workspace: Used by ``skill_use`` to resolve default skills_dir
                 from workspace's ``skills/`` node when not explicitly provided.
+            context: Runtime carrier forwarded to a registered rail provider.
+
+        Returns:
+            A rail, a list of rails, or ``None``; callers flatten the result.
         """
         _ensure_builtin_rails_registered()
+        factory = _RAIL_PROVIDER_REGISTRY.get(self.type)
+        if factory is not None:
+            return factory(dict(self.params), context)
         cls = _RAIL_TYPE_REGISTRY.get(self.type)
         if cls is None:
             raise ValueError(
@@ -305,16 +380,26 @@ class BuiltinToolSpec(BaseModel):
     type: str
     params: dict[str, Any] = {}
 
-    def build(self, *, language: str, tool_id: str | None = None) -> Any:
-        """Construct a live Tool instance.
+    def build(
+        self,
+        *,
+        language: str,
+        tool_id: str | None = None,
+        context: "BuildContext | None" = None,
+    ) -> Any:
+        """Construct a live Tool instance (or a list of tools).
 
         Args:
             language: Auto-injected if constructor accepts it.
             tool_id: Auto-injected if constructor accepts it.
                 Callers can pass e.g. ``f"{member_name}.{type}"``
                 to namespace tools per member.
+            context: Runtime carrier forwarded to a registered tool provider.
         """
         _ensure_builtin_tools_registered()
+        factory = _TOOL_PROVIDER_REGISTRY.get(self.type)
+        if factory is not None:
+            return factory(dict(self.params), context)
         cls = _TOOL_TYPE_REGISTRY.get(self.type)
         if cls is None:
             raise ValueError(
@@ -354,20 +439,34 @@ class SubAgentSpec(BaseModel):
     factory_name: Optional[str] = None
     factory_kwargs: dict[str, Any] = {}
 
-    def build(self, *, parent_model: Model, language: str) -> SubAgentConfig:
+    def build(
+        self,
+        *,
+        parent_model: Model,
+        language: str,
+        context: "BuildContext | None" = None,
+    ) -> Any:
         """Materialize into a runtime SubAgentConfig.
 
         Args:
             parent_model: Fallback model when self.model is None.
             language: Resolved language for rail construction.
+            context: Runtime carrier; if ``factory_name`` matches a registered
+                sub-agent provider it builds the config directly.
         """
+        if self.factory_name and self.factory_name in _SUBAGENT_PROVIDER_REGISTRY:
+            return _SUBAGENT_PROVIDER_REGISTRY[self.factory_name](dict(self.factory_kwargs), context)
         resolved_model = self.model.build() if self.model else None
         resolved_workspace = self.workspace.build() if self.workspace else None
-        resolved_rails = (
-            [r.build(language=language, workspace=resolved_workspace) for r in self.rails]
-            if self.rails
-            else None
-        )
+        resolved_rails = None
+        if self.rails:
+            resolved_rails = []
+            for rail_spec in self.rails:
+                resolved_rails.extend(
+                    _as_built_list(
+                        rail_spec.build(language=language, workspace=resolved_workspace, context=context),
+                    ),
+                )
 
         resolved_sys_op = None
         if self.sys_operation:
@@ -383,7 +482,7 @@ class SubAgentSpec(BaseModel):
         for item in self.tools:
             if isinstance(item, BuiltinToolSpec):
                 tid = f"{sa_prefix}.{item.type}"
-                resolved_tools.append(item.build(language=language, tool_id=tid))
+                resolved_tools.extend(_as_built_list(item.build(language=language, tool_id=tid, context=context)))
             else:
                 resolved_tools.append(item)
 
@@ -445,7 +544,12 @@ class DeepAgentSpec(BaseModel):
     progressive_tool: Optional[ProgressiveToolSpec] = None
     approval_required_tools: Optional[list[str]] = None
 
-    def _resolve_tools(self, language: str, tool_id_prefix: str | None = None) -> list | None:
+    def _resolve_tools(
+        self,
+        language: str,
+        tool_id_prefix: str | None = None,
+        context: "BuildContext | None" = None,
+    ) -> list | None:
         """Resolve tools list: BuiltinToolSpec → Tool instance, ToolCard passes through."""
         if not self.tools:
             return None
@@ -453,13 +557,19 @@ class DeepAgentSpec(BaseModel):
         for item in self.tools:
             if isinstance(item, BuiltinToolSpec):
                 tid = f"{tool_id_prefix}.{item.type}" if tool_id_prefix else None
-                resolved.append(item.build(language=language, tool_id=tid))
+                resolved.extend(_as_built_list(item.build(language=language, tool_id=tid, context=context)))
             else:
                 resolved.append(item)
         return resolved or None
 
-    def build(self) -> "DeepAgent":
-        """Materialize a live DeepAgent from this spec."""
+    def build(self, context: "BuildContext | None" = None) -> "DeepAgent":
+        """Materialize a live DeepAgent from this spec.
+
+        Args:
+            context: Optional runtime carrier forwarded to capability providers.
+                A per-build view is derived with the resolved workspace and card
+                id before rails / tools / sub-agents are built.
+        """
         from openjiuwen.core.runner.runner import Runner
         from openjiuwen.harness.factory import create_deep_agent
         from openjiuwen.harness.prompts import resolve_language
@@ -471,16 +581,28 @@ class DeepAgentSpec(BaseModel):
         audio_config = self.audio_model.build() if self.audio_model else None
         workspace = self.workspace.build() if self.workspace else None
 
-        rails = (
-            [r.build(language=language, workspace=workspace) for r in self.rails]
-            if self.rails
+        build_ctx = (
+            context.derive(workspace=workspace, member_card_id=self.card.id if self.card else None)
+            if context is not None
             else None
         )
-        subagents = (
-            [s.build(parent_model=llm_model, language=language) for s in self.subagents]
-            if self.subagents
-            else None
-        )
+
+        rails = None
+        if self.rails:
+            rails = []
+            for rail_spec in self.rails:
+                rails.extend(
+                    _as_built_list(rail_spec.build(language=language, workspace=workspace, context=build_ctx)),
+                )
+        subagents = None
+        if self.subagents:
+            subagents = []
+            for subagent_spec in self.subagents:
+                subagents.extend(
+                    _as_built_list(
+                        subagent_spec.build(parent_model=llm_model, language=language, context=build_ctx),
+                    ),
+                )
 
         sys_operation = None
         if self.sys_operation:
@@ -492,7 +614,7 @@ class DeepAgentSpec(BaseModel):
             model=llm_model,
             card=self.card,
             system_prompt=self.system_prompt,
-            tools=self._resolve_tools(language, self.card.id if self.card else None),
+            tools=self._resolve_tools(language, self.card.id if self.card else None, context=build_ctx),
             mcps=self.mcps,
             subagents=subagents,
             rails=rails,
@@ -538,6 +660,9 @@ __all__ = [
     "TeamModelConfig",
     "VisionModelSpec",
     "WorkspaceSpec",
+    "register_rail_provider",
     "register_rail_type",
+    "register_subagent_provider",
+    "register_tool_provider",
     "register_tool_type",
 ]

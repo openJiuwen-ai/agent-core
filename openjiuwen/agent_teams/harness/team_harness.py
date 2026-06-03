@@ -48,6 +48,7 @@ if TYPE_CHECKING:
         TeamToolRail,
     )
     from openjiuwen.agent_teams.reliability.rail import ReliabilityRail
+    from openjiuwen.agent_teams.schema.build_context import BuildContext
     from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
     from openjiuwen.agent_teams.schema.team import TeamRole
     from openjiuwen.agent_teams.team_workspace.rails import TeamWorkspaceRail
@@ -122,6 +123,7 @@ class TeamHarness:
         team_plan_mode_rail: Optional["TeamPlanModeRail"] = None,
         reliability_rail: Optional["ReliabilityRail"] = None,
         initial_plan_mode: bool = False,
+        build_context: "BuildContext | None" = None,
     ) -> "TeamHarness":
         """Build the deep-agent provider, construct the native, and configure it.
 
@@ -137,7 +139,7 @@ class TeamHarness:
         team memory manager) the customizer may rely on.
         """
         def _deep_provider() -> "DeepAgent":
-            deep_agent = agent_spec.build()
+            deep_agent = agent_spec.build(context=build_context)
             deep_agent.add_rail(team_tool_rail)
             deep_agent.add_rail(team_policy_rail)
             if team_workspace_rail is not None:
