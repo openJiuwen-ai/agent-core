@@ -130,6 +130,12 @@ class NativeHarness(DeepAgent):
         self._forwarder_task: asyncio.Task | None = None
         self._started_event = asyncio.Event()
         self._starting: bool = False
+        # ``_config_prepared``: sync configure (card/config/rails) done, so a
+        # host can run an agent_customizer / read workspace off ``deep_config``
+        # before any async init. ``_prepared``: configure + ensure_initialized
+        # done. Splitting them lets ``start`` only spin up supervisor + session.
+        self._config_prepared: bool = False
+        self._prepared: bool = False
 
     # ------------------------------------------------------------------
     # Read-only accessors
@@ -149,6 +155,47 @@ class NativeHarness(DeepAgent):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def prepare_config(self) -> None:
+        """Configure from the provider synchronously, without async init.
+
+        Adopts the template's identity + config + rails so a host can run an
+        agent_customizer or read ``workspace`` / ``sys_operation`` off
+        ``deep_config`` before any run cycle. Rail registration is queued; rails
+        actually initialize during ``prepare`` / ``start``. Idempotent.
+        """
+        if self._config_prepared:
+            return
+        template = self._provider()
+        if template is None:
+            raise_error(
+                StatusCode.DEEPAGENT_RUNTIME_ERROR,
+                error_msg="deep_agent_provider returned None.",
+            )
+        # Adopt the template's identity + config, then inherit its rails so this
+        # instance behaves exactly like the configured template.
+        self.card = template.card
+        self.configure(template.deep_config)
+        for rail in (*template._pending_rails, *template._registered_rails):
+            self.add_rail(rail)
+        # Round-boundary snapshot rail (AFTER_TASK_ITERATION is a deep event, so
+        # add_rail/register_rail routes it onto this outer DeepAgent).
+        self.add_rail(self._snapshot_rail)
+        if template.deep_config is not None:
+            self._timeout = template.deep_config.completion_timeout
+        self._config_prepared = True
+
+    async def prepare(self) -> None:
+        """Configure (``prepare_config``) then run ``ensure_initialized``.
+
+        Idempotent. ``start`` calls this first, so a standalone ``start`` is
+        unchanged.
+        """
+        if self._prepared:
+            return
+        self.prepare_config()
+        await self.ensure_initialized()
+        self._prepared = True
+
     async def start(self, *, session: Session | None = None) -> None:
         """Configure self from the provider, build the task-loop kernel, start supervisor.
 
@@ -165,26 +212,7 @@ class NativeHarness(DeepAgent):
             return
         self._starting = True
         try:
-            template = self._provider()
-            if template is None:
-                raise_error(
-                    StatusCode.DEEPAGENT_RUNTIME_ERROR,
-                    error_msg="deep_agent_provider returned None.",
-                )
-
-            # Adopt the template's identity + config, then inherit its rails so
-            # this instance behaves exactly like the configured template.
-            self.card = template.card
-            self.configure(template.deep_config)
-            for rail in (*template._pending_rails, *template._registered_rails):
-                self.add_rail(rail)
-            # Round-boundary snapshot rail (AFTER_TASK_ITERATION is a deep event,
-            # so add_rail/register_rail routes it onto this outer DeepAgent).
-            self.add_rail(self._snapshot_rail)
-            await self.ensure_initialized()
-
-            if template.deep_config is not None:
-                self._timeout = template.deep_config.completion_timeout
+            await self.prepare()
 
             if session is None:
                 self._session = Session(card=self.card)
