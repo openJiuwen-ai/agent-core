@@ -6,7 +6,7 @@
 |---|---|
 | 日期 | 2026-06-03 |
 | 范围 | `harness/team_harness.py`、`harness/protocol.py`、`agent/stream_controller.py`、`agent/member_runtime.py`、`agent/coordination/kernel.py`、`agent/agent_configurator.py`、`agent/resources.py`、`agent/team_agent.py`、`external/runtime.py`、删 `rails/first_iteration_gate.py` |
-| 测试基线 | `tests/unit_tests/agent_teams/` 1326 passed / 16 skipped / 0 failed |
+| 测试基线 | `tests/unit_tests/agent_teams/` 1329 passed / 16 skipped / 0 failed |
 | Refs | #984 |
 
 ## 背景
@@ -116,13 +116,19 @@ CLI 成员也实现同一抽象。
   （nudge 测试 `_start_agent`/`steer`→`deliver_input`、删 first_iter_gate 测试）、
   `test_runner_team_runtime`（plan-mode 测试驱动 `_seed_initial_plan_mode`）、
   `test_human_agent_setup`（去 gate）。
+- 新增 `test_team_harness_integration.py`：live-native E2E——真 TeamHarness（组合真
+  NativeHarness over 真 task-loop 内核）+ 真 StreamController，仅 fake inner
+  react_agent，覆盖完整 forward 链路+状态映射、immediate abort 取消在途 invoke +
+  转发 round_aborted、teammate live round 经 observer fan-out 到 leader queue。
 
 ## 已知遗留
 
 - **修了一个伴生生产 bug**：`TeamHarness.abort/pause` 原盲目转发到 `native`，未 start 时
   触发 `_require_alive` 抛错（session=None 协调启动后 teardown 会崩）。加 `_is_cycle_active()`
   守卫（`_active_agent_session` 非空 = cycle 活跃）降级为 no-op。
-- **重型 inprocess E2E 待补**：leader+teammate 实进程 chunk fan-out / deliver / cancel /
-  resume / 状态转移的端到端验证目前靠单测层覆盖接线，未补一条 live 进程 E2E。
+- **live-native E2E 已补**（`test_team_harness_integration.py`），覆盖真 TeamHarness +
+  真 NativeHarness + 真 StreamController 的 forward / abort / fan-out。仍未做的是
+  **真 OS 子进程**（`spawn_mode="process"`）+ 真模型的全链路 E2E——成本高且 flaky，
+  当前由 inprocess live-native E2E + 单测覆盖接线代偿。
 - **subprocess 模式 teammate chunk 转发**仍是 unimplemented（messager-driven observer），
   与本次收编正交，沿用 S_05 既有遗留。
