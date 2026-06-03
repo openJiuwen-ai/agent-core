@@ -3,7 +3,7 @@
 
 """Tests for reliability sliding-window counter and stable call hashing."""
 
-from openjiuwen.agent_teams.reliability.window import SlidingWindowCounter, stable_call_hash
+from openjiuwen.agent_teams.reliability.window import SlidingWindowCounter, stable_call_hash, stable_result_hash
 
 
 def test_sliding_window_counts_within_window():
@@ -60,5 +60,35 @@ def test_stable_call_hash_treats_none_and_empty_args_alike():
 
 def test_stable_call_hash_tolerates_non_serializable_args():
     digest = stable_call_hash("call", {"obj": object()})
+    assert isinstance(digest, str)
+    assert len(digest) == 64
+
+
+def test_stable_result_hash_none():
+    assert stable_result_hash(None) == "none"
+
+
+def test_stable_result_hash_str_and_dict_order_independent():
+    assert stable_result_hash("abc") == stable_result_hash("abc")
+    assert stable_result_hash({"a": 1, "b": 2}) == stable_result_hash({"b": 2, "a": 1})
+
+
+def test_stable_result_hash_distinguishes_different_results():
+    assert stable_result_hash("abc") != stable_result_hash("abd")
+    assert stable_result_hash({"a": 1}) != stable_result_hash({"a": 2})
+
+
+def test_stable_result_hash_pydantic_model():
+    from openjiuwen.harness.tools.base_tool import ToolOutput
+
+    same_a = ToolOutput(success=True, data={"x": 1})
+    same_b = ToolOutput(success=True, data={"x": 1})
+    different = ToolOutput(success=True, data={"x": 2})
+    assert stable_result_hash(same_a) == stable_result_hash(same_b)
+    assert stable_result_hash(same_a) != stable_result_hash(different)
+
+
+def test_stable_result_hash_tolerates_non_serializable():
+    digest = stable_result_hash({"obj": object()})
     assert isinstance(digest, str)
     assert len(digest) == 64

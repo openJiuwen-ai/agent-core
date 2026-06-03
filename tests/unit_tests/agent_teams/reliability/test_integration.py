@@ -18,6 +18,8 @@ import pytest
 
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 from openjiuwen.agent_teams.reliability import ReliabilityConfig
+from openjiuwen.agent_teams.reliability.anomaly import Anomaly, AnomalyKind, Severity
+from openjiuwen.agent_teams.reliability.rail import ReliabilityRail
 from openjiuwen.agent_teams.schema.blueprint import DeepAgentSpec, LeaderSpec, TeamAgentSpec
 from openjiuwen.agent_teams.schema.events import AnomalyDetectedEvent, EventMessage
 from openjiuwen.agent_teams.schema.team import TeamRole, TeamRuntimeContext, TeamSpec
@@ -88,3 +90,31 @@ async def test_anomaly_ignored_when_reliability_disabled():
 
     await agent._stop_coordination()
     agent.deliver_input.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_leader_self_monitor_routes_local_anomaly():
+    # monitor_roles defaults to ["leader", "teammate"], so the leader mounts
+    # its own reliability rail with a LocalAnomalyReporter whose sink is bound
+    # to the handler. A leader-local anomaly routes straight to deliver_input
+    # without going through the messager (which would self-filter it).
+    agent = _make_leader_with_reliability(enabled=True)
+    agent._is_agent_running = lambda: False
+    agent.deliver_input = AsyncMock()
+    await agent._start_coordination(session=None)
+
+    rails = agent._configurator.harness.find_rails(ReliabilityRail)
+    assert rails  # the leader's own rail is mounted
+
+    anomaly = Anomaly(
+        detector="tool_error_rate",
+        kind=AnomalyKind.TOOL_ERROR_RATE,
+        severity=Severity.MEDIUM,
+        member_name="leader-1",
+        summary="leader own anomaly",
+    )
+    await rails[0]._local_reporter.report(anomaly)
+    await asyncio.sleep(0.05)
+
+    await agent._stop_coordination()
+    agent.deliver_input.assert_called_once()

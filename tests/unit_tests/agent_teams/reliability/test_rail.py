@@ -13,6 +13,7 @@ from openjiuwen.agent_teams.reliability.monitor import ReliabilityMonitor
 from openjiuwen.agent_teams.reliability.rail import ReliabilityRail
 from openjiuwen.agent_teams.reliability.remediation.local import LocalAutoRemediator
 from openjiuwen.agent_teams.reliability.remediation.policy import RemediationPolicy
+from openjiuwen.agent_teams.reliability.reporter import LocalAnomalyReporter
 from openjiuwen.agent_teams.reliability.signals import Signal, SignalKind
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCallInputs, ToolCallInputs
 
@@ -148,3 +149,41 @@ async def test_rail_local_steer_pushes_steering():
 
 def test_reliability_rail_priority_is_low():
     assert ReliabilityRail.priority < 12
+
+
+@pytest.mark.asyncio
+async def test_rail_after_tool_call_captures_tool_result():
+    monitor = _RecordingMonitor()
+    rail = ReliabilityRail(monitor=monitor, member_name="m1")
+    await rail.after_tool_call(_ctx(ToolCallInputs(tool_name="run", tool_result="the-result")))
+    signal = monitor.signals[0]
+    assert signal.kind == SignalKind.AFTER_TOOL_CALL
+    assert signal.tool_result == "the-result"
+
+
+@pytest.mark.asyncio
+async def test_leader_rail_bind_local_sink_routes_anomaly():
+    received = []
+
+    async def sink(anomaly):
+        received.append(anomaly)
+
+    local_reporter = LocalAnomalyReporter()
+    monitor = ReliabilityMonitor(
+        [ToolErrorRateDetector(consecutive_threshold=1, now=lambda: 0.0)],
+        local_reporter,
+        RemediationPolicy(),
+    )
+    rail = ReliabilityRail(monitor=monitor, member_name="leader-1", local_reporter=local_reporter)
+    rail.bind_local_sink(sink)
+    await rail.on_tool_exception(_ctx(ToolCallInputs(tool_name="run"), exception=ValueError("boom")))
+    assert len(received) == 1
+
+
+@pytest.mark.asyncio
+async def test_non_leader_rail_bind_local_sink_is_noop():
+    async def sink(anomaly):
+        pass
+
+    rail = ReliabilityRail(monitor=_RecordingMonitor(), member_name="dev-1")
+    rail.bind_local_sink(sink)  # no local reporter -> no-op, must not raise

@@ -153,9 +153,12 @@ def _call_cycle(
     outcome_kind: SignalKind = SignalKind.AFTER_TOOL_CALL,
     error: str | None = None,
     member: str = "m",
+    tool_result=None,
 ):
     det.observe(Signal(kind=SignalKind.BEFORE_TOOL_CALL, member_name=member, tool_name=tool, tool_args=args))
-    return det.observe(Signal(kind=outcome_kind, member_name=member, tool_name=tool, error=error))
+    return det.observe(
+        Signal(kind=outcome_kind, member_name=member, tool_name=tool, error=error, tool_result=tool_result)
+    )
 
 
 def test_repeat_generic_repeat_low():
@@ -206,3 +209,21 @@ def test_repeat_stable_hash_ignores_arg_order():
     result = _call_cycle(det, "run", {"a": 1, "b": 2})
     assert result is not None
     assert result.severity == Severity.LOW
+
+
+def test_repeat_result_aware_ignores_changing_results():
+    # Same call_key, but each result differs -> different outcome -> not a loop.
+    det = RepeatToolCallDetector(repeat_warn=100, pingpong_warn=100, loop_block=5, global_stop=10)
+    results = [_call_cycle(det, "read", {"p": "a"}, tool_result=f"result-{i}") for i in range(12)]
+    assert not any(r is not None and r.severity in (Severity.HIGH, Severity.CRITICAL) for r in results)
+
+
+def test_repeat_result_aware_detects_identical_results():
+    # Same call_key + identical result -> identical outcome -> real loop.
+    det = RepeatToolCallDetector(repeat_warn=100, pingpong_warn=100, loop_block=5, global_stop=10)
+    severities = []
+    for _ in range(12):
+        result = _call_cycle(det, "read", {"p": "a"}, tool_result="same-result")
+        if result is not None:
+            severities.append(result.severity)
+    assert Severity.HIGH in severities or Severity.CRITICAL in severities

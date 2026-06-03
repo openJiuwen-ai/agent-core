@@ -5,6 +5,7 @@
 
 import pytest
 
+from openjiuwen.agent_teams.reliability.anomaly import Anomaly, AnomalyKind, Severity
 from openjiuwen.agent_teams.reliability.detectors.pingpong import PingPongDetector
 from openjiuwen.agent_teams.reliability.handler import ReliabilityHandler
 from openjiuwen.agent_teams.reliability.remediation.policy import RemediationPolicy
@@ -87,3 +88,32 @@ async def test_handler_pingpong_over_messages():
     await handler.on_message(first)
     await handler.on_message(second)
     assert len(host.delivered) >= 1
+
+
+@pytest.mark.asyncio
+async def test_handle_local_anomaly_routes_to_leader():
+    handler, host = _make_handler()
+    anomaly = Anomaly(
+        detector="tool_error_rate",
+        kind=AnomalyKind.TOOL_ERROR_RATE,
+        severity=Severity.MEDIUM,
+        member_name="team_leader",
+        summary="leader own anomaly",
+    )
+    await handler.handle_local_anomaly(anomaly)
+    assert len(host.delivered) == 1
+    assert "leader own anomaly" in host.delivered[0]
+
+
+@pytest.mark.asyncio
+async def test_handle_local_anomaly_ignored_when_not_leader():
+    handler, host = _make_handler(role=TeamRole.TEAMMATE)
+    anomaly = Anomaly(
+        detector="d",
+        kind=AnomalyKind.MODEL_ERROR,
+        severity=Severity.HIGH,
+        member_name="dev-1",
+        summary="x",
+    )
+    await handler.handle_local_anomaly(anomaly)
+    assert host.delivered == []

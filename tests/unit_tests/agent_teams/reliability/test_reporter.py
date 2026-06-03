@@ -7,7 +7,7 @@ import pytest
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.reliability.anomaly import Anomaly, AnomalyKind, Severity
-from openjiuwen.agent_teams.reliability.reporter import EventAnomalyReporter
+from openjiuwen.agent_teams.reliability.reporter import EventAnomalyReporter, LocalAnomalyReporter
 from openjiuwen.agent_teams.schema.events import AnomalyDetectedEvent, EventMessage
 
 
@@ -68,3 +68,28 @@ def test_anomaly_event_round_trip():
     assert payload.kind == "ping_pong"
     assert payload.peer_member == "other"
     assert payload.evidence == {"volleys": 6}
+
+
+@pytest.mark.asyncio
+async def test_local_reporter_noop_before_bind():
+    reporter = LocalAnomalyReporter()
+    anomaly = Anomaly(
+        detector="d", kind=AnomalyKind.TOOL_ERROR_RATE, severity=Severity.MEDIUM, member_name="m", summary="s"
+    )
+    await reporter.report(anomaly)  # no sink bound -> no-op, must not raise
+
+
+@pytest.mark.asyncio
+async def test_local_reporter_routes_to_bound_sink():
+    received = []
+
+    async def sink(anomaly):
+        received.append(anomaly)
+
+    reporter = LocalAnomalyReporter()
+    reporter.bind(sink)
+    anomaly = Anomaly(
+        detector="d", kind=AnomalyKind.TOOL_ERROR_RATE, severity=Severity.HIGH, member_name="m", summary="s"
+    )
+    await reporter.report(anomaly)
+    assert received == [anomaly]
