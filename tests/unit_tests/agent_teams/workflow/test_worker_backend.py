@@ -43,6 +43,7 @@ class _FakeWorkerBackend(TeamWorkerBackend):
         *,
         member_name: str,
         has_schema: bool,
+        model: Any,
     ) -> str:
         if has_schema and tools:
             tools[0].captured = {"answer": f"done::{member_name}"}
@@ -87,7 +88,7 @@ def test_missing_submit_makes_agent_return_none(tmp_path):
     """
 
     class _SilentWorker(TeamWorkerBackend):
-        async def _execute_worker(self, prompt, tools, *, member_name, has_schema):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model):
             return ""  # never fills submit_result
 
     script = _write(tmp_path, _SCRIPT)
@@ -95,6 +96,38 @@ def test_missing_submit_makes_agent_return_none(tmp_path):
     result = asyncio.run(run_workflow(str(script), backend=backend))
     assert result["a"] is None  # structured call gave up after retries
     assert result["b"] == ""  # free-text call returns the empty final message
+
+
+def test_per_call_model_hint_routes_through_resolver(tmp_path):
+    """agent(model=X): known name -> resolved model; unknown / no hint -> default."""
+    script = '''
+from swarmflow import agent
+
+META = {"name": "route", "description": "model routing", "phases": []}
+
+async def run(args):
+    a = await agent("task a", label="a", model="fast")
+    b = await agent("task b", label="b", model="unknown")
+    c = await agent("task c", label="c")
+    return [a, b, c]
+'''
+    seen: list = []
+
+    class _RecordingBackend(TeamWorkerBackend):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model):
+            seen.append(model)
+            return f"ran::{model}"
+
+    backend = _RecordingBackend(
+        model="leader-model",
+        team_backend=None,
+        model_resolver=lambda name: "fast-model" if name == "fast" else None,
+    )
+    result = asyncio.run(run_workflow(_write(tmp_path, script), backend=backend))
+
+    # "fast" resolves; "unknown" misses -> default; no hint -> default.
+    assert result == ["ran::fast-model", "ran::leader-model", "ran::leader-model"]
+    assert seen == ["fast-model", "leader-model", "leader-model"]
 
 
 def test_preprocess_builds_four_layer_offline(tmp_path):
