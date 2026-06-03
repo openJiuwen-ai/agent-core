@@ -25,8 +25,9 @@ Concurrency model:
 
 ``contextvars`` isolation: ``asyncio.gather`` wraps each coroutine in a Task,
 which copies the current context — so a branch/chain's ``_path``/``_seq`` writes
-are private to that branch. ``CancelledError`` is always re-raised (never
-swallowed) so runs stay cancellable.
+are private to that branch. ``CancelledError`` is a ``BaseException`` (not
+``Exception``), so the broad ``except Exception`` guards never swallow it and
+runs stay cancellable without an explicit re-raise clause.
 
 Observability hooks (the one divergence from a pure port): ``phase`` / ``log``
 and ``agent`` start/end emit structured :class:`WorkflowProgressEvent`s to
@@ -161,19 +162,29 @@ async def agent(
     prompt: str, *, schema: type[M],
     label: str | None = ..., phase: str | None = ...,
     model: str | None = ..., timeout: float | None = ...,
-) -> "M | None": ...
+) -> "M | None":
+    """Overload: ``schema=<pydantic model>`` narrows the result to that model."""
+    ...
+
+
 @overload
 async def agent(
     prompt: str, *, schema: dict,
     label: str | None = ..., phase: str | None = ...,
     model: str | None = ..., timeout: float | None = ...,
-) -> "dict | None": ...
+) -> "dict | None":
+    """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
+    ...
+
+
 @overload
 async def agent(
     prompt: str, *, schema: None = ...,
     label: str | None = ..., phase: str | None = ...,
     model: str | None = ..., timeout: float | None = ...,
-) -> "str | None": ...
+) -> "str | None":
+    """Overload: no ``schema`` returns the agent's raw text."""
+    ...
 
 
 async def agent(
@@ -235,8 +246,6 @@ async def _call_backend(rt, prompt, opts, json_schema, model) -> Any:
                     res = await rt.backend.run(prompt, opts, json_schema)
             else:
                 res = await rt.backend.run(prompt, opts, json_schema)
-        except asyncio.CancelledError:
-            raise
         except Exception as e:  # backend / timeout error -> retry, then skip
             last_err = e
             continue
@@ -246,8 +255,6 @@ async def _call_backend(rt, prompt, opts, json_schema, model) -> Any:
         if json_schema is not None:
             try:
                 return coerce(res.structured, json_schema, model)
-            except asyncio.CancelledError:
-                raise
             except Exception as e:  # validation failure -> retry
                 last_err = e
                 continue
@@ -298,9 +305,9 @@ async def parallel(thunks: Sequence[Callable[[], Awaitable]]) -> list:
         try:
             r = th()
             return await r if inspect.isawaitable(r) else r
-        except asyncio.CancelledError:
-            raise
         except Exception:
+            # CancelledError is BaseException, not caught here — cancellation
+            # still propagates out of the branch; only real errors map to None.
             return None
 
     return await asyncio.gather(*[branch(i, th) for i, th in enumerate(thunks)])
@@ -321,10 +328,10 @@ async def pipeline(items: Sequence, *stages: Callable) -> list:
                 r = stage(prev, item, i)  # stage may be sync (returning awaitable) or async
                 prev = await r if inspect.isawaitable(r) else r
             return prev
-        except asyncio.CancelledError:
-            raise
         except Exception:
-            return None  # first throwing stage drops THIS item, skips its rest
+            # CancelledError is BaseException, not caught here — cancellation
+            # still propagates; the first throwing stage drops THIS item only.
+            return None
 
     return await asyncio.gather(*[chain(i, it) for i, it in enumerate(items)])
 
@@ -384,10 +391,12 @@ class _Budget:
     def total(self) -> int | None:
         return _rt.get().budget_total
 
-    def spent(self) -> int:
+    @staticmethod
+    def spent() -> int:
         return _rt.get().tokens_spent
 
-    def remaining(self) -> int | None:
+    @staticmethod
+    def remaining() -> int | None:
         rt = _rt.get()
         return None if rt.budget_total is None else rt.budget_total - rt.tokens_spent
 
@@ -425,7 +434,12 @@ def compact(xs: Sequence) -> list:
 
 def flatten_filter(xs: Sequence) -> list:
     """``xs.flat().filter(Boolean)`` — one level, None sublists tolerated."""
-    return [x for sub in xs for x in (sub or []) if x]
+    out: list = []
+    for sub in xs:
+        for x in sub or []:
+            if x:
+                out.append(x)
+    return out
 
 
 # ─────────────────────── entrypoint ───────────────────────

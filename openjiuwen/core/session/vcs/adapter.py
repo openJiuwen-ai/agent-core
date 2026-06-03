@@ -15,7 +15,8 @@ existing code:
 """
 import uuid
 from copy import deepcopy
-from typing import Callable
+from dataclasses import dataclass
+from typing import Any, Callable
 
 from openjiuwen.core.session.vcs import constants as const
 from openjiuwen.core.session.vcs.backend import VersioningBackend
@@ -23,6 +24,20 @@ from openjiuwen.core.session.vcs.codec import decode_context_state, encode_conte
 from openjiuwen.core.session.vcs.config import VersioningConfig, build_backend
 from openjiuwen.core.session.vcs.manager import VersioningManager
 from openjiuwen.core.session.vcs.models import ForkResult, Head, Snapshot
+
+
+@dataclass(frozen=True)
+class _Wiring:
+    """Dependencies needed to (re)build a VersioningManager for a session.
+
+    Bundles the three co-traveling inputs (context engine, backend factory,
+    config) so the build/fork helpers pass one value instead of a long
+    argument list.
+    """
+
+    context_engine: Any
+    backend_factory: Callable[[str], VersioningBackend]
+    config: VersioningConfig
 
 
 def _strip_context(full_state: dict) -> dict:
@@ -83,32 +98,32 @@ def for_session(
         def backend_factory(sid: str) -> VersioningBackend:
             return build_backend(sid, config, kv_store=kv_store)
 
-    return _build_manager(session, context_engine, backend_factory, config)
+    return _build_manager(session, _Wiring(context_engine, backend_factory, config))
 
 
-def _build_manager(session, context_engine, backend_factory, config) -> VersioningManager:
+def _build_manager(session, wiring: _Wiring) -> VersioningManager:
     session_id = session.get_session_id()
 
     async def provider() -> dict:
-        return await _snapshot(session, context_engine)
+        return await _snapshot(session, wiring.context_engine)
 
     async def applier(snapshot: dict) -> None:
-        await _apply(session, context_engine, snapshot)
+        await _apply(session, wiring.context_engine, snapshot)
 
     async def forker(new_id: str, seed: dict, forked_from: tuple[str, str]) -> ForkResult:
-        return await _fork_session(session, context_engine, backend_factory, config, new_id, seed, forked_from)
+        return await _fork_session(session, wiring, new_id, seed, forked_from)
 
     return VersioningManager(
         session_id,
-        backend_factory(session_id),
+        wiring.backend_factory(session_id),
         snapshot_provider=provider,
         applier=applier,
         forker=forker,
-        snapshot_every=config.snapshot_every,
+        snapshot_every=wiring.config.snapshot_every,
     )
 
 
-async def _fork_session(source_session, context_engine, backend_factory, config, new_id, seed, forked_from) -> ForkResult:
+async def _fork_session(source_session, wiring: _Wiring, new_id, seed, forked_from) -> ForkResult:
     """Clone a new Session seeded from `seed` and bind a fresh VersioningManager."""
     from openjiuwen.core.session.agent import create_agent_session
 
@@ -117,9 +132,9 @@ async def _fork_session(source_session, context_engine, backend_factory, config,
         envs=source_session.get_envs(),
         card=source_session._card,
     )
-    await _apply(new_session, context_engine, seed)
+    await _apply(new_session, wiring.context_engine, seed)
 
-    new_backend = backend_factory(new_id)
+    new_backend = wiring.backend_factory(new_id)
     await new_backend.put_snapshot(
         Snapshot(
             snapshot_id=uuid.uuid4().hex,
@@ -130,5 +145,5 @@ async def _fork_session(source_session, context_engine, backend_factory, config,
     )
     await new_backend.put_head(Head(event_id=0, forked_from=forked_from))
 
-    new_vc = _build_manager(new_session, context_engine, backend_factory, config)
+    new_vc = _build_manager(new_session, wiring)
     return ForkResult(session_id=new_id, session=new_session, version_control=new_vc)

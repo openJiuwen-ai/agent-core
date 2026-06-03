@@ -299,7 +299,10 @@ STRINGS: dict[str, dict[str, str]] = {
             "or reply."
         ),
         # agent/coordination/handlers/workflow.py — swarmflow spectator broadcast
-        "workflow.started": "[Workflow] Orchestration of '{name}' has started; I will report progress to you at each phase.",
+        "workflow.started": (
+            "[Workflow] Orchestration of '{name}' has started; I will "
+            "report progress to you at each phase."
+        ),
         "workflow.phase": "[Workflow] Entering phase: {phase}",
         "workflow.completed": "[Workflow] Orchestration of '{name}' is complete.",
     },

@@ -72,7 +72,8 @@ def _resolve_ref(ref: str, root: dict) -> dict:
 def _synth_string(key: str | None, rng: random.Random) -> str:
     k = (key or "").lower()
     n = rng.randint(1000, 9999)
-    if ("url" in k or "link" in k or "source" in k) and "quality" not in k:
+    url_like = "url" in k or "link" in k or "source" in k
+    if url_like and "quality" not in k:
         return f"https://example{rng.randint(1, 99)}.test/{k or 'page'}/{n}"
     if "file" in k or "path" in k:
         return f"/tmp/wf-mock/{k or 'out'}_{n}.md"

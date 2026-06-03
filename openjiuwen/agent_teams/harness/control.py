@@ -16,7 +16,7 @@ from openjiuwen.agent_teams.harness.state import InboxMessage
 
 
 @dataclass(frozen=True, slots=True)
-class _Cmd_Send:
+class _CmdSend:
     """A send() invocation reaching the supervisor.
 
     Attributes:
@@ -29,7 +29,7 @@ class _Cmd_Send:
 
 
 @dataclass(frozen=True, slots=True)
-class _Cmd_Abort:
+class _CmdAbort:
     """An abort() invocation reaching the supervisor.
 
     Attributes:
@@ -44,7 +44,7 @@ class _Cmd_Abort:
 
 
 @dataclass(frozen=True, slots=True)
-class _Cmd_Pause:
+class _CmdPause:
     """A pause() invocation reaching the supervisor.
 
     Attributes:
@@ -56,7 +56,7 @@ class _Cmd_Pause:
 
 
 @dataclass(frozen=True, slots=True)
-class _Cmd_RoundFinished:
+class _CmdRoundFinished:
     """Internal notification emitted by the round task when it finishes
     (success, cancellation, or error).
 
@@ -74,7 +74,7 @@ class _Cmd_RoundFinished:
 
 
 @dataclass(frozen=True, slots=True)
-class _Cmd_Stop:
+class _CmdStop:
     """A stop() invocation reaching the supervisor.
 
     Attributes:
@@ -86,9 +86,9 @@ class _Cmd_Stop:
 
 
 ControlEvent = Union[
-    _Cmd_Send,
-    _Cmd_Abort,
-    _Cmd_Pause,
-    _Cmd_RoundFinished,
-    _Cmd_Stop,
+    _CmdSend,
+    _CmdAbort,
+    _CmdPause,
+    _CmdRoundFinished,
+    _CmdStop,
 ]

@@ -58,11 +58,11 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.state import DeepAgentState
 from openjiuwen.agent_teams.harness.control import (
-    _Cmd_Abort,
-    _Cmd_Pause,
-    _Cmd_RoundFinished,
-    _Cmd_Send,
-    _Cmd_Stop,
+    _CmdAbort,
+    _CmdPause,
+    _CmdRoundFinished,
+    _CmdSend,
+    _CmdStop,
 )
 from openjiuwen.agent_teams.harness.outputs import _END, _OutputIterator
 from openjiuwen.agent_teams.harness.snapshot_rail import (
@@ -175,7 +175,7 @@ class NativeHarness(DeepAgent):
         # instance behaves exactly like the configured template.
         self.card = template.card
         self.configure(template.deep_config)
-        for rail in (*template._pending_rails, *template._registered_rails):
+        for rail in template.configured_rails():
             self.add_rail(rail)
         # Round-boundary snapshot rail (AFTER_TASK_ITERATION is a deep event, so
         # add_rail/register_rail routes it onto this outer DeepAgent).
@@ -250,7 +250,7 @@ class NativeHarness(DeepAgent):
         if self._st.supervisor_task is None or self._st.phase is HarnessState.TERMINATED:
             return
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
-        await self._control.put(_Cmd_Stop(ack=ack))
+        await self._control.put(_CmdStop(ack=ack))
         try:
             await ack
         except Exception:
@@ -371,7 +371,7 @@ class NativeHarness(DeepAgent):
         self._require_alive()
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
         msg = InboxMessage(seq=0, content=content, immediate=immediate)
-        await self._control.put(_Cmd_Send(msg=msg, ack=ack))
+        await self._control.put(_CmdSend(msg=msg, ack=ack))
         return await ack
 
     async def abort(self, *, immediate: bool = False) -> None:
@@ -392,7 +392,7 @@ class NativeHarness(DeepAgent):
         """
         self._require_alive()
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
-        await self._control.put(_Cmd_Abort(immediate=immediate, ack=ack))
+        await self._control.put(_CmdAbort(immediate=immediate, ack=ack))
         await ack
 
     async def pause(self) -> None:
@@ -407,7 +407,7 @@ class NativeHarness(DeepAgent):
         """
         self._require_alive()
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
-        await self._control.put(_Cmd_Pause(ack=ack))
+        await self._control.put(_CmdPause(ack=ack))
         await ack
 
     # ------------------------------------------------------------------
@@ -443,7 +443,7 @@ class NativeHarness(DeepAgent):
 
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
         msg = InboxMessage(seq=0, content=query, immediate=False)
-        await self._control.put(_Cmd_Send(msg=msg, ack=ack))
+        await self._control.put(_CmdSend(msg=msg, ack=ack))
         try:
             await ack
         except Exception:
@@ -478,7 +478,7 @@ class NativeHarness(DeepAgent):
         try:
             while self._st.phase is not HarnessState.TERMINATED:
                 cmd = await self._control.get()
-                if isinstance(cmd, _Cmd_Stop):
+                if isinstance(cmd, _CmdStop):
                     await self._on_stop(cmd)
                     break
                 try:
@@ -501,13 +501,13 @@ class NativeHarness(DeepAgent):
 
     async def _dispatch(self, cmd: Any) -> None:
         """Route a non-Stop control event to its handler."""
-        if isinstance(cmd, _Cmd_Send):
+        if isinstance(cmd, _CmdSend):
             await self._on_send(cmd)
-        elif isinstance(cmd, _Cmd_Abort):
+        elif isinstance(cmd, _CmdAbort):
             await self._on_abort(cmd)
-        elif isinstance(cmd, _Cmd_Pause):
+        elif isinstance(cmd, _CmdPause):
             await self._on_pause(cmd)
-        elif isinstance(cmd, _Cmd_RoundFinished):
+        elif isinstance(cmd, _CmdRoundFinished):
             await self._on_round_done(cmd)
         else:  # pragma: no cover - defensive
             logger.warning("[NativeHarness] unknown control event: %r", cmd)
@@ -520,7 +520,7 @@ class NativeHarness(DeepAgent):
         """Reject the acks of the crashed command and all queued commands.
 
         Without this, a supervisor that crashed (or stopped with commands still
-        queued behind ``_Cmd_Stop``) would leave callers blocked on
+        queued behind ``_CmdStop``) would leave callers blocked on
         ``await ack`` forever.
         """
         err = crash_exc if crash_exc is not None else build_error(
@@ -544,7 +544,7 @@ class NativeHarness(DeepAgent):
     # Event handlers (single-writer, serialized by supervisor)
     # ------------------------------------------------------------------
 
-    async def _on_send(self, cmd: _Cmd_Send) -> None:
+    async def _on_send(self, cmd: _CmdSend) -> None:
         """Route a send according to current phase."""
         seq = self._st.next_seq()
         msg = InboxMessage(seq=seq, content=cmd.msg.content, immediate=cmd.msg.immediate)
@@ -578,7 +578,7 @@ class NativeHarness(DeepAgent):
             await self._emit_round("started", active.round_id)
         cmd.ack.set_result(seq)
 
-    async def _on_abort(self, cmd: _Cmd_Abort) -> None:
+    async def _on_abort(self, cmd: _CmdAbort) -> None:
         """Handle graceful or immediate abort."""
         phase = self._st.phase
         if phase is HarnessState.IDLE:
@@ -616,7 +616,7 @@ class NativeHarness(DeepAgent):
                 coordinator.request_abort()
         cmd.ack.set_result(None)
 
-    async def _on_pause(self, cmd: _Cmd_Pause) -> None:
+    async def _on_pause(self, cmd: _CmdPause) -> None:
         """Cancel current round, roll back to its pre-round baseline, cache query."""
         if self._st.phase is not HarnessState.RUNNING:
             cmd.ack.set_result(None)
@@ -644,7 +644,7 @@ class NativeHarness(DeepAgent):
         await self._transition(HarnessState.PAUSED)
         cmd.ack.set_result(None)
 
-    async def _on_round_done(self, cmd: _Cmd_RoundFinished) -> None:
+    async def _on_round_done(self, cmd: _CmdRoundFinished) -> None:
         """Round finished naturally; reuse DeepAgent's multi-round decision.
 
         Mirrors the per-round tail of ``DeepAgent._run_task_loop``: advance the
@@ -719,7 +719,7 @@ class NativeHarness(DeepAgent):
 
         await self._transition(HarnessState.IDLE)
 
-    async def _on_stop(self, cmd: _Cmd_Stop) -> None:
+    async def _on_stop(self, cmd: _CmdStop) -> None:
         """Terminal cleanup: cancel active round, transition TERMINATED.
 
         The controller teardown + output stream close happen in ``stop()``
@@ -793,7 +793,7 @@ class NativeHarness(DeepAgent):
         cancel the scheduler task running ``react_agent.invoke``; awaits the
         round result; writes it to the stream. On cancellation (immediate
         abort / pause) the CancelledError propagates so the wait unwinds; a
-        ``_Cmd_RoundFinished`` is always posted so the supervisor can transition.
+        ``_CmdRoundFinished`` is always posted so the supervisor can transition.
 
         Args:
             active: The round being driven.
@@ -829,7 +829,7 @@ class NativeHarness(DeepAgent):
             error = exc
         finally:
             await self._control.put(
-                _Cmd_RoundFinished(
+                _CmdRoundFinished(
                     round_id=active.round_id,
                     error=error,
                     result=result,
@@ -939,11 +939,12 @@ class NativeHarness(DeepAgent):
         Runs until ``stop()`` closes the session stream (END_FRAME ends the
         iterator), then emits the ``_END`` sentinel so ``outputs()`` terminates.
         """
+        # CancelledError is BaseException (not Exception) on py3.8+, so the broad
+        # ``except Exception`` below never catches it — cancellation propagates
+        # naturally while ``finally`` still emits the _END sentinel.
         try:
             async for chunk in self._session.stream_iterator():
                 await self._st.output_queue.put(chunk)
-        except asyncio.CancelledError:
-            raise
         except Exception:
             logger.exception("[NativeHarness] output forwarder crashed")
         finally:

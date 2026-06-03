@@ -138,12 +138,12 @@ def _lint(tree: ast.Module, path: str) -> list[str]:
     for comp in ast.walk(tree):
         if isinstance(comp, (ast.ListComp, ast.GeneratorExp, ast.SetComp)):
             for inner in ast.walk(comp):
-                if (
+                is_bare_lambda = (
                     isinstance(inner, ast.Lambda)
                     and not inner.args.defaults
                     and not inner.args.kw_defaults
-                    and _calls_thunk_target(inner.body)
-                ):
+                )
+                if is_bare_lambda and _calls_thunk_target(inner.body):
                     warnings.append(
                         f"{path}:{inner.lineno}: `lambda: agent(...)` in a comprehension "
                         f"late-binds the loop var. Use `lambda x=x: agent(...)` or `map_parallel`."

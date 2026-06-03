@@ -46,10 +46,12 @@ class EngineProvider:
     async def map_parallel(self, items: Sequence, fn: Callable) -> list:
         return await _p.map_parallel(items, fn)
 
-    def phase(self, title: str) -> None:
+    @staticmethod
+    def phase(title: str) -> None:
         _p.phase(title)
 
-    def log(self, message: Any) -> None:
+    @staticmethod
+    def log(message: Any) -> None:
         _p.log(message)
 
     async def workflow(self, name_or_path: str, args: Any = None) -> Any:

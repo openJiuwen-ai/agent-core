@@ -1158,6 +1158,14 @@ class DeepAgent(BaseAgent):
         self._pending_rails.append(rail)
         return self
 
+    def configured_rails(self) -> List[AgentRail]:
+        """Return all queued + registered rails (pending first, then registered).
+
+        Public accessor for hosts that need to copy a template agent's full rail
+        set without touching DeepAgent's internal rail lists directly.
+        """
+        return [*self._pending_rails, *self._registered_rails]
+
     def find_rails_by_type(self, rail_types: tuple[type, ...]) -> List[AgentRail]:
         """Return queued + registered rails matching any of the given types.
 

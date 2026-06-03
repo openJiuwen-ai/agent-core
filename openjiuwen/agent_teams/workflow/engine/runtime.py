@@ -7,12 +7,11 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
 from .backends.base import AgentBackend
 from .journal import Journal
 from .progress import ProgressSink, noop_progress_sink
-from typing import Any
 
 
 def _noop_log(message: str) -> None:

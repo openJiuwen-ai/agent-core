@@ -223,8 +223,8 @@ class StreamController:
                             member_name or "?",
                         )
                         self.remove_chunk_observer(ob)
-        except asyncio.CancelledError:
-            raise
+        # CancelledError is BaseException, never caught by ``except Exception`` —
+        # cancellation propagates without an explicit re-raise clause.
         except Exception:
             team_logger.exception("[{}] output forwarder crashed", member_name or "?")
 

@@ -57,19 +57,29 @@ async def agent(
     prompt: str, *, schema: type[M],
     label: str | None = ..., phase: str | None = ...,
     model: str | None = ..., timeout: float | None = ...,
-) -> "M | None": ...
+) -> "M | None":
+    """Overload: ``schema=<pydantic model>`` narrows the result to that model."""
+    ...
+
+
 @overload
 async def agent(
     prompt: str, *, schema: dict,
     label: str | None = ..., phase: str | None = ...,
     model: str | None = ..., timeout: float | None = ...,
-) -> "dict | None": ...
+) -> "dict | None":
+    """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
+    ...
+
+
 @overload
 async def agent(
     prompt: str, *, schema: None = ...,
     label: str | None = ..., phase: str | None = ...,
     model: str | None = ..., timeout: float | None = ...,
-) -> "str | None": ...
+) -> "str | None":
+    """Overload: no ``schema`` returns the agent's raw text."""
+    ...
 
 
 async def agent(
@@ -127,10 +137,12 @@ class _BudgetProxy:
     def total(self) -> int | None:
         return current_provider().budget.total
 
-    def spent(self) -> int:
+    @staticmethod
+    def spent() -> int:
         return current_provider().budget.spent()
 
-    def remaining(self) -> int | None:
+    @staticmethod
+    def remaining() -> int | None:
         return current_provider().budget.remaining()
 
 
@@ -147,7 +159,12 @@ def compact(xs: Sequence) -> list:
 
 def flatten_filter(xs: Sequence) -> list:
     """``xs.flat().filter(Boolean)`` — one level, None sublists tolerated."""
-    return [x for sub in xs for x in (sub or []) if x]
+    out: list = []
+    for sub in xs:
+        for x in sub or []:
+            if x:
+                out.append(x)
+    return out
 
 
 __all__ = [

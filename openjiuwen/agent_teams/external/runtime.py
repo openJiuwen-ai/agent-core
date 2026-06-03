@@ -282,11 +282,11 @@ class _CliRuntimeBase(ABC):
         events are suppressed.
         """
         error: Optional[BaseException] = None
+        # CancelledError is BaseException, never caught by ``except Exception`` —
+        # cancellation propagates while a crash is captured into ``error``.
         try:
             async for chunk in self._drive({"query": content}):
                 await self._output_queue.put(chunk)
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:  # noqa: BLE001 - reported via round event
             error = exc
             team_logger.exception("[{}] external cli turn crashed", self._member_name)
