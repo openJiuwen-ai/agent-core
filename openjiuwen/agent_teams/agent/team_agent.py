@@ -305,22 +305,13 @@ class TeamAgent(BaseAgent):
         return self._has_in_flight_round()
 
     async def deliver_input(self, content: Any, *, use_steer: bool = True) -> None:
-        if self._is_agent_running():
-            if use_steer:
-                await self.steer(content)
-            else:
-                await self.follow_up(content)
+        # The runtime's single supervisor serialises inputs: send() starts a
+        # round when idle, steers (use_steer) or queues a follow-up when running.
+        # No transition-window race, so no manual branch / pending queue here.
+        harness = self.harness
+        if harness is None:
             return
-        if self._has_in_flight_round():
-            preview = content if isinstance(content, str) else type(content).__name__
-            team_logger.info(
-                "[{}] queueing input for next round (transition window): {:.60}",
-                self._member_name() or "?",
-                str(preview),
-            )
-            self._stream_controller.pending_inputs.append(content)
-            return
-        await self._start_agent(content)
+        await harness.send(content, immediate=use_steer)
 
     def has_pending_interrupt(self) -> bool:
         return self._stream_controller.has_pending_interrupt()
@@ -329,7 +320,9 @@ class TeamAgent(BaseAgent):
         await self._start_agent(content)
 
     async def follow_up(self, content: str) -> None:
-        await self._stream_controller.follow_up(content)
+        harness = self.harness
+        if harness is not None:
+            await harness.send(content, immediate=False)
 
     async def cancel_agent(self) -> None:
         team_logger.debug("[{}] cancel_agent requested", self._member_name() or "?")
@@ -399,20 +392,19 @@ class TeamAgent(BaseAgent):
             )
 
     async def steer(self, content: str) -> None:
-        await self._stream_controller.steer(content)
+        harness = self.harness
+        if harness is not None:
+            await harness.send(content, immediate=True)
 
     async def resume_interrupt(self, user_input) -> None:
         if not self._stream_controller.is_valid_interrupt_resume(user_input):
             team_logger.info("[{}] dropping stale interrupt resume input", self._member_name() or "?")
             return
-        if self._has_in_flight_round():
-            team_logger.info(
-                "[{}] queueing interrupt resume until current round completes",
-                self._member_name() or "?",
-            )
-            self._stream_controller.pending_interrupt_resumes.append(user_input)
-            return
-        await self._start_agent(user_input)
+        # The supervisor serialises the resume: send() either starts the resume
+        # round (idle) or steers it into the active one — no pending queue.
+        harness = self.harness
+        if harness is not None:
+            await harness.send(user_input)
 
     # ------------------------------------------------------------------
     # BaseAgent abstract method: configure
@@ -683,7 +675,9 @@ class TeamAgent(BaseAgent):
         self._stream_controller.emit_completion_and_close(member_count, task_count)
 
     async def _start_agent(self, initial_message: Any) -> None:
-        await self._stream_controller.start_round(initial_message)
+        harness = self.harness
+        if harness is not None:
+            await harness.send(initial_message)
 
     def _initial_leader_route_payloads(self, raw_query: str) -> list["InteractPayload"] | None:
         """Parse leader initial input when it uses explicit team routing."""

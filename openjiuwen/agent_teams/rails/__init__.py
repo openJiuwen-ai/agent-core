@@ -9,8 +9,6 @@ Layout:
   into the agent's shared system prompt builder.
 - ``team_tool_rail``: ``TeamToolRail`` — registers role-appropriate
   team coordination tools onto the agent's ability manager.
-- ``first_iteration_gate``: ``FirstIterationGate`` — async signal that
-  unblocks once the agent enters its first task-loop iteration.
 - ``tool_approval_rail``: ``TeamToolApprovalRail`` — leader-mediated
   approval gate for teammate tool calls.
 - ``team_plan_mode_rail``: ``TeamPlanModeRail`` — team.plan leader
@@ -19,7 +17,6 @@ Layout:
 
 from __future__ import annotations
 
-from openjiuwen.agent_teams.rails.first_iteration_gate import FirstIterationGate
 from openjiuwen.agent_teams.rails.team_policy_rail import TeamPolicyRail
 from openjiuwen.agent_teams.rails.team_plan_mode_rail import TeamPlanModeRail
 from openjiuwen.agent_teams.rails.team_tool_rail import (
@@ -29,7 +26,6 @@ from openjiuwen.agent_teams.rails.team_tool_rail import (
 from openjiuwen.agent_teams.rails.tool_approval_rail import TeamToolApprovalRail
 
 __all__ = [
-    "FirstIterationGate",
     "TeamPolicyRail",
     "TeamPlanModeRail",
     "TeamToolApprovalRail",

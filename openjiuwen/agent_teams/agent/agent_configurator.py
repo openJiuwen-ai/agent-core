@@ -51,7 +51,6 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.member_runtime import MemberRuntime
     from openjiuwen.agent_teams.memory.manager import TeamMemoryManager
     from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
-    from openjiuwen.agent_teams.rails import FirstIterationGate
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
@@ -175,14 +174,6 @@ class AgentConfigurator:
     @memory_manager.setter
     def memory_manager(self, value: Optional["TeamMemoryManager"]) -> None:
         self._resources.memory_manager = value
-
-    @property
-    def first_iter_gate(self) -> Optional["FirstIterationGate"]:
-        return self._resources.first_iter_gate
-
-    @first_iter_gate.setter
-    def first_iter_gate(self, value: Optional["FirstIterationGate"]) -> None:
-        self._resources.first_iter_gate = value
 
     @property
     def model_allocator(self) -> Optional["ModelAllocator"]:
@@ -412,18 +403,6 @@ class AgentConfigurator:
             expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
         )
 
-        # Human agents have no autonomous task loop and no mailbox poll
-        # cycle — their input arrives through HumanAgentInbox, and team
-        # messages addressed to them are passed through to the external
-        # user. Skipping FirstIterationGate keeps
-        # ``enqueue_mailbox_after_first_iteration`` a no-op for them.
-        first_iter_gate = None
-        if ctx.role != TeamRole.HUMAN_AGENT:
-            from openjiuwen.agent_teams.rails import FirstIterationGate
-
-            first_iter_gate = FirstIterationGate()
-            self.first_iter_gate = first_iter_gate
-
         team_workspace_rail = None
         if self.workspace_manager:
             from openjiuwen.agent_teams.team_workspace.rails import TeamWorkspaceRail
@@ -459,7 +438,6 @@ class AgentConfigurator:
             member_name=member_name,
             team_tool_rail=team_tool_rail,
             team_policy_rail=team_policy_rail,
-            first_iter_gate=first_iter_gate,
             team_workspace_rail=team_workspace_rail,
             tool_approval_rail=tool_approval_rail,
             team_plan_mode_rail=team_plan_mode_rail,
