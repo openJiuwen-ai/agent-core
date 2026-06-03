@@ -27,7 +27,7 @@
 | `spawn_manager.py` | `SpawnManager` | teammate 进程生命周期：拉起 / 心跳 / 重启 / 取消 |
 | `recovery_manager.py` | `RecoveryManager` | 团队级容错：成员崩溃恢复、状态对齐 |
 | `session_manager.py` | `SessionManager` | session checkpoint 读写、生命周期 |
-| `stream_controller.py` | `StreamController` | DeepAgent 的 stream 队列、round 状态、pending input、interrupt 收纳；自动给 chunk 升级为 `TeamOutputSchema` 并通过 `add_chunk_observer` 对外 fan-out；`emit_completion_and_close` 发完成标记 chunk + 关流；round-end 经注入的 `request_completion_poll_callback` 触发 leader 完成评估 |
+| `stream_controller.py` | `StreamController` | runtime（NativeHarness/CLI runtime）输出转发 + 状态映射层。`start()` 挂 `_forward_outputs`（消费 `runtime.outputs()`→`_tag_chunk`→stream_queue+observers）+ 注册 `on_state_changed`/`on_round`；不再驱动 round / 排 pending / 自重启（单 supervisor 模型接管）。`_map_state` RUNNING→BUSY、IDLE→READY+`_on_idle_settled`；`_map_round` 走 EXECUTION_TRANSITIONS；transient retry（181001）在 `_handle_retry` swallow+重驱，exhausted/non-retryable 转发不再 raise；自动升级 chunk 为 `TeamOutputSchema` 并 `add_chunk_observer` fan-out；`emit_completion_and_close` 发完成标记 + 关流；`_on_idle_settled` 经注入的 `request_completion_poll_callback` 触发 leader 完成评估 |
 
 ## coordination/ — 唤醒循环
 

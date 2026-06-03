@@ -40,7 +40,7 @@ agent_teams/
 ├── models/              # 多模型部署原语（ModelPoolEntry / 池继承 / Allocator）
 ├── agent/               # 核心运行时（TeamAgent 本体 + 装配链）
 ├── prompts/             # 系统提示词模板、加载器、PromptSection 构造与缓存
-├── rails/               # 团队相关 Rail（系统提示词注入 / 首迭代门 / 工具审批）
+├── rails/               # 团队相关 Rail（系统提示词注入 / 工具审批）
 ├── runtime/             # Runner 进程内 TeamAgent 对象池 + 派发决策 + Run/Interact 并发门禁
 ├── interaction/         # 外部交互入口（UserInbox / HumanAgentInbox / @ 路由）
 ├── tools/               # 团队工具（Leader / Teammate / Human Agent 可调用的原子操作）
@@ -79,7 +79,6 @@ agent_teams/
 | 文件 | 职责 |
 |---|---|
 | `team_policy_rail.py` | `TeamPolicyRail`：把 prompts/sections 的 `PromptSection` 注入 `SystemPromptBuilder`；含 `MtimeSectionCache` 驱动的 dynamic section 刷新 |
-| `first_iteration_gate.py` | `FirstIterationGate`：异步信号，等到 agent 真正进入 task loop 才放行 steer / follow_up |
 | `tool_approval_rail.py` | `TeamToolApprovalRail`：teammate 调工具时通过消息向 leader 申请审批的中断 rail |
 
 ### schema/ — 数据模型分层
@@ -223,7 +222,7 @@ openclaw 无已知注册方式则 `mcp_inject=none` + 大声告警。MCP server 
 `OPENJIUWEN_TEAM_JOIN` env，自动绑定成员身份。外部 CLI 成员的**系统提示词**复用 team-rail 的
 `build_team_static_sections`（role/workflow/lifecycle/persona，排除其它 DeepAgent rail），经
 claude `--append-system-prompt` / codex `-c developer_instructions` / 其余 prepend 下发；其
-stdout 叙述经 `run_streaming` surface 为 `TeamOutputSchema` chunk、与进程内成员同路 fan-out。
+stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内成员同路 fan-out。
 详见 [[F_22]] 与 [[F_25_external-cli-hardening-and-gemini]]。
 
 设计文档见 `docs/features/F_21_external-agent-access.md`（接入面 + spawn 接线）与
