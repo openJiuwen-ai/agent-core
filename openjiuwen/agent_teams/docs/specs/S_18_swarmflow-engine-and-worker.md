@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `workflow/`（engine / backends / observer / schema / runner / tool_swarmflow）、`schema/team.py`、`schema/events.py`、`schema/blueprint.py`、`agent/team_agent.py`、`agent/coordination/handlers/workflow.py`、`rails/team_policy_rail.py`、`prompts/sections.py` |
-| 最近一次修订日期 | 2026-06-02 |
-| 关联 feature | `F_27_swarmflow-workflow-orchestration.md` |
+| 最近一次修订日期 | 2026-06-03 |
+| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md` |
 
 ## 范围 / 边界
 
@@ -38,7 +38,7 @@
 1. **单轮、无状态、用完即弃**：一个 `agent()` 调用对应一个 worker；worker 跑一轮 DeepAgent 即销毁，上下文每次全新。
 2. **不进 coordination 协作循环**：worker 不订阅消息总线、不认领任务、不多轮、不被 dispatcher 唤醒。它由 `TeamWorkerBackend` 直接 `create_deep_agent` + `Runner.run_agent` 执行，**不经** `TeamAgent.invoke` / `CoordinationKernel.start`。
 3. **有 roster 身份**：`TeamWorkerBackend` 经 `spawn_member(role=WORKER, status=BUSY)` 开 DB row（member_name 形如 `wf-<label-slug>-<n>`，满足 `_MEMBER_NAME_PATTERN`），完成标 `SHUTDOWN`。row 操作 best-effort，失败不阻断执行。
-4. **model**：worker 复用 leader 的 model（`TeamWorkerBackend(model=leader_agent.harness.model)`）。
+4. **model**：worker 默认复用 leader 的 model（`TeamWorkerBackend(model=leader_agent.harness.model)`）。`agent(model="X")` 的 per-call hint 经注入的 `model_resolver` 回调解析——`run_swarmflow_background` 用 `resolve_member_model(team_spec, model_name="X", model_index=None)` 对 team model pool 做**纯位置查找**（无 allocator 轮转、无状态），命中则该 worker 用 pool 条目的 model。pool 未配 / 名字缺失 / 无 hint 一律回退 leader model。解析逻辑留在 team 层（`run_swarmflow_background`），`TeamWorkerBackend` 只持 `(name) -> Model | None` 回调，engine 对接层不耦合 pool/allocator 结构。
 
 ## 结构化输出工具协议（`SubmitResultTool`）
 
