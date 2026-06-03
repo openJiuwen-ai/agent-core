@@ -65,6 +65,9 @@ class TraceBaseHandler:
     def _get_node_status(span: Span) -> str:
         if span.error:
             return NodeStatus.ERROR.value
+        inner_error = getattr(span, "inner_error", None)
+        if inner_error:
+            return NodeStatus.ERROR.value
         if span.on_invoke_data:
             return NodeStatus.RUNNING.value if not span.end_time else NodeStatus.FINISH.value
         if span.end_time:
@@ -315,7 +318,11 @@ class TraceWorkflowHandler(TraceBaseHandler):
                 span.error = {"error_code": StatusCode.WORKFLOW_EXECUTION_ERROR.code,
                               "message": StatusCode.WORKFLOW_EXECUTION_ERROR.errmsg.format(reason=str(exception))}
             if on_invoke_data:
-                span.on_invoke_data.append(on_invoke_data)
+                if isinstance(on_invoke_data, dict) and "inner_error" in on_invoke_data:
+                    span.inner_error = on_invoke_data["inner_error"]
+                    span.on_invoke_data.append(on_invoke_data)
+                else:
+                    span.on_invoke_data.append(on_invoke_data)
             update_data = {
                 "end_time": end_time
             }
@@ -325,7 +332,11 @@ class TraceWorkflowHandler(TraceBaseHandler):
         else:
             if not isinstance(span.on_invoke_data, list):
                 span.on_invoke_data = []
-            span.on_invoke_data.append(on_invoke_data)
+            if isinstance(on_invoke_data, dict) and "inner_error" in on_invoke_data:
+                span.inner_error = on_invoke_data["inner_error"]
+                span.on_invoke_data.append(on_invoke_data)
+            else:
+                span.on_invoke_data.append(on_invoke_data)
         self._span_manager.update_span(span, update_data)
 
         await self._send_data(span)

@@ -43,6 +43,24 @@ http-server = [
 ]
 
 [[package]]
+name = "adbutils"
+version = "2.12.0"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
+dependencies = [
+    { name = "deprecation" },
+    { name = "pillow" },
+    { name = "requests" },
+    { name = "retry2" },
+]
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/64/a9/ebe3356cb224d5bbbf9d3d31ef6d31935d356340b2d37a09b6796ffcf2f4/adbutils-2.12.0.tar.gz", hash = "sha256:3653a8f39735620bc45b15ee2e7a00e502c9f1a259452e1fb2bbba3ea59d0e68" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/fb/7b/9b8e55a9357244148380bce6ce51402f92fe441f2fb7673cedc6d509dd5b/adbutils-2.12.0-py3-none-macosx_10_9_intel.macosx_10_9_x86_64.macosx_10_10_intel.macosx_10_10_x86_64.whl", hash = "sha256:adf131c746519f8a9576765d8f1315396d2573c9f178d6104e2a42dc9a714a3f" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/9f/bd/47dfb989b4a086cf8ca67b4b56c2760dea5e61064e3869175579c9ccad23/adbutils-2.12.0-py3-none-manylinux1_x86_64.whl", hash = "sha256:fe2699b15150c828a7f81c4753e2f22da9c506b72ac785658ddd90c1362701ee" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/35/2c/4a6c0e7405b61b62698157a50d364348dac1c572f13ec7506b9f9bbc95e9/adbutils-2.12.0-py3-none-win32.whl", hash = "sha256:189e0060737bb84111892ccaf7bcd098603297ecdd89a9224f390c2949ba8a5a" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/d3/b5/da4d7929d2e4db4fe811efcde669e178539e1695ddc33a9c2741998df805/adbutils-2.12.0-py3-none-win_amd64.whl", hash = "sha256:e7629bb5783f4aa40942889da1455c879b21f9d1cc057596003b42f3371543be" },
+]
+
+[[package]]
 name = "agent-sandbox"
 version = "0.0.26"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
@@ -1113,6 +1131,27 @@ dependencies = [
 ]
 wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/f9/35/f1fbc93189da944ea1505647dd2ae3b7f8c2688e1f8087e08ffe043d3c3e/dashscope-1.25.13-py3-none-any.whl", hash = "sha256:03e7ce41954bacc3786ec3f45d5dc01e1a8ccf2741503ce3dc9e4ce60866386e" },
+]
+
+[[package]]
+name = "decorator"
+version = "5.3.1"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/60/8b/32f9823da46cde7df2087faa08cd98d01b908f8dcab982cdba9c84e85355/decorator-5.3.1.tar.gz", hash = "sha256:4cbcdd55a6efadb9dbea26b858f4fb3264567b52d69ca0d25b721b553f60ea82" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/05/7f/798705f5296a58ca505d600456748d1be48078eac8a7050d8a98bc9edb89/decorator-5.3.1-py3-none-any.whl", hash = "sha256:f47fe6fdbd2edd623ecfe36875d37aba411624e2670dd395dddae1358689bb3c" },
+]
+
+[[package]]
+name = "deprecation"
+version = "2.1.0"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
+dependencies = [
+    { name = "packaging" },
+]
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/5a/d3/8ae2869247df154b64c1884d7346d412fed0c49df84db635aab2d1c40e62/deprecation-2.1.0.tar.gz", hash = "sha256:72b3bde64e5d778694b0cf68178aed03d15e15477116add3fb773e581f9518ff" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/02/c3/253a89ee03fc9b9682f1541728eb66db7db22148cd94f89ab22528cd1e1b/deprecation-2.1.0-py2.py3-none-any.whl", hash = "sha256:a10811591210e1fb0e768a8c25517cabeabcba6f0bf96564f8ff45189f90b14a" },
 ]
 
 [[package]]
@@ -3097,6 +3136,10 @@ gaussvector = [
 mem0 = [
     { name = "mem0ai" },
 ]
+mobile-gui = [
+    { name = "pillow" },
+    { name = "uiautomator2" },
+]
 mysql = [
     { name = "aiomysql" },
 ]
@@ -3225,6 +3268,7 @@ requires-dist = [
     { name = "pandas", marker = "extra == 'online-rl'" },
     { name = "pdfplumber", specifier = ">=0.11.8" },
     { name = "pgvector", marker = "extra == 'pgvector'", specifier = ">=0.2.0" },
+    { name = "pillow", marker = "extra == 'mobile-gui'", specifier = ">=10.0.0" },
     { name = "portalocker", specifier = ">=3.2.0" },
     { name = "prompt-toolkit", marker = "extra == 'cli'", specifier = ">=3.0" },
     { name = "protobuf", marker = "extra == 'chromadb'", specifier = ">=5.0,<7.0" },
@@ -3247,9 +3291,10 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.12.0" },
     { name = "tornado", marker = "extra == 'zmq'", specifier = ">=6.1" },
     { name = "transformers", specifier = ">=4.52.4" },
+    { name = "uiautomator2", marker = "extra == 'mobile-gui'", specifier = ">=3.2.0" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'online-rl'" },
 ]
-provides-extras = ["all-a2a", "pulsar", "elasticsearch", "redis", "sqlite", "postgres", "mysql", "gaussdb", "pgvector", "gaussvector", "chromadb", "obs", "zmq", "sandbox", "mem0", "online-rl", "all-mq", "all-storage", "all-vector", "cli", "default", "all"]
+provides-extras = ["all-a2a", "pulsar", "elasticsearch", "redis", "sqlite", "postgres", "mysql", "gaussdb", "pgvector", "gaussvector", "chromadb", "obs", "zmq", "sandbox", "mem0", "mobile-gui", "online-rl", "all-mq", "all-storage", "all-vector", "cli", "default", "all"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -5039,6 +5084,17 @@ wheels = [
 ]
 
 [[package]]
+name = "retry2"
+version = "0.9.5"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
+dependencies = [
+    { name = "decorator" },
+]
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/97/49/1cae6d9b932378cc75f902fa70648945b7ea7190cb0d09ff83b47de3e60a/retry2-0.9.5-py2.py3-none-any.whl", hash = "sha256:f7fee13b1e15d0611c462910a6aa72a8919823988dd0412152bc3719c89a4e55" },
+]
+
+[[package]]
 name = "rich"
 version = "14.3.3"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
@@ -5811,6 +5867,22 @@ source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/5e/a7/c202b344c5ca7daf398f3b8a477eeb205cf3b6f32e7ec3a6bac0629ca975/tzdata-2025.3.tar.gz", hash = "sha256:de39c2ca5dc7b0344f2eba86f49d614019d29f060fc4ebc8a417896a620b56a7" }
 wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/c7/b0/003792df09decd6849a5e39c28b513c06e84436a54440380862b5aeff25d/tzdata-2025.3-py2.py3-none-any.whl", hash = "sha256:06a47e5700f3081aab02b2e513160914ff0694bce9947d6b76ebd6bf57cfc5d1" },
+]
+
+[[package]]
+name = "uiautomator2"
+version = "3.5.0"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
+dependencies = [
+    { name = "adbutils" },
+    { name = "lxml" },
+    { name = "pillow" },
+    { name = "requests" },
+    { name = "retry2" },
+]
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/4c/02/c78f737d8ed8b72e883c96e749a4c87058dd33a4670cbf5b5c28f4c9315c/uiautomator2-3.5.0.tar.gz", hash = "sha256:f6f5e402382c3a662dbda0ace89c691c8d3f9aa340412f8bbfcf5f08249a21a6" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/9c/47/e1d1f82a9569728bb8406729989839e2c2f569dea9a0886b0c5f67659ed5/uiautomator2-3.5.0-py3-none-any.whl", hash = "sha256:3480c6f1cc3f660ba97588516340b65c61098901de355a21f06c059e316aad7a" },
 ]
 
 [[package]]

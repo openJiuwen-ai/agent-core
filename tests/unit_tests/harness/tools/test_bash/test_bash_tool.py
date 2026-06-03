@@ -5,12 +5,15 @@
 import os
 import shutil
 import tempfile
+import unittest
+from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
+from openjiuwen.core.sys_operation.cwd import set_workspace
 from openjiuwen.harness.tools import BashTool
 
 
@@ -268,3 +271,52 @@ async def test_empty_command(sys_op) -> None:
     res = await tool.invoke({"command": ""})
     assert res.success is False
     assert "empty" in res.error
+
+
+# ── history path construction ─────────────────────────────────
+
+class TestBashToolHistoryPath(unittest.TestCase):
+    """Unit tests for _build_history_path — no Runner required."""
+
+    def _make_session(self, session_id: str, agent_id: str | None = None) -> MagicMock:
+        mock = MagicMock()
+        mock.get_session_id.return_value = session_id
+        mock.agent_id.return_value = agent_id
+        return mock
+
+    def test_path_contains_agent_id_and_session_id(self):
+        """History path embeds both agent_id and session_id."""
+        session = self._make_session("sess_abc", agent_id="agent_xyz")
+        tool = BashTool(MagicMock())
+        path = tool._build_history_path(session)
+        assert "agent_xyz" in path
+        assert "sess_abc" in path
+        session.get_session_id.assert_called_once()
+
+    def test_default_agent_id_used_when_none(self):
+        """session.agent_id() returning None falls back to 'default'."""
+        session = self._make_session("s1", agent_id=None)
+        tool = BashTool(MagicMock())
+        path = tool._build_history_path(session)
+        assert "default" in path
+
+    def test_workspace_path_is_base_dir(self):
+        """Workspace ContextVar is used as the base directory."""
+        session = self._make_session("s1", agent_id="a")
+        workspace = tempfile.mkdtemp()
+        try:
+            set_workspace(workspace)
+            tool = BashTool(MagicMock())
+            path = tool._build_history_path(session)
+            assert path.startswith(workspace)
+            assert ".agent_history" in path
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
+
+    def test_filename_pattern(self):
+        """Filename follows file_ops_{agent_id}_{session_id}.json pattern."""
+        session = self._make_session("sess123", agent_id="myagent")
+        tool = BashTool(MagicMock())
+        path = tool._build_history_path(session)
+        filename = os.path.basename(path)
+        assert filename == "file_ops_myagent_sess123.json"

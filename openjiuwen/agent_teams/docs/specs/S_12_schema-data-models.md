@@ -1,5 +1,13 @@
 # Schema Data Models
 
+## Checkpoint `db_state` note
+
+The per-team checkpoint bucket includes `db_state` in addition to
+`spec`, `context`, `model_allocator_state`, and `lifecycle`.
+Valid values are `pending_create`, `created`, and `cleaned`; runtime
+dispatch uses this field when a session bucket exists but the team DB row
+does not.
+
 ## 元信息
 
 | 项 | 值 |

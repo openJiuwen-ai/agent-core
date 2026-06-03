@@ -212,7 +212,7 @@ class ContextEvents(EventBase):
     CONTEXT_OFFLOADED = EventBase.get_event("context_offloaded")
     CONTEXT_RETRIEVED = EventBase.get_event("context_retrieved")
     CONTEXT_CLEARED = EventBase.get_event("context_cleared")
-    CONTEXT_COMPRESSION_STATE = EventBase.get_event("context_compression_state")
+    CONTEXT_COMPRESSION_STATE = EventBase.get_event("context.compression_state")
 
 
 class SessionEvents(EventBase):

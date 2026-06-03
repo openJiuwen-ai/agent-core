@@ -35,6 +35,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
+from openjiuwen.agent_teams.runtime.metadata import (
+    TEAM_DB_STATE_CLEANED,
+    TEAM_DB_STATE_PENDING_CREATE,
+)
 from openjiuwen.agent_teams.runtime.pool import (
     ActiveTeam,
     RuntimeState,
@@ -69,6 +73,7 @@ def decide_run_action(
     pool_entry: Optional[ActiveTeam],
     target_session_id: str,
     target_team_name: str,
+    team_db_state: Optional[str] = None,
 ) -> RunAction:
     """Pick the run path for the given (team, session, pool, checkpoint) state.
 
@@ -79,6 +84,9 @@ def decide_run_action(
         pool_entry: The pool entry for ``target_team_name`` if any, else None.
         target_session_id: The session id the caller wants to bind to.
         target_team_name: The team name being requested.
+        team_db_state: Optional DB lifecycle state stored in the session
+            bucket. ``pending_create`` and ``cleaned`` are recreatable
+            states when the DB row is absent.
 
     Returns:
         A :class:`RunAction` describing what the runtime should do.
@@ -93,8 +101,14 @@ def decide_run_action(
             ),
         )
 
-    # Orphaned: session bucket lingers but DB has no team row.
+    # Re-creatable: the checkpoint bucket describes a team whose DB row
+    # has not been created yet, or was intentionally cleaned.
     if not team_in_db and team_in_session:
+        if team_db_state in {
+            TEAM_DB_STATE_PENDING_CREATE,
+            TEAM_DB_STATE_CLEANED,
+        }:
+            return RunAction(kind=RunActionKind.CREATE, require_spec=True)
         return RunAction(
             kind=RunActionKind.REJECT_ORPHANED,
             require_spec=False,

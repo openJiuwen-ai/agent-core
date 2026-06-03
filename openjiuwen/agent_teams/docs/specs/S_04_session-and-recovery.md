@@ -1,5 +1,22 @@
 # Session and Recovery
 
+## `db_state` lifecycle note
+
+`state["teams"][team_name]["db_state"]` is part of the checkpoint bucket
+schema. It tracks the durable team-row lifecycle independently from the
+bucket's presence:
+
+- `pending_create`: `persist_leader_config` has flushed `spec` / `context`,
+  but `build_team` has not yet created the DB row. This is the expected
+  state after early manifest flush.
+- `created`: `build_team` created the team row and initial members.
+- `cleaned`: `clean_team` deleted the team row.
+
+`persist_leader_config` preserves an existing `db_state`; when no value is
+present it writes `pending_create`. `TeamAgent._mark_team_built` and
+`TeamAgent._mark_team_cleaned` advance the state with
+`merge_team_db_state(...)` and immediately `flush_checkpoint()`.
+
 ## 元信息
 
 | 项 | 值 |
@@ -107,6 +124,7 @@ state["teams"][team_name] = {
     "context":               TeamRuntimeContext.model_dump(mode="json"),
     "model_allocator_state": Optional[dict],
     "lifecycle":             Optional["running" | "paused"],
+    "db_state":              Optional["pending_create" | "created" | "cleaned"],
 }
 ```
 
@@ -276,16 +294,28 @@ class RecoveryManager:
   bind 路径上唯一调用点；后续 round 内的增量更新走 `persist_allocator_state`
   的 `merge_team_namespace`。
 
+`db_state` 用于区分 checkpoint bucket 与 DB row 的关系：`pending_create`
+表示 early flush 已写 spec/context 但 `build_team` 还未成功创建 DB row；
+`created` 表示 DB row 已创建；`cleaned` 表示 `clean_team` 已成功删除 DB row。
+`persist_leader_config` 在没有旧值时默认写 `pending_create`，如已有
+`created` / `cleaned` 则保留，不回退状态。
+
 ### `openjiuwen.agent_teams.runtime.metadata`
 
 ```python
 TEAMS_KEY = "teams"
+TEAM_DB_STATE_KEY = "db_state"
+TEAM_DB_STATE_PENDING_CREATE = "pending_create"
+TEAM_DB_STATE_CREATED = "created"
+TEAM_DB_STATE_CLEANED = "cleaned"
 
 def read_teams_bucket(session) -> dict[str, dict[str, Any]]: ...
 def read_team_namespace(session, team_name: str) -> dict[str, Any] | None: ...
 def read_team_names_in_session(session) -> list[str]: ...
+def read_team_db_state(session, team_name: str) -> str | None: ...
 def write_team_namespace(session, team_name: str, payload: dict[str, Any]) -> None: ...
 def merge_team_namespace(session, team_name: str, partial: dict[str, Any]) -> None: ...
+def merge_team_db_state(session, team_name: str, state: str) -> None: ...
 def remove_team_namespace(session, team_name: str) -> bool: ...
 ```
 

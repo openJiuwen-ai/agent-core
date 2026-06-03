@@ -200,6 +200,7 @@ class AgentConfigurator:
         *,
         on_teammate_created=None,
         on_team_cleaned=None,
+        on_team_built=None,
     ) -> None:
         """Phase 1: set spec/context, create messager, workspace manager, prepare team backend."""
         agent_spec = self.resolve_agent_spec(spec, ctx.role, ctx.member_name)
@@ -231,7 +232,13 @@ class AgentConfigurator:
 
             self.model_allocator = build_model_allocator(spec, ctx.team_spec)
 
-        self.setup_team_backend(spec, ctx, self.messager, on_team_cleaned=on_team_cleaned)
+        self.setup_team_backend(
+            spec,
+            ctx,
+            self.messager,
+            on_team_cleaned=on_team_cleaned,
+            on_team_built=on_team_built,
+        )
 
         if ctx.role != TeamRole.LEADER and spec.worktree and spec.worktree.enabled:
             self.worktree_manager = self.create_worktree_manager(spec)
@@ -499,6 +506,7 @@ class AgentConfigurator:
         messager: Messager,
         *,
         on_team_cleaned=None,
+        on_team_built=None,
     ) -> TeamBackend:
         """Construct the TeamBackend and register cleanup paths.
 
@@ -512,6 +520,9 @@ class AgentConfigurator:
                 on the ``clean_team`` success path. Wired for every role;
                 only the leader can ever fire it (``clean_team`` is a
                 leader-only tool).
+            on_team_built: Optional async callback threaded into the
+                ``TeamBackend`` so the hosting ``TeamAgent`` can persist
+                DB lifecycle state after ``build_team`` succeeds.
         """
         from openjiuwen.agent_teams.schema.status import MemberMode
         from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
@@ -534,6 +545,7 @@ class AgentConfigurator:
             leader_allocation=self.leader_allocation if is_leader else None,
             enable_hitt=spec.enable_hitt,
             on_team_cleaned=on_team_cleaned,
+            on_team_built=on_team_built,
         )
         self.team_backend = agent_team
         self.task_manager = agent_team.task_manager

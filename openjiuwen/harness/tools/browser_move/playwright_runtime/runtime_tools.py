@@ -91,6 +91,63 @@ _RUNTIME_HEALTH_PARAMS: Dict[str, Any] = {
     "required": [],
 }
 
+_PROBE_INTERACTIVES_DESC = (
+    "Return a compact list of visible, high-value interactive elements on the current page. "
+    "Use this for page-level controls such as buttons, links, inputs, forms, navigation, login, "
+    "pagination, menus, and visible actions. Prefer max_items around 20-30 unless a larger inventory "
+    "is needed. For product/search/listing card data, prefer browser_probe_cards first. "
+    "The result includes role/text/aria-label/testid/bbox/selector_hint for likely controls."
+)
+_PROBE_INTERACTIVES_PARAMS: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "max_items": {
+            "type": "integer",
+            "description": "Maximum number of elements to return. Default 50, hard-capped at 100.",
+        },
+        "viewport_only": {
+            "type": "boolean",
+            "description": "When true, only return elements currently visible in the viewport. Default true.",
+        },
+        "query": {
+            "type": "string",
+            "description": "Optional text filter, e.g. 'cart', 'search', 'next', or 'login'.",
+        },
+    },
+    "required": [],
+}
+
+_PROBE_CARDS_DESC = (
+    "Return compact repeated card/listing structures from the current page. "
+    "Use this first on product pages, marketplace pages, search-result pages, catalog pages, "
+    "article-list pages, or any page with repeated visible cards/listings. "
+    "The result includes candidate card title, price, rating, review count, availability, "
+    "primary link, visible buttons, bbox, selector_hint, and recurring structure signatures. "
+    "This should usually be preferred over browser_probe_interactives for product/listing/item-data tasks."
+)
+_PROBE_CARDS_PARAMS: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "max_cards": {
+            "type": "integer",
+            "description": "Maximum number of cards to return. Default 20, hard-capped at 50.",
+        },
+        "viewport_only": {
+            "type": "boolean",
+            "description": "When true, only inspect cards visible in the current viewport. Default true.",
+        },
+        "include_buttons": {
+            "type": "boolean",
+            "description": "When true, include visible buttons/links inside each card. Default true.",
+        },
+        "query": {
+            "type": "string",
+            "description": "Optional text filter, e.g. 'mouse', 'book', 'laptop', or 'cart'.",
+        },
+    },
+    "required": [],
+}
+
 
 class BrowserCancelTool(Tool):
     """Cancel an in-progress browser task."""
@@ -231,6 +288,119 @@ class BrowserListActionsTool(Tool):
             yield None
 
 
+class BrowserProbeInteractivesTool(Tool):
+    """Compact visible-interactive-element probe."""
+
+    def __init__(self, runtime: "BrowserAgentRuntime", language: str = "cn") -> None:
+        del language
+        super().__init__(
+            ToolCard(
+                name="browser_probe_interactives",
+                description=_PROBE_INTERACTIVES_DESC,
+                input_params=_PROBE_INTERACTIVES_PARAMS,
+            )
+        )
+        self._runtime = runtime
+
+    async def invoke(self, inputs: Dict[str, Any], **kwargs: Any) -> ToolOutput:
+        del kwargs
+
+        try:
+            max_items = int(inputs.get("max_items", 50))
+        except (TypeError, ValueError):
+            max_items = 50
+        max_items = max(1, min(100, max_items))
+
+        viewport_only_raw = inputs.get("viewport_only", True)
+        if isinstance(viewport_only_raw, str):
+            viewport_only = viewport_only_raw.strip().lower() not in {"0", "false", "no"}
+        else:
+            viewport_only = bool(viewport_only_raw)
+
+        query = str(inputs.get("query") or "").strip()
+
+        try:
+            data = await self._runtime.probe_interactives(
+                max_items=max_items,
+                viewport_only=viewport_only,
+                query=query,
+            )
+            return ToolOutput(
+                success=bool(data.get("ok", True)),
+                data=data,
+                error=data.get("error"),
+            )
+        except Exception as exc:
+            return ToolOutput(success=False, error=str(exc))
+
+    async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[Any]:
+        del inputs, kwargs
+        if False:
+            yield None
+
+
+class BrowserProbeCardsTool(Tool):
+    """Compact repeated-card/listing probe."""
+
+    def __init__(self, runtime: "BrowserAgentRuntime", language: str = "cn") -> None:
+        del language
+        super().__init__(
+            ToolCard(
+                name="browser_probe_cards",
+                description=_PROBE_CARDS_DESC,
+                input_params=_PROBE_CARDS_PARAMS,
+            )
+        )
+        self._runtime = runtime
+
+    async def invoke(self, inputs: Dict[str, Any], **kwargs: Any) -> ToolOutput:
+        del kwargs
+
+        try:
+            max_cards = int(inputs.get("max_cards", 20))
+        except (TypeError, ValueError):
+            max_cards = 20
+        max_cards = max(1, min(50, max_cards))
+
+        viewport_only_raw = inputs.get("viewport_only", True)
+        if isinstance(viewport_only_raw, str):
+            viewport_only = viewport_only_raw.strip().lower() not in {"0", "false", "no"}
+        else:
+            viewport_only = bool(viewport_only_raw)
+
+        include_buttons_raw = inputs.get("include_buttons", True)
+        if isinstance(include_buttons_raw, str):
+            include_buttons = include_buttons_raw.strip().lower() not in {
+                "0",
+                "false",
+                "no",
+            }
+        else:
+            include_buttons = bool(include_buttons_raw)
+
+        query = str(inputs.get("query") or "").strip()
+
+        try:
+            data = await self._runtime.probe_cards(
+                max_cards=max_cards,
+                viewport_only=viewport_only,
+                include_buttons=include_buttons,
+                query=query,
+            )
+            return ToolOutput(
+                success=bool(data.get("ok", True)),
+                data=data,
+                error=data.get("error"),
+            )
+        except Exception as exc:
+            return ToolOutput(success=False, error=str(exc))
+
+    async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[Any]:
+        del inputs, kwargs
+        if False:
+            yield None
+
+
 class BrowserRuntimeHealthTool(Tool):
     """Return runtime readiness and heartbeat metadata."""
 
@@ -275,5 +445,7 @@ def build_browser_runtime_tools(
         BrowserClearCancelTool(runtime, language),
         BrowserCustomActionTool(runtime, language),
         BrowserListActionsTool(runtime, language),
+        BrowserProbeInteractivesTool(runtime, language),
+        BrowserProbeCardsTool(runtime, language),
         BrowserRuntimeHealthTool(runtime, language),
     ]

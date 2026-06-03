@@ -65,6 +65,14 @@ leader's round, which is how a temporary-team leader ends its own stream
 after `clean_team` (the leader ignores its own `TeamCleanedEvent`). See
 `docs/specs/S_08` + `docs/features/F_10`.
 
+`TeamBackend.__init__` also takes keyword-only `on_team_built`, fired
+after `build_team` creates the DB row and initial members. The hosting
+`TeamAgent` uses `on_team_built` / `on_team_cleaned` to persist checkpoint
+`db_state` (`created` / `cleaned`) while keeping checkpoint writes inside
+agent-core rather than the outer caller. `on_team_cleaned` fires
+immediately after the team DB row is deleted, before best-effort
+filesystem cleanup and event publishing.
+
 Worktree tools (`enter_worktree`, `exit_worktree`) have moved to `openjiuwen.harness.tools.worktree`. Their description and parameter schema live in `harness/prompts/tools/{enter,exit}_worktree.py`, and they are mounted by `TeamToolRail` whenever `agent_configurator.create_worktree_manager()` returns a `WorktreeManager` for the agent. There is nothing left to maintain in `tools/locales/descs/` for these two tools.
 
 ## Tool Design Principles

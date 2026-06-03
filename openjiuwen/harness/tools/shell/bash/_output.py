@@ -20,13 +20,13 @@ def truncate_output(text: str, max_chars: int, *, head_ratio: float = 0.8) -> st
 
     Args:
         text: Raw output text.
-        max_chars: Maximum character budget.
+        max_chars: Maximum character budget. 0 means no limit.
         head_ratio: Fraction of the budget allocated to the head.
 
     Returns:
         The original or truncated text.
     """
-    if len(text) <= max_chars:
+    if max_chars == 0 or len(text) <= max_chars:
         return text
 
     head_budget = int(max_chars * head_ratio)

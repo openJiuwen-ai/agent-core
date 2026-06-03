@@ -9,8 +9,8 @@ from pathlib import Path
 
 
 def truncate_output(text: str, max_chars: int, *, head_ratio: float = 0.8) -> str:
-    """Truncate long output while preserving both the beginning and end."""
-    if len(text) <= max_chars:
+    """Truncate long output while preserving both the beginning and end. 0 means no limit."""
+    if max_chars == 0 or len(text) <= max_chars:
         return text
 
     head_budget = int(max_chars * head_ratio)

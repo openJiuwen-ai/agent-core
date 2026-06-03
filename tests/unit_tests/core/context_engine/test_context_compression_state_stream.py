@@ -105,7 +105,7 @@ async def test_active_compression_streams_started_and_completed_state():
     result = await context.compress_context()
 
     assert result == "compressed"
-    states = [chunk for chunk in session.chunks if chunk.type == "context_compression_state"]
+    states = [chunk for chunk in session.chunks if chunk.type == "context.compression_state"]
     assert [chunk.payload.status for chunk in states] == ["started", "completed"]
 
     started = states[0].payload
@@ -155,7 +155,7 @@ async def test_active_compression_returns_noop_when_processor_does_not_change_co
     result = await context.compress_context()
 
     assert result == "noop"
-    states = [chunk for chunk in session.chunks if chunk.type == "context_compression_state"]
+    states = [chunk for chunk in session.chunks if chunk.type == "context.compression_state"]
     assert [chunk.payload.status for chunk in states] == ["started", "noop"]
     assert states[0].payload.before.context_percent == 0
 
@@ -176,7 +176,7 @@ async def test_context_percent_uses_model_context_window_mapping():
     result = await context.compress_context(model_name="mapped-model")
 
     assert result == "noop"
-    states = [chunk for chunk in session.chunks if chunk.type == "context_compression_state"]
+    states = [chunk for chunk in session.chunks if chunk.type == "context.compression_state"]
     assert states[0].payload.before.tokens == 20
     assert states[0].payload.before.context_percent == 10
 
@@ -201,5 +201,5 @@ async def test_state_callback_failure_does_not_block_stream_emit():
         result = await context.compress_context()
 
     assert result == "noop"
-    states = [chunk for chunk in session.chunks if chunk.type == "context_compression_state"]
+    states = [chunk for chunk in session.chunks if chunk.type == "context.compression_state"]
     assert [chunk.payload.status for chunk in states] == ["started", "noop"]

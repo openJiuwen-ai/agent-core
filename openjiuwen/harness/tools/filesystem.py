@@ -20,10 +20,11 @@ from typing import Dict, Any, AsyncIterator, List, Optional, Tuple
 import pdfplumber
 
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.session import get_current_session
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import SysOperation
-from openjiuwen.core.sys_operation.cwd import get_cwd
+from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
 from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
@@ -70,8 +71,8 @@ MAX_HISTORY_PER_FILE: int = 100
 
 
 async def _append_op_history(history_path: str, file_path: str, action: str,
-                              old_content: Optional[str], new_content: str) -> None:
-    """Append a write/edit operation to the per-workspace history JSON file.
+                              old_content: Optional[str], new_content: Optional[str]) -> None:
+    """Append a write/edit/delete operation to the per-workspace history JSON file.
 
     Async-safe: concurrent coroutines share _HISTORY_LOCK so reads and writes
     to the JSON file are serialised without blocking the event loop.
@@ -100,6 +101,142 @@ async def _append_op_history(history_path: str, file_path: str, action: str,
             os.replace(tmp, history_path)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[_append_op_history] Failed to persist file op history to %s: %s", history_path, exc)
+
+
+def _parse_rm_targets(command: str) -> List[str]:
+    """Extract explicit, non-glob file paths from a simple rm command.
+
+    Returns empty list for compound commands, glob patterns, or recursive flags.
+    """
+    stripped = command.strip()
+    if any(op in stripped for op in ('|', ';', '&&', '||', '\n', '`', '$(')):
+        return []
+    try:
+        parts = shlex.split(stripped)
+    except ValueError:
+        return []
+    if not parts or os.path.basename(parts[0]) != 'rm':
+        return []
+    targets = []
+    for part in parts[1:]:
+        if part.startswith('-'):
+            if any(c in part for c in ('r', 'R')):
+                return []  # recursive deletion — leave to post-execution cross-reference
+            continue
+        if any(c in part for c in ('*', '?', '[', '{')):
+            continue  # glob pattern — leave to post-execution cross-reference
+        targets.append(part)
+    return targets
+
+
+def _parse_ps_remove_targets(command: str) -> List[str]:
+    """Extract explicit, non-glob file paths from a simple PowerShell Remove-Item command.
+
+    Handles Remove-Item and its aliases (rm, del, ri, erase).
+    Returns empty list for recursive deletions, wildcards, or compound commands.
+    """
+    stripped = command.strip()
+    if any(op in stripped for op in ('|', ';', '\n', '`')):
+        return []
+
+    remove_aliases = ('remove-item', 'ri', 'rm', 'del', 'erase')
+    cmd_lower = stripped.lower()
+    matched_alias = next(
+        (a for a in remove_aliases if cmd_lower.startswith(a + ' ') or cmd_lower == a),
+        None,
+    )
+    if not matched_alias:
+        return []
+
+    rest = stripped[len(matched_alias):].strip()
+
+    # Reject recursive deletions
+    if re.search(r'-Recurse\b', rest, re.IGNORECASE):
+        return []
+
+    # Strip value-less flags so they don't interfere with path extraction
+    rest = re.sub(r'-(?:Force|WhatIf|Confirm|Verbose)\b', '', rest, flags=re.IGNORECASE).strip()
+    # Strip -ErrorAction <value>
+    rest = re.sub(r'-ErrorAction\s+\S+', '', rest, flags=re.IGNORECASE).strip()
+
+    # Handle named -Path or -LiteralPath flag
+    path_match = re.search(r'-(?:Path|LiteralPath)\s+(["\']?)(.+?)\1(?:\s|$)', rest, re.IGNORECASE)
+    if path_match:
+        path = path_match.group(2).strip()
+        return [] if any(c in path for c in ('*', '?', '[')) else [path]
+
+    # Positional paths — strip surrounding quotes, skip flags and wildcards
+    targets = []
+    for token in rest.split():
+        if token.startswith('-'):
+            continue
+        token = token.strip('"\'')
+        if any(c in token for c in ('*', '?', '[')):
+            continue
+        targets.append(token)
+    return targets
+
+
+async def _record_rm_targets_before_deletion(
+        history_path: str, file_paths: List[str], operation: "SysOperation") -> None:
+    """Read and record explicit rm targets into history before the rm command runs."""
+    cwd = get_cwd()
+    for raw_path in file_paths:
+        try:
+            p = pathlib.Path(raw_path).expanduser()
+            abs_path = str((pathlib.Path(cwd) / p).resolve() if not p.is_absolute() else p.resolve())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[_record_rm_targets_before_deletion] path resolve failed %s: %s", raw_path, exc)
+            continue
+        if not os.path.isfile(abs_path):
+            continue
+        try:
+            res = await operation.fs().read_file(abs_path)
+            if res.code != StatusCode.SUCCESS.code:
+                continue
+            content = res.data.content if res.data else ""
+            if isinstance(content, bytes):
+                content = content.decode("utf-8", errors="replace")
+            await _append_op_history(history_path, abs_path, "delete", content, None)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[_record_rm_targets_before_deletion] %s: %s", abs_path, exc)
+
+
+async def _detect_and_record_deletions(history_path: str) -> None:
+    """After bash execution, scan history to detect and record files that no longer exist."""
+    try:
+        async with _HISTORY_LOCK:
+            if not os.path.exists(history_path):
+                return
+            with open(history_path, "r", encoding="utf-8") as f:
+                history: Dict[str, list] = json.load(f)
+            now = datetime.now(timezone.utc).isoformat()
+            deletions_added = False
+            for file_path, entries in history.items():
+                if not entries:
+                    continue
+                if entries[-1].get("action") == "delete":
+                    continue
+                if not os.path.exists(file_path):
+                    old_content = entries[-1].get("new_content")
+                    entries.append({
+                        "action": "delete",
+                        "timestamp": now,
+                        "old_content": old_content,
+                        "new_content": None,
+                    })
+                    if len(entries) > MAX_HISTORY_PER_FILE:
+                        history[file_path] = entries[-MAX_HISTORY_PER_FILE:]
+                    deletions_added = True
+            if not deletions_added:
+                return
+            os.makedirs(os.path.dirname(history_path), exist_ok=True)
+            tmp = history_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(history, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, history_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[_detect_and_record_deletions] %s: %s", history_path, exc)
 
 
 class MaxFileReadTokenExceededError(Exception):
@@ -465,11 +602,6 @@ class ReadFileTool(Tool):
             return None
 
     async def _read_image(self, file_path: str, model_name: str) -> Dict[str, Any]:
-        if model_name and not self._is_pdf_supported(model_name):
-            return {
-                "content": "Current model does not support vision image payload.",
-                "multimodal": [],
-            }
 
         res = await self.operation.fs().read_file(file_path, mode="bytes")
         if res.code != StatusCode.SUCCESS.code:
@@ -695,17 +827,26 @@ class WriteFileTool(Tool):
 
     MAX_FILE_SIZE: int = 1 * 1024 * 1024 * 1024  # 1 GiB
 
-    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None,
-                 workspace_path: Optional[str] = None):
+    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
         super().__init__(
             build_tool_card("write_file", "WriteFileTool", language, agent_id=agent_id))
         self.operation = operation
-        self._agent_id = agent_id or "default"
-        self._workspace_path = workspace_path
 
     @staticmethod
     def _detect_encoding(raw: bytes) -> str:
         return "utf-16-le" if raw[:2] == b"\xff\xfe" else "utf-8"
+
+    def _build_history_path(self, session: Any) -> str:
+        base_dir = get_workspace() or str(pathlib.Path(get_cwd()).expanduser().resolve())
+        agent_id = (
+            session.agent_id() if hasattr(session, "agent_id")
+            else session.get_agent_id() if hasattr(session, "get_agent_id")
+            else None
+        ) or "default"
+        return os.path.join(
+            base_dir, ".agent_history",
+            f"file_ops_{agent_id}_{session.get_session_id()}.json",
+        )
 
     async def _read_existing_text(self, file_path: str) -> Tuple[str, str]:
         res = await self.operation.fs().read_file(file_path, mode="bytes")
@@ -809,12 +950,9 @@ class WriteFileTool(Tool):
             except OSError:
                 _FILE_READ_REGISTRY.pop(path, None)
 
-        _session = kwargs.get("session")
+        _session = get_current_session()
         if _session is not None:
-            _base_dir = self._workspace_path or str(pathlib.Path(get_cwd()).expanduser().resolve())
-            _history_path = os.path.join(
-                _base_dir, ".agent_history", f"file_ops_{self._agent_id}_{_session.get_session_id()}.json"
-            )
+            _history_path = self._build_history_path(_session)
             await _append_op_history(_history_path, path, "write", old_content, content)
 
         return ToolOutput(
@@ -855,12 +993,9 @@ class EditFileTool(Tool):
     _STRAIGHT_TO_CURLY: dict = str.maketrans({'"': '\u201c', '\u201c': '"', '\u201d': '"',
                                                "'": '\u2018', '\u2018': "'", '\u2019': "'"})
 
-    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None,
-                 workspace_path: Optional[str] = None):
+    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
         super().__init__(build_tool_card("edit_file", "EditFileTool", language, agent_id=agent_id))
         self.operation = operation
-        self._agent_id = agent_id or "default"
-        self._workspace_path = workspace_path
 
     # ------------------------------------------------------------------
     # Static helpers
@@ -1004,6 +1139,18 @@ class EditFileTool(Tool):
         if index == -1:
             return None
         return content[index:index + len(old_str)]
+
+    def _build_history_path(self, session: Any) -> str:
+        base_dir = get_workspace() or str(pathlib.Path(get_cwd()).expanduser().resolve())
+        agent_id = (
+            session.agent_id() if hasattr(session, "agent_id")
+            else session.get_agent_id() if hasattr(session, "get_agent_id")
+            else None
+        ) or "default"
+        return os.path.join(
+            base_dir, ".agent_history",
+            f"file_ops_{agent_id}_{session.get_session_id()}.json",
+        )
 
     async def _read_existing_text(self, file_path: str) -> Tuple[str, bytes]:
         res = await self.operation.fs().read_file(file_path, mode="bytes")
@@ -1221,12 +1368,9 @@ class EditFileTool(Tool):
         except OSError:
             _FILE_READ_REGISTRY.pop(file_path, None)
 
-        _session = kwargs.get("session")
+        _session = get_current_session()
         if _session is not None:
-            _base_dir = self._workspace_path or str(pathlib.Path(get_cwd()).expanduser().resolve())
-            _history_path = os.path.join(
-                _base_dir, ".agent_history", f"file_ops_{self._agent_id}_{_session.get_session_id()}.json"
-            )
+            _history_path = self._build_history_path(_session)
             await _append_op_history(_history_path, file_path, "edit", content, new_content)
 
         return ToolOutput(

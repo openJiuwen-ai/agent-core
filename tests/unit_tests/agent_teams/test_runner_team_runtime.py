@@ -326,7 +326,7 @@ async def test_team_runtime_manager_cold_recover_reinjects_runtime_spec():
         patch.object(
             TeamRuntimeManager,
             "_inspect_session",
-            AsyncMock(return_value=(True, True)),
+            AsyncMock(return_value=(True, True, None)),
         ),
         patch.object(
             TeamAgent,
@@ -343,6 +343,35 @@ async def test_team_runtime_manager_cold_recover_reinjects_runtime_spec():
     assert args[1] == "cold_recover_team"
     assert kwargs["runtime_spec"] is spec
     assert agent.recover_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_team_runtime_manager_recreates_pending_session_bucket():
+    from openjiuwen.agent_teams.runtime.dispatch import RunActionKind
+    from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+    from openjiuwen.agent_teams.runtime.metadata import TEAM_DB_STATE_PENDING_CREATE
+
+    session_id = f"pending_recreate_{uuid.uuid4().hex}"
+    team_name = "pending_recreate_team"
+    spec = TeamAgentSpec.model_construct(team_name=team_name, agents={})
+    agent = FakeTeamAgent(team_name, stream_label="team.chunk")
+
+    manager = TeamRuntimeManager()
+    manager._pool.add = AsyncMock()
+
+    with (
+        patch.object(
+            TeamRuntimeManager,
+            "_inspect_session",
+            AsyncMock(return_value=(True, False, TEAM_DB_STATE_PENDING_CREATE)),
+        ),
+        patch.object(TeamAgentSpec, "build", return_value=agent) as build_mock,
+    ):
+        activation = await manager.activate(spec, session_id, {"query": "create"})
+
+    assert activation.action.kind is RunActionKind.CREATE
+    build_mock.assert_called_once()
+    manager._pool.add.assert_awaited_once()
 
 
 @pytest.mark.asyncio

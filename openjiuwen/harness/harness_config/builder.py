@@ -34,7 +34,7 @@ _BUILTIN_TOOL_GROUPS: Dict[str, Tuple[str, List[str], bool]] = {
         ["ReadFileTool", "WriteFileTool", "EditFileTool", "ListDirTool", "GlobTool", "GrepTool"],
         True,
     ),
-    "shell": ("openjiuwen.harness.tools.bash", ["BashTool"], True),
+    "shell": ("openjiuwen.harness.tools.shell", ["BashTool"], True),
     "code": ("openjiuwen.harness.tools.code", ["CodeTool"], True),
     "web_search": (
         "openjiuwen.harness.tools.web_tools",

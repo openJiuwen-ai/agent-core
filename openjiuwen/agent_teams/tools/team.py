@@ -87,6 +87,7 @@ class TeamBackend:
         enable_hitt: bool = False,
         *,
         on_team_cleaned: Callable[[], Awaitable[None]] | None = None,
+        on_team_built: Callable[[], Awaitable[None]] | None = None,
     ):
         """Initialize agent team manager.
 
@@ -116,14 +117,16 @@ class TeamBackend:
                 ``build_team``) decides whether the capability is
                 actually engaged.
             on_team_cleaned: Optional async callback fired exactly once
-                on the ``clean_team`` SUCCESS path (after the success
-                log + ``TeamCleanedEvent`` publish, before
-                ``return True``). NOT fired on the early ``return
-                False`` path (active members remain). The hosting
+                on the ``clean_team`` SUCCESS path. NOT fired on the early
+                ``return False`` path (active members remain). The hosting
                 ``TeamAgent`` wires this to ``_mark_team_cleaned`` so the
                 leader's StreamController can end the round
                 deterministically — the racy ``on_cleaned`` bus event is
                 deliberately not relied on for the leader.
+                The callback is invoked immediately after the team DB row
+                is deleted, before best-effort cleanup and event publishing.
+            on_team_built: Optional async callback fired exactly once after
+                ``build_team`` creates the team row and initial members.
         """
         self.team_name = team_name
         self.member_name = member_name
@@ -141,10 +144,11 @@ class TeamBackend:
         # enable beyond it.
         self._spec_enable_hitt: bool = enable_hitt
         self._enable_hitt: bool = enable_hitt
-        # Fired once on the clean_team success path so the hosting
-        # TeamAgent can latch state.team_cleaned deterministically inside
-        # the leader's round.
+        # Fired once on the build_team / clean_team success paths so the
+        # hosting TeamAgent can persist DB lifecycle state and latch
+        # state.team_cleaned deterministically inside the leader's round.
         self._on_team_cleaned = on_team_cleaned
+        self._on_team_built = on_team_built
 
         self.task_manager = TeamTaskManager(self.team_name, member_name, self.db, messager)
         # Roster of human-collaborator members. Sync in-memory cache so
@@ -649,6 +653,15 @@ class TeamBackend:
         # Delete team from database
         await self.db.team.delete_team(self.team_name)
 
+        # Notify the hosting TeamAgent as soon as the DB row is gone so
+        # the checkpoint mirrors the durable source of truth before any
+        # best-effort filesystem cleanup or event publishing.
+        if self._on_team_cleaned is not None:
+            try:
+                await self._on_team_cleaned()
+            except Exception as e:
+                team_logger.error(f"on_team_cleaned callback failed for team {self.team_name}: {e}")
+
         # Remove registered filesystem paths for the team.  TeamAgent
         # registers the actual resolved locations of the team shared
         # workspace, member workspaces, and the team-named parent
@@ -669,18 +682,6 @@ class TeamBackend:
             team_logger.error(f"Failed to publish team cleaned event for {self.team_name}: {e}")
 
         team_logger.info(f"Team {self.team_name} cleaned successfully")
-
-        # Notify the hosting TeamAgent so it can latch state.team_cleaned.
-        # Deliberately on the success path only: the early `return False`
-        # branch (active members remain) must NOT fire this — the round is
-        # not ending there. Best-effort: a callback failure is logged, not
-        # raised, so a wiring bug cannot turn a successful clean into a
-        # tool error.
-        if self._on_team_cleaned is not None:
-            try:
-                await self._on_team_cleaned()
-            except Exception as e:
-                team_logger.error(f"on_team_cleaned callback failed for team {self.team_name}: {e}")
 
         return True
 
@@ -1009,6 +1010,12 @@ class TeamBackend:
                 len(human_specs),
                 team_name,
             )
+
+        if self._on_team_built is not None:
+            try:
+                await self._on_team_built()
+            except Exception as e:
+                team_logger.error(f"on_team_built callback failed for team {team_name}: {e}")
 
         # Publish team created event
         session_id = get_session_id()

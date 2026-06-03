@@ -41,7 +41,7 @@ class TokenTrackingRail(AgentRail):
         response = getattr(ctx.inputs, "response", None)
         if response is None:
             return
-        usage = getattr(response, "usage", None)
+        usage = getattr(response, "usage", None) or getattr(response, "usage_metadata", None)
         if usage is None:
             return
         self.total_input_tokens += getattr(

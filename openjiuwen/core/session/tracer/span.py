@@ -64,6 +64,8 @@ class TraceWorkflowSpan(Span):
     stream_outputs: Optional[list] = Field(default=None, alias="streamOutputs")
     # for interactive inputs
     interactive_inputs: Optional[Any] = Field(default=None, alias="interactiveInputs")
+    # for retry inner error
+    inner_error: Optional[dict] = Field(default=None, alias="innerError")
 
 
     def append_stream_output(self, chunk):

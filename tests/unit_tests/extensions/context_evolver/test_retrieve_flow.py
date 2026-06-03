@@ -4,6 +4,7 @@
 
 Runs all tests against each algorithm: ACE, ReasoningBank, and ReMe.
 """
+# ruff: noqa: E402
 
 import sys
 import os
@@ -27,10 +28,18 @@ from openjiuwen.extensions.context_evolver import (
 from openjiuwen.extensions.context_evolver.core import config as app_config
 
 # ---------------------------------------------------------------------------
-# Skip marker – tests are skipped when API_KEY is absent or a placeholder.
+# Skip marker - live API tests are opt-in because they require external network.
+# Set RUN_CONTEXT_EVOLVER_API_TESTS=1 to run them with a valid API_KEY.
 # Set SKIP_API_TESTS = True to force-skip regardless of .env contents.
 # ---------------------------------------------------------------------------
-SKIP_API_TESTS = False
+API_TESTS_ENV = "RUN_CONTEXT_EVOLVER_API_TESTS"
+TRUE_VALUES = {"1", "true", "yes", "on"}
+SKIP_API_TESTS = True
+
+
+def _live_api_tests_enabled():
+    """Check whether live context_evolver API tests were explicitly enabled."""
+    return os.getenv(API_TESTS_ENV, "").strip().lower() in TRUE_VALUES
 
 
 def _api_key_missing():
@@ -40,9 +49,11 @@ def _api_key_missing():
 
 
 requires_api_key = pytest.mark.skipif(
-    SKIP_API_TESTS or _api_key_missing(),
-    reason="API_KEY not configured - API_KEY is needed in .env file. "
-           "Please create .env file by referring to .env.example",
+    SKIP_API_TESTS or _api_key_missing() or not _live_api_tests_enabled(),
+    reason=(
+        f"Live context_evolver API tests require {API_TESTS_ENV}=1 "
+        "and a valid API_KEY in .env."
+    ),
 )
 
 

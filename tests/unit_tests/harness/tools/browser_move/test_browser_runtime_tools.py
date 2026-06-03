@@ -16,6 +16,8 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime_tools impo
     BrowserClearCancelTool,
     BrowserCustomActionTool,
     BrowserListActionsTool,
+    BrowserProbeInteractivesTool,
+    BrowserProbeCardsTool,
     BrowserRuntimeHealthTool,
     build_browser_runtime_tools,
 )
@@ -45,7 +47,7 @@ def _make_runtime() -> BrowserAgentRuntime:
 
 def test_build_browser_runtime_tools_returns_five_helper_tools_by_default() -> None:
     tools = build_browser_runtime_tools(_make_runtime())
-    assert len(tools) == 5
+    assert len(tools) == 7
 
 
 def test_each_tool_is_tool_subclass() -> None:
@@ -65,16 +67,20 @@ def test_default_helper_tool_names() -> None:
         "browser_clear_cancel",
         "browser_custom_action",
         "browser_list_custom_actions",
+        "browser_probe_interactives",
+        "browser_probe_cards",
         "browser_runtime_health",
     ]
 
 
 def test_helper_tool_classes() -> None:
-    cancel, clear_cancel, custom_action, list_actions, health = build_browser_runtime_tools(_make_runtime())
+    cancel, clear_cancel, custom_action, list_actions, probe_interactives, probe_cards, health = build_browser_runtime_tools(_make_runtime())
     assert isinstance(cancel, BrowserCancelTool)
     assert isinstance(clear_cancel, BrowserClearCancelTool)
     assert isinstance(custom_action, BrowserCustomActionTool)
     assert isinstance(list_actions, BrowserListActionsTool)
+    assert isinstance(probe_interactives, BrowserProbeInteractivesTool)
+    assert isinstance(probe_cards, BrowserProbeCardsTool)
     assert isinstance(health, BrowserRuntimeHealthTool)
 
 
@@ -143,6 +149,84 @@ def test_custom_action_tool_uses_runtime_api() -> None:
         params={"text": "hello"},
     )
     assert result.success is True
+
+
+def test_probe_interactives_tool_uses_runtime_api() -> None:
+    runtime = _make_runtime()
+    runtime.probe_interactives = AsyncMock(
+        return_value={
+            "ok": True,
+            "elements": [
+                {
+                    "id": "e1",
+                    "role": "button",
+                    "text": "Next",
+                    "selector_hint": "button:nth-of-type(1)",
+                }
+            ],
+            "error": None,
+        }
+    )
+
+    tool = BrowserProbeInteractivesTool(runtime)
+
+    result = _run(
+        tool.invoke(
+            {
+                "max_items": 20,
+                "viewport_only": True,
+                "query": "next",
+            }
+        )
+    )
+
+    runtime.probe_interactives.assert_called_once_with(
+        max_items=20,
+        viewport_only=True,
+        query="next",
+    )
+    assert result.success is True
+    assert result.data["elements"][0]["text"] == "Next"
+
+
+def test_probe_cards_tool_uses_runtime_api() -> None:
+    runtime = _make_runtime()
+    runtime.probe_cards = AsyncMock(
+        return_value={
+            "ok": True,
+            "cards": [
+                {
+                    "id": "card_1",
+                    "title": "Book",
+                    "price": "£10.00",
+                    "selector_hint": "article.product_pod",
+                }
+            ],
+            "error": None,
+        }
+    )
+
+    tool = BrowserProbeCardsTool(runtime)
+
+    result = _run(
+        tool.invoke(
+            {
+                "max_cards": 20,
+                "viewport_only": True,
+                "include_buttons": True,
+                "query": "book",
+            }
+        )
+    )
+
+    runtime.probe_cards.assert_called_once_with(
+        max_cards=20,
+        viewport_only=True,
+        include_buttons=True,
+        query="book",
+    )
+    assert result.success is True
+    assert result.data["cards"][0]["title"] == "Book"
 
 
 def test_runtime_health_tool_uses_runtime_api() -> None:

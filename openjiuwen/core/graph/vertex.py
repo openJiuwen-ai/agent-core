@@ -3,6 +3,7 @@
 
 import asyncio
 from asyncio import CancelledError
+from datetime import datetime, timezone
 from typing import Any, Optional, AsyncIterator, Literal
 
 from openjiuwen.core.common.constants.constant import INTERACTIVE_INPUT, END_NODE_STREAM, INPUTS_KEY, CONFIG_KEY
@@ -208,6 +209,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                         exception=e,
                         **self._log_message
                     )
+                    await self.__trace_inner_error__(e)
                     continue
                 raise
 
@@ -581,6 +583,19 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         if (not self._session.tracer()) or self._executable.skip_trace():
             return
         await TracerWorkflowUtils.trace_error(self._session, error)
+
+    async def __trace_inner_error__(self, error: Exception) -> None:
+        if (not self._session.tracer()) or self._executable.skip_trace():
+            return
+        if isinstance(error, BaseError):
+            inner_error_info = {"error_code": error.code, "message": error.message}
+        else:
+            inner_error_info = {"error_code": StatusCode.WORKFLOW_COMPONENT_EXECUTION_ERROR.code,
+                                "message": str(error)}
+        await TracerWorkflowUtils.trace(self._session, data={
+            "inner_error": inner_error_info,
+            "current_time": datetime.now(timezone.utc).isoformat(),
+        })
 
     async def __trace_component_stream_input_send__(self) -> None:
         if (not self._session.tracer()) or self._executable.skip_trace():

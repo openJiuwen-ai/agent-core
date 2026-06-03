@@ -5,6 +5,7 @@
 Supports ACE, ReasoningBank, and ReMe algorithms based on .env configuration.
 The summarize() method works the same way for all algorithms.
 """
+# ruff: noqa: E402
 
 import sys
 import os
@@ -35,9 +36,17 @@ from openjiuwen.extensions.context_evolver.summary.task.reme.update import (
     PersistMemoryOp as ReMePersist,
 )
 
-# Set to True to force-skip tests that require API_KEY configured in .env file.
-# Set to False to auto-detect: tests run only if a valid API_KEY is found in .env.
-SKIP_API_TESTS = False
+# Live API tests are opt-in because they require external network.
+# Set RUN_CONTEXT_EVOLVER_API_TESTS=1 to run them with a valid API_KEY.
+# Set SKIP_API_TESTS = True to force-skip regardless of .env contents.
+API_TESTS_ENV = "RUN_CONTEXT_EVOLVER_API_TESTS"
+TRUE_VALUES = {"1", "true", "yes", "on"}
+SKIP_API_TESTS = True
+
+
+def _live_api_tests_enabled():
+    """Check whether live context_evolver API tests were explicitly enabled."""
+    return os.getenv(API_TESTS_ENV, "").strip().lower() in TRUE_VALUES
 
 
 def _api_key_missing():
@@ -47,9 +56,11 @@ def _api_key_missing():
 
 
 requires_api_key = pytest.mark.skipif(
-    SKIP_API_TESTS or _api_key_missing(),
-    reason="API_KEY not configured - API_KEY is needed in .env file. "
-           "Please create .env file by referring to .env.example",
+    SKIP_API_TESTS or _api_key_missing() or not _live_api_tests_enabled(),
+    reason=(
+        f"Live context_evolver API tests require {API_TESTS_ENV}=1 "
+        "and a valid API_KEY in .env."
+    ),
 )
 
 

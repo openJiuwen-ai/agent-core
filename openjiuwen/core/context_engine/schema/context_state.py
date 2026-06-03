@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from openjiuwen.core.context_engine.base import ContextStats
 
 
-CONTEXT_COMPRESSION_STATE_TYPE = "context_compression_state"
+CONTEXT_COMPRESSION_STATE_TYPE = "context.compression_state"
 
 
 class ContextCompressionMetric(BaseModel):

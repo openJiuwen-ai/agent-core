@@ -1101,6 +1101,34 @@ async def test_clean_team_fires_callback_on_success(db, message_bus):
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_team_fires_callback_on_success(db, message_bus):
+    """build_team runs on_team_built exactly once on the success path."""
+    calls: list[int] = []
+
+    async def _on_built() -> None:
+        calls.append(1)
+
+    backend = TeamBackend(
+        team_name="build_cb_team",
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        on_team_built=_on_built,
+    )
+
+    await backend.build_team(
+        display_name="Build Callback Team",
+        desc="Callback Team",
+        leader_display_name="Leader",
+        leader_desc="Leader persona",
+    )
+
+    assert calls == [1]
+
+
+@pytest.mark.asyncio
 @pytest.mark.level1
 async def test_clean_team_skips_callback_on_failure(db, message_bus, sample_agent_card):
     """clean_team must NOT fire on_team_cleaned when members are still active."""

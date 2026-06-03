@@ -129,7 +129,7 @@ def parse_interact_str(body: str) -> list[InteractPayload]
 
 ```
 input := channel? recipients? body
-channel := "# " | "$" name " "    # default "# " when omitted
+channel := "# " | "$" name (" " | "@")  # default "# " when omitted; "$name@member" is legal (no space)
 recipients := ("@" name " ")*
 body := remaining text
 ```
@@ -145,6 +145,7 @@ body := remaining text
 | `# @all body` 或 `# @* body` | `[OperatorMessage(body, target=None)]`（broadcast 吞掉同时列出的具名收件人）|
 | `$<name> body` | `[HumanAgentMessage(body, sender=<name>, target=None)]` |
 | `$<name> @m body` | `[HumanAgentMessage(body, sender=<name>, target="m")]` |
+| `$<name>@m body` | `[HumanAgentMessage(body, sender=<name>, target="m")]`（`@` 紧跟 `$name` 无空格同义） |
 | `$<name> @all body` / `$<name> @* body` | `[HumanAgentMessage(body, sender=<name>, target="*")]` |
 
 行为铁律：

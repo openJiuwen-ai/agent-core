@@ -4,8 +4,12 @@
 from __future__ import annotations
 
 from openjiuwen.agent_teams.runtime.metadata import (
+    TEAM_DB_STATE_CREATED,
+    TEAM_DB_STATE_KEY,
     TEAMS_KEY,
+    merge_team_db_state,
     merge_team_namespace,
+    read_team_db_state,
     read_team_names_in_session,
     read_team_namespace,
     read_teams_bucket,
@@ -67,6 +71,25 @@ def test_merge_team_namespace_creates_bucket_if_absent():
     merge_team_namespace(session, "alpha", {"lifecycle": "running"})
     bucket = read_team_namespace(session, "alpha")
     assert bucket == {"lifecycle": "running"}
+
+
+def test_merge_team_db_state_preserves_existing_bucket():
+    session = _StubSession()
+    write_team_namespace(session, "alpha", {"spec": {"team_name": "alpha"}})
+    merge_team_db_state(session, "alpha", TEAM_DB_STATE_CREATED)
+    bucket = read_team_namespace(session, "alpha")
+    assert bucket == {
+        "spec": {"team_name": "alpha"},
+        TEAM_DB_STATE_KEY: TEAM_DB_STATE_CREATED,
+    }
+    assert read_team_db_state(session, "alpha") == TEAM_DB_STATE_CREATED
+
+
+def test_read_team_db_state_returns_none_when_absent_or_not_string():
+    session = _StubSession()
+    write_team_namespace(session, "alpha", {TEAM_DB_STATE_KEY: 1})
+    assert read_team_db_state(session, "alpha") is None
+    assert read_team_db_state(session, "beta") is None
 
 
 def test_multi_team_buckets_are_independent():

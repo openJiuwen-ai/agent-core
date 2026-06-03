@@ -44,6 +44,7 @@ from openjiuwen.agent_teams.runtime.dispatch import (
     decide_run_action,
 )
 from openjiuwen.agent_teams.runtime.metadata import (
+    read_team_db_state,
     read_team_names_in_session,
     read_team_namespace,
     read_teams_bucket,
@@ -131,7 +132,7 @@ class TeamRuntimeManager:
                 session_id=pool_entry.current_session_id,
             )
             pool_entry = None
-        team_in_session, team_in_db = await self._inspect_session(
+        team_in_session, team_in_db, team_db_state = await self._inspect_session(
             spec,
             team_session,
             team_name,
@@ -142,6 +143,7 @@ class TeamRuntimeManager:
             pool_entry=pool_entry,
             target_session_id=target_session_id,
             target_team_name=team_name,
+            team_db_state=team_db_state,
         )
         return await self._apply_action(
             action,
@@ -701,7 +703,7 @@ class TeamRuntimeManager:
         spec: "TeamAgentSpec",
         team_session: AgentTeamSession,
         team_name: str,
-    ) -> tuple[bool, bool]:
+    ) -> tuple[bool, bool, Optional[str]]:
         """Inspect the session checkpoint and team table.
 
         ``team_in_session`` comes from the checkpoint bucket; ``team_in_db``
@@ -718,13 +720,15 @@ class TeamRuntimeManager:
         await team_session.pre_run()
         if not session_exists:
             team_in_session = False
+            team_db_state = None
         else:
             team_in_session = read_team_namespace(team_session, team_name) is not None
+            team_db_state = read_team_db_state(team_session, team_name)
 
         db = get_shared_db(spec.resolve_db_config())
         await db.initialize()
         team_in_db = await db.team.team_exists(team_name)
-        return team_in_session, team_in_db
+        return team_in_session, team_in_db, team_db_state
 
     async def _apply_action(
         self,

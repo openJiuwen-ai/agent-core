@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import os
+import pathlib
+import re
 import time
 from dataclasses import dataclass
 from typing import (
@@ -36,6 +38,23 @@ from openjiuwen.harness.tools.shell.bash._semantics import (
     interpret_exit_code,
     is_silent,
 )
+from openjiuwen.core.session import get_current_session
+from openjiuwen.harness.tools.filesystem import (
+    _detect_and_record_deletions,
+    _parse_rm_targets,
+    _record_rm_targets_before_deletion,
+)
+
+# Matches sudo not already followed by -n / -En / --non-interactive
+_SUDO_NEEDS_N_RE = re.compile(
+    r"\bsudo\b(?!(?:\s+-[a-zA-Z]*n|\s+--non-interactive))(?=\s)"
+)
+
+
+def _make_sudo_noninteractive(command: str) -> str:
+    """Inject -n into sudo calls so they fail fast instead of hanging for a password."""
+    return _SUDO_NEEDS_N_RE.sub("sudo -n", command)
+
 
 _VALID_SHELL_TYPES = frozenset({"auto", "cmd", "powershell", "bash", "sh"})
 
@@ -93,22 +112,51 @@ class BashTool(Tool):
         return max(1, min(timeout, max_timeout))
 
     @staticmethod
+    def _resolve_max_output_chars(raw_value: Any, default: int = 0) -> int:
+        """Parse and validate a max_output_chars value. 0 means no limit."""
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            value = default
+        if value == 0:
+            return 0
+        try:
+            max_chars = int(os.getenv("BASH_TOOL_MAX_OUTPUT_CHARS") or "20000")
+        except ValueError:
+            max_chars = 20000
+        max_chars = max(200, max_chars)
+        return max(200, min(value, max_chars))
+
+    @staticmethod
     def _parse_inputs(inputs: Dict[str, Any]) -> _BashInputs:
         """Parse and clamp tool inputs."""
         shell_type = inputs.get("shell_type", "auto")
         if shell_type not in _VALID_SHELL_TYPES:
             shell_type = "auto"
         return _BashInputs(
-            command=(inputs.get("command") or "").strip(),
+            command=_make_sudo_noninteractive((inputs.get("command") or "").strip()),
             timeout=BashTool._resolve_timeout(inputs.get("timeout", 300)),
             workdir=inputs.get("workdir", ""),
             run_in_background=bool(inputs.get("run_in_background", False)),
-            max_output_chars=max(200, min(int(inputs.get("max_output_chars", 8000)), 20000)),
+            max_output_chars=BashTool._resolve_max_output_chars(inputs.get("max_output_chars", 0)),
             shell_type=shell_type,
             description=inputs.get("description", ""),
         )
 
     # ── invoke ────────────────────────────────────────────────
+
+    def _build_history_path(self, session: Any) -> str:
+        from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
+        base_dir = get_workspace() or str(pathlib.Path(get_cwd()).expanduser().resolve())
+        agent_id = (
+            session.agent_id() if hasattr(session, "agent_id")
+            else session.get_agent_id() if hasattr(session, "get_agent_id")
+            else None
+        ) or "default"
+        return os.path.join(
+            base_dir, ".agent_history",
+            f"file_ops_{agent_id}_{session.get_session_id()}.json",
+        )
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs: Any) -> ToolOutput:
         from openjiuwen.core.sys_operation.cwd import get_cwd
@@ -143,6 +191,15 @@ class BashTool(Tool):
                 return ToolOutput(success=False, error=res.message)
             return ToolOutput(success=True, data={"pid": res.data.pid, "status": "started"})
 
+        # ── pre-execution: record explicit rm targets ─────────
+        _session = get_current_session()
+        _history_path: Optional[str] = None
+        if _session is not None:
+            _history_path = self._build_history_path(_session)
+            rm_targets = _parse_rm_targets(p.command)
+            if rm_targets:
+                await _record_rm_targets_before_deletion(_history_path, rm_targets, self._operation)
+
         # ── normal execution ──────────────────────────────────
         res = await self._operation.shell().execute_cmd(
             p.command, cwd=resolved_cwd, timeout=p.timeout, shell_type=p.shell_type,
@@ -157,10 +214,14 @@ class BashTool(Tool):
         meaning = interpret_exit_code(p.command, exit_code, stdout, stderr)
         silent = is_silent(p.command)
 
+        # ── post-execution: cross-reference history for missed deletions ──
+        if _history_path is not None and not meaning.is_error:
+            await _detect_and_record_deletions(_history_path)
+
         # persist large outputs to disk before truncation
         persisted_path: str | None = None
         persisted_size: int | None = None
-        if len(stdout) + len(stderr) > p.max_output_chars:
+        if p.max_output_chars > 0 and len(stdout) + len(stderr) > p.max_output_chars:
             persisted_path, persisted_size = persist_large_output(stdout, stderr)
 
         return ToolOutput(
@@ -203,6 +264,15 @@ class BashTool(Tool):
         if p.description:
             sys_operation_logger.debug("BashTool(stream): %s — %s", p.description, p.command)
 
+        # ── pre-execution: record explicit rm targets ─────────
+        _session = get_current_session()
+        _history_path: Optional[str] = None
+        if _session is not None:
+            _history_path = self._build_history_path(_session)
+            rm_targets = _parse_rm_targets(p.command)
+            if rm_targets:
+                await _record_rm_targets_before_deletion(_history_path, rm_targets, self._operation)
+
         start = time.monotonic()
         accumulated_stdout = ""
         accumulated_stderr = ""
@@ -239,8 +309,11 @@ class BashTool(Tool):
                 },
             )
 
-        # final summary after stream ends
+        # ── post-execution: cross-reference history for missed deletions ──
         meaning = interpret_exit_code(p.command, final_exit_code, accumulated_stdout, accumulated_stderr)
+        if _history_path is not None and not meaning.is_error:
+            await _detect_and_record_deletions(_history_path)
+
         silent = is_silent(p.command)
         yield ToolOutput(
             success=not meaning.is_error,

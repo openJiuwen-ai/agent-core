@@ -40,7 +40,6 @@ class SysOperationRail(DeepAgentRail):
     def init(self, agent) -> None:
         lang = agent.system_prompt_builder.language
         agent_id = getattr(getattr(agent, "card", None), "id", None)
-        workspace_path = str(self.workspace.root_path) if self.workspace else None
         enable_read_image_multimodal = self._enable_read_image_multimodal
         if enable_read_image_multimodal is None:
             deep_config = getattr(agent, "deep_config", None)
@@ -53,8 +52,8 @@ class SysOperationRail(DeepAgentRail):
             agent_id,
             enable_image_multimodal=enable_read_image_multimodal,
         )
-        write_tool = WriteFileTool(self.sys_operation, lang, agent_id, workspace_path=workspace_path)
-        edit_tool = EditFileTool(self.sys_operation, lang, agent_id, workspace_path=workspace_path)
+        write_tool = WriteFileTool(self.sys_operation, lang, agent_id)
+        edit_tool = EditFileTool(self.sys_operation, lang, agent_id)
         glob_tool = GlobTool(self.sys_operation, lang, agent_id)
         list_dir_tool = ListDirTool(self.sys_operation, lang, agent_id)
         grep_tool = GrepTool(self.sys_operation, lang, agent_id)

@@ -65,6 +65,9 @@ DESCRIPTION: Dict[str, str] = {
         "只在确实必要时使用\n"
         "   - 除非用户明确要求，不要跳过 hooks（--no-verify）"
         "或绕过签名（--no-gpg-sign）。hook 失败时应排查并修复根本原因\n"
+        "   - 用户分享代码仓 URL 让你「看看这个仓库」或「分析一下」时，"
+        "首选动作是 `git clone <url> <本地路径>`；克隆完再用 read_file/grep/glob "
+        "等专用工具读源码，比抓取仓库主页能拿到的信息完整得多\n"
         " - 避免不必要的 `sleep` 命令：\n"
         "   - 能立即执行的命令之间不要 sleep\n"
         "   - 长时间运行的命令使用 `run_in_background: true`，"
@@ -145,6 +148,11 @@ DESCRIPTION: Dict[str, str] = {
         "   - Never skip hooks (--no-verify) or bypass signing "
         "(--no-gpg-sign) unless the user has explicitly asked for it. "
         "If a hook fails, investigate and fix the underlying issue.\n"
+        "   - When a user shares a repo URL and asks you to 'look at' "
+        "or 'analyze' it, the natural first step is "
+        "`git clone <url> <local_path>`; after cloning, use "
+        "read_file/grep/glob on the working tree - it gives you far "
+        "more than the rendered repository page would.\n"
         " - Avoid unnecessary `sleep` commands:\n"
         "   - Do not sleep between commands that can run immediately "
         "-- just run them.\n"
@@ -238,10 +246,10 @@ BASH_PARAMS: Dict[str, Dict[str, str]] = {
         ),
     },
     "max_output_chars": {
-        "cn": "最大输出字符数，默认 8000（上限 20000），防止超大输出撑爆上下文",
+        "cn": "最大输出字符数，0 表示不限制（默认）；非零时上限 20000，防止超大输出撑爆上下文",
         "en": (
-            "Max output characters, default 8000 (max 20000), "
-            "prevents oversized output from flooding context"
+            "Max output characters; 0 (default) means no limit; "
+            "non-zero values are capped at 20000 to prevent oversized output from flooding context"
         ),
     },
     "shell_type": {

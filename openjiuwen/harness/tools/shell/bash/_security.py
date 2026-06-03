@@ -64,6 +64,7 @@ _DESTRUCTIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bTRUNCATE\s+TABLE\b", re.IGNORECASE), "May truncate database table"),
     (re.compile(r"\bkubectl\s+delete\b"), "May delete Kubernetes resources"),
     (re.compile(r"\bterraform\s+destroy\b"), "May destroy Terraform infrastructure"),
+    (re.compile(r"\bsudo\b"), "sudo may require a password in non-interactive mode; configure NOPASSWD or run as root"),
 ]
 
 

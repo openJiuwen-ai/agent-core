@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Dict, Optional
+import logging
 
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
@@ -19,6 +20,12 @@ from ..controllers import ActionController, BaseController
 from .browser_tools import ensure_browser_runtime_client_patch
 from .config import BrowserRunGuardrails
 from .service import BrowserService, BrowserTaskProgressState, MAX_ITERATION_MESSAGE
+
+from ..utils.parsing import extract_json_object
+from .probes import build_card_probe_js, build_interactive_probe_js
+from .site_profiles import builtin_site_profiles, get_selector_cache
+
+logger = logging.getLogger(__name__)
 
 _BROWSER_PROGRESS_STATE_KEY = "__browser_subagent_progress_state__"
 _BROWSER_PROGRESS_TASK_KEY = "__browser_subagent_last_task__"
@@ -71,6 +78,8 @@ class BrowserAgentRuntime:
         self._browser_list_actions_tool = None
         self._controller: BaseController = ActionController()
         self._code_executor = None
+        self._browser_probe_interactives_tool = None
+        self._browser_probe_cards_tool = None
 
     @property
     def service(self) -> BrowserService:
@@ -83,6 +92,14 @@ class BrowserAgentRuntime:
     @property
     def browser_list_actions_tool(self) -> Any:
         return self._browser_list_actions_tool
+    
+    @property
+    def browser_probe_interactives_tool(self) -> Any:
+        return self._browser_probe_interactives_tool
+    
+    @property
+    def browser_probe_cards_tool(self) -> Any:
+        return self._browser_probe_cards_tool
 
     @property
     def controller(self) -> BaseController:
@@ -119,24 +136,185 @@ class BrowserAgentRuntime:
             "request_id": request_id,
             "error": None,
         }
+    
+    def _playwright_client_lookup_keys(self) -> list[str]:
+        """Return likely registry keys for the active Playwright MCP client."""
+        server_id = str(getattr(self._service.mcp_cfg, "server_id", "") or "").strip()
+        server_name = str(getattr(self._service.mcp_cfg, "server_name", "") or "").strip()
+
+        candidates = [
+            server_id,
+            server_name,
+            server_id.replace("-", "_"),
+            server_id.replace("_", "-"),
+            server_name.replace("-", "_"),
+            server_name.replace("_", "-"),
+        ]
+
+        # Common IDs seen in the direct Playwright runtime path.
+        candidates.extend(
+            [
+                "playwright_official_stdio",
+                "playwright-official",
+                "playwright",
+            ]
+        )
+
+        result: list[str] = []
+        seen: set[str] = set()
+        for item in candidates:
+            if item and item not in seen:
+                seen.add(item)
+                result.append(item)
+        return result
+
+    @staticmethod
+    def _unwrap_mcp_text_result(raw: Any) -> Any:
+        """Extract text payload from common MCP tool-result shapes."""
+        if isinstance(raw, dict):
+            content = raw.get("content")
+            if isinstance(content, list):
+                texts: list[str] = []
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        texts.append(str(item.get("text") or ""))
+                if texts:
+                    return "\n".join(texts)
+
+            if "result" in raw:
+                return raw.get("result")
+
+            if "text" in raw:
+                return raw.get("text")
+
+            if "data" in raw:
+                return raw.get("data")
+
+        return raw
+
+    async def _get_playwright_mcp_tool(self, tool_name: str) -> Any:
+        """Resolve a registered Playwright MCP tool through Runner.resource_mgr."""
+        server_id = str(getattr(self._service.mcp_cfg, "server_id", "") or "").strip()
+        server_name = str(getattr(self._service.mcp_cfg, "server_name", "") or "").strip()
+
+        server_id_candidates = [
+            server_id,
+            server_id.replace("-", "_"),
+            server_id.replace("_", "-"),
+            "playwright_official_stdio",
+            "playwright-official-stdio",
+            "playwright",
+        ]
+
+        server_name_candidates = [
+            server_name,
+            server_name.replace("-", "_"),
+            server_name.replace("_", "-"),
+            "playwright-official",
+            "playwright_official",
+            "playwright",
+        ]
+
+        def _first_tool(value: Any) -> Any:
+            if isinstance(value, list):
+                return next((item for item in value if item is not None), None)
+            return value
+
+        tried: list[str] = []
+
+        for candidate in server_id_candidates:
+            if not candidate:
+                continue
+
+            tried.append(f"server_id={candidate}")
+
+            tool = None
+            try:
+                tool = await Runner.resource_mgr.get_mcp_tool(
+                    name=tool_name,
+                    server_id=candidate,
+                    skip_if_tag_not_exists=True,
+                    ignore_exception=True,
+                )
+                tool = _first_tool(tool)
+            except Exception:
+                logger.debug(
+                    "Failed to resolve MCP tool %s using server_id=%s",
+                    tool_name,
+                    candidate,
+                    exc_info=True,
+                )
+
+            if tool is not None:
+                return tool
+
+        for candidate in server_name_candidates:
+            if not candidate:
+                continue
+
+            tried.append(f"server_name={candidate}")
+
+            tool = None
+            try:
+                tool = await Runner.resource_mgr.get_mcp_tool(
+                    name=tool_name,
+                    server_name=candidate,
+                    skip_if_tag_not_exists=True,
+                    ignore_exception=True,
+                )
+                tool = _first_tool(tool)
+            except Exception:
+                logger.debug(
+                    "Failed to resolve MCP tool %s using server_name=%s",
+                    tool_name,
+                    candidate,
+                    exc_info=True,
+                )
+
+            if tool is not None:
+                return tool
+
+        raise RuntimeError(
+            f"Registered Playwright MCP tool not found: {tool_name}. "
+            f"Tried {', '.join(tried)}"
+        )
+
+    async def _get_playwright_run_code_tool(self) -> tuple[Any, str]:
+        """Resolve browser_run_code_unsafe, with browser_run_code as compatibility fallback."""
+        try:
+            return await self._get_playwright_mcp_tool("browser_run_code_unsafe"), "browser_run_code_unsafe"
+        except RuntimeError:
+            logger.debug(
+                "browser_run_code_unsafe is unavailable; falling back to browser_run_code",
+                exc_info=True,
+            )
+
+        return await self._get_playwright_mcp_tool("browser_run_code"), "browser_run_code"
+
+    async def _call_playwright_run_code_unsafe(self, js_code: str) -> Any:
+        """Execute Playwright page code through the registered run-code MCP tool."""
+        tool, tool_name = await self._get_playwright_run_code_tool()
+
+        result = await tool.invoke({"code": js_code})
+
+        success = getattr(result, "success", None)
+        if success is False:
+            error = str(getattr(result, "error", "") or "").strip()
+            raise RuntimeError(error or f"{tool_name} failed")
+
+        data = getattr(result, "data", None)
+        if data is not None:
+            return data
+
+        return result
 
     async def ensure_runtime_ready(self) -> None:
         await self._service.ensure_runtime_ready()
         if self._code_executor is not None:
             return
-        playwright_server_id = (self._service.mcp_cfg.server_id or "").strip() or getattr(
-            self._service.mcp_cfg, "server_name", ""
-        )
 
         async def _direct_code_executor(js_code: str):
-            from playwright_runtime.browser_tools import get_registered_client
-
-            client = get_registered_client(playwright_server_id)
-            if client is None:
-                raise RuntimeError(
-                    f"Playwright MCP client not found (server_id={playwright_server_id!r})"
-                )
-            return await client.call_tool("browser_run_code", {"code": js_code})
+            return await self._call_playwright_run_code_unsafe(js_code)
 
         self._code_executor = _direct_code_executor
         self._controller.bind_code_executor(_direct_code_executor)
@@ -147,10 +325,17 @@ class BrowserAgentRuntime:
         await self._service.ensure_started()
         if self._browser_custom_action_tool is not None:
             return
-        from .runtime_tools import BrowserCustomActionTool, BrowserListActionsTool
+        from .runtime_tools import (
+            BrowserCustomActionTool,
+            BrowserListActionsTool,
+            BrowserProbeCardsTool,
+            BrowserProbeInteractivesTool,
+        )
 
         self._browser_custom_action_tool = BrowserCustomActionTool(self, language="en")
         self._browser_list_actions_tool = BrowserListActionsTool(self, language="en")
+        self._browser_probe_interactives_tool = BrowserProbeInteractivesTool(self, language="en")
+        self._browser_probe_cards_tool = BrowserProbeCardsTool(self, language="en")
         self._register_runtime_tool(
             self._browser_custom_action_tool,
             tool_name="browser_custom_action",
@@ -158,6 +343,14 @@ class BrowserAgentRuntime:
         self._register_runtime_tool(
             self._browser_list_actions_tool,
             tool_name="browser_list_custom_actions",
+        )
+        self._register_runtime_tool(
+            self._browser_probe_interactives_tool,
+            tool_name="browser_probe_interactives",
+        )
+        self._register_runtime_tool(
+            self._browser_probe_cards_tool,
+            tool_name="browser_probe_cards",
         )
 
         # Legacy browser_run_task compatibility: let the worker agent call
@@ -168,6 +361,12 @@ class BrowserAgentRuntime:
             )
             self._service.browser_agent.ability_manager.add(
                 self._browser_list_actions_tool.card
+            )
+            self._service.browser_agent.ability_manager.add(
+                self._browser_probe_interactives_tool.card
+            )
+            self._service.browser_agent.ability_manager.add(
+                self._browser_probe_cards_tool.card
             )
 
     async def run_browser_task(
@@ -203,6 +402,118 @@ class BrowserAgentRuntime:
             request_id=request_id,
             **(params or {}),
         )
+    
+    async def probe_interactives(
+        self,
+        *,
+        max_items: int = 50,
+        viewport_only: bool = True,
+        query: str = "",
+    ) -> Dict[str, Any]:
+        """Return compact visible/high-value interactive elements from the current page."""
+        await self.ensure_runtime_ready()
+
+        if self._code_executor is None:
+            return {
+                "ok": False,
+                "error": "browser_code_executor_not_ready",
+                "elements": [],
+            }
+
+        js_code = build_interactive_probe_js(
+            max_items=max_items,
+            viewport_only=viewport_only,
+            query=query,
+        )
+
+        try:
+            raw = await self._code_executor(js_code)
+            raw = self._unwrap_mcp_text_result(raw)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"browser_probe_interactives failed: {exc}",
+                "elements": [],
+            }
+
+        parsed = extract_json_object(raw)
+        if not parsed:
+            return {
+                "ok": False,
+                "error": "Could not parse browser_probe_interactives result JSON",
+                "raw_preview": str(raw)[:400],
+                "elements": [],
+            }
+
+        parsed.setdefault("ok", True)
+        parsed.setdefault("error", None)
+        parsed.setdefault("elements", [])
+        return parsed
+    
+    async def probe_cards(
+        self,
+        *,
+        max_cards: int = 20,
+        viewport_only: bool = True,
+        include_buttons: bool = True,
+        query: str = "",
+    ) -> Dict[str, Any]:
+        """Return compact repeated card/listing structures from the current page."""
+        await self.ensure_runtime_ready()
+
+        if self._code_executor is None:
+            return {
+                "ok": False,
+                "error": "browser_code_executor_not_ready",
+                "cards": [],
+            }
+
+        site_profiles = builtin_site_profiles()
+        selector_cache = get_selector_cache()
+        selector_cache_records = selector_cache.export_for_probe()
+
+        js_code = build_card_probe_js(
+            max_cards=max_cards,
+            viewport_only=viewport_only,
+            include_buttons=include_buttons,
+            query=query,
+            site_profiles=site_profiles,
+            selector_cache_records=selector_cache_records,
+        )
+
+        try:
+            raw = await self._code_executor(js_code)
+            raw = self._unwrap_mcp_text_result(raw)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"browser_probe_cards failed: {exc}",
+                "cards": [],
+            }
+
+        parsed = extract_json_object(raw)
+        if not parsed:
+            return {
+                "ok": False,
+                "error": "Could not parse browser_probe_cards result JSON",
+                "raw_preview": str(raw)[:400],
+                "cards": [],
+            }
+
+        parsed.setdefault("ok", True)
+        parsed.setdefault("error", None)
+        parsed.setdefault("cards", [])
+
+        if parsed.get("ok") and parsed.get("cards"):
+            try:
+                selector_cache.record_card_probe_result(parsed)
+            except Exception:
+                logger.debug(
+                    "Failed to record card probe result in selector cache",
+                    exc_info=True,
+                )
+        
+        return parsed
 
     async def list_actions(self) -> Dict[str, Any]:
         return {

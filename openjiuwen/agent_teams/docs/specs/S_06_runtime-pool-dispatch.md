@@ -171,6 +171,7 @@ def decide_run_action(
     *,
     team_in_db: bool,
     team_in_session: bool,
+    team_db_state: str | None = None,
     pool_entry: ActiveTeam | None,
     target_session_id: str,
     target_team_name: str,
@@ -331,6 +332,9 @@ CLOSING --admit()------>      None  (rejected)
 
 ```python
 TEAMS_KEY = "teams"
+
+# Dispatch also reads bucket["db_state"] for DB-missing session buckets:
+# pending_create / cleaned -> CREATE; created / missing -> REJECT_ORPHANED.
 
 def read_teams_bucket(session) -> dict[str, dict[str, Any]]: ...
 def read_team_namespace(session, team_name: str) -> dict[str, Any] | None: ...

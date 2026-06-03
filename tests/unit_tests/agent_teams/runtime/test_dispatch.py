@@ -11,6 +11,11 @@ from openjiuwen.agent_teams.runtime.dispatch import (
     RunActionKind,
     decide_run_action,
 )
+from openjiuwen.agent_teams.runtime.metadata import (
+    TEAM_DB_STATE_CLEANED,
+    TEAM_DB_STATE_CREATED,
+    TEAM_DB_STATE_PENDING_CREATE,
+)
 from openjiuwen.agent_teams.runtime.pool import (
     ActiveTeam,
     RuntimeState,
@@ -64,6 +69,38 @@ def test_reject_orphaned_when_session_bucket_exists_but_no_team_row():
     )
     assert action.kind is RunActionKind.REJECT_ORPHANED
     assert action.reason and "not in DB" in action.reason
+
+
+@pytest.mark.parametrize(
+    "team_db_state",
+    [
+        TEAM_DB_STATE_PENDING_CREATE,
+        TEAM_DB_STATE_CLEANED,
+    ],
+)
+def test_create_when_session_bucket_is_recreatable_without_team_row(team_db_state: str):
+    action = decide_run_action(
+        team_in_db=False,
+        team_in_session=True,
+        pool_entry=None,
+        target_session_id="s1",
+        target_team_name="alpha",
+        team_db_state=team_db_state,
+    )
+    assert action.kind is RunActionKind.CREATE
+    assert action.require_spec is True
+
+
+def test_reject_orphaned_when_created_bucket_loses_team_row():
+    action = decide_run_action(
+        team_in_db=False,
+        team_in_session=True,
+        pool_entry=None,
+        target_session_id="s1",
+        target_team_name="alpha",
+        team_db_state=TEAM_DB_STATE_CREATED,
+    )
+    assert action.kind is RunActionKind.REJECT_ORPHANED
 
 
 def test_new_team_in_session_for_cold_path_with_db_team_no_session_bucket():

@@ -1,5 +1,18 @@
 # Team Tools Contract
 
+## `TeamBackend` lifecycle callbacks
+
+`TeamBackend.__init__` accepts `on_team_built` and `on_team_cleaned`
+callbacks for checkpoint DB lifecycle state. `on_team_built` fires after
+`build_team()` creates the team DB row and initial members; `TeamAgent`
+persists `db_state=created` and flushes the checkpoint. `on_team_cleaned`
+fires immediately after `clean_team()` deletes the team DB row, before
+best-effort filesystem cleanup and event publishing; `TeamAgent` persists
+`db_state=cleaned`, flushes the checkpoint, and latches
+`TeamAgentState.team_cleaned`. Tool `invoke(**kwargs)` must not receive or
+mutate the session directly; checkpoint lifecycle writes stay behind the
+`TeamBackend -> TeamAgent` callback boundary.
+
 ## 元信息
 
 | 项 | 值 |

@@ -1009,6 +1009,15 @@ class DeepAgent(BaseAgent):
                     **create_kwargs,
                     **dict(spec.factory_kwargs or {}),
                 )
+            if normalized_factory in {"mobile_gui_agent", "mobile_agent"}:
+                from openjiuwen.harness.subagents.mobile_gui_agent import (
+                    create_mobile_gui_agent,
+                )
+
+                return create_mobile_gui_agent(
+                    **create_kwargs,
+                    **dict(spec.factory_kwargs or {}),
+                )
 
             raise build_error(
                 StatusCode.DEEPAGENT_CREATE_SUBAGENT_NOT_FOUND,

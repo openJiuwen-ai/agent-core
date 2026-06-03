@@ -126,6 +126,34 @@ def test_human_agent_at_all_emits_broadcast_marker():
     assert payloads == [HumanAgentMessage(body="heads up", sender="alice", target="*")]
 
 
+@pytest.mark.level0
+def test_human_agent_no_space_before_at_splits_sender_and_recipient():
+    """``$alice@dev-1 ping`` — ``@`` glued to ``$name`` still splits correctly."""
+    payloads = parse_interact_str("$alice@dev-1 ping me")
+    assert payloads == [
+        HumanAgentMessage(body="ping me", sender="alice", target="dev-1"),
+    ]
+
+
+@pytest.mark.level0
+def test_human_agent_at_in_sender_name_is_rejected():
+    """``@`` must not be part of the sender name; ``$name@other`` splits at ``@``."""
+    payloads = parse_interact_str("$player-6@player-3 汇报当前进展")
+    assert payloads == [
+        HumanAgentMessage(body="汇报当前进展", sender="player-6", target="player-3"),
+    ]
+
+
+@pytest.mark.level0
+def test_human_agent_no_space_multi_recipient():
+    """``$name@m1@m2 body`` — multiple ``@`` glued recipients."""
+    payloads = parse_interact_str("$alice@m1 @m2 sync")
+    assert payloads == [
+        HumanAgentMessage(body="sync", sender="alice", target="m1"),
+        HumanAgentMessage(body="sync", sender="alice", target="m2"),
+    ]
+
+
 # ----------------------------------------------------------------------
 # Robustness / falls back to god-view default
 # ----------------------------------------------------------------------
