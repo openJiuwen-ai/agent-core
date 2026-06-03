@@ -47,6 +47,7 @@ if TYPE_CHECKING:
         TeamToolApprovalRail,
         TeamToolRail,
     )
+    from openjiuwen.agent_teams.reliability.rail import ReliabilityRail
     from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
     from openjiuwen.agent_teams.schema.team import TeamRole
     from openjiuwen.agent_teams.team_workspace.rails import TeamWorkspaceRail
@@ -75,6 +76,7 @@ class _MountedRails:
     team_workspace: Optional["TeamWorkspaceRail"] = None
     tool_approval: Optional["TeamToolApprovalRail"] = None
     team_plan_mode: Optional["TeamPlanModeRail"] = None
+    reliability: Optional["ReliabilityRail"] = None
 
 
 class TeamHarness:
@@ -118,6 +120,7 @@ class TeamHarness:
         team_workspace_rail: Optional["TeamWorkspaceRail"] = None,
         tool_approval_rail: Optional["TeamToolApprovalRail"] = None,
         team_plan_mode_rail: Optional["TeamPlanModeRail"] = None,
+        reliability_rail: Optional["ReliabilityRail"] = None,
         initial_plan_mode: bool = False,
     ) -> "TeamHarness":
         """Build the deep-agent provider, construct the native, and configure it.
@@ -143,6 +146,8 @@ class TeamHarness:
                 deep_agent.add_rail(tool_approval_rail)
             if team_plan_mode_rail is not None:
                 deep_agent.add_rail(team_plan_mode_rail)
+            if reliability_rail is not None:
+                deep_agent.add_rail(reliability_rail)
             return deep_agent
 
         rails = _MountedRails(
@@ -151,6 +156,7 @@ class TeamHarness:
             team_workspace=team_workspace_rail,
             tool_approval=tool_approval_rail,
             team_plan_mode=team_plan_mode_rail,
+            reliability=reliability_rail,
         )
         native = NativeHarness(_deep_provider)
         # Sync configure so the configurator's customizer / workspace read work

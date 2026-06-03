@@ -33,6 +33,7 @@ from openjiuwen.agent_teams.constants import (
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.memory import TeamMemoryConfig
 from openjiuwen.agent_teams.models.pool import ModelPoolEntry, ModelRouterConfig
+from openjiuwen.agent_teams.reliability.config import ReliabilityConfig
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import (
     BridgeMemberSpec,
@@ -353,6 +354,11 @@ class TeamAgentSpec(BaseModel):
     memory: Optional[TeamMemoryConfig] = None
     """Optional team memory configuration. When enabled, TeamMemoryManager
     replaces default MemoryRail/CodingMemoryRail with per-member isolated instances."""
+
+    reliability: Optional[ReliabilityConfig] = None
+    """Optional team reliability framework configuration. Opt-in via
+    ``reliability.enabled``; attaches a monitoring rail to the configured roles
+    and a remediation handler on the leader."""
 
     """
     Signature: ``(deep_agent: DeepAgent) -> None``.

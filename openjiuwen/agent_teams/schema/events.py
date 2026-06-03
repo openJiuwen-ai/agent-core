@@ -65,6 +65,9 @@ class TeamEvent:
     PLAN_APPROVAL = "plan_approval"
     TOOL_APPROVAL_RESULT = "tool_approval_result"
 
+    # Reliability events
+    ANOMALY_DETECTED = "anomaly_detected"
+
     # Messaging events
     MESSAGE = "message"
     BROADCAST = "broadcast"
@@ -290,6 +293,23 @@ class WorkspaceLockResponseEvent(BaseEventMessage):
     holder: dict | None = Field(default=None, description="Current lock holder info if not granted")
 
 
+class AnomalyDetectedEvent(BaseEventMessage):
+    """Published when a reliability detector flags an unhealthy member state.
+
+    Member-scoped: ``member_name`` (from BaseEventMessage) is the affected
+    member. Carried across processes so the leader's reliability handler can
+    route it through the remediation policy. ``kind`` and ``severity`` are the
+    string values of ``AnomalyKind`` / ``Severity`` so this schema stays
+    independent of the reliability package.
+    """
+    detector: str = Field(..., description="Detector identifier")
+    kind: str = Field(..., description="AnomalyKind value")
+    severity: str = Field(..., description="Severity value")
+    summary: str = Field(..., description="One-line description for human/LLM")
+    evidence: Dict[str, Any] = Field(default_factory=dict, description="Supporting evidence snapshot")
+    peer_member: Optional[str] = Field(default=None, description="Peer member for team-level anomalies")
+
+
 _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model class
     TeamEvent.CREATED: TeamCreatedEvent,
     TeamEvent.CLEANED: TeamCleanedEvent,
@@ -320,6 +340,7 @@ _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model cl
     TeamEvent.WORKSPACE_CONFLICT: WorkspaceConflictEvent,
     TeamEvent.WORKSPACE_LOCK_REQUEST: WorkspaceLockRequestEvent,
     TeamEvent.WORKSPACE_LOCK_RESPONSE: WorkspaceLockResponseEvent,
+    TeamEvent.ANOMALY_DETECTED: AnomalyDetectedEvent,
 }
 
 _EVENT_CLASS_MAP: Dict[Type[BaseEventMessage], str] = {  # model class -> event_type

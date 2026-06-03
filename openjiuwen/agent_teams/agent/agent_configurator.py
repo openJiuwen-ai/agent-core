@@ -432,6 +432,20 @@ class AgentConfigurator:
 
             team_plan_mode_rail = TeamPlanModeRail(language=resolved_language)
 
+        reliability_rail = None
+        reliability_cfg = spec.reliability
+        if reliability_cfg and reliability_cfg.enabled and self.messager and member_name:
+            if ctx.role.value in reliability_cfg.monitor_roles:
+                from openjiuwen.agent_teams.reliability.factory import build_reliability_rail
+
+                reliability_rail = build_reliability_rail(
+                    reliability_cfg,
+                    member_name=member_name,
+                    messager=self.messager,
+                    team_name=resolved_team_name,
+                    sender_id=member_name,
+                )
+
         self.harness = TeamHarness.build(
             agent_spec=build_spec,
             role=ctx.role,
@@ -441,6 +455,7 @@ class AgentConfigurator:
             team_workspace_rail=team_workspace_rail,
             tool_approval_rail=tool_approval_rail,
             team_plan_mode_rail=team_plan_mode_rail,
+            reliability_rail=reliability_rail,
             initial_plan_mode=is_team_plan_leader,
         )
 

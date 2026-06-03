@@ -45,6 +45,17 @@ STRINGS: dict[str, dict[str, str]] = {
         # tools/team.py
         "team.shutdown_request_content": "当前任务已全部完成，请结束流程",
         "team.cancel_request_content": "当前任务有变动，请停止执行当前任务，重新尝试认领合适任务",
+        # reliability/ — anomaly remediation messages
+        "reliability.steer_self_correct": (
+            "⚙️[可靠性] 检测到 {kind}：{summary}。请停止重复无效操作，改换策略或换用其他工具。"
+        ),
+        "reliability.report_leader": (
+            "[可靠性告警] {summary}。请评估该成员状态并决定处理方式"
+            "（发消息提醒 / 取消任务 / 停止成员 / 新建成员或任务）。"
+        ),
+        "reliability.escalate_user": (
+            "[可靠性·严重] {summary}。已超出自动处理范围，建议立即上报控制者 / 用户决策。"
+        ),
         # agent/dispatcher.py — member lifecycle events
         "dispatcher.member_online": "[成员事件] 成员 {target_id} 已上线",
         "dispatcher.member_restarted": "[成员事件] 成员 {target_id} 已重启 (第{restart_count}次)",
@@ -152,6 +163,19 @@ STRINGS: dict[str, dict[str, str]] = {
         "team.shutdown_request_content": "All tasks are complete. Please wrap up and exit.",
         "team.cancel_request_content": (
             "The current task has changed. Stop executing it and try claiming a suitable task again."
+        ),
+        # reliability/ — anomaly remediation messages
+        "reliability.steer_self_correct": (
+            "[reliability] Detected {kind}: {summary}. Stop repeating the ineffective action; "
+            "change strategy or use a different tool."
+        ),
+        "reliability.report_leader": (
+            "[reliability alert] {summary}. Assess this member's state and decide how to handle it "
+            "(send a reminder / cancel the task / stop the member / spawn a new member or task)."
+        ),
+        "reliability.escalate_user": (
+            "[reliability critical] {summary}. Beyond automated handling; escalate to the "
+            "controller/user for a decision now."
         ),
         # agent/dispatcher.py — member lifecycle events
         "dispatcher.member_online": "[Member Event] Member {target_id} is online",

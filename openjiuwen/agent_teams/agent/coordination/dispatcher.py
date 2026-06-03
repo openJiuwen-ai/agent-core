@@ -194,14 +194,39 @@ class EventDispatcher:
         # fans out after StaleTaskHandler's: a stale sweep may deliver
         # input and make the leader non-idle, and the completion check
         # must see that before deciding the team is done.
-        for handler in (
+        handlers = [
             self.lifecycle,
             self.member,
             self.message,
             self.task_board,
             self.stale_task,
             self.team_completion,
-        ):
+        ]
+        # The reliability handler (leader-side remediation + team-level
+        # ping-pong) mounts only when the team opts into the reliability
+        # framework. It is appended after team_completion but does not listen
+        # on POLL_TASK, so the completion ordering above is unaffected; on
+        # MESSAGE / BROADCAST it fans out after MessageHandler.
+        self.reliability = None
+        reliability_cfg = getattr(blueprint.spec, "reliability", None)
+        if reliability_cfg is not None and reliability_cfg.enabled:
+            from openjiuwen.agent_teams.reliability.factory import (
+                build_pingpong_detector,
+                build_remediation_policy,
+            )
+            from openjiuwen.agent_teams.reliability.handler import ReliabilityHandler
+
+            self.reliability = ReliabilityHandler(
+                host,
+                blueprint,
+                infra,
+                poll_ctrl,
+                policy=build_remediation_policy(reliability_cfg),
+                pingpong=build_pingpong_detector(reliability_cfg),
+            )
+            handlers.append(self.reliability)
+
+        for handler in handlers:
             for event_key, callback in handler.get_callbacks().items():
                 self._framework.register_sync(event_key, callback)
 
