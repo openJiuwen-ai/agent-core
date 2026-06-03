@@ -978,7 +978,7 @@ class DeepAgent(BaseAgent):
             "enable_async_subagent": False,
             "add_general_purpose_agent": False,
             "enable_plan_mode": spec.enable_plan_mode,
-            "restrict_to_work_dir": spec.restrict_to_work_dir,
+            "restrict_to_work_dir": spec.restrict_to_work_dir or self._deep_config.restrict_to_work_dir,
         }
 
         if spec.factory_name:
