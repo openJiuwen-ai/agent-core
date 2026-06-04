@@ -97,9 +97,10 @@ TODO_LIST_DESCRIPTION_CN = """
 - 需要查看当前任务全貌和各任务ID，再决定如何更新
 - 不确定当前有哪些任务处于 in_progress 或 pending
 
-使用 todo_modify 的场景（不需要先调用 todo_list）：
+使用 todo_modify 的场景（必要时再触发 todo_list）：
 - 已知任务 ID，直接更新状态、内容或追加新任务
 - 任务刚完成，立即标记为 completed
+- 重要：不确定任务 ID 是否准确时，调用 todo_list 获取最新的任务列表和准确的 ID，再调用 todo_modify。因为错误的 ID（即使只错一个字符）会导致操作失败。
 """
 
 TODO_LIST_DESCRIPTION_EN = """
@@ -111,9 +112,10 @@ Use todo_list when:
 - You need an overview of all tasks and their IDs before deciding how to update
 - You are unsure which tasks are currently in_progress or pending
 
-Use todo_modify directly (no need to call todo_list first) when:
+Use todo_modify directly (Trigger todo_list when necessary) when:
 - You already know the task ID and want to update status, content, or append new tasks
 - A task just finished and you want to mark it completed immediately
+- Important: If you are not 100% sure about the task IDs, call todo_list first to get the accurate ID list, then call todo_modify. An incorrect ID (even one wrong character) will cause the operation to fail.
 """
 
 TODO_LIST_DESCRIPTION: Dict[str, str] = {
@@ -189,6 +191,11 @@ insert_before：在指定任务之前插入新任务（目标任务状态须为 
 1. **按序更新**：不得跳过仍为 pending 的前序任务将后项标为 in_progress/completed；in_progress 只能落在第一个非终态任务上；若当前项为 in_progress，须在同批先标 completed 再开下一项；跳过步骤须同批将前序标为 cancelled。
 2. **批量更新前**：跨多个 Stage/步骤变更状态时，或不确定 UUID 时，先 todo_list 再 modify。
 3. **仅改当前 in_progress 的 content/activeForm**（不改 status）时，可直接 update；其余跨任务状态变更适用上述规则。
+
+ID 精确性要求（极其重要）：
+- 任务 ID 是 UUID 格式，必须从 todo_create 返回值或 todo_list 结果中原样复制
+- 禁止凭记忆推测或修改 ID 中的任何字符，即使只错一个字符也会导致操作失败
+- 如果不确定任务 ID，请先调用 todo_list 获取准确的 ID 列表
 """
 
 TODO_MODIFY_DESCRIPTION_EN = """
@@ -256,6 +263,11 @@ The todo list has a fixed order (same as todo_create).
 1. **Update in order**: Do not skip pending earlier tasks when setting later tasks to in_progress/completed; in_progress may only be on the first non-terminal task; if the current task is in_progress, complete it in the same batch before starting the next; to skip a step, cancel the earlier task in the same batch.
 2. **Before batch status changes** across stages or when UUIDs are uncertain, call todo_list first.
 3. **Content-only updates** to the current in_progress task (no status change) may use update directly; cross-task status changes follow the rules above.
+
+ID Accuracy Requirement (Critical):
+- Task IDs are UUID format and MUST be copied exactly from todo_create results or todo_list output
+- Do NOT guess or modify any character in the ID — even a single wrong character will cause the operation to fail
+- If unsure about task IDs, call todo_list first to get the accurate ID list
 """
 
 TODO_MODIFY_DESCRIPTION: Dict[str, str] = {
@@ -275,7 +287,9 @@ TODO_CREATE_PARAMS: Dict[str, Dict[str, str]] = {
 }
 
 _TODO_ITEM_PARAMS: Dict[str, Dict[str, str]] = {
-    "id": {"cn": "任务唯一标识符", "en": "Unique task identifier"},
+    "id": {"cn": "任务唯一标识符（UUID格式，必须从 todo_create 或 todo_list 结果中原样复制，禁止推测或修改）",
+           "en": "Unique task identifier "
+           "(UUID format, must be copied exactly from todo_create or todo_list results — do NOT guess or modify)"},
     "content": {"cn": "任务详细描述", "en": "Detailed task description"},
     "activeForm": {"cn": "任务进行时描述", "en": "Present-tense task description"},
     "status": {"cn": "任务状态", "en": "Task status"},
