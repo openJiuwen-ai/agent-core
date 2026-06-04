@@ -34,6 +34,8 @@ class BuildContext:
         workspace: Live workspace, filled by ``DeepAgentSpec.build`` before
             rails / tools / sub-agents are materialized.
         member_card_id: Resolved agent card id, used to namespace tool ids.
+        project_dir: Resolved project root directory, when members are built
+            against a code project (e.g. the ``lsp`` rail roots here).
         extras: Escape-hatch mapping for platform handles when subclassing is
             not convenient.
     """
@@ -43,6 +45,7 @@ class BuildContext:
     role: Optional[str] = None
     workspace: Optional["Workspace"] = None
     member_card_id: Optional[str] = None
+    project_dir: Optional[str] = None
     extras: dict[str, Any] = field(default_factory=dict)
 
     def derive(self, **overrides: Any) -> "BuildContext":

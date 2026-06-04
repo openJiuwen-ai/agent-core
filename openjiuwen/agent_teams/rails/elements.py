@@ -46,14 +46,15 @@ from openjiuwen.agent_teams.rails.team_context import (
     team_rail_cache,
 )
 
-# Element names (the RailSpec ``type`` values; ``team.*`` namespace mirrors the
-# swarm ``swarm.*`` convention and stays clear of the bare built-in rail names).
-TEAM_TOOL = "team.tool"
-TEAM_POLICY = "team.policy"
-TEAM_WORKSPACE = "team.workspace"
-TEAM_TOOL_APPROVAL = "team.tool_approval"
-TEAM_PLAN_MODE = "team.plan_mode"
-TEAM_RELIABILITY = "team.reliability"
+# Element names (the RailSpec ``type`` values). The team rails live under the
+# ``core.team.*`` namespace — the ``core.`` layer prefix plus a ``team`` group —
+# parallel to a platform's ``swarm.*`` namespace.
+TEAM_TOOL = "core.team.tool"
+TEAM_POLICY = "core.team.policy"
+TEAM_WORKSPACE = "core.team.workspace"
+TEAM_TOOL_APPROVAL = "core.team.tool_approval"
+TEAM_PLAN_MODE = "core.team.plan_mode"
+TEAM_RELIABILITY = "core.team.reliability"
 
 
 # ---------------------------------------------------------------------------

@@ -146,7 +146,7 @@ def _build_spec(team_name: str, workspace_path: Path) -> TeamAgentSpec:
         "agents": {
             "leader": {
                 "model": _leader_model(),
-                "rails": [{"type": "filesystem"}],
+                "rails": [{"type": "core.sys_operation"}],
                 "language": "cn",
                 "max_iterations": 200,
                 "enable_task_planning": False,

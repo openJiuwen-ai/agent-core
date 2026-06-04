@@ -31,6 +31,7 @@ def ensure_harness_elements_registered() -> None:
     # Importing the modules runs their ``harness_element`` declarations.
     import openjiuwen.agent_teams.rails.builtin_elements  # noqa: F401
     import openjiuwen.agent_teams.rails.elements  # noqa: F401
+    import openjiuwen.agent_teams.rails.subagent_elements  # noqa: F401
 
     register_from_catalog()
     _REGISTERED = True

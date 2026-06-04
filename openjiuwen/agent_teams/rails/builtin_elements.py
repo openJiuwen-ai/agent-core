@@ -14,39 +14,54 @@ Most rails take no required constructor args, so they are declared with a class
 ``builder`` (adapted to the ``(params, context) -> instance`` provider contract
 at registration, auto-injecting ``language`` when the constructor accepts it).
 ``skill_use`` needs a resolved ``skills_dir`` and so uses a small factory.
-Optional rails / tools (CLI trackers, interrupt rails, web tools) are declared
-only when their classes are importable.
 """
 
 from __future__ import annotations
 
-import importlib
 from typing import Any
 
 from openjiuwen.agent_teams.harness.manifest import (
+    ConstructionInput,
     ElementKind,
+    context_field,
     harness_element,
+    param_field,
 )
+from openjiuwen.harness.cli.rails.token_tracker import TokenTrackingRail
+from openjiuwen.harness.cli.rails.tool_tracker import ToolTrackingRail
+from openjiuwen.harness.lsp import InitializeOptions
 from openjiuwen.harness.rails import (
+    HeartbeatRail,
+    LspRail,
+    SecurityRail,
     SkillUseRail,
     SubagentRail,
     TaskPlanningRail,
 )
+from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRail
+from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
+from openjiuwen.harness.tools.web_tools import WebFetchWebpageTool, WebFreeSearchTool
+from openjiuwen.harness.tools.worktree import WorktreeConfig, WorktreeRail
 
-# Element name constants — these are the RailSpec / BuiltinToolSpec ``type``
-# values, kept identical to the legacy class-registry keys so existing specs
-# resolve unchanged.
-TASK_PLANNING = "task_planning"
-SKILL_USE = "skill_use"
-SUBAGENT = "subagent"
-FILESYSTEM = "filesystem"
-TOKEN_TRACKING = "token_tracking"
-TOOL_TRACKING = "tool_tracking"
-ASK_USER = "ask_user"
-CONFIRM_INTERRUPT = "confirm_interrupt"
-WEB_SEARCH = "web_search"
-WEB_FETCH = "web_fetch"
+# Element name constants — the RailSpec / BuiltinToolSpec ``type`` values. Every
+# openjiuwen built-in element lives under the ``core.`` namespace (parallel to a
+# platform's ``swarm.*`` namespace), so a spec ``type`` unambiguously names its
+# owning layer.
+TASK_PLANNING = "core.task_planning"
+SKILL_USE = "core.skill_use"
+SUBAGENT = "core.subagent"
+SYS_OPERATION = "core.sys_operation"
+SECURITY = "core.security"
+HEARTBEAT = "core.heartbeat"
+WORKTREE = "core.worktree"
+LSP = "core.lsp"
+TOKEN_TRACKING = "core.token_tracking"
+TOOL_TRACKING = "core.tool_tracking"
+ASK_USER = "core.ask_user"
+CONFIRM_INTERRUPT = "core.confirm_interrupt"
+WEB_SEARCH = "core.web_search"
+WEB_FETCH = "core.web_fetch"
 
 
 def _build_skill_use_rail(params: dict[str, Any], context: Any) -> SkillUseRail:
@@ -81,31 +96,61 @@ def _build_skill_use_rail(params: dict[str, Any], context: Any) -> SkillUseRail:
     return SkillUseRail(**kwargs)
 
 
-def _try_declare(
-    kind: ElementKind,
-    name: str,
-    module_path: str,
-    cls_name: str,
-    description: str,
-) -> None:
-    """Declare an optional element only when its class is importable.
+class ConfirmInterruptInput(ConstructionInput):
+    """Construction inputs for the confirm-interrupt rail."""
+
+    tool_names: list[str] = param_field(
+        default_factory=list,
+        description="Tool names that require user confirmation before running.",
+    )
+
+
+class WorktreeInput(ConstructionInput):
+    """Construction inputs for the git worktree rail."""
+
+    enabled: bool = param_field(
+        default=False,
+        description="Whether the worktree workflow (enter / exit tools) is enabled.",
+    )
+
+
+def _build_worktree_rail(params: dict[str, Any], context: Any) -> WorktreeRail:
+    """Build a WorktreeRail from a serializable worktree config block.
 
     Args:
-        kind: The element kind (RAIL / TOOL).
-        name: The element name (= spec ``type``).
-        module_path: Dotted module path to import.
-        cls_name: Class attribute to read from the module.
-        description: Human-readable element description.
+        params: Spec params matching ``WorktreeConfig`` fields (e.g. ``enabled``).
+        context: Per-member build context (unused).
+
+    Returns:
+        A configured ``WorktreeRail``.
     """
-    try:
-        module = importlib.import_module(module_path)
-        cls = getattr(module, cls_name)
-    except (ImportError, AttributeError):
-        return
-    harness_element(kind=kind, name=name, description=description, builder=cls)
+    return WorktreeRail(config=WorktreeConfig(**dict(params or {})))
 
 
-# Mandatory rails (always importable).
+class LspInput(ConstructionInput):
+    """Construction inputs for the LSP rail."""
+
+    project_dir: str | None = context_field(
+        attr="project_dir",
+        default=None,
+        description="Project root the language server operates in.",
+    )
+
+
+def _build_lsp_rail(params: dict[str, Any], context: Any) -> LspRail:
+    """Build an LspRail rooted at the build context's project directory.
+
+    Args:
+        params: Spec params (unused).
+        context: Per-member build context; ``project_dir`` roots the LSP.
+
+    Returns:
+        A configured ``LspRail``.
+    """
+    inp = LspInput.resolve(params, context)
+    return LspRail(InitializeOptions(cwd=inp.project_dir))
+
+
 harness_element(
     kind=ElementKind.RAIL,
     name=TASK_PLANNING,
@@ -120,7 +165,7 @@ harness_element(
 )
 harness_element(
     kind=ElementKind.RAIL,
-    name=FILESYSTEM,
+    name=SYS_OPERATION,
     description="System-operation rail (shell / file / sandbox operation tools).",
     builder=SysOperationRail,
 )
@@ -130,50 +175,68 @@ harness_element(
     description="Skill discovery / use rail; resolves skills_dir from the workspace.",
     builder=_build_skill_use_rail,
 )
-
-# Optional rails / tools — declared only when importable (CLI trackers, the
-# interrupt rails, and the web tools are not always present).
-_try_declare(
-    ElementKind.RAIL,
-    TOKEN_TRACKING,
-    "openjiuwen.harness.cli.rails.token_tracker",
-    "TokenTrackingRail",
-    "Tracks token usage across the run (CLI).",
+harness_element(
+    kind=ElementKind.RAIL,
+    name=TOKEN_TRACKING,
+    description="Tracks token usage across the run (CLI).",
+    builder=TokenTrackingRail,
 )
-_try_declare(
-    ElementKind.RAIL,
-    TOOL_TRACKING,
-    "openjiuwen.harness.cli.rails.tool_tracker",
-    "ToolTrackingRail",
-    "Tracks tool calls across the run (CLI).",
+harness_element(
+    kind=ElementKind.RAIL,
+    name=TOOL_TRACKING,
+    description="Tracks tool calls across the run (CLI).",
+    builder=ToolTrackingRail,
 )
-_try_declare(
-    ElementKind.RAIL,
-    ASK_USER,
-    "openjiuwen.harness.rails.interrupt.ask_user_rail",
-    "AskUserRail",
-    "Interrupt rail that asks the user for input.",
+harness_element(
+    kind=ElementKind.RAIL,
+    name=ASK_USER,
+    description="Interrupt rail that asks the user for input.",
+    builder=AskUserRail,
 )
-_try_declare(
-    ElementKind.RAIL,
-    CONFIRM_INTERRUPT,
-    "openjiuwen.harness.rails.interrupt.confirm_rail",
-    "ConfirmInterruptRail",
-    "Interrupt rail that confirms tool calls with the user.",
+harness_element(
+    kind=ElementKind.RAIL,
+    name=CONFIRM_INTERRUPT,
+    description="Interrupt rail that confirms tool calls with the user.",
+    input_model=ConfirmInterruptInput,
+    builder=ConfirmInterruptRail,
 )
-_try_declare(
-    ElementKind.TOOL,
-    WEB_SEARCH,
-    "openjiuwen.harness.tools.web_tools",
-    "WebFreeSearchTool",
-    "Free web search tool.",
+harness_element(
+    kind=ElementKind.RAIL,
+    name=SECURITY,
+    description="Injects the safety / security prompt segment.",
+    builder=SecurityRail,
 )
-_try_declare(
-    ElementKind.TOOL,
-    WEB_FETCH,
-    "openjiuwen.harness.tools.web_tools",
-    "WebFetchWebpageTool",
-    "Web page fetch tool.",
+harness_element(
+    kind=ElementKind.RAIL,
+    name=HEARTBEAT,
+    description="Heartbeat rail keeping long-running agents alive.",
+    builder=HeartbeatRail,
+)
+harness_element(
+    kind=ElementKind.RAIL,
+    name=WORKTREE,
+    description="Git worktree rail (enter_worktree / exit_worktree tools).",
+    input_model=WorktreeInput,
+    builder=_build_worktree_rail,
+)
+harness_element(
+    kind=ElementKind.RAIL,
+    name=LSP,
+    description="Language-server rail rooted at the project directory.",
+    input_model=LspInput,
+    builder=_build_lsp_rail,
+)
+harness_element(
+    kind=ElementKind.TOOL,
+    name=WEB_SEARCH,
+    description="Free web search tool.",
+    builder=WebFreeSearchTool,
+)
+harness_element(
+    kind=ElementKind.TOOL,
+    name=WEB_FETCH,
+    description="Web page fetch tool.",
+    builder=WebFetchWebpageTool,
 )
 
 
@@ -181,7 +244,11 @@ __all__ = [
     "TASK_PLANNING",
     "SKILL_USE",
     "SUBAGENT",
-    "FILESYSTEM",
+    "SYS_OPERATION",
+    "SECURITY",
+    "HEARTBEAT",
+    "WORKTREE",
+    "LSP",
     "TOKEN_TRACKING",
     "TOOL_TRACKING",
     "ASK_USER",
