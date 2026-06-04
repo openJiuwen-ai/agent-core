@@ -41,6 +41,11 @@ tools:
 必须创建临时 `DeepAgent`，调用真实加载路径：
 
 ```python
+from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.schema.config import DeepAgentConfig
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+agent = DeepAgent(AgentCard(name="test_agent", description="test")).configure(
+            DeepAgentConfig(enable_task_loop=False))
 loaded = await agent.load_harness_config(config_path)
 ```
 
@@ -104,7 +109,7 @@ loaded = await agent.load_harness_config(config_path)
 ```
 
 Tool 验收必须使用 agent-core/harness 自身可观测接口：
-- 检查 `agent.ability_manager.list()` 中是否存在目标 `ToolCard.name`
+- 检查 `agent.ability_manager.list()` 中是否存在目标 `ToolCard`
 - 检查 `Runner.resource_mgr.get_tool(tool_id)` 能取回工具实例
 - 优先通过 agent-core 工具执行链验证工具，例如构造 `ToolCall` 并让 `ability_manager` 在 session 下执行
 - 可以直接调用 `Runner.resource_mgr.get_tool(tool_id).invoke(..., session=session)` 验证工具核心输出，但这不能替代工具注册检查
@@ -148,8 +153,10 @@ Rail 验收必须检查可观测副作用：
 
 Skill 验收必须检查：
 - `SKILL.md` frontmatter 合法
-- skill 内容能被加载进上下文
-- 测试 query 能触发 skill 的关键行为或关键术语
+- skill 目录能被 SkillUseRail 加载（目录路径正确追加到 skills_dir）
+- skill 内容能被注入 agent 上下文
+
+注意：skill 的验证目标仅限于"能加载生效"，不需要深入验证 skill 内容质量、功能完整性或依赖安装情况。SkillUseRail 仅读取 SKILL.md frontmatter，不执行 skill 内部 Python 文件。
 
 失败归因：
 - `tool_not_called`
@@ -160,7 +167,7 @@ Skill 验收必须检查：
 - `artifact_placeholder_output`
 - `rail_hook_not_observed`
 - `rail_tool_state_not_shared`
-- `skill_not_used`
+- `skill_not_loaded`
 
 ## 自修复循环
 

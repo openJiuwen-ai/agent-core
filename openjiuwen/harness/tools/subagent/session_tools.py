@@ -19,7 +19,7 @@ from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.prompts.tools import build_tool_card
 
 if TYPE_CHECKING:
-    pass
+    from openjiuwen.harness.deep_agent import DeepAgent
 
 
 SESSION_SPAWN_TASK_TYPE = "session_spawn_task"

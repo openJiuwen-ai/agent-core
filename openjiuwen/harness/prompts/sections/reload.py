@@ -3,7 +3,10 @@
 """Reload prompt section for DeepAgent - context offload hint."""
 from __future__ import annotations
 
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from openjiuwen.harness.prompts.builder import PromptSection
 
 
 RELOAD_HINT_CN = (

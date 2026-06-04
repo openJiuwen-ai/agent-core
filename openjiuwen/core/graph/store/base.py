@@ -8,6 +8,7 @@ from abc import (
 )
 from dataclasses import dataclass
 from typing import (
+    TYPE_CHECKING,
     Any,
     Dict,
     List,
@@ -15,6 +16,9 @@ from typing import (
 )
 
 from openjiuwen.core.common.logging import graph_logger, LogEventType
+
+if TYPE_CHECKING:
+    from openjiuwen.core.graph.pregel.base import Message
 
 
 @dataclass

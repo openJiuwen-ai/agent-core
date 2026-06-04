@@ -23,11 +23,14 @@ class PlanModeState:
         plan_slug: Short identifier for the active plan file
             (e.g. ``"gleaming-brewing-phoenix"``).  The absolute path is
             derived at runtime via ``resolve_plan_file_path()``.
+        prompt_context: Legacy prompt-specialization marker retained for
+            older checkpoints. New prompt overlays are owned by rails.
     """
 
     mode: str = "normal"
     pre_plan_mode: str = "normal"
     plan_slug: str | None = None
+    prompt_context: str | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to a JSON-friendly dict.
@@ -39,6 +42,7 @@ class PlanModeState:
             "mode": self.mode,
             "pre_plan_mode": self.pre_plan_mode,
             "plan_slug": self.plan_slug,
+            "prompt_context": self.prompt_context,
         }
 
     @classmethod
@@ -58,6 +62,7 @@ class PlanModeState:
             mode=data.get("mode", "normal"),
             pre_plan_mode=data.get("pre_plan_mode"),
             plan_slug=data.get("plan_slug"),
+            prompt_context=data.get("prompt_context"),
         )
 
 

@@ -10,7 +10,10 @@ For tool registration metadata, see sections/tools/task_tool.py
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional
+
+if TYPE_CHECKING:
+    from openjiuwen.harness.prompts.builder import PromptSection
 
 # ---------------------------------------------------------------------------
 # Task system prompt (bilingual) - for system message injection
@@ -21,11 +24,6 @@ TASK_SYSTEM_PROMPT_EN = """\
 **Core advantage**: subagents run in isolated context windows — ALL intermediate tool \
 call results never enter YOUR context; only the final summary is returned to you, \
 dramatically saving tokens and keeping your main context clean and efficient.
-
-**Mandatory use cases (MUST call task_tool — direct tool calls are not allowed):**
-    - Deeply reading 2 or more documents/papers/files: each must be delegated to \
-an independent subagent; do NOT use read_file to read them yourself one by one
-    - Searching, fetching, or analysing 3 or more independent sources
 
 Proactively delegate in these scenarios:
     - Reasoning-heavy tasks: research or analysis requiring many tool calls \

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
+from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
 from openjiuwen.agent_evolving.experience import (
     ExperienceTracker,
     OnlineEvolutionOrchestrator,
@@ -22,7 +23,14 @@ from openjiuwen.agent_evolving.experience.scorer import (
     ExperienceScorer,
 )
 from openjiuwen.agent_evolving.experience.skill_experience_manager import ExperienceManager
-from openjiuwen.agent_evolving.experience.types import ExperienceApprovalRequest, ExperienceProposal, PendingChange
+from openjiuwen.agent_evolving.experience.types import (
+    ONLINE_EVOLUTION_OUTCOME_STATUSES,
+    ExperienceApprovalRequest,
+    ExperienceProposal,
+    OnlineEvolutionResult,
+    PendingChange,
+    request_for_online_evolution_result,
+)
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.optimizer.skill_call import SkillExperienceOptimizer
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
@@ -54,15 +62,19 @@ from openjiuwen.harness.rails.evolution.approval_events import (
     build_skill_approval_event,
 )
 from openjiuwen.harness.rails.evolution.approval_runtime import EvolutionApprovalRuntime
-from openjiuwen.harness.rails.evolution.contracts import EvolutionRequestResult, SimplifyRequestResult
+from openjiuwen.harness.rails.evolution.contracts import (
+    EvolutionRequestResult,
+    SimplifyRequestResult,
+)
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail
+from openjiuwen.harness.rails.evolution.skill_evolution_sharing import SkillEvolutionSharingMixin
 
 _MAX_PROCESSED_SIGNAL_KEYS = 500
 _DEFAULT_EVOLUTION_TOTAL_TIMEOUT_SECS = 600.0
 _NON_REGULAR_SKILL_KINDS = {"team-skill", "swarm-skill"}
 
 
-class SkillEvolutionRail(EvolutionRail):
+class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
     """Online auto-evolution rail for skill patching and persistence.
 
     Inherits EvolutionRail to gain automatic trajectory collection.
@@ -95,6 +107,8 @@ class SkillEvolutionRail(EvolutionRail):
         generate_records_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY,
         evaluate_llm_policy: LLMInvokePolicy = EVALUATE_LLM_POLICY,
         simplify_llm_policy: LLMInvokePolicy = SIMPLIFY_LLM_POLICY,
+        sharing_config: Optional[Dict[str, Any]] = None,
+        disabled_skills: Optional[Union[str, List[str]]] = None,
     ) -> None:
         """Initialize SkillEvolutionRail.
 
@@ -107,11 +121,18 @@ class SkillEvolutionRail(EvolutionRail):
             language: Language for experience generation ("cn" or "en")
             trajectory_store: Optional trajectory store (inherited from EvolutionRail)
             eval_interval: Number of conversations between async evaluations
+            sharing_config: Optional cross-user sharing settings (enabled, hub_path, etc.)
+            disabled_skills: Optional deny-list of skill names excluded from self-optimization.
+                Supports a single skill name (str) or multiple names (list[str]).
         """
         if eval_interval < 1:
             raise ValueError("eval_interval must be >= 1")
 
-        super().__init__(trajectory_store=trajectory_store, team_trajectory_store=team_trajectory_store)
+        super().__init__(
+            trajectory_store=trajectory_store,
+            team_trajectory_store=team_trajectory_store,
+            disabled_skills=disabled_skills,
+        )
         self._evolution_store = EvolutionStore(skills_dir)
         self._evolver = SkillExperienceOptimizer(
             llm,
@@ -167,6 +188,13 @@ class SkillEvolutionRail(EvolutionRail):
             store=self._evolution_store,
             scorer=self._scorer,
             eval_interval=self._eval_interval,
+        )
+        self._init_sharing(
+            sharing_config,
+            llm=llm,
+            model=model,
+            language=language,
+            evolution_store=self._evolution_store,
         )
 
     @property
@@ -277,6 +305,8 @@ class SkillEvolutionRail(EvolutionRail):
         """Hot-update LLM client and model."""
         self._evolver.update_llm(llm, model)
         self._scorer.update_llm(llm, model)
+        if self._keyword_extractor is not None:
+            self._keyword_extractor.update_llm(llm, model)
 
     def clear_processed_signals(self) -> None:
         """Clear signal fingerprints, typically on conversation boundary."""
@@ -385,6 +415,8 @@ class SkillEvolutionRail(EvolutionRail):
 
             all_skill_names = self._evolution_store.list_skill_names()
             skill_names = [name for name in all_skill_names if self._is_regular_skill(name)]
+            if self._disabled_skills:
+                skill_names = [name for name in skill_names if name not in self._disabled_skills]
             logger.info(
                 "[SkillEvolutionRail] found %d regular skills (filtered from %d local skills)",
                 len(skill_names),
@@ -468,15 +500,30 @@ class SkillEvolutionRail(EvolutionRail):
                 await self._experience_tracker.evaluate_presented(presented_entries)
                 return
 
-            # Evolve existing skills (when signals are attributed to known skills)
+            # Download hub experiences before local generation
+            incremental_messages = self._resolve_incremental_messages(messages, ctx, snapshot)
+            downloaded_per_skill: dict[str, List[EvolutionRecord]] = {}
+            if self.is_sharing_enabled and skill_groups:
+                downloaded_per_skill = await self._download_shared_experiences(
+                    messages,
+                    list(skill_groups.keys()),
+                    incremental_messages=incremental_messages,
+                )
+
             for skill_name, skill_signals in skill_groups.items():
-                await self._handle_evolution_from_signals(
+                generated = await self._evolve_skill_with_sharing(
                     skill_name=skill_name,
-                    signals=skill_signals,
+                    skill_signals=skill_signals,
                     messages=messages,
                     ctx=ctx,
-                    requires_approval=not self._auto_save,
+                    shared_records=downloaded_per_skill.get(skill_name, []),
                 )
+                if not generated:
+                    self._emit_progress(
+                        "completed",
+                        f"no evolution records generated for '{skill_name}'",
+                        skill_name=skill_name,
+                    )
 
             await self._experience_tracker.evaluate_presented(presented_entries)
         except Exception as exc:
@@ -518,10 +565,7 @@ class SkillEvolutionRail(EvolutionRail):
                 return signal.excerpt
         for message in reversed(messages):
             # Handle both dict and Pydantic model objects (SystemMessage, AssistantMessage, etc.)
-            if isinstance(message, dict):
-                content = message.get("content")
-            else:
-                content = getattr(message, "content", "")
+            content = message.get("content") if isinstance(message, dict) else getattr(message, "content", "")
             if isinstance(content, str) and content:
                 return content
         return ""
@@ -529,30 +573,57 @@ class SkillEvolutionRail(EvolutionRail):
     async def request_user_evolution(
         self,
         skill_name: str,
-        user_intent: str,
+        user_intent: str = "",
         *,
         auto_approve: bool = False,
     ) -> EvolutionRequestResult:
         """User-triggered evolution entry point for regular skills."""
-        signal = make_evolution_signal(
-            signal_type=USER_INTENT_SIGNAL,
-            section="Instructions",
-            excerpt=user_intent,
+        trajectory = self._build_trajectory()
+        messages: List[dict] = []
+        signals: List[EvolutionSignal] = []
+        if trajectory is not None and trajectory.steps:
+            messages = self._collect_messages_from_trajectory(trajectory)
+            signals = await self._detect_active_request_signals(
+                skill_name=skill_name,
+                trajectory=trajectory,
+                messages=messages,
+            )
+
+        if user_intent:
+            self._append_unique_signal(
+                signals,
+                make_evolution_signal(
+                    signal_type=USER_INTENT_SIGNAL,
+                    section="Instructions",
+                    excerpt=user_intent,
+                    skill_name=skill_name,
+                    source="explicit_request",
+                ),
+            )
+
+        if not signals:
+            return EvolutionRequestResult(skill_name=skill_name)
+
+        if not messages and user_intent:
+            messages = [{"role": "user", "content": user_intent}]
+
+        online_result = await self._handle_evolution_from_signals_with_result(
             skill_name=skill_name,
-            source="explicit_request",
-        )
-        request = await self._handle_evolution_from_signals(
-            skill_name=skill_name,
-            signals=[signal],
-            messages=[{"role": "user", "content": user_intent}],
+            signals=signals,
+            messages=messages,
             ctx=None,
             user_query=user_intent,
             requires_approval=not auto_approve,
             emit_host_events=False,
         )
+        request = request_for_online_evolution_result(online_result)
 
         if request is None:
-            return EvolutionRequestResult(skill_name=skill_name)
+            return EvolutionRequestResult(
+                skill_name=skill_name,
+                status=online_result.status,
+                message=online_result.message,
+            )
 
         proposal = getattr(request, "proposal", None)
         records = list(getattr(proposal, "records", []) or [])
@@ -563,7 +634,56 @@ class SkillEvolutionRail(EvolutionRail):
             approval_event=approval_event,
             records=records,
             auto_approved=auto_approve,
+            status=online_result.status,
+            message=online_result.message,
         )
+
+    async def _detect_active_request_signals(
+        self,
+        *,
+        skill_name: str,
+        trajectory: Trajectory,
+        messages: List[dict],
+    ) -> List[EvolutionSignal]:
+        """Detect evidence-window signals for an explicit regular-skill request."""
+        detector = SignalDetector(existing_skills=self._active_request_regular_skill_names(skill_name)).bind_llm(
+            llm=self._evolver.llm,
+            model=self._evolver.model,
+            language=self._language,
+        )
+        detected: List[EvolutionSignal] = []
+        try:
+            detected.extend(detector.detect_trajectory_signals(trajectory, messages=messages))
+        except Exception as exc:
+            logger.warning("[SkillEvolutionRail] active request trajectory detection failed: %s", exc)
+        try:
+            detected.extend(await detector.detect_user_intent(messages))
+        except Exception as exc:
+            logger.warning("[SkillEvolutionRail] active request user-feedback detection failed: %s", exc)
+
+        signals: List[EvolutionSignal] = []
+        for signal in detected:
+            if signal.skill_name and signal.skill_name != skill_name:
+                continue
+            self._append_unique_signal(signals, signal)
+        return signals
+
+    def _active_request_regular_skill_names(self, skill_name: str) -> set[str]:
+        """Return known regular skills for active-request attribution."""
+        try:
+            all_skill_names = list(self._evolution_store.list_skill_names())
+        except Exception:
+            return {skill_name}
+        skill_names = {name for name in all_skill_names if self._is_regular_skill(name)}
+        skill_names.add(skill_name)
+        return skill_names
+
+    @staticmethod
+    def _append_unique_signal(signals: List[EvolutionSignal], signal: EvolutionSignal) -> None:
+        fingerprint = make_signal_fingerprint(signal)
+        if any(make_signal_fingerprint(existing) == fingerprint for existing in signals):
+            return
+        signals.append(signal)
 
     def _emit_progress(
         self,
@@ -600,10 +720,13 @@ class SkillEvolutionRail(EvolutionRail):
             request_id=approval_request.request_id,
             records=pending.payload,
             language=self._language,
+            is_shared_records=bool(getattr(pending, "is_shared_records", False)),
+            rail_kind="regular",
         )
         proposal = getattr(approval_request, "proposal", None)
         attach_evolution_meta(
             event,
+            rail_kind="regular",
             signal_type=getattr(proposal, "signal_type", None),
             signal_source=getattr(proposal, "signal_source", None),
         )
@@ -719,9 +842,7 @@ class SkillEvolutionRail(EvolutionRail):
         if skill_dir is None:
             return True
 
-        if isinstance(skill_dir, str):
-            skill_dir = Path(skill_dir)
-        elif isinstance(skill_dir, os.PathLike):
+        if isinstance(skill_dir, (str, os.PathLike)):
             skill_dir = Path(skill_dir)
         elif not isinstance(skill_dir, Path):
             return True
@@ -745,10 +866,10 @@ class SkillEvolutionRail(EvolutionRail):
         *,
         user_query: str = "",
         requires_approval: bool,
-    ) -> Optional[ExperienceApprovalRequest]:
+    ) -> OnlineEvolutionResult:
         """Generate and stage skill experiences through the unified updater flow.
 
-        Returns the staged request if records were produced.
+        Returns the structured orchestration result.
         """
         return await self._online_orchestrator.evolve(
             skill_name=skill_name,
@@ -772,21 +893,60 @@ class SkillEvolutionRail(EvolutionRail):
         emit_host_events: bool = True,
     ) -> Optional[ExperienceApprovalRequest]:
         """Shared downstream handler for both passive and explicit skill evolution."""
+        result = await self._handle_evolution_from_signals_with_result(
+            skill_name=skill_name,
+            signals=signals,
+            messages=messages,
+            ctx=ctx,
+            user_query=user_query,
+            requires_approval=requires_approval,
+            emit_host_events=emit_host_events,
+        )
+        return request_for_online_evolution_result(result)
+
+    async def _handle_evolution_from_signals_with_result(
+        self,
+        *,
+        skill_name: str,
+        signals: List[EvolutionSignal],
+        messages: List[dict],
+        ctx: Optional[AgentCallbackContext],
+        user_query: str = "",
+        requires_approval: bool,
+        emit_host_events: bool = True,
+    ) -> OnlineEvolutionResult:
+        """Handle evolution and retain the orchestrator status for active APIs."""
         if emit_host_events:
             self._emit_progress(
                 "generating_updates", f"generating evolution records for '{skill_name}'", skill_name=skill_name
             )
-        request = await self._stage_evolution_from_signals(
+        result = await self._stage_evolution_from_signals(
             skill_name=skill_name,
             signals=signals,
             messages=messages,
             user_query=user_query,
             requires_approval=requires_approval,
         )
-        if request is None:
-            return None
+        request = result.request
+        if result.status in ONLINE_EVOLUTION_OUTCOME_STATUSES:
+            if emit_host_events:
+                self._emit_background_outcome_event(
+                    {
+                        "status": result.status,
+                        "message": result.message or f"online evolution finished with status={result.status}",
+                        "rail_kind": "regular",
+                        "skill_name": result.skill_name,
+                        "request_id": getattr(request, "request_id", None),
+                        "stage": "completed" if result.status == "no_evolution_no_records" else "failed",
+                        "source": "experience_updater",
+                    }
+                )
+            return result
 
-        def _on_auto_approved(staged_request: ExperienceApprovalRequest) -> None:
+        if request is None:
+            return result
+
+        async def _on_auto_approved(staged_request: ExperienceApprovalRequest) -> None:
             logger.info(
                 "[SkillEvolutionRail] auto-approved evolution request for skill=%s (request=%s)",
                 skill_name,
@@ -799,8 +959,12 @@ class SkillEvolutionRail(EvolutionRail):
                     skill_name=skill_name,
                     request_id=staged_request.request_id,
                 )
+            await self._sharing_after_auto_approved(
+                skill_name=skill_name,
+                staged_request=staged_request,
+            )
 
-        return await self.approval_runtime.finalize_staged_evolution_request(
+        await self.approval_runtime.finalize_staged_evolution_request(
             request,
             requires_approval=requires_approval,
             emit_approval_request=(
@@ -810,31 +974,60 @@ class SkillEvolutionRail(EvolutionRail):
             ),
             on_auto_approved=_on_auto_approved,
         )
+        return result
 
-    async def approve_record(self, request_id: str) -> None:
+    async def approve_record(
+        self,
+        request_id: str,
+        *,
+        approved_record_ids: Optional[List[str]] = None,
+    ) -> None:
         """Approve staged evolution records.
 
         The ``request_id`` matches ``payload["request_id"]`` from the approval event.
-        Only the records captured in this approval snapshot are written. On
-        partial failure the unwritten tail is preserved in the same
-        ``PendingChange`` so the host can retry by calling ``approve_record``
-        again with the same id.
+        When ``approved_record_ids`` is provided, only those records are written.
         """
+        snapshot_pending = self._pending_approval_snapshots.get(request_id)
+        approved_records: List[EvolutionRecord] = []
+        approval_messages = None
+        is_shared = False
+        if snapshot_pending is not None:
+            payload = getattr(snapshot_pending, "payload", None)
+            if isinstance(payload, list):
+                approved_records = list(payload)
+            approval_messages = getattr(snapshot_pending, "messages", None)
+            is_shared = bool(getattr(snapshot_pending, "is_shared_records", False))
+        if approved_record_ids is not None and approved_records:
+            approved_id_set = set(approved_record_ids)
+            approved_records = [record for record in approved_records if record.id in approved_id_set]
+
+        approve_kwargs: Dict[str, List[str]] = {}
+        if approved_record_ids is not None:
+            approve_kwargs["approved_record_ids"] = approved_record_ids
         pending, result = await self.approval_runtime.approve_pending_request(
             request_id,
             rail_name="SkillEvolutionRail",
             action_name="approve_record",
+            **approve_kwargs,
         )
         if pending is None:
             return
         if result.pending_count:
             return
         logger.info(
-            "[SkillEvolutionRail] user approved %d record(s) for skill=%s (request=%s)",
+            "[SkillEvolutionRail] user approved %d record(s) for skill=%s (request=%s, is_shared=%s)",
             result.applied_count,
             pending.skill_name,
             request_id,
+            is_shared,
         )
+        if not is_shared and approved_records:
+            await self._stage_records_for_share(
+                skill_name=pending.skill_name,
+                messages=approval_messages,
+                records=approved_records,
+            )
+            await self._flush_share_uploads(pending.skill_name)
 
     async def reject_record(self, request_id: str) -> None:
         """Reject staged evolution records without writing them.
@@ -1027,6 +1220,7 @@ class SkillEvolutionRail(EvolutionRail):
                 "session_id": session_id,
                 "presented_entries": presented_entries,
                 "skill_name": "skill-evolution",
+                "incremental_messages": self._resolve_incremental_messages(messages, ctx, None),
             }
         )
         return snapshot
@@ -1056,6 +1250,7 @@ class SkillEvolutionRail(EvolutionRail):
             request_id=request_id,
             actions=actions,
             language=self._language,
+            rail_kind="regular",
         )
         return SimplifyRequestResult(
             skill_name=skill_name,

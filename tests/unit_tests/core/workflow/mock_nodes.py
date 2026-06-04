@@ -31,7 +31,7 @@ class MockStartNode(Start):
 
 class MockEndNode(End):
     def __init__(self, node_id: str):
-        super().__init__({"responseTemplate": "hello:{{end_input}}"})
+        super().__init__()
         self.node_id = node_id
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:

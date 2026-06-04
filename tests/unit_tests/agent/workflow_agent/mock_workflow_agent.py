@@ -556,7 +556,8 @@ class MockWorkflowAgent:
         await self._inner.context_engine.save_contexts(
             agent_session
         )
-        await agent_session.post_run()
+        await agent_session.close_stream()
+        await agent_session.commit()
 
     @staticmethod
     def _adapt_invoke_output(

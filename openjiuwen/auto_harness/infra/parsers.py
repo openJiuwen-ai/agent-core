@@ -338,16 +338,20 @@ def _row_to_gap(cells: list[str]) -> Gap | None:
 
 def parse_extension_designs(
     raw: str,
-) -> List[ExtensionDesign]:
+) -> tuple[str | None, List[ExtensionDesign]]:
     """从 agent 输出中解析 ExtensionDesign JSON 列表。
 
-    支持 ```json ... ``` 包裹和裸 JSON 数组。
+    支持两种格式（向后兼容）：
+    - 新格式：{"package_name": "...", "designs": [...]}
+    - 旧格式：[{"gap_id": ...}, ...] 或单个 design 对象
+
+    支持 ```json ... ``` 包裹和裸 JSON。
 
     Args:
         raw: agent 输出的原始文本。
 
     Returns:
-        解析后的 ExtensionDesign 列表。
+        (package_name, designs) 元组。旧格式返回 (None, designs)。
     """
     match = re.search(
         r"```json\s*(.*?)\s*```", raw, re.DOTALL,
@@ -356,21 +360,43 @@ def parse_extension_designs(
     if match:
         json_str = match.group(1)
     else:
-        arr_match = re.search(r"\[.*]", raw, re.DOTALL)
-        if not arr_match:
-            return []
-        json_str = arr_match.group(0)
+        # 尝试匹配完整 JSON 对象（新格式）或数组（旧格式）
+        obj_match = re.search(r"\{.*\}", raw, re.DOTALL)
+        arr_match = re.search(r"\[.*\]", raw, re.DOTALL)
+        if obj_match:
+            json_str = obj_match.group(0)
+        elif arr_match:
+            json_str = arr_match.group(0)
+        else:
+            return None, []
 
     try:
-        items = json.loads(json_str)
+        data = json.loads(json_str)
     except json.JSONDecodeError:
         logger.warning(
             "Failed to parse extension designs JSON"
         )
-        return []
+        return None, []
 
-    if not isinstance(items, list):
-        items = [items]
+    # 判断格式类型
+    package_name: str | None = None
+    items: List[Any] = []
+    if isinstance(data, dict) and "designs" in data:
+        # 新格式：顶层对象包含 package_name 和 designs
+        package_name_raw = data.get("package_name")
+        if package_name_raw and isinstance(package_name_raw, str):
+            package_name = package_name_raw.strip()
+        items = data.get("designs", [])
+        if not isinstance(items, list):
+            items = [items]
+    elif isinstance(data, list):
+        # 旧格式：裸数组
+        items = data
+    elif isinstance(data, dict):
+        # 兼容：单个 design 对象（无 package_name）
+        items = [data]
+    else:
+        return None, []
 
     designs: List[ExtensionDesign] = []
     for item in items:
@@ -404,6 +430,9 @@ def parse_extension_designs(
                 harness_config_patch=item.get(
                     "harness_config_patch", {}
                 ),
+                skill_source=str(
+                    item.get("skill_source", "")
+                ),
             )
         )
-    return designs
+    return package_name, designs

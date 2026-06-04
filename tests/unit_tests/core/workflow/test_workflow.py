@@ -1,3 +1,4 @@
+import asyncio
 from typing import AsyncIterator
 
 import pytest
@@ -955,6 +956,218 @@ async def test_five_transform_workflow():
     assert result.result == {"result": 3}
 
 
+async def test_end_stream_with_parallel_stream_and_transform_inputs():
+    flow = Workflow()
+    flow.set_start_comp("start_id", Start(), inputs_schema={"a": "${user_inputs.a}", "b": "${user_inputs.b}"})
+    flow.set_end_comp("end_id", End(),
+                      stream_inputs_schema={"result_a": {"a": "${A.a}", "op": "${A.op}", "b": "${A.b}",
+                                                         "result": "${A.result}"},
+                                            "result_c": {"a": "${C.a}", "op": "${C.op}", "b": "${C.b}",
+                                                         "result": "${C.result}"}},
+                      response_mode="streaming")
+
+    component_inputs = {"a": "${start_id.a}", "b": "${start_id.b}"}
+    flow.add_workflow_comp("A", ComputeComponent2(), inputs_schema=component_inputs,
+                           comp_ability=[ComponentAbility.STREAM], wait_for_all=True)
+    flow.add_workflow_comp("B", ComputeComponent2(), inputs_schema=component_inputs,
+                           comp_ability=[ComponentAbility.STREAM], wait_for_all=True)
+    flow.add_workflow_comp("C", ComputeComponent2(),
+                           stream_inputs_schema={"data": {"a": "${B.a}", "op": "${B.op}",
+                                                          "b": "${B.b}", "result": "${B.result}"}},
+                           comp_ability=[ComponentAbility.TRANSFORM], wait_for_all=True)
+
+    flow.add_connection("start_id", "A")
+    flow.add_connection("start_id", "B")
+    flow.add_stream_connection("A", "end_id")
+    flow.add_stream_connection("B", "C")
+    flow.add_stream_connection("C", "end_id")
+
+    chunks = []
+    async for chunk in flow.stream({"user_inputs": {"a": 1, "b": 2}}, create_workflow_session(),
+                                   stream_modes=[BaseStreamMode.OUTPUT]):
+        chunks.append(chunk)
+
+    assert chunks == [
+        OutputSchema(type="end node stream", index=0, payload={"output": {"result_a.a": 1}}),
+        OutputSchema(type="end node stream", index=1, payload={"output": {"result_a.op": "+"}}),
+        OutputSchema(type="end node stream", index=2, payload={"output": {"result_a.b": 2}}),
+        OutputSchema(type="end node stream", index=3, payload={"output": {"result_a.result": 3}}),
+        OutputSchema(type="end node stream", index=4, payload={"output": {"result_c.a": 1}}),
+        OutputSchema(type="end node stream", index=5, payload={"output": {"result_c.op": "+"}}),
+        OutputSchema(type="end node stream", index=6, payload={"output": {"result_c.b": 2}}),
+        OutputSchema(type="end node stream", index=7, payload={"output": {"result_c.result": 3}}),
+    ]
+
+
+async def test_end_stream_with_mixed_batch_and_stream_dual_ability_node():
+    """Equivalent to test_workflow_041: batch + stream into dual-ability C -> End."""
+    flow = Workflow()
+    flow.set_start_comp("start_id", Start(),
+                        inputs_schema={'a': '${user_inputs.a}', 'b': '${user_inputs.b}'})
+    flow.set_end_comp("end_id", End(), response_mode="streaming",
+                      stream_inputs_schema={'a': '${C.a}', 'op': '${C.op}', 'b': '${C.b}', 'result': '${C.result}',
+                                            'a_A': '${C.a_A}', 'op_A': '${C.op_A}', 'b_A': '${C.b_A}',
+                                            'result_A': '${C.result_A}'})
+
+    inputs_schema_a = {'a': '${start_id.a}', 'b': '${start_id.b}'}
+    flow.add_workflow_comp("A", ComputeComponent2(),
+                           inputs_schema=inputs_schema_a,
+                           comp_ability=[ComponentAbility.STREAM], wait_for_all=True)
+
+    inputs_schema_b = {'a': '${start_id.a}', 'b': '${start_id.b}'}
+    flow.add_workflow_comp("B", ComputeComponent2(),
+                           inputs_schema=inputs_schema_b,
+                           wait_for_all=True,
+                           comp_ability=[ComponentAbility.INVOKE])
+
+    inputs_schema_c = {'a': '${B.result}', 'b': '${B.result}'}
+    stream_inputs_schema_c = {'data': {'a_A': '${A.a}', 'op_A': '${A.op}',
+                                       'b_A': '${A.b}', 'result_A': '${A.result}'}}
+    flow.add_workflow_comp("C", ComputeComponent2(),
+                           inputs_schema=inputs_schema_c,
+                           stream_inputs_schema=stream_inputs_schema_c,
+                           wait_for_all=True,
+                           comp_ability=[ComponentAbility.TRANSFORM, ComponentAbility.STREAM])
+
+    flow.add_connection("start_id", "A")
+    flow.add_connection("start_id", "B")
+    flow.add_stream_connection("A", "C")
+    flow.add_connection("B", "C")
+    flow.add_stream_connection("C", "end_id")
+
+    chunks = []
+    async for chunk in flow.stream({'user_inputs': {'a': 1, 'b': 2}}, create_workflow_session(),
+                                   stream_modes=[BaseStreamMode.OUTPUT]):
+        chunks.append(chunk)
+
+    assert len(chunks) == 8
+    expected_chunks = [
+        OutputSchema(type='end node stream', index=0, payload={'output': {'a': 3}}),
+        OutputSchema(type='end node stream', index=1, payload={'output': {'op': '+'}}),
+        OutputSchema(type='end node stream', index=2, payload={'output': {'b': 3}}),
+        OutputSchema(type='end node stream', index=3, payload={'output': {'result': 6}}),
+        OutputSchema(type='end node stream', index=4, payload={'output': {'a_A': 1}}),
+        OutputSchema(type='end node stream', index=5, payload={'output': {'op_A': '+'}}),
+        OutputSchema(type='end node stream', index=6, payload={'output': {'b_A': 2}}),
+        OutputSchema(type='end node stream', index=7, payload={'output': {'result_A': 3}}),
+    ]
+    for chunk in expected_chunks:
+        assert chunk in chunks
+
+
+async def test_sub_workflow_mixed_batch_and_stream_output():
+    """Equivalent to test_sub_flow_streaming_output_007: sub-flow dual-ability C -> main End."""
+    sub_flow = Workflow()
+    sub_flow.set_start_comp("start", Start(),
+                            inputs_schema={'a': '${user_inputs.a}', 'b': '${user_inputs.b}'})
+    sub_flow.add_workflow_comp("A", ComputeComponent2(),
+                               inputs_schema={'a': '${start.a}', 'b': '${start.b}'},
+                               comp_ability=[ComponentAbility.STREAM], wait_for_all=True)
+    sub_flow.add_workflow_comp("B", ComputeComponent2(),
+                               inputs_schema={'a': '${start.a}', 'b': '${start.b}'},
+                               comp_ability=[ComponentAbility.INVOKE], wait_for_all=True)
+    sub_flow.add_workflow_comp("C", ComputeComponent2(),
+                               inputs_schema={'a': '${B.result}', 'b': '${B.result}'},
+                               stream_inputs_schema={'data': {'a_A': '${A.a}', 'op_A': '${A.op}',
+                                                              'b_A': '${A.b}', 'result_A': '${A.result}'}},
+                               comp_ability=[ComponentAbility.TRANSFORM, ComponentAbility.STREAM],
+                               wait_for_all=True)
+    sub_flow.set_end_comp("end", End(), response_mode="streaming",
+                          stream_inputs_schema={'a': '${C.a}', 'op': '${C.op}', 'b': '${C.b}', 'result': '${C.result}',
+                                                'a_A': '${C.a_A}', 'op_A': '${C.op_A}', 'b_A': '${C.b_A}',
+                                                'result_A': '${C.result_A}'})
+
+    sub_flow.add_connection("start", "A")
+    sub_flow.add_connection("start", "B")
+    sub_flow.add_stream_connection("A", "C")
+    sub_flow.add_connection("B", "C")
+    sub_flow.add_stream_connection("C", "end")
+
+    main_workflow = Workflow()
+    main_workflow.set_start_comp("s", Start(), inputs_schema={'data': '${inputs}'})
+    main_workflow.add_workflow_comp("sub_flow", SubWorkflowComponent(sub_flow),
+                                    inputs_schema={"user_inputs": "${s.data}"})
+    main_workflow.set_end_comp("e", End(), response_mode="streaming",
+                               stream_inputs_schema={"result": "${sub_flow.output}"})
+    main_workflow.add_connection("s", "sub_flow")
+    main_workflow.add_stream_connection("sub_flow", "e")
+
+    chunks = []
+    async for chunk in main_workflow.stream({'inputs': {'a': 1, 'b': 2}}, create_workflow_session(),
+                                            stream_modes=[BaseStreamMode.OUTPUT]):
+        chunks.append(chunk)
+
+    assert len(chunks) == 8
+    expected_result = [
+        OutputSchema(type='end node stream', index=0, payload={'output': {'result': {'a': 3}}}),
+        OutputSchema(type='end node stream', index=1, payload={'output': {'result': {'op': '+'}}}),
+        OutputSchema(type='end node stream', index=2, payload={'output': {'result': {'b': 3}}}),
+        OutputSchema(type='end node stream', index=3, payload={'output': {'result': {'result': 6}}}),
+        OutputSchema(type='end node stream', index=4, payload={'output': {'result': {'a_A': 1}}}),
+        OutputSchema(type='end node stream', index=5, payload={'output': {'result': {'op_A': '+'}}}),
+        OutputSchema(type='end node stream', index=6, payload={'output': {'result': {'b_A': 2}}}),
+        OutputSchema(type='end node stream', index=7, payload={'output': {'result': {'result_A': 3}}}),
+    ]
+    assert sorted(chunks, key=lambda x: x.index) == sorted(expected_result, key=lambda x: x.index)
+
+
+async def test_end_stream_with_mutually_exclusive_branch_stream_inputs():
+    class BranchMergeTransform(WorkflowComponent):
+        async def transform(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
+            for key, stream in inputs.items():
+                async for value in stream:
+                    yield {"value": f"{key}:{value}"}
+
+    def create_flow():
+        flow = Workflow()
+        flow.set_start_comp("start_id", Start(),
+                            inputs_schema={"route": "${user_inputs.route}", "a": "${user_inputs.a}",
+                                           "b": "${user_inputs.b}"})
+
+        router = BranchRouter()
+        router.add_branch("${start_id.route} == 'A'", "A", "A")
+        router.add_branch("${start_id.route} == 'B'", "B", "B")
+        flow.add_conditional_connection("start_id", router)
+
+        flow.add_workflow_comp("A", StreamCompNode("A"), inputs_schema={"value": "${start_id.a}"},
+                               comp_ability=[ComponentAbility.STREAM], wait_for_all=True)
+        flow.add_workflow_comp("B", StreamCompNode("B"), inputs_schema={"value": "${start_id.a}"},
+                               comp_ability=[ComponentAbility.STREAM], wait_for_all=True)
+        flow.add_workflow_comp("C", BranchMergeTransform(),
+                               stream_inputs_schema={"b_value": "${B.value}", "a_value": "${A.value}"},
+                               comp_ability=[ComponentAbility.TRANSFORM], wait_for_all=True)
+        flow.set_end_comp("end_id", End(),
+                          stream_inputs_schema={"result": "${C.value}"},
+                          response_mode="streaming")
+
+        flow.add_stream_connection("A", "C")
+        flow.add_stream_connection("B", "C")
+        flow.add_stream_connection("C", "end_id")
+        return flow
+
+    chunks = []
+    async for chunk in create_flow().stream({"user_inputs": {"route": "A", "a": 1, "b": 2}},
+                                            create_workflow_session(),
+                                            stream_modes=[BaseStreamMode.OUTPUT]):
+        chunks.append(chunk)
+
+    assert chunks == [
+        OutputSchema(type="end node stream", index=0, payload={"output": {"result": "a_value:1"}}),
+        OutputSchema(type="end node stream", index=1, payload={"output": {"result": "a_value:2"}}),
+    ]
+
+    chunks = []
+    async for chunk in create_flow().stream({"user_inputs": {"route": "B", "a": 1, "b": 2}},
+                                            create_workflow_session(),
+                                            stream_modes=[BaseStreamMode.OUTPUT]):
+        chunks.append(chunk)
+
+    assert chunks == [
+        OutputSchema(type="end node stream", index=0, payload={"output": {"result": "b_value:1"}}),
+        OutputSchema(type="end node stream", index=1, payload={"output": {"result": "b_value:2"}}),
+    ]
+
+
 async def test_auto_complete_abilities_detects_unregistered_edge_nodes():
     """Test that auto_complete_abilities raises exception when edges reference unregistered components."""
     flow = Workflow()
@@ -1765,3 +1978,514 @@ async def test_loop_with_stream():
     result = await flow.invoke({"inputs": [{"a": 1, "b": 2}, {"a": 3, "b": 1}]}, create_workflow_session())
     logger.info(f"result: {result}")
     assert result.result["output"]['end_out'] == ['final_result:9', 'final_result:12']
+
+
+# ===========================================================================
+# Branch + End deadlock reproduction tests
+#
+# Topology A (see spec: "Branch-default direct to End"):
+#   node_start -> node_branch -> (default -> node_end, if -> node_llm -> node_end)
+#   End: [STREAM, TRANSFORM] (mix mode), inputs_schema={}, stream_inputs_schema={...}
+#   Edges: (start,branch), (llm,end), (branch,end)
+#   Stream edges: llm -> end
+#
+# Topology B (see spec: "Two branches both through LLM"):
+#   node_start -> node_branch -> (default -> llm1 -> node_end, if -> llm2 -> node_end)
+#   End: [TRANSFORM] only, stream_inputs_schema={...}
+#   Edges: (start,branch), (llm1,end), (llm2,end)
+#   Stream edges: llm1 -> end, llm2 -> end
+#   NOTE: No branch->End barrier edge (branch does not directly connect to End)
+# ===========================================================================
+
+class StreamMockLLM(WorkflowComponent):
+    """Simulates an LLM component with both invoke and stream abilities."""
+
+    def __init__(self, name: str, response: str):
+        super().__init__()
+        self._name = name
+        self._response = response
+        self.ran = False
+
+    async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+        self.ran = True
+        return {"raw_output": self._response}
+
+    async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
+        self.ran = True
+        yield {"raw_output": self._response}
+
+
+def _build_topology_a_flow(llm, end_comp):
+    """Build Topology A flow: start -> branch -> (default -> End, if -> LLM -> End)."""
+    flow = Workflow()
+    flow.set_start_comp("node_start", Start(), inputs_schema={"query": "${query}"})
+
+    branch = BranchComponent()
+    branch.add_branch("${node_start.query} == 'trigger_if'", ["node_llm"], "node_branch-if")
+    branch.add_branch("True", ["node_end"], "node_branch-default")
+    flow.add_workflow_comp("node_branch", branch)
+    flow.add_workflow_comp("node_llm", llm)
+
+    flow.set_end_comp(
+        "node_end", end_comp,
+        inputs_schema={},
+        stream_inputs_schema={"result": "${node_llm.raw_output}"},
+        response_mode="streaming",
+    )
+
+    flow.add_connection("node_start", "node_branch")
+    flow.add_stream_connection("node_llm", "node_end")
+    return flow
+
+
+def _build_topology_b_flow(llm1, llm2, end_comp):
+    """Build Topology B flow: start -> branch -> (default -> LLM1 -> End, if -> LLM2 -> End)."""
+    flow = Workflow()
+    flow.set_start_comp("node_start", Start(), inputs_schema={"query": "${query}"})
+
+    branch = BranchComponent()
+    branch.add_branch("length(${node_start.query}) >= 5", ["node_llm2"], "node_branch-if")
+    branch.add_branch("True", ["node_llm1"], "node_branch-default")
+    flow.add_workflow_comp("node_branch", branch)
+    flow.add_workflow_comp("node_llm1", llm1)
+    flow.add_workflow_comp("node_llm2", llm2)
+
+    flow.set_end_comp(
+        "node_end", end_comp,
+        stream_inputs_schema={
+            "result": "${node_llm1.raw_output}",
+            "result2": "${node_llm2.raw_output}",
+        },
+        response_mode="streaming",
+    )
+
+    flow.add_connection("node_start", "node_branch")
+    flow.add_stream_connection("node_llm1", "node_end")
+    flow.add_stream_connection("node_llm2", "node_end")
+    return flow
+
+
+async def _run_stream_and_collect(flow, inputs, session, timeout=15.0):
+    """Run flow.stream() with timeout, collect chunks and extract rendered response."""
+    chunks = []
+
+    async def _consume():
+        async for chunk in flow.stream(inputs, session, stream_modes=[BaseStreamMode.OUTPUT]):
+            chunks.append(chunk)
+
+    await asyncio.wait_for(_consume(), timeout=timeout)
+
+    rendered = "".join(
+        str(chunk.payload.get("response", ""))
+        for chunk in chunks
+        if hasattr(chunk, "type") and chunk.type == "end node stream"
+    )
+    return rendered
+
+
+# ---------------------------------------------------------------------------
+# Topology A: branch-default directly to End
+#
+# Graph:
+#   start -> branch --default--> end
+#                   |--if-------> llm(stream) -> end
+#
+# Key properties:
+#   End abilities: [STREAM, TRANSFORM], set_mix() -> _data_source_count=2
+#   Barrier CNF: [{llm, branch}] -> OR (either completes -> barrier passes)
+#   Edges: (start,branch), (llm,end), (branch,end)
+# ---------------------------------------------------------------------------
+
+async def test_topology_a_default_path():
+    """
+    Topology A: branch takes default -> End directly, LLM does NOT execute.
+
+    Per spec:
+      - LLM does not execute -> no stream data -> stream_call NOT triggered
+      - TRANSFORM never runs (no stream_call)
+      - STREAM render_stream encounters None variable 'result'
+      - Expected after fix: output "End output: " (static text + empty var)
+
+    Known issues to debug:
+      - Without TRANSFORM fallback: render_stream enters wait loop,
+        relies on 0.2s timeout to skip variable segment
+      - Without CNF OR-group: barrier deadlocks waiting for LLM
+    """
+    llm = StreamMockLLM("node_llm", "llm_stream_response")
+    end_comp = End(conf={"responseTemplate": "End output: {{result}}"})
+    flow = _build_topology_a_flow(llm, end_comp)
+
+    rendered = await _run_stream_and_collect(
+        flow, {"query": "other"}, create_workflow_session(),
+    )
+    assert not llm.ran, "LLM should NOT execute on default path"
+    assert "End output:" in rendered, f"Output should contain static text, got: {rendered}"
+
+
+async def test_topology_a_if_path():
+    """
+    Topology A: branch takes if -> LLM executes -> stream to End.
+
+    Per spec:
+      - LLM executes, produces stream data
+      - stream_call triggered -> TRANSFORM runs with LLM data
+      - Barrier: node_llm completes -> OR-group satisfied
+      - Expected after fix: output "End output: llm_stream_response"
+    """
+    llm = StreamMockLLM("node_llm", "llm_stream_response")
+    end_comp = End(conf={"responseTemplate": "End output: {{result}}"})
+    flow = _build_topology_a_flow(llm, end_comp)
+
+    rendered = await _run_stream_and_collect(
+        flow, {"query": "trigger_if"}, create_workflow_session(),
+    )
+    assert llm.ran, "LLM should execute on if path"
+    assert "llm_stream_response" in rendered, \
+        f"Output should contain LLM result, got: {rendered}"
+
+
+# ---------------------------------------------------------------------------
+# Topology B: both branches go through LLM, then to End
+#
+# Graph:
+#   start -> branch --default--> llm1(stream) -> end
+#                   |--if-------> llm2(stream) -> end
+#
+# Key properties:
+#   End abilities: [TRANSFORM] only (no inputs_schema passed)
+#   Barrier CNF: [{llm1, llm2}] -> OR (either completes -> barrier passes)
+#   Edges: (start,branch), (llm1,end), (llm2,end)
+#   NOTE: NO branch->End edge (branch does not directly connect to End)
+# ---------------------------------------------------------------------------
+
+async def test_topology_b_default_path():
+    """
+    Topology B: branch takes default -> LLM1 executes, LLM2 does NOT.
+
+    Per spec:
+      - LLM1 executes, produces stream data -> stream_call triggers TRANSFORM
+      - LLM2 never executes -> result2 is None in inputs
+      - sanitize replaces result2 with ""
+      - Expected after fix: "End: default: llm1_resp...if branch:"
+    """
+    llm1 = StreamMockLLM("node_llm1", "llm1_default_resp")
+    llm2 = StreamMockLLM("node_llm2", "llm2_if_resp")
+    end_comp = End(conf={"responseTemplate": "End: default: {{result}}...if branch:{{result2}}"})
+    flow = _build_topology_b_flow(llm1, llm2, end_comp)
+
+    rendered = await _run_stream_and_collect(
+        flow, {"query": "abc"}, create_workflow_session(),
+    )
+    assert llm1.ran, "LLM1 should execute on default path"
+    assert not llm2.ran, "LLM2 should NOT execute on default path"
+    assert "llm1_default_resp" in rendered, \
+        f"Output should contain LLM1 result, got: {rendered}"
+
+
+async def test_topology_b_if_path():
+    """
+    Topology B: branch takes if -> LLM2 executes, LLM1 does NOT.
+
+    Per spec:
+      - LLM2 executes, produces stream data -> stream_call triggers TRANSFORM
+      - LLM1 never executes -> result is None in inputs
+      - sanitize replaces result with ""
+      - Expected after fix: "End: default: ...if branch:llm2_resp"
+    """
+    llm1 = StreamMockLLM("node_llm1", "llm1_default_resp")
+    llm2 = StreamMockLLM("node_llm2", "llm2_if_resp")
+    end_comp = End(conf={"responseTemplate": "End: default: {{result}}...if branch:{{result2}}"})
+    flow = _build_topology_b_flow(llm1, llm2, end_comp)
+
+    rendered = await _run_stream_and_collect(
+        flow, {"query": "long_query_value"}, create_workflow_session(),
+    )
+    assert not llm1.ran, "LLM1 should NOT execute on if path"
+    assert llm2.ran, "LLM2 should execute on if path"
+    assert "llm2_if_resp" in rendered, \
+        f"Output should contain LLM2 result, got: {rendered}"
+
+
+# ===========================================================================
+# Error recovery via CallbackFramework trigger
+# ===========================================================================
+
+
+async def test_workflow_error_recovery_with_trigger():
+    """error recovery returns configured default outputs via trigger mechanism.
+
+    When a component fails after exhausting all retries, _run_error_recovery
+    fires a ``component_error_recovery`` event through CallbackFramework.
+    A registered handler returns recovery data which is then written to session
+    state, allowing downstream nodes to reference ``${node_id.field}``.
+    """
+    from openjiuwen.core.runner.runner import Runner
+    from openjiuwen.core.workflow.workflow_config import ExceptionConfig
+
+    # Component that always fails on invoke
+    class FailingComponent(WorkflowComponent):
+        def __init__(self):
+            super().__init__()
+            self.call_count = 0
+
+        async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+            self.call_count += 1
+            raise RuntimeError("Simulated component failure")
+
+    component = FailingComponent()
+
+    # Register a one-shot recovery handler on the callback framework
+    fw = Runner.callback_framework
+
+    @fw.on("component_error_recovery", priority=100, once=True)
+    async def recovery_handler(error, session, node_id, exception_config, **kwargs):
+        if exception_config is not None and exception_config.handle_type == "defaultOutputs":
+            return {**exception_config.default_outputs, "isSuccess": False}
+        return None
+
+    # Build workflow: start → failing_comp → end
+    flow = Workflow()
+    flow.set_start_comp("start", Start(), inputs_schema={"query": "${query}"})
+    flow.add_workflow_comp(
+        "failing_comp", component, max_retries=2, timeout=-1.0,
+        exception_config=ExceptionConfig(
+            handle_type="defaultOutputs",
+            default_outputs={"result": "recovery_result"},
+        ),
+    )
+    flow.set_end_comp("end", End(), inputs_schema={"result": "${failing_comp.result}"})
+    flow.add_connection("start", "failing_comp")
+    flow.add_connection("failing_comp", "end")
+
+    result = await flow.invoke({"query": "test"}, create_workflow_session())
+
+    # Component called 3 times: 1 initial + 2 retries
+    assert component.call_count == 3
+    # Recovery output reached the end node via ${failing_comp.result}
+    assert result.result["output"] == {"result": "recovery_result"}
+
+
+# ===========================================================================
+# Branch + End deadlock reproduction tests
+#
+# Topology A (see spec: "Branch-default direct to End"):
+#   node_start -> node_branch -> (default -> node_end, if -> node_llm -> node_end)
+#   End: [STREAM, TRANSFORM] (mix mode), inputs_schema={}, stream_inputs_schema={...}
+#   Edges: (start,branch), (llm,end), (branch,end)
+#   Stream edges: llm -> end
+#
+# Topology B (see spec: "Two branches both through LLM"):
+#   node_start -> node_branch -> (default -> llm1 -> node_end, if -> llm2 -> node_end)
+#   End: [TRANSFORM] only, stream_inputs_schema={...}
+#   Edges: (start,branch), (llm1,end), (llm2,end)
+#   Stream edges: llm1 -> end, llm2 -> end
+#   NOTE: No branch->End barrier edge (branch does not directly connect to End)
+# ===========================================================================
+
+class StreamMockLLM(WorkflowComponent):
+    """Simulates an LLM component with both invoke and stream abilities."""
+
+    def __init__(self, name: str, response: str):
+        super().__init__()
+        self._name = name
+        self._response = response
+        self.ran = False
+
+    async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+        self.ran = True
+        return {"raw_output": self._response}
+
+    async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
+        self.ran = True
+        yield {"raw_output": self._response}
+
+
+def _build_topology_a_flow(llm, end_comp):
+    """Build Topology A flow: start -> branch -> (default -> End, if -> LLM -> End)."""
+    flow = Workflow()
+    flow.set_start_comp("node_start", Start(), inputs_schema={"query": "${query}"})
+
+    branch = BranchComponent()
+    branch.add_branch("${node_start.query} == 'trigger_if'", ["node_llm"], "node_branch-if")
+    branch.add_branch("True", ["node_end"], "node_branch-default")
+    flow.add_workflow_comp("node_branch", branch)
+    flow.add_workflow_comp("node_llm", llm)
+
+    flow.set_end_comp(
+        "node_end", end_comp,
+        inputs_schema={},
+        stream_inputs_schema={"result": "${node_llm.raw_output}"},
+        response_mode="streaming",
+    )
+
+    flow.add_connection("node_start", "node_branch")
+    flow.add_stream_connection("node_llm", "node_end")
+    return flow
+
+
+def _build_topology_b_flow(llm1, llm2, end_comp):
+    """Build Topology B flow: start -> branch -> (default -> LLM1 -> End, if -> LLM2 -> End)."""
+    flow = Workflow()
+    flow.set_start_comp("node_start", Start(), inputs_schema={"query": "${query}"})
+
+    branch = BranchComponent()
+    branch.add_branch("length(${node_start.query}) >= 5", ["node_llm2"], "node_branch-if")
+    branch.add_branch("True", ["node_llm1"], "node_branch-default")
+    flow.add_workflow_comp("node_branch", branch)
+    flow.add_workflow_comp("node_llm1", llm1)
+    flow.add_workflow_comp("node_llm2", llm2)
+
+    flow.set_end_comp(
+        "node_end", end_comp,
+        stream_inputs_schema={
+            "result": "${node_llm1.raw_output}",
+            "result2": "${node_llm2.raw_output}",
+        },
+        response_mode="streaming",
+    )
+
+    flow.add_connection("node_start", "node_branch")
+    flow.add_stream_connection("node_llm1", "node_end")
+    flow.add_stream_connection("node_llm2", "node_end")
+    return flow
+
+
+async def _run_stream_and_collect(flow, inputs, session, timeout=15.0):
+    """Run flow.stream() with timeout, collect chunks and extract rendered response."""
+    chunks = []
+
+    async def _consume():
+        async for chunk in flow.stream(inputs, session, stream_modes=[BaseStreamMode.OUTPUT]):
+            chunks.append(chunk)
+
+    await asyncio.wait_for(_consume(), timeout=timeout)
+
+    rendered = "".join(
+        str(chunk.payload.get("response", ""))
+        for chunk in chunks
+        if hasattr(chunk, "type") and chunk.type == "end node stream"
+    )
+    return rendered
+
+
+# ---------------------------------------------------------------------------
+# Topology A: branch-default directly to End
+#
+# Graph:
+#   start -> branch --default--> end
+#                   |--if-------> llm(stream) -> end
+#
+# Key properties:
+#   End abilities: [STREAM, TRANSFORM], set_mix() -> _data_source_count=2
+#   Barrier CNF: [{llm, branch}] -> OR (either completes -> barrier passes)
+#   Edges: (start,branch), (llm,end), (branch,end)
+# ---------------------------------------------------------------------------
+
+async def test_topology_a_default_path():
+    """
+    Topology A: branch takes default -> End directly, LLM does NOT execute.
+
+    Per spec:
+      - LLM does not execute -> no stream data -> stream_call NOT triggered
+      - TRANSFORM never runs (no stream_call)
+      - STREAM render_stream encounters None variable 'result'
+      - Expected after fix: output "End output: " (static text + empty var)
+
+    Known issues to debug:
+      - Without TRANSFORM fallback: render_stream enters wait loop,
+        relies on 0.2s timeout to skip variable segment
+      - Without CNF OR-group: barrier deadlocks waiting for LLM
+    """
+    llm = StreamMockLLM("node_llm", "llm_stream_response")
+    end_comp = End(conf={"responseTemplate": "End output: {{result}}"})
+    flow = _build_topology_a_flow(llm, end_comp)
+
+    rendered = await _run_stream_and_collect(
+        flow, {"query": "other"}, create_workflow_session(),
+    )
+    assert not llm.ran, "LLM should NOT execute on default path"
+    assert "End output:" in rendered, f"Output should contain static text, got: {rendered}"
+
+
+async def test_topology_a_if_path():
+    """
+    Topology A: branch takes if -> LLM executes -> stream to End.
+
+    Per spec:
+      - LLM executes, produces stream data
+      - stream_call triggered -> TRANSFORM runs with LLM data
+      - Barrier: node_llm completes -> OR-group satisfied
+      - Expected after fix: output "End output: llm_stream_response"
+    """
+    llm = StreamMockLLM("node_llm", "llm_stream_response")
+    end_comp = End(conf={"responseTemplate": "End output: {{result}}"})
+    flow = _build_topology_a_flow(llm, end_comp)
+
+    rendered = await _run_stream_and_collect(
+        flow, {"query": "trigger_if"}, create_workflow_session(),
+    )
+    assert llm.ran, "LLM should execute on if path"
+    assert "llm_stream_response" in rendered, \
+        f"Output should contain LLM result, got: {rendered}"
+
+
+# ---------------------------------------------------------------------------
+# Topology B: both branches go through LLM, then to End
+#
+# Graph:
+#   start -> branch --default--> llm1(stream) -> end
+#                   |--if-------> llm2(stream) -> end
+#
+# Key properties:
+#   End abilities: [TRANSFORM] only (no inputs_schema passed)
+#   Barrier CNF: [{llm1, llm2}] -> OR (either completes -> barrier passes)
+#   Edges: (start,branch), (llm1,end), (llm2,end)
+#   NOTE: NO branch->End edge (branch does not directly connect to End)
+# ---------------------------------------------------------------------------
+
+async def test_topology_b_default_path():
+    """
+    Topology B: branch takes default -> LLM1 executes, LLM2 does NOT.
+
+    Per spec:
+      - LLM1 executes, produces stream data -> stream_call triggers TRANSFORM
+      - LLM2 never executes -> result2 is None in inputs
+      - sanitize replaces result2 with ""
+      - Expected after fix: "End: default: llm1_resp...if branch:"
+    """
+    llm1 = StreamMockLLM("node_llm1", "llm1_default_resp")
+    llm2 = StreamMockLLM("node_llm2", "llm2_if_resp")
+    end_comp = End(conf={"responseTemplate": "End: default: {{result}}...if branch:{{result2}}"})
+    flow = _build_topology_b_flow(llm1, llm2, end_comp)
+
+    rendered = await _run_stream_and_collect(
+        flow, {"query": "abc"}, create_workflow_session(),
+    )
+    assert llm1.ran, "LLM1 should execute on default path"
+    assert not llm2.ran, "LLM2 should NOT execute on default path"
+    assert "llm1_default_resp" in rendered, \
+        f"Output should contain LLM1 result, got: {rendered}"
+
+
+async def test_topology_b_if_path():
+    """
+    Topology B: branch takes if -> LLM2 executes, LLM1 does NOT.
+
+    Per spec:
+      - LLM2 executes, produces stream data -> stream_call triggers TRANSFORM
+      - LLM1 never executes -> result is None in inputs
+      - sanitize replaces result with ""
+      - Expected after fix: "End: default: ...if branch:llm2_resp"
+    """
+    llm1 = StreamMockLLM("node_llm1", "llm1_default_resp")
+    llm2 = StreamMockLLM("node_llm2", "llm2_if_resp")
+    end_comp = End(conf={"responseTemplate": "End: default: {{result}}...if branch:{{result2}}"})
+    flow = _build_topology_b_flow(llm1, llm2, end_comp)
+
+    rendered = await _run_stream_and_collect(
+        flow, {"query": "long_query_value"}, create_workflow_session(),
+    )
+    assert not llm1.ran, "LLM1 should NOT execute on if path"
+    assert llm2.ran, "LLM2 should execute on if path"
+    assert "llm2_if_resp" in rendered, \
+        f"Output should contain LLM2 result, got: {rendered}"

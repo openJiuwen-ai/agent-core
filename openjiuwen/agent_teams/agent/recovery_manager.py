@@ -44,13 +44,6 @@ class RecoveryManager:
 
         member_name = self._configurator.member_name
         team_logger.info("[{}] recovering team", member_name or "?")
-        # Rebuild the in-memory HITT roster from DB before any
-        # restart_teammate fan-out. ``build_context_from_db`` already
-        # reads ``role`` straight off the row, but other sync HITT
-        # consumers (rails, coordination handlers, prompt sections)
-        # still read this cache and would otherwise see an empty
-        # roster after a cold leader restart.
-        await team_backend.refresh_human_agent_roster()
         all_members = await team_backend.list_members()
         restarted: list[str] = []
 

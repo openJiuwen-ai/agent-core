@@ -36,7 +36,7 @@ from typing import Any, Optional
 
 from openjiuwen.agent_teams.prompts.loader import load_template
 from openjiuwen.agent_teams.schema.team import TeamRole
-from openjiuwen.core.single_agent.prompts.builder import PromptSection
+from openjiuwen.core.single_agent.prompts.builder import PromptSection, SystemPromptBuilder
 
 # ---------------------------------------------------------------------------
 # Section name constants
@@ -48,6 +48,7 @@ class TeamSectionName:
 
     ROLE = "team_role"
     HITT = "team_hitt"
+    BRIDGE = "team_bridge"
     WORKFLOW = "team_workflow"
     LIFECYCLE = "team_lifecycle"
     PERSONA = "team_persona"
@@ -79,11 +80,13 @@ _LABELS: dict[str, dict[str, str]] = {
         "team_workspace_abs": "绝对路径",
         "members_heading": "# 成员关系",
         "leader_mode_plan": (
-            "团队成员执行模式: plan_mode（成员领取任务后需先提交计划，由你通过 approve_plan 审批后才能执行）"
+            "团队成员执行模式: plan_mode（成员选择或接到任务后需直接通过 submit_plan 提交计划，"
+            "由你通过 approve_plan 审批后才能执行）"
         ),
         "leader_mode_build": ("团队成员执行模式: build_mode（成员领取任务后自主执行并直接完成，无需你审批计划）"),
         "teammate_mode_plan": (
-            "你的执行模式: plan_mode（领取任务后必须先通过 write_plan 提交计划，"
+            "你的执行模式: plan_mode（选择或接到任务后必须先通过 submit_plan 提交计划，"
+            "该工具会认领任务；"
             "等待 leader 通过 approve_plan 审批后才能开始执行）"
         ),
         "teammate_mode_build": ("你的执行模式: build_mode（领取任务后可自主执行并直接标记完成，无需 leader 审批计划）"),
@@ -108,7 +111,8 @@ _LABELS: dict[str, dict[str, str]] = {
         "members_heading": "# Relationships",
         "leader_mode_plan": (
             "Teammate execution mode: plan_mode (teammates must submit a plan "
-            "after claiming a task and wait for your approval via approve_plan "
+            "with submit_plan after selecting or receiving a task; "
+            "that tool reserves the task, then teammates wait for your exact plan_id approval via approve_plan "
             "before executing)"
         ),
         "leader_mode_build": (
@@ -116,9 +120,9 @@ _LABELS: dict[str, dict[str, str]] = {
             "complete tasks autonomously without plan approval)"
         ),
         "teammate_mode_plan": (
-            "Your execution mode: plan_mode (after claiming a task you must "
-            "submit a plan via write_plan and wait for the leader to approve "
-            "it via approve_plan before executing)"
+            "Your execution mode: plan_mode (after selecting or receiving a task you must "
+            "submit a plan via submit_plan; that tool reserves the task. Wait for the leader to approve "
+            "that plan_id via approve_plan before executing)"
         ),
         "teammate_mode_build": (
             "Your execution mode: build_mode (after claiming a task you "
@@ -709,6 +713,191 @@ def build_team_hitt_section(
     )
 
 
+def _format_bridge_agent_roster(names: list[str], language: str) -> str:
+    """Render the list of bridge-agent member names for inline prompts."""
+    quoted = ", ".join(f"`{n}`" for n in names)
+    if language == "cn":
+        return f"注册的桥接成员：{quoted}"
+    return f"Registered bridge members: {quoted}"
+
+
+def _bridge_section_leader_cn(names: list[str]) -> str:
+    roster = _format_bridge_agent_roster(names, "cn")
+    return (
+        "# Bridge Agent — 与桥接外部 agent 的成员协作\n\n"
+        f"{roster}。他们是注册的正式成员，**与其它 teammate 完全一致**——"
+        "你按照普通 teammate 的方式分派任务、收发消息、协作。\n\n"
+        "这些成员内部接入了一个 jiuwen 之外的独立 agent 作为**实际执行者**，"
+        "由协议适配层驱动，**对你而言行为与普通 teammate 一致**——直接 "
+        "`@<bridge_member_name>` 沟通即可。你不需要也无法直接和远程 agent 对话。\n"
+    )
+
+
+def _bridge_section_teammate_cn(names: list[str]) -> str:
+    roster = _format_bridge_agent_roster(names, "cn")
+    return (
+        "# Bridge Agent — 与桥接外部 agent 的成员协作\n\n"
+        f"团队里存在下列桥接成员（背后由 jiuwen 之外的独立 agent 执行）："
+        f"{roster}。把他们视作普通 teammate，使用 `send_message(to=<对应名字>, ...)` "
+        "正常沟通。你无需关心他们的对端是远程 agent —— 他们的输出形式与你完全一致。\n"
+    )
+
+
+def _bridge_section_bridge_agent_cn(names: list[str], self_name: str | None) -> str:
+    roster = _format_bridge_agent_roster(names, "cn")
+    peers = ""
+    if self_name:
+        peers = f"你的 member_name 是 `{self_name}`。\n"
+    return (
+        "# Bridge Agent — 你是外部独立 agent 在团队中的调度员\n\n"
+        f"{roster}。\n"
+        f"{peers}"
+        "你是 jiuwen 团队的 teammate，但**具体工作产出由外部独立 agent**"
+        "（如 claudecode / codex / hermes 等）通过协议接入完成。你的角色是"
+        "**调度员**，不是内容创造者。\n\n"
+        "## 工作流\n"
+        "- 团队消息会**自动转发**给外部执行者，你将看到 `[来自团队成员 X 的消息]"
+        " + [外部执行者的执行结果]` 一同进入上下文。\n"
+        "- 你的工作是**调度决策**：是否调用 `send_message` 把外部的执行结果"
+        "原样回传给原发件人；是否调用 `claim_task` / `member_complete_task` "
+        "等任务管理工具；或保持沉默。\n\n"
+        "## 行为准则（重要）\n"
+        "- **不要改写、综合或解释**外部的执行结果——把它原样传达给团队即可，"
+        "最多在前后加极简的调度性说明（如「这是任务 X 的结果：」）。\n"
+        "- **不要试图自己思考任务的内容**——具体工作由外部执行者完成，你不是"
+        "内容生产者。\n"
+        "- **不要把原消息再次转发**给团队（消息已经送到了你这；如果你要回复，"
+        "调用 `send_message`，传达内容直接用外部执行者的输出）。\n"
+        "- **你没有任何「咨询外部」的工具**——外部接入只通过自动转发自然到来。\n"
+        "- 当上下文显示 `[remote agent unavailable: no protocol adapter "
+        "registered]` 时表示外部尚未接入，此时你应当作为普通 teammate 自主"
+        "完成任务（如果你能完成）或通过 send_message 告知发件人外部 agent "
+        "暂不可用。\n"
+    )
+
+
+def _bridge_section_leader_en(names: list[str]) -> str:
+    roster = _format_bridge_agent_roster(names, "en")
+    return (
+        "# Bridge Agent — Working with bridge-to-remote members\n\n"
+        f"{roster}. They are first-class members and **behave exactly "
+        "like ordinary teammates** — assign tasks, exchange messages, "
+        "and collaborate with them through the standard channels.\n\n"
+        "Internally each of these members is paired with an independent "
+        "agent outside jiuwen reached through a protocol adapter. From "
+        "your perspective they are still teammates: use "
+        "`@<bridge_member_name>` to address them. You neither need to "
+        "nor can talk to the remote agent directly.\n"
+    )
+
+
+def _bridge_section_teammate_en(names: list[str]) -> str:
+    roster = _format_bridge_agent_roster(names, "en")
+    return (
+        "# Bridge Agent — Working with bridge-to-remote members\n\n"
+        f"The team includes these bridge members (backed by an external "
+        f"independent agent): {roster}. Treat each as an ordinary "
+        "teammate — use `send_message(to=<their_name>, ...)` normally. "
+        "You don't need to care that their backing executor is remote; "
+        "their outputs look the same to you as any other teammate's.\n"
+    )
+
+
+def _bridge_section_bridge_agent_en(names: list[str], self_name: str | None) -> str:
+    roster = _format_bridge_agent_roster(names, "en")
+    peers = ""
+    if self_name:
+        peers = f"Your member_name is `{self_name}`.\n"
+    return (
+        "# Bridge Agent — You are an external agent's scheduler on this team\n\n"
+        f"{roster}.\n"
+        f"{peers}"
+        "You are a regular jiuwen teammate locally, but the **concrete "
+        "work output** is produced by an independent agent outside "
+        "jiuwen (e.g. claudecode / codex / hermes) reached over a "
+        "protocol. Your role is the **scheduler** — not the content "
+        "producer.\n\n"
+        "## Workflow\n"
+        "- Inbound team messages are **auto-forwarded** to the remote "
+        "executor for you. Your context will show "
+        "`[Team message from X]` followed by `[Remote executor's "
+        "output]` in the same turn.\n"
+        "- Your job is to **schedule**: whether to `send_message` the "
+        "remote output verbatim back to the original sender, whether "
+        "to call `claim_task` / `member_complete_task` and similar task "
+        "management tools, or to stay silent.\n\n"
+        "## Conduct (important)\n"
+        "- **Do NOT rewrite, synthesize, or interpret** the remote "
+        "output — pass it through verbatim. At most prepend a minimal "
+        'scheduling preamble (e.g. "Result for task X:").\n'
+        "- **Do NOT think through the work yourself** — the concrete "
+        "content comes from the remote executor; you are not the "
+        "content producer.\n"
+        "- **Do NOT forward the original message again** — it already "
+        "reached you; if you reply, the content body should be the "
+        "remote executor's output.\n"
+        "- You have **no 'consult the remote' tool** — the external "
+        "executor is invoked automatically by the framework on the "
+        "mailbox path; no additional tool is exposed.\n"
+        "- When the context shows `[remote agent unavailable: no "
+        "protocol adapter registered]`, the remote is not wired yet. "
+        "Behave as a regular teammate — complete the work yourself if "
+        "you can, or `send_message` the requester to explain that the "
+        "remote agent is currently offline.\n"
+    )
+
+
+def build_team_bridge_section(
+    *,
+    role: TeamRole,
+    bridge_agent_names: "list[str] | frozenset[str] | set[str] | None" = None,
+    language: str = "cn",
+    self_member_name: str | None = None,
+) -> Optional[PromptSection]:
+    """Build the Bridge Agent collaboration-rules section.
+
+    Returns a non-None section only when at least one bridge-agent
+    member is registered. Text is role-specific and enumerates every
+    registered bridge member inline so the leader / other teammates
+    see whom to address through ``send_message``, and the bridge
+    avatar itself sees the scheduling contract.
+
+    Args:
+        role: The role whose prompt this section targets.
+        bridge_agent_names: Member names of every registered bridge
+            agent. Empty/None means no bridges → no section.
+        language: ``"cn"`` or ``"en"``.
+        self_member_name: The current member's own name, used to tell
+            a bridge-agent reader which entry in the roster is itself.
+    """
+    if not bridge_agent_names:
+        return None
+    names = sorted(bridge_agent_names)
+    if language == "cn":
+        if role == TeamRole.LEADER:
+            body = _bridge_section_leader_cn(names)
+        elif role == TeamRole.TEAMMATE:
+            body = _bridge_section_teammate_cn(names)
+        elif role == TeamRole.BRIDGE_AGENT:
+            body = _bridge_section_bridge_agent_cn(names, self_member_name)
+        else:
+            return None
+    else:
+        if role == TeamRole.LEADER:
+            body = _bridge_section_leader_en(names)
+        elif role == TeamRole.TEAMMATE:
+            body = _bridge_section_teammate_en(names)
+        elif role == TeamRole.BRIDGE_AGENT:
+            body = _bridge_section_bridge_agent_en(names, self_member_name)
+        else:
+            return None
+    return PromptSection(
+        name=TeamSectionName.BRIDGE,
+        content={language: body},
+        priority=12,
+    )
+
+
 def build_team_members_section(
     *,
     team_members: list[dict[str, str]] | None,
@@ -751,14 +940,146 @@ def build_team_members_section(
     )
 
 
+def build_team_static_sections(
+    *,
+    role: TeamRole,
+    persona: str,
+    member_name: str | None,
+    lifecycle: str = "temporary",
+    teammate_mode: str = "build_mode",
+    team_mode: str = "default",
+    base_prompt: str | None = None,
+    language: str = "cn",
+    human_agent_names: list[str] | None = None,
+    expose_human_agents_to_teammates: bool = False,
+    bridge_agent_names: list[str] | None = None,
+) -> list[PromptSection]:
+    """Build the never-changing team sections for one member.
+
+    Single source of truth for one-shot static team sections. In-process
+    DeepAgent members call this through :class:`TeamPolicyRail` for role /
+    bridge / workflow / lifecycle / persona / extra; HITT is refreshed by
+    the rail dynamically instead of being passed here. External CLI members
+    use this function to build a standalone prompt snapshot, so callers may
+    still pass ``human_agent_names`` to include a static HITT section.
+
+    Args:
+        role: LEADER or TEAMMATE (other roles get the role-appropriate slices).
+        persona: The member's persona text (empty drops the persona section).
+        member_name: Semantic member identifier.
+        lifecycle: Team lifecycle ("temporary" / "persistent").
+        teammate_mode: Teammate execution mode ("build_mode" / "plan_mode").
+        team_mode: Team mode ("default" / "predefined" / "hybrid").
+        base_prompt: Optional user-supplied prompt appended as the extra section.
+        language: Prompt language ("cn" / "en").
+        human_agent_names: Optional registered human-agent member names used
+            for one-shot HITT prompt snapshots, mainly external CLI members.
+        expose_human_agents_to_teammates: Whether teammates see human agents
+            in that one-shot HITT snapshot.
+        bridge_agent_names: Registered bridge-agent member names (bridge section).
+
+    Returns:
+        The non-None sections, unsorted (the caller orders by priority).
+    """
+    builders = [
+        build_team_role_section(
+            role=role,
+            member_name=member_name,
+            teammate_mode=teammate_mode,
+            language=language,
+        ),
+        build_team_hitt_section(
+            role=role,
+            human_agent_names=human_agent_names,
+            language=language,
+            self_member_name=member_name,
+            expose_human_agents_to_teammates=expose_human_agents_to_teammates,
+        ),
+        build_team_bridge_section(
+            role=role,
+            bridge_agent_names=bridge_agent_names,
+            language=language,
+            self_member_name=member_name,
+        ),
+        build_team_workflow_section(
+            role=role,
+            team_mode=team_mode,
+            language=language,
+        ),
+        build_team_lifecycle_section(
+            role=role,
+            lifecycle=lifecycle,
+            language=language,
+        ),
+        build_team_persona_section(
+            persona=persona,
+            language=language,
+        ),
+        build_team_extra_section(
+            base_prompt=base_prompt,
+            language=language,
+        ),
+    ]
+    return [section for section in builders if section is not None]
+
+
+def build_team_member_system_prompt(
+    *,
+    role: TeamRole,
+    persona: str,
+    member_name: str | None,
+    lifecycle: str = "temporary",
+    teammate_mode: str = "build_mode",
+    team_mode: str = "default",
+    base_prompt: str | None = None,
+    language: str = "cn",
+    human_agent_names: list[str] | None = None,
+    expose_human_agents_to_teammates: bool = False,
+    bridge_agent_names: list[str] | None = None,
+) -> str:
+    """Render a member's team sections into a single standalone system prompt.
+
+    Used to give an external CLI member (whose brain is not a local DeepAgent)
+    the same team-rail sections an in-process member gets, assembled the same
+    way (priority-ordered, ``\\n\\n``-joined). It includes ONLY the team
+    sections — the harness / other DeepAgent rails do not apply to an external
+    CLI, so their prompt contributions are intentionally excluded.
+
+    Args mirror :func:`build_team_static_sections`.
+
+    Returns:
+        The rendered system prompt, or ``""`` when no section produced content.
+    """
+    sections = build_team_static_sections(
+        role=role,
+        persona=persona,
+        member_name=member_name,
+        lifecycle=lifecycle,
+        teammate_mode=teammate_mode,
+        team_mode=team_mode,
+        base_prompt=base_prompt,
+        language=language,
+        human_agent_names=human_agent_names,
+        expose_human_agents_to_teammates=expose_human_agents_to_teammates,
+        bridge_agent_names=bridge_agent_names,
+    )
+    builder = SystemPromptBuilder(language=language)
+    for section in sections:
+        builder.add_section(section)
+    return builder.build()
+
+
 __all__ = [
     "TeamSectionName",
+    "build_team_bridge_section",
     "build_team_extra_section",
     "build_team_hitt_section",
     "build_team_info_section",
     "build_team_lifecycle_section",
+    "build_team_member_system_prompt",
     "build_team_members_section",
     "build_team_persona_section",
     "build_team_role_section",
+    "build_team_static_sections",
     "build_team_workflow_section",
 ]

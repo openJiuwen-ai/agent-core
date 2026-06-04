@@ -34,7 +34,9 @@ from openjiuwen.harness.tools.worktree.manager import WorktreeManager
 from openjiuwen.harness.tools.worktree.models import WorktreeConfig, WorktreeSession
 from openjiuwen.harness.tools.worktree.session import (
     get_current_session,
+    get_default_worktree_name,
     init_session_state,
+    set_default_worktree_name,
     set_current_session,
 )
 from openjiuwen.harness.tools.worktree.tools import EnterWorktreeTool, ExitWorktreeTool
@@ -48,6 +50,7 @@ if TYPE_CHECKING:
 # invocations. The ContextVar layer in ``session.py`` is the per-invoke
 # cache; agent ``Session.state`` is the persistent authority.
 _SESSION_STATE_KEY = "_worktree_session"
+_DEFAULT_WORKTREE_NAME_KEY = "_worktree_default_name"
 
 
 class WorktreeRail(DeepAgentRail):
@@ -168,8 +171,12 @@ class WorktreeRail(DeepAgentRail):
         :class:`WorktreeSession` (defensive fallback for legacy
         in-process checkpointers).
         """
+
         if ctx.session is None:
             return
+        default_name = ctx.session.get_state(_DEFAULT_WORKTREE_NAME_KEY)
+        set_default_worktree_name(default_name if isinstance(default_name, str) else None)
+
         stored = ctx.session.get_state(_SESSION_STATE_KEY)
         if stored is None:
             set_current_session(None)
@@ -196,7 +203,12 @@ class WorktreeRail(DeepAgentRail):
             return
         current = get_current_session()
         payload = current.model_dump() if current is not None else None
-        ctx.session.update_state({_SESSION_STATE_KEY: payload})
+        ctx.session.update_state(
+            {
+                _SESSION_STATE_KEY: payload,
+                _DEFAULT_WORKTREE_NAME_KEY: get_default_worktree_name(),
+            }
+        )
 
 
 class WorktreeLifecycleRail(DeepAgentRail):

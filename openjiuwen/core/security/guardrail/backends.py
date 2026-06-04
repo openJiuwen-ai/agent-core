@@ -21,6 +21,7 @@ from abc import (
 )
 from dataclasses import dataclass, field
 from typing import (
+    TYPE_CHECKING,
     Any,
     Dict,
     List,
@@ -30,6 +31,9 @@ from typing import (
 from openjiuwen.core.security.guardrail.context import GuardrailContext
 from openjiuwen.core.security.guardrail.models import RiskAssessment
 from openjiuwen.core.security.guardrail.enums import RiskLevel
+
+if TYPE_CHECKING:
+    from openjiuwen.core.security.guardrail.context import ModelOutputParser
 
 
 class GuardrailBackend(ABC):

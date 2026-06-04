@@ -57,7 +57,7 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
-from openjiuwen.agent_teams.tools.team import TeamBackend
+from openjiuwen.agent_teams.tools.team import CapabilityOverrides, TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import (
     HUMAN_AGENT_TOOLS,
     create_team_tools,
@@ -297,7 +297,7 @@ async def test_build_team_arg_enable_hitt_true_with_spec_false_raises(team_backe
             desc="y",
             leader_display_name="Leader",
             leader_desc="z",
-            enable_hitt=True,
+            overrides=CapabilityOverrides(enable_hitt=True),
         )
 
 
@@ -310,7 +310,7 @@ async def test_build_team_arg_enable_hitt_false_overrides_spec_true(hitt_team_ba
         desc="test",
         leader_display_name="Leader",
         leader_desc="Leader persona",
-        enable_hitt=False,
+        overrides=CapabilityOverrides(enable_hitt=False),
     )
     member = await db.member.get_member(HUMAN_AGENT_MEMBER_NAME, "hitt_team")
     assert member is None
@@ -499,7 +499,7 @@ async def test_direct_message_to_regular_member_is_unread(team_backend, db):
         desc="t",
         leader_display_name="Leader",
         leader_desc="p",
-        enable_hitt=False,
+        overrides=CapabilityOverrides(enable_hitt=False),
     )
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
@@ -591,7 +591,7 @@ async def test_human_agent_inbox_raises_when_hitt_off(team_backend, db):
         desc="t",
         leader_display_name="Leader",
         leader_desc="p",
-        enable_hitt=False,
+        overrides=CapabilityOverrides(enable_hitt=False),
     )
     inbox = HumanAgentInbox(team_backend, team_backend.message_manager)
     with pytest.raises(HumanAgentNotEnabledError):
@@ -693,9 +693,9 @@ async def multi_human_backend(db, messager):
 @pytest.mark.level0
 async def test_build_team_registers_every_declared_human_member(multi_human_backend, db):
     assert multi_human_backend.hitt_enabled() is True
-    assert multi_human_backend.is_human_agent("human_designer") is True
-    assert multi_human_backend.is_human_agent("human_pm") is True
-    assert multi_human_backend.is_human_agent("team_leader") is False
+    assert await multi_human_backend.is_human_agent("human_designer") is True
+    assert await multi_human_backend.is_human_agent("human_pm") is True
+    assert await multi_human_backend.is_human_agent("team_leader") is False
     # Both must be persisted as UNSTARTED members so the leader's
     # standard startup sweep brings up a real DeepAgent for each.
     for name in ("human_designer", "human_pm"):
@@ -1184,7 +1184,7 @@ async def test_hitt_enabled_reflects_capability_not_roster(db, messager):
         enable_hitt=True,
     )
     assert backend.hitt_enabled() is True
-    assert backend.human_agent_names() == frozenset()
+    assert await backend.human_agent_names() == frozenset()
 
 
 @pytest.mark.asyncio

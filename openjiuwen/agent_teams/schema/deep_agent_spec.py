@@ -11,11 +11,15 @@ from __future__ import annotations
 
 import inspect
 from typing import (
+    TYPE_CHECKING,
     Any,
     Optional,
 )
 
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from openjiuwen.harness.deep_agent import DeepAgent
 
 from openjiuwen.core.foundation.llm import (
     Model,

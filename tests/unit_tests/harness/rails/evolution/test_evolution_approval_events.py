@@ -7,8 +7,8 @@ from openjiuwen.agent_evolving.checkpointing.types import EvolutionPatch, Evolut
 from openjiuwen.harness.rails.evolution.approval_events import (
     build_evolution_progress_event,
     build_progress_event,
-    build_skill_approval_event,
     build_simplify_approval_event,
+    build_skill_approval_event,
     build_team_skill_approval_event_from_records,
 )
 
@@ -45,7 +45,7 @@ def test_build_evolution_progress_event_includes_normalized_meta():
 
     assert event.type == "llm_reasoning"
     assert event.payload["content"] == "[Skill Evolution] awaiting approval\n"
-    assert event.payload["_evolution_meta"] == {
+    assert event.payload["evolution_meta"] == {
         "event_kind": "progress",
         "rail_kind": "regular",
         "stage": "approval_required",
@@ -68,13 +68,16 @@ def test_build_skill_approval_event_matches_existing_contract():
 
     assert event.type == "chat.ask_user_question"
     assert event.payload["request_id"] == "skill_evolve_1234"
-    assert event.payload["_evolution_meta"] == {
+    assert event.payload["evolution_meta"] == {
         "event_kind": "approval",
+        "rail_kind": "regular",
         "skill_name": "skill-a",
         "request_id": "skill_evolve_1234",
     }
     assert event.payload["questions"][0]["header"] == "技能演进审批"
     assert len(event.payload["questions"]) == 2
+    assert event.payload["questions"][0]["record_id"] == pending[0].id
+    assert event.payload["questions"][1]["record_id"] == pending[1].id
     assert "Skill 'skill-a'" in event.payload["questions"][0]["question"]
 
 
@@ -92,8 +95,39 @@ def test_build_simplify_approval_event_matches_existing_contract():
 
     assert event.type == "chat.ask_user_question"
     assert event.payload["request_id"] == "evolve_simplify_1234"
+    assert event.payload["evolution_meta"] == {
+        "event_kind": "approval",
+        "rail_kind": "regular",
+        "skill_name": "skill-a",
+        "request_id": "evolve_simplify_1234",
+    }
     assert event.payload["questions"][0]["header"] == "Skill 精简审批"
     assert "共 2 项操作" in event.payload["questions"][0]["question"]
+
+
+def test_build_skill_approval_event_uses_shared_header_for_downloaded_records():
+    event = build_skill_approval_event(
+        skill_name="skill-a",
+        request_id="skill_evolve_shared",
+        records=[_make_record(content="shared experience")],
+        is_shared_records=True,
+    )
+
+    assert event.payload["questions"][0]["header"] == "在线共享经验审批"
+    assert event.payload["evolution_meta"]["source"] == "experience_sharing"
+    assert event.payload["evolution_meta"]["is_shared_records"] == "true"
+
+
+def test_build_skill_approval_event_shared_header_supports_english_language():
+    event = build_skill_approval_event(
+        skill_name="skill-a",
+        request_id="skill_evolve_shared_en",
+        records=[_make_record(content="shared experience")],
+        language="en",
+        is_shared_records=True,
+    )
+
+    assert event.payload["questions"][0]["header"] == "Shared Experience Approval"
 
 
 def test_build_skill_approval_event_supports_english_language():
@@ -139,6 +173,12 @@ def test_build_team_skill_approval_event_from_records_matches_record_payloads():
 
     assert event.type == "chat.ask_user_question"
     assert event.payload["request_id"] == "skill_evolve_team_records"
+    assert event.payload["evolution_meta"] == {
+        "event_kind": "approval",
+        "rail_kind": "team",
+        "skill_name": "team-skill-a",
+        "request_id": "skill_evolve_team_records",
+    }
     assert len(event.payload["questions"]) == 2
     assert "Team Skill 'team-skill-a' evolution" in event.payload["questions"][0]["question"]
     assert "improve handoff" in event.payload["questions"][0]["question"]

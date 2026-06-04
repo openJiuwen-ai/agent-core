@@ -214,17 +214,27 @@ class LLMAgent(ControllerAgent):
                     await self._write_memory(inputs, result_for_memory_list, session)
             finally:
                 if need_cleanup:
-                    await session.post_run()
+                    await session.close_stream()
+                    await session.commit()
 
         task = asyncio.create_task(stream_process())
 
         if own_stream:
-            # Only read from stream_iterator when owning stream
-            # If external session passed, external caller handles reading
-            async for result in session.stream_iterator():
-                yield result
-
-        await task
+            stream_iter = session.stream_iterator()
+            try:
+                async for result in stream_iter:
+                    yield result
+            except Exception:
+                try:
+                    async for _chunk in stream_iter:
+                        logger.debug("Consuming remaining stream message after exception")
+                except Exception as drain_err:
+                    logger.debug(f"Error while consuming remaining stream messages: {drain_err}")
+                raise
+            finally:
+                await task
+        else:
+            await task
 
         # When own_stream = False, yield final result to send_to_agent
         # This allows send_to_agent to get actual single_agent return value

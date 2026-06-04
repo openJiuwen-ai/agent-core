@@ -3,9 +3,12 @@
 """Skill prompt section for DeepAgent (used by SkillUseRail)."""
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
 from openjiuwen.harness.prompts.sections import SectionName
+
+if TYPE_CHECKING:
+    from openjiuwen.harness.prompts.builder import PromptSection
 
 # ---------------------------------------------------------------------------
 # List-skill system prompt (bilingual)
@@ -74,13 +77,17 @@ SKILL_RAIL_ALL_MODE_INSTRUCTION: Dict[str, str] = {
 SKILL_RAIL_AUTO_LIST_MODE_PROMPT_CN = """# 技能
 
 需要时先调用 list_skill 查看可用技能，再用 read_file 读取相关 SKILL.md 后执行。
-需要时使用 code 执行 Python 或 JavaScript，使用 bash 执行 shell 命令。
+需要时使用 code 执行 Python 或 JavaScript；执行 shell 命令时，根据运行环境信息选择合适的 shell
+（Windows 按 Git Bash/PowerShell 可用性选择，Linux/macOS 通常使用 bash/sh）。
 """
 
 SKILL_RAIL_AUTO_LIST_MODE_PROMPT_EN = """# Skills
 
-When needed, call list_skill first to see available skills, then read the relevant SKILL.md with read_file before execution.
-Use code for Python or JavaScript snippets when needed, and use bash for shell commands.
+When needed, call list_skill first to see available skills,
+then read the relevant SKILL.md with read_file before execution.
+Use code for Python or JavaScript snippets when needed.
+For shell commands, choose the shell according to the runtime environment information
+(Windows depends on Git Bash/PowerShell availability; Linux/macOS usually use bash/sh).
 """
 
 SKILL_RAIL_AUTO_LIST_MODE_PROMPT: Dict[str, str] = {

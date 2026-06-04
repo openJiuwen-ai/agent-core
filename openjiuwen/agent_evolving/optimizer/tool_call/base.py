@@ -54,7 +54,7 @@ class ToolOptimizerBase(BaseOptimizer):
         for i in range(self.max_turns):
             # update desc for after iters
             if i > 0:
-                latest_description = result_desc[-1][0]["description"]
+                latest_description = result_descs[-1][-1][0]["description"]
                 tool["description"] = latest_description
 
             # stage 1 - example
@@ -79,7 +79,7 @@ class ToolOptimizerBase(BaseOptimizer):
             result_descs.append(result_desc)
 
         # description final reviewer
-        output_desc = result_desc[-1][-1]["description"]
+        output_desc = result_descs[-1][-1][-1]["description"]
         eval_model_id = self.config_desc.get("eval_model_id")
         processor = ToolDescriptionReviewer(
             eval_model_id=eval_model_id,

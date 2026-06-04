@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import uuid
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -12,8 +15,11 @@ from typing import Any, Dict, Optional
 from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionLog,
     EvolutionRecord,
+    EvolutionTarget,
     UsageStats,
 )
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import logger
 
 _EVOLUTION_FILENAME = "evolutions.json"
@@ -82,7 +88,153 @@ class StoreRecordsHelper:
 
         target_dir.mkdir(parents=True, exist_ok=True)
         evo_path = target_dir / _EVOLUTION_FILENAME
-        await self._store.write_file_text(evo_path, json.dumps(evo_log.to_dict(), ensure_ascii=False, indent=2))
+        expected = evo_log.to_dict()
+        content = json.dumps(expected, ensure_ascii=False, indent=2)
+        await self._write_file_text_atomic(evo_path, content)
+
+        readback = await self._store.read_file_text(evo_path)
+        try:
+            actual = json.loads(readback)
+        except Exception as exc:
+            raise_error(
+                StatusCode.TOOLCHAIN_EVOLVING_SKILL_STORE_EXECUTION_ERROR,
+                error_msg=f"failed to read back {evo_path}: invalid JSON",
+                cause=exc,
+            )
+        if actual != expected:
+            raise_error(
+                StatusCode.TOOLCHAIN_EVOLVING_SKILL_STORE_EXECUTION_ERROR,
+                error_msg=f"failed to read back {evo_path}: content mismatch",
+            )
+
+    async def _write_file_text_atomic(self, path: Path, content: str) -> None:
+        tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            await self._store.write_file_text(tmp_path, content)
+            tmp_path.replace(path)
+        except Exception as exc:
+            with suppress(OSError):
+                tmp_path.unlink()
+            raise_error(
+                StatusCode.TOOLCHAIN_EVOLVING_SKILL_STORE_EXECUTION_ERROR,
+                error_msg=f"failed to atomically write {path}: {exc}",
+                cause=exc,
+            )
+
+    async def append_record_transactional(
+        self,
+        name: str,
+        record: EvolutionRecord,
+        *,
+        skill_dir: Optional[Path] = None,
+    ) -> Optional[EvolutionLog]:
+        """Append or merge one record and roll back all related files on failure."""
+        target_dir = skill_dir or self._store.resolve_skill_dir(name, create=True)
+        if target_dir is None:
+            return None
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        evo_path = target_dir / _EVOLUTION_FILENAME
+        had_log = evo_path.exists()
+        old_log_content = evo_path.read_text(encoding="utf-8") if had_log else None
+        projection_backups = self._snapshot_projection_files(target_dir)
+
+        try:
+            prepared_record = copy.deepcopy(record)
+            if prepared_record.change.target == EvolutionTarget.SCRIPT:
+                await self.persist_script(target_dir, prepared_record)
+
+            evo_log = await self.load_full_evolution_log(name)
+            self._append_or_merge_record(evo_log, prepared_record)
+            evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
+
+            await self.save_evolution_log(name, evo_log, skill_dir=target_dir)
+            await self._store.render_evolution_markdown(name)
+        except Exception:
+            await self._restore_projection_files(target_dir, projection_backups)
+            await self._restore_text_file(evo_path, old_log_content if had_log else None)
+            raise
+
+        if prepared_record.change.target == EvolutionTarget.SCRIPT:
+            record.change.script_filename = prepared_record.change.script_filename
+            record.change.content = prepared_record.change.content
+
+        logger.info(
+            "[EvolutionStore] atomically wrote record %s for skill=%s",
+            record.id,
+            name,
+        )
+        return evo_log
+
+    @staticmethod
+    def _append_or_merge_record(evo_log: EvolutionLog, record: EvolutionRecord) -> None:
+        merge_target = record.change.merge_target
+        if not merge_target:
+            evo_log.entries.append(record)
+            return
+
+        for idx, existing in enumerate(evo_log.entries):
+            if existing.id == merge_target:
+                evo_log.entries[idx] = record
+                logger.info(
+                    "[EvolutionStore] merged record %s replacing %s",
+                    record.id,
+                    merge_target,
+                )
+                return
+        evo_log.entries.append(record)
+
+    @staticmethod
+    def _snapshot_projection_files(skill_dir: Path) -> Dict[Path, str]:
+        backups: Dict[Path, str] = {}
+        evo_dir = skill_dir / "evolution"
+        if evo_dir.exists():
+            for path in evo_dir.rglob("*"):
+                if path.is_file():
+                    backups[path] = path.read_text(encoding="utf-8")
+
+        skill_md = skill_dir / "SKILL.md"
+        if skill_md.is_file():
+            backups[skill_md] = skill_md.read_text(encoding="utf-8")
+        return backups
+
+    @classmethod
+    async def _restore_projection_files(cls, skill_dir: Path, backups: Dict[Path, str]) -> None:
+        evo_dir = skill_dir / "evolution"
+        cls._remove_unbacked_files(evo_dir, backups)
+
+        for path, content in backups.items():
+            await cls._restore_text_file(path, content)
+
+        cls._remove_empty_dirs(evo_dir)
+
+    @staticmethod
+    def _remove_unbacked_files(evo_dir: Path, backups: Dict[Path, str]) -> None:
+        if not evo_dir.exists():
+            return
+        for path in evo_dir.rglob("*"):
+            if path.is_file() and path not in backups:
+                path.unlink()
+
+    @staticmethod
+    def _remove_empty_dirs(root: Path) -> None:
+        if not root.exists():
+            return
+        for path in sorted(root.rglob("*"), reverse=True):
+            if path.is_dir():
+                with suppress(OSError):
+                    path.rmdir()
+        with suppress(OSError):
+            root.rmdir()
+
+    @staticmethod
+    async def _restore_text_file(path: Path, content: Optional[str]) -> None:
+        if content is None:
+            if path.exists():
+                path.unlink()
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
 
     async def update_record_scores(
         self,

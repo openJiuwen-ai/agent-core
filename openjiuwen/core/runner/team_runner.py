@@ -742,6 +742,23 @@ class _TeamRunnerMixin:
             role=leader_role,
         )
 
+    @staticmethod
+    def _build_team_control_chunk(
+        payload: dict[str, Any],
+        *,
+        leader_member_name: Optional[str] = None,
+        leader_role: Optional[Any] = None,
+    ) -> OutputSchema:
+        from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
+
+        return TeamOutputSchema(
+            type="message",
+            index=0,
+            payload=payload,
+            source_member=leader_member_name,
+            role=leader_role,
+        )
+
 
 def _global_runner():
     """Indirection so the class mixin doesn't import GLOBAL_RUNNER at definition time."""

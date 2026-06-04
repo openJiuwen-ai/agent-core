@@ -176,12 +176,9 @@ class ContextProcessorRail(DeepAgentRail):
                 (
                     "MessageSummaryOffloader",
                     MessageSummaryOffloaderConfig(
-                        tokens_threshold=60000,
-                        large_message_threshold=60000,
+                        large_message_threshold=10000,
                         offload_message_type=["tool"],
                         protected_tool_names=["read_file:*SKILL.md", "reload_original_context_messages"],
-                        messages_to_keep=None,
-                        keep_last_round=False,
                         model=model_cfg,
                         model_client=model_client_config,
                     ),
@@ -211,9 +208,7 @@ class ContextProcessorRail(DeepAgentRail):
                     RoundLevelCompressorConfig(
                         trigger_total_tokens=230000,
                         target_total_tokens=160000,
-                        keep_last_round=True,
                         keep_recent_messages=6,
-                        messages_to_keep=6,
                         model=model_cfg,
                         model_client=model_client_config,
                     )

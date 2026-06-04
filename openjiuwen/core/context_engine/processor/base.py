@@ -30,6 +30,8 @@ class MetaContextProcessor(type):
 class ContextEvent(BaseModel):
     event_type: str = Field(...)
     messages_to_modify: List[int] = Field(default_factory=list)
+    compact_summary: str = Field(default="")
+    compression_usage: Dict[str, Any] | None = Field(default=None)
 
 
 class ContextProcessor(metaclass=MetaContextProcessor):
@@ -61,6 +63,7 @@ class ContextProcessor(metaclass=MetaContextProcessor):
             processor's own *Config schema.
         """
         self._config = config
+        self._compression_usage: Dict[str, Any] | None = None
 
     # ------------------------------------------------------------------
     # Processing hooks
@@ -169,6 +172,72 @@ class ContextProcessor(metaclass=MetaContextProcessor):
         supplied at construction time.
         """
         return self._config
+
+    def _reset_compression_usage(self) -> None:
+        self._compression_usage = None
+
+    def _record_compression_usage(self, response: Any) -> None:
+        usage = self._extract_usage_metadata(response)
+        if usage is None:
+            return
+        self._compression_usage = self._merge_compression_usage(self._compression_usage, usage)
+
+    def _current_compression_usage(self) -> Dict[str, Any] | None:
+        return dict(self._compression_usage) if self._compression_usage else None
+
+    @staticmethod
+    def _extract_usage_metadata(response: Any) -> Dict[str, Any] | None:
+        metadata = getattr(response, "usage_metadata", None)
+        if metadata is None:
+            return None
+        if hasattr(metadata, "model_dump"):
+            data = metadata.model_dump(mode="json")
+        elif isinstance(metadata, dict):
+            data = metadata
+        else:
+            return None
+        if not isinstance(data, dict):
+            return None
+        return {
+            "calls": 1,
+            "input_tokens": int(data.get("input_tokens") or 0),
+            "output_tokens": int(data.get("output_tokens") or 0),
+            "total_tokens": int(data.get("total_tokens") or 0),
+            "cache_tokens": int(data.get("cache_tokens") or 0),
+            "input_cost": float(data.get("input_cost") or 0),
+            "output_cost": float(data.get("output_cost") or 0),
+            "total_cost": float(data.get("total_cost") or 0),
+            "model_name": str(data.get("model_name") or ""),
+            "details": [data],
+        }
+
+    @staticmethod
+    def _merge_compression_usage(
+            left: Dict[str, Any] | None,
+            right: Dict[str, Any] | None,
+    ) -> Dict[str, Any] | None:
+        if left is None:
+            return dict(right) if right else None
+        if right is None:
+            return dict(left)
+        merged = dict(left)
+        for key in (
+            "calls",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cache_tokens",
+        ):
+            merged[key] = int(merged.get(key) or 0) + int(right.get(key) or 0)
+        for key in ("input_cost", "output_cost", "total_cost"):
+            merged[key] = float(merged.get(key) or 0) + float(right.get(key) or 0)
+        if not merged.get("model_name"):
+            merged["model_name"] = str(right.get("model_name") or "")
+        merged["details"] = [
+            *(merged.get("details") or []),
+            *(right.get("details") or []),
+        ]
+        return merged
 
     async def offload_messages(
             self,

@@ -13,6 +13,7 @@ Created on: 2025-11-25
 from __future__ import annotations
 
 import asyncio
+import sys
 from abc import ABC
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -612,7 +613,8 @@ def rail(
                         await ctx.fire(before)
                     # If a before hook requested force_finish, skip the method body.
                     if ctx.has_force_finish_request:
-                        return None
+                        ff = ctx.consume_force_finish()
+                        return ff.result if ff is not None else None
                     return await fn(self, ctx, *args, **kwargs)
                 except Exception as e:
                     exc_to_raise = e
@@ -639,7 +641,15 @@ def rail(
                     exc_to_raise = None
                     attempt += 1
                 finally:
-                    if after:
+                    # 跳过 after 回调当函数被 asyncio.CancelledError 中断时。
+                    # CancelledError 是 BaseException 不是 Exception（Python 3.9+），
+                    # 会跳过上面的 except 块直接进入 finally。
+                    # 此时触发 after_tool_call 会发出虚假的空结果事件。
+                    is_cancelled = isinstance(
+                        sys.exc_info()[1] if sys.exc_info()[1] is not None else None,
+                        asyncio.CancelledError,
+                    )
+                    if after and not is_cancelled:
                         try:
                             await ctx.fire(after)
                         except Exception as callback_exc:

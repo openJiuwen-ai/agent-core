@@ -240,7 +240,7 @@ class TeamMemoryManager:
                         return content.strip() if content else None
                     except (AttributeError, TypeError):
                         return None
-            except Exception:
+            except Exception as e:
                 logger.error(f"[_fetch_personal_memory_for_prompt] read MEMORY.md failed: {e}")
 
         return None

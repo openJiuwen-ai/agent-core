@@ -258,6 +258,9 @@ class StatusCode(Enum):
     RESOURCE_VALUE_INVALID = (110404, "{resource_type} value is invalid, reason='{reason}'")
 
     RESOURCE_ADD_ERROR = (110430, "resource add failed, card='{card}', error='{reason}'")
+    RESOURCE_GET_ERROR = (
+        110431,
+        "resource get failed, resource_id='{resource_id}', resource_type='{resource_type}', error='{reason}'")
 
     # tag manager error 110480 - 110499
     RESOURCE_TAG_REMOVE_TAG_ERROR = (110480, "tag is invalid, tag='{tag}', error='{reason}'")
@@ -780,6 +783,12 @@ class StatusCode(Enum):
     )
     TOOLCHAIN_EVOLVING_TOOL_CALL_RESULT_PERSIST_EXECUTION_ERROR = (
         174036, "toolchain optimizer tool_call result persist execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_SKILL_DEFINITION_NOT_FOUND = (
+        174037, "toolchain evolving skill definition not found, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_SKILL_STORE_EXECUTION_ERROR = (
+        174038, "toolchain evolving skill store execution error, reason: {error_msg}"
     )
 
     # =========================

@@ -189,7 +189,7 @@ def build_explore_agent_config(
         tools=list(tools or []),
         mcps=list(mcps or []),
         model=model,
-        rails=rails if rails is not None else [SysOperationRail()],
+        rails=rails if rails is not None else [SysOperationRail(read_only=True)],
         skills=skills,
         backend=backend,
         workspace=workspace,

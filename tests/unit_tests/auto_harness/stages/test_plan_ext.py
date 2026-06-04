@@ -69,7 +69,7 @@ def test_design_query_preserves_domain_artifacts_for_ppt_extensions():
         )
     )
 
-    assert "`huawei_ppt_generator`" in query
+    assert "huawei_ppt_generator" in query
     assert "`office_ppt_generator`" in query
     assert "Tool" in query
     assert "Skill" in query
@@ -109,7 +109,7 @@ def test_fallback_design_infers_tool_skill_for_ppt_generation():
 
 
 def test_parse_extension_designs_preserves_execution_fields():
-    designs = parse_extension_designs(
+    package_name, designs = parse_extension_designs(
         """
         ```json
         [
@@ -132,6 +132,8 @@ def test_parse_extension_designs_preserves_execution_fields():
         """
     )
 
+    # Old format (array) returns None for package_name
+    assert package_name is None
     assert [design.extension_name for design in designs] == [
         "huawei_filename_guard",
         "huawei_ppt_generator",
@@ -142,6 +144,44 @@ def test_parse_extension_designs_preserves_execution_fields():
     assert designs[1].depends_on == [
         "huawei_filename_guard"
     ]
+
+
+def test_parse_extension_designs_new_format_with_package_name():
+    """Test parsing new format with package_name and designs."""
+    package_name, designs = parse_extension_designs(
+        """
+        ```json
+        {
+          "package_name": "huawei_office_generator",
+          "designs": [
+            {
+              "gap_id": "gap_guard",
+              "extension_name": "huawei_filename_guard",
+              "kind": "constraint",
+              "depends_on": [],
+              "applies_to": ["huawei_ppt_generator"],
+              "components": ["rail"]
+            },
+            {
+              "gap_id": "gap_ppt",
+              "extension_name": "huawei_ppt_generator",
+              "depends_on": ["huawei_filename_guard"],
+              "components": ["tool", "skill"]
+            }
+          ]
+        }
+        ```
+        """
+    )
+
+    # New format returns package_name
+    assert package_name == "huawei_office_generator"
+    assert [design.extension_name for design in designs] == [
+        "huawei_filename_guard",
+        "huawei_ppt_generator",
+    ]
+    assert designs[0].kind == "constraint"
+    assert designs[1].kind == "capability"
 
 
 def test_fallback_designs_keep_constraints_outside_capability_cap():

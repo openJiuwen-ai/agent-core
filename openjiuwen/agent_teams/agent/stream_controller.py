@@ -95,6 +95,7 @@ class StreamController:
         status_updater: Callable[[MemberStatus], Any],
         execution_updater: Callable[[ExecutionStatus], Any],
         wake_mailbox_callback: Optional[Callable[[], Any]] = None,
+        request_completion_poll_callback: Optional[Callable[[], Awaitable[None]]] = None,
     ):
         self._get_blueprint = blueprint_getter
         self._state = state
@@ -102,6 +103,10 @@ class StreamController:
         self._update_status = status_updater
         self._update_execution = execution_updater
         self._wake_mailbox_callback = wake_mailbox_callback
+        # Fired at round-end when the round settled cleanly with no pending
+        # work. The leader wires it to enqueue a POLL_TASK so team completion
+        # is re-evaluated immediately; teammates pass None.
+        self._request_completion_poll = request_completion_poll_callback
 
         self.stream_queue: Optional[asyncio.Queue] = None
         self.agent_task: Optional[asyncio.Task] = None
@@ -211,6 +216,37 @@ class StreamController:
     def close_stream(self) -> None:
         if self.stream_queue is not None:
             self.stream_queue.put_nowait(None)
+
+    def emit_completion_and_close(self, member_count: int, task_count: int) -> None:
+        """Enqueue a team-completed marker chunk, then close the stream.
+
+        The marker lands on ``stream_queue`` strictly before the ``None``
+        sentinel that ``close_stream`` enqueues, so a streaming consumer
+        reads the completion signal before the stream ends. No-op when the
+        queue is already gone (the round tore down before this ran).
+
+        Args:
+            member_count: Total team member count at completion time.
+            task_count: Total task count at completion time.
+        """
+        if self.stream_queue is None:
+            return
+        bp = self._get_blueprint()
+        member_name = bp.member_name if bp else None
+        role = bp.role if bp else None
+        marker = TeamOutputSchema(
+            type="message",
+            index=0,
+            payload={
+                "event_type": "team.completed",
+                "member_count": member_count,
+                "task_count": task_count,
+            },
+            source_member=member_name,
+            role=role,
+        )
+        self.stream_queue.put_nowait(marker)
+        self.close_stream()
 
     async def drain_agent_task(self) -> None:
         """Tear down the in-flight round during lifecycle pause/stop.
@@ -351,6 +387,12 @@ class StreamController:
                     team_member = self._state.team_member
                     if team_member and await team_member.status() == MemberStatus.SHUTDOWN_REQUESTED:
                         self.close_stream()
+                    elif self._request_completion_poll is not None:
+                        # Round ended cleanly with no pending work; ask the
+                        # event bus to evaluate team completion now instead of
+                        # waiting for the periodic POLL_TASK tick. Only the
+                        # leader wires this callback (teammates pass None).
+                        await self._request_completion_poll()
 
     async def _stream_one_round(self, query: Any) -> Optional[Tuple[Optional[int], str]]:
         harness = self._resources.harness
@@ -360,10 +402,10 @@ class StreamController:
         error_text: str = ""
         self.streaming_active = True
         try:
-            async for chunk in harness.run_streaming(
-                inputs,
-                session_id=get_session_id() or None,
-            ):
+            stream_kwargs: dict[str, Any] = {"session_id": get_session_id() or None}
+            if self._state.team_session is not None:
+                stream_kwargs["team_session"] = self._state.team_session
+            async for chunk in harness.run_streaming(inputs, **stream_kwargs):
                 if error_seen:
                     continue
                 detected = _detect_task_failed(chunk)

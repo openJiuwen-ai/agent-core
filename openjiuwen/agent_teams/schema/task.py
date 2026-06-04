@@ -83,13 +83,21 @@ class TaskCreateResult:
 
 
 class TaskSummary(BaseModel):
-    """Lightweight task summary returned by list/claimable actions."""
+    """Lightweight task summary returned by list/claimable actions.
+
+    ``updated_at`` is the millisecond wall-clock timestamp of the last
+    status transition (same semantic as ``TaskDetail.updated_at``). It is a
+    lightweight routing/identity field (one int, like status/assignee), not
+    a heavy field like content — it lets the list view render a relative
+    time so an idle member can tell which task has been stalling.
+    """
 
     task_id: str
     title: str
     status: str
     assignee: Optional[str] = None
     blocked_by: list[str] = Field(default_factory=list)
+    updated_at: Optional[int] = None
 
 
 class TaskDetail(BaseModel):

@@ -157,9 +157,11 @@ async def test_init_preset_defaults(tmp_path: Path):
     # MessageSummaryOffloader tests
     off = procs.get("MessageSummaryOffloader")
     assert off is not None
-    assert off.messages_threshold is None
-    assert off.tokens_threshold == 60000
-    assert off.large_message_threshold == 60000
+    assert "messages_threshold" not in type(off).model_fields
+    assert "tokens_threshold" not in type(off).model_fields
+    assert "messages_to_keep" not in type(off).model_fields
+    assert "keep_last_round" not in type(off).model_fields
+    assert off.large_message_threshold == 10000
     assert off.offload_message_type == ["tool"]
     assert off.protected_tool_names == ["read_file:*SKILL.md", "reload_original_context_messages"]
     assert off.summary_max_tokens == 900
@@ -680,7 +682,12 @@ async def test_refresh_task_state_runtime_with_deep_agent_state(tmp_path: Path):
         "iteration": 5,
         "stop_condition_state": {"iteration": 5},
         "pending_follow_ups": ["follow1"],
-        "plan_mode": {"mode": "normal", "pre_plan_mode": None, "plan_slug": None},
+        "plan_mode": {
+            "mode": "normal",
+            "pre_plan_mode": None,
+            "plan_slug": None,
+            "prompt_context": None,
+        },
     }
     runtime_state = DeepAgentState(
         iteration=5,
@@ -702,7 +709,12 @@ async def test_refresh_task_state_runtime_with_deep_agent_state(tmp_path: Path):
     call_args = mock_session.update_state.call_args[0][0]
     assert call_args["iteration"] == 5
     assert call_args["pending_follow_ups"] == ["follow1"]
-    assert call_args["plan_mode"] == {"mode": "normal", "pre_plan_mode": "normal", "plan_slug": None}
+    assert call_args["plan_mode"] == {
+        "mode": "normal",
+        "pre_plan_mode": "normal",
+        "plan_slug": None,
+        "prompt_context": None,
+    }
 
 
 @pytest.mark.asyncio
@@ -720,7 +732,12 @@ async def test_refresh_task_state_runtime_with_persisted_dict(tmp_path: Path):
         "iteration": 10,
         "stop_condition_state": {"iteration": 10},
         "pending_follow_ups": [],
-        "plan_mode": {"mode": "manual", "pre_plan_mode": None, "plan_slug": None},
+        "plan_mode": {
+            "mode": "manual",
+            "pre_plan_mode": None,
+            "plan_slug": None,
+            "prompt_context": None,
+        },
     }
     setattr(mock_session, _SESSION_RUNTIME_ATTR, None)
 

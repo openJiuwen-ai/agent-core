@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
+from openjiuwen.core.context_engine.schema.context_state import ContextCompressionState
 from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
 from openjiuwen.core.session.stream.base import OutputSchema
 
@@ -29,6 +30,19 @@ class _FakeSession:
 class _CompressConfig(BaseModel):
     trigger_total_tokens: int = 100
     model: str = "test-compressor-model"
+
+
+def _compression_states(session: _FakeSession) -> list[ContextCompressionState]:
+    states: list[ContextCompressionState] = []
+    for chunk in session.chunks:
+        if chunk.type != "context.compression_state":
+            continue
+        payload = chunk.payload
+        if isinstance(payload, ContextCompressionState):
+            states.append(payload)
+        else:
+            states.append(ContextCompressionState(**payload))
+    return states
 
 
 class _ReplacingCompressor(ContextProcessor):
@@ -86,6 +100,44 @@ class _NoopCompressor(ContextProcessor):
         return {}
 
 
+class _ReplacingSummaryCompressor(_ReplacingCompressor):
+    async def on_add_messages(
+            self,
+            context,
+            messages_to_add: List[BaseMessage],
+            **kwargs: Any,
+    ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
+        context.set_messages([UserMessage(content="short summary")])
+        return ContextEvent(
+            event_type=self.processor_type(),
+            messages_to_modify=[0, 1],
+            compact_summary="current round summary",
+        ), []
+
+
+class _ReplacingUsageCompressor(_ReplacingCompressor):
+    async def on_add_messages(
+            self,
+            context,
+            messages_to_add: List[BaseMessage],
+            **kwargs: Any,
+    ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
+        context.set_messages([UserMessage(content="short")])
+        return ContextEvent(
+            event_type=self.processor_type(),
+            messages_to_modify=[0, 1],
+            compression_usage={
+                "calls": 1,
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+                "cache_tokens": 10,
+                "model_name": "compress-model",
+                "details": [{"model_name": "compress-model", "total_tokens": 120}],
+            },
+        ), []
+
+
 @pytest.mark.asyncio
 async def test_active_compression_streams_started_and_completed_state():
     session = _FakeSession()
@@ -105,10 +157,10 @@ async def test_active_compression_streams_started_and_completed_state():
     result = await context.compress_context()
 
     assert result == "compressed"
-    states = [chunk for chunk in session.chunks if chunk.type == "context.compression_state"]
-    assert [chunk.payload.status for chunk in states] == ["started", "completed"]
+    states = _compression_states(session)
+    assert [state.status for state in states] == ["started", "completed"]
 
-    started = states[0].payload
+    started = states[0]
     assert started.phase == "active_compress"
     assert started.processor == "_ReplacingCompressor"
     assert started.model == "test-compressor-model"
@@ -124,7 +176,7 @@ async def test_active_compression_streams_started_and_completed_state():
     assert started.saved is None
     assert started.duration_ms is None
 
-    completed = states[1].payload
+    completed = states[1]
     assert completed.after.time
     assert re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}", completed.after.time)
     assert completed.after.messages == 1
@@ -137,6 +189,37 @@ async def test_active_compression_streams_started_and_completed_state():
     assert completed.statistic.user_messages == 1
     assert completed.summary == "Compressed 2 -> 1 messages, ~40 -> ~2 tokens, saved ~38 tokens (95.0%), modified 2 messages"
     assert completed.duration_ms is not None
+
+
+@pytest.mark.asyncio
+async def test_active_compression_streams_compression_usage():
+    session = _FakeSession()
+    context = SessionModelContext(
+        "context-1",
+        session.get_session_id(),
+        ContextEngineConfig(),
+        history_messages=[
+            UserMessage(content="a" * 80),
+            UserMessage(content="b" * 80),
+        ],
+        processors=[_ReplacingUsageCompressor()],
+        token_counter=None,
+    )
+    setattr(context, "_session_ref", session)
+
+    result = await context.compress_context()
+
+    assert result == "compressed"
+    states = _compression_states(session)
+    assert [state.status for state in states] == ["started", "completed"]
+    completed = states[1]
+    assert completed.compression_usage.calls == 1
+    assert completed.compression_usage.input_tokens == 100
+    assert completed.compression_usage.output_tokens == 20
+    assert completed.compression_usage.total_tokens == 120
+    assert completed.compression_usage.cache_tokens == 10
+    assert completed.compression_usage.model_name == "compress-model"
+    assert completed.compression_usage.details == [{"model_name": "compress-model", "total_tokens": 120}]
 
 
 @pytest.mark.asyncio
@@ -155,9 +238,9 @@ async def test_active_compression_returns_noop_when_processor_does_not_change_co
     result = await context.compress_context()
 
     assert result == "noop"
-    states = [chunk for chunk in session.chunks if chunk.type == "context.compression_state"]
-    assert [chunk.payload.status for chunk in states] == ["started", "noop"]
-    assert states[0].payload.before.context_percent == 0
+    states = _compression_states(session)
+    assert [state.status for state in states] == ["started", "noop"]
+    assert states[0].before.context_percent == 0
 
 
 @pytest.mark.asyncio
@@ -176,9 +259,9 @@ async def test_context_percent_uses_model_context_window_mapping():
     result = await context.compress_context(model_name="mapped-model")
 
     assert result == "noop"
-    states = [chunk for chunk in session.chunks if chunk.type == "context.compression_state"]
-    assert states[0].payload.before.tokens == 20
-    assert states[0].payload.before.context_percent == 10
+    states = _compression_states(session)
+    assert states[0].before.tokens == 20
+    assert states[0].before.context_percent == 10
 
 
 @pytest.mark.asyncio
@@ -201,5 +284,5 @@ async def test_state_callback_failure_does_not_block_stream_emit():
         result = await context.compress_context()
 
     assert result == "noop"
-    states = [chunk for chunk in session.chunks if chunk.type == "context.compression_state"]
-    assert [chunk.payload.status for chunk in states] == ["started", "noop"]
+    states = _compression_states(session)
+    assert [state.status for state in states] == ["started", "noop"]

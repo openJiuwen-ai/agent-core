@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.core.common.logging import logger
@@ -314,9 +315,9 @@ class LspRail(DeepAgentRail):
 
         async def _trigger() -> None:
             try:
-                from pathlib import Path
+                from pathlib import Path as _Path
                 from openjiuwen.harness.lsp.core.utils.file_uri import path_to_file_uri
-                ext = Path(resolved_path).suffix.lower()
+                ext = _Path(resolved_path).suffix.lower()
                 language_id = "python" if ext in {".py", ".pyi"} else ext.lstrip(".") or "plaintext"
                 # Some servers (e.g. pyright) require a prior didOpen before they
                 # accept didChange.  Send didOpen first when the file is unknown.

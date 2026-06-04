@@ -36,17 +36,28 @@ from openjiuwen.agent_teams.runtime.pool import (
 
 
 def _make_agent(*, known_members: set[str] | None = None) -> MagicMock:
-    """Build a fake TeamAgent exposing the surface dispatch_payload uses."""
+    """Build a fake TeamAgent exposing the surface dispatch_payload uses.
+
+    ``known_members`` seeds the roster predicate ``interact`` calls
+    (``team_backend.get_member``): names in the set resolve to a stub
+    member row, everything else to ``None`` so unknown ``@<member>``
+    recipients fall back to the no-mention channel.
+    """
     members = known_members or set()
     agent = MagicMock(name="TeamAgent")
     agent.team_backend = MagicMock(name="TeamBackend")
     agent.team_backend.message_manager = MagicMock(name="TeamMessageManager")
     agent.team_backend.message_manager.send_message = AsyncMock(return_value="msg-id")
     agent.team_backend.message_manager.broadcast_message = AsyncMock(return_value="bcast-id")
+    agent.team_backend.get_member = AsyncMock(
+        side_effect=lambda name: MagicMock(name=f"TeamMember:{name}") if name in members else None
+    )
     agent.deliver_input = AsyncMock()
     agent.has_team_member = AsyncMock(side_effect=lambda name: name in members)
+    agent.auto_start_member = AsyncMock(return_value=False)
+    agent.auto_start_all = AsyncMock(return_value=[])
     avatar = AsyncMock(name="HumanAgentRuntime")
-    agent.lookup_human_agent_runtime = MagicMock(return_value=avatar)
+    agent.lookup_human_agent_runtime = AsyncMock(return_value=avatar)
     agent._avatar = avatar  # exposed for tests that want to assert on it
     return agent
 
@@ -74,7 +85,7 @@ async def test_god_view_always_goes_to_leader():
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_operator_message_direct_routes_to_member():
-    """OperatorMessage with a target writes a user→target message."""
+    """OperatorMessage with a target auto-starts the member then writes a message."""
     agent = _make_agent()
 
     result = await TeamRuntimeManager._dispatch_payload(
@@ -83,6 +94,7 @@ async def test_operator_message_direct_routes_to_member():
     )
 
     assert result.ok
+    agent.auto_start_member.assert_awaited_once_with("dev-1")
     agent.team_backend.message_manager.send_message.assert_awaited_once_with(
         content="ping",
         to_member_name="dev-1",
@@ -94,7 +106,7 @@ async def test_operator_message_direct_routes_to_member():
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_operator_message_broadcasts_when_target_none():
-    """OperatorMessage with target=None broadcasts as the user."""
+    """OperatorMessage with target=None auto-starts all then broadcasts as the user."""
     agent = _make_agent()
 
     result = await TeamRuntimeManager._dispatch_payload(
@@ -103,6 +115,7 @@ async def test_operator_message_broadcasts_when_target_none():
     )
 
     assert result.ok
+    agent.auto_start_all.assert_awaited_once()
     agent.team_backend.message_manager.broadcast_message.assert_awaited_once_with(
         content="hello team",
         from_member_name="user",
@@ -114,7 +127,7 @@ async def test_operator_message_broadcasts_when_target_none():
 async def test_human_agent_message_drives_avatar_when_no_target():
     """HumanAgentMessage with no target/mention drives the avatar's DeepAgent."""
     agent = _make_agent()
-    agent.team_backend.human_agent_names = MagicMock(return_value={"human_alice"})
+    agent.team_backend.human_agent_names = AsyncMock(return_value={"human_alice"})
 
     result = await TeamRuntimeManager._dispatch_payload(
         agent,
@@ -147,13 +160,14 @@ async def _make_manager_with_agent(agent: MagicMock) -> TeamRuntimeManager:
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_interact_str_at_member_routes_via_operator():
-    """``interact("@dev-1 hi")`` parses to OperatorMessage(target='dev-1')."""
+    """``interact("@dev-1 hi")`` auto-starts dev-1 then writes a message."""
     agent = _make_agent(known_members={"dev-1"})
     manager = await _make_manager_with_agent(agent)
 
     result = await manager.interact("@dev-1 hi", team_name="alpha", session_id="s1")
 
     assert result.ok
+    agent.auto_start_member.assert_awaited_once_with("dev-1")
     agent.team_backend.message_manager.send_message.assert_awaited_once_with(
         content="hi",
         to_member_name="dev-1",
@@ -165,13 +179,14 @@ async def test_interact_str_at_member_routes_via_operator():
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_interact_str_at_all_broadcasts_via_operator():
-    """``interact("@all status")`` parses to OperatorMessage(target=None)."""
+    """``interact("@all status")`` auto-starts all then broadcasts."""
     agent = _make_agent()
     manager = await _make_manager_with_agent(agent)
 
     result = await manager.interact("@all status", team_name="alpha", session_id="s1")
 
     assert result.ok
+    agent.auto_start_all.assert_awaited_once()
     agent.team_backend.message_manager.broadcast_message.assert_awaited_once_with(
         content="status",
         from_member_name="user",
@@ -198,13 +213,33 @@ async def test_interact_str_hash_prefix_routes_to_god_view():
 async def test_interact_str_dollar_prefix_drives_human_agent():
     """``interact("$alice please summarise")`` parses to HumanAgentMessage."""
     agent = _make_agent()
-    agent.team_backend.human_agent_names = MagicMock(return_value={"alice"})
+    agent.team_backend.human_agent_names = AsyncMock(return_value={"alice"})
     manager = await _make_manager_with_agent(agent)
 
     result = await manager.interact("$alice please summarise", team_name="alpha", session_id="s1")
 
     assert result.ok
     agent._avatar.deliver_input.assert_awaited_once_with("please summarise")
+    agent.deliver_input.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_interact_str_dollar_direct_routes_as_human_agent():
+    """``interact("$human-p1 @recorder hi")`` writes a human-sent direct message."""
+    agent = _make_agent(known_members={"recorder"})
+    agent.team_backend.human_agent_names = AsyncMock(return_value={"human-p1"})
+    manager = await _make_manager_with_agent(agent)
+
+    result = await manager.interact("$human-p1 @recorder hi", team_name="alpha", session_id="s1")
+
+    assert result.ok
+    agent.auto_start_member.assert_awaited_once_with("recorder")
+    agent.team_backend.message_manager.send_message.assert_awaited_once_with(
+        content="hi",
+        to_member_name="recorder",
+        from_member_name="human-p1",
+    )
     agent.deliver_input.assert_not_called()
 
 
@@ -234,3 +269,71 @@ async def test_interact_str_at_target_without_body_is_unparseable():
     assert result.ok
     agent.deliver_input.assert_awaited_once_with("@dev-1")
     agent.team_backend.message_manager.send_message.assert_not_called()
+
+
+# ----------------------------------------------------------------------
+# Strict roster matching — unknown ``@<member>`` recipients are not
+# routing directives; they fold back into a no-mention message instead
+# of writing a bus message to a non-existent member.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_interact_str_unknown_member_folds_to_god_view():
+    """``@ghost body`` with no such member → leader receives the verbatim text."""
+    agent = _make_agent()  # empty roster
+    manager = await _make_manager_with_agent(agent)
+
+    result = await manager.interact("@ghost ship it", team_name="alpha", session_id="s1")
+
+    assert result.ok
+    agent.deliver_input.assert_awaited_once_with("@ghost ship it")
+    agent.team_backend.message_manager.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_interact_str_multiple_unknown_members_fold_into_one_message():
+    """All-unknown recipients collapse into a single god-view message."""
+    agent = _make_agent()
+    manager = await _make_manager_with_agent(agent)
+
+    result = await manager.interact("# @g1 @g2 stand-up in 5", team_name="alpha", session_id="s1")
+
+    assert result.ok
+    agent.deliver_input.assert_awaited_once_with("@g1 @g2 stand-up in 5")
+    agent.team_backend.message_manager.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_interact_str_unknown_member_dollar_drives_avatar():
+    """``$alice @ghost body`` with no member ghost drives alice's avatar verbatim."""
+    agent = _make_agent()
+    agent.team_backend.human_agent_names = AsyncMock(return_value={"alice"})
+    manager = await _make_manager_with_agent(agent)
+
+    result = await manager.interact("$alice @ghost hi", team_name="alpha", session_id="s1")
+
+    assert result.ok
+    agent._avatar.deliver_input.assert_awaited_once_with("@ghost hi")
+    agent.team_backend.message_manager.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_interact_str_partial_match_routes_known_and_folds_unknown():
+    """Known recipients get point-to-point; unknown ones fold to the leader."""
+    agent = _make_agent(known_members={"m1"})
+    manager = await _make_manager_with_agent(agent)
+
+    result = await manager.interact("# @m1 @ghost on it", team_name="alpha", session_id="s1")
+
+    assert result.ok
+    agent.team_backend.message_manager.send_message.assert_awaited_once_with(
+        content="on it",
+        to_member_name="m1",
+        from_member_name="user",
+    )
+    agent.deliver_input.assert_awaited_once_with("@ghost on it")

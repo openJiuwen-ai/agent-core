@@ -62,6 +62,7 @@ class PregelGraph(Graph):
         self.waits: set[str] = set()
         self.nodes: dict[str, Vertex] = {}
         self.branches: defaultdict[str, dict[str, Branch]] = defaultdict(dict)
+        self.branch_targets: dict[str, set[str]] = {}
         self.checkpointer = None
         self._session = None
 
@@ -130,6 +131,84 @@ class PregelGraph(Graph):
         self.branches[source_node_id][name] = Branch(router)
         return self
 
+    def register_branch_targets(self, branch_node_id: str, targets: set[str]) -> Self:
+        """Register the set of possible targets for a branch node.
+
+        At compile time, wait_for_all nodes query this mapping to determine
+        whether their predecessors belong to the same branch (mutually exclusive),
+        and merge them into OR-groups accordingly.
+        """
+        if branch_node_id and targets and len(targets) > 1:
+            self.branch_targets[branch_node_id] = targets
+        return self
+
+    def _forward_reachable(self, start_node: str) -> set[str]:
+        """BFS forward search: all nodes reachable from start_node along self.edges."""
+        visited = set()
+        queue = [start_node]
+        while queue:
+            node = queue.pop(0)
+            if node in visited:
+                continue
+            visited.add(node)
+            for (src, tgt) in self.edges:
+                if src == node and isinstance(tgt, str) and tgt not in visited:
+                    queue.append(tgt)
+        return visited
+
+    def _resolve_barrier_groups(
+        self, target_id: str, source_list: list[set[str]]
+    ) -> list[set[str]]:
+        """Resolve mutually exclusive predecessors into CNF OR-groups.
+
+        Uses a consumer perspective: for each branch target, perform BFS to find
+        forward-reachable nodes, then determine which predecessors are exclusive
+        to a single branch (OR-group candidates) vs shared/standalone.
+        """
+        if not self.branch_targets or not source_list:
+            return source_list
+
+        # Step 1: collect all direct predecessors
+        all_predecessors = set()
+        for g in source_list:
+            all_predecessors |= g
+
+        # Step 2: BFS forward search from each branch target
+        reachable: dict[tuple[str, str], set[str]] = {}
+        for branch_id, targets in self.branch_targets.items():
+            for target in targets:
+                reachable[(branch_id, target)] = self._forward_reachable(target)
+
+        # Step 3: build ownership info for each predecessor
+        pred_info: dict[str, set[tuple[str, str]]] = {}
+        for p in all_predecessors:
+            pred_info[p] = set()
+            for (bid, tgt), nodes in reachable.items():
+                if p in nodes:
+                    pred_info[p].add((bid, tgt))
+
+        # Step 4: group predecessors by branch_id
+        from collections import defaultdict as _defaultdict
+        branch_groups: dict[str, set[str]] = _defaultdict(set)
+        standalone: list[set[str]] = []
+
+        for p in all_predecessors:
+            branches = pred_info[p]
+            if len(branches) == 1:
+                bid = next(iter(branches))[0]
+                branch_groups[bid].add(p)
+            else:
+                standalone.append({p})
+
+        # Step 5: assemble result
+        result: list[set[str]] = []
+        for group in branch_groups.values():
+            result.append(group)
+        for s in standalone:
+            result.append(s)
+
+        return result if result else source_list
+
     def compile(self, session: BaseSession, **kwargs) -> ExecutableGraph:
         for node_id, node in self.nodes.items():
             node.init(session, **kwargs)
@@ -160,23 +239,34 @@ class PregelGraph(Graph):
 
     def _compile(self, graph_store=None, step_callback=None) -> Pregel:
         edges: list[Tuple[str | list[str], str]] = []
-        sources: dict[str, set[str]] = {}
+        sources: dict[str, list[set[str]]] = {}
         builder = PregelBuilder()
         for node_id, action in self.nodes.items():
             builder.add_node(node_id, action)
 
+        # Step 1: collect sources as single-element groups
         for (source_node_id, target_node_id) in self.edges:
             if target_node_id in self.waits:
                 if target_node_id not in sources:
-                    sources[target_node_id] = set()
+                    sources[target_node_id] = []
                 if isinstance(source_node_id, str):
-                    sources[target_node_id].add(source_node_id)
+                    sources[target_node_id].append({source_node_id})
                 elif isinstance(source_node_id, list):
-                    sources[target_node_id].update(source_node_id)
+                    for s in source_node_id:
+                        sources[target_node_id].append({s})
             else:
                 edges.append((source_node_id, target_node_id))
-        for (target_node_id, source_node_id) in sources.items():
-            builder.add_edge(source_node_id, target_node_id)
+
+        # Step 2: resolve mutually exclusive predecessors into CNF OR-groups
+        for target_node_id in sources:
+            sources[target_node_id] = self._resolve_barrier_groups(
+                target_node_id, sources[target_node_id]
+            )
+
+        # Step 3: pass to builder
+        for (target_node_id, groups) in sources.items():
+            start = [next(iter(g)) if len(g) == 1 else g for g in groups]
+            builder.add_edge(start, target_node_id)
         for (source_node_id, target_node_id) in edges:
             builder.add_edge(source_node_id, target_node_id)
 

@@ -21,7 +21,7 @@ class openjiuwen.core.memory.config.config.MemoryEngineConfig(default_model_cfg:
 * **default_model_client_cfg**(ModelClientConfig | None, 可选)：默认的大模型客户端配置（`client_id / client_provider / api_base / api_key / verify_ssl` 等）；若为 `None`，同样无法生成记忆（除非通过 scope 配置）。默认值：`None`。
 * **forbidden_variables**(str, 可选)：禁止记忆的变量（逗号分隔的变量名）；默认值：`""`（不禁止任何变量）。
 * **input_msg_max_len**(int, 可选)：输入消息最大长度（字符数）；在生成记忆时，超过此长度的消息内容会被截断。默认值：8192。
-* **crypto_key**(bytes, 可选)：AES 加密密钥，用于加密存储中的敏感参数（如 API key）；长度必须为 32 字节；若为空字节串 `b''`，则不启用加密。默认值：`b''`（不加密）。
+* **crypto_key**(bytes, 可选)：AES-256-GCM 加密密钥，长度必须为 32 字节（32 bytes）。若设置为非空字节串，在调用 `set_config` 时会自动为 `memory_index`（`BaseMemoryIndex`）注入 `AesStorageCodec`，对记忆内容的 `text` 字段进行存储层透明加解密；同时也会用于加密 `MemoryScopeConfig` 中的 `api_key` 等敏感参数。若为空字节串 `b''`，则所有加解密功能不启用。默认值：`b''`（不加密）。
 
 **参数校验**：
 

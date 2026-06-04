@@ -113,13 +113,9 @@ class FragmentMemoryManager(BaseMemoryManager):
         )
 
     def _doc_to_dict(self, doc: MemoryDoc, score: float = 0.0) -> dict[str, Any]:
-        encrypted_content = BaseMemoryManager.encrypt_memory_if_needed(
-            key=self.crypto_key,
-            plaintext=doc.text
-        ) if self.crypto_key else doc.text
         return {
             "id": doc.id,
-            "mem": encrypted_content,
+            "mem": doc.text,
             "mem_type": doc.type,
             "timestamp": doc.timestamp,
             "score": score,

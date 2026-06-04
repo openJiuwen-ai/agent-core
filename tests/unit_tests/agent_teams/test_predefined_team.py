@@ -8,6 +8,7 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.messager import Messager
+from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberStatus,
@@ -70,6 +71,13 @@ def predefined_members():
             persona="Senior frontend engineer",
         ),
     ]
+
+
+def test_team_agent_spec_defaults_teammate_mode_to_build_mode():
+    spec = TeamAgentSpec(agents={})
+
+    assert spec.enable_team_plan is False
+    assert spec.teammate_mode == "build_mode"
 
 
 class TestBuildTeamWithPredefinedMembers:
@@ -283,6 +291,21 @@ class TestToolExclusion:
 
             assert "approve_plan" not in tool_names, f"teammate got approve_plan in {mode}"
             assert "approve_tool" not in tool_names, f"teammate got approve_tool in {mode}"
+            if mode == "plan_mode":
+                assert "submit_plan" in tool_names
+            else:
+                assert "submit_plan" not in tool_names
+
+    @pytest.mark.level1
+    def test_team_plan_uses_teammate_mode(self):
+        """team.plan uses the same member mode switch as normal team mode."""
+        spec = TeamAgentSpec.model_construct(
+            agents={},
+            enable_team_plan=True,
+            teammate_mode="plan_mode",
+        )
+
+        assert spec.teammate_mode == "plan_mode"
 
 
 class TestPredefinedTeamPrompt:

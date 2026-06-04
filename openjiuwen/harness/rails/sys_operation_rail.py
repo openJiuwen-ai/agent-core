@@ -30,11 +30,13 @@ class SysOperationRail(DeepAgentRail):
         self,
         *,
         with_code_tool: bool = False,
+        read_only: bool = False,
         enable_read_image_multimodal: Optional[bool] = None,
     ) -> None:
         super().__init__()
         self.tools = None
         self._with_code_tool = with_code_tool
+        self._read_only = read_only
         self._enable_read_image_multimodal = enable_read_image_multimodal
 
     def init(self, agent) -> None:
@@ -64,21 +66,25 @@ class SysOperationRail(DeepAgentRail):
             else None
         )
 
-        self.tools = [
-            read_tool,
-            write_tool,
-            edit_tool,
-            glob_tool,
-            list_dir_tool,
-            grep_tool,
-            bash_tool,
-        ]
+        shared = [glob_tool, list_dir_tool, grep_tool, bash_tool]
+        if self._read_only:
+            self.tools = [read_tool, *shared]
+        else:
+            self.tools = [read_tool, write_tool, edit_tool, *shared]
         if powershell_tool is not None:
             self.tools.append(powershell_tool)
 
-        if self._with_code_tool:
+        if self._with_code_tool and not self._read_only:
             self.tools.append(CodeTool(self.sys_operation, lang, agent_id))
 
+        # 工具 id 形如 "WriteFileTool_<agent_id>" 与 SysOperation 实例无关; 若上一次 agent
+        # 生命周期里的同名工具仍残留在 resource_mgr (例如 adapter cleanup 未驱动 rail.uninit),
+        # 直接 add_tool 会因 resource_already_exist 静默失败, 旧工具实例继续持有过期的
+        # SysOperation 引用, 导致 SANDBOX 切换时 fs/shell 调用走 LOCAL 并写穿宿主。
+        # 这里与 SkillUseRail.init 同款 idempotent 注册: 已存在则先 remove, 再 add。
+        for tool in self.tools:
+            if Runner.resource_mgr.get_tool(tool.card.id) is not None:
+                Runner.resource_mgr.remove_tool(tool.card.id)
         Runner.resource_mgr.add_tool(self.tools)
 
         for tool in self.tools:

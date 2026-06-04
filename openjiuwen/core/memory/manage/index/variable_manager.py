@@ -6,6 +6,7 @@ from typing import Any, List, Optional, Tuple
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType, BaseMemoryUnit, VariableUnit
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
+from openjiuwen.core.memory.codec.aes_storage_codec import AesStorageCodec
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
@@ -23,6 +24,7 @@ class VariableManager(BaseMemoryManager):
                  crypto_key: bytes):
         self.kv_store = kv_store
         self.crypto_key = crypto_key
+        self._codec = AesStorageCodec(crypto_key)
         self.mem_type = MemoryType.VARIABLE.value
         kv_prefix_registry.register_current(self.USER_VAR_PREFIX)
         kv_prefix_registry.register_current(self.SESSION_VAR_PREFIX)
@@ -164,7 +166,7 @@ class VariableManager(BaseMemoryManager):
             kv_ret = await self.kv_store.get_by_prefix(prefix_str)
             result = {}
             for k, v in kv_ret.items():
-                v = BaseMemoryManager.decrypt_memory_if_needed(key=self.crypto_key, ciphertext=v)
+                v = self._codec.decode(v)
                 result[k.split(f"{self.SEPARATOR}")[-1]] = v
             return result
         if session_id:
@@ -173,7 +175,7 @@ class VariableManager(BaseMemoryManager):
         else:
             key = f"{self.USER_VAR_PREFIX}{self.SEPARATOR}{user_id}{self.SEPARATOR}{scope_id}{self.SEPARATOR}{name}"
         kv_ret = await self.kv_store.get(key)
-        kv_ret = BaseMemoryManager.decrypt_memory_if_needed(key=self.crypto_key, ciphertext=kv_ret)
+        kv_ret = self._codec.decode(kv_ret)
         return {name: kv_ret}
 
     def _make_variable_pairs(
@@ -187,10 +189,8 @@ class VariableManager(BaseMemoryManager):
             session_var_value: Optional[str] = None
     ) -> Tuple[str, str]:
         key, value = "", ""
-        user_var_value = BaseMemoryManager.encrypt_memory_if_needed(key=self.crypto_key,
-                                                                    plaintext=user_var_value)
-        session_var_value = BaseMemoryManager.encrypt_memory_if_needed(key=self.crypto_key,
-                                                                       plaintext=session_var_value)
+        user_var_value = self._codec.encode(user_var_value)
+        session_var_value = self._codec.encode(session_var_value)
         if var_name is not None:
             # 1) user_var
             if session_id is None:

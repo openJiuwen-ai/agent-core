@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.rails import (
         FirstIterationGate,
         TeamPolicyRail,
+        TeamPlanModeRail,
         TeamToolApprovalRail,
         TeamToolRail,
     )
@@ -60,6 +61,7 @@ class _MountedRails:
     first_iter_gate: Optional["FirstIterationGate"] = None
     team_workspace: Optional["TeamWorkspaceRail"] = None
     tool_approval: Optional["TeamToolApprovalRail"] = None
+    team_plan_mode: Optional["TeamPlanModeRail"] = None
 
 
 class TeamHarness:
@@ -72,11 +74,15 @@ class TeamHarness:
         *,
         role: "TeamRole",
         member_name: Optional[str],
+        initial_plan_mode: bool = False,
     ) -> None:
         self._deep_agent = deep_agent
         self._rails = rails
         self._role = role
         self._member_name = member_name
+        self._initial_plan_mode = initial_plan_mode
+        self._initial_plan_mode_seeded = False
+        self._active_agent_session: Optional[Any] = None
 
     # ------------------------------------------------------------------
     # Construction
@@ -94,6 +100,8 @@ class TeamHarness:
         first_iter_gate: Optional["FirstIterationGate"] = None,
         team_workspace_rail: Optional["TeamWorkspaceRail"] = None,
         tool_approval_rail: Optional["TeamToolApprovalRail"] = None,
+        team_plan_mode_rail: Optional["TeamPlanModeRail"] = None,
+        initial_plan_mode: bool = False,
     ) -> "TeamHarness":
         """Materialize a DeepAgent from the spec and mount all team rails.
 
@@ -128,14 +136,24 @@ class TeamHarness:
         if tool_approval_rail is not None:
             deep_agent.add_rail(tool_approval_rail)
 
+        if team_plan_mode_rail is not None:
+            deep_agent.add_rail(team_plan_mode_rail)
+
         rails = _MountedRails(
             team_tool=team_tool_rail,
             team_policy=team_policy_rail,
             first_iter_gate=first_iter_gate,
             team_workspace=team_workspace_rail,
             tool_approval=tool_approval_rail,
+            team_plan_mode=team_plan_mode_rail,
         )
-        return cls(deep_agent, rails, role=role, member_name=member_name)
+        return cls(
+            deep_agent,
+            rails,
+            role=role,
+            member_name=member_name,
+            initial_plan_mode=initial_plan_mode,
+        )
 
     def run_agent_customizer(self, customizer: AgentCustomizer) -> None:
         """Invoke a user-supplied customizer hook on the underlying agent.
@@ -179,8 +197,8 @@ class TeamHarness:
         return self._deep_agent.deep_config.model
 
     def has_pending_interrupt(self) -> bool:
-        """Return True if the agent's loop session has an interruption state."""
-        session = self._deep_agent.loop_session
+        """Return True if the agent has an interruption state to resume."""
+        session = self._interrupt_session()
         if session is None:
             return False
         return session.get_state(INTERRUPTION_KEY) is not None
@@ -189,7 +207,7 @@ class TeamHarness:
         """Return True if ``user_input`` matches the pending interrupt requests."""
         if not isinstance(user_input, InteractiveInput):
             return False
-        session = self._deep_agent.loop_session
+        session = self._interrupt_session()
         if session is None:
             return False
         state = session.get_state(INTERRUPTION_KEY)
@@ -204,6 +222,9 @@ class TeamHarness:
             return False
         resume_ids = set(user_input.user_inputs.keys())
         return bool(resume_ids) and resume_ids.issubset(pending_ids)
+
+    def _interrupt_session(self) -> Optional[Any]:
+        return self._deep_agent.loop_session or self._active_agent_session
 
     def init_cwd_for_round(self) -> None:
         """Initialize the per-round cwd from the workspace root.
@@ -245,24 +266,74 @@ class TeamHarness:
         """
         await self._deep_agent.abort()
 
-    def run_streaming(
+    async def run_streaming(
         self,
         inputs: dict[str, Any],
         *,
         session_id: Optional[str],
+        team_session: Optional[Any] = None,
     ) -> AsyncIterator[Any]:
         """Stream chunks from the underlying agent.
 
-        Returns the async iterator from ``Runner.run_agent_streaming`` so
-        callers can ``async for`` directly. The signature is intentionally
-        serialization-friendly: ``inputs`` is a dict and ``session_id`` is
-        a string, both transportable to a future remote runtime.
+        Prepares the child AgentSession explicitly so team.plan can seed the
+        real Leader DeepAgent into plan mode before its normal stream starts.
+        The returned chunks still come from ``Runner.run_agent_streaming``.
         """
-        return Runner.run_agent_streaming(
+        if team_session is None and not self._initial_plan_mode:
+            async for chunk in Runner.run_agent_streaming(
+                self._deep_agent,
+                inputs,
+                session=session_id,
+            ):
+                yield chunk
+            return
+
+        agent_session = await self._prepare_agent_session(
+            inputs=inputs,
+            session_id=session_id,
+            team_session=team_session,
+        )
+        async for chunk in Runner.run_agent_streaming(
             self._deep_agent,
             inputs,
-            session=session_id,
-        )
+            session=agent_session,
+        ):
+            yield chunk
+
+    async def _prepare_agent_session(
+        self,
+        *,
+        inputs: dict[str, Any],
+        session_id: Optional[str],
+        team_session: Optional[Any],
+    ):
+        card = getattr(self._deep_agent, "card", None)
+        if team_session is not None and hasattr(team_session, "create_agent_session"):
+            agent_session = team_session.create_agent_session(
+                card=card,
+                share_stream_writer=False,
+            )
+        else:
+            from openjiuwen.core.session.agent import create_agent_session
+
+            agent_session = create_agent_session(session_id=session_id, card=card)
+        await agent_session.pre_run(inputs=inputs)
+        self._active_agent_session = agent_session
+        self._ensure_initial_plan_mode(agent_session)
+        return agent_session
+
+    def _ensure_initial_plan_mode(self, session: Any) -> None:
+        if not self._is_initial_team_plan_leader():
+            return
+        if self._initial_plan_mode_seeded:
+            return
+        state = self._deep_agent.load_state(session)
+        if state.plan_mode.mode != "plan":
+            self._deep_agent.switch_mode(session, "plan")
+        self._initial_plan_mode_seeded = True
+
+    def _is_initial_team_plan_leader(self) -> bool:
+        return self._initial_plan_mode and getattr(self._role, "value", self._role) == "leader"
 
     # ------------------------------------------------------------------
     # Rail / tool registration

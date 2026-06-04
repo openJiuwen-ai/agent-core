@@ -58,6 +58,14 @@ class ContextEngineConfig(BaseModel):
     model_context_window_tokens : dict[str, int], optional
         Best-effort fallback mapping from model name to total context window
         tokens. Explicit runtime values and context_window_tokens take priority.
+
+    enable_openrouter_model_context_window_tokens : bool, default False
+        Whether to fetch model context windows from OpenRouter when creating a
+        context. Results are cached process-wide and explicit
+        model_context_window_tokens values take priority.
+
+    openrouter_request_timeout : float, default 3.0
+        Timeout in seconds for fetching OpenRouter model metadata.
     """
 
     max_context_message_num: Optional[int] = Field(default=None, gt=0)
@@ -69,3 +77,5 @@ class ContextEngineConfig(BaseModel):
     context_window_tokens: Optional[int] = Field(default=None, gt=0)
     model_name: Optional[str] = Field(default=None)
     model_context_window_tokens: Optional[Dict[str, int]] = Field(default=None)
+    enable_openrouter_model_context_window_tokens: bool = Field(default=False)
+    openrouter_request_timeout: float = Field(default=3.0, gt=0)

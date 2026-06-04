@@ -26,7 +26,7 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
-from openjiuwen.core.foundation.store.base_memory_index import BaseMemoryIndex, MemoryDoc
+from openjiuwen.core.foundation.store.base_memory_index import BaseMemoryIndex, MemoryDoc, StorageCodec
 from openjiuwen.core.foundation.store.base_vector_store import (
     BaseVectorStore,
     CollectionSchema,
@@ -63,9 +63,23 @@ class SimpleMemoryIndex(BaseMemoryIndex):
         self._created_collections: set[str] = set()
         self._schema_version = 0
         self._backups: dict[str, dict[str, Any]] = {}
+        self._codec: StorageCodec | None = None
 
     def set_embedding_model(self, embedding_model: Any) -> None:
         self._embedding_model = embedding_model
+
+    def set_storage_codec(self, codec: StorageCodec) -> None:
+        self._codec = codec
+
+    def _read_kv_value(self, raw: bytes | str | None) -> str | None:
+        if raw is None:
+            return None
+        if isinstance(raw, bytes):
+            return raw.decode("utf-8")
+        return raw
+
+    def _write_kv_value(self, text: str) -> bytes:
+        return text.encode("utf-8")
 
     # ------------------------------------------------------------------ #
     #  KV helpers                                                         #
@@ -80,12 +94,6 @@ class SimpleMemoryIndex(BaseMemoryIndex):
                     f"{scope_id}{self._KV_SEP}{self._IDS_SUFFIX}")
         return (f"{self._KV_PREFIX}{self._KV_SEP}{user_id}{self._KV_SEP}"
                 f"{scope_id}{self._KV_SEP}{mem_type}{self._KV_SEP}{self._IDS_SUFFIX}")
-
-    @staticmethod
-    def _decode(raw: str | bytes | None) -> str | None:
-        if raw is None:
-            return None
-        return raw.decode("utf-8") if isinstance(raw, bytes) else raw
 
     @staticmethod
     def _parse_all_ids(raw: str) -> list[str]:
@@ -112,34 +120,34 @@ class SimpleMemoryIndex(BaseMemoryIndex):
     ) -> None:
         # Global IDs
         key = self._kv_ids_key(user_id, scope_id)
-        val = self._decode(await self._kv_store.get(key)) or ""
+        val = self._read_kv_value(await self._kv_store.get(key)) or ""
         if mem_id not in self._parse_all_ids(val):
-            await self._kv_store.set(key, self._append_id(val, mem_id))
+            await self._kv_store.set(key, self._write_kv_value(self._append_id(val, mem_id)))
         # Type-specific IDs
         tkey = self._kv_ids_key(user_id, scope_id, mem_type)
-        tval = self._decode(await self._kv_store.get(tkey)) or ""
+        tval = self._read_kv_value(await self._kv_store.get(tkey)) or ""
         if mem_id not in self._parse_all_ids(tval):
-            await self._kv_store.set(tkey, self._append_id(tval, mem_id))
+            await self._kv_store.set(tkey, self._write_kv_value(self._append_id(tval, mem_id)))
 
     async def _remove_id_from_tracking(
         self, user_id: str, scope_id: str, mem_id: str, mem_type: str | None,
     ) -> None:
         # Global IDs
         key = self._kv_ids_key(user_id, scope_id)
-        val = self._decode(await self._kv_store.get(key)) or ""
+        val = self._read_kv_value(await self._kv_store.get(key)) or ""
         new_val = self._remove_id(val, mem_id)
         if new_val:
-            await self._kv_store.set(key, new_val)
+            await self._kv_store.set(key, self._write_kv_value(new_val))
         else:
             await self._kv_store.delete(key)
         if not mem_type:
             return
         # Type-specific IDs
         tkey = self._kv_ids_key(user_id, scope_id, mem_type)
-        tval = self._decode(await self._kv_store.get(tkey)) or ""
+        tval = self._read_kv_value(await self._kv_store.get(tkey)) or ""
         new_tval = self._remove_id(tval, mem_id)
         if new_tval:
-            await self._kv_store.set(tkey, new_tval)
+            await self._kv_store.set(tkey, self._write_kv_value(new_tval))
         else:
             await self._kv_store.delete(tkey)
 
@@ -267,8 +275,12 @@ class SimpleMemoryIndex(BaseMemoryIndex):
 
             for doc in docs:
                 kv_key = self._kv_mem_key(user_id, scope_id, doc.id)
+                kv_data = self._memory_doc_to_kv_data(doc, user_id, scope_id)
+                if self._codec is not None:
+                    kv_data["mem"] = self._codec.encode(kv_data.get("mem", ""))
                 await self._kv_store.set(
-                    kv_key, json.dumps(self._memory_doc_to_kv_data(doc, user_id, scope_id))
+                    kv_key,
+                    self._write_kv_value(json.dumps(kv_data)),
                 )
                 await self._add_id_to_tracking(user_id, scope_id, doc.id, mem_type)
 
@@ -325,10 +337,12 @@ class SimpleMemoryIndex(BaseMemoryIndex):
             values = await self._kv_store.mget(keys)
 
             for mid, raw in zip(hit_ids, values):
-                decoded = self._decode(raw)
+                decoded = self._read_kv_value(raw)
                 if decoded is None:
                     continue
                 data = json.loads(decoded)
+                if self._codec is not None and "mem" in data:
+                    data["mem"] = self._codec.decode(data["mem"])
                 results.append((self._kv_data_to_memory_doc(data, mid), scores.get(mid, 0.0)))
 
         results.sort(key=lambda x: x[1], reverse=True)
@@ -349,7 +363,7 @@ class SimpleMemoryIndex(BaseMemoryIndex):
 
         for mid in ids:
             kv_key = self._kv_mem_key(user_id, scope_id, mid)
-            raw = self._decode(await self._kv_store.get(kv_key))
+            raw = self._read_kv_value(await self._kv_store.get(kv_key))
 
             mem_type = None
             if raw:
@@ -404,16 +418,19 @@ class SimpleMemoryIndex(BaseMemoryIndex):
 
     async def get_by_id(self, user_id: str, scope_id: str, mem_id: str) -> MemoryDoc | None:
         """Retrieve a single memory document by ID from the KV store."""
-        raw = self._decode(await self._kv_store.get(self._kv_mem_key(user_id, scope_id, mem_id)))
+        raw = self._read_kv_value(await self._kv_store.get(self._kv_mem_key(user_id, scope_id, mem_id)))
         if raw is None:
             return None
-        return self._kv_data_to_memory_doc(json.loads(raw), mem_id)
+        data = json.loads(raw)
+        if self._codec is not None and "mem" in data:
+            data["mem"] = self._codec.decode(data["mem"])
+        return self._kv_data_to_memory_doc(data, mem_id)
 
     async def list_memories(self, user_id: str, scope_id: str, offset: int = 0,
                             limit: int = 100, mem_types: list[str] | None = None) -> list[MemoryDoc]:
         """List memory documents with pagination, reading from the KV store."""
         ids_key = self._kv_ids_key(user_id, scope_id)
-        raw = self._decode(await self._kv_store.get(ids_key)) or ""
+        raw = self._read_kv_value(await self._kv_store.get(ids_key)) or ""
         if not raw:
             return []
 
@@ -426,10 +443,13 @@ class SimpleMemoryIndex(BaseMemoryIndex):
 
         docs: list[MemoryDoc] = []
         for mid, val in zip(all_ids, values):
-            decoded = self._decode(val)
+            decoded = self._read_kv_value(val)
             if decoded is None:
                 continue
-            doc = self._kv_data_to_memory_doc(json.loads(decoded), mid)
+            data = json.loads(decoded)
+            if self._codec is not None and "mem" in data:
+                data["mem"] = self._codec.decode(data["mem"])
+            doc = self._kv_data_to_memory_doc(data, mid)
             if not mem_types or doc.type in mem_types:
                 docs.append(doc)
         if mem_types:

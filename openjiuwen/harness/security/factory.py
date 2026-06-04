@@ -7,11 +7,14 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openjiuwen.harness.security.core import PermissionEngine
 from openjiuwen.harness.security.models import PermissionsSection
 from openjiuwen.harness.security.host import ToolPermissionHost
+
+if TYPE_CHECKING:
+    from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
 
 
 def build_permission_interrupt_rail(

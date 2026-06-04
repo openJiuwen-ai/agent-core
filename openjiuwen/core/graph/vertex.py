@@ -2,9 +2,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import asyncio
+import math
 from asyncio import CancelledError
 from datetime import datetime, timezone
-from typing import Any, Optional, AsyncIterator, Literal
+from typing import Any, Optional, AsyncIterator, AsyncGenerator, Literal
 
 from openjiuwen.core.common.constants.constant import INTERACTIVE_INPUT, END_NODE_STREAM, INPUTS_KEY, CONFIG_KEY
 from openjiuwen.core.common.exception.errors import BaseError, ExecutionError, build_error
@@ -20,6 +21,7 @@ from openjiuwen.core.session import BaseSession
 from openjiuwen.core.session import NodeSession
 from openjiuwen.core.session.stream import StreamSchemas, OutputSchema
 from openjiuwen.core.session.stream import StreamEmitter
+from openjiuwen.core.session.utils import is_ref_path, extract_origin_key
 from openjiuwen.core.graph.stream_actor.base import StreamConsumer
 from openjiuwen.core.session.tracer import TracerWorkflowUtils
 from openjiuwen.core.graph.pregel import GraphInterrupt
@@ -27,6 +29,38 @@ from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import WorkflowEvents
 
 SUB_WORKFLOW_COMPONENT = "sub_workflow"
+
+
+def _collect_ref_source_ids(schema: dict) -> set[str]:
+    """Recursively collect all unique component IDs referenced in a schema dict.
+
+    Scans string values matching ``${comp_id.field.path}`` and extracts the
+    leading ``comp_id`` segment.
+
+    Args:
+        schema: A dict-based inputs/outputs schema that may contain reference
+            strings as leaf values.
+
+    Returns:
+        A set of component IDs referenced by the schema, or an empty set if
+        no references are found.
+    """
+    ids: set[str] = set()
+
+    def _walk(obj):
+        if isinstance(obj, dict):
+            for v in obj.values():
+                _walk(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _walk(item)
+        elif isinstance(obj, str) and is_ref_path(obj):
+            origin = extract_origin_key(obj)
+            if origin:
+                ids.add(origin.split(".")[0])
+
+    _walk(schema)
+    return ids
 
 
 class Vertex(AsyncAtomicNode, StreamConsumer):
@@ -81,6 +115,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
     async def _run_executable(self, ability: ComponentAbility, is_subgraph: bool = False, config: Any = None,
                               event: asyncio.Event = None) -> bool:
         try:
+            self._mark_node_executed()
             logger.info(
                 f"Begin to call node [{self._node_id}] ability [{ability.name}]",
                 event_type=LogEventType.GRAPH_VERTEX_ABILITY_START,
@@ -126,6 +161,12 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             async def collect_strategy():
                 collect_iter = await self._pre_stream(ComponentAbility.COLLECT)
                 set_event()
+                # Sanitize End node COLLECT inputs from unexecuted branch components
+                if self.is_end_node and isinstance(collect_iter, dict):
+                    stream_schema = self._node_config.stream_io_configs.inputs_schema \
+                        if self._node_config and self._node_config.stream_io_configs else None
+                    if isinstance(stream_schema, dict):
+                        collect_iter = await self._sanitize_unexecuted_branch_inputs(collect_iter, stream_schema)
                 batch_output = await self._executable.on_collect(collect_iter, self._session, context=self._context)
                 results = await self._post_invoke(batch_output)
                 logger.debug(f"Post-process inputs for [{self._node_id}] ability [{ability.name}]",
@@ -138,6 +179,12 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                 transform_iter = None
                 transform_iter = await self._pre_stream(ComponentAbility.TRANSFORM)
                 set_event()
+                # Sanitize End node TRANSFORM inputs from unexecuted branch components
+                if self.is_end_node and isinstance(transform_iter, dict):
+                    stream_schema = self._node_config.stream_io_configs.inputs_schema \
+                        if self._node_config and self._node_config.stream_io_configs else None
+                    if isinstance(stream_schema, dict):
+                        transform_iter = await self._sanitize_unexecuted_branch_inputs(transform_iter, stream_schema)
                 output_iter = self._executable.on_transform(transform_iter, self._session, context=self._context)
                 await self._post_stream(output_iter, ComponentAbility.TRANSFORM)
 
@@ -192,14 +239,39 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
     async def _run_executable_with_retry(self, ability: ComponentAbility, is_subgraph: bool = False,
                                          config: Any = None, event: asyncio.Event = None) -> bool:
         max_retries = self._node_config.max_retries if self._node_config else 0
-        if max_retries <= 0:
+        timeout = getattr(self._node_config, 'timeout', -1.0)
+
+        if max_retries <= 0 and (timeout < 0 or math.isclose(timeout, 0.0, abs_tol=1e-9)):
             return await self._run_executable(ability, is_subgraph, config, event)
 
         for attempt in range(max_retries + 1):
             try:
-                return await self._run_executable(ability, is_subgraph, config, event)
+                if timeout < 0 or math.isclose(timeout, 0.0, abs_tol=1e-9):
+                    return await self._run_executable(ability, is_subgraph, config, event)
+                return await asyncio.wait_for(
+                    self._run_executable(ability, is_subgraph, config, event),
+                    timeout=timeout,
+                )
             except GraphInterrupt:
                 raise
+            except asyncio.TimeoutError as e:
+                # Wrap as BaseError to prevent capture by workflow-level timeout handler
+                wrapped = build_error(
+                    StatusCode.WORKFLOW_EXECUTION_TIMEOUT,
+                    cause=e, timeout=timeout, node_id=self._node_id,
+                )
+                if attempt < max_retries:
+                    logger.warning(
+                        f"Node [{self._node_id}] ability [{ability.name}] "
+                        f"timed out on attempt {attempt + 1}/{max_retries + 1}, will retry",
+                        event_type=LogEventType.GRAPH_VERTEX_ABILITY_ERROR,
+                        exception=e,
+                        **self._log_message
+                    )
+                    await self.__trace_inner_error__(e)
+                    continue
+                # All retries exhausted → error recovery
+                return await self._run_error_recovery(ability, wrapped)
             except (BaseError, Exception) as e:
                 if attempt < max_retries:
                     logger.warning(
@@ -211,7 +283,42 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                     )
                     await self.__trace_inner_error__(e)
                     continue
-                raise
+                # All retries exhausted → error recovery
+                return await self._run_error_recovery(ability, e)
+
+        return False
+
+    async def _run_error_recovery(self, ability: ComponentAbility, error: Exception) -> bool:
+        """Error recovery after all retries exhausted. Decoupled via CallbackFramework trigger."""
+
+        # STREAM / TRANSFORM: streaming output is not recoverable
+        if ability not in (ComponentAbility.INVOKE, ComponentAbility.COLLECT):
+            raise error
+
+        # Read exception config from node spec (set at workflow build time)
+        exception_config = self._node_config.exception_config if self._node_config else None
+
+        # Trigger event via CallbackFramework; registered handlers process recovery
+        try:
+            from openjiuwen.core.runner.runner import Runner
+            _fw = Runner.callback_framework
+            if _fw is not None:
+                result = await _fw.trigger_until(
+                    "component_error_recovery",
+                    lambda r: r is not None,  # First non-None result is the recovery data
+                    error=error,
+                    session=self._session,
+                    node_id=self._node_id,
+                    ability=ability,
+                    exception_config=exception_config,  # config per node, no global state
+                )
+                if result is not None:
+                    await self._post_invoke(result)
+                    return True
+        except Exception:
+            pass  # Handler exception → treat as interrupt
+
+        raise error  # No framework / no handler / handler returned None → interrupt
 
     async def __call__(self, state: GraphState, config) -> Output:
         logger.info(f"Begin to call batch-in node [{self._node_id}]", event_type=LogEventType.GRAPH_VERTEX_CALL_START,
@@ -278,8 +385,118 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             inputs = self._session.state().get_inputs(inputs_schema) if inputs_schema is not None else None
         else:
             inputs = self._session.state().get_inputs_by_transformer(inputs_transformer)
+        if self.is_end_node and isinstance(inputs, dict) and isinstance(inputs_schema, dict):
+            inputs = await self._sanitize_end_node_inputs(inputs, inputs_schema)
         await self.__trace_component_inputs__(inputs)
         return inputs
+
+    async def _sanitize_end_node_inputs(self, inputs: dict, inputs_schema: dict) -> dict:
+        """Sanitize End node batch inputs and adjust mix-mode wait behaviour.
+
+        Performs two operations:
+        1. Replaces values from unexecuted branch components with empty strings
+           to prevent the template renderer from entering its wait loop for
+           data that will never arrive.
+        2. In mix mode (both batch and stream data sources expected), when
+           *all* stream-side source components haven't executed (because the
+           if-branch wasn't taken), reduces the template's data-source count
+           to 0 so that :meth:`_render_stream` skips the 5-second wait
+           entirely.
+        """
+        template = getattr(self._executable, '_template', None)
+        if template is None:
+            return inputs
+        inputs = await self._sanitize_unexecuted_branch_inputs(inputs, inputs_schema)
+        if not (self._has_call and self._has_stream_call):
+            return inputs
+        stream_schema = (
+            self._node_config.stream_io_configs.inputs_schema
+            if self._node_config and self._node_config.stream_io_configs
+            else None
+        )
+        if not (isinstance(stream_schema, dict) and stream_schema):
+            return inputs
+        stream_src_ids = _collect_ref_source_ids(stream_schema)
+        if stream_src_ids and not any(
+            self._is_component_executed(sid) for sid in stream_src_ids
+        ):
+            template.set_data_source_count(0)
+        return inputs
+
+    async def _sanitize_unexecuted_branch_inputs(self, inputs: dict, inputs_schema: dict) -> dict:
+        """Replace values from unexecuted branch components with empty string.
+
+        For End nodes, when a branch path was not taken, the upstream component
+        never executed. For invoke/stream abilities, the value is None.
+        For collect/transform abilities, the value is an AsyncGenerator that
+        will never receive data. We detect this by checking if the component
+        has any output in IO state or is an active stream producer.
+
+        Handles nested dict and list structures, matching the traversal
+        capability of extract_leaf_nodes / rebuild_dict.
+        """
+        await self._sanitize_node(inputs, inputs_schema)
+        return inputs
+
+    async def _sanitize_node(self, inputs, inputs_schema):
+        """Recursively traverse nested inputs/schema structures, supporting both dict and list."""
+        if isinstance(inputs, dict) and isinstance(inputs_schema, dict):
+            for key in list(inputs.keys()):
+                value = inputs[key]
+                schema_value = inputs_schema.get(key, "")
+                if isinstance(value, dict) and isinstance(schema_value, dict):
+                    await self._sanitize_node(value, schema_value)
+                elif isinstance(value, list) and isinstance(schema_value, list):
+                    await self._sanitize_node(value, schema_value)
+                else:
+                    await self._sanitize_leaf(inputs, key, value, schema_value)
+        elif isinstance(inputs, list) and isinstance(inputs_schema, list):
+            for i in range(min(len(inputs), len(inputs_schema))):
+                value = inputs[i]
+                schema_value = inputs_schema[i]
+                if isinstance(value, (dict, list)):
+                    await self._sanitize_node(value, schema_value)
+                else:
+                    await self._sanitize_leaf(inputs, i, value, schema_value)
+
+    async def _sanitize_leaf(self, container, key, value, ref_path):
+        """Check if a leaf node comes from an unexecuted branch and replace with empty string."""
+        if value is not None and not isinstance(value, AsyncGenerator):
+            return
+        if not isinstance(ref_path, str) or not is_ref_path(ref_path):
+            return
+        origin_key = extract_origin_key(ref_path)
+        if not origin_key:
+            return
+        comp_id = origin_key.split(".")[0]
+        if self._is_component_executed(comp_id):
+            return
+        if isinstance(value, AsyncGenerator) and self._is_stream_source_still_pending(comp_id):
+            return
+        if isinstance(value, AsyncGenerator):
+            await value.aclose()
+        container[key] = ""
+
+    def _is_stream_source_still_pending(self, comp_id: str) -> bool:
+        actor_manager = self._session.actor_manager()
+        if actor_manager is None:
+            return False
+        should_sanitize = getattr(actor_manager, "should_sanitize_stream_source", None)
+        if should_sanitize is None:
+            return False
+        return not should_sanitize(self._node_id, comp_id)
+
+    def _is_component_executed(self, comp_id: str) -> bool:
+        """Check if a component has executed in this workflow run."""
+        executed_nodes = self._session.state().get_workflow_state("executed_nodes") or []
+        return comp_id in executed_nodes
+
+    def _mark_node_executed(self):
+        """Mark this node as having started execution in workflow state."""
+        executed_nodes = self._session.state().get_workflow_state("executed_nodes") or []
+        if self._node_id not in executed_nodes:
+            executed_nodes.append(self._node_id)
+            self._session.state().update_and_commit_workflow_state({"executed_nodes": executed_nodes})
 
     async def _post_invoke(self, results: Optional[dict]) -> Any:
         outputs_schema = self._node_config.io_configs.outputs_schema if self._node_config else None

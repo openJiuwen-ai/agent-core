@@ -66,6 +66,35 @@ def test_experience_apply_result_ok_ignores_rejections_but_not_pending_records()
     assert ExperienceApplyResult(skill_name="skill-a", applied_count=1, errors=["disk failed"]).ok is False
 
 
+def test_experience_apply_result_to_host_result_preserves_mixed_approval_counts():
+    host_result = ExperienceApplyResult(
+        skill_name="skill-a",
+        applied_count=1,
+        rejected_count=1,
+    ).to_host_result(request_id="req-1")
+
+    assert host_result.status == "partial"
+    assert host_result.applied_count == 1
+    assert host_result.rejected_count == 1
+    assert host_result.pending_count == 0
+    assert host_result.errors == []
+
+
+def test_experience_apply_result_to_host_result_preserves_failed_selective_accept_counts():
+    host_result = ExperienceApplyResult(
+        skill_name="skill-a",
+        rejected_count=1,
+        pending_count=1,
+        errors=["disk full"],
+    ).to_host_result(request_id="req-1")
+
+    assert host_result.status == "partial"
+    assert host_result.applied_count == 0
+    assert host_result.rejected_count == 1
+    assert host_result.pending_count == 1
+    assert host_result.errors == ["disk full"]
+
+
 def test_make_pending_change_uses_checkpointing_snapshot_type():
     record = _make_record()
 

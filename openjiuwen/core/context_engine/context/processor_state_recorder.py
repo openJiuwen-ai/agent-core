@@ -15,6 +15,7 @@ from openjiuwen.core.context_engine.schema.context_state import (
     ContextCompressionMetric,
     ContextCompressionSaved,
     ContextCompressionState,
+    ContextCompressionUsage,
 )
 from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.foundation.llm import BaseMessage
@@ -39,6 +40,8 @@ class ContextProcessorStateInput:
     messages_to_modify: list[int]
     force: bool
     context_max: Optional[int]
+    compact_summary: str = ""
+    compression_usage: Optional[dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -120,7 +123,11 @@ class ContextProcessorStateRecorder:
             return
         try:
             await session.write_stream(
-                OutputSchema(type=CONTEXT_COMPRESSION_STATE_TYPE, index=0, payload=state)
+                OutputSchema(
+                    type=CONTEXT_COMPRESSION_STATE_TYPE,
+                    index=0,
+                    payload=state.model_dump(mode="json"),
+                )
             )
             logger.debug(
                 "context compression state stream emitted: session_id=%s context_id=%s op=%s status=%s",
@@ -175,6 +182,7 @@ class ContextProcessorStateRecorder:
             after=after,
             statistic=self._build_statistic(statistic_messages),
             saved=saved,
+            compression_usage=self._build_compression_usage(state_input.compression_usage),
             duration_ms=(
                 int((state_input.ended_at - state_input.started_at) * 1000)
                 if state_input.ended_at is not None
@@ -189,8 +197,15 @@ class ContextProcessorStateRecorder:
                 reason=state_input.reason,
                 messages_to_modify=state_input.messages_to_modify,
             )),
+            compact_summary=state_input.compact_summary or "",
             error=state_input.error,
         )
+
+    @staticmethod
+    def _build_compression_usage(usage: Optional[dict[str, Any]]) -> Optional[ContextCompressionUsage]:
+        if not usage:
+            return None
+        return ContextCompressionUsage(**usage)
 
     def _record(self, state: ContextCompressionState) -> None:
         self._history.append(state.model_dump(mode="json"))

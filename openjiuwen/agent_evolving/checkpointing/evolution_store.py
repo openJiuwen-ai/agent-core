@@ -5,10 +5,16 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from openjiuwen.agent_evolving.checkpointing.skill_package import (
+    ensure_skill_id_in_content,
+    pack_skill_directory,
+    read_skill_id_from_content,
+    unpack_skill_package,
+)
 from openjiuwen.agent_evolving.checkpointing.store_archive import StoreArchiveHelper
 from openjiuwen.agent_evolving.checkpointing.store_projection import StoreProjectionHelper
 from openjiuwen.agent_evolving.checkpointing.store_records import StoreRecordsHelper
@@ -17,11 +23,17 @@ from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionRecord,
     EvolutionTarget,
 )
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, raise_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.sys_operation import SysOperation
 
 _EVOLUTION_FILENAME = "evolutions.json"
 _TOTAL_WARNING_THRESHOLD = 30
+_EVOLUTION_INDEX_PATTERN = re.compile(
+    r"<!-- evolution-index-start -->.*?<!-- evolution-index-end -->",
+    re.DOTALL,
+)
 
 
 class EvolutionStore:
@@ -108,15 +120,130 @@ class EvolutionStore:
     def skill_exists(self, name: str) -> bool:
         return self.resolve_skill_dir(name) is not None
 
-    async def read_skill_content(self, name: str) -> str:
+    def skill_definition_exists(self, name: str) -> bool:
+        """Return True only when the skill directory contains ``SKILL.md``."""
+        skill_dir = self.resolve_skill_dir(name)
+        return skill_dir is not None and (skill_dir / "SKILL.md").is_file()
+
+    async def read_skill_content(self, name: str, *, strict: bool = False) -> str:
         """Read SKILL.md content for one skill."""
+        skill_dir = self.resolve_skill_dir(name)
+        if skill_dir is None:
+            if strict:
+                raise_error(
+                    StatusCode.TOOLCHAIN_EVOLVING_SKILL_DEFINITION_NOT_FOUND,
+                    error_msg=f"skill '{name}' does not exist",
+                )
+            return ""
+        md_path = skill_dir / "SKILL.md" if strict else self._find_skill_md(skill_dir)
+        if strict and not md_path.is_file():
+            raise_error(
+                StatusCode.TOOLCHAIN_EVOLVING_SKILL_DEFINITION_NOT_FOUND,
+                error_msg=f"skill '{name}' is missing SKILL.md",
+            )
+        if md_path is None:
+            return ""
+        return await self.read_file_text(md_path)
+
+    async def read_pristine_skill_content(self, name: str) -> str:
+        """Read SKILL.md without the auto-injected evolution-index block.
+
+        Used by the cross-user sharing path so the hub persists the author's
+        original content, not the locally rendered evolution summary index.
+        """
+        content = await self.read_skill_content(name)
+        if not content:
+            return ""
+        stripped = _EVOLUTION_INDEX_PATTERN.sub("", content)
+        return stripped.rstrip() + "\n"
+
+    async def read_skill_id(self, name: str) -> str:
+        """Return ``skill_id`` from SKILL.md frontmatter without modifying the file."""
+        content = await self.read_skill_content(name)
+        if not content:
+            return ""
+        return read_skill_id_from_content(content)
+
+    async def ensure_skill_id(self, name: str) -> str:
+        """Ensure SKILL.md has a ``skill_id`` in frontmatter; persist when newly assigned."""
         skill_dir = self.resolve_skill_dir(name)
         if skill_dir is None:
             return ""
         md_path = self._find_skill_md(skill_dir)
         if md_path is None:
             return ""
-        return await self.read_file_text(md_path)
+        content = await self.read_file_text(md_path)
+        if not content:
+            return ""
+        updated, skill_id = ensure_skill_id_in_content(content)
+        if updated != content:
+            await self.write_file_text(md_path, updated)
+            logger.info("[EvolutionStore] assigned skill_id=%s for skill=%s", skill_id, name)
+        return skill_id
+
+    async def pack_skill_for_sharing(self, name: str) -> bytes:
+        """Build a tarball of the skill directory for hub upload."""
+        skill_dir = self.resolve_skill_dir(name)
+        if skill_dir is None:
+            return b""
+        md_path = self._find_skill_md(skill_dir)
+        if md_path is None:
+            return pack_skill_directory(skill_dir)
+        pristine = await self.read_pristine_skill_content(name)
+        if not pristine:
+            return pack_skill_directory(skill_dir)
+        relpath = str(md_path.relative_to(skill_dir)).replace("\\", "/")
+        return pack_skill_directory(
+            skill_dir,
+            skill_md_relpath=relpath,
+            skill_md_content=pristine,
+        )
+
+    async def install_skill_package(
+        self,
+        package_bytes: bytes,
+        *,
+        skill_name: Optional[str] = None,
+    ) -> Optional[Path]:
+        """Extract a hub skill package into the local skills directory."""
+        if not package_bytes:
+            return None
+
+        import io
+        import tarfile
+
+        buffer = io.BytesIO(package_bytes)
+        with tarfile.open(fileobj=buffer, mode="r:gz") as archive:
+            members = archive.getmembers()
+            top_level_names = {
+                member.name.split("/")[0] for member in members if member.name and not member.name.startswith("/")
+            }
+            resolved_name = (skill_name or "").strip()
+            if not resolved_name:
+                if len(top_level_names) == 1:
+                    resolved_name = next(iter(top_level_names))
+                else:
+                    for member in members:
+                        if member.name.endswith("SKILL.md"):
+                            resolved_name = member.name.split("/")[0]
+                            break
+            if not resolved_name:
+                logger.warning("[EvolutionStore] install_skill_package: cannot infer skill name")
+                return None
+
+            dest_dir = self.resolve_skill_dir(resolved_name, create=True)
+            if dest_dir is None:
+                return None
+            if dest_dir.exists() and any(dest_dir.iterdir()):
+                logger.warning(
+                    "[EvolutionStore] install_skill_package: skill directory already exists: %s",
+                    dest_dir,
+                )
+                return None
+
+            unpack_skill_package(package_bytes, dest_dir)
+            logger.info("[EvolutionStore] installed skill package to %s", dest_dir)
+            return dest_dir
 
     def resolve_skill_dir(self, name: str, create: bool = False) -> Optional[Path]:
         candidates = [base / name for base in self._base_dirs]
@@ -166,11 +293,22 @@ class EvolutionStore:
                     str(path), content=content, mode="text", encoding="utf-8", prepend_newline=False
                 )
                 if getattr(result, "code", 0) != 0:
-                    logger.warning("[EvolutionStore] failed to write %s: %s", path, result.message)
+                    message = getattr(result, "message", "")
+                    raise_error(
+                        StatusCode.TOOLCHAIN_EVOLVING_SKILL_STORE_EXECUTION_ERROR,
+                        error_msg=f"failed to write {path}: {message}",
+                    )
             else:
                 path.write_text(content, encoding="utf-8")
+        except BaseError:
+            raise
         except Exception as exc:
             logger.error("[EvolutionStore] write %s failed: %s", path, exc)
+            raise_error(
+                StatusCode.TOOLCHAIN_EVOLVING_SKILL_STORE_EXECUTION_ERROR,
+                error_msg=f"failed to write {path}: {exc}",
+                cause=exc,
+            )
 
     async def write_skill_content(self, name: str, content: str) -> bool:
         """Write full SKILL.md content for a skill.
@@ -219,34 +357,9 @@ class EvolutionStore:
     async def append_record(self, name: str, record: EvolutionRecord) -> None:
         """Append or merge one evolution record to evolutions.json."""
         async with self._get_skill_lock(name):
-            skill_dir = self.resolve_skill_dir(name, create=True)
-            if skill_dir is None:
+            evo_log = await self._records.append_record_transactional(name, record)
+            if evo_log is None:
                 return
-
-            if record.change.target == EvolutionTarget.SCRIPT:
-                await self._records.persist_script(skill_dir, record)
-
-            evo_log = await self.load_full_evolution_log(name)
-            merge_target = record.change.merge_target
-            if merge_target:
-                replaced = False
-                for idx, existing in enumerate(evo_log.entries):
-                    if existing.id == merge_target:
-                        evo_log.entries[idx] = record
-                        replaced = True
-                        logger.info(
-                            "[EvolutionStore] merged record %s replacing %s",
-                            record.id,
-                            merge_target,
-                        )
-                        break
-                if not replaced:
-                    evo_log.entries.append(record)
-            else:
-                evo_log.entries.append(record)
-
-            evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
-            await self._records.save_evolution_log(name, evo_log, skill_dir=skill_dir)
             logger.info(
                 "[EvolutionStore] wrote %s/%s (id=%s, target=%s)",
                 name,
@@ -262,8 +375,6 @@ class EvolutionStore:
                     name,
                     total,
                 )
-
-            await self.render_evolution_markdown(name)
 
     async def load_full_evolution_log(self, name: str) -> EvolutionLog:
         return await self._records.load_full_evolution_log(name)

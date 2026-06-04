@@ -109,3 +109,61 @@ async def test_no_callback_does_not_crash():
     )
     await asyncio.sleep(0.05)
     await loop.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_human_agent_bus_does_not_start_poll_timers():
+    """A human-agent avatar's bus runs no periodic poll timers.
+
+    Its POLL_MAILBOX / POLL_TASK inner events are muted at the
+    dispatcher, so spawning the timers would only spin uselessly. The
+    main event loop still runs (transport events are still delivered);
+    only the periodic poll tasks stay absent.
+    """
+    loop = EventBus(role=TeamRole.HUMAN_AGENT)
+    await loop.start()
+
+    assert loop.is_running
+    assert loop._mailbox_poll_task is None
+    assert loop._task_poll_task is None
+
+    await loop.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_non_human_bus_starts_poll_timers():
+    """Leader / teammate buses keep the periodic poll fallback."""
+    for role in (TeamRole.LEADER, TeamRole.TEAMMATE):
+        loop = EventBus(role=role)
+        await loop.start()
+
+        assert loop._mailbox_poll_task is not None
+        assert loop._task_poll_task is not None
+
+        await loop.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_human_agent_resume_polls_stays_noop():
+    """resume_polls must not resurrect poll timers for a human agent.
+
+    Without the role gate in ``_start_poll_tasks``, a MESSAGE-driven
+    ``resume_polls`` (after a STANDBY pause) would spawn the timers the
+    avatar must never run. The pause flag still clears so the bus state
+    machine stays consistent.
+    """
+    loop = EventBus(role=TeamRole.HUMAN_AGENT)
+    await loop.start()
+    await loop.pause_polls()
+    assert loop.polls_paused is True
+
+    await loop.resume_polls()
+
+    assert loop.polls_paused is False
+    assert loop._mailbox_poll_task is None
+    assert loop._task_poll_task is None
+
+    await loop.stop()

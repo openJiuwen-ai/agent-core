@@ -95,6 +95,18 @@ features/ F_NN_<slug>.md
 可以根据情况增减小节，但 **"决策"和"拒绝的方案"是 features 的核心**，缺它们等于
 没归档——commit message 已经写了 what，feature 文档要写 why-not。
 
+## 提交约定
+
+涉及本目录文档（`F_*` / `S_*`）更新的特性改动，**代码与文档必须拆成两个连续提交**：
+
+1. **提交 1 — 代码**：实现 + 单测，`feat(swarm): <实现>`（或 `fix` / `refactor` 等对应 type）。
+2. **提交 2 — 文档**：本次涉及的 `features/F_NN_*.md` 新增与 `specs/S_NN_*.md` 修订，`docs(swarm): ...`。
+
+提交 2 必须**直接紧跟**在提交 1 之后，在同一工作单元 / PR 内落地——既不让大段文档 diff
+淹没代码评审，也不把文档归档拖到下次而丢失设计上下文。这是硬约束，不是"同一次 commit 也行"。
+scope / footer 等其余约定见 `openjiuwen/agent_teams/CLAUDE.md` 的「提交约定」段，强制语境见同文件
+「设计文档归档与双向同步」约束 #1。
+
 ## 与其它 CLAUDE.md 的关系
 
 - `openjiuwen/agent_teams/CLAUDE.md`：模块入口索引 + 公开 API + 架构铁律 + **本目录的归档强制约束**

@@ -8,7 +8,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import ValidationError, build_error
 from openjiuwen.core.common.logging import LogEventType, runner_logger as logger
 
-from openjiuwen.core.foundation.tool import McpServerConfig
+from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.tool import Tool, ToolInfo, ToolCard
 from openjiuwen.core.multi_agent import BaseTeam, TeamCard
@@ -37,6 +37,7 @@ from openjiuwen.core.workflow import WorkflowCard
 
 if TYPE_CHECKING:
     from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
+    from openjiuwen.core.session.agent import Session
 
 
 def _is_remote_agent(provider: Any) -> bool:
@@ -49,6 +50,21 @@ def _is_remote_agent(provider: Any) -> bool:
     return isinstance(provider, RemoteAgent)
 
 
+_REGISTRY_ACCESSORS: dict[str, str] = {
+    "workflow": "workflow",
+    "agent": "agent",
+    "team": "agent_team",
+    "tool": "tool",
+    "prompt": "prompt",
+    "model": "model",
+    "sys_operation": "sys_operation",
+}
+
+_ASYNC_GET_TYPES: frozenset[str] = frozenset({"workflow", "agent", "team", "model"})
+_SESSION_GET_TYPES: frozenset[str] = frozenset({"workflow", "model", "tool"})
+_ID_RETURN_TYPES: frozenset[str] = frozenset({"tool", "prompt"})
+
+
 class ResourceMgr:
     """
     Resource Manager for Model, Workflow, Prompt, Tool, Agent, AgentTeam
@@ -58,6 +74,33 @@ class ResourceMgr:
         self._resource_registry = ResourceRegistry()
         self._tag_mgr = TagMgr()
         self._id_to_card: dict[str, BaseCard] = {}
+
+    def _get_mgr(self, resource_type: str):
+        accessor = _REGISTRY_ACCESSORS[resource_type]
+        return getattr(self._resource_registry, accessor)()
+
+    def _dispatch_add(self, resource_type: str, resource_id: str, resource: Any,
+                      *, resource_card: BaseCard | None = None, interface_url: str | None = None) -> None:
+        mgr = self._get_mgr(resource_type)
+        method_name = f"add_{_REGISTRY_ACCESSORS[resource_type]}"
+        kwargs: dict[str, Any] = {}
+        if resource_type == "agent":
+            kwargs["card"] = resource_card
+            kwargs["interface_url"] = interface_url
+        getattr(mgr, method_name)(resource_id, resource, **kwargs)
+
+    def _dispatch_remove(self, resource_type: str, resource_id: str) -> Any:
+        mgr = self._get_mgr(resource_type)
+        method_name = f"remove_{_REGISTRY_ACCESSORS[resource_type]}"
+        return getattr(mgr, method_name)(resource_id)
+
+    def _dispatch_get(self, resource_type: str, resource_id: str, session=None) -> Any:
+        mgr = self._get_mgr(resource_type)
+        method_name = f"get_{_REGISTRY_ACCESSORS[resource_type]}"
+        kwargs: dict[str, Any] = {}
+        if resource_type in _SESSION_GET_TYPES:
+            kwargs["session"] = session
+        return getattr(mgr, method_name)(resource_id, **kwargs)
 
     async def add_agent_team(self,
                              card: TeamCard,
@@ -1357,28 +1400,8 @@ class ResourceMgr:
             if self._tag_mgr.has_resource(resource_id):
                 raise build_error(StatusCode.RESOURCE_ADD_ERROR, card=resource_card if resource_card else resource_id,
                                   reason=f'resource already exist')
-            # add resource
-            if resource_type == "workflow":
-                self._resource_registry.workflow().add_workflow(resource_id, resource)
-            elif resource_type == "agent":
-                self._resource_registry.agent().add_agent(
-                    resource_id,
-                    resource,
-                    card=resource_card,
-                    interface_url=interface_url,
-                )
-            elif resource_type == "team":
-                self._resource_registry.agent_team().add_agent_team(resource_id, resource)
-            elif resource_type == "tool":
-                self._resource_registry.tool().add_tool(resource_id, resource)
-            elif resource_type == "prompt":
-                self._resource_registry.prompt().add_prompt(resource_id, resource)
-            elif resource_type == "model":
-                self._resource_registry.model().add_model(resource_id, resource)
-            elif resource_type == "sys_operation":
-                self._resource_registry.sys_operation().add_sys_operation(resource_id, resource)
-            else:
-                ...
+            self._dispatch_add(resource_type, resource_id, resource,
+                               resource_card=resource_card, interface_url=interface_url)
             if resource_card:
                 self._id_to_card[resource_id] = resource_card
             self._tag_mgr.tag_resource(resource_id, tag if tag else GLOBAL)
@@ -1434,23 +1457,7 @@ class ResourceMgr:
             error = None
             try:
                 self._tag_mgr.remove_resource(remove_id)
-                # add resource
-                if resource_type == "workflow":
-                    self._resource_registry.workflow().remove_workflow(remove_id)
-                elif resource_type == "agent":
-                    self._resource_registry.agent().remove_agent(remove_id)
-                elif resource_type == "team":
-                    self._resource_registry.agent_team().remove_agent_team(remove_id)
-                elif resource_type == "model":
-                    self._resource_registry.model().remove_model(remove_id)
-                elif resource_type == "tool":
-                    self._resource_registry.tool().remove_tool(remove_id)
-                elif resource_type == "prompt":
-                    self._resource_registry.prompt().remove_prompt(remove_id)
-                elif resource_type == "sys_operation":
-                    self._resource_registry.sys_operation().remove_sys_operation(remove_id)
-                else:
-                    ...
+                self._dispatch_remove(resource_type, remove_id)
             except Exception as e:
                 if not remove_by_tag:
                     error = e
@@ -1464,7 +1471,7 @@ class ResourceMgr:
                              tag=tag if tag else GLOBAL,
                              card=removed_card.to_str() if removed_card else None)
                 results.append(Error(error))
-            elif resource_type in ["tool", "prompt"]:
+            elif resource_type in _ID_RETURN_TYPES:
                 results.append(Ok(remove_id))
             else:
                 if removed_card or not remove_by_tag:
@@ -1523,20 +1530,23 @@ class ResourceMgr:
         results = []
         for get_id in ids_to_get:
             resource = None
+            exc = None
             try:
                 if self._tag_mgr.has_resource(get_id):
-                    if resource_type == "tool":
-                        resource = self._resource_registry.tool().get_tool(get_id, session=session)
-                    elif resource_type == "prompt":
-                        resource = self._resource_registry.prompt().get_prompt(get_id)
-                    elif resource_type == "sys_operation":
-                        resource = self._resource_registry.sys_operation().get_sys_operation(get_id)
-                    else:
-                        ...
+                    resource = self._dispatch_get(resource_type, get_id, session=session)
             except Exception as e:
-                ...
+                logger.error("get resource failed",
+                             event_type=LogEventType.RESOURCE_MGR_GET_RESOURCE,
+                             resource_id=get_id,
+                             resource_type=resource_type,
+                             exception=e)
+                if exact_match:
+                    raise
+                exc = e
             finally:
-                if resource or exact_match:
+                if exc is not None:
+                    results.append(Error(exc))
+                elif resource or exact_match:
                     results.append(resource)
 
         return results[0] if results and isinstance(resource_id, str) else results
@@ -1565,23 +1575,23 @@ class ResourceMgr:
             return results
         for get_id in ids_to_get:
             resource = None
+            exc = None
             try:
                 if self._tag_mgr.has_resource(get_id):
-                    # add resource
-                    if resource_type == "workflow":
-                        resource = await self._resource_registry.workflow().get_workflow(get_id, session=session)
-                    elif resource_type == "agent":
-                        resource = await self._resource_registry.agent().get_agent(get_id)
-                    elif resource_type == "team":
-                        resource = await self._resource_registry.agent_team().get_agent_team(get_id)
-                    elif resource_type == "model":
-                        resource = await self._resource_registry.model().get_model(get_id, session=session)
-                    else:
-                        ...
+                    resource = await self._dispatch_get(resource_type, get_id, session=session)
             except Exception as e:
-                ...
+                logger.error("get resource failed",
+                             event_type=LogEventType.RESOURCE_MGR_GET_RESOURCE,
+                             resource_id=get_id,
+                             resource_type=resource_type,
+                             exception=e)
+                if exact_match:
+                    raise
+                exc = e
             finally:
-                if resource or exact_match:
+                if exc is not None:
+                    results.append(Error(exc))
+                elif resource or exact_match:
                     results.append(resource)
 
         return results[0] if results and isinstance(resource_id, str) else results
@@ -2070,26 +2080,14 @@ class ResourceMgr:
 
     @staticmethod
     def _get_card_type(card):
-        """
-        Get the type of a card.
-
-        Args:
-            card: Card to check.
-
-        Returns:
-            Card type as string, or None if unknown.
-        """
-        if type(card).__name__(card) == "TeamCard":
-            return "team"
-        elif type(card).__name__(card) == "WorkflowCard":
-            return "workflow"
-        elif type(card).__name__(card) == "AgentCard":
-            return "agent"
-        elif type(card).__name__(card) == "RestfulCard":
-            return "restfulapi"
-        elif type(card).__name__(card) == "McpToolCard":
+        if isinstance(card, McpToolCard):
             return "mcp"
-        elif type(card).__name__(card) == "ToolCard":
+        if isinstance(card, ToolCard):
             return "function"
-        else:
-            return None
+        if isinstance(card, TeamCard):
+            return "team"
+        if isinstance(card, WorkflowCard):
+            return "workflow"
+        if isinstance(card, AgentCard):
+            return "agent"
+        return None

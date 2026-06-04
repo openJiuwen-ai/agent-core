@@ -7,7 +7,7 @@ wildcard 模式：
 - ? → .   (恰好一个)
 - 正则元字符转义
 - " *" 结尾 → ( .*)? 便于 "ls *" 匹配 "ls" 或 "ls -la"
-- 全串锚定 ^...$ 防注入
+- 全串匹配防注入
 """
 
 from __future__ import annotations
@@ -126,7 +126,7 @@ def match_wildcard(value: str, pattern: str) -> bool:
     - ? → 限制性字符类 (恰好一个)
     - 正则元字符转义
     - " *" 结尾 → ( 字符类*)? 使 "ls *" 可匹配 "ls" 或 "ls -la"
-    - 全串锚定 ^...$ 防止 "git status; rm -rf /" 匹配 "git status *"
+    - 全串匹配防止 "git status; rm -rf /" 匹配 "git status *"
 
     Args:
         value: 被匹配字符串（来自工具输入）
@@ -149,10 +149,10 @@ def match_wildcard(value: str, pattern: str) -> bool:
         escaped = escaped[:-2] + "( " + _WILDCARD_CHARS + "*)?"
     else:
         escaped = escaped.replace("*", _WILDCARD_CHARS + "*")
-    # 3. 全串锚定
+    # 3. 全串匹配
     flags = re.IGNORECASE if sys.platform == "win32" else 0
     try:
-        return bool(re.match("^" + escaped + "$", val, flags))
+        return bool(re.fullmatch(escaped, val, flags))
     except re.error:
         return False
 

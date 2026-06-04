@@ -64,7 +64,7 @@ async def standalone_invoke_context(
     3. Binds the session to *runtime*.
     4. Yields ``(session, session_id)`` to the caller.
     5. In the ``finally`` block: unbinds, cleans up the message bus, and
-       calls ``session.post_run()``.
+       closes the stream and commits the session checkpoint.
 
     When *session* is already a :class:`Session` (Runner path), the context
     manager is a no-op wrapper - it just yields the existing session so the
@@ -96,7 +96,8 @@ async def standalone_invoke_context(
         if not caller_owns:
             runtime.unbind_team_session(sid)
             await runtime.cleanup_session(sid)
-            await team_session.post_run()
+            await team_session.close_stream()
+            await team_session.commit()
 
 
 async def standalone_stream_context(
@@ -115,7 +116,8 @@ async def standalone_stream_context(
 
     1. Creates a fresh session, calls ``pre_run``, binds to *runtime*.
     2. Spawns a background Task that runs ``run_coro(session, sid)``.
-    3. In the Task's ``finally``: calls ``session.close_stream()`` to signal end-of-stream.
+    3. In the Task's ``finally``: unbinds, cleans up message bus, calls
+       ``post_run``.
     4. Yields chunks from ``session.stream_iterator()``.
     5. In the outer ``finally``: awaits the Task (protects against early break)
        then re-raises any background exception.
@@ -158,13 +160,14 @@ async def standalone_stream_context(
         except Exception as exc:  # noqa: BLE001
             bg_exc = exc
         finally:
-            # Always close the stream emitter to signal end-of-stream
-            # This unblocks stream_iterator() so it can exit cleanly
-            await team_session.close_stream()
             if not caller_owns:
                 runtime.unbind_team_session(sid)
                 await runtime.cleanup_session(sid)
-                await team_session.post_run()
+                await team_session.close_stream()
+                await team_session.commit()
+            else:
+                # Runner owns lifecycle; just signal end-of-stream.
+                await team_session.close_stream()
 
     task = asyncio.create_task(_bg())
     try:

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from openjiuwen.core.sys_operation.config import SandboxLauncherConfig
+
+if TYPE_CHECKING:
+    from openjiuwen.core.sys_operation.sandbox.gateway.sandbox_store import SandboxStatus
 
 
 @dataclass(frozen=True)

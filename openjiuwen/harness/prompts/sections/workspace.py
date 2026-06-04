@@ -3,7 +3,7 @@
 """Workspace prompt section for DeepAgent - dynamically scans real directory structure."""
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 from openjiuwen.harness.prompts.workspace_content.workspace_header import (
     WORKSPACE_HEADER,
@@ -11,6 +11,9 @@ from openjiuwen.harness.prompts.workspace_content.workspace_header import (
     IMPORTANT_FILES,
 )
 from openjiuwen.harness.prompts.sections import SectionName
+
+if TYPE_CHECKING:
+    from openjiuwen.harness.prompts.builder import PromptSection
 
 
 # ---------------------------------------------------------------------------

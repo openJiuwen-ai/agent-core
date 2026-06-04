@@ -594,3 +594,23 @@ async def test_has_unread_messages_broadcast_read_by_all_non_senders(team_messag
 async def test_has_unread_messages_empty(team_messaging):
     """A team with no messages reports no unread."""
     assert await team_messaging.has_unread_messages() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_excludes_broadcast(team_messaging):
+    """include_broadcast=False ignores an unread broadcast."""
+    await team_messaging.broadcast_message(content="all hands")
+
+    assert await team_messaging.has_unread_messages() is True
+    assert await team_messaging.has_unread_messages(include_broadcast=False) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_direct_counts_when_broadcast_excluded(team_messaging):
+    """A direct message is unread regardless of the include_broadcast flag."""
+    await team_messaging.send_message(content="ping", to_member_name="member2")
+
+    assert await team_messaging.has_unread_messages() is True
+    assert await team_messaging.has_unread_messages(include_broadcast=False) is True

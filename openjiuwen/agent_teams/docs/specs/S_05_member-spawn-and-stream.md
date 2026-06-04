@@ -39,9 +39,12 @@ DeepAgent round 的 stream 队列、cooperative cancel、observer fan-out 行为
 
 ## 不变量
 
-1. **Spawn 入口唯一性**：对外只有 `TeamAgent.spawn_member`（工具层）→
-   `SpawnManager.spawn_teammate` 这一条路径，模式由
-   `TeamAgentSpec.spawn_mode` 决定。任何"自己 import 一下 process_manager
+1. **Spawn 入口唯一性**：对外只有两条路径：
+   - `TeamAgent.spawn_member`（工具层）→ `SpawnManager.spawn_teammate`
+   - `TeamAgent.auto_start_member` / `auto_start_all`（interact dispatch 层）→ `TeamBackend.startup_member` / `startup`
+   两条路径最终都走 `_on_teammate_created`（即 `SpawnManager.spawn_teammate`），
+   并且都经过 `MemberStatus.UNSTARTED→STARTING` 的 CAS guard（`try_transition_member_status`）。
+   模式由 `TeamAgentSpec.spawn_mode` 决定。任何"自己 import 一下 process_manager
    或 inprocess_spawn"的旁路调用都是错的。
 2. **Spawned 实例从不进 leader pool**：两种模式的 spawned member 都通过
    `Runner.run_agent_team(..., member=True)` 跳过 activate / dispatch。

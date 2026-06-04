@@ -17,7 +17,7 @@
 
 2. **收集上下文** — 根据 components 读取对应的框架基类：
    - 包含 rail → `openjiuwen/harness/rails/base.py` — DeepAgentRail
-   - 包含 tool → `openjiuwen/core/foundation/tool.py` — Tool, ToolCard
+   - 包含 tool → `openjiuwen/core/foundation/tool/tool.py` — Tool, ToolCard
    - 包含 skill → 无需基类，只需创建 SKILL.md 目录结构
 
 3. **生成代码** — 按 file_plan 创建完整的扩展代码：

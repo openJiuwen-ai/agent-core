@@ -29,6 +29,7 @@ from openjiuwen.agent_teams.paths import (
     team_memory_dir as default_team_memory_dir,
 )
 from openjiuwen.agent_teams.prompts import role_policy
+from openjiuwen.agent_teams.runtime.team_plan import is_team_plan_enabled
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import SysOperationSpec
 from openjiuwen.agent_teams.schema.team import (
@@ -47,6 +48,7 @@ from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode
 from openjiuwen.harness.prompts import resolve_language as _resolve_language
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.agent.member_runtime import MemberRuntime
     from openjiuwen.agent_teams.memory.manager import TeamMemoryManager
     from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
     from openjiuwen.agent_teams.rails import FirstIterationGate
@@ -57,13 +59,15 @@ if TYPE_CHECKING:
 def _resolve_team_mode(spec: TeamAgentSpec) -> str:
     if spec.team_mode is not None:
         return spec.team_mode
-    # HUMAN_AGENT predefined members are HITT roster declarations, not a
-    # signal to flip the team away from "default". A non-human predefined
-    # roster derives "hybrid": the leader keeps its spawn_member tool so
-    # the roster can still grow at runtime. Lock it down by setting an
-    # explicit "predefined" team_mode.
-    non_human_predefined = [m for m in spec.predefined_members if m.role_type != TeamRole.HUMAN_AGENT]
-    return "hybrid" if non_human_predefined else "default"
+    # HUMAN_AGENT predefined members are HITT roster declarations, and
+    # BRIDGE_AGENT entries are bridge-to-remote declarations — neither
+    # is a signal to flip the team away from "default". A roster of
+    # ordinary predefined teammates derives "hybrid": the leader keeps
+    # its spawn_member tool so the roster can still grow at runtime.
+    # Lock it down by setting an explicit "predefined" team_mode.
+    avatar_roles = {TeamRole.HUMAN_AGENT, TeamRole.BRIDGE_AGENT}
+    non_avatar_predefined = [m for m in spec.predefined_members if m.role_type not in avatar_roles]
+    return "hybrid" if non_avatar_predefined else "default"
 
 
 class AgentConfigurator:
@@ -149,11 +153,11 @@ class AgentConfigurator:
         self._infra.message_manager = value
 
     @property
-    def harness(self) -> Optional[TeamHarness]:
+    def harness(self) -> Optional["MemberRuntime"]:
         return self._resources.harness
 
     @harness.setter
-    def harness(self, value: Optional[TeamHarness]) -> None:
+    def harness(self, value: Optional["MemberRuntime"]) -> None:
         self._resources.harness = value
 
     @property
@@ -188,10 +192,16 @@ class AgentConfigurator:
     def model_allocator(self, value: Optional["ModelAllocator"]) -> None:
         self._resources.model_allocator = value
 
-    def configure(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> TeamHarness:
-        """Main entry point: configure infrastructure and build the harness."""
+    def configure(
+        self,
+        spec: TeamAgentSpec,
+        ctx: TeamRuntimeContext,
+        *,
+        member_runtime: Optional["MemberRuntime"] = None,
+    ) -> "MemberRuntime":
+        """Main entry point: configure infrastructure and build the runtime."""
         self.setup_infra(spec, ctx)
-        return self.setup_agent(spec, ctx)
+        return self.setup_agent(spec, ctx, member_runtime=member_runtime)
 
     def setup_infra(
         self,
@@ -297,8 +307,22 @@ class AgentConfigurator:
         self,
         spec: TeamAgentSpec,
         ctx: TeamRuntimeContext,
-    ) -> TeamHarness:
-        """Phase 2: build prompt, create DeepAgent through TeamHarness, set up coordination."""
+        *,
+        member_runtime: Optional["MemberRuntime"] = None,
+    ) -> "MemberRuntime":
+        """Phase 2: build the member runtime and set up coordination.
+
+        The default path builds a ``TeamHarness`` over DeepAgent. When
+        ``member_runtime`` is supplied (e.g. an ``ExternalCliRuntime`` for an
+        external CLI member), it is adopted as-is and the DeepAgent / rail /
+        memory / customizer setup is skipped — coordination still drives it
+        through the same :class:`MemberRuntime` surface.
+        """
+        if member_runtime is not None:
+            self.harness = member_runtime
+            self.memory_manager = None
+            return member_runtime
+
         agent_spec = self.resolve_agent_spec(spec, ctx.role, ctx.member_name)
         resolved_language = self._blueprint.language if self._blueprint else _resolve_language(agent_spec.language)
         member_name = ctx.member_name
@@ -340,6 +364,7 @@ class AgentConfigurator:
         )
 
         resolved_team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
+        teammate_mode = str(spec.teammate_mode)
 
         team_workspace_mount: str | None = None
         team_workspace_path: str | None = None
@@ -353,7 +378,7 @@ class AgentConfigurator:
         team_tool_rail = TeamToolRail(
             team_backend=self.team_backend,
             role=ctx.role.value,
-            teammate_mode=spec.teammate_mode,
+            teammate_mode=teammate_mode,
             lifecycle=spec.lifecycle,
             language=resolved_language,
             on_teammate_created=self._on_teammate_created,
@@ -371,7 +396,7 @@ class AgentConfigurator:
             persona=ctx.persona,
             member_name=member_name,
             lifecycle=spec.lifecycle,
-            teammate_mode=spec.teammate_mode,
+            teammate_mode=teammate_mode,
             language=resolved_language,
             team_mode=_resolve_team_mode(spec),
             base_prompt=agent_spec.system_prompt,
@@ -415,6 +440,13 @@ class AgentConfigurator:
                     tool_names=approval_tools,
                 )
 
+        team_plan_mode_rail = None
+        is_team_plan_leader = ctx.role == TeamRole.LEADER and is_team_plan_enabled(spec)
+        if is_team_plan_leader:
+            from openjiuwen.agent_teams.rails import TeamPlanModeRail
+
+            team_plan_mode_rail = TeamPlanModeRail(language=resolved_language)
+
         self.harness = TeamHarness.build(
             agent_spec=build_spec,
             role=ctx.role,
@@ -424,6 +456,8 @@ class AgentConfigurator:
             first_iter_gate=first_iter_gate,
             team_workspace_rail=team_workspace_rail,
             tool_approval_rail=tool_approval_rail,
+            team_plan_mode_rail=team_plan_mode_rail,
+            initial_plan_mode=is_team_plan_leader,
         )
 
         # Team memory manager (only when explicitly enabled in the spec).
@@ -532,20 +566,22 @@ class AgentConfigurator:
 
         is_leader = ctx.role == TeamRole.LEADER
         current_member_name = ctx.member_name or (ctx.team_spec.leader_member_name if ctx.team_spec else "")
-
         agent_team = TeamBackend(
             team_name=team_name,
             member_name=current_member_name,
             is_leader=is_leader,
             db=db,
             messager=messager,
-            teammate_mode=MemberMode(spec.teammate_mode),
+            teammate_mode=MemberMode(str(spec.teammate_mode)),
             predefined_members=spec.predefined_members or None,
             model_config_allocator=self.model_allocator.allocate if self.model_allocator else None,
             leader_allocation=self.leader_allocation if is_leader else None,
             enable_hitt=spec.enable_hitt,
+            enable_bridge=spec.enable_bridge,
+            external_cli_agents=spec.external_cli_agents,
             on_team_cleaned=on_team_cleaned,
             on_team_built=on_team_built,
+            leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,
         )
         self.team_backend = agent_team
         self.task_manager = agent_team.task_manager

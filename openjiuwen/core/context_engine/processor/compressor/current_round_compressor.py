@@ -15,6 +15,7 @@ from openjiuwen.core.context_engine.processor.compressor.util import (
     find_last_completed_api_round_end_idx,
     is_summary_message,
     iter_summary_merge_ranges,
+    message_to_text,
 )
 from openjiuwen.core.foundation.llm import (
     BaseMessage, AssistantMessage, UserMessage,
@@ -507,6 +508,7 @@ class CurrentRoundCompressor(ContextProcessor):
         is marked as non-binding historical context, which reduces the risk of
         strategy solidification in later rounds.
         """
+        summary = self._unwrap_memory_block_summary(summary)
         return (
             f"{_SUMMARY_MARKER}\n"
             "processor: CurrentRoundCompressor\n"
@@ -533,6 +535,16 @@ class CurrentRoundCompressor(ContextProcessor):
             "Summary:\n"
             f"{summary}"
         )
+
+    def _unwrap_memory_block_summary(self, summary: str) -> str:
+        """Remove an already-generated current-round memory envelope before wrapping."""
+        text = (summary or "").strip()
+        if not text.startswith(_SUMMARY_MARKER):
+            return text
+        marker = "\nSummary:\n"
+        if marker not in text:
+            return text
+        return text.split(marker, 1)[1].strip()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -621,18 +633,23 @@ class CurrentRoundCompressor(ContextProcessor):
         written back to `context`.
         """
         context_messages = context.get_messages() + messages_to_add
+        self._reset_compression_usage()
         last_user_idx = await self.get_compress_idx(context_messages)
         if last_user_idx == -1:
             return None, messages_to_add
         keep_start_idx = max(0, len(context_messages) - self._messages_to_keep)
         end_idx = keep_start_idx - 1
 
-        event = ContextEvent(event_type=self.processor_type())
         try:
-            compressed_context, modified_indices = await self.multi_compress(
+            compressed_context, modified_indices, compact_summary = await self.multi_compress(
                 context_messages, last_user_idx, end_idx, context
             )
             if compressed_context:
+                event = ContextEvent(
+                    event_type=self.processor_type(),
+                    compact_summary=compact_summary,
+                    compression_usage=self._current_compression_usage(),
+                )
                 event.messages_to_modify += modified_indices
                 context.set_messages(compressed_context)
                 return event, []
@@ -711,7 +728,7 @@ class CurrentRoundCompressor(ContextProcessor):
             last_user_idx: int,
             end_idx: int,
             context: ModelContext,
-    ) -> Tuple[Optional[list[BaseMessage]], List[int]]:
+    ) -> Tuple[Optional[list[BaseMessage]], List[int], str]:
         """
         Compress the whole eligible span into one memory block.
 
@@ -723,6 +740,7 @@ class CurrentRoundCompressor(ContextProcessor):
         """
         updated = False
         modified_indices: List[int] = []
+        compact_summary_parts: List[str] = []
         start_idx = last_user_idx + 1
         actual_end_idx = end_idx
         if actual_end_idx >= start_idx:
@@ -737,6 +755,7 @@ class CurrentRoundCompressor(ContextProcessor):
                 messages_to_compress, context, context_messages, actual_end_idx, current_query_idx=last_user_idx
             )
             if compressed_msg:
+                compact_summary_parts.append(message_to_text(compressed_msg))
                 context_messages = ContextUtils.replace_messages(
                     context_messages, [compressed_msg], start_idx, actual_end_idx
                 )
@@ -750,13 +769,18 @@ class CurrentRoundCompressor(ContextProcessor):
             old_compress_messages = context_messages[start_idx_:end_idx_ + 1]
             compressed_msg = await self._merge_summary_blocks(context, old_compress_messages)
             if compressed_msg:
+                compact_summary_parts.append(message_to_text(compressed_msg))
                 context_messages = ContextUtils.replace_messages(
                     context_messages, [compressed_msg], start_idx_, end_idx_
                 )
                 modified_indices.extend(range(start_idx_, end_idx_ + 1))
                 updated = True
                 break
-        return (context_messages if updated else None), modified_indices
+        return (
+            context_messages if updated else None,
+            modified_indices,
+            "\n\n".join(part for part in compact_summary_parts if part),
+        )
 
     async def compress(
             self,
@@ -826,6 +850,7 @@ class CurrentRoundCompressor(ContextProcessor):
 
         try:
             response = await self._model.invoke([UserMessage(content=filled_prompt)])
+            self._record_compression_usage(response)
         except Exception as exc:
             logger.warning(
                 f"[{self.processor_type()}] compression model invoke failed during current-round compression, "
@@ -885,6 +910,7 @@ class CurrentRoundCompressor(ContextProcessor):
 
         try:
             response = await self._model.invoke(model_messages)
+            self._record_compression_usage(response)
         except Exception as exc:
             logger.warning(
                 f"[{self.processor_type()}] compression model invoke failed during summary merge, "

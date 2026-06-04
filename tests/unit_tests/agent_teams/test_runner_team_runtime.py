@@ -110,6 +110,7 @@ class FakeTeamAgent:
         self.interactions: list[str] = []
         self.invoke_calls = 0
         self.stream_calls = 0
+        self.stream_inputs: list[Any] = []
 
     def persist_session_manifest(self, session) -> None:
         from openjiuwen.agent_teams.runtime.metadata import write_team_namespace
@@ -144,6 +145,7 @@ class FakeTeamAgent:
 
     async def stream(self, inputs: Any, session=None) -> AsyncIterator[Any]:
         self.stream_calls += 1
+        self.stream_inputs.append(inputs)
         await self.invoke(inputs, session=session)
         yield OutputSchema(
             type="message",
@@ -181,11 +183,23 @@ class FakeTeamAgent:
         await self._stop_coordination()
 
 
+def _runtime_spec(team_name: str) -> TeamAgentSpec:
+    """Build a TeamAgentSpec for runtime tests that are not exercising team.plan."""
+    return TeamAgentSpec.model_construct(
+        team_name=team_name,
+        agents={},
+        enable_team_plan=False,
+    )
+
+
 @pytest.mark.asyncio
-async def test_runner_run_agent_team_streaming_accepts_spec_and_emits_runtime_ready(isolated_checkpointer):
+async def test_runner_run_agent_team_streaming_accepts_spec_and_emits_runtime_ready(
+    isolated_checkpointer,
+    stateful_team_db,
+):
     await Runner.start()
     session_id = f"team_spec_{uuid.uuid4().hex}"
-    spec = TeamAgentSpec.model_construct(team_name="spec_team", agents={})
+    spec = _runtime_spec("spec_team")
     agent = FakeTeamAgent("spec_team", stream_label="team.chunk")
 
     with patch.object(TeamAgentSpec, "build", return_value=agent):
@@ -217,7 +231,7 @@ async def test_runner_run_agent_team_streaming_flushes_team_manifest_before_runt
     await Runner.start()
     session_id = f"team_manifest_{uuid.uuid4().hex}"
     team_name = "manifest_team"
-    spec = TeamAgentSpec.model_construct(team_name=team_name, agents={})
+    spec = _runtime_spec(team_name)
     agent = FakeTeamAgent(team_name, stream_label="team.chunk")
 
     stream = Runner.run_agent_team_streaming(
@@ -250,7 +264,7 @@ async def test_runner_run_agent_team_streaming_without_stream_logger(isolated_ch
     """Omitting ``stream_logger`` leaves no diagnostic file behind."""
     await Runner.start()
     session_id = f"team_spec_{uuid.uuid4().hex}"
-    spec = TeamAgentSpec.model_construct(team_name="spec_team", agents={})
+    spec = _runtime_spec("spec_team")
     agent = FakeTeamAgent("spec_team", stream_label="team.chunk")
     target = tmp_path / "stream.log"
 
@@ -272,6 +286,45 @@ async def test_runner_run_agent_team_streaming_without_stream_logger(isolated_ch
 
 
 @pytest.mark.asyncio
+async def test_runner_team_plan_uses_leader_stream_without_outer_approval_gate(
+    isolated_checkpointer,
+    stateful_team_db,
+    tmp_path,
+):
+    await Runner.start()
+    session_id = f"team_plan_{uuid.uuid4().hex}"
+    spec = TeamAgentSpec.model_construct(
+        team_name="plan_gate_team",
+        agents={},
+        enable_team_plan=True,
+        workspace=SimpleNamespace(root_path=str(tmp_path)),
+        predefined_members=[],
+    )
+    agent = FakeTeamAgent("plan_gate_team", stream_label="team.chunk")
+
+    with patch.object(TeamAgentSpec, "build", return_value=agent):
+        chunks = [
+            chunk
+            async for chunk in Runner.run_agent_team_streaming(
+                agent_team=spec,
+                inputs={"query": "do work", "request_id": "req"},
+                session=session_id,
+            )
+        ]
+
+    assert [chunk.payload["event_type"] for chunk in chunks] == ["team.runtime_ready", "team.chunk"]
+    payloads = [chunk.payload for chunk in chunks if isinstance(chunk.payload, dict)]
+    assert all(payload.get("source") != "team_plan_approval" for payload in payloads)
+    assert all("_approved_team_inputs" not in payload for payload in payloads)
+    assert all("_team_plan_rejected" not in payload for payload in payloads)
+    assert agent.stream_inputs
+    assert agent.stream_inputs[0]["query"] == "do work"
+
+    await Runner.stop()
+    await isolated_checkpointer.release(session_id)
+
+
+@pytest.mark.asyncio
 @pytest.mark.level0
 async def test_runner_run_agent_team_streaming_with_stream_logger_writes_file(isolated_checkpointer, tmp_path):
     """Passing a ``TeamStreamLogger`` writes aggregated records to its file
@@ -280,7 +333,7 @@ async def test_runner_run_agent_team_streaming_with_stream_logger_writes_file(is
 
     await Runner.start()
     session_id = f"team_spec_{uuid.uuid4().hex}"
-    spec = TeamAgentSpec.model_construct(team_name="spec_team", agents={})
+    spec = _runtime_spec("spec_team")
     agent = FakeTeamAgent("spec_team", stream_label="team.chunk")
     log_path = tmp_path / "stream.log"
     stream_logger = TeamStreamLogger(log_path)
@@ -310,12 +363,227 @@ async def test_runner_run_agent_team_streaming_with_stream_logger_writes_file(is
 
 
 @pytest.mark.asyncio
+async def test_team_harness_seeds_team_plan_mode_before_streaming(
+    isolated_checkpointer,
+    tmp_path,
+):
+    from openjiuwen.agent_teams.harness import TeamHarness
+    from openjiuwen.agent_teams.schema.team import TeamRole
+    from openjiuwen.harness.factory import create_deep_agent
+
+    deep_agent = create_deep_agent(
+        SimpleNamespace(model_client_config=None, model_config=None),
+        card=AgentCard(name="team_leader", description="leader persona"),
+        system_prompt="leader system prompt",
+        workspace=str(tmp_path),
+        enable_task_loop=True,
+    )
+    harness = TeamHarness(
+        deep_agent,
+        SimpleNamespace(),
+        role=TeamRole.LEADER,
+        member_name="team_leader",
+        initial_plan_mode=True,
+    )
+    session_id = f"team_plan_seed_{uuid.uuid4().hex}"
+    team_session = create_agent_team_session(session_id=session_id)
+
+    async def fake_run_agent_streaming(agent, inputs, *, session, **_kwargs):
+        assert agent is deep_agent
+        assert inputs["query"] == "plan first"
+        state = deep_agent.load_state(session)
+        assert state.plan_mode.mode == "plan"
+        assert state.plan_mode.plan_slug is None
+        assert state.plan_mode.prompt_context is None
+        yield OutputSchema(type="message", index=1, payload={"event_type": "seeded"})
+
+    with patch.object(Runner, "run_agent_streaming", side_effect=fake_run_agent_streaming):
+        chunks = [
+            chunk
+            async for chunk in harness.run_streaming(
+                {"query": "plan first"},
+                session_id=session_id,
+                team_session=team_session,
+            )
+        ]
+
+    assert [chunk.payload["event_type"] for chunk in chunks] == ["seeded"]
+    await isolated_checkpointer.release(session_id)
+
+
+def test_team_harness_keeps_code_plan_prompt_when_not_team_plan(tmp_path):
+    from openjiuwen.agent_teams.harness import TeamHarness
+    from openjiuwen.agent_teams.schema.team import TeamRole
+    from openjiuwen.harness.factory import create_deep_agent
+    from openjiuwen.harness.schema.config import SubAgentConfig
+    from openjiuwen.harness.subagents.plan_agent import (
+        PLAN_AGENT_DESC,
+        PLAN_AGENT_SYSTEM_PROMPT_EN,
+        build_plan_agent_config,
+    )
+
+    deep_agent = create_deep_agent(
+        SimpleNamespace(model_client_config=None, model_config=None),
+        card=AgentCard(name="team_leader", description="leader persona"),
+        system_prompt="leader system prompt",
+        workspace=str(tmp_path),
+        subagents=[build_plan_agent_config(language="en")],
+        language="en",
+        enable_task_loop=True,
+    )
+
+    TeamHarness(
+        deep_agent,
+        SimpleNamespace(),
+        role=TeamRole.LEADER,
+        member_name="team_leader",
+        initial_plan_mode=False,
+    )
+
+    plan_spec = next(
+        spec
+        for spec in deep_agent.deep_config.subagents
+        if isinstance(spec, SubAgentConfig) and spec.agent_card.name == "plan_agent"
+    )
+    assert plan_spec.agent_card.description == PLAN_AGENT_DESC["en"]
+    assert plan_spec.system_prompt == PLAN_AGENT_SYSTEM_PROMPT_EN
+
+
+@pytest.mark.asyncio
+async def test_team_harness_reenters_team_plan_mode_with_existing_plan_slug():
+    from openjiuwen.agent_teams.harness import TeamHarness
+    from openjiuwen.agent_teams.schema.team import TeamRole
+
+    state = SimpleNamespace(
+        plan_mode=SimpleNamespace(mode="normal", plan_slug="existing-plan")
+    )
+    agent_session = SimpleNamespace(
+        pre_run=AsyncMock(),
+    )
+
+    class FakeTeamSession:
+        def create_agent_session(self, *, card=None, share_stream_writer=True):
+            assert share_stream_writer is False
+            return agent_session
+
+    class FakeDeepAgent:
+        card = AgentCard(name="team_leader", description="leader persona")
+
+        def __init__(self):
+            self.switch_modes = []
+
+        def load_state(self, session):
+            assert session is agent_session
+            return state
+
+        def switch_mode(self, session, mode):
+            assert session is agent_session
+            self.switch_modes.append(mode)
+            state.plan_mode.mode = mode
+
+        def save_state(self, session, next_state):
+            assert session is agent_session
+            assert next_state is state
+
+    deep_agent = FakeDeepAgent()
+    harness = TeamHarness(
+        deep_agent,
+        SimpleNamespace(),
+        role=TeamRole.LEADER,
+        member_name="team_leader",
+        initial_plan_mode=True,
+    )
+
+    stream_calls = 0
+
+    async def fake_run_agent_streaming(agent, inputs, *, session, **_kwargs):
+        nonlocal stream_calls
+        stream_calls += 1
+        assert agent is deep_agent
+        assert session is agent_session
+        assert state.plan_mode.plan_slug == "existing-plan"
+        if stream_calls == 1:
+            assert state.plan_mode.mode == "plan"
+            yield OutputSchema(type="message", index=1, payload={"event_type": "seeded"})
+        else:
+            assert state.plan_mode.mode == "normal"
+            yield OutputSchema(type="message", index=2, payload={"event_type": "continued"})
+
+    with patch.object(Runner, "run_agent_streaming", side_effect=fake_run_agent_streaming):
+        chunks = [
+            chunk
+            async for chunk in harness.run_streaming(
+                {"query": "plan again"},
+                session_id="team_plan_existing_slug",
+                team_session=FakeTeamSession(),
+            )
+        ]
+        state.plan_mode.mode = "normal"
+        chunks.extend(
+            [
+                chunk
+                async for chunk in harness.run_streaming(
+                    {"query": "start implementation"},
+                    session_id="team_plan_existing_slug",
+                    team_session=FakeTeamSession(),
+                )
+            ]
+        )
+
+    assert deep_agent.switch_modes == ["plan"]
+    assert not hasattr(state.plan_mode, "prompt_context") or state.plan_mode.prompt_context is None
+    assert [chunk.payload["event_type"] for chunk in chunks] == ["seeded", "continued"]
+
+
+@pytest.mark.asyncio
+async def test_team_harness_child_stream_close_does_not_close_team_stream(isolated_checkpointer):
+    from openjiuwen.agent_teams.harness import TeamHarness
+    from openjiuwen.agent_teams.schema.team import TeamRole
+
+    deep_agent = SimpleNamespace(card=AgentCard(id="leader", name="leader"))
+    harness = TeamHarness(
+        deep_agent,
+        SimpleNamespace(),
+        role=TeamRole.LEADER,
+        member_name="leader",
+    )
+    session_id = f"team_stream_isolation_{uuid.uuid4().hex}"
+    team_session = create_agent_team_session(session_id=session_id, team_id="stream_team")
+    await team_session.pre_run(inputs={"query": "hello"})
+
+    async def fake_run_agent_streaming(agent, inputs, *, session, **_kwargs):
+        assert agent is deep_agent
+        await session.write_stream({"event_type": "child"})
+        await session.close_stream()
+        yield OutputSchema(type="message", index=1, payload={"event_type": "child_done"})
+
+    with patch.object(Runner, "run_agent_streaming", side_effect=fake_run_agent_streaming):
+        chunks = [
+            chunk
+            async for chunk in harness.run_streaming(
+                {"query": "hello"},
+                session_id=session_id,
+                team_session=team_session,
+            )
+        ]
+
+    await team_session.write_stream({"event_type": "team_still_open"})
+    await team_session.post_run()
+    team_chunks = [chunk async for chunk in team_session.stream_iterator()]
+
+    assert [chunk.payload["event_type"] for chunk in chunks] == ["child_done"]
+    assert any(chunk.payload.get("event_type") == "team_still_open" for chunk in team_chunks)
+
+    await isolated_checkpointer.release(session_id)
+
+
+@pytest.mark.asyncio
 async def test_team_runtime_manager_cold_recover_reinjects_runtime_spec():
     from openjiuwen.agent_teams.runtime.dispatch import RunActionKind
     from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 
     session_id = f"cold_recover_{uuid.uuid4().hex}"
-    spec = TeamAgentSpec.model_construct(team_name="cold_recover_team", agents={})
+    spec = _runtime_spec("cold_recover_team")
     spec.agent_customizer = lambda *_args, **_kwargs: None
     agent = FakeTeamAgent("cold_recover_team", stream_label="team.chunk")
 
@@ -353,7 +621,7 @@ async def test_team_runtime_manager_recreates_pending_session_bucket():
 
     session_id = f"pending_recreate_{uuid.uuid4().hex}"
     team_name = "pending_recreate_team"
-    spec = TeamAgentSpec.model_construct(team_name=team_name, agents={})
+    spec = _runtime_spec(team_name)
     agent = FakeTeamAgent(team_name, stream_label="team.chunk")
 
     manager = TeamRuntimeManager()
@@ -391,7 +659,7 @@ async def test_runner_session_switch_stops_and_rebuilds(
     await Runner.start()
     session_one = f"resume_{uuid.uuid4().hex}"
     session_two = f"resume_{uuid.uuid4().hex}"
-    spec = TeamAgentSpec.model_construct(team_name="persistent_team", agents={})
+    spec = _runtime_spec("persistent_team")
     active_agent = FakeTeamAgent("persistent_team", stream_label="active.chunk")
 
     with patch.object(TeamAgentSpec, "build", return_value=active_agent):
@@ -438,7 +706,7 @@ async def test_runner_session_switch_stops_and_rebuilds(
 @pytest.mark.asyncio
 async def test_runner_same_session_streaming_short_circuits_and_skips_second_stream(isolated_checkpointer):
     session_id = f"same_{uuid.uuid4().hex}"
-    spec = TeamAgentSpec.model_construct(team_name="same_team", agents={})
+    spec = _runtime_spec("same_team")
     agent = FakeTeamAgent("same_team", stream_label="active.chunk")
     await Runner.start()
 
@@ -477,7 +745,7 @@ async def test_runner_same_session_after_pause_resumes_paused_runtime(
     stateful_team_db,
 ):
     session_id = f"paused_{uuid.uuid4().hex}"
-    spec = TeamAgentSpec.model_construct(team_name="paused_team", agents={})
+    spec = _runtime_spec("paused_team")
     agent = FakeTeamAgent("paused_team", stream_label="team.chunk")
     await Runner.start()
 
@@ -523,7 +791,7 @@ async def test_runner_paused_same_session_resume_uses_same_prepared_session(
     stateful_team_db,
 ):
     session_id = f"paused_same_{uuid.uuid4().hex}"
-    spec = TeamAgentSpec.model_construct(team_name="paused_same_team", agents={})
+    spec = _runtime_spec("paused_same_team")
     agent = FakeTeamAgent("paused_same_team", stream_label="team.chunk")
     await Runner.start()
 
@@ -562,7 +830,7 @@ async def test_runner_paused_same_session_resume_uses_same_prepared_session(
 async def test_runner_interact_pause_and_delete_agent_team_route_through_team_runtime_manager(isolated_checkpointer):
     await Runner.start()
     session_id = f"delete_{uuid.uuid4().hex}"
-    spec = TeamAgentSpec.model_construct(team_name="delete_team", agents={})
+    spec = _runtime_spec("delete_team")
     agent = FakeTeamAgent("delete_team", stream_label="team.chunk")
 
     fake_db = AsyncMock()
@@ -1230,7 +1498,7 @@ class TestTeamRuntimeManagerInteract:
         await Runner.start()
         try:
             session_id = f"runner_god_{uuid.uuid4().hex}"
-            spec = TeamAgentSpec.model_construct(team_name="god_runner_team", agents={})
+            spec = _runtime_spec("god_runner_team")
             agent = FakeTeamAgent("god_runner_team", stream_label="team.chunk")
 
             with patch.object(TeamAgentSpec, "build", return_value=agent):
@@ -1911,7 +2179,7 @@ async def test_run_agent_team_resolves_team_name_via_pool(isolated_checkpointer,
     """After spec activation seeds the pool, follow-up calls may pass team_name as str."""
     await Runner.start()
     team_name = f"reuse_{uuid.uuid4().hex}"
-    spec = TeamAgentSpec.model_construct(team_name=team_name, agents={})
+    spec = _runtime_spec(team_name)
     agent = FakeTeamAgent(team_name, stream_label="team.chunk", spec=spec)
 
     with patch.object(TeamAgentSpec, "build", return_value=agent):
@@ -1957,7 +2225,7 @@ async def test_run_agent_team_base_true_rejects_team_agent_spec():
     from openjiuwen.core.common.exception.errors import ValidationError
 
     await Runner.start()
-    spec = TeamAgentSpec.model_construct(team_name="mis_routed", agents={})
+    spec = _runtime_spec("mis_routed")
     with pytest.raises(ValidationError, match=r"run_agent_team\(base=True\) accepts"):
         await Runner.run_agent_team(agent_team=spec, inputs={"query": "x"}, base=True)
 

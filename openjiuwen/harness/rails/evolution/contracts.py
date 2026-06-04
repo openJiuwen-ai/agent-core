@@ -18,7 +18,7 @@ EvolutionEventKind = Literal["approval", "progress", "outcome"]
 
 @dataclass(frozen=True)
 class EvolutionHostEventMeta:
-    """Canonical metadata carried inside ``OutputSchema.payload['_evolution_meta']``."""
+    """Canonical metadata carried inside ``OutputSchema.payload['evolution_meta']``."""
 
     event_kind: EvolutionEventKind
     rail_kind: Optional[str] = None
@@ -83,6 +83,8 @@ class EvolutionRequestResult:
     approval_event: Optional[OutputSchema] = None
     records: list[EvolutionRecord] = field(default_factory=list)
     auto_approved: bool = False
+    status: Optional[str] = None
+    message: str = ""
 
     @property
     def has_changes(self) -> bool:
@@ -105,7 +107,12 @@ class SimplifyRequestResult:
 
 @runtime_checkable
 class ApprovalManagerProtocol(Protocol):
-    async def approve_request(self, request_id: str) -> Any:
+    async def approve_request(
+        self,
+        request_id: str,
+        *,
+        approved_record_ids: Optional[list[str]] = None,
+    ) -> Any:
         """Persist or apply one staged approval request."""
 
     async def reject_request(self, request_id: str) -> Any:

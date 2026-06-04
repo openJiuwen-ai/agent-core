@@ -373,8 +373,9 @@ class TestRecordRmTargetsBeforeDeletion(unittest.IsolatedAsyncioTestCase):
             await _record_rm_targets_before_deletion(history_path, [target], mock_op)
 
             data = _load(history_path)
-            assert target in data
-            entry = data[target][0]
+            resolved_target = os.path.realpath(target)
+            assert resolved_target in data
+            entry = data[resolved_target][0]
             assert entry["action"] == "delete"
             assert entry["old_content"] == "file content"
             assert entry["new_content"] is None
@@ -421,8 +422,8 @@ class TestRecordRmTargetsBeforeDeletion(unittest.IsolatedAsyncioTestCase):
             await _record_rm_targets_before_deletion(history_path, paths, mock_op)
 
             data = _load(history_path)
-            assert paths[0] in data
-            assert paths[1] in data
+            assert os.path.realpath(paths[0]) in data
+            assert os.path.realpath(paths[1]) in data
 
 
 # ---------------------------------------------------------------------------

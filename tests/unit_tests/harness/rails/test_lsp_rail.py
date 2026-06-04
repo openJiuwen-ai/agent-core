@@ -59,37 +59,35 @@ def _make_agent(workspace_root="/workspace", language="cn"):
 
 @contextmanager
 def _patch_init_deps(agent, *, workspace_root="/workspace"):
-    """Patch the three external deps touched by LspRail.init()."""
+    """Patch the three external deps touched by LspRail.init().
+
+    Intentionally does NOT mock asyncio.get_running_loop — in synchronous test
+    context it raises RuntimeError naturally, which causes LspRail.init() to
+    fall through to the asyncio.run() branch where the mocked initialize_lsp
+    returns immediately.  Mocking a non-running loop caused a 20s timeout.
+    """
     mock_tool = MagicMock()
     mock_tool.card = MagicMock(id="lsp-tool-id", name="lsp")
-    loop = asyncio.new_event_loop()
-    try:
-        with patch("openjiuwen.harness.tools.LspTool") as MockLspTool, \
-             patch("openjiuwen.core.runner.runner.Runner") as MockRunner, \
-             patch("openjiuwen.harness.lsp.initialize_lsp", new_callable=AsyncMock), \
-             patch("openjiuwen.harness.deep_agent.DeepAgent", _FakeDeepAgent), \
-             patch("asyncio.get_running_loop", return_value=loop):
-            MockLspTool.return_value = mock_tool
-            yield MockLspTool, MockRunner, mock_tool, loop
-        # drain tasks created by init() before closing the loop
-        loop.run_until_complete(asyncio.sleep(0))
-    finally:
-        loop.close()
+    with patch("openjiuwen.harness.tools.LspTool") as MockLspTool, \
+         patch("openjiuwen.core.runner.runner.Runner") as MockRunner, \
+         patch("openjiuwen.harness.lsp.initialize_lsp", new_callable=AsyncMock), \
+         patch("openjiuwen.harness.deep_agent.DeepAgent", _FakeDeepAgent):
+        MockLspTool.return_value = mock_tool
+        yield MockLspTool, MockRunner, mock_tool
 
 
 @contextmanager
 def _patch_uninit_deps():
-    loop = asyncio.new_event_loop()
-    try:
-        with patch("openjiuwen.core.runner.runner.Runner") as MockRunner, \
-             patch("openjiuwen.harness.lsp.shutdown_lsp", new_callable=AsyncMock), \
-             patch("openjiuwen.harness.deep_agent.DeepAgent", _FakeDeepAgent), \
-             patch("asyncio.get_running_loop", return_value=loop):
-            yield MockRunner, loop
-        # drain any tasks created by uninit() before closing the loop
-        loop.run_until_complete(asyncio.sleep(0))
-    finally:
-        loop.close()
+    """Patch deps touched by LspRail.uninit().
+
+    Same rationale as _patch_init_deps: let asyncio.get_running_loop raise
+    RuntimeError so uninit() falls through to asyncio.run(), avoiding the 15s
+    run_coroutine_threadsafe timeout.
+    """
+    with patch("openjiuwen.core.runner.runner.Runner") as MockRunner, \
+         patch("openjiuwen.harness.lsp.shutdown_lsp", new_callable=AsyncMock), \
+         patch("openjiuwen.harness.deep_agent.DeepAgent", _FakeDeepAgent):
+        yield MockRunner
 
 
 # ===========================================================================
@@ -130,7 +128,7 @@ class TestLspRailInitMethod:
     def test_registers_tool_instance_in_resource_manager(self):
         rail = LspRail()
         agent = _make_agent()
-        with _patch_init_deps(agent) as (_, MockRunner, mock_tool, _):
+        with _patch_init_deps(agent) as (_, MockRunner, mock_tool):
             rail.init(agent)
         MockRunner.resource_mgr.add_tool.assert_called_once_with(mock_tool)
 
@@ -138,7 +136,7 @@ class TestLspRailInitMethod:
         """resource_mgr.add_tool 必须收到 Tool 实例，而非 ToolCard。"""
         rail = LspRail()
         agent = _make_agent()
-        with _patch_init_deps(agent) as (_, MockRunner, mock_tool, _):
+        with _patch_init_deps(agent) as (_, MockRunner, mock_tool):
             rail.init(agent)
         arg = MockRunner.resource_mgr.add_tool.call_args[0][0]
         assert arg is mock_tool
@@ -147,7 +145,7 @@ class TestLspRailInitMethod:
     def test_registers_tool_card_in_ability_manager(self):
         rail = LspRail()
         agent = _make_agent()
-        with _patch_init_deps(agent) as (_, _, mock_tool, _):
+        with _patch_init_deps(agent) as (_, _, mock_tool):
             rail.init(agent)
         agent.ability_manager.add.assert_called_once_with(mock_tool.card)
 
@@ -162,7 +160,7 @@ class TestLspRailInitMethod:
         """LspTool 应使用 agent.deep_config.language 初始化，并传递 operation、workspace 和 agent_id"""
         rail = LspRail()
         agent = _make_agent(language="en")
-        with _patch_init_deps(agent) as (MockLspTool, _, _, _):
+        with _patch_init_deps(agent) as (MockLspTool, _, _):
             rail.init(agent)
         MockLspTool.assert_called_once_with(
             operation=agent.deep_config.sys_operation,
@@ -175,7 +173,7 @@ class TestLspRailInitMethod:
         """默认语言应为 cn，并正确传递 operation、workspace 和 agent_id"""
         rail = LspRail()
         agent = _make_agent()  # 默认 language="cn"
-        with _patch_init_deps(agent) as (MockLspTool, _, _, _):
+        with _patch_init_deps(agent) as (MockLspTool, _, _):
             rail.init(agent)
         MockLspTool.assert_called_once_with(
             operation=agent.deep_config.sys_operation,
@@ -224,25 +222,18 @@ class TestLspRailCwdResolution:
     def _captured_opts(self, rail, agent):
         """Run init() and return the InitializeOptions passed to initialize_lsp."""
         captured = {}
-        loop = asyncio.new_event_loop()
 
         async def _fake_init(opts):
             captured["opts"] = opts
 
-        try:
-            with patch("openjiuwen.harness.tools.LspTool") as MockLspTool, \
-                 patch("openjiuwen.core.runner.runner.Runner"), \
-                 patch("openjiuwen.harness.lsp.initialize_lsp", side_effect=_fake_init), \
-                 patch("openjiuwen.harness.deep_agent.DeepAgent", _FakeDeepAgent), \
-                 patch("asyncio.get_running_loop", return_value=loop):
-                mock_tool = MagicMock()
-                mock_tool.card = MagicMock(id="lsp-tool-id", name="lsp")
-                MockLspTool.return_value = mock_tool
-                rail.init(agent)
-                # drain the task that was created
-                loop.run_until_complete(asyncio.sleep(0))
-        finally:
-            loop.close()
+        with patch("openjiuwen.harness.tools.LspTool") as MockLspTool, \
+             patch("openjiuwen.core.runner.runner.Runner"), \
+             patch("openjiuwen.harness.lsp.initialize_lsp", side_effect=_fake_init), \
+             patch("openjiuwen.harness.deep_agent.DeepAgent", _FakeDeepAgent):
+            mock_tool = MagicMock()
+            mock_tool.card = MagicMock(id="lsp-tool-id", name="lsp")
+            MockLspTool.return_value = mock_tool
+            rail.init(agent)
         return captured.get("opts")
 
     def test_uses_workspace_root_as_cwd(self):
@@ -271,7 +262,7 @@ class TestLspRailCwdResolution:
 
 class TestLspRailUninit:
     def _init_rail(self, rail, agent):
-        with _patch_init_deps(agent) as (_, _, mock_tool, _):
+        with _patch_init_deps(agent) as (_, _, mock_tool):
             rail.init(agent)
         return mock_tool
 
@@ -287,7 +278,7 @@ class TestLspRailUninit:
         rail = LspRail()
         agent = _make_agent()
         mock_tool = self._init_rail(rail, agent)
-        with _patch_uninit_deps() as (MockRunner, _):
+        with _patch_uninit_deps() as MockRunner:
             rail.uninit(agent)
         MockRunner.resource_mgr.remove_tool.assert_called_once_with(mock_tool.card.id)
 

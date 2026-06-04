@@ -25,11 +25,14 @@ from openjiuwen.agent_teams.schema.blueprint import (
     TeamAgentSpec,
 )
 from openjiuwen.agent_teams.schema.events import (
+    BroadcastEvent,
     EventMessage,
+    MemberShutdownEvent,
     MemberStatusChangedEvent,
     MessageEvent,
     TaskClaimedEvent,
     TaskCompletedEvent,
+    TaskCreatedEvent,
     TaskListDrainedEvent,
     TeamCleanedEvent,
     TeamCompletedEvent,
@@ -38,6 +41,7 @@ from openjiuwen.agent_teams.schema.events import (
 )
 from openjiuwen.agent_teams.schema.team import (
     TeamCompletionSnapshot,
+    TeamMemberSpec,
     TeamRole,
     TeamRuntimeContext,
     TeamSpec,
@@ -49,25 +53,31 @@ from openjiuwen.core.single_agent.schema.agent_card import (
 )
 
 
-def _make_leader() -> TeamAgent:
+def _make_leader(
+    lifecycle: str = "temporary",
+    *,
+    team_name: str = "test-team",
+    member_name: str = "leader-1",
+) -> TeamAgent:
     team_spec = TeamSpec(
-        team_name="test-team",
-        display_name="test-team",
-        leader_member_name="leader-1",
+        team_name=team_name,
+        display_name=team_name,
+        leader_member_name=member_name,
     )
 
     spec = TeamAgentSpec(
         agents={"leader": DeepAgentSpec()},
-        team_name="test-team",
+        team_name=team_name,
+        lifecycle=lifecycle,
         leader=LeaderSpec(
-            member_name="leader-1",
+            member_name=member_name,
             display_name="Leader",
             persona="PM",
         ),
     )
     context = TeamRuntimeContext(
         role=TeamRole.LEADER,
-        member_name="leader-1",
+        member_name=member_name,
         persona="PM",
         team_spec=team_spec,
         db_config=DatabaseConfig(db_type="memory"),
@@ -77,6 +87,50 @@ def _make_leader() -> TeamAgent:
             id="t1",
             name="leader",
             description="test",
+        ),
+    )
+    agent.configure(spec, context)
+    return agent
+
+
+def _make_human_agent(member_name: str = "human_alice") -> TeamAgent:
+    """Build a configured ``role=HUMAN_AGENT`` avatar runtime.
+
+    Mirrors ``_make_leader`` but with a HITT-enabled spec and a
+    HUMAN_AGENT runtime context, so dispatcher role-aware filtering can
+    be exercised directly.
+    """
+    team_spec = TeamSpec(
+        team_name="hitt-team",
+        display_name="hitt-team",
+        leader_member_name="leader-1",
+    )
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        team_name="hitt-team",
+        lifecycle="temporary",
+        enable_hitt=True,
+        predefined_members=[
+            TeamMemberSpec(
+                member_name=member_name,
+                display_name="Alice",
+                role_type=TeamRole.HUMAN_AGENT,
+                persona="user avatar",
+            ),
+        ],
+    )
+    context = TeamRuntimeContext(
+        role=TeamRole.HUMAN_AGENT,
+        member_name=member_name,
+        persona="user avatar",
+        team_spec=team_spec,
+        db_config=DatabaseConfig(db_type="memory"),
+    )
+    agent = TeamAgent(
+        AgentCard(
+            id=member_name,
+            name=member_name,
+            description="avatar",
         ),
     )
     agent.configure(spec, context)
@@ -171,15 +225,22 @@ async def test_human_agent_inbound_callback_fires_on_message_event():
     agent = _make_leader()
 
     # Register a human-agent member name on the live backend so
-    # ``is_human_agent`` recognises the recipient.
-    agent.team_backend._human_agent_names.add("human_alice")
+    # ``is_human_agent`` recognises the recipient. Persist to DB
+    # so async queries find the row.
+    await agent.team_backend.spawn_member(
+        member_name="human_alice",
+        display_name="Alice",
+        agent_card=AgentCard(),
+        desc="user avatar",
+        role=TeamRole.HUMAN_AGENT,
+    )
 
     received: list = []
 
     async def cb(evt):
         received.append(evt)
 
-    agent.team_backend.register_human_agent_inbound("human_alice", cb)
+    await agent.team_backend.register_human_agent_inbound("human_alice", cb)
 
     # Mock the message DB lookup the dispatcher does to fetch the body.
     fake_row = MagicMock()
@@ -248,6 +309,256 @@ async def test_tool_approval_event_resumes_interrupt():
     assert interactive_input.user_inputs["call-1"]["approved"] is True
     assert interactive_input.user_inputs["call-1"]["feedback"] == "ok"
     assert interactive_input.user_inputs["call-1"]["auto_confirm"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_idle_human_agent_tears_down_on_self_shutdown():
+    """An idle human agent must tear its avatar down on MEMBER_SHUTDOWN.
+
+    Unlike a teammate, a human agent has no autonomous LLM round to
+    consume the shutdown message and reach the round-end
+    ``close_stream`` path. When idle there is no round to ride, so the
+    dispatcher must let MEMBER_SHUTDOWN through and the member handler
+    must call ``shutdown_self`` directly; otherwise the avatar's run
+    cycle never ends and the member is stuck in SHUTDOWN_REQUESTED
+    forever (notably blocking a temporary team's ``clean_team``).
+    """
+    agent = _make_human_agent("human_alice")
+    agent.shutdown_self = AsyncMock()
+    assert not agent.has_in_flight_round()
+
+    event = EventMessage.from_event(
+        MemberShutdownEvent(
+            team_name="hitt-team",
+            member_name="human_alice",
+            force=False,
+        )
+    )
+    await agent._coordination.dispatcher.dispatch(event)
+
+    agent.shutdown_self.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_busy_human_agent_not_interrupted_on_self_shutdown():
+    """A controller-driven round in flight must not be interrupted.
+
+    ``shutdown_member`` already wrote SHUTDOWN_REQUESTED before this
+    event, so the in-flight round closes the stream at its own round-end
+    (the teammate path). The handler must therefore leave a non-forced
+    shutdown alone rather than collapsing the avatar mid-turn.
+    """
+    agent = _make_human_agent("human_alice")
+    agent.shutdown_self = AsyncMock()
+    agent.has_in_flight_round = MagicMock(return_value=True)
+
+    event = EventMessage.from_event(
+        MemberShutdownEvent(
+            team_name="hitt-team",
+            member_name="human_alice",
+            force=False,
+        )
+    )
+    await agent._coordination.dispatcher.dispatch(event)
+
+    agent.shutdown_self.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_forced_shutdown_collapses_busy_human_agent():
+    """``force=True`` bypasses the grace period and tears down immediately."""
+    agent = _make_human_agent("human_alice")
+    agent.shutdown_self = AsyncMock()
+    agent.has_in_flight_round = MagicMock(return_value=True)
+
+    event = EventMessage.from_event(
+        MemberShutdownEvent(
+            team_name="hitt-team",
+            member_name="human_alice",
+            force=True,
+        )
+    )
+    await agent._coordination.dispatcher.dispatch(event)
+
+    agent.shutdown_self.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_human_agent_ignores_other_member_shutdown():
+    """A human agent only tears down on its own shutdown event.
+
+    MEMBER_SHUTDOWN targeting a different member must not collapse the
+    avatar — it observes nothing about other members' lifecycles.
+    """
+    agent = _make_human_agent("human_alice")
+    agent.shutdown_self = AsyncMock()
+
+    event = EventMessage.from_event(
+        MemberShutdownEvent(
+            team_name="hitt-team",
+            member_name="dev-1",
+            force=False,
+        )
+    )
+    await agent._coordination.dispatcher.dispatch(event)
+
+    agent.shutdown_self.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_human_agent_dispatch_delivers_message_broadcast_and_task_claimed():
+    """F_14 team events must survive the human-agent whitelist in dispatch.
+
+    The role-aware rendering branches in ``MessageHandler`` /
+    ``TaskBoardHandler`` (``hitt.msg_received_for_human`` /
+    ``hitt.task_assigned_to_self_human``) are only reachable when
+    MESSAGE / BROADCAST / TASK_CLAIMED pass the coarse whitelist in
+    ``dispatch``. F_14 shipped those handler branches but left the
+    whitelist muting the events, so the controller-facing rendering
+    never ran. Drive each event through the real ``dispatch`` and
+    assert the framework is triggered with the matching event_type.
+    """
+    agent = _make_human_agent("human_alice")
+    trigger = AsyncMock()
+    agent._coordination.dispatcher._framework.trigger = trigger
+
+    models = [
+        MessageEvent(
+            team_name="hitt-team",
+            message_id="m1",
+            from_member_name="leader-1",
+            to_member_name="human_alice",
+        ),
+        BroadcastEvent(
+            team_name="hitt-team",
+            message_id="b1",
+            from_member_name="leader-1",
+        ),
+        TaskClaimedEvent(
+            team_name="hitt-team",
+            member_name="human_alice",
+            task_id="t1",
+        ),
+    ]
+    for model in models:
+        trigger.reset_mock()
+        event = EventMessage.from_event(model)
+        await agent._coordination.dispatcher.dispatch(event)
+        trigger.assert_awaited_once()
+        assert trigger.await_args.args[0] == event.event_type
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_human_agent_dispatch_mutes_task_board_survey_events():
+    """Task-board survey events stay muted for a human-agent avatar.
+
+    TASK_CREATED / TASK_UPDATED / ... drive ``_nudge_idle_agent``, which
+    would push the avatar to autonomously scan the board for claimable
+    work. Only TASK_CLAIMED (a direct assignment to the avatar) is a
+    controller notification; survey events must not reach the framework.
+    """
+    agent = _make_human_agent("human_alice")
+    trigger = AsyncMock()
+    agent._coordination.dispatcher._framework.trigger = trigger
+
+    event = EventMessage.from_event(
+        TaskCreatedEvent(
+            team_name="hitt-team",
+            task_id="t1",
+            status="pending",
+        )
+    )
+    await agent._coordination.dispatcher.dispatch(event)
+
+    trigger.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_human_agent_ignores_other_member_task_claim():
+    """A claim targeting someone else must not nudge a human-agent avatar.
+
+    A regular teammate / leader falls through to the board nudge so an
+    idle member sees the change (see
+    ``test_task_claimed_for_other_member_falls_through_to_board_nudge``).
+    A human-agent avatar never autonomously surveys the board, so
+    ``on_task_claimed`` short-circuits for a claim addressed to another
+    member — no ``list_tasks`` survey, no ``deliver_input``.
+    """
+    agent = _make_leader(team_name="human-claim-other-team", member_name="human-leader-other")
+    # Role check consults backend.is_human_agent (not TeamRole); persist
+    # a HUMAN_AGENT row so async DB queries find it.
+    await agent.team_backend.spawn_member(
+        member_name="human-leader-other",
+        display_name="Leader",
+        agent_card=AgentCard(),
+        desc="leader as human",
+        role=TeamRole.HUMAN_AGENT,
+    )
+
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[])
+    agent._is_agent_running = lambda: False
+    agent._start_agent = AsyncMock()
+    agent.steer = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskClaimedEvent(
+            team_name="human-claim-other-team",
+            member_name="dev-1",
+            task_id="task-7",
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_claimed(event)
+
+    agent._configurator.task_manager.list_tasks.assert_not_awaited()
+    agent._start_agent.assert_not_called()
+    agent.steer.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_teammate_does_not_self_shutdown_on_member_shutdown():
+    """Teammates keep the round-end teardown path on MEMBER_SHUTDOWN.
+
+    A teammate consumes its shutdown message through the mailbox drain
+    and final round, so the member handler must not short-circuit it
+    with a direct ``shutdown_self`` (that is the human-agent-only path).
+    """
+    team_spec = TeamSpec(
+        team_name="test-team",
+        display_name="test-team",
+        leader_member_name="leader-1",
+    )
+    spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="test-team")
+    ctx = TeamRuntimeContext(
+        role=TeamRole.TEAMMATE,
+        member_name="dev-1",
+        persona="dev",
+        team_spec=team_spec,
+        db_config=DatabaseConfig(db_type="memory"),
+    )
+    agent = TeamAgent(AgentCard(id="dev-1", name="dev", description="test"))
+    agent.configure(spec, ctx)
+    agent.shutdown_self = AsyncMock()
+
+    await agent._coordination.dispatcher.member._handle_teammate_member_event(
+        EventMessage.from_event(
+            MemberShutdownEvent(
+                team_name="test-team",
+                member_name="dev-1",
+                force=False,
+            )
+        )
+    )
+
+    agent.shutdown_self.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -432,6 +743,7 @@ async def test_task_claimed_for_other_member_falls_through_to_board_nudge():
     incomplete_task.content = "Reproduce and root-cause"
     incomplete_task.status = "claimed"
     incomplete_task.assignee = "dev-1"
+    incomplete_task.updated_at = 1_700_000_000_000
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[incomplete_task])
@@ -473,6 +785,7 @@ async def test_task_claimed_for_other_member_nudges_leader_via_steer_when_busy()
     incomplete_task.content = "Working"
     incomplete_task.status = "claimed"
     incomplete_task.assignee = "dev-1"
+    incomplete_task.updated_at = 1_700_000_000_000
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[incomplete_task])
@@ -515,7 +828,7 @@ async def test_task_claimed_for_self_uses_teammate_template():
     # Make sure the leader is NOT registered as a human-agent member —
     # the default after _make_leader is an empty roster, but assert it
     # explicitly so the test does not silently drift.
-    assert "leader-1" not in agent.team_backend.human_agent_names()
+    assert "leader-1" not in await agent.team_backend.human_agent_names()
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.get = AsyncMock(return_value=MagicMock(title="Fix bug"))
@@ -554,12 +867,18 @@ async def test_task_claimed_for_self_uses_human_template_when_human_agent():
     inlined so the controller sees what was assigned without a separate
     ``view_task`` round-trip.
     """
-    agent = _make_leader()
+    agent = _make_leader(team_name="human-claim-self-team", member_name="human-leader-self")
     # Register the leader's member_name as a human-agent member. The
     # role check in TaskBoardHandler only consults
-    # ``backend.is_human_agent`` — TeamRole itself is not gated, so
-    # piggy-backing on the leader fixture keeps the test small.
-    agent.team_backend._human_agent_names.add("leader-1")
+    # ``backend.is_human_agent`` — persist a HUMAN_AGENT row so async
+    # DB queries find it.
+    await agent.team_backend.spawn_member(
+        member_name="human-leader-self",
+        display_name="Leader",
+        agent_card=AgentCard(),
+        desc="leader as human",
+        role=TeamRole.HUMAN_AGENT,
+    )
 
     task_row = MagicMock()
     task_row.title = "Write design doc"
@@ -571,8 +890,8 @@ async def test_task_claimed_for_self_uses_human_template_when_human_agent():
 
     event = EventMessage.from_event(
         TaskClaimedEvent(
-            team_name="test-team",
-            member_name="leader-1",
+            team_name="human-claim-self-team",
+            member_name="human-leader-self",
             task_id="task-7",
         )
     )
@@ -606,8 +925,14 @@ async def test_task_claimed_for_human_self_swallows_title_lookup_error():
     the prompt still goes out with an empty title placeholder so the
     avatar still gets notified.
     """
-    agent = _make_leader()
-    agent.team_backend._human_agent_names.add("leader-1")
+    agent = _make_leader(team_name="human-claim-error-team", member_name="human-leader-error")
+    await agent.team_backend.spawn_member(
+        member_name="human-leader-error",
+        display_name="Leader",
+        agent_card=AgentCard(),
+        desc="leader as human",
+        role=TeamRole.HUMAN_AGENT,
+    )
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.get = AsyncMock(side_effect=RuntimeError("db down"))
@@ -616,8 +941,8 @@ async def test_task_claimed_for_human_self_swallows_title_lookup_error():
 
     event = EventMessage.from_event(
         TaskClaimedEvent(
-            team_name="test-team",
-            member_name="leader-1",
+            team_name="human-claim-error-team",
+            member_name="human-leader-error",
             task_id="task-9",
         )
     )
@@ -640,8 +965,9 @@ def test_format_message_uses_teammate_template_when_not_human():
     msg.from_member_name = "dev-1"
     msg.content = "ping"
     msg.broadcast = False
+    msg.timestamp = 1_700_000_000_000
 
-    text = handler._format_message(msg, is_human_agent=False)
+    text = handler._format_message(msg, is_human_agent=False, now_ms=1_700_000_000_000)
     assert "msg-1" in text
     assert "dev-1" in text
     assert "ping" in text
@@ -667,8 +993,9 @@ def test_format_message_uses_human_template_when_human_agent():
     direct.from_member_name = "leader"
     direct.content = "are you around?"
     direct.broadcast = False
+    direct.timestamp = 1_700_000_000_000
 
-    direct_text = handler._format_message(direct, is_human_agent=True)
+    direct_text = handler._format_message(direct, is_human_agent=True, now_ms=1_700_000_000_000)
     assert "[转发给控制者的单播消息]" in direct_text
     assert "msg-direct" in direct_text
     assert "are you around?" in direct_text
@@ -685,8 +1012,9 @@ def test_format_message_uses_human_template_when_human_agent():
     bcast.from_member_name = "leader"
     bcast.content = "stand-up in 5"
     bcast.broadcast = True
+    bcast.timestamp = 1_700_000_000_000
 
-    bcast_text = handler._format_message(bcast, is_human_agent=True)
+    bcast_text = handler._format_message(bcast, is_human_agent=True, now_ms=1_700_000_000_000)
     assert "[转发给控制者的广播消息]" in bcast_text
     assert "严格禁止" in bcast_text
     assert "保持静默" in bcast_text
@@ -1379,6 +1707,7 @@ async def test_task_completed_with_incomplete_tasks_nudges_leader_board():
     incomplete_task.content = "In progress"
     incomplete_task.status = "claimed"
     incomplete_task.assignee = "member-2"
+    incomplete_task.updated_at = 1_700_000_000_000
 
     agent._configurator.task_manager = MagicMock()
     agent._configurator.task_manager.list_tasks = AsyncMock(
@@ -1402,3 +1731,74 @@ async def test_task_completed_with_incomplete_tasks_nudges_leader_board():
     assert "task-2" in content
     # Should NOT contain the "all done" summary prompt
     assert "完成" not in content or "task" in content.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_persistent_completion_closes_leader_stream():
+    """A completed persistent team emits a completion marker then closes the stream."""
+    agent = _make_leader(lifecycle="persistent")
+    snapshot = TeamCompletionSnapshot(member_count=2, task_count=3)
+    _wire_completion_handler(agent, snapshot)
+    agent._stream_controller.stream_queue = asyncio.Queue()
+
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK, payload={})
+    await agent._coordination.dispatcher.team_completion.on_poll_task(event)
+
+    marker = agent._stream_controller.stream_queue.get_nowait()
+    assert marker.payload["event_type"] == "team.completed"
+    assert marker.payload["member_count"] == 2
+    assert marker.payload["task_count"] == 3
+    assert agent._stream_controller.stream_queue.get_nowait() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_temporary_completion_does_not_close_stream():
+    """A temporary team still emits TEAM_COMPLETED but never closes its own stream."""
+    agent = _make_leader()
+    snapshot = TeamCompletionSnapshot(member_count=1, task_count=1)
+    messager = _wire_completion_handler(agent, snapshot)
+    agent._stream_controller.stream_queue = asyncio.Queue()
+
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK, payload={})
+    await agent._coordination.dispatcher.team_completion.on_poll_task(event)
+
+    messager.publish.assert_awaited_once()
+    assert agent._stream_controller.stream_queue.empty()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_persistent_completion_concludes_once_per_rising_edge():
+    """The completion marker is enqueued once until the team leaves completion."""
+    agent = _make_leader(lifecycle="persistent")
+    snapshot = TeamCompletionSnapshot(member_count=1, task_count=1)
+    _wire_completion_handler(agent, snapshot)
+    agent._stream_controller.stream_queue = asyncio.Queue()
+
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK, payload={})
+    await agent._coordination.dispatcher.team_completion.on_poll_task(event)
+    await agent._coordination.dispatcher.team_completion.on_poll_task(event)
+
+    # marker + sentinel from the first tick only.
+    assert agent._stream_controller.stream_queue.qsize() == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_rearm_allows_completion_to_conclude_again():
+    """rearm() resets the guard so a resumed completed team concludes again."""
+    agent = _make_leader(lifecycle="persistent")
+    snapshot = TeamCompletionSnapshot(member_count=1, task_count=1)
+    _wire_completion_handler(agent, snapshot)
+    handler = agent._coordination.dispatcher.team_completion
+    agent._stream_controller.stream_queue = asyncio.Queue()
+
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK, payload={})
+    await handler.on_poll_task(event)
+    handler.rearm()
+    await handler.on_poll_task(event)
+
+    # Two rising edges → two markers + two sentinels.
+    assert agent._stream_controller.stream_queue.qsize() == 4

@@ -180,7 +180,7 @@ class MessageDao:
             rows = result.scalars().all()
             return rows
 
-    async def has_unread_messages(self, team_name: str) -> bool:
+    async def has_unread_messages(self, team_name: str, *, include_broadcast: bool = True) -> bool:
         """Return True if any team message is still unread by its intended reader.
 
         Direct messages: unread when ``is_read`` is False. Broadcast messages:
@@ -190,6 +190,16 @@ class MessageDao:
         ``is_read`` as-is — messages addressed to consumer-less members (the
         ``user`` pseudo-member, human_agent) are marked read on write or
         auto-acked by the leader, so they do not block completion.
+
+        Args:
+            team_name: Team identifier.
+            include_broadcast: When False, only direct (point-to-point)
+                messages count toward the unread check; the broadcast
+                watermark comparison is skipped. Defaults to True to keep
+                the original behavior.
+
+        Returns:
+            True if at least one matching message has not been read.
         """
         message_model = _get_message_model()
         read_status_model = _get_message_read_status_model()
@@ -206,6 +216,9 @@ class MessageDao:
             )
             if direct_unread.first() is not None:
                 return True
+
+            if not include_broadcast:
+                return False
 
             # Broadcast messages: per-member watermark comparison.
             broadcast_result = await session.execute(

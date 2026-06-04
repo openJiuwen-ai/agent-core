@@ -20,12 +20,12 @@ from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
+    InvokeInputs,
     ModelCallInputs,
     ToolCallInputs,
-    InvokeInputs,
 )
-from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint
 from openjiuwen.harness.rails.evolution.contracts import EvolutionSnapshot
+from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint
 from openjiuwen.harness.rails.evolution.trajectory_rail import TrajectoryRail
 
 
@@ -286,15 +286,36 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
         self.assertIsNone(typed_snapshot.skill_name)
 
     async def test_approval_event_compat_wrapper_drains_host_buffer(self):
-        self.rail._emit_background_outcome_event(
-            {"status": "failed", "message": "background evolution failed"}
-        )
+        self.rail._emit_background_outcome_event({"status": "failed", "message": "background evolution failed"})
 
         events = await self.rail.drain_pending_approval_events()
 
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].payload["_evolution_meta"]["event_kind"], "outcome")
-        self.assertEqual(events[0].payload["_evolution_meta"]["status"], "failed")
+        self.assertEqual(events[0].payload["evolution_meta"]["event_kind"], "outcome")
+        self.assertEqual(events[0].payload["evolution_meta"]["rail_kind"], "base")
+        self.assertEqual(events[0].payload["evolution_meta"]["status"], "failed")
+
+    async def test_background_outcome_event_includes_optional_structured_fields(self):
+        self.rail._emit_background_outcome_event(
+            {
+                "status": "no_evolution_no_records",
+                "message": "no applied updates for skill=skill-a",
+                "rail_kind": "regular",
+                "skill_name": "skill-a",
+                "stage": "completed",
+                "source": "experience_updater",
+            }
+        )
+
+        events = await self.rail.drain_pending_host_events()
+
+        meta = events[0].payload["evolution_meta"]
+        self.assertEqual(meta["event_kind"], "outcome")
+        self.assertEqual(meta["status"], "no_evolution_no_records")
+        self.assertEqual(meta["rail_kind"], "regular")
+        self.assertEqual(meta["skill_name"], "skill-a")
+        self.assertEqual(meta["stage"], "completed")
+        self.assertEqual(meta["source"], "experience_updater")
 
     async def test_after_tool_call_trigger_defaults_to_compatible_behavior(self):
         """Default gate should preserve unconditional AFTER_TOOL_CALL triggering."""
@@ -410,6 +431,7 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
         # Verify no trajectory saved
         trajectories = self.store.query()
         self.assertEqual(len(trajectories), 0)
+
 
 class TestEvolutionRailAccumulation(IsolatedAsyncioTestCase):
     """Tests for multi-round trajectory accumulation."""
@@ -819,13 +841,16 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
 
     async def test_safe_run_evolution_catches_exceptions(self):
         """_safe_run_evolution catches and logs exceptions."""
+
         class FailingRail(EvolutionRail):
             async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 raise RuntimeError("evolution failed")
 
         rail = FailingRail(trajectory_store=self.store)
         # Should not raise
-        await rail._safe_run_evolution({"trajectory": Trajectory(execution_id="test", steps=[], session_id="test", source="online")})
+        await rail._safe_run_evolution(
+            {"trajectory": Trajectory(execution_id="test", steps=[], session_id="test", source="online")}
+        )
 
     async def test_safe_run_evolution_respects_total_timeout_hook(self):
         """_safe_run_evolution should stop background evolution when total timeout is exceeded."""
@@ -850,8 +875,8 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
         self.assertFalse(rail.completed)
         events = await rail.drain_pending_approval_events()
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].payload["_evolution_meta"]["event_kind"], "outcome")
-        self.assertEqual(events[0].payload["_evolution_meta"]["status"], "timed_out")
+        self.assertEqual(events[0].payload["evolution_meta"]["event_kind"], "outcome")
+        self.assertEqual(events[0].payload["evolution_meta"]["status"], "timed_out")
         self.assertIn("background evolution timed out after 0.01s", events[0].payload["content"])
 
     async def test_safe_run_evolution_records_failure_outcome(self):
@@ -868,8 +893,8 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
 
         events = await rail.drain_pending_approval_events()
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].payload["_evolution_meta"]["event_kind"], "outcome")
-        self.assertEqual(events[0].payload["_evolution_meta"]["status"], "failed")
+        self.assertEqual(events[0].payload["evolution_meta"]["event_kind"], "outcome")
+        self.assertEqual(events[0].payload["evolution_meta"]["status"], "failed")
         self.assertIn("evolution failed", events[0].payload["content"])
 
     async def test_safe_run_evolution_does_not_buffer_completed_outcomes(self):
@@ -910,7 +935,7 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
         events = await rail.drain_pending_approval_events()
         self.assertEqual(len(events), 3)
         self.assertEqual(
-            [event.payload["_evolution_meta"]["status"] for event in events],
+            [event.payload["evolution_meta"]["status"] for event in events],
             ["failed", "failed", "failed"],
         )
         self.assertIn("failed-0", events[0].payload["content"])

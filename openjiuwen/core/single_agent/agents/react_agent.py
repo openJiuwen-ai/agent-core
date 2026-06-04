@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
 
@@ -624,6 +625,7 @@ class ReActAgent(BaseAgent):
             preview_messages.insert(0, SystemMessage(content=preview_system_prompt))
         return preview_messages
 
+
     async def _call_model(
             self,
             ctx: AgentCallbackContext,
@@ -652,8 +654,8 @@ class ReActAgent(BaseAgent):
 
         ai_message = await self._railed_model_call(ctx)
 
-        if ai_message is None:
-            return None
+        if not isinstance(ai_message, AssistantMessage):
+            return ai_message
 
         log_llm_response(logger, ai_message)
 
@@ -760,6 +762,10 @@ class ReActAgent(BaseAgent):
         # Streaming path: accumulate chunks via __add__, write to session in real-time
         accumulated_chunk = None
         chunk_index = 0
+        call_start_time = time.monotonic()
+        call_first_token_time = None
+        call_last_token_time = None
+        call_chunk_count = 0
 
         async for chunk in llm.stream(
                 model=self._config.model_name,
@@ -771,6 +777,11 @@ class ReActAgent(BaseAgent):
                 accumulated_chunk = chunk
             else:
                 accumulated_chunk = accumulated_chunk + chunk
+
+            if call_first_token_time is None:
+                call_first_token_time = time.monotonic()
+            call_last_token_time = time.monotonic()
+            call_chunk_count += 1
 
             if chunk.reasoning_content:
                 await session.write_stream(OutputSchema(
@@ -801,10 +812,25 @@ class ReActAgent(BaseAgent):
             )
         ctx.inputs.response = ai_message
         if ai_message.usage_metadata:
+
+            perf_metrics = {}
+            call_latency = (time.monotonic() - call_start_time) * 1000
+            perf_metrics["total_latency_ms"] = round(call_latency, 2)
+            if call_first_token_time is not None:
+                perf_metrics["ttft_ms"] = round((call_first_token_time - call_start_time) * 1000, 2)
+            if call_first_token_time is not None and call_last_token_time is not None and call_chunk_count > 1:
+                perf_metrics["tpot_ms"] = round(
+                    (call_last_token_time - call_first_token_time) / (call_chunk_count - 1) * 1000, 2
+                )
+
             await session.write_stream(OutputSchema(
                 type="llm_usage",
                 index=0,
-                payload={"usage_metadata": ai_message.usage_metadata.model_dump(), "result_type": "answer"},
+                payload={
+                    "usage_metadata": ai_message.usage_metadata.model_dump(),
+                    "result_type": "answer",
+                    **perf_metrics,
+                },
             ))
         return ai_message
 
@@ -1379,6 +1405,10 @@ class ReActAgent(BaseAgent):
                             invoke_inputs.result = finish.result
                             break
 
+                        if not isinstance(ai_message, AssistantMessage):
+                            invoke_inputs.result = ai_message if isinstance(ai_message, dict) else {}
+                            break
+
                         await context.add_messages(
                             AssistantMessage(
                                 content=ai_message.content,
@@ -1432,14 +1462,17 @@ class ReActAgent(BaseAgent):
             # after_invoke rails have fired; return result (possibly adapted by rails via ctx.extra)
             return ctx.extra.get("invoke_result", invoke_inputs.result)
         except asyncio.CancelledError:
-            # Clear context messages to prevent stale messages from accumulating
-            # when cancelled requests leave behind partial state
+            # 外部取消（非工具级 CancelledError）。
+            # Fix 1 确保工具级 CancelledError 在 asyncio.gather 中被捕获并转为
+            # ToolMessage，不会传播到这里。此处只清理当前轮次的消息（工具调用请求 +
+            # 部分结果），保留历史对话上下文（with_history=False）。
             await self.clear_context_messages(session_id=session.get_session_id())
             raise  # Re-raise to propagate cancellation signal
         finally:
             if need_cleanup:
                 await self.context_engine.save_contexts(session)
-                await session.post_run()
+                await session.close_stream()
+                await session.commit()
 
     async def write_invoke_result_to_stream(
             self,
@@ -1515,8 +1548,12 @@ class ReActAgent(BaseAgent):
             )
             need_cleanup = True
 
-        # Only call pre_run/post_run for agent sessions, not workflow sessions
-        self.is_agent_session = hasattr(session, "pre_run") and hasattr(session, "post_run")
+        # Only manage agent-session stream lifecycle, not workflow sessions.
+        self.is_agent_session = (
+            hasattr(session, "pre_run")
+            and hasattr(session, "close_stream")
+            and hasattr(session, "commit")
+        )
         # self.is_agent_session = isinstance(session, AgentSession)
         if self.is_agent_session:
             await session.pre_run(
@@ -1548,7 +1585,8 @@ class ReActAgent(BaseAgent):
                 if need_cleanup:
                     await self.context_engine.save_contexts(session)
                 if self.is_agent_session:
-                    await session.post_run()
+                    await session.close_stream()
+                    await session.commit()
 
         if self.is_agent_session:
             # Agent sessions use stream_iterator for consuming output

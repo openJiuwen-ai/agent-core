@@ -77,6 +77,13 @@ class ExtendedEvolvePipeline(BasePipeline):
         self,
         ctx: SessionContext,
     ) -> AsyncIterator[Any]:
+        # Ensure skill source repos are cloned (cached, 48h skip)
+        from openjiuwen.auto_harness.infra.skill_source_manager import (
+            ensure_skill_sources,
+        )
+
+        await ensure_skill_sources(ctx.orchestrator.config)
+
         logger.info(
             "[AutoHarnessExtendedPipeline] session pipeline start: max_tasks=%s budget_remaining=%.1fs",
             ctx.orchestrator.config.max_tasks_per_session,
@@ -183,10 +190,13 @@ class ExtendedEvolvePipeline(BasePipeline):
             logger.info("[AutoHarnessExtendedPipeline] get multiple verified tasks")
             merge_before_activate = MergeActivationBlock()
             merged_artifact: RuntimeExtensionArtifact | None = None
+            # Use pre-generated package_name from design_artifact
+            package_name = design_artifact.package_name
             try:
                 async for chunk in merge_before_activate.stream(
                     ctx.orchestrator,
                     verified_tasks,
+                    package_name=package_name,
                 ):
                     if isinstance(chunk, MergeSuccessResult):
                         merged_artifact = chunk.artifact
@@ -252,6 +262,11 @@ async def _run_dependency_waves(
     wave_index = 0
 
     while pending:
+        if ctx.orchestrator.should_cancel:
+            logger.info(
+                "[AutoHarnessExtendedPipeline] cancellation requested, stopping dependency waves"
+            )
+            break
         skipped = []
         for design in pending.values():
             if _has_unmet_selected_dependency(
@@ -338,6 +353,13 @@ async def _run_build_verify_wave(
     semaphore = asyncio.Semaphore(concurrency)
 
     async def _worker(design: ExtensionDesign) -> None:
+        if ctx.orchestrator.should_cancel:
+            logger.info(
+                "[AutoHarnessExtendedPipeline] cancellation requested, skipping extension %s",
+                design.extension_name,
+            )
+            wave_results[design.extension_name] = False
+            return
         if ctx.orchestrator.budget.should_stop:
             wave_results[design.extension_name] = False
             return

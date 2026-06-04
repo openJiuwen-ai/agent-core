@@ -13,7 +13,6 @@ from openjiuwen.harness.prompts.sections.heartbeat import (
     build_heartbeat_section,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
-from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
 
 class HeartbeatRail(DeepAgentRail):
@@ -28,7 +27,6 @@ class HeartbeatRail(DeepAgentRail):
     def __init__(self) -> None:
         super().__init__()
         self.system_prompt_builder = None
-        self.heartbeat_dir = None
 
     def init(self, agent) -> None:
         """Initialize HeartbeatRail."""
@@ -42,7 +40,6 @@ class HeartbeatRail(DeepAgentRail):
             self.set_sys_operation(agent.deep_config.sys_operation)
         if not self.workspace:
             self.set_workspace(agent.deep_config.workspace)
-        self.heartbeat_dir = str(self.workspace.get_node_path(WorkspaceNode.HEARTBEAT_MD))
 
     def uninit(self, agent) -> None:
         """Remove heartbeat system prompt."""
@@ -54,19 +51,8 @@ class HeartbeatRail(DeepAgentRail):
         if self.system_prompt_builder is None or ctx.extra.get("run_kind") != RunKind.HEARTBEAT:
             return
 
-        if not self.sys_operation:
-            logger.warning("HeartbeatRail: sys_operation not configured")
-            return
-
-        fs = self.sys_operation.fs()
-        read_res = await fs.read_file(self.heartbeat_dir, mode="text")
-        content = ""
-        if read_res.code == 0:
-            content = read_res.data.content
-        else:
-            logger.warning("HeartbeatRail: failed to read HEARTBEAT.md")
         heartbeat_section = build_heartbeat_section(
-            language=self.system_prompt_builder.language, heartbeat_content=content)
+            language=self.system_prompt_builder.language)
         if heartbeat_section is not None:
             self.system_prompt_builder.add_section(heartbeat_section)
         else:

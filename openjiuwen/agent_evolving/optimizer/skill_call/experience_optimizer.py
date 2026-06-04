@@ -44,9 +44,9 @@ INITIAL_SCORE_BY_SIGNAL = {
 }
 
 GENERATE_RECORDS_LLM_POLICY = LLMInvokePolicy(
-    attempt_timeout_secs=60,
-    total_budget_secs=180,
-    max_attempts=3,
+    attempt_timeout_secs=150,
+    total_budget_secs=300,
+    max_attempts=2,
 )
 _RETRY_PARSE_TIMEOUT_SECS = 20
 
@@ -417,7 +417,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
             )
         except BaseError as exc:
             logger.error("[SkillExperienceOptimizer] LLM call failed: %s", exc)
-            return []
+            raise
         except ValueError:
             logger.warning("[SkillExperienceOptimizer] all retries exhausted, returning no records")
             return []

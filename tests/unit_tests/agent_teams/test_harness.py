@@ -24,6 +24,7 @@ import pytest
 from openjiuwen.agent_teams.harness import TeamHarness, _MountedRails
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 
 
 def _stub_deep_agent(
@@ -154,6 +155,29 @@ def test_build_skips_optional_rails_when_none() -> None:
 
     mounted = [call.args[0] for call in deep_agent.add_rail.call_args_list]
     assert mounted == [team_tool, team_policy]
+
+
+def test_build_mounts_team_plan_mode_rail_when_provided() -> None:
+    deep_agent = _stub_deep_agent()
+    spec = MagicMock(name="DeepAgentSpec")
+    spec.build.return_value = deep_agent
+
+    team_tool = MagicMock(name="TeamToolRail")
+    team_policy = MagicMock(name="TeamPolicyRail")
+    team_plan_mode = MagicMock(name="TeamPlanModeRail")
+
+    harness = TeamHarness.build(
+        agent_spec=spec,
+        role=TeamRole.LEADER,
+        member_name="leader",
+        team_tool_rail=team_tool,
+        team_policy_rail=team_policy,
+        team_plan_mode_rail=team_plan_mode,
+    )
+
+    mounted = [call.args[0] for call in deep_agent.add_rail.call_args_list]
+    assert mounted == [team_tool, team_policy, team_plan_mode]
+    assert harness.rails.team_plan_mode is team_plan_mode
 
 
 def test_run_agent_customizer_invokes_with_inner_agent() -> None:
@@ -310,6 +334,52 @@ def test_has_pending_interrupt_returns_true_when_state_present() -> None:
     harness = _make_harness(deep_agent)
 
     assert harness.has_pending_interrupt() is True
+
+
+@pytest.mark.asyncio
+async def test_pending_interrupt_survives_loop_session_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ask_user interrupts can outlive DeepAgent.loop_session cleanup."""
+    from openjiuwen.agent_teams import harness as harness_module
+
+    class FakeAgentSession:
+        def __init__(self, state: Any) -> None:
+            self.state = state
+
+        async def pre_run(self, inputs: dict[str, Any]) -> None:
+            self.inputs = inputs
+
+        def get_state(self, key: str) -> Any:
+            return self.state if key == INTERRUPTION_KEY else None
+
+    async def _fake_runner(*_: Any, **__: Any) -> Any:
+        if False:  # pragma: no cover - async generator marker
+            yield None
+
+    pending_state = SimpleNamespace(
+        interrupted_tools={
+            "ask-user": SimpleNamespace(interrupt_requests={"tool-ask-1": object()}),
+        }
+    )
+    agent_session = FakeAgentSession(pending_state)
+    team_session = SimpleNamespace(
+        create_agent_session=MagicMock(return_value=agent_session),
+    )
+    deep_agent = _stub_deep_agent(loop_session=None)
+    harness = _make_harness(deep_agent)
+    monkeypatch.setattr(harness_module.Runner, "run_agent_streaming", _fake_runner)
+
+    async for _ in harness.run_streaming(
+        {"query": "q"},
+        session_id="team-session",
+        team_session=team_session,
+    ):
+        pass
+
+    interactive = InteractiveInput()
+    interactive.update("tool-ask-1", {"answers": {"framework": "React"}})
+
+    assert harness.has_pending_interrupt() is True
+    assert harness.is_pending_interrupt_resume_valid(interactive) is True
 
 
 def test_is_pending_interrupt_resume_valid_rejects_non_interactive_input() -> None:

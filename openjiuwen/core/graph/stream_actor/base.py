@@ -3,7 +3,6 @@
 
 import asyncio
 from abc import ABC, abstractmethod
-from collections import defaultdict
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import AsyncGenerator, Any
@@ -49,10 +48,11 @@ class StreamPayload:
 
 
 class StreamActor:
-    def __init__(self, node_id: str, vertex: StreamConsumer, abilities: list[ComponentAbility], sources: list[str],
+    def __init__(self, node_id: str, vertex: StreamConsumer, abilities: list[ComponentAbility],
+                 source_groups: list[list[str]],
                  stream_generator_timeout: float = 1):
         self._processors: dict[ComponentAbility, StreamProcessor] = {
-            ability: StreamProcessor(node_id, sources, stream_generator_timeout=stream_generator_timeout)
+            ability: StreamProcessor(node_id, source_groups, stream_generator_timeout=stream_generator_timeout)
             for ability in abilities
         }
         self._task: asyncio.Task = None
@@ -158,51 +158,75 @@ class StreamActor:
 
 
 class StreamProcessor:
-    def __init__(self, node_id: str, sources: list[str], stream_generator_timeout: float = 1):
+    def __init__(self, node_id: str, source_groups: list[list[str]], stream_generator_timeout: float = 1):
         self.node_id = node_id
         self.queue: asyncio.Queue[StreamPayload] = asyncio.Queue()
         self.processor_queues: dict[str, list[asyncio.Queue]] = {}
-        self.sources = set(sources)
+        self.source_groups = [set(group) for group in source_groups if group]
+        self.sources = set().union(*self.source_groups) if self.source_groups else set()
+        self.source_ids = {self._producer_id_from_source_key(source_key) for source_key in self.sources}
         self._timeout = stream_generator_timeout if stream_generator_timeout > 0 else None
 
     async def run(self, ability: ComponentAbility):
         handle_map = set()
-        source_map: dict[ComponentAbility, set[str]] = defaultdict(set)
+        source_path_map: dict[str, set[str]] = {}
         while True:
             payload = await self.queue.get()
             message = payload.message
-            source_ability = payload.source_ability
             source_key = self._get_unique_source_key(payload)
             if _is_end_message(message):
                 source_id = _get_producer_id(message)
                 handle_map.add(source_key)
-                all_queues = []
-                is_all_finish = False
-                for path, queues in self.processor_queues.items():
-                    path = extract_origin_key(path)
-                    is_handled = False
-                    paths = source_map.get(source_ability)
-                    if paths:
-                        is_handled = path in paths
-                    is_all_finish = handle_map == self.sources
-                    all_queues.extend(queues)
-                    if (is_handled or is_all_finish) and self.is_value_from_source(path, source_id):
-                        for queue in queues:
-                            await queue.put(EndFrame(source_id))
-                if is_all_finish:
-                    for queue in all_queues:
-                        await queue.put(EndFrame(source_id))
+                await self._close_queues_for_source_key(source_id, source_key, source_path_map)
+
+                if self._all_source_groups_finished(handle_map):
+                    await self._close_all_queues(source_id)
 
             else:
+                await self._close_inactive_group_sources(source_key)
                 for path, queues in self.processor_queues.items():
-                    path = extract_origin_key(path)
-                    value = get_value_by_nested_path(path, message)
+                    origin_path = extract_origin_key(path)
+                    value = get_value_by_nested_path(origin_path, message)
                     if value is not None:
-                        source_map[source_ability].add(path)
+                        source_path_map.setdefault(source_key, set()).add(path)
                         for queue in queues:
                             await queue.put(value)
-            if handle_map == self.sources:
+            if self._all_source_groups_finished(handle_map):
                 break
+
+    def _all_source_groups_finished(self, handled_sources: set[str]) -> bool:
+        if not self.source_groups:
+            return False
+        return all(group & handled_sources for group in self.source_groups)
+
+    async def _close_inactive_group_sources(self, active_source_key: str) -> None:
+        for group in self.source_groups:
+            if active_source_key not in group or len(group) <= 1:
+                continue
+            for inactive_source_key in group - {active_source_key}:
+                await self._close_queues_for_source(self._producer_id_from_source_key(inactive_source_key))
+
+    async def _close_queues_for_source(self, source_id: str) -> None:
+        for path, queues in self.processor_queues.items():
+            if self.is_value_from_source(extract_origin_key(path), source_id):
+                for queue in queues:
+                    await queue.put(EndFrame(source_id))
+
+    async def _close_queues_for_source_key(self, source_id: str, source_key: str,
+                                           source_path_map: dict[str, set[str]]) -> None:
+        handled_paths = source_path_map.get(source_key)
+        if not handled_paths:
+            return
+        for path in handled_paths:
+            for queue in self.processor_queues.get(path, []):
+                await queue.put(EndFrame(source_id))
+
+    async def _close_all_queues(self, source_id: str) -> None:
+        all_queues = []
+        for queues in self.processor_queues.values():
+            all_queues.extend(queues)
+        for queue in all_queues:
+            await queue.put(EndFrame(source_id))
 
     @staticmethod
     def is_value_from_source(path: str, source_id: str) -> bool:
@@ -213,6 +237,10 @@ class StreamProcessor:
         source_id = _get_producer_id(payload.message)
         ability = payload.source_ability.name
         return f"{source_id}-{ability}"
+
+    @staticmethod
+    def _producer_id_from_source_key(source_key: str) -> str:
+        return source_key.rsplit("-", 1)[0]
 
     async def receive(self, message: StreamPayload):
         await self.queue.put(message)
@@ -238,14 +266,15 @@ class StreamProcessor:
             self.processor_queues[r_path].append(queue)
         else:
             self.processor_queues[r_path] = [queue]
+        timeout = None if self._path_has_declared_source(r_path) else self._timeout
 
         async def generator():
             while True:
                 try:
-                    message = await asyncio.wait_for(queue.get(), timeout=self._timeout)
+                    message = await asyncio.wait_for(queue.get(), timeout=timeout)
                 except asyncio.TimeoutError:
                     logger.warning(
-                        f"Receive chunk timeout {self._timeout}s of [{self.node_id}.{k_path}]",
+                        f"Receive chunk timeout {timeout}s of [{self.node_id}.{k_path}]",
                         event_type=LogEventType.GRAPH_RECEIVE_STREAM_CHUNK,
                         node_id=self.node_id,
                         chunk=None,
@@ -275,6 +304,13 @@ class StreamProcessor:
                 queue.task_done()
 
         return generator()
+
+    def _path_has_declared_source(self, r_path: str) -> bool:
+        origin_key = extract_origin_key(r_path)
+        if not origin_key:
+            return False
+        source_id = origin_key.split(".", 1)[0]
+        return source_id in self.source_ids
 
 
 def _is_end_message(message: dict[str, Any]) -> bool:

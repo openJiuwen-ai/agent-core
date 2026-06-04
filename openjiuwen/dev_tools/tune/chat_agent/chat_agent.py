@@ -109,7 +109,8 @@ class ChatAgent(BaseAgent):
             tools=await Runner.resource_mgr.get_tool_infos()
         )
         if session is None:
-            await agent_session.post_run()
+            await agent_session.close_stream()
+            await agent_session.commit()
         async for result in stream_iterator:
             yield dict(output=result.content, tool_calls=result.tool_calls)
 

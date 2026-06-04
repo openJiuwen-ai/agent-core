@@ -230,6 +230,7 @@ class RoundLevelCompressor(ContextProcessor):
     ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
         all_messages = context.get_messages() + messages_to_add
         force = kwargs.get("force", False)
+        self._reset_compression_usage()
 
         compressed_messages = await self._compress_until_target(
             context_messages=all_messages,
@@ -246,6 +247,8 @@ class RoundLevelCompressor(ContextProcessor):
         event = ContextEvent(
             event_type=self.processor_type(),
             messages_to_modify=list(range(len(all_messages))),
+            compact_summary=self._extract_compact_summary(compressed_messages),
+            compression_usage=self._current_compression_usage(),
         )
         return event, []
 
@@ -271,6 +274,7 @@ class RoundLevelCompressor(ContextProcessor):
         context_window: ContextWindow,
         **kwargs,
     ) -> Tuple[ContextEvent | None, ContextWindow]:
+        self._reset_compression_usage()
         total_tokens = self._count_context_window_tokens(
             system_messages=context_window.system_messages,
             context_messages=context_window.context_messages,
@@ -294,6 +298,8 @@ class RoundLevelCompressor(ContextProcessor):
         event = ContextEvent(
             event_type=self.processor_type(),
             messages_to_modify=list(range(original_context_len)),
+            compact_summary=self._extract_compact_summary(compressed_messages),
+            compression_usage=self._current_compression_usage(),
         )
         return event, context_window
 
@@ -701,6 +707,7 @@ class RoundLevelCompressor(ContextProcessor):
 
         try:
             response = await self._get_model().invoke(model_messages, output_parser=JsonOutputParser())
+            self._record_compression_usage(response)
         except Exception as exc:
             raise build_error(
                 StatusCode.MODEL_CALL_FAILED,
@@ -961,6 +968,14 @@ class RoundLevelCompressor(ContextProcessor):
             "Summary:\n"
             f"{summary}"
         )
+
+    def _extract_compact_summary(self, messages: List[BaseMessage]) -> str:
+        parts = []
+        for message in messages:
+            content = self._to_text(getattr(message, "content", ""))
+            if content.startswith(self._compression_marker):
+                parts.append(content)
+        return "\n\n".join(parts)
 
     def _build_minimal_truncated_message(self) -> UserMessage:
         return UserMessage(

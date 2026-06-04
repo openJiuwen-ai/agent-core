@@ -3,10 +3,14 @@
 """Base operation class for all operations in the system."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 from openjiuwen.core.common.logging import context_engine_logger as logger
 
 from ..context import RuntimeContext, ServiceContext
+
+if TYPE_CHECKING:
+    from openjiuwen.extensions.context_evolver.core.op.parallel_op import ParallelOp
+    from openjiuwen.extensions.context_evolver.core.op.sequential_op import SequentialOp
 
 
 class BaseOp(ABC):

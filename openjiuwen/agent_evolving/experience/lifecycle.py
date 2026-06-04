@@ -34,6 +34,8 @@ class PendingCommitResult:
 
     applied_count: int
     pending_count: int
+    rejected_count: int = 0
+    errors: List[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -77,19 +79,23 @@ class HostFacingExperienceResult:
         request_id: Optional[str],
         change_type: str = SKILL_EXPERIENCE_ENTRY,
         applied_count: int,
+        rejected_count: int = 0,
         pending_count: int = 0,
         errors: Optional[List[str]] = None,
     ) -> "HostFacingExperienceResult":
-        status = "persisted" if pending_count == 0 and not errors else "partial"
+        error_list = list(errors or [])
+        has_partial_outcome = pending_count > 0 or rejected_count > 0 or bool(error_list)
+        status = "partial" if has_partial_outcome else "persisted"
         return cls(
             skill_name=skill_name,
             request_id=request_id,
             effect=STATE_EFFECT,
             change_type=change_type,
             applied_count=applied_count,
+            rejected_count=rejected_count,
             pending_count=pending_count,
             status=status,
-            errors=list(errors or []),
+            errors=error_list,
         )
 
     @classmethod

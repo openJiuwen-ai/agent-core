@@ -14,9 +14,11 @@ from __future__ import annotations
 from typing import ClassVar
 
 from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordinationHandler
+from openjiuwen.agent_teams.external.format import render_task_line
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
 
 
@@ -28,6 +30,8 @@ class TaskBoardHandler(BaseCoordinationHandler):
         TeamEvent.TASK_CLAIMED: "on_task_claimed",
         # Task board (everything except TASK_CLAIMED nudges idle agent)
         TeamEvent.TASK_CREATED: "on_task_board_event",
+        TeamEvent.TASK_PLAN_REQUEST: "on_task_board_event",
+        TeamEvent.TASK_PLAN_RESPONSE: "on_task_plan_decision",
         TeamEvent.TASK_UPDATED: "on_task_board_event",
         TeamEvent.TASK_COMPLETED: "on_task_board_event",
         TeamEvent.TASK_CANCELLED: "on_task_board_event",
@@ -61,13 +65,21 @@ class TaskBoardHandler(BaseCoordinationHandler):
         if not member_name or self._infra.task_manager is None:
             return
         payload = event.get_payload()
+        backend = self._infra.team_backend
+        is_self_human = backend is not None and await backend.is_human_agent(member_name)
         if payload.member_name != member_name:
+            # A claim targeting someone else nudges idle teammates / the
+            # leader with the refreshed board. A human-agent avatar never
+            # autonomously surveys the board for claimable work, so it
+            # ignores other members' claims — only a claim addressed to
+            # the avatar itself (its controller's assignment notification,
+            # rendered below) is delivered.
+            if is_self_human:
+                return
             await self.on_task_board_event(event)
             return
         await self._poll.resume_polls()
 
-        backend = self._infra.team_backend
-        is_self_human = backend is not None and backend.is_human_agent(member_name)
         if is_self_human:
             # Title lookup is best-effort: a glitch must not break the
             # dispatch loop. Same exception discipline as
@@ -96,6 +108,30 @@ class TaskBoardHandler(BaseCoordinationHandler):
             member_name,
             payload.task_id,
             is_self_human,
+        )
+        await self._round.deliver_input(content)
+
+    async def on_task_plan_decision(self, event: EventMessage) -> None:
+        """Notify a member when the leader approves or rejects its plan."""
+        member_name = self._blueprint.member_name
+        if not member_name or self._infra.task_manager is None:
+            return
+        payload = event.get_payload()
+        if payload.member_name != member_name:
+            await self.on_task_board_event(event)
+            return
+        await self._poll.resume_polls()
+        if getattr(payload, "tool_call_id", ""):
+            team_logger.debug(
+                "[{}] task plan decision resumes pending interrupt, skip extra deliver_input",
+                member_name,
+            )
+            return
+        key = "dispatcher.task_plan_approved_to_self" if payload.approved else "dispatcher.task_plan_rejected_to_self"
+        content = t(
+            key,
+            task_id=payload.task_id,
+            feedback=getattr(payload, "feedback", "") or "",
         )
         await self._round.deliver_input(content)
 
@@ -153,8 +189,8 @@ class TaskBoardHandler(BaseCoordinationHandler):
                 return
             lines = [t("dispatcher.teammate_task_list")]
 
+        now_ms = get_current_time()
         for task in incomplete:
-            assignee = f" → {task.assignee}" if task.assignee else t("dispatcher.task_unassigned_marker")
-            lines.append(f"- [{task.task_id}] [{task.status}] {task.title}: {task.content}{assignee}")
+            lines.append(render_task_line(task, now_ms=now_ms))
 
         await self._round.deliver_input("\n".join(lines))

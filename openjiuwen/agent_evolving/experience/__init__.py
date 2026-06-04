@@ -9,15 +9,19 @@ from openjiuwen.agent_evolving.experience.scorer import ExperienceScorer
 from openjiuwen.agent_evolving.experience.skill_experience_manager import ExperienceManager
 from openjiuwen.agent_evolving.experience.tracker import ExperienceTracker
 from openjiuwen.agent_evolving.experience.types import (
-    OnlineEvolutionContext,
     ExperienceApplyResult,
     ExperienceApprovalRequest,
     ExperienceProposal,
+    OnlineEvolutionContext,
+    OnlineEvolutionResult,
+    OnlineEvolutionStatus,
     PendingChange,
 )
 
 __all__ = [
     "OnlineEvolutionContext",
+    "OnlineEvolutionResult",
+    "OnlineEvolutionStatus",
     "OnlineEvolutionOrchestrator",
     "ExperienceProposal",
     "ExperienceApprovalRequest",

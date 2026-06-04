@@ -219,16 +219,8 @@ class LLMController(BaseController):
                 if event.content.interactive_input is not None:
                     interactive_input = event.content.interactive_input
                 else:
-                    # Create InteractiveInput with component_ids
                     user_query = event.get_display_content()
-                    interactive_input = InteractiveInput()
-                    if component_ids:
-                        # Use first component_id to bind user input
-                        for comp_id in component_ids:
-                            interactive_input.update(comp_id, user_query)
-                    else:
-                        # Fallback to raw_inputs
-                        interactive_input = InteractiveInput(raw_inputs=user_query)
+                    interactive_input = self._create_query_resume_input(component_ids, user_query)
                     logger.info(
                         f"Created InteractiveInput with component_ids: {component_ids}, user_query: {user_query}")
 
@@ -750,9 +742,10 @@ class LLMController(BaseController):
         """
         accumulated_chunk = None
         stream_index = 0
+        stream_iter = model.stream(llm_inputs, tools=tools, model=model_name)
 
         try:
-            async for chunk in model.stream(llm_inputs, tools=tools, model=model_name):
+            async for chunk in stream_iter:
                 # Accumulate chunks using AIMessageChunk's __add__ method
                 if accumulated_chunk is None:
                     accumulated_chunk = chunk
@@ -805,6 +798,11 @@ class LLMController(BaseController):
 
         except Exception as e:
             logger.error(f"Failed to stream LLM output: {e}")
+            try:
+                async for _chunk in stream_iter:
+                    logger.debug("Consuming remaining stream chunk after exception")
+            except Exception as drain_err:
+                logger.debug(f"Error while consuming remaining stream chunks: {drain_err}")
             raise
 
     async def _get_model(self, session=None):
@@ -891,6 +889,20 @@ class LLMController(BaseController):
             if task.task_type == TaskType.WORKFLOW:
                 return task
         return None
+
+    def _create_query_resume_input(self, component_ids: list[str], user_query: str) -> InteractiveInput:
+        """Create InteractiveInput for plain-query workflow resume."""
+        if not component_ids:
+            return InteractiveInput(raw_inputs=user_query)
+
+        interactive_input = InteractiveInput()
+        if component_ids[0] != "questioner":
+            interactive_input.update(component_ids[0], user_query)
+            return interactive_input
+
+        for comp_id in component_ids:
+            interactive_input.update(comp_id, user_query)
+        return interactive_input
 
     def _find_interrupted_task(self, workflow_task: Task, session: Session):
         """Find interrupted task

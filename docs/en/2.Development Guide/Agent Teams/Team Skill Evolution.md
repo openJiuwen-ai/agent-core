@@ -141,13 +141,13 @@ When issues are detected, Rail aggregates signals and calls `TeamSkillExperience
 User actively provides improvement suggestions:
 
 ```python
-request_id = await team_rail.request_user_evolution(
+result = await team_rail.request_user_evolution(
     skill_name="research-team",
     user_intent="Add reviewer role, limit research time to 10 minutes",
 )
 ```
 
-Rail merges user intent into the same aggregated `generate_records(EvolutionContext)` flow to generate experience records.
+Rail first uses the current rail trajectory, or the aggregated team trajectory from `trajectory_source`, as the evidence window for trajectory issue detection. It then merges user intent as supplemental direction into the same `generate_records(EvolutionContext)` flow to generate experience records.
 
 ### Record Approval Flow
 

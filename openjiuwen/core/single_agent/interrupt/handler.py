@@ -6,7 +6,7 @@ from __future__ import annotations
 import copy
 import json
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.logging import logger
@@ -29,6 +29,9 @@ from openjiuwen.core.single_agent.interrupt.state import (
     RESUME_START_ITERATION_KEY, INTERRUPT_AUTO_CONFIRM_KEY,
 )
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
+
+if TYPE_CHECKING:
+    from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
 
 
 @dataclass

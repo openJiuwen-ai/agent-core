@@ -67,7 +67,31 @@ STRINGS: dict[str, str] = {
         "member driven by the real user via HumanAgentInbox; **rejects** model_name "
         "and prompt (the framework template manages them) — passing those fields "
         "raises an error. Choosing 'human_agent' requires spec.enable_hitt=True and "
-        "the current build_team instance must not have disabled HITT"
+        "the current build_team instance must not have disabled HITT. "
+        "'bridge_agent' = bridge to an external independent agent (e.g. claudecode "
+        "/ codex / hermes). Behaves as a full teammate locally (claims tasks, "
+        "sends/receives messages); concrete work output is produced by the remote "
+        "agent reached over a pure-text protocol, and the local LLM only "
+        "schedules — it passes the remote's output through verbatim. Choosing "
+        "'bridge_agent' requires non-empty 'desc' (used both as the teammate "
+        "persona and the remote's connect briefing) and optional "
+        "mailbox_inject_mode / protocol / adapter_config / model_name. Requires "
+        "spec.enable_bridge=True and the current build_team instance must not have "
+        "disabled Bridge. "
+        "'external_cli' = launch a third-party CLI agent (claudecode / codex / ...) "
+        "directly as a teammate; its brain is the CLI subprocess rather than a local "
+        "LLM, and it sends messages / claims tasks through the auto-injected team MCP "
+        "tools. Choosing 'external_cli' requires 'cli_agent' (the CLI kind) and "
+        "non-empty 'desc' (the member persona), and rejects model_name/prompt (the "
+        "model and config live on the CLI side). 'cli_agent' must name a CLI kind "
+        "pre-declared in spec.external_cli_agents"
+    ),
+    "spawn_member.cli_agent": (
+        "Only used when role_type='external_cli'. Identifier of the third-party CLI "
+        "agent kind to launch, e.g. 'claude' (claudecode) or 'codex'. Must match a "
+        "static config entry pre-declared in spec.external_cli_agents — the launch "
+        "command, working directory and MCP injection all live in that entry; this "
+        "field only references it by name"
     ),
     "spawn_member.prompt": (
         "[PRIVATE, visible only to this member] Long-term working conventions, "
@@ -82,7 +106,26 @@ STRINGS: dict[str, str] = {
         "Optional. Suggested model name for this member "
         "(e.g. gpt-4, claude-sonnet-4); "
         "the system picks an appropriate model when omitted. "
-        "Forbidden when role_type='human_agent'"
+        "Forbidden when role_type='human_agent'; "
+        "for role_type='bridge_agent' it selects the local scheduler LLM"
+    ),
+    "spawn_member.mailbox_inject_mode": (
+        "Only used when role_type='bridge_agent'. Controls how team-side "
+        "mailbox messages are wrapped before being relayed to the remote agent. "
+        "'passthrough' (default) prefixes only the sender label; 'rephrase' "
+        "wraps full sender context (role, persona, optional task hint)"
+    ),
+    "spawn_member.protocol": (
+        "Only used when role_type='bridge_agent'. Protocol identifier "
+        "(e.g. 'a2a' / 'acp' / 'claudecode'). Reserved for future "
+        "BridgeProtocolAdapter lookup; empty string means no adapter is "
+        "wired yet (bridge degrades to a normal teammate)"
+    ),
+    "spawn_member.adapter_config": (
+        "Only used when role_type='bridge_agent'. Free-form adapter "
+        "configuration (endpoint, auth, relay_timeout_s, ...). Passed "
+        "verbatim to BridgeProtocolAdapter.connect — schema is up to the "
+        "concrete adapter implementation"
     ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/en/shutdown_member.md
@@ -96,7 +139,7 @@ STRINGS: dict[str, str] = {
     ),
     # ===== approve_plan ========================================================
     # approve_plan._desc lives in descs/en/approve_plan.md
-    "approve_plan.member_name": "member_name of the member who submitted the plan (semantic slug, not display label)",
+    "approve_plan.plan_id": "Member plan submission ID to approve or reject one exact plan revision.",
     "approve_plan.approved": (
         "Whether to approve the current plan. true means proceed to implementation; false means revise it"
     ),
@@ -105,6 +148,13 @@ STRINGS: dict[str, str] = {
         "reason and revision direction; when approving, "
         "you may add constraints, reminders, or extra requirements"
     ),
+    # ===== submit_plan ==========================================================
+    "submit_plan._desc": "Submit a prepared execution-plan Markdown file for a plan-mode task before implementation",
+    "submit_plan.task_id": "Task ID to plan before execution",
+    "submit_plan.plan_id": "Optional member plan ID; the system generates one when omitted. "
+                           "The Leader uses this plan_id for review",
+    "submit_plan.plan_path": "Path to the member-authored Markdown plan file; the system copies "
+                             "it to a managed snapshot for Leader review",
     # ===== approve_tool ========================================================
     # approve_tool._desc lives in descs/en/approve_tool.md
     "approve_tool.member_name": (

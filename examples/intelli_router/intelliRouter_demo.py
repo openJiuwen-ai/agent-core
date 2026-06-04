@@ -365,8 +365,38 @@ async def demo_router_sharing():
     print("=" * 60)
 
 
+async def main_streaming():
+    """Streaming counterpart of main(): consume chunks via Runner.run_agent_streaming."""
+    print("\n" + "=" * 60)
+    print("Hello Agent with IntelliRouter Demo (Streaming)")
+    print("=" * 60)
+    print(f"\n[Config Info]")
+    print(f"  Model: {model_config.model_name}")
+    print(f"  Deployments: {len(intelli_router_deployments)}")
+    print(f"  Routing Strategy: adaptive")
+
+    print(f"\n[Streaming]")
+    try:
+        chunk_count = 0
+        # stream_modes=None falls back to the agent's default streaming events.
+        # Pass a list[BaseStreamMode] (e.g. [BaseStreamMode.MESSAGES]) to filter.
+        async for chunk in Runner.run_agent_streaming(
+            workflow_agent,
+            {"query": "Hello, tell me a joke in under 20 words"},
+            stream_modes=None,
+        ):
+            chunk_count += 1
+            print(f"  [chunk #{chunk_count}] {chunk}")
+        print(f"\n[Done] received {chunk_count} streaming chunks")
+    except Exception as e:
+        print(f"\n[Streaming Failed] Error: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 async def async_main():
     await main()
+    await main_streaming()
     await demo_router_sharing()
 
 

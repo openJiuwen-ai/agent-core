@@ -26,7 +26,9 @@ from openjiuwen.harness.tools.worktree import (
     WorktreeManager,
     WorktreeSession,
     get_current_session,
+    get_default_worktree_name,
     set_current_session,
+    set_default_worktree_name,
 )
 from openjiuwen.harness.tools.worktree.tools import (
     _generate_random_slug,
@@ -41,9 +43,11 @@ from openjiuwen.harness.tools.worktree.tools import (
 def _isolate_cwd_and_session(tmp_path):
     """Each test starts with a clean ContextVar + cwd."""
     set_current_session(None)
+    set_default_worktree_name(None)
     init_cwd(str(tmp_path), workspace=str(tmp_path))
     yield
     set_current_session(None)
+    set_default_worktree_name(None)
     _cwd_state.set(CwdState())
 
 
@@ -275,3 +279,85 @@ async def test_legacy_team_kwargs_propagate_to_session():
     assert out.success, out.error
     # Manager saw the legacy keys re-routed through the generic args.
     assert mgr_calls == [("legacy-wt", "member-1", "team-x")]
+
+
+@pytest.mark.asyncio
+async def test_enter_existing_worktree_by_name(tmp_path, monkeypatch):
+    repo = str(tmp_path / "repo")
+    workspace = repo
+    _init_git_repo(repo)
+    worktree = os.path.join(repo, ".worktrees", "bold-elm-1732")
+    os.makedirs(os.path.dirname(worktree), exist_ok=True)
+    _git(repo, "worktree", "add", "-b", "worktree-bold-elm-1732", worktree, "HEAD")
+
+    monkeypatch.chdir(repo)
+    init_cwd(repo, workspace=workspace)
+    tool = EnterWorktreeTool(WorktreeManager(WorktreeConfig(enabled=True)))
+
+    result = await tool.invoke({"name": "bold-elm-1732"})
+
+    assert result.success is True
+    assert result.data["existed"] is True
+    assert os.path.normcase(result.data["worktree_path"]) == os.path.normcase(worktree)
+    assert result.data["worktree_branch"] == "worktree-bold-elm-1732"
+    assert os.path.normcase(get_cwd()) == os.path.normcase(worktree)
+
+@pytest.mark.asyncio
+async def test_unnamed_enter_reuses_session_default_after_keep(tmp_path, monkeypatch):
+    repo = str(tmp_path / "repo")
+    workspace = repo
+    _init_git_repo(repo)
+
+    monkeypatch.chdir(repo)
+    init_cwd(repo, workspace=workspace)
+    mgr = WorktreeManager(WorktreeConfig(enabled=True))
+    enter_tool = EnterWorktreeTool(mgr)
+    exit_tool = ExitWorktreeTool(mgr)
+
+    first = await enter_tool.invoke({})
+    assert first.success, first.error
+    default_name = get_default_worktree_name()
+    assert default_name is not None
+    first_path = first.data["worktree_path"]
+
+    kept = await exit_tool.invoke({"action": "keep"})
+    assert kept.success, kept.error
+    assert get_current_session() is None
+
+    second = await enter_tool.invoke({})
+    assert second.success, second.error
+    assert second.data["existed"] is True
+    assert get_default_worktree_name() == default_name
+    assert os.path.normcase(second.data["worktree_path"]) == os.path.normcase(first_path)
+
+
+@pytest.mark.asyncio
+async def test_explicit_name_does_not_replace_session_default(tmp_path, monkeypatch):
+    repo = str(tmp_path / "repo")
+    workspace = repo
+    _init_git_repo(repo)
+
+    monkeypatch.chdir(repo)
+    init_cwd(repo, workspace=workspace)
+    mgr = WorktreeManager(WorktreeConfig(enabled=True))
+    enter_tool = EnterWorktreeTool(mgr)
+    exit_tool = ExitWorktreeTool(mgr)
+
+    default_result = await enter_tool.invoke({})
+    assert default_result.success, default_result.error
+    default_name = get_default_worktree_name()
+    default_path = default_result.data["worktree_path"]
+    assert default_name is not None
+    await exit_tool.invoke({"action": "keep"})
+
+    named_result = await enter_tool.invoke({"name": "named-wt"})
+    assert named_result.success, named_result.error
+    assert get_default_worktree_name() == default_name
+    assert os.path.basename(named_result.data["worktree_path"]) == "named-wt"
+    await exit_tool.invoke({"action": "keep"})
+
+    reused_default = await enter_tool.invoke({})
+    assert reused_default.success, reused_default.error
+    assert reused_default.data["existed"] is True
+    assert get_default_worktree_name() == default_name
+    assert os.path.normcase(reused_default.data["worktree_path"]) == os.path.normcase(default_path)

@@ -19,8 +19,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-05-15 |
-| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md |
+| 最近一次修订日期 | 2026-05-27 |
+| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md |
 
 ## 范围 / 边界
 
@@ -108,6 +108,10 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     `MappedToolOutput`，其 `__str__` 返回该文本。`ToolOutput.data` 仍保留
     给事件 / 日志等程序消费者用。新工具如果不显式覆盖 `map_result`，
     就只会得到 `json.dumps(data)` 的兜底——意味着 token 浪费，应当显式覆盖。
+    `view_task` 的 list / detail 两级输出都把 `updated_at` 经
+    `timefmt.format_time_context` 渲染为「绝对本地时间 + 相对差」，给 LLM
+    任务停留时长的时间感（`map_result` 签名不可加参，内部取 `get_current_time()`，
+    用 `updated_at is not None` 守卫 `exclude_none` 剔除的情况）。
 15. **Card / Config 分层**：`ToolCard` 只承载可序列化的 `id` / `name` /
     `description` / `input_params`；`teammate_mode` / `model_config_allocator` /
     `on_teammate_created` 这类运行时句柄属于工具实例的私有字段，禁止下沉

@@ -178,6 +178,8 @@ class TestCurrentRoundCompressor:
 
         assert_context_state_pair(states, processor_type="CurrentRoundCompressor")
         assert "modified" in states[1].summary
+        assert "[CURRENT_ROUND_MEMORY_BLOCK]" in states[1].compact_summary
+        assert "Compressed: tool execution result." in states[1].compact_summary
 
     @pytest.mark.asyncio
     async def test_compression_with_assistant_and_tool_messages(self):
@@ -360,7 +362,7 @@ class TestCurrentRoundCompressor:
         compressor.compress_ = AsyncMock(return_value=None)
         compressor._collect_prior_summary_indices = MagicMock(return_value=[])
 
-        updated_messages, modified_indices = await compressor.multi_compress(
+        updated_messages, modified_indices, compact_summary = await compressor.multi_compress(
             context_messages=context_messages,
             last_user_idx=0,
             end_idx=3,
@@ -375,4 +377,5 @@ class TestCurrentRoundCompressor:
         assert isinstance(updated_messages[3], ToolMessage)
         assert updated_messages[3].tool_call_id == "tc-1"
         assert modified_indices == [1, 2]
+        assert compact_summary == "[CURRENT_ROUND_MEMORY_BLOCK]\ncompressed"
 

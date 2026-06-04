@@ -18,9 +18,10 @@ tools:
 
 1. 阅读 GapAnalysisArtifact，理解每个 gap 的用户目标、能力缺口和建议方案
 2. 检查 harness 扩展框架规范（rail 基类、tool 注册方式、harness_config.yaml 格式）
-3. 为每个 gap 设计一个 ExtensionDesign，包含具体的组件列表和文件规划
-4. 信息不足时，优先保守设计，不凭空臆断
-5. 保留用户目标中的关键实体和产物类型，不要把具体目标泛化成普通需求收集、需求报告或泛办公扩展
+3. **检查社区 skill 是否可复用**：如果 query 中包含"可复用社区 Skill 列表"，先查看列表中是否有 description 与 gap 语义匹配的 skill；匹配时设置 `skill_source='community:<skill_name>'`，不要自行设计 SKILL.md 内容
+4. 为每个 gap 设计一个 ExtensionDesign，包含具体的组件列表和文件规划；只在社区没有匹配 skill 时，才从零设计 skill 方案
+5. 信息不足时，优先保守设计，不凭空臆断
+6. 保留用户目标中的关键实体和产物类型，不要把具体目标泛化成普通需求收集、需求报告或泛办公扩展
 
 ## 范围约束
 
@@ -71,6 +72,7 @@ tools:
 不适合：
 - 被动拦截或修改 agent 行为（应该用 Rail）
 - 纯知识传递，不涉及代码执行（应该用 Skill）
+- Skill 独立即可满足需求时，无需强行搭配 Tool（无论社区复用还是自行设计，Skill 往往能完整实现功能）
 
 ### Skill — 知识注入与流程指导
 
@@ -139,7 +141,7 @@ tools:
 
 一个扩展可以同时包含多种组件。例如：
 - Rail + Tool：rail 检测意图并注入上下文，tool 提供具体操作能力
-- Tool + Skill：tool 提供操作能力，skill 提供使用指南
+- Tool + Skill：tool 提供操作能力，skill 提供使用指南, **tool 需要基于 skill 使用**
 - Rail + Skill：rail 在特定时机注入 skill 内容到 prompt
 
 ## 扩展框架规范
@@ -168,7 +170,7 @@ openjiuwen/extensions/harness/<name>/
 - 为每个独立 gap 输出一个 ExtensionDesign，最多 10 个
 - 普通新增能力输出为 `kind="capability"`
 - 全局硬约束、写入前强制检查、所有文件命名约束输出为独立 `kind="constraint"`，不要合并进 PPT/Excel/Word 等 tool
-- 文件名必须带 `huawei` 后缀等硬性约束必须优先建模为 rail，例如 `huawei_filename_guard`
+- 文件名必须带特定后缀等硬性约束必须优先建模为 rail，例如 `filename_guard`
 - capability 可通过 `depends_on` 声明依赖的 constraint extension_name
 - 输出 JSON 数组，可包含多个 ExtensionDesign 元素：
 
@@ -199,7 +201,7 @@ openjiuwen/extensions/harness/<name>/
 - components 只列出实际需要的类型，不得强制添加 `"rail"`；如果只需要知识注入，可以只输出 `["skill"]`
 - kind 只能是 `"capability"` 或 `"constraint"`；省略时等价于 `"capability"`
 - 如果需求是生成 PPT、报告、文档、配置或其他文件，通常应至少包含 `"tool"`，并在需要领域/品牌/模板规范时追加 `"skill"`
-- extension_name 必须表达用户目标能力并保留关键实体；例如“生成华为风格 PPT”应命名为 `huawei_ppt_generator` 或类似名称，不要命名为 `user_demand_office_extension`
+- extension_name 必须表达用户目标能力并保留关键实体；例如“生成财务excel”应命名为 `excel_financial_generator` 或类似名称，不要命名为 `user_demand_office_extension`
 - 如果 gap 明确来自竞品，可使用竞品名前缀；如果来源是用户需求或领域范式，不要强行添加竞品名前缀
 - extension_name 必须是合法 Python 标识符（snake_case）
 - module 路径必须以 `openjiuwen.extensions.harness.<name>.` 开头

@@ -166,7 +166,7 @@ class MemoryItemParser:
         Args:
             lines: List of text lines
             start_idx: Starting index
-            field_pattern: Regex pattern for field header (e.g., r'^##\s*Title\s+')
+            field_pattern: Regex pattern for field header (e.g., ``^##\\s*Title\\s+``)
 
         Returns:
             Tuple of (field_value, next_index)

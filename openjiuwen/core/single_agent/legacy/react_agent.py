@@ -213,7 +213,8 @@ class LegacyReActAgent(BaseAgent):
             }
         finally:
             if session_created:
-                await session.post_run()
+                await session.close_stream()
+                await session.commit()
 
     async def stream(self, inputs: Dict, session: Session = None) -> AsyncIterator[Any]:
         """Stream call - minimal version"""
@@ -257,7 +258,8 @@ class LegacyReActAgent(BaseAgent):
                 logger.error(f"ReActAgent stream error: {e}")
             finally:
                 if need_cleanup:
-                    await session.post_run()
+                    await session.close_stream()
+                    await session.commit()
 
         task = asyncio.create_task(stream_process())
 

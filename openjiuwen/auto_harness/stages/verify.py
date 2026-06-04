@@ -7,8 +7,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 from typing import Any, AsyncIterator
@@ -21,6 +21,9 @@ from openjiuwen.auto_harness.contexts import (
 )
 from openjiuwen.auto_harness.infra.parsers import (
     extract_text,
+)
+from openjiuwen.auto_harness.infra.ci_gate_runner import (
+    decode_stdout,
 )
 from openjiuwen.auto_harness.infra.runtime_extension_static_checks import (
     ExtStaticCheckResult,
@@ -64,6 +67,139 @@ if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import (
         DeepAgent,
     )
+
+
+async def _install_extension_dependencies(
+    extension_root: Path,
+) -> tuple[bool, str]:
+    """Install dependencies from requirements.txt if present.
+
+    Returns:
+        (success, error_message) - error_message is empty on success.
+    """
+    req_file = extension_root / "requirements.txt"
+    if not req_file.exists():
+        logger.debug(
+            "[verify_ext] no requirements.txt found: %s",
+            extension_root,
+        )
+        return True, ""
+
+    logger.info(
+        "[verify_ext] installing dependencies from: %s",
+        req_file,
+    )
+
+    env = _build_install_env()
+
+    # Ensure pip is available, bootstrap via ensurepip if not
+    pip_available = await _check_pip_available(env)
+    if not pip_available:
+        logger.info("[verify_ext] pip not available, bootstrapping via ensurepip")
+        bootstrap_ok, bootstrap_error = await _bootstrap_pip(env)
+        if not bootstrap_ok:
+            return False, bootstrap_error
+
+    return await _run_pip_install(req_file, env)
+
+
+def _build_install_env() -> dict[str, str]:
+    """Build env for pip install, ensuring correct Python environment."""
+    env = {**os.environ, "CI": "1"}
+    # Remove VIRTUAL_ENV to prevent targeting wrong environment
+    env.pop("VIRTUAL_ENV", None)
+    # Set AUTO_HARNESS_PYTHON and prepend bin dir to PATH
+    python_path = Path(sys.executable)
+    env["AUTO_HARNESS_PYTHON"] = sys.executable
+    if python_path.name.startswith("python"):
+        bin_dir = str(python_path.parent)
+        existing_path = env.get("PATH", "")
+        pathsep = os.pathsep
+        env["PATH"] = (
+            f"{bin_dir}{pathsep}{existing_path}"
+            if existing_path
+            else bin_dir
+        )
+    return env
+
+
+async def _check_pip_available(env: dict[str, str]) -> bool:
+    """Check if pip module is available in current Python environment."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "pip",
+            "--version",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        await proc.communicate()
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+async def _run_pip_install(
+    req_file: Path,
+    env: dict[str, str],
+) -> tuple[bool, str]:
+    """Run pip install -r requirements.txt."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-r",
+            str(req_file),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await proc.communicate()
+
+        if proc.returncode == 0:
+            logger.info("[verify_ext] pip install succeeded")
+            return True, ""
+
+        error = stderr.decode("utf-8", errors="replace").strip()
+        if not error:
+            error = stdout.decode("utf-8", errors="replace").strip()
+        return False, f"pip_install_failed: {error[:500]}"
+    except Exception as e:
+        return False, f"pip_install_exception: {e}"
+
+
+async def _bootstrap_pip(env: dict[str, str]) -> tuple[bool, str]:
+    """Bootstrap pip via ensurepip if not available.
+
+    Returns:
+        (success, error_message)
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "ensurepip",
+            "--upgrade",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await proc.communicate()
+
+        if proc.returncode == 0:
+            logger.info("[verify_ext] pip bootstrapped successfully")
+            return True, ""
+
+        error = stderr.decode("utf-8", errors="replace").strip()
+        if not error:
+            error = stdout.decode("utf-8", errors="replace").strip()
+        return False, f"pip_bootstrap_failed: {error[:500]}"
+    except Exception as e:
+        return False, f"pip_bootstrap_exception: {e}"
 
 
 def _summarize_text(
@@ -400,6 +536,14 @@ class ExtendVerifyStage(VerifyStage):
                 "ExtensionBuildArtifact"
             )
 
+        # L0: Install dependencies from requirements.txt
+        extension_root = Path(build.extension_root)
+        dep_ok, dep_error = await _install_extension_dependencies(
+            extension_root,
+        )
+        if not dep_ok:
+            logger.error(f"[verify_ext] 依赖安装失败: {dep_error}")
+
         static_result = ExtStaticCheckResult()
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
@@ -477,7 +621,6 @@ class ExtendVerifyStage(VerifyStage):
             rails_count=static_result.rails_count,
             tools_count=static_result.tools_count,
             skills_count=static_result.skills_count,
-            skill_dirs_count=static_result.skill_dirs_count,
         ):
             if isinstance(item, _CIResult):
                 acceptance_ok = item.passed
@@ -543,7 +686,6 @@ async def _run_agent_generated_ext_acceptance(
     rails_count: int,
     tools_count: int,
     skills_count: int,
-    skill_dirs_count: int,
 ) -> AsyncIterator[Any]:
     """Generate acceptance tests once, then repair code and rerun them."""
     agent = ctx.runtime.task_agent
@@ -580,7 +722,6 @@ async def _run_agent_generated_ext_acceptance(
                 rails_count=rails_count,
                 tools_count=tools_count,
                 skills_count=skills_count,
-                skill_dirs_count=skill_dirs_count,
                 previous_error=last_error,
             )
             async for chunk in _stream_verify_ext_agent_turn(
@@ -694,7 +835,6 @@ def _build_ext_acceptance_test_prompt(
     rails_count: int,
     tools_count: int,
     skills_count: int,
-    skill_dirs_count: int,
     previous_error: str,
 ) -> str:
     """Build prompt for agent-generated extension acceptance tests."""
@@ -703,42 +843,160 @@ def _build_ext_acceptance_test_prompt(
         if previous_error
         else ""
     )
+
     return (
-        "你正在执行 verify_ext 阶段。请根据已加载的 verify_ext skill，"
-        "为 runtime extension 生成可执行 pytest 验收测试。\n\n"
+        "你正在执行 verify_ext 阶段。请严格遵循 verify_ext skill 规范生成 pytest 验收测试。\n\n"
+
+        # ===== 强制约束 =====
+        "【强制约束 - 违反将导致测试无法执行】\n\n"
+
+        "1. 路径动态解析:\n"
+        "   禁止硬编码任何绝对路径。必须从 __file__ 或环境变量动态推断:\n"
+        "   ```python\n"
+        "   test_file = Path(__file__).resolve()\n"
+        "   wt_root = test_file.parent.parent.parent  # .auto_harness_verify/<ext>/test.py\n"
+        "   ext_root = wt_root / 'openjiuwen/extensions/harness/<extension_name>'\n"
+        "   ```\n\n"
+
+        "2. sys.path 操作:\n"
+        "   只在模块顶部一次性添加路径，禁止在测试方法内修改:\n"
+        "   ```python\n"
+        "   for p in [str(wt_root), str(agent_core_root)]:\n"
+        "       if p not in sys.path:\n"
+        "           sys.path.insert(0, p)\n"
+        "   ```\n\n"
+
+        "3. 异步测试规范:\n"
+        "   async 测试方法必须加 @pytest.mark.asyncio 装饰器。\n"
+        "   禁止在非 async 测试中使用 asyncio.run()。\n\n"
+
+        "4. 动态导入:\n"
+        "   必须从 harness_config.yaml 实际声明的 module/class 获取:\n"
+        "   ```python\n"
+        "   import importlib\n"
+        "   with open(config_path) as f:\n"
+        "       config = yaml.safe_load(f)\n"
+        "   for entry in config['resources']['tools']:\n"
+        "       module = importlib.import_module(entry['module'])\n"
+        "       tool_cls = getattr(module, entry['class'])\n"
+        "   ```\n"
+        "   禁止假设特定 module path。\n\n"
+
+        "5. 失败归因格式:\n"
+        "   所有 assert 失败必须以 `failure_id=<ID>: ` 开头，ID 来自 verify_ext skill:\n"
+        "   L1: manifest_invalid, entry_point_not_allowed, module_import_failed,\n"
+        "       class_init_failed, skill_manifest_invalid\n"
+        "   L2: harness_load_failed, rail_not_registered, tool_not_registered,\n"
+        "       skill_not_loaded\n"
+        "   L3: tool_not_called, tool_result_failed, tool_result_schema_missing,\n"
+        "       artifact_not_created, artifact_format_invalid, artifact_placeholder_output,\n"
+        "       rail_hook_not_observed, rail_tool_state_not_shared\n\n"
+
+        "6. API 安全调用:\n"
+        "   调用方法前用 hasattr 检查:\n"
+        "   ```python\n"
+        "   if hasattr(agent, 'shutdown'):\n"
+        "       await agent.shutdown()\n"
+        "   ```\n\n"
+
+        "7. 跨平台兼容性:\n"
+        "   测试代码必须在 Windows 和 Linux 环境下都能执行:\n"
+        "   - 路径操作: 使用 pathlib.Path，禁止字符串拼接路径分隔符\n"
+        "   - 路径比较: 使用 Path.resolve() 规范化后再比较\n"
+        "   - 环境变量: 使用 os.getenv()，不假设特定路径前缀 (C:/ vs /)\n"
+        "   - 换行符: 文件读写指定 encoding='utf-8'，不假设换行符\n"
+        "   - subprocess: 使用 asyncio.create_subprocess_exec 而非 shell=True\n"
+        "   - 临时目录: 使用 pytest tmp_path 或 tempfile.gettempdir()\n"
+        "   ```python\n"
+        "   # 正确: 使用 Path 进行跨平台路径操作\n"
+        "   ext_root = wt_root / 'openjiuwen' / 'extensions' / 'harness' / ext_name\n"
+        "   config_path = ext_root / 'harness_config.yaml'\n\n"
+        "   # 错误: 字符串拼接路径分隔符\n"
+        "   ext_root = wt_root + '/openjiuwen/extensions/harness/' + ext_name  # 禁止\n"
+        "   ```\n\n"
+
+        # ===== 验证分层 (来自 SKILL.md) =====
+        "【验证分层 - 验收测试必须覆盖 L1/L2/L3】\n\n"
+
+        "L1 结构校验:\n"
+        "  必须检查:\n"
+        "  - harness_config.yaml 存在且 schema_version: harness_config.v0.1\n"
+        "  - rail/tool 条目必须是 type: package，包含 module 和 class\n"
+        "  - module 必须以 openjiuwen.extensions.harness.<extension_name> 开头\n"
+        "  - module 能映射到扩展根目录内真实 .py 文件\n"
+        "  - __init__.py 不得包含 re-export\n"
+        "  - Tool class 必须无参构造，且自己创建 ToolCard\n"
+        "  - ToolCard.id 和 ToolCard.name 必须显式设置\n"
+        "  - skill 目录必须包含合法 SKILL.md (frontmatter 有 name/description)\n"
+        "  建议测试: test_harness_config_schema, test_entry_points_valid, test_skill_manifests\n\n"
+
+        "L2 临时热加载:\n"
+        "  必须创建临时 DeepAgent，调用真实加载路径:\n"
+        "  ```python\n"
+        "  from openjiuwen.harness.deep_agent import DeepAgent\n"
+        "  from openjiuwen.harness.schema.config import DeepAgentConfig\n"
+        "  from openjiuwen.core.single_agent.schema.agent_card import AgentCard\n"
+        "  agent = DeepAgent(AgentCard(name='test_agent', description='test')).configure(\n"
+        "    DeepAgentConfig(enable_task_loop=False))\n"
+        "  loaded = await agent.load_harness_config(config_path)\n"
+        "  ```\n"
+        "  断言:\n"
+        "  - 每个 rail 返回 rail:<ClassName>\n"
+        "  - 每个 tool 返回 tool:<ClassName>\n"
+        "  - ToolCard 出现在 agent.ability_manager.list()\n"
+        "  - skill 目录被追加到 SkillUseRail\n"
+        "  建议测试: test_load_harness_config, test_tools_registered\n\n"
+
+        "L3 运行时验收:\n"
+        "  Tool 验收:\n"
+        "  - 导入：from openjiuwen.core.runner.runner import Runner"
+        "  - 调用 Runner.resource_mgr.get_tool(tool_id).invoke(...) 验证输出\n"
+        "  - ToolOutput.success 必须为 true\n"
+        "  - 输出必须包含设计声明的字段\n\n"
+
+        "  Rail 验收:\n"
+        "  - 检查可观测副作用: 状态文件、prompt section 注入、tool gating\n"
+        "  - 状态文件路径: <extension_root>/.state/<session_id>.json\n"
+        "  - 或检查 session stream 中的 OutputSchema/steering message\n\n"
+
+        "  Skill 验收:\n"
+        "  - SKILL.md frontmatter 合法\n"
+        "  - skill 目录能被 SkillUseRail 加载\n"
+        "  (skill 验证已在静态检查完成大部分，验收测试确认加载生效即可)\n\n"
+
+        "  文件产物验收 (仅文件生成类 Tool):\n"
+        "  - 传入 pytest tmp_path 下的 output_path\n"
+        "  - 断言返回: success=true, path/absolute_path 存在, exists=true, size_bytes>0\n"
+        "  - PPTX: zipfile 校验 [Content_Types].xml + ppt/presentation.xml + slide*.xml\n"
+        "  - DOCX: zipfile 校验 [Content_Types].xml + word/document.xml\n"
+        "  - PDF: 文件头 %PDF\n"
+        "  - JSON: json.load 重解析 + 关键字段\n"
+        "  - 禁止 JSON/Markdown 冒充 PPTX/DOCX/PDF\n\n"
+
+        # ===== 测试范围限制 =====
+        "【测试范围限制】\n"
+        "  - L1: 最多 3 个测试方法\n"
+        "  - L2: 最多 2 个测试方法\n"
+        "  - L3: 每类组件最多 1 个测试方法\n"
+        "  - 禁止测试异常输入拒绝、父目录自动创建等边界情况\n"
+        "  - 禁止测试 DeepAgent 完整生命周期\n\n"
+
+        # ===== 扩展信息 =====
         f"扩展名称: {build.extension_name}\n"
         f"扩展根目录: {build.extension_root}\n"
         f"harness_config: {build.config_path}\n"
         f"测试文件必须写入: {test_file}\n"
-        f"pytest 必须使用的解释器: {python_executable}\n"
-        "这个解释器路径是关键执行环境信息，测试代码和说明不得假设其他 Python 环境。\n\n"
-        "组件数量:\n"
-        f"- rails: {rails_count}\n"
-        f"- tools: {tools_count}\n"
-        f"- skill files: {skills_count}\n"
-        f"- skill dirs: {skill_dirs_count}\n\n"
-        "测试要求:\n"
-        "1. 必须覆盖 DeepAgent.load_harness_config(config_path) 真实加载路径。\n"
-        "2. 必须检查 agent.ability_manager 和 Runner.resource_mgr 中的工具注册。\n"
-        "   测试代码需要导入或实例化 rail/tool 时，必须先读取 "
-        "harness_config.yaml 中实际声明的 module/class；不要手写或猜测 "
-        "module path。module 必须以 "
-        "`openjiuwen.extensions.harness.<extension_name>.` 开头，并映射到"
-        "扩展根目录内真实存在的 .py 文件。\n"
-        "3. Rail 必须通过 agent-core/harness 可观测副作用验证，例如状态文件、"
-        "ToolCallInputs 记录、session OutputSchema 或 steering message。\n"
-        "4. Tool 必须验证 ToolOutput 或 invoke 输出结构，不依赖任何 web/UI 事件。\n"
-        "5. 文件/产物生成类 Tool 必须验证真实产物，而不是只验证 success 文本："
-        "调用 Tool 时传入 pytest tmp_path 下的 output_path，断言返回的 path/"
-        "absolute_path 指向真实存在文件，exists=true，size_bytes > 0，"
-        "format/后缀匹配。PPTX/DOCX 必须用 zipfile 校验关键内部结构；"
-        "PPTX 至少包含 `[Content_Types].xml`、`ppt/presentation.xml` 和 "
-        "`ppt/slides/slide*.xml`。PDF 必须校验 `%PDF` 文件头；JSON 必须"
-        "用 json parser 重新解析并检查关键字段。不得接受 JSON/Markdown/"
-        "纯文本占位冒充 PPTX/DOCX/PDF。\n"
-        "6. Skill 必须验证 SKILL.md frontmatter 和加载路径。\n"
-        "7. 测试失败信息要具体，便于 implement_ext 修复扩展代码。\n"
-        "8. 只写测试文件，不要修改扩展实现代码。\n"
+        f"pytest 解释器: {python_executable}\n\n"
+
+        f"组件数量: rails={rails_count}, tools={tools_count}, skills={skills_count}\n\n"
+
+        # ===== 禁止事项 =====
+        "【禁止事项】\n"
+        "- 不要修改扩展实现代码\n"
+        "- 不要为绕过失败修改测试\n"
+        "- 不要使用 bare except\n"
+        "- 不要使用网络请求\n\n"
+
         f"{previous}"
     )
 
@@ -756,7 +1014,8 @@ def _build_ext_static_fix_prompt(
         f"扩展名称: {build.extension_name}\n"
         f"扩展根目录: {build.extension_root}\n"
         f"harness_config: {build.config_path}\n\n"
-        "常见修复要求:\n"
+
+        "【常见修复要求】\n"
         "- harness_config.yaml 必须符合 HarnessConfig schema；"
         "`description` 必须是字符串，不能是多语言 dict。\n"
         "- resources 中只声明实际生成的 rails/tools/skills；"
@@ -770,7 +1029,16 @@ def _build_ext_static_fix_prompt(
         "实际声明的 module/class 为唯一来源，不要手写或猜测路径。\n"
         "- Tool class 必须可无参构造，并在 __init__ 内创建 ToolCard。\n"
         "- SKILL.md 必须有合法 frontmatter。\n"
+        "- 依赖缺失：若报错 `No module named 'xxx'`，在扩展根目录 "
+        "创建或者追加 `requirements.txt` 文件，添加所需依赖（如 `python-pptx`、"
+        "`python-docx`、`openpyxl` 等）；verify_ext 会自动安装。\n"
         "- 只允许修改扩展根目录内文件，不要修改测试或 auto-harness 主代码。\n\n"
+
+        "【跨平台兼容性】\n"
+        "- 路径操作: 使用 pathlib.Path，禁止字符串拼接路径分隔符\n"
+        "- 状态文件路径: 使用 Path 跨平台构建，不假设 / 或 \\\\ 分隔符\n"
+        "- 环境变量: 使用 os.getenv() 获取，不假设 Windows 盘符路径\n\n"
+
         f"失败信息:\n{static_errors[:6000]}"
     )
 
@@ -783,23 +1051,124 @@ def _build_ext_acceptance_fix_prompt(
     python_executable: str,
 ) -> str:
     """Build prompt for fixing extension package after acceptance failure."""
+    # 解析失败归因 ID，帮助 agent 精准定位
+    failure_ids = _extract_failure_ids_from_pytest_output(pytest_output)
+    failure_summary = (
+        f"\n检测到的 failure_id:\n{failure_ids}\n"
+        if failure_ids
+        else ""
+    )
+
     return (
-        "verify_ext 生成的 runtime extension 验收测试失败。"
-        "请只修改扩展 package 内的实现文件，直到测试能通过。\n\n"
+        "verify_ext 验收测试失败。请根据 failure_id 精准定位并修复扩展实现。\n\n"
+
+        # ===== 失败信息 =====
         f"扩展根目录: {build.extension_root}\n"
         f"harness_config: {build.config_path}\n"
         f"测试文件: {test_file}\n"
         f"pytest 解释器: {python_executable}\n\n"
-        "约束:\n"
-        "- 只允许修改扩展根目录内文件。\n"
-        "- 不要修改测试来绕过失败；verify_ext 会复跑同一个测试文件，"
-        "不会因为实现修复而重新生成测试。\n"
-        "- Tool/Rail 共享状态必须使用按 session_id 隔离的文件状态。\n\n"
-        "- 如果失败来自文件产物验收，必须修复 Tool 生成真实目标格式；"
-        "不得用 JSON/Markdown/纯文本占位，也不得在文件不存在或格式无效时"
-        "返回 success=true。\n\n"
-        f"pytest 输出:\n{pytest_output[:6000]}"
+        f"{failure_summary}"
+
+        # ===== 修复约束 =====
+        "【修复约束】\n"
+        "1. 只允许修改扩展根目录内的实现文件。\n"
+        "2. 不要修改测试文件来绕过失败。\n"
+        "3. 不要修改 harness_config.yaml 中的 module/class 声明。\n"
+        "4. 跨平台兼容: 使用 pathlib.Path 操作路径，禁止字符串拼接路径分隔符。\n\n"
+
+        # ===== 按 failure_id 修复建议 (来自 SKILL.md) =====
+        "【按 failure_id 修复建议】\n\n"
+
+        "L1 结构类:\n"
+        "  - manifest_invalid: 检查 harness_config.yaml schema_version/name/resources 格式\n"
+        "  - entry_point_not_allowed: 确保 type=package + module/class 字段\n"
+        "  - module_import_failed: 检查 module 路径以 openjiuwen.extensions.harness.<ext> 开头\n"
+        "  - class_init_failed: 检查 Tool class 无参构造 + ToolCard 创建\n"
+        "  - skill_manifest_invalid: 检查 SKILL.md frontmatter name/description\n\n"
+
+        "L2 热加载类:\n"
+        "  - harness_load_failed: 检查 harness_config.yaml 格式 + DeepAgent.load_harness_config 路径\n"
+        "  - rail_not_registered: 检查 rail 返回 rail:<ClassName>\n"
+        "  - tool_not_registered: 检查 ToolCard 在 ability_manager.list() 返回的Ability中\n"
+        "  - skill_not_loaded: 检查 skills.dirs 被追加到 SkillUseRail\n\n"
+
+        "L3 运行时类:\n"
+        "  - tool_not_called: 检查 agent 是否实际调用工具\n"
+        "  - tool_result_failed: 检查 ToolOutput.success + invoke 内部异常\n"
+        "  - tool_result_schema_missing: 检查返回结构包含设计声明字段\n"
+        "  - artifact_not_created: 检查文件产物真实存在\n"
+        "  - artifact_format_invalid: 检查 PPTX/DOCX/PDF/JSON 格式结构\n"
+        "  - artifact_placeholder_output: 禁止 JSON/Markdown 冒充 PPTX/DOCX/PDF\n"
+        "  - rail_hook_not_observed: 检查状态文件/steering message 等副作用\n"
+        "  - rail_tool_state_not_shared: 检查 Rail/Tool 按 session_id 隔离的状态文件\n\n"
+
+        # ===== 文件产物修复 =====
+        "【文件产物修复 - artifact_* 类 failure_id】\n"
+        "- PPTX: 使用 python-pptx 或直接写入 ZIP，校验 [Content_Types].xml + ppt/presentation.xml\n"
+        "- DOCX: 使用 python-docx，校验 [Content_Types].xml + word/document.xml\n"
+        "- PDF: 必须生成 %PDF 开头的真实文件\n"
+        "- JSON: 必须可 json.loads 解析\n"
+        "- 路径处理: 使用 Path 跨平台构建 output_path，不假设 / 或 \\\\ 分隔符\n"
+        "禁止返回 JSON/Markdown 占位并标记 success=true\n\n"
+
+        # ===== pytest 输出 =====
+        f"pytest 输出 (前 5000 字符):\n{pytest_output[:5000]}"
     )
+
+
+def _extract_failure_ids_from_pytest_output(pytest_output: str) -> str:
+    """从 pytest 输出中提取所有 failure_id。
+
+    Returns:
+        格式化的 failure_id 列表字符串，按 L1/L2/L3 分类。
+    """
+    import re
+
+    # 匹配 failure_id=<ID>: 格式
+    pattern = r"failure_id=([a-zA-Z_]+):"
+    matches = re.findall(pattern, pytest_output)
+
+    if not matches:
+        return ""
+
+    # 去重并排序
+    unique_ids = sorted(set(matches))
+
+    # 按 SKILL.md 定义分类
+    l1_ids = [
+        "manifest_invalid", "entry_point_not_allowed",
+        "module_import_failed", "class_init_failed", "skill_manifest_invalid",
+    ]
+    l2_ids = [
+        "harness_load_failed", "rail_not_registered",
+        "tool_not_registered", "skill_not_loaded",
+    ]
+    l3_ids = [
+        "tool_not_called", "tool_result_failed", "tool_result_schema_missing",
+        "artifact_not_created", "artifact_format_invalid", "artifact_placeholder_output",
+        "rail_hook_not_observed", "rail_tool_state_not_shared",
+    ]
+
+    found_l1 = [id for id in unique_ids if id in l1_ids]
+    found_l2 = [id for id in unique_ids if id in l2_ids]
+    found_l3 = [id for id in unique_ids if id in l3_ids]
+    other_ids = [id for id in unique_ids if id not in l1_ids + l2_ids + l3_ids]
+
+    lines: list[str] = []
+    if found_l1:
+        lines.append("L1 结构类:")
+        lines.extend([f"  - {id}" for id in found_l1])
+    if found_l2:
+        lines.append("L2 热加载类:")
+        lines.extend([f"  - {id}" for id in found_l2])
+    if found_l3:
+        lines.append("L3 运行时类:")
+        lines.extend([f"  - {id}" for id in found_l3])
+    if other_ids:
+        lines.append("其他 (未识别):")
+        lines.extend([f"  - {id}" for id in other_ids])
+
+    return "\n".join(lines)
 
 
 async def _run_pytest_file(
@@ -826,20 +1195,27 @@ async def _run_pytest_file(
     if python_path.is_file():
         bin_dir = str(python_path.parent)
         env["VIRTUAL_ENV"] = str(python_path.parent.parent)
-        env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+        pathsep = os.pathsep
+        env["PATH"] = (
+            f"{bin_dir}{pathsep}{env.get('PATH', '')}"
+            if env.get("PATH")
+            else bin_dir
+        )
     proc = await asyncio.create_subprocess_exec(
         python_executable,
         "-m",
         "pytest",
         str(test_file),
         "-q",
+        "-o",
+        "addopts=",
         cwd=str(cwd),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         env=env,
     )
     stdout, _ = await proc.communicate()
-    output = stdout.decode("utf-8", errors="replace")
+    output = decode_stdout(stdout)
     return _CIResult(
         passed=proc.returncode == 0,
         errors=output[-6000:],
@@ -862,7 +1238,6 @@ def _check_imports(
         List of import error descriptions.
     """
     import importlib.util
-    import sys
     import types
 
     errors: list[str] = []

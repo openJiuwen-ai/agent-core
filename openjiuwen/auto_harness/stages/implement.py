@@ -4,13 +4,13 @@
 
 from __future__ import annotations
 
-import logging
 import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.auto_harness.contexts import (
     TaskContext,
 )
@@ -42,8 +42,6 @@ if TYPE_CHECKING:
     from openjiuwen.core.session.agent import (
         Session,
     )
-
-logger = logging.getLogger(__name__)
 
 
 def _build_implement_prompt(
@@ -498,19 +496,39 @@ def _build_implement_ext_prompt(
         )
         step += 1
     if "tool" in components:
-        requirements.append(
+        tool_req = (
             f"{step}. 实现 tool 组件 "
             "(继承 Tool，包含 ToolCard)。ToolCard.id 和 "
             "ToolCard.name 必须稳定、snake_case、语义明确，"
             "优先与 extension_name 或核心动作一致。"
         )
+        if "skill" in components:
+            tool_req += (
+                " Tool + Skill 协作模式：Tool 不应独立完成复杂任务，"
+                "应作为 Skill 的执行层；ToolCard.description 必须明确说明"
+                "\"需配合对应 Skill 使用\"，禁止在单个 invoke 中完成"
+                "品牌适配、模板选择、内容生成、格式校验等全部环节。"
+            )
+        requirements.append(tool_req)
         step += 1
     if "skill" in components:
-        requirements.append(
-            f"{step}. 创建 skills/<skill_name>/SKILL.md，"
-            "包含 frontmatter (name, description) 和正文；"
-            "必须参考 skill-creator 规范：name/description 要准确描述"
-            "触发场景，正文保持精简且可操作，只写 agent 真正需要的"
+        if design.skill_source:
+            skill_name = design.skill_source.removeprefix(
+                "community:"
+            )
+            requirements.append(
+                f"{step}. Skill 部分已从社区 skill "
+                f"'{skill_name}' 复用，skill 目录已存在于 "
+                f"skills/<skill_name>/ 下；不要重新创建或修改 "
+                f"SKILL.md，只需确保 harness_config.yaml "
+                f"正确声明 skills.dirs"
+            )
+        else:
+            requirements.append(
+                f"{step}. 创建 skills/<skill_name>/SKILL.md，"
+                "包含 frontmatter (name, description) 和正文；"
+                "必须参考 skill-creator 规范：name/description 要准确描述"
+                "触发场景，正文保持精简且可操作，只写 agent 真正需要的"
             "领域规范、品牌风格、模板原则、生成流程、示例和验收标准；"
             "如需 PPT 模板、品牌素材或详细参考资料，可放在 skill "
             "目录下的 assets/ 或 references/，并在 SKILL.md 中说明何时使用"
@@ -661,6 +679,29 @@ class ExtendImplementStage(ImplementStage):
             ctx.runtime.wt_path,
             design,
         )
+
+        extension_root.mkdir(parents=True, exist_ok=True)
+
+        # Copy community skill if skill_source is set
+        if design.skill_source:
+            skill_name = design.skill_source.removeprefix(
+                "community:"
+            )
+            from openjiuwen.auto_harness.infra.skill_source_manager import (
+                copy_skill_to_extension,
+            )
+            copied = copy_skill_to_extension(
+                skill_name,
+                extension_root,
+                ctx.orchestrator.config,
+            )
+            if not copied:
+                logger.warning(
+                    "Community skill '%s' not found in cache, "
+                    "falling back to agent-generated skill",
+                    skill_name,
+                )
+                design.skill_source = ""
 
         prompt = _build_implement_ext_prompt(
             design,

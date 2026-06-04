@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import unittest
+from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.workflow import (
@@ -149,108 +150,98 @@ async def test_retry_count_and_timeout_session_handling():
     retries to fail with "Session is closed" error.
 
     Fix: Create a new connector inside the retry loop for each attempt.
+
+    Uses mocked aiohttp to avoid real network calls while still exercising
+    the retry loop and connector-creation logic.
     """
-    logger.info("Testing retry count and timeout session handling in workflow...")
+    flow = Workflow()
+    start_component = Start()
+    end_component = End({"responseTemplate": "{{output}}"})
 
-    # Store original environment variable value to restore later
-    original_ssl_verify = os.environ.get('HTTP_SSL_VERIFY')
-
-    # Set environment variable to disable SSL verification
-    os.environ['HTTP_SSL_VERIFY'] = 'false'
-
-    try:
-        # Create a workflow
-        flow = Workflow()
-
-        # Create components
-        start_component = Start()
-        end_component = End({"responseTemplate": "{{output}}"})
-
-        # Create HTTP Request component configuration with retry enabled
-        config = HttpComponentConfig(
-            request_params=HttpRequestParamConfig(
-                url="{{url}}",  # URL will be dynamically set from input
-                method="GET",
-                timeout=5.0,  # 5 seconds timeout
-                advanced_options=HttpAdvancedOptionsConfig(
-                    timeout=10000,  # 10 seconds in milliseconds
-                    ignore_ssl_issues=True
-                ),
-                retry_config=HttpRetryConfig(
-                    enabled=True,
-                    max_retries=2,  # 2 retries = 3 total attempts (initial + 2 retries)
-                    retry_delay=100,  # 100ms delay between retries
-                    retry_on_status_codes=[500, 502, 503, 504, 429],
-                    backoff_type="fixed"
-                )
-            )
+    config = HttpComponentConfig(
+        request_params=HttpRequestParamConfig(
+            url="{{url}}",
+            method="GET",
+            timeout=5.0,
+            advanced_options=HttpAdvancedOptionsConfig(
+                timeout=10000,
+                ignore_ssl_issues=True,
+            ),
+            retry_config=HttpRetryConfig(
+                enabled=True,
+                max_retries=2,
+                retry_delay=1,  # 1ms — fast in tests
+                retry_on_status_codes=[500, 502, 503, 504, 429],
+                backoff_type="fixed",
+            ),
         )
-        http_component = HTTPRequestComponent(config=config)
+    )
+    http_component = HTTPRequestComponent(config=config)
 
-        # Set up the workflow connections
-        flow.set_start_comp("s", start_component, inputs_schema={"query": "${query}"})
-        flow.set_end_comp("e", end_component, inputs_schema={"output": "${http.output}"})
-        flow.add_workflow_comp("http", http_component, inputs_schema={"url": "${s.query}"})
+    flow.set_start_comp("s", start_component, inputs_schema={"query": "${query}"})
+    flow.set_end_comp("e", end_component, inputs_schema={"output": "${http.output}"})
+    flow.add_workflow_comp("http", http_component, inputs_schema={"url": "${s.query}"})
+    flow.add_connection("s", "http")
+    flow.add_connection("http", "e")
 
-        # Add connections: start -> http -> end
-        flow.add_connection("s", "http")
-        flow.add_connection("http", "e")
+    # Verify config is wired up correctly
+    assert config.request_params.timeout == 5.0
+    assert config.request_params.advanced_options.timeout == 10000
+    assert config.request_params.retry_config.enabled is True
+    assert config.request_params.retry_config.max_retries == 2
 
-        # Create session context
-        context = create_workflow_session()
+    connector_create_count = 0
 
-        # Verify configuration is set correctly before invoking
-        assert config.request_params.timeout == 5.0
-        assert config.request_params.advanced_options.timeout == 10000
-        assert config.request_params.retry_config.enabled is True
-        assert config.request_params.retry_config.max_retries == 2
-        assert config.request_params.retry_config.retry_delay == 100
+    class _CountingConnector:
+        """Tracks how many times a fresh connector is created."""
+        def __init__(self, *args, **kwargs):
+            nonlocal connector_create_count
+            connector_create_count += 1
 
-        logger.info("Workflow configuration verified:")
-        logger.info(f"  - Timeout: {config.request_params.timeout}s")
-        logger.info(f"  - Advanced timeout: {config.request_params.advanced_options.timeout}ms")
-        logger.info(f"  - Max retries: {config.request_params.retry_config.max_retries}")
-        logger.info(f"  - Retry delay: {config.request_params.retry_config.retry_delay}ms")
-        logger.info(f"  - Retry on status codes: {config.request_params.retry_config.retry_on_status_codes}")
+    async def _fake_iter_chunked(size):
+        yield b"Internal Server Error"
 
-        # Invoke the workflow with a URL that returns 500 error
-        # This will trigger the retry mechanism
-        # After the fix, retries should work without "Session is closed" error
-        try:
+    mock_response = MagicMock()
+    mock_response.status = 500
+    mock_response.reason = "Internal Server Error"
+    mock_response.url = "https://example.com/status/500"
+    mock_response.headers = {"content-type": "text/plain; charset=utf-8"}
+    mock_response.content.iter_chunked = _fake_iter_chunked
+
+    mock_request_ctx = MagicMock()
+    mock_request_ctx.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_request_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    mock_session = MagicMock()
+    mock_session.request = MagicMock(return_value=mock_request_ctx)
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+
+    context = create_workflow_session()
+    os.environ['HTTP_SSL_VERIFY'] = 'false'
+    try:
+        with patch(
+            "openjiuwen.core.workflow.components.tool.http.http_request_component.aiohttp.TCPConnector",
+            _CountingConnector,
+        ), patch(
+            "openjiuwen.core.workflow.components.tool.http.http_request_component.aiohttp.ClientSession",
+            return_value=mock_session,
+        ):
             result = await flow.invoke(
-                inputs={"query": "https://httpbin.org/status/500"},
-                session=context
+                inputs={"query": "https://example.com/status/500"},
+                session=context,
             )
-
-            logger.info("✓ Retry count and timeout configuration verified in workflow!")
-            logger.info(f"  - Workflow completed after {config.request_params.retry_config.max_retries} retries")
-            logger.info(f"  - No 'Session is closed' error occurred (bug is fixed)")
-            logger.info(f"  - Result: {result}")
-
-            # Verify the response contains the expected HTTP 500 status
-            assert result is not None
-            # The response should indicate the HTTP 500 error was received
-            logger.info(f"  - Response confirms HTTP component handled retries correctly")
-
-        except ExecutionError as e:
-            error_message = str(e)
-            logger.error(f"ExecutionError occurred: {error_message}")
-
-            # Check if the error is the "Session is closed" bug
-            if "Session is closed" in error_message:
-                logger.error("❌ BUG DETECTED: 'Session is closed' error occurred!")
-                logger.error("This indicates the connector is being reused after being closed.")
-                logger.error("The connector should be created inside the retry loop, not outside.")
-
-            # Re-raise to fail the test
-            raise
-
     finally:
-        # Restore original environment variable value
-        if original_ssl_verify is not None:
-            os.environ['HTTP_SSL_VERIFY'] = original_ssl_verify
-        else:
-            del os.environ['HTTP_SSL_VERIFY']
+        del os.environ['HTTP_SSL_VERIFY']
+
+    # Connector must be recreated for each attempt: 1 initial + 2 retries = 3 total.
+    # The original bug reused a closed connector, so this count verifies the fix.
+    assert connector_create_count == 3, (
+        f"Expected connector to be created 3 times (1 initial + 2 retries), "
+        f"got {connector_create_count}. "
+        "The 'Session is closed' bug likely regressed."
+    )
+    assert result is not None
 
 
 @unittest.skip("skip system test")

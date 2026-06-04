@@ -191,6 +191,15 @@ class TestRunnerIntegration:
         single_agent adapter returns an exception.
         """
         logger.info("=== Test 4: Adapter error propagation ===")
+        # Use a short timeout: adapter raises immediately, so we only wait for
+        # the request_timeout to expire (previously 5s, now 0.1s).
+        Runner.set_config(RunnerConfig(
+            distributed_mode=True,
+            distributed_config=DistributedConfig(
+                request_timeout=0.1,
+                message_queue_config=MessageQueueConfig(type="fake"),
+            ),
+        ))
         await Runner.start()
 
         # Simulate adapter throwing exception

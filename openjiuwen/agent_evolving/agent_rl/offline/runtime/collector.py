@@ -106,7 +106,8 @@ class TrajectoryCollector:
             if hasattr(agent, "unregister_rail"):
                 await agent.unregister_rail(rail)
             if session is not None:
-                await session.post_run()
+                await session.close_stream()
+                await session.commit()
 
         # Retrieve trajectory from store (base class after_invoke() saves it there)
         trajectories: List[Trajectory] = store.query()

@@ -1,6 +1,6 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-from typing import Any, Dict, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Union
 from pydantic import Field
 
 from openjiuwen.core.common.clients.connector_pool import get_connector_pool_manager
@@ -8,6 +8,11 @@ from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.common.clients.client_registry import get_client_registry
 from openjiuwen.core.common.clients.connector_pool import ConnectorPool, ConnectorPoolConfig
 from openjiuwen.core.common.utils.header_utils import sanitize_headers
+
+if TYPE_CHECKING:
+    import httpx
+    from openai import AsyncOpenAI, OpenAI
+    from openjiuwen.core.foundation.llm import ModelClientConfig
 
 
 class HttpXConnectorPoolConfig(ConnectorPoolConfig):

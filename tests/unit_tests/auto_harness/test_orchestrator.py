@@ -49,6 +49,9 @@ _LEARNINGS_STAGE_MOD = (
 _TASK_PIPELINE_MOD = (
     "openjiuwen.auto_harness.pipelines.meta_evolve_pipeline.meta_evolve_task_pipeline"
 )
+_SKILL_SOURCE_MANAGER_MOD = (
+    "openjiuwen.auto_harness.infra.skill_source_manager"
+)
 
 
 async def _collect(agen):
@@ -62,6 +65,12 @@ async def _noop_agen(*args, **kwargs):
     del args, kwargs
     return
     yield  # noqa: RET504
+
+
+async def _noop_ensure_skill_sources(*args, **kwargs):
+    """Mock for ensure_skill_sources that returns empty list."""
+    del args, kwargs
+    return []
 
 
 class TestOrchestratorRunSession(
@@ -167,6 +176,10 @@ class TestOrchestratorRunSession(
             )
 
     @patch(f"{_LEARNINGS_STAGE_MOD}.run_learnings", new=_noop_agen)
+    @patch(
+        f"{_SKILL_SOURCE_MANAGER_MOD}.ensure_skill_sources",
+        new=_noop_ensure_skill_sources,
+    )
     async def test_extended_assess_and_plan_keep_workspace(
         self,
     ):
@@ -345,6 +358,11 @@ class TestOrchestratorRunSession(
                 EXTENDED_EVOLVE_PIPELINE
             )
 
+    @patch(f"{_LEARNINGS_STAGE_MOD}.run_learnings", new=_noop_agen)
+    @patch(
+        f"{_SKILL_SOURCE_MANAGER_MOD}.ensure_skill_sources",
+        new=_noop_ensure_skill_sources,
+    )
     async def test_extended_pipeline_runs_extension_task_pipeline(
         self,
     ):
@@ -397,6 +415,10 @@ class TestOrchestratorRunSession(
             assert session_results.results[0].summary == "hermes"
 
     @patch(f"{_LEARNINGS_STAGE_MOD}.run_learnings", new=_noop_agen)
+    @patch(
+        f"{_SKILL_SOURCE_MANAGER_MOD}.ensure_skill_sources",
+        new=_noop_ensure_skill_sources,
+    )
     async def test_session_stream_passthroughs_ext_assess_and_plan_chunks(
         self,
     ):
@@ -488,6 +510,10 @@ class TestOrchestratorRunSession(
             assert "streamed design" not in message_chunks
 
     @patch(f"{_LEARNINGS_STAGE_MOD}.run_learnings", new=_noop_agen)
+    @patch(
+        f"{_SKILL_SOURCE_MANAGER_MOD}.ensure_skill_sources",
+        new=_noop_ensure_skill_sources,
+    )
     async def test_extended_pipeline_caps_extension_design_tasks(
         self,
     ):
@@ -586,6 +612,10 @@ class TestOrchestratorRunSession(
             )
 
     @patch(f"{_LEARNINGS_STAGE_MOD}.run_learnings", new=_noop_agen)
+    @patch(
+        f"{_SKILL_SOURCE_MANAGER_MOD}.ensure_skill_sources",
+        new=_noop_ensure_skill_sources,
+    )
     async def test_extended_pipeline_runs_constraints_before_capabilities(
         self,
     ):
@@ -662,6 +692,10 @@ class TestOrchestratorRunSession(
             assert seen_names == ["guard"]
 
     @patch(f"{_LEARNINGS_STAGE_MOD}.run_learnings", new=_noop_agen)
+    @patch(
+        f"{_SKILL_SOURCE_MANAGER_MOD}.ensure_skill_sources",
+        new=_noop_ensure_skill_sources,
+    )
     async def test_extended_pipeline_skips_failed_constraint_dependencies(
         self,
     ):
@@ -743,6 +777,10 @@ class TestOrchestratorRunSession(
             ]
 
     @patch(f"{_LEARNINGS_STAGE_MOD}.run_learnings", new=_noop_agen)
+    @patch(
+        f"{_SKILL_SOURCE_MANAGER_MOD}.ensure_skill_sources",
+        new=_noop_ensure_skill_sources,
+    )
     async def test_extension_design_tasks_are_capped_by_task_limit(self):
         with tempfile.TemporaryDirectory() as d:
             orch = self._make_orchestrator(d)
@@ -806,6 +844,10 @@ class TestOrchestratorRunSession(
             assert len(orch.results) == 2
 
     @patch(f"{_LEARNINGS_STAGE_MOD}.run_learnings", new=_noop_agen)
+    @patch(
+        f"{_SKILL_SOURCE_MANAGER_MOD}.ensure_skill_sources",
+        new=_noop_ensure_skill_sources,
+    )
     async def test_extended_pipeline_starts_next_extension_with_partial_budget(
         self,
     ):
@@ -968,7 +1010,7 @@ class TestTaskPipeline(IsolatedAsyncioTestCase):
             create_commit_agent.assert_called_once_with(
                 orch.config,
                 workspace_override=f"{d}/worktrees/task-1",
-                extra_rails=None,
+                extra_rails=orch.stream_rails,
             )
             create_agent_session.assert_called_once_with(
                 session_id="auto-harness-task-1",

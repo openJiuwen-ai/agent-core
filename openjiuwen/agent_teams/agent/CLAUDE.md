@@ -19,7 +19,7 @@
 
 | 文件 | 类 | 职责 |
 |---|---|---|
-| `team_agent.py` | `TeamAgent(BaseAgent)` | 唯一对外类。leader / teammate 都是它，行为由 `blueprint.role` 切 |
+| `team_agent.py` | `TeamAgent(BaseAgent)` | 唯一对外类。leader / teammate 都是它，行为由 `blueprint.role` 切。`auto_start_member` / `auto_start_all` 用于 interact dispatch 层 best-effort lazy startup |
 | `agent_configurator.py` | `AgentConfigurator` | DeepAgent 装配，挂 prompts/ 与 rails/ 子模块（spawn 时复用 `models/` 的 allocator 回调）；`_resolve_team_mode` 在这里 |
 | `member.py` | `TeamMember` | 成员状态机封装 |
 | `member_factory.py` | `create_member_handle(...)` | 集中 TeamMember 构造，leader / teammate 路径共用一份实现 |
@@ -27,7 +27,7 @@
 | `spawn_manager.py` | `SpawnManager` | teammate 进程生命周期：拉起 / 心跳 / 重启 / 取消 |
 | `recovery_manager.py` | `RecoveryManager` | 团队级容错：成员崩溃恢复、状态对齐 |
 | `session_manager.py` | `SessionManager` | session checkpoint 读写、生命周期 |
-| `stream_controller.py` | `StreamController` | DeepAgent 的 stream 队列、round 状态、pending input、interrupt 收纳；自动给 chunk 升级为 `TeamOutputSchema` 并通过 `add_chunk_observer` 对外 fan-out |
+| `stream_controller.py` | `StreamController` | DeepAgent 的 stream 队列、round 状态、pending input、interrupt 收纳；自动给 chunk 升级为 `TeamOutputSchema` 并通过 `add_chunk_observer` 对外 fan-out；`emit_completion_and_close` 发完成标记 chunk + 关流；round-end 经注入的 `request_completion_poll_callback` 触发 leader 完成评估 |
 
 ## coordination/ — 唤醒循环
 

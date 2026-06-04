@@ -179,3 +179,95 @@ section 用例对术语调整不敏感，仍然通过（关键词如 `relay chan
    （leader 进程 fire on_inbound，human-agent 进程 deliver_input）。SDK 如果只看
    on_inbound，会和 avatar harness 看到的同一条消息分两路出现。下次清理时可以考虑
    只保留一条 —— 但本次保守起见保留向后兼容。
+
+## Follow-up：dispatch 白名单漏改导致团队事件从未送达（2026-05-26）
+
+### 症状
+
+本特性上线后，human-agent avatar 实际**从未**收到 message / broadcast / 任务指派
+事件——`MessageHandler._format_message` 的 `is_human_agent` 分支、
+`TaskBoardHandler.on_task_claimed` 的 `is_self_human` 分支这两段渲染逻辑是死代码，
+`hitt.msg_received_for_human` / `hitt.task_assigned_to_self_human` 从未实际触发。
+
+### 根因
+
+本特性首次落地（见上文「范围」）改了 8 个文件，**唯独漏了
+`agent/coordination/dispatcher.py`**。`dispatch()` 里有一段更早的 human-agent 粗筛
+白名单（旧设计是「avatar harness 静音团队事件、由 leader 的
+`_notify_human_agent_inbound` 回调通知真人」），它在 transport 事件分支只放行
+`{CLEANED, MEMBER_SHUTDOWN, MEMBER_CANCELED, STANDBY}` 四类生命周期事件，把
+`MESSAGE` / `BROADCAST` / `TASK_CLAIMED` 在进 framework 之前就 `return` 掉了。本特性
+新增的 handler 渲染分支因此永远走不到——新旧两套设计直接冲突，而白名单是漏网的旧逻辑。
+
+测试没抓到：本特性新增的 5 个用例全部**直接调 handler 方法**
+（`dispatcher.task_board.on_task_claimed(...)` / `handler._format_message(...)`），
+绕过了 `dispatch()` 这道粗筛门；而走 `dispatch()` 的 human-agent 用例只覆盖了白名单
+放行的生命周期事件（`MEMBER_SHUTDOWN` 等）。两层之间的缝隙正好漏掉了本特性。
+
+### 修复
+
+1. `dispatcher.py` 白名单增加放行 `TeamEvent.MESSAGE` / `TeamEvent.BROADCAST` /
+   `TeamEvent.TASK_CLAIMED`，并重写注释说明两组放行（生命周期 vs F_14 团队事件）。
+   任务板巡视事件（`TASK_CREATED` / `TASK_UPDATED` / ... → `_nudge_idle_agent`）
+   **继续静音**——它们没有 human-agent 渲染分支，会驱使 avatar 自主扫描任务板找活，
+   与本特性「avatar 不自主行动」矛盾。
+2. `TaskBoardHandler.on_task_claimed`：`is_self_human` 判断提前到入口算一次；human-agent
+   收到「指派给别人」的 `TASK_CLAIMED` 时**不** fall-through 到 `on_task_board_event`
+   →`_nudge_idle_agent`（avatar 不做任务板巡视），只有指派给自己的认领才 deliver。
+3. 补 3 个走 `dispatch()` 的端到端回归用例（`test_team_agent_coordination.py`）：
+   `test_human_agent_dispatch_delivers_message_broadcast_and_task_claimed`（三类穿过
+   白名单）、`test_human_agent_dispatch_mutes_task_board_survey_events`（巡视类被静音）、
+   `test_human_agent_ignores_other_member_task_claim`（指派给别人不 nudge）。
+
+### 拒绝的方案（Follow-up）
+
+- **放行全部 task 事件（含 `TASK_CREATED` 等板变动）**：会让 `_nudge_idle_agent` 把
+  「可认领任务列表」灌给 avatar、诱导它自主认领，与本特性核心矛盾，且这些事件没有
+  human-agent 渲染分支。只放行「指派给自己」语义明确的 `TASK_CLAIMED`。
+
+### 验证
+
+`pytest tests/unit_tests/agent_teams/test_team_agent_coordination.py test_hitt.py
+test_coordination_lifecycle.py test_coordination_loop.py`：129 通过，无回归。
+
+## Follow-up：human-agent 不启动周期 poll timer（2026-05-26）
+
+### 背景
+
+上一个 follow-up 放行 `MESSAGE` / `BROADCAST` 给 human-agent 后，
+`MessageHandler.on_message_or_broadcast` 里那句对所有 role 共用的
+`await self._poll.resume_polls()` 被激活——human-agent 收到消息会重启周期 poll
+timer。顺藤摸瓜发现更根本的问题：`EventBus.start()` 本就**无条件**为所有 role 起
+`POLL_MAILBOX` / `POLL_TASK` 两个 timer，**包括 human-agent**；而 human-agent 的这两个
+poll inner event 在 dispatch 入口全程被 mute，于是 timer 自启动起就纯空转（每 30s 两次
+无用唤醒，被 dispatch 在 `framework.trigger` 之前 return）。`STANDBY → pause_polls` 是
+设计者已知此空转后打的补丁，message → `resume_polls` 又会把它撤销。功能无影响（poll 被
+mute 兜住），但代码起了一个全程用不到的 timer，不诚实。
+
+### 决策：EventBus 按 role 根本不起 poll timer
+
+`EventBus.__init__` 从 `role` 派生 `_periodic_poll_enabled = role != HUMAN_AGENT`；
+`start` 与 `resume_polls` 共用新私有方法 `_start_poll_tasks()`，门控收到这一个点
+（顺手消除两处重复的 `create_task`）。human-agent 的 bus 主事件循环照常跑（transport
+事件仍送达），只是周期 poll task 不再创建。连带效果：dispatch 的 `POLL_*` human-agent
+短路降为纯防御性双保险；`STANDBY` 的 `pause_polls` 对 human-agent 变 no-op（无 timer 可
+停），白名单仍保留 `STANDBY` 是为对齐 teammate 路径，不连锁改动。
+
+安全性：human-agent 的 `POLL_MAILBOX` / `POLL_TASK` 本就被 dispatch 完全 mute，不起 timer
+等价于现状（功能上零差异），只是省掉空转——不损失任何既有能力。
+
+### 拒绝的方案
+
+- **在 `on_message_or_broadcast` 里对 human-agent 跳过 `resume_polls`**：治标——只挡住
+  message 触发的重启，挡不住 `start()` 启动即空转的根本；且在所有 role 共用的 handler
+  里塞 caller-role 分支，与 [[feedback_no_role_aware_tool_hacks]] 同源的"共用路径别加
+  role hack"精神相悖。根因在 EventBus 起了用不到的 timer，就在 EventBus 治。
+
+### 验证
+
+新增 3 条单测（`test_coordination_loop.py`）：
+`test_human_agent_bus_does_not_start_poll_timers`（human-agent start 后无 poll task）、
+`test_non_human_bus_starts_poll_timers`（leader / teammate 仍起）、
+`test_human_agent_resume_polls_stays_noop`（pause 后 resume 不复活 timer，pause 标志仍
+清零）。`pytest test_coordination_loop.py test_coordination_lifecycle.py
+test_team_agent_coordination.py test_hitt.py test_persistent_team.py`：143 通过，无回归。

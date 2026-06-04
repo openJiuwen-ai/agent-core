@@ -7,14 +7,18 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from openjiuwen.agent_evolving.checkpointing.evolution_store import EvolutionStore
-from openjiuwen.agent_evolving.experience.skill_experience_manager import ExperienceManager
 from openjiuwen.agent_evolving.experience.lifecycle import LocalApplyPreview
-from openjiuwen.agent_evolving.experience.types import EvolutionContext, ExperienceApprovalRequest
+from openjiuwen.agent_evolving.experience.skill_experience_manager import ExperienceManager
+from openjiuwen.agent_evolving.experience.types import (
+    EvolutionContext,
+    OnlineEvolutionResult,
+)
 from openjiuwen.agent_evolving.protocols import EXPERIENCES_TARGET, USER_INTENT_SIGNAL
 from openjiuwen.agent_evolving.signal import EvolutionSignal, EvolutionTarget, get_signal_source
 from openjiuwen.agent_evolving.trajectory import Trajectory
 from openjiuwen.agent_evolving.update_execution import execute_updates
 from openjiuwen.agent_evolving.updater import SingleDimUpdater
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
 
 if TYPE_CHECKING:
@@ -57,12 +61,26 @@ class OnlineEvolutionOrchestrator:
         requires_approval: bool,
         metadata: Optional[Dict[str, Any]] = None,
         source: Optional[str] = None,
-    ) -> Optional[ExperienceApprovalRequest]:
-        """Run online evolution and return the staged approval request, if any."""
+    ) -> OnlineEvolutionResult:
+        """Run online evolution and return a structured orchestration result."""
         if not skill_name or not signals:
-            return None
+            return OnlineEvolutionResult(
+                skill_name=skill_name,
+                status="skipped_no_input",
+                message="online evolution skipped because skill_name or signals are empty",
+            )
         if not self._store.skill_exists(skill_name):
-            return None
+            return OnlineEvolutionResult(
+                skill_name=skill_name,
+                status="skipped_skill_not_found",
+                message=f"online evolution skipped because skill '{skill_name}' does not exist",
+            )
+        if not self._store.skill_definition_exists(skill_name):
+            return OnlineEvolutionResult(
+                skill_name=skill_name,
+                status="skipped_skill_definition_not_found",
+                message=f"online evolution skipped because skill '{skill_name}' is missing SKILL.md",
+            )
 
         operator = self._skill_ops.get(skill_name)
         if operator is None:
@@ -78,10 +96,23 @@ class OnlineEvolutionOrchestrator:
             trajectory=trajectory,
             metadata=metadata,
         )
-        preview = await self._generate_local_apply_preview(operator, online_context)
+        try:
+            preview = await self._generate_local_apply_preview(operator, online_context)
+        except BaseError as exc:
+            logger.error("[OnlineEvolutionOrchestrator] generation failed for skill=%s: %s", skill_name, exc)
+            return OnlineEvolutionResult(
+                skill_name=skill_name,
+                status="generation_failed",
+                message=str(exc),
+            )
         if not preview.records:
-            logger.info("[OnlineEvolutionOrchestrator] no applied updates for skill=%s", skill_name)
-            return None
+            message = f"no applied updates for skill={skill_name}"
+            logger.info("[OnlineEvolutionOrchestrator] %s", message)
+            return OnlineEvolutionResult(
+                skill_name=skill_name,
+                status="no_evolution_no_records",
+                message=message,
+            )
 
         request = self._manager.stage_apply_results(
             skill_name,
@@ -92,12 +123,32 @@ class OnlineEvolutionOrchestrator:
             user_query=online_context.user_query,
             signal_type=self._get_signal_type(online_context),
             signal_source=self._get_signal_source(online_context),
+            messages=list(online_context.messages),
         )
         if requires_approval:
-            return request
+            return OnlineEvolutionResult(
+                skill_name=skill_name,
+                status="staged",
+                request=request,
+                message=f"evolution request staged for skill={skill_name}",
+            )
 
-        await self._manager.approve_request(request.request_id or "")
-        return request
+        apply_result = await self._manager.approve_request(request.request_id or "")
+        if not getattr(apply_result, "ok", False):
+            errors = getattr(apply_result, "errors", []) or []
+            message = "; ".join(str(error) for error in errors) or "persistence failed"
+            return OnlineEvolutionResult(
+                skill_name=skill_name,
+                status="persistence_failed",
+                request=request,
+                message=message,
+            )
+        return OnlineEvolutionResult(
+            skill_name=skill_name,
+            status="auto_approved",
+            request=request,
+            message=f"evolution request auto-approved for skill={skill_name}",
+        )
 
     async def _build_context(
         self,
@@ -109,7 +160,7 @@ class OnlineEvolutionOrchestrator:
         trajectory: Trajectory | None = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> EvolutionContext:
-        skill_content = await self._store.read_skill_content(skill_name)
+        skill_content = await self._store.read_skill_content(skill_name, strict=True)
         existing_desc_records = await self._store.get_pending_records(
             skill_name,
             EvolutionTarget.DESCRIPTION,

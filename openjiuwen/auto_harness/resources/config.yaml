@@ -27,7 +27,7 @@
 
 git:
   remote: ""                    # fork remote name（如 "k00591264"）
-  base_branch: "develop"        # PR 目标分支
+  base_branch: "develop-auto-harness"        # PR 目标分支
   user_name: ""                 # git commit 用户名
   user_email: ""                # git commit 邮箱
   fork_owner: ""                # fork 所有者（如 "SnapeK"）
@@ -43,7 +43,7 @@ budget:
   cost_limit_usd: 10.0          # 费用上限（美元）
   task_timeout_secs: 300000      # 单任务超时（秒）
   model_timeout_secs: 300000     # 单次 LLM 请求超时（秒），用于实现/修复等长耗时流式调用
-  max_tasks_per_session: 10     # 每会话最大任务数
+  max_tasks_per_session: 5     # 每会话最大任务数
 
 ci_gate:
   config_path: ""               # CI 门控配置路径，空则用仓库内默认

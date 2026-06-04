@@ -1157,7 +1157,7 @@ class MemoryIndexManager:
                 full_path,
                 line_range=line_range,
             )
-            content = read_result.content
+            content = read_result.data.content if read_result.data else ""
             all_lines = content.split("\n") if content else []
             total_lines = len(all_lines)
 

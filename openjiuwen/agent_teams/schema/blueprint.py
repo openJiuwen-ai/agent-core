@@ -12,10 +12,12 @@ from __future__ import annotations
 
 from typing import (
     TYPE_CHECKING,
+    Annotated,
     Any,
     Callable,
     Literal,
     Optional,
+    Union,
 )
 
 from pydantic import (
@@ -33,6 +35,8 @@ from openjiuwen.agent_teams.memory import TeamMemoryConfig
 from openjiuwen.agent_teams.models.pool import ModelPoolEntry, ModelRouterConfig
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import (
+    BridgeMemberSpec,
+    ExternalCliAgentSpec,
     TeamLifecycle,
     TeamMemberSpec,
     TeamRole,
@@ -123,6 +127,22 @@ class StorageSpec(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Predefined member union
+# ---------------------------------------------------------------------------
+#
+# ``predefined_members`` entries dispatch on ``role_type``: bridge entries
+# carry extra fields (mailbox_inject_mode / protocol / adapter_config), so
+# the spec layer needs to materialize ``BridgeMemberSpec`` rather than the
+# base ``TeamMemberSpec`` for those rows. Pydantic v2's discriminated union
+# does the dispatch when both arms declare the discriminator as ``Literal``
+# (already wired in ``schema/team.py``).
+PredefinedMemberSpec = Annotated[
+    Union[BridgeMemberSpec, TeamMemberSpec],
+    Field(discriminator="role_type"),
+]
+
+
+# ---------------------------------------------------------------------------
 # TeamAgentSpec
 # ---------------------------------------------------------------------------
 
@@ -161,10 +181,29 @@ class TeamAgentSpec(BaseModel):
     agents: dict[str, DeepAgentSpec]
     team_name: str = "agent_team"
     lifecycle: str = TeamLifecycle.TEMPORARY
+    enable_team_plan: bool = False
+    """Whether the leader starts in single-agent plan mode for this run.
+
+    This is a request/spec-level switch, not a YAML configuration entry.
+    ``teammate_mode`` remains the single switch that controls whether
+    members submit per-task plans to the leader.
+    """
     teammate_mode: str = "build_mode"
+    """Member execution mode: ``build_mode`` or ``plan_mode``."""
     spawn_mode: str = "process"
     leader: LeaderSpec = LeaderSpec()
-    predefined_members: list[TeamMemberSpec] = []
+    predefined_members: list[PredefinedMemberSpec] = []
+    external_cli_agents: list[ExternalCliAgentSpec] = []
+    """Static launch configs for external CLI agents (claudecode / codex / ...).
+
+    Each entry pre-declares how to launch one CLI kind and whether to
+    auto-inject the team MCP server. The runtime
+    ``spawn_member(role_type='external_cli', cli_agent=<name>)`` references an
+    entry by its ``cli_agent`` name, so the spawn call carries only the role
+    type and the CLI identifier — all launch knowledge stays here. A
+    ``cli_agent`` not declared here is rejected at spawn time (the non-empty
+    set is the capability ceiling for external-CLI members).
+    """
     model_pool: list[ModelPoolEntry] = []
     """Optional pool of LLM endpoints shared by every team member.
 
@@ -275,6 +314,27 @@ class TeamAgentSpec(BaseModel):
     sees the full roster (it owns spawn / approval flows); a
     human_agent always sees the roster (it includes itself).
     """
+    enable_bridge: bool = False
+    """Spec-level Bridge-Agent capability ceiling.
+
+    True opens the capability — the framework will register every
+    BRIDGE_AGENT member declared in ``predefined_members`` during
+    ``build_team``, and the leader's ``spawn_member`` tool may
+    additionally bring up new bridge members at runtime via
+    ``role_type='bridge_agent'``. False forbids both paths.
+
+    Bridge agents are full local teammates paired with a remote
+    independent agent reachable through a pure-text protocol. The
+    framework auto-forwards inbound mailbox messages to the remote
+    via ``BridgeProtocolAdapter.relay`` and composes the original
+    body with the remote's reply into the bridge avatar's context.
+    See ``BridgeMemberSpec`` for per-member configuration.
+
+    Consistency check (``build()`` time):
+    - ``enable_bridge=False`` with any BRIDGE_AGENT in predefined → error.
+    - ``enable_bridge=True`` with no BRIDGE_AGENT predefined → allowed
+      (dynamic spawn path).
+    """
     language: Optional[str] = None
     """Preferred language for prompts and tool descriptions ("cn" or "en").
 
@@ -313,6 +373,27 @@ class TeamAgentSpec(BaseModel):
         if self.model_router is not None and self.model_pool:
             raise ValueError(
                 "model_pool and model_router are mutually exclusive; configure one or the other",
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_external_cli_unique(self) -> "TeamAgentSpec":
+        """Reject duplicate ``cli_agent`` names in ``external_cli_agents``.
+
+        Entries are resolved by ``cli_agent`` name at spawn time, so a
+        duplicate would silently shadow an earlier config. Surface the
+        collision while the caller is still looking at the spec.
+        """
+        seen: set[str] = set()
+        duplicates: set[str] = set()
+        for cfg in self.external_cli_agents:
+            if cfg.cli_agent in seen:
+                duplicates.add(cfg.cli_agent)
+            seen.add(cfg.cli_agent)
+        if duplicates:
+            raise ValueError(
+                f"external_cli_agents has duplicate cli_agent name(s) {sorted(duplicates)}; "
+                f"declare each CLI kind at most once",
             )
         return self
 
@@ -365,6 +446,7 @@ class TeamAgentSpec(BaseModel):
 
         self._validate_reserved_names()
         self._validate_hitt_consistency()
+        self._validate_bridge_consistency()
 
         resolved_language = resolve_language(self.language)
         for role_spec in self.agents.values():
@@ -550,10 +632,40 @@ class TeamAgentSpec(BaseModel):
             ),
         )
 
+    def _validate_bridge_consistency(self) -> None:
+        """Reject configs where predefined BRIDGE_AGENT members exist without Bridge enabled.
+
+        ``enable_bridge`` is the spec-level capability ceiling for the
+        bridge feature. Declaring a BRIDGE_AGENT predefined member without
+        opening that ceiling is a misconfiguration. The reverse
+        (``enable_bridge=True`` with no predefined BRIDGE_AGENT) is
+        allowed: callers may rely on dynamic
+        ``spawn_member(role_type='bridge_agent', ...)`` after build.
+        """
+        if self.enable_bridge:
+            return
+        if not any(m.role_type == TeamRole.BRIDGE_AGENT for m in self.predefined_members):
+            return
+
+        from openjiuwen.core.common.exception.codes import StatusCode
+        from openjiuwen.core.common.exception.errors import raise_error
+
+        offenders = [m.member_name for m in self.predefined_members if m.role_type == TeamRole.BRIDGE_AGENT]
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason=(
+                f"predefined_members contains BRIDGE_AGENT role(s) {offenders} "
+                f"but enable_bridge=False; set enable_bridge=True (capability ceiling) "
+                f"or remove the bridge member(s)"
+            ),
+        )
+
 
 __all__ = [
     "DeepAgentSpec",
+    "ExternalCliAgentSpec",
     "LeaderSpec",
+    "PredefinedMemberSpec",
     "StorageSpec",
     "TeamAgentSpec",
     "TransportSpec",

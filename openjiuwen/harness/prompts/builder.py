@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import List
+from typing import TYPE_CHECKING, List
 
 from openjiuwen.core.single_agent.prompts.builder import (
     DEFAULT_LANGUAGE,
@@ -13,6 +13,9 @@ from openjiuwen.core.single_agent.prompts.builder import (
     SystemPromptBuilder as BaseSystemPromptBuilder,
 )
 from openjiuwen.harness.prompts.sections import SectionName
+
+if TYPE_CHECKING:
+    from openjiuwen.harness.prompts.report import PromptReport
 
 
 class PromptMode(str, Enum):

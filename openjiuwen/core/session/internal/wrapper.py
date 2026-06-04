@@ -84,6 +84,9 @@ class WrappedSession(ABC):
     async def post_run(self):
         pass
 
+    async def commit(self):
+        pass
+
     async def pre_run(self, **kwargs):
         pass
 

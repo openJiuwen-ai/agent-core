@@ -209,7 +209,6 @@ class IntentDetectionExecutable(ComponentExecutable):
         self._set_session(session)
         self._router.set_session(session)
         await self._initialize_if_needed()
-        await self._write_user_message_to_context(inputs, context)
         chat_history = await self._get_chat_history_from_context(context)
         current_inputs = self._prepare_detection_inputs(inputs, chat_history)
         llm_output = await self._invoke_llm_and_get_result(current_inputs)
@@ -225,6 +224,7 @@ class IntentDetectionExecutable(ComponentExecutable):
                 "sensitive_mode": UserConfig.is_sensitive()
             }
         )
+        await self._write_user_message_to_context(inputs, context)
         await self._write_assistant_message_to_context(llm_output, context)
         intent_res = self._parse_detection_result(llm_output)
         return intent_res

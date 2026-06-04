@@ -17,7 +17,7 @@ from openjiuwen.harness.schema.agent_mode import AgentMode
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
 if TYPE_CHECKING:
-    pass
+    from openjiuwen.harness.deep_agent import DeepAgent
 
 # ---------------------------------------------------------------------------
 # Word lists for slug generation (adjective-verb-noun, aligns with Claude Code)
@@ -370,6 +370,7 @@ class ExitPlanModeTool(Tool):
         if not plan_text.strip():
             return _EXIT_PLAN_EMPTY_MSG[lang].format(plan_path=plan_path_str)
 
+        agent.restore_mode_after_plan_exit(session)
         prefix = _EXIT_PLAN_WITH_CONTENT_PREFIX[lang].format(plan_path=plan_path_str)
         return prefix + plan_text
 

@@ -175,6 +175,11 @@ class CoordinationKernel:
             team_name = host.team_name
             if team_name and not self._subscribed_topics:
                 await self.subscribe_transport(team_name)
+        # Re-arm the team-completion rising-edge guard on every start (cold
+        # start / resume / recover) so each run cycle evaluates completion
+        # independently — a resumed persistent team can conclude again.
+        if self._dispatcher is not None:
+            self._dispatcher.team_completion.rearm()
         self._lifecycle_state = "running"
 
     async def pause(self) -> None:

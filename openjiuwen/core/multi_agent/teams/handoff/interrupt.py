@@ -58,7 +58,8 @@ async def flush_team_session(session):
     if session is None:
         return
     try:
-        await session.post_run()
+        await session.close_stream()
+        await session.commit()
     except Exception as exc:
         logger.warning(
             "[flush_team_session] checkpointer flush failed after interrupt; "

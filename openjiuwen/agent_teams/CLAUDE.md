@@ -34,6 +34,7 @@ agent_teams/
 ├── constants.py         # 保留名（user/team_leader/human_agent）集中定义
 ├── context.py           # session_id 跨成员/跨模式共享 contextvars
 ├── i18n.py              # 运行时中/英文字符串（仅装运行时 hard-coded 串）
+├── timefmt.py           # 毫秒 epoch → "绝对本地时间 + 相对差" 渲染（喂 LLM/观测，文案走 i18n）
 ├── paths.py             # 文件系统布局单一真相源
 ├── schema/              # 全部数据模型（Spec / Context / Event / Status / Task）
 ├── models/              # 多模型部署原语（ModelPoolEntry / 池继承 / Allocator）
@@ -48,6 +49,9 @@ agent_teams/
 ├── monitor/             # 团队运行态监控（TeamMonitor 只读视图 + TeamStreamLogger 流式诊断日志）
 ├── team_workspace/      # 团队共享工作空间（跨成员的文件/锁/版本）
 ├── cli/                 # 交互式 TUI / 斜杠命令子模块（prompt_toolkit + rich）
+├── external/            # 外部 agent 接入核心（ExternalTeamClient + 连接 descriptor + inbound 渲染）
+├── skill/               # 外部 agent 的非交互 CLI + SKILL.md（skill+cli 封装）
+├── mcp/                 # 外部 agent 的 stdio MCP server（FastMCP，仓库首个 MCP server）
 └── worktree_remote.py   # 跨机器 worktree 后端（团队专属，generic 实现见 harness/tools/worktree）
 ```
 
@@ -94,7 +98,7 @@ task.py            # TaskSummary / TaskDetail —— 任务返回模型
 - `TeamRuntimeContext`：运行时上下文，携带 role / messager_config / db_config 等资源配置，是 `Spec → Runtime` 的边界。
 - 新增 spec 字段要想清楚：**属于装配数据**（放 Spec）还是**运行时资源**（放 Config/Manager/Runtime）。不要让 Spec 持有 `Runner`、`Session`、文件句柄。
 - **Session checkpoint 状态结构按 team 分桶**：`session.update_state` 的全局状态根上有一个 `teams` namespace —— `state["teams"][team_name] = {spec, context, model_allocator_state, lifecycle, db_state}`。同一 session 可以承载多个 team 的状态；读写一律走 `runtime/metadata.py` 的 `read_team_namespace / merge_team_namespace / read_team_db_state / merge_team_db_state`，不要直接在 root 上 `update_state({"spec": ...})`。`db_state` 用 `pending_create / created / cleaned` 标记 team DB row 生命周期。
-- `MemberStatus` 三态分得清：`PAUSED` 是自然 round-end idle（persistent team，coordination kernel `pause` 路径写）；`STOPPED` 是外部 `stop_team` 拆掉 runtime、但 team 仍 live（kernel `stop` 路径写）；`SHUTDOWN` 是永久退场。三者都可经 `RESTARTING` 复活，DB 写状态选谁取决于"为什么 runtime 不在了"。`schema.team.TeamLifecycle`（temporary / persistent）描述静态团队类型，`runtime.pool.RuntimeState`（running / paused）描述对象池中 team 的运行时状态——和 MemberStatus 是不同层次的枚举，不要混用。
+- `MemberStatus` 状态流转：`UNSTARTED`（DB 记录已创建，agent 进程未启动）→ `STARTING`（CAS guard 占位，正在 spawn）→ `READY`（agent 进程已就绪）→ `BUSY`/`PAUSED`/`STOPPED`/`SHUTDOWN`/`ERROR`。`STARTING` 是过渡态——只有第一个 startup 路径能 CAS 成功 `UNSTARTED→STARTING`，第二个并发路径查到 STARTING/READY 直接跳过。spawn 失败时 rollback `STARTING→UNSTARTED` 保证可重试。`PAUSED` 是自然 round-end idle（persistent team）；`STOPPED` 是外部 `stop_team` 拆掉 runtime、但 team 仍 live；`SHUTDOWN` 是永久退场。`BUSY`/`PAUSED`/`STOPPED`/`SHUTDOWN` 可经 `RESTARTING` 复活。`schema.team.TeamLifecycle`（temporary / persistent）描述静态团队类型，`runtime.pool.RuntimeState`（running / paused）描述对象池中 team 的运行时状态——和 MemberStatus 是不同层次的枚举，不要混用。
 - `TeamOutputSchema` 是 `core.session.stream.OutputSchema` 的子类（不污染 core 层），扩出 `source_member: str | None` 与 `role: TeamRole | None`。`Runner.run_agent_team_streaming` 的所有输出 chunk 在 team 路径下都会被 `StreamController` 自动升级为 `TeamOutputSchema` 并打上 `(member_name, role)` 标签。**inprocess 模式**下，`SpawnManager` 在 spawn teammate 时通过 `StreamController.add_chunk_observer` 把 teammate chunk fan-out 到 leader 的 `stream_queue`，让 leader 的 streaming 流出全成员 chunk；subprocess 模式不做转发（chunk 留在 teammate 进程内），扩展点已留好（messager-driven observer）。详见 `agent/CLAUDE.md` 的 StreamController 段。
 
 ### models/ — 多模型部署原语
@@ -141,8 +145,14 @@ Messager 是点对点 + broadcast 的统一抽象，**任何直接新建 socket 
 
 ### spawn/ — 成员启动
 
-两种启动模式走不同入口，但对外由 `TeamAgent.spawn_member` 统一：
+两种启动模式走不同入口，但对外由两条路径触发：
 
+- `TeamAgent.spawn_member`（工具层）→ `SpawnManager.spawn_teammate`：Leader LLM 调用 spawn_member tool 时触发
+- `TeamAgent.auto_start_member` / `auto_start_all`（interact dispatch 层）→ `TeamBackend.startup_member` / `startup`：用户通过 `@member` 或 `@all` 发消息时 best-effort lazy startup
+
+两条路径最终都走 `_on_teammate_created`（即 `SpawnManager.spawn_teammate`），并且都经过 `MemberStatus.UNSTARTED→STARTING` 的 CAS guard（`try_transition_member_status`）。模式由 `TeamAgentSpec.spawn_mode` 决定。
+
+启动模式：
 - `spawn_mode="process"` → `Runner.spawn_agent` 走子进程（跨平台，默认）。
 - `spawn_mode="inprocess"` → `inprocess_spawn` 在同 event loop 启动协程（适合测试或轻量场景）。
 - 顶层 `context.py` 的 `session_id` contextvars 是两种模式共享的上下文载体。
@@ -165,15 +175,60 @@ Messager 是点对点 + broadcast 的统一抽象，**任何直接新建 socket 
 
 跨成员的文件共享区，支持锁 / 版本 / 冲突策略。独立于 worktree：**worktree 管代码隔离，workspace 管产物协同**。
 
-### interaction/ — 外部交互入口 + HITT
+### interaction/ — 外部交互入口 + HITT + Bridge Agent
 
 三种交互视角（`GodViewMessage` / `OperatorMessage` / `HumanAgentMessage`）+ `UserInbox` / `HumanAgentInbox` 的实现层，所有 HITT runtime 表面（`enable_hitt` 分层开关、人类成员来源、一致性约束、运行约束）也落在这里。
+
+Bridge Agent 把外部独立 agent（claudecode / codex / openclaw / hermes 等）以"团队成员"形式接入：`bridge_protocol.py` 定义纯文本 `BridgeProtocolAdapter`（connect / relay / close），`BridgeMemberSpec(TeamMemberSpec)` 子类 + `enable_bridge` 是 capability ceiling，dynamic spawn 走 `SpawnMemberTool(role_type='bridge_agent')`；bridge avatar 本地是完整 teammate，远程做实际工作，框架在 mailbox 路径自动转发原消息给远程并把回复组合进 avatar context（参见 `agent/coordination/handlers/message.py:_bridge_deliverable_for`）。详见 `docs/features/F_07_bridge-agent.md`。
 
 详见 [`interaction/CLAUDE.md`](interaction/CLAUDE.md)。
 
 ### cli/ — 交互式 TUI / 斜杠命令
 
 prompt_toolkit + rich 驱动的交互式 CLI。`run_team_cli(*, specs, yaml_paths)` 是公共入口，把 `Runner` 暴露的 team lifecycle facade（`run_agent_team_streaming` / `interact_agent_team` / `pause_agent_team` / `stop_agent_team` / `delete_agent_team` / `release` / `list_active_teams` / `register_human_agent_inbound` / `get_agent_team_monitor`）映射成 `/team` `/session` `/spec` 子命令。普通文本透传 `Runner.interact_agent_team`，由 runtime 的 `parse_interact_str` 一处解析 `# / $ / @member` 前缀；CLI 不做二次解析。详见 [`cli/CLAUDE.md`](cli/CLAUDE.md)。
+
+### external/ · skill/ · mcp/ — 外部 agent 直连接入
+
+让团队进程**之外**的 agent（第三方 CLI claudecode / codex / openclaw / hermes，
+或独立运行的 agent 服务进程）以一等成员身份直接调用协同工具——直连共享 DB + zmq
+messager，不经本地 avatar 代理。与 F_07 bridge（本地完整 DeepAgent + relay 纯文本给
+无工具远程执行者）是**正交互补**的两条接入路径：bridge 管"被动文本执行者"，本路径管
+"自主一等成员"。
+
+- `external/descriptor.py`：`TeamJoinDescriptor`（session/team/member + role + language +
+  db_config + transport_config）+ `TEAM_JOIN_ENV` 环境变量（`OPENJIUWEN_TEAM_JOIN`）。
+  团队拉起外部 agent 时注入，或运维下发给独立服务。
+- `external/client.py`：`ExternalTeamClient` 按 descriptor 开 DB（`get_shared_db`）+ messager
+  （`create_messager`），复用 `TeamTaskManager` / `TeamMessageManager` 暴露
+  send/broadcast/view/list/claim/complete/update/list_members + `fetch_inbox`（poll）/
+  `watch`（zmq 订阅，事件即唤醒后回查 DB）。写路径与进程内成员对称：发同样的
+  `EventMessage` 到同样的 topic，进程内 handler 照常被 nudge。
+- `external/format.py`：纯函数把消息 / 任务板渲染成与进程内 dispatcher 一致的文本
+  （复用 `i18n.t` 文案）。
+- `skill/cli.py` + `skill/SKILL.md`：非交互脚本式 CLI（`team-member` 入口）+ 协同协议
+  教学文档。与 `cli/` 的交互式 TUI 不同——后者给人用，本 CLI 给外部 agent 脚本化调用。
+- `mcp/server.py`：FastMCP **stdio** server（`openjiuwen-team-mcp` 入口），把 ops 暴露为
+  MCP 工具，协同协议放进 server-level instructions（工具 schema 自描述，无需单独 skill）。
+  这是仓库首个 MCP server（其余 MCP 代码都是 client）。
+
+**team 拉起外部 CLI 成员（F_22）**：CLI 启动知识静态预置在
+`TeamAgentSpec.external_cli_agents`（`ExternalCliAgentSpec` 列表：`cli_agent` 种类标识 +
+`command`/`cwd`/`inject_mcp`/`mcp_server_command`/`env`），非空集即外部 CLI 成员的能力上限。
+leader 用 `spawn_member(role_type='external_cli', cli_agent=<name>)` 按名引用，不在 spawn
+调用里传启动细节。当前内置 adapter：claude / codex / gemini / openclaw / hermes / generic。
+spawn 路径（`external_cli_spawn` → `build_cli_runtime`）按 adapter 注入团队 MCP server——
+有 launch flag 的 claude `--mcp-config <inline-json>`、codex `-c mcp_servers...`；无 flag 的
+gemini / hermes 由 spawn 路径跑一次 `<cli> mcp add ...` 带外注册（`mcp_register_command`），
+openclaw 无已知注册方式则 `mcp_inject=none` + 大声告警。MCP server 是 CLI 子进程，继承
+`OPENJIUWEN_TEAM_JOIN` env，自动绑定成员身份。外部 CLI 成员的**系统提示词**复用 team-rail 的
+`build_team_static_sections`（role/workflow/lifecycle/persona，排除其它 DeepAgent rail），经
+claude `--append-system-prompt` / codex `-c developer_instructions` / 其余 prepend 下发；其
+stdout 叙述经 `run_streaming` surface 为 `TeamOutputSchema` chunk、与进程内成员同路 fan-out。
+详见 [[F_22]] 与 [[F_25_external-cli-hardening-and-gemini]]。
+
+设计文档见 `docs/features/F_21_external-agent-access.md`（接入面 + spawn 接线）与
+`docs/features/F_22_external-cli-spawn-member-and-mcp-injection.md`（spawn_member 角色 +
+静态 spec 配置 + MCP 自动注入）。
 
 ### worktree — Git worktree 隔离
 
@@ -225,10 +280,13 @@ prompt_toolkit + rich 驱动的交互式 CLI。`run_team_cli(*, specs, yaml_path
 
 三条强制约束，提交时必查：
 
-1. **每次特性更新提交代码前必须归档 feature 文档**：在 `docs/features/` 下新增一份
-   `F_NN_<slug>.md`，记录决策、拒绝的方案、验证基线、已知遗留。commit message 只写 what，
-   feature 文档负责写 why / why-not。归档与代码改动应在同一次 commit（或紧邻的两次 commit）落地，
-   避免设计上下文随时间漂移。
+1. **每次特性更新必须归档 feature 文档，且特性代码、测试代码、文档拆成三个连续提交**：在 `docs/features/`
+   下新增一份 `F_NN_<slug>.md`，记录决策、拒绝的方案、验证基线、已知遗留。commit message 只写
+   what，feature 文档负责写 why / why-not。落地顺序**固定为三个紧邻的提交**——提交 1 落特性代码
+   （`feat(swarm): ...` 或对应 type），提交 2 落本次新增/改动的单测（`test(swarm): ...`），提交 3
+   落本次涉及的全部文档：`docs/features/F_NN_*.md` 新增 + 下面 #2 要求的 `docs/specs/S_NN_*.md`
+   修订（`docs(swarm): ...`）。特性代码、测试、文档不再混进同一次 commit——既不让大段文档 diff 淹没
+   代码评审，也让测试改动独立可审，还避免文档归档拖延导致设计上下文随时间漂移。
 2. **所有模块设计规约变动必须更新 specs 文档**：模块契约、跨子模块的公共协议、不变量、
    公共 API 形态发生变化时，同步修订对应 `docs/specs/S_NN_<slug>.md`；新规约 = 新 spec 文件。
    规约变了但 specs 没改，下次读 spec 的人就被误导——这是设计债，不是文档懒。
@@ -250,4 +308,8 @@ prompt_toolkit + rich 驱动的交互式 CLI。`run_team_cli(*, specs, yaml_path
 
 ## 提交约定
 
-本模块改动的 commit footer 固定：`Refs: #751`。见 `CLAUDE.local.md` 的 Git 提交规范。
+本模块改动的 commit message scope 固定用 `swarm`（如 `feat(swarm): ...`）。
+
+footer 用 `Refs: #<issue>` 格式关联 issue。issue 号若无法从当前上下文明确，必须先询问用户，不要臆造或留空。
+
+涉及 `docs/features/F_*` / `docs/specs/S_*` 文档更新的特性改动，**特性代码、测试代码、文档拆成三个连续提交**（提交 1 特性代码 `feat(swarm)`，提交 2 单测 `test(swarm)`，提交 3 文档 `docs(swarm)`），细则见上文「设计文档归档与双向同步」约束 #1。

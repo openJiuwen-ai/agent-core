@@ -109,6 +109,74 @@ class TestFullCompactProcessor:
         assert "modified 1 messages" in states[1].summary
 
     @pytest.mark.asyncio
+    async def test_full_compact_streams_generated_summary_in_state(self):
+        session = Session(session_id="full-compact-summary-session")
+        ctx = await create_context_with_full_compact(
+            FullCompactProcessorConfig(
+                trigger_total_tokens=1,
+                compression_call_max_tokens=2000,
+                messages_to_keep=0,
+                session_memory_enabled=False,
+            ),
+            history_messages=[
+                UserMessage(content="Please implement compact summary state."),
+                AssistantMessage(content="I will wire the generated summary through."),
+            ],
+            session=session,
+        )
+        processor = ctx._processors[0]  # type: ignore[attr-defined]
+        processor._generate_summary = AsyncMock(return_value="Summary:\nGenerated compact summary")  # type: ignore[method-assign]
+
+        result, states = await capture_context_compression_states(
+            session,
+            lambda: ctx.compress_context(return_state=True),
+        )
+
+        assert result["result"] == "compressed"
+        assert result["compact_summary"] == "Summary:\nGenerated compact summary"
+        assert_context_state_pair(states, processor_type="FullCompactProcessor", phase="active_compress")
+        assert states[0].compact_summary == ""
+        assert states[1].summary.startswith("Compressed ")
+        assert states[1].compact_summary == "Summary:\nGenerated compact summary"
+
+    @pytest.mark.asyncio
+    async def test_session_memory_replacement_streams_summary_in_state(self):
+        session = Session(session_id="session-memory-summary-session")
+        ctx = await create_context_with_full_compact(
+            FullCompactProcessorConfig(
+                trigger_total_tokens=1000,
+                compression_call_max_tokens=2000,
+                messages_to_keep=0,
+                session_memory_enabled=True,
+            ),
+            history_messages=[
+                UserMessage(content="old-a", metadata={"context_message_id": "msg-1"}),
+                AssistantMessage(content="old-b", metadata={"context_message_id": "msg-2"}),
+                UserMessage(content="keep", metadata={"context_message_id": "msg-3"}),
+            ],
+            session=session,
+        )
+        processor = ctx._processors[0]  # type: ignore[attr-defined]
+        processor._load_session_memory_runtime = MagicMock(
+            return_value={
+                "is_extracting": False,
+                "notes_upto_message_id": "msg-2",
+                "memory_path": "unused",
+            }
+        )  # type: ignore[method-assign]
+        processor._load_session_memory_text = MagicMock(return_value="Persisted session memory")  # type: ignore[method-assign]
+
+        result, states = await capture_context_compression_states(
+            session,
+            lambda: ctx.compress_context(return_state=True),
+        )
+
+        assert result["result"] == "compressed"
+        assert "Persisted session memory" in result["compact_summary"]
+        assert_context_state_pair(states, processor_type="FullCompactProcessor", phase="active_compress")
+        assert "Persisted session memory" in states[1].compact_summary
+
+    @pytest.mark.asyncio
     async def test_on_add_messages_uses_session_memory_candidate_after_prior_full_compact(self):
         from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
             FullCompactProcessor,
@@ -131,7 +199,7 @@ class TestFullCompactProcessor:
             ],
         )
         processor._build_session_memory_messages = AsyncMock(return_value=(["should not be used"], None))  # type: ignore[method-assign]
-        processor._build_full_compact_messages = AsyncMock(return_value=ctx.get_messages())  # type: ignore[method-assign]
+        processor._build_full_compact_messages = AsyncMock(return_value=(ctx.get_messages(), ""))  # type: ignore[method-assign]
 
         with pytest.raises(Exception, match="messages should be a BaseMessage or a list of BaseMessage"):
             await processor.on_add_messages(ctx, [UserMessage(content="new message")])

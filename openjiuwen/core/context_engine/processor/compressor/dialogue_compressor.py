@@ -16,6 +16,7 @@ from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
+from openjiuwen.core.context_engine.processor.compressor.util import message_to_text
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     BaseMessage,
@@ -196,6 +197,7 @@ class DialogueCompressor(ContextProcessor):
         **kwargs,
     ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
         context_messages = context.get_messages() + messages_to_add
+        self._reset_compression_usage()
         compress_until_idx = await self.get_compress_idx(context_messages)
         if compress_until_idx == -1:
             return None, messages_to_add
@@ -219,7 +221,12 @@ class DialogueCompressor(ContextProcessor):
         replacements, modified_indices = await self._build_json_replacements(context, targets, response.parser_content)
         if replacements:
             updated_messages = self._apply_replacements(context_messages, replacements)
-            event = ContextEvent(event_type=self.processor_type(), messages_to_modify=modified_indices)
+            event = ContextEvent(
+                event_type=self.processor_type(),
+                messages_to_modify=modified_indices,
+                compact_summary=self._extract_compact_summary_from_replacements(replacements),
+                compression_usage=self._current_compression_usage(),
+            )
             context.set_messages(updated_messages)
             return event, []
 
@@ -231,6 +238,8 @@ class DialogueCompressor(ContextProcessor):
                 event = ContextEvent(
                     event_type=self.processor_type(),
                     messages_to_modify=list(range(start_idx, end_idx + 1)),
+                    compact_summary=self._extract_compact_summary_from_replacements([fallback_replacement]),
+                    compression_usage=self._current_compression_usage(),
                 )
                 context.set_messages(updated_messages)
                 return event, []
@@ -354,7 +363,9 @@ class DialogueCompressor(ContextProcessor):
             UserMessage(content=self._build_targets_payload(targets)),
         ]
         try:
-            return await self._model.invoke(model_messages, output_parser=JsonOutputParser())
+            response = await self._model.invoke(model_messages, output_parser=JsonOutputParser())
+            self._record_compression_usage(response)
+            return response
         except Exception as exc:
             raise build_error(
                 StatusCode.MODEL_CALL_FAILED,
@@ -480,6 +491,18 @@ class DialogueCompressor(ContextProcessor):
             replacements.append((target.start_idx, target.end_idx, replacement_messages))
             modified_indices.extend(range(target.start_idx, target.end_idx + 1))
         return replacements, modified_indices
+
+    @staticmethod
+    def _extract_compact_summary_from_replacements(
+        replacements: List[Tuple[int, int, List[BaseMessage]]],
+    ) -> str:
+        parts = []
+        for _, _, replacement_messages in replacements:
+            for message in replacement_messages:
+                text = message_to_text(message)
+                if text.startswith(_DIALOGUE_MEMORY_BLOCK_MARKER):
+                    parts.append(text)
+        return "\n\n".join(parts)
 
     async def _build_fallback_replacement(
         self,

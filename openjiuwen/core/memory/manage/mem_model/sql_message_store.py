@@ -12,7 +12,7 @@ from openjiuwen.core.foundation.llm.schema.message import BaseMessage
 from openjiuwen.core.foundation.store.base_message_store import (
     BaseMessageStore, MessageMetadata,
 )
-from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
+from openjiuwen.core.memory.codec.aes_storage_codec import AesStorageCodec
 from openjiuwen.core.memory.migration.migrator.memory_meta_manager import MemoryMetaManager
 
 DEFAULT_TABLE_NAME = "user_message"
@@ -38,6 +38,7 @@ class SqlMessageStore(BaseMessageStore):
         self.crypto_key = crypto_key
         self.sql_db_store = sql_db_store
         self.table_name = table_name
+        self._codec = AesStorageCodec(crypto_key)
 
     def _generate_message_id(self, message: BaseMessage, timestamp: datetime) -> str:
         content_str = json.dumps(message.content, ensure_ascii=False)
@@ -62,7 +63,7 @@ class SqlMessageStore(BaseMessageStore):
 
         message_id = self._generate_message_id(message, timestamp)
         
-        content = BaseMemoryManager.encrypt_memory_if_needed(self.crypto_key, message.content)
+        content = self._codec.encode(message.content)
         
         data = {
             'message_id': message_id,
@@ -118,7 +119,7 @@ class SqlMessageStore(BaseMessageStore):
         
         message_data = messages[0]
         
-        content = BaseMemoryManager.decrypt_memory_if_needed(self.crypto_key, message_data['content'])
+        content = self._codec.decode(message_data['content'])
         
         base_msg = BaseMessage(
             content=content,
@@ -173,7 +174,7 @@ class SqlMessageStore(BaseMessageStore):
         
         result = []
         for message_data in messages:
-            content = BaseMemoryManager.decrypt_memory_if_needed(self.crypto_key, message_data['content'])
+            content = self._codec.decode(message_data['content'])
             
             base_msg = BaseMessage(
                 content=content,
@@ -204,7 +205,7 @@ class SqlMessageStore(BaseMessageStore):
         Returns:
             bool: Whether the update was successful
         """
-        encrypted_content = BaseMemoryManager.encrypt_memory_if_needed(self.crypto_key, content)
+        encrypted_content = self._codec.encode(content)
         
         conditions = {'message_id': message_id}
         data = {'content': encrypted_content}

@@ -1252,19 +1252,19 @@ class TestEdgeCases:
             return "result"
 
         async def grandchild_work():
-            await asyncio.sleep(10)
+            await asyncio.sleep(0.5)
             return "grandchild_done"
 
         async def child_work():
             nonlocal grandchild_ref
             grandchild_ref = await manager.create_task(grandchild_work(), name="grandchild", group="group1")
-            await asyncio.sleep(10)
+            await asyncio.sleep(0.5)
             return "child_done"
 
         async def parent_work():
             nonlocal child_ref
             child_ref = await manager.create_task(child_work(), name="child", group="group2")
-            await asyncio.sleep(10)
+            await asyncio.sleep(0.5)
             return "parent_done"
 
         async with manager.task_group() as tg:
@@ -1357,19 +1357,19 @@ class TestEdgeCases:
         child_ref = None
 
         async def grandchild_work():
-            await asyncio.sleep(10)
+            await asyncio.sleep(0.5)
             return "grandchild_done"
 
         async def child_work():
             nonlocal grandchild_ref
             grandchild_ref = await manager.create_task(grandchild_work(), name="grandchild")
-            await asyncio.sleep(10)
+            await asyncio.sleep(0.5)
             return "child_done"
 
         async def parent_work():
             nonlocal child_ref
             child_ref = await manager.create_task(child_work(), name="child")
-            await asyncio.sleep(10)
+            await asyncio.sleep(0.5)
             return "parent_done"
 
         async with manager.task_group() as tg:

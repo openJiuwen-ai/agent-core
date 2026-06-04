@@ -5,6 +5,7 @@ from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.config import LocalWorkConfig, SandboxGatewayConfig
 from openjiuwen.core.sys_operation.sys_operation import (SysOperationCard, SysOperation,
                                                          generate_isolation_key_template)
+from openjiuwen.core.sys_operation.shell_process_registry import kill_shell_processes_for_session
 
 __all__ = [
     "OperationMode",
@@ -13,4 +14,5 @@ __all__ = [
     "SysOperationCard",
     "SysOperation",
     "generate_isolation_key_template",
+    "kill_shell_processes_for_session",
 ]

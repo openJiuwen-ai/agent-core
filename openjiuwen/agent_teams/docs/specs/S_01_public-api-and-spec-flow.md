@@ -192,7 +192,7 @@ async def run_agent_team_streaming(
 - 默认路径传入既不是 `str` 也不是 `TeamAgentSpec` 的对象（包括已 build 的 `TeamAgent`） → `AGENT_TEAM_CONFIG_INVALID`。
 - 默认路径传入 `str` 但池中无对应 entry → `AGENT_TEAM_CONFIG_INVALID`，提示首次必须传 spec。
 - `base=True` 传入既不是 `str` 也不是 `BaseTeam` → `AGENT_TEAM_CONFIG_INVALID`。
-- `activate` 返回 `RunActionKind.REJECT_RUNNING` / `REJECT_ORPHANED` / `REJECT_INCONSISTENT` 的 `RunAction` → 非流式返回 `None`、流式静默结束；这两种情况都会 `logger.warning` 记录并按规则关 `InteractGate` + `session.post_run()`。
+- `activate` 返回 `RunActionKind.REJECT_RUNNING` / `REJECT_ORPHANED` / `REJECT_INCONSISTENT` 的 `RunAction` → 非流式返回 `None`、流式静默结束；这两种情况都会 `logger.warning` 记录并按规则关 `InteractGate` + `session.close_stream()` + `session.commit()`。
 
 ### 团队 lifecycle facade
 

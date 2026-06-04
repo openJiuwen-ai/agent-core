@@ -186,26 +186,30 @@ def decide_run_action(
 
 - `team_in_db`：静态 team 表里有这条 row 吗（`db.team.team_exists`）。
 - `team_in_session`：当前 session 的 checkpoint `state["teams"][team_name]` 这个 bucket 存在吗（`read_team_namespace`）。
+- `team_db_state`：仅当 `team_in_session=True` 时有意义——bucket 中的 `db_state` 字段，取值 `pending_create` / `cleaned` / `created` 等。`pending_create` 表示 `persist_leader_config` 已写入但 `build_team` 尚未创建 DB row；`cleaned` 表示团队已被清理但 session bucket 仍保留。这两种状态允许重新创建团队。
 - `pool_entry`：内存 pool 里有这个 team 的 ActiveTeam 实例吗。**一旦非 None，`entry.current_session_id == target_session_id` 必然成立**——`activate` 在调 dispatch 前已经把跨 session 的 entry 走 `stop_team` 拆掉了。
 - `pool_state`：仅当 `pool_entry` 非 None 时有意义——`entry.state` 是 RUNNING 还是 PAUSED。
 
 输出维度：`RunActionKind` + `_apply_action` 实际执行的副作用。
 
-| # | team_in_db | team_in_session | pool_entry | pool_state | RunActionKind | `_apply_action` 副作用 |
-|---|---|---|---|---|---|---|
-| 1 | F | F | None | — | `CREATE` | `pre_run(inputs)` → `spec.build()` → 新 entry 入 pool |
-| 2 | F | F | present | * | `REJECT_INCONSISTENT` | 不动 pool；返回 `reason` |
-| 3 | F | T | * | * | `REJECT_ORPHANED` | 不动 pool；返回 `reason` |
-| 4 | T | F | None | — | `NEW_TEAM_IN_SESSION` | `pre_run(inputs)` → `spec.build()` → `agent.resume_for_new_session(session)` → 入 pool |
-| 5 | T | T | None | — | `COLD_RECOVER` | `TeamAgent.recover_from_session(session, team_name, runtime_spec=spec)` → `agent.recover_team()` → 入 pool |
-| 6 | T | * | present | RUNNING | `REJECT_RUNNING` | 不动 pool；引导 caller 改用 `interact` |
-| 7 | T | * | present | PAUSED | `RESUME_FROM_PAUSE` | `pre_run(inputs)` → `entry.state = RUNNING` → `gate.reset()` |
+| # | team_in_db | team_in_session | team_db_state | pool_entry | pool_state | RunActionKind | `_apply_action` 副作用 |
+|---|---|---|---|---|---|---|---|
+| 1 | F | F | — | None | — | `CREATE` | `pre_run(inputs)` → `spec.build()` → 新 entry 入 pool |
+| 2 | F | T | `pending_create` / `cleaned` | * | * | `CREATE` | 同行 1（允许重新创建团队） |
+| 3 | F | T | 其他 | * | * | `REJECT_ORPHANED` | 不动 pool；返回 `reason` |
+| 4 | F | * | — | present | * | `REJECT_INCONSISTENT` | 不动 pool；返回 `reason` |
+| 5 | T | F | — | None | — | `NEW_TEAM_IN_SESSION` | `pre_run(inputs)` → `spec.build()` → `agent.resume_for_new_session(session)` → 入 pool |
+| 6 | T | T | — | None | — | `COLD_RECOVER` | `TeamAgent.recover_from_session(session, team_name, runtime_spec=spec)` → `agent.recover_team()` → 入 pool |
+| 7 | T | * | — | present | RUNNING | `REJECT_RUNNING` | 不动 pool；引导 caller 改用 `interact` |
+| 8 | T | * | — | present | PAUSED | `RESUME_FROM_PAUSE` | `pre_run(inputs)` → `entry.state = RUNNING` → `gate.reset()` |
 
 注：
 
-- `pool_state` 在 `pool_entry is None` 时不参与判定（标 `—`）；标 `*` 表示该维度不影响判定。
-- 行 2 是"内存说有，DB 说无"——本应不可能出现，一旦出现说明状态机已腐化，直接 reject 拒绝继续，不要试图自愈。
-- 行 6 的语义不是"出错"，而是"这个 team 在这个 session 上正常运行中——别再 run 了，去 interact"。
+- `team_db_state` 仅在 `team_in_session=True` 时有意义；标 `—` 表示该维度不参与判定，标 `*` 表示该维度不影响判定。
+- `pool_state` 在 `pool_entry is None` 时不参与判定（标 `—`）。
+- **行 2 是关键修复**：当 `team_db_state` 为 `pending_create` 或 `cleaned` 时，即使 `team_in_db=False` 且 `pool_entry` 存在，也允许重新创建团队。这解决了"Team 创建过程中被 pause 后无法恢复"的问题。
+- 行 4 是"内存说有，DB 说无"——如果 `team_db_state` 不是 `pending_create` / `cleaned`，说明状态机已腐化，直接 reject 拒绝继续。
+- 行 7 的语义不是"出错"，而是"这个 team 在这个 session 上正常运行中——别再 run 了，去 interact"。
 - 旧 `WARM_RECOVER` / `NEW_TEAM_IN_SESSION_WARM` 两行已下架（见 F_05）。任何"跨 session 复用 in-memory `TeamAgent`"的诱惑——例如想避免重建 LLM client、想保留 contextvars——必须再次评估，不允许重新引入。
 
 ### `TeamRuntimeManager` 公共方法

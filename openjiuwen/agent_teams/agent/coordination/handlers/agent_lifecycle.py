@@ -39,6 +39,7 @@ class AgentLifecycleHandler(BaseCoordinationHandler):
         TeamEvent.CLEANED: "on_cleaned",
         # Tool approval
         TeamEvent.TOOL_APPROVAL_RESULT: "on_tool_approval_result",
+        TeamEvent.TASK_PLAN_RESPONSE: "on_task_plan_response",
     }
 
     async def on_user_input(self, event: InnerEventMessage) -> None:
@@ -105,6 +106,36 @@ class AgentLifecycleHandler(BaseCoordinationHandler):
         )
         team_logger.debug(
             "[{}] received tool approval result for tool_call_id={}, approved={}",
+            member_name,
+            payload.tool_call_id,
+            payload.approved,
+        )
+        await self._round.resume_interrupt(interactive_input)
+
+    async def on_task_plan_response(self, event: EventMessage) -> None:
+        """Handle a leader decision for a submitted member plan."""
+        member_name = self._blueprint.member_name
+        payload = event.get_payload()
+        target_id = payload.member_name
+
+        if target_id is None or target_id != member_name:
+            return
+        if not getattr(payload, "tool_call_id", ""):
+            return
+
+        from openjiuwen.core.session import InteractiveInput
+
+        interactive_input = InteractiveInput()
+        interactive_input.update(
+            payload.tool_call_id,
+            {
+                "approved": payload.approved,
+                "feedback": payload.feedback,
+                "plan_id": getattr(payload, "plan_id", "") or "",
+            },
+        )
+        team_logger.debug(
+            "[{}] received task plan response for tool_call_id={}, approved={}",
             member_name,
             payload.tool_call_id,
             payload.approved,

@@ -22,6 +22,8 @@ from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordina
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.schema.events import EventMessage, MessageEvent, TeamEvent
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.timefmt import format_time_context
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
 
 
@@ -79,13 +81,16 @@ class MessageHandler(BaseCoordinationHandler):
     async def on_member_shutdown_drain(self, event: EventMessage) -> None:
         """Drain own mailbox when this teammate is the one shutting down.
 
-        Leader does not drain on shutdown events — it observes other
-        members' shutdowns at the lifecycle level. Only the teammate
+        Teammate-only: the leader observes other members' shutdowns at
+        the lifecycle level, and a human agent has no autonomous round —
+        draining its mailbox would ``deliver_input`` and resurrect a
+        round just as the avatar is collapsing (its own teardown rides
+        ``MemberHandler`` → ``shutdown_self`` instead). Only the teammate
         whose own ``member_name`` matches the event's payload drains.
         Steer mode ensures the messages land even if the agent is in
         the middle of a round.
         """
-        if self._blueprint.role == TeamRole.LEADER:
+        if self._blueprint.role != TeamRole.TEAMMATE:
             return
         member_name = self._blueprint.member_name
         if not member_name or self._infra.message_manager is None:
@@ -114,7 +119,9 @@ class MessageHandler(BaseCoordinationHandler):
         """
         seen_ids: set[str] = set()
         backend = self._infra.team_backend
-        is_human_agent = backend is not None and backend.is_human_agent(member_name)
+        is_human_agent = backend is not None and await backend.is_human_agent(member_name)
+        is_bridge = self._blueprint.role == TeamRole.BRIDGE_AGENT and backend is not None
+
 
         while True:
             all_unread = await self._read_all_unread(member_name)
@@ -133,11 +140,119 @@ class MessageHandler(BaseCoordinationHandler):
                         msg.message_id,
                     )
                     return
-                text = self._format_message(msg, is_human_agent=is_human_agent)
+                if is_bridge:
+                    text = await self._bridge_deliverable_for(member_name, msg)
+                else:
+                    text = self._format_message(msg, is_human_agent=is_human_agent, now_ms=get_current_time())
                 team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
                 await self._round.deliver_input(text, use_steer=use_steer)
                 await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
+
+    async def _bridge_deliverable_for(self, member_name: str, msg: Any) -> str:
+        """Build the text delivered to a bridge avatar's DeepAgent.
+
+        The bridge avatar is a full local teammate, but inbound team
+        messages must first be auto-forwarded to its remote backing
+        agent (via ``BridgeProtocolAdapter.relay``) so the remote's
+        text reply is part of the avatar's next context. The avatar
+        then schedules — it decides whether to ``send_message`` the
+        remote reply back to the team, claim/complete tasks, or stay
+        silent. The local LLM passes the remote output through verbatim;
+        the explicit instructions in the composed template enforce that
+        contract.
+
+        Falls back to ``REMOTE_UNAVAILABLE_SENTINEL`` when no adapter
+        is wired or when the adapter raises — the bridge then degrades
+        to a normal teammate-style mailbox round.
+        """
+        from openjiuwen.agent_teams.agent.bridge_inbound_compose import compose_bridge_inbound
+        from openjiuwen.agent_teams.agent.bridge_outbound_wrap import wrap_outbound_to_remote
+        from openjiuwen.agent_teams.interaction.bridge_protocol import REMOTE_UNAVAILABLE_SENTINEL
+        from openjiuwen.agent_teams.schema.team import (
+            BridgeMailboxInjectMode,
+        )
+
+        backend = self._infra.team_backend
+        spec = backend.get_bridge_member_spec(member_name) if backend is not None else None
+        # Defensive: if the role inference labelled this member as a
+        # bridge but the spec dict has no entry (e.g. mid-recovery race),
+        # fall back to the plain teammate format. A bridge avatar is
+        # never a human_agent, so the human-forwarding template stays off.
+        if spec is None:
+            return self._format_message(msg, is_human_agent=False, now_ms=get_current_time())
+
+        language = "cn"
+        team_spec = self._blueprint.team_spec
+        if team_spec is not None and team_spec.language:
+            language = team_spec.language
+
+        outbound_text = wrap_outbound_to_remote(
+            sender=msg.from_member_name,
+            sender_display_name=await self._lookup_display_name(msg.from_member_name),
+            sender_role=await self._lookup_role(msg.from_member_name),
+            sender_persona=await self._lookup_persona(msg.from_member_name),
+            body=msg.content,
+            broadcast=bool(getattr(msg, "broadcast", False)),
+            task_hint=None,
+            mode=spec.mailbox_inject_mode or BridgeMailboxInjectMode.PASSTHROUGH,
+            language=language,
+        )
+
+        adapter = backend.get_bridge_adapter(member_name) if backend is not None else None
+        remote_reply: str = REMOTE_UNAVAILABLE_SENTINEL
+        if adapter is not None:
+            try:
+                remote_reply = await adapter.relay(member_name=member_name, text=outbound_text)
+            except Exception as exc:
+                team_logger.warning(
+                    "bridge_agent[%s] relay raised: %s — falling back to sentinel",
+                    member_name,
+                    exc,
+                )
+                remote_reply = REMOTE_UNAVAILABLE_SENTINEL
+
+        return compose_bridge_inbound(
+            original_sender=msg.from_member_name,
+            original_body=msg.content,
+            remote_reply=remote_reply,
+            language=language,
+            time_info=format_time_context(msg.timestamp, get_current_time()),
+        )
+
+    async def _lookup_display_name(self, member_name: str) -> Any:
+        backend = self._infra.team_backend
+        if backend is None or backend.db is None:
+            return None
+        try:
+            row = await backend.db.member.get_member(member_name, backend.team_name)
+        except Exception:
+            return None
+        return row.display_name if row is not None else None
+
+    async def _lookup_persona(self, member_name: str) -> Any:
+        backend = self._infra.team_backend
+        if backend is None or backend.db is None:
+            return None
+        try:
+            row = await backend.db.member.get_member(member_name, backend.team_name)
+        except Exception:
+            return None
+        return row.desc if row is not None else None
+
+    async def _lookup_role(self, member_name: str) -> Any:
+        backend = self._infra.team_backend
+        if backend is None:
+            return None
+        if await backend.is_human_agent(member_name):
+            return TeamRole.HUMAN_AGENT
+        if backend.is_bridge_agent(member_name):
+            return TeamRole.BRIDGE_AGENT
+        # The leader uses the team's leader_member_name from team_spec.
+        team_spec = self._blueprint.team_spec
+        if team_spec is not None and member_name == team_spec.leader_member_name:
+            return TeamRole.LEADER
+        return TeamRole.TEAMMATE
 
     async def _notify_human_agent_inbound(self, event: CoordinationEvent) -> None:
         """Forward a team-side message to the SDK's human-agent callbacks.
@@ -183,10 +298,10 @@ class MessageHandler(BaseCoordinationHandler):
         ts = row.timestamp
 
         if is_broadcast:
-            recipients = [name for name in backend.human_agent_names() if name != sender]
+            recipients = [name for name in await backend.human_agent_names() if name != sender]
         else:
             target = payload.to_member_name
-            if not backend.is_human_agent(target):
+            if not await backend.is_human_agent(target):
                 return
             recipients = [target]
 
@@ -246,11 +361,15 @@ class MessageHandler(BaseCoordinationHandler):
         merged.sort(key=lambda m: m.timestamp, reverse=True)
         return merged
 
-    def _format_message(self, msg: Any, *, is_human_agent: bool) -> str:
+    def _format_message(self, msg: Any, *, is_human_agent: bool, now_ms: int) -> str:
         """Format one TeamMessage for agent input.
 
         Includes message_id so the agent can call mark_message_read,
-        and distinguishes direct vs broadcast messages.
+        and distinguishes direct vs broadcast messages. The message's
+        send time is rendered as ``<absolute local time> (<relative
+        diff>)`` so the agent can judge recency and ordering — mailbox
+        delivery is often delayed, and a bare epoch tells the LLM
+        nothing about how stale the message is.
 
         Rendering is role-aware. A teammate / leader sees
         ``dispatcher.msg_received`` ("reply via send_message if the
@@ -260,6 +379,11 @@ class MessageHandler(BaseCoordinationHandler):
         not to autonomously call ``send_message`` — the avatar's
         outbound actions are driven only by Inbox instructions from
         its controller.
+
+        Args:
+            msg: The team message row to render.
+            is_human_agent: Whether the recipient is a human-agent avatar.
+            now_ms: Current millisecond UTC epoch, the relative-time anchor.
         """
         msg_type = t("dispatcher.msg_type_broadcast") if msg.broadcast else t("dispatcher.msg_type_direct")
         key = "hitt.msg_received_for_human" if is_human_agent else "dispatcher.msg_received"
@@ -269,4 +393,5 @@ class MessageHandler(BaseCoordinationHandler):
             message_id=msg.message_id,
             sender=msg.from_member_name,
             content=msg.content,
+            time_info=format_time_context(msg.timestamp, now_ms),
         )

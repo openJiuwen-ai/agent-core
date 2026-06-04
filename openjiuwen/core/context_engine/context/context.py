@@ -65,8 +65,10 @@ class SessionModelContext(ModelContext):
         self._enable_reload = config.enable_reload
         self._context_window_tokens = config.context_window_tokens
         self._model_name = config.model_name
-        self._model_context_window_tokens = dict(
-            config.model_context_window_tokens if config.model_context_window_tokens else {}
+        self._model_context_window_tokens = ContextUtils.build_model_context_window_tokens(
+            config.model_context_window_tokens,
+            enable_openrouter_model_context_window_tokens=config.enable_openrouter_model_context_window_tokens,
+            openrouter_request_timeout=config.openrouter_request_timeout,
         )
         self._workspace = workspace
         self._sys_operation = sys_operation
@@ -170,8 +172,10 @@ class SessionModelContext(ModelContext):
             self,
             processor_types: List[str] = None,
             **kwargs,
-    ) -> str:
+    ) -> str | dict[str, Any]:
+        return_state = bool(kwargs.pop("return_state", False))
         if self._processor_lock.locked():
+            history_start = len(self._processor_state_recorder.history())
             logger.info("skip active compression because context processor is already running")
             await self._build_and_emit_compression_state(ContextProcessorStateInput(
                 operation_id=uuid.uuid4().hex,
@@ -193,11 +197,16 @@ class SessionModelContext(ModelContext):
                     model_context_window_tokens=self._model_context_window_tokens,
                 ),
             ))
-            return _ACTIVE_COMPRESSION_RESULT_BUSY
+            return self._build_active_compression_result(
+                _ACTIVE_COMPRESSION_RESULT_BUSY,
+                return_state,
+                history_start=history_start,
+            )
 
         await self._processor_lock.acquire()
         try:
             self._active_compression_in_progress = True
+            history_start = len(self._processor_state_recorder.history())
             kwargs.setdefault("sys_operation", self._sys_operation)
             processors = self._select_processors(processor_types=processor_types)
             if not processors:
@@ -230,7 +239,11 @@ class SessionModelContext(ModelContext):
                         ),
                     )
                 )
-                return _ACTIVE_COMPRESSION_RESULT_NOOP
+                return self._build_active_compression_result(
+                    _ACTIVE_COMPRESSION_RESULT_NOOP,
+                    return_state,
+                    history_start=history_start,
+                )
 
             changed, _ = await self._run_add_processors(
                 [],
@@ -241,9 +254,17 @@ class SessionModelContext(ModelContext):
             )
             if changed:
                 logger.info("active compression finished and changed context messages")
-                return _ACTIVE_COMPRESSION_RESULT_COMPRESSED
+                return self._build_active_compression_result(
+                    _ACTIVE_COMPRESSION_RESULT_COMPRESSED,
+                    return_state,
+                    history_start=history_start,
+                )
             logger.info("active compression finished without changing context messages")
-            return _ACTIVE_COMPRESSION_RESULT_NOOP
+            return self._build_active_compression_result(
+                _ACTIVE_COMPRESSION_RESULT_NOOP,
+                return_state,
+                history_start=history_start,
+            )
         finally:
             self._active_compression_in_progress = False
             self._processor_lock.release()
@@ -372,6 +393,8 @@ class SessionModelContext(ModelContext):
                                 messages_to_modify=list(getattr(event, "messages_to_modify", []) or []),
                                 force=False,
                                 context_max=context_max,
+                                compact_summary=str(getattr(event, "compact_summary", "") or ""),
+                                compression_usage=getattr(event, "compression_usage", None),
                             )
                         )
                 except Exception as e:
@@ -644,6 +667,8 @@ class SessionModelContext(ModelContext):
                             messages_to_modify=list(getattr(event, "messages_to_modify", []) or []),
                             force=force,
                             context_max=context_max,
+                            compact_summary=str(getattr(event, "compact_summary", "") or ""),
+                            compression_usage=getattr(event, "compression_usage", None),
                         )
                     )
                     if event is not None:
@@ -683,6 +708,36 @@ class SessionModelContext(ModelContext):
     ) -> None:
         state = self._processor_state_recorder.build_state(state_input)
         await self._processor_state_recorder.emit(self, state)
+
+    def _build_active_compression_result(
+            self,
+            result: str,
+            include_state: bool,
+            *,
+            history_start: int = 0,
+    ) -> str | dict[str, Any]:
+        if not include_state:
+            return result
+        history = self._processor_state_recorder.history()
+        active_history = history[history_start:] if history_start > 0 else history
+        state = self._select_active_compression_result_state(active_history)
+        payload: dict[str, Any] = {"result": result}
+        if isinstance(state, dict):
+            payload["state"] = state
+            compact_summary = state.get("compact_summary")
+            if isinstance(compact_summary, str) and compact_summary:
+                payload["compact_summary"] = compact_summary
+        return payload
+
+    @staticmethod
+    def _select_active_compression_result_state(
+            history: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        for state in reversed(history):
+            compact_summary = state.get("compact_summary")
+            if state.get("status") == "completed" and isinstance(compact_summary, str) and compact_summary:
+                return state
+        return history[-1] if history else None
 
     def _select_processors(
             self,

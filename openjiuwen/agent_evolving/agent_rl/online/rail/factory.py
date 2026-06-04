@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_evolving.agent_rl.online.rail.online_rail import RLOnlineRail
 
 logger = logging.getLogger(__name__)
 

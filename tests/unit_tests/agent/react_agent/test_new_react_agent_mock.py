@@ -28,6 +28,7 @@ Card + Config 设计模式。与老接口 (create_react_agent_config) 区分。
 - 老接口: test_react_agent_mock.py 使用 create_react_agent_config()
 - 新接口: 本文件使用 AgentCard + ReActAgentConfig + configure()
 """
+import asyncio
 import os
 import unittest
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -39,7 +40,7 @@ from openjiuwen.core.single_agent.agents.react_agent import (
     ReActAgentConfig,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.core.foundation.llm import UserMessage
+from openjiuwen.core.foundation.llm import ToolCall, UserMessage
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.context_engine import ContextEngineConfig
 
@@ -731,6 +732,12 @@ class TestNewReActAgentStream(unittest.IsolatedAsyncioTestCase):
         async def mock_post_run():
             await data_queue.put(None)  # 发送结束信号
 
+        async def mock_close_stream():
+            await data_queue.put(None)
+
+        async def mock_commit():
+            return None
+
         async def mock_stream_iterator():
             while True:
                 data = await data_queue.get()
@@ -740,6 +747,8 @@ class TestNewReActAgentStream(unittest.IsolatedAsyncioTestCase):
 
         mock_session.write_stream = mock_write_stream
         mock_session.post_run = mock_post_run
+        mock_session.close_stream = mock_close_stream
+        mock_session.commit = mock_commit
         mock_session.stream_iterator = mock_stream_iterator
         return mock_session
 
@@ -1244,6 +1253,91 @@ class TestAbilityManagerAgentCardInputParams(unittest.IsolatedAsyncioTestCase):
             elif tool_info.name == "agent3":
                 expected_params = {"type": "object", "properties": {}, "required": []}
                 self.assertEqual(tool_info.parameters, expected_params)
+
+
+class TestAbilityManagerAgentCardStreaming(unittest.IsolatedAsyncioTestCase):
+    """Regression tests for AgentCard abilities sharing parent stream output."""
+
+    def setUp(self):
+        from openjiuwen.core.single_agent import AbilityManager
+        from openjiuwen.core.session.agent import create_agent_session
+
+        self.ability_manager = AbilityManager()
+        self.child_card = AgentCard(id="child_agent", name="child_agent", description="Child agent")
+        self.parent_session = create_agent_session(
+            session_id="parent-session",
+            card=AgentCard(id="parent_agent", name="parent_agent"),
+        )
+        self.ability_manager.add(self.child_card)
+
+    async def asyncTearDown(self):
+        try:
+            await self.parent_session.close_stream()
+        except Exception:
+            pass
+
+    def _tool_call(self):
+        return ToolCall(
+            id="call-1",
+            type="function",
+            name="child_agent",
+            arguments='{"query": "hello"}',
+        )
+
+    @patch("openjiuwen.core.single_agent.ability_manager.create_agent_session")
+    @patch("openjiuwen.core.runner.Runner.run_agent", new_callable=AsyncMock)
+    @patch("openjiuwen.core.runner.Runner.resource_mgr.get_agent", new_callable=AsyncMock)
+    async def test_agent_card_child_session_reuses_parent_stream_writer(
+            self, mock_get_agent, mock_run_agent, mock_create_session
+    ):
+        child_agent = MagicMock()
+        child_agent.card = self.child_card
+        mock_get_agent.return_value = child_agent
+        mock_create_session.return_value = MagicMock()
+        mock_run_agent.return_value = {"output": "done", "result_type": "answer"}
+
+        await self.ability_manager._execute_single_tool_call(  # pylint: disable=protected-access
+            self._tool_call(),
+            self.parent_session,
+        )
+
+        kwargs = mock_create_session.call_args.kwargs
+        self.assertEqual(kwargs["session_id"], "parent-session:call-1")
+        self.assertEqual(kwargs["card"], self.child_card)
+        self.assertIs(
+            kwargs["stream_writer_manager"],
+            self.parent_session._inner.stream_writer_manager(),  # pylint: disable=protected-access
+        )
+        self.assertFalse(kwargs["close_stream_on_post_run"])
+        self.assertEqual(kwargs["source_metadata"], {"source_agent_id": "child_agent"})
+        self.assertEqual(mock_run_agent.call_args.kwargs["inputs"]["conversation_id"], "parent-session:call-1")
+
+    @patch("openjiuwen.core.runner.Runner.resource_mgr.get_agent", new_callable=AsyncMock)
+    async def test_agent_card_child_stream_writes_to_parent_stream(self, mock_get_agent):
+        from openjiuwen.core.runner import Runner
+
+        child_agent = MagicMock()
+        child_agent.card = self.child_card
+        mock_get_agent.return_value = child_agent
+
+        async def run_agent(agent, inputs, session):
+            await session.write_stream({"message": "child streamed"})
+            return {"output": "done", "result_type": "answer"}
+
+        with patch.object(Runner, "run_agent", new=AsyncMock(side_effect=run_agent)):
+            result, _ = await self.ability_manager._execute_single_tool_call(  # pylint: disable=protected-access
+                self._tool_call(),
+                self.parent_session,
+            )
+
+        chunk = await asyncio.wait_for(
+            self.parent_session.stream_iterator().__anext__(),
+            timeout=1,
+        )
+
+        self.assertEqual(result, {"output": "done", "result_type": "answer"})
+        self.assertEqual(chunk.payload["message"], "child streamed")
+        self.assertEqual(chunk.payload["source_agent_id"], "child_agent")
 
 
 if __name__ == "__main__":

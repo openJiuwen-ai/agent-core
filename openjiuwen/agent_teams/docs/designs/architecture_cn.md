@@ -1229,7 +1229,7 @@ sequenceDiagram
     Bus-->>L: TASK 事件
 
     alt 通过
-        L->>DB: approve_plan(member_name, approved=true)
+        L->>DB: approve_plan(plan_id, approved=true)
         DB->>DB: status → PLAN_APPROVED
         Bus-->>T: PLAN_APPROVAL(approved=true)
         T->>T: 执行已批准计划

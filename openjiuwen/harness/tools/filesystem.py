@@ -826,6 +826,7 @@ class WriteFileTool(Tool):
     """Full-file writer with Claude Write-tool style stale-write protection."""
 
     MAX_FILE_SIZE: int = 1 * 1024 * 1024 * 1024  # 1 GiB
+    MAX_CONTENT_SIZE: int = 5 * 1024 * 1024  # 5 MiB — larger files must use bash/shell I/O
 
     def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
         super().__init__(
@@ -870,6 +871,19 @@ class WriteFileTool(Tool):
             return ToolOutput(success=False, error="content is required")
         if not isinstance(content, str):
             return ToolOutput(success=False, error="content must be a string")
+
+        content_bytes = len(content.encode("utf-8", errors="replace"))
+        if content_bytes > self.MAX_CONTENT_SIZE:
+            return ToolOutput(
+                success=False,
+                error=(
+                    f"content is too large ({content_bytes // (1024 * 1024)} MiB) for write_file. "
+                    f"Maximum allowed is {self.MAX_CONTENT_SIZE // (1024 * 1024)} MiB. "
+                    "Use the bash or powershell tool to write large files instead, e.g.:\n"
+                    "  python -c \"open('path', 'w').write('...' * N)\"\n"
+                    "  or use shell redirection / a script that writes incrementally."
+                ),
+            )
 
         try:
             path = _resolve_tool_file_path(self.operation, path)

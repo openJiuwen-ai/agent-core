@@ -62,6 +62,14 @@ def normalize_pipeline_preference(value: Any) -> str:
     return PIPELINE_PREFERENCE_AUTO
 
 
+def _venv_python_candidates(base_dir: str) -> list[Path]:
+    """Return platform-aware venv python paths under *base_dir*."""
+    venv = Path(base_dir) / ".venv"
+    if sys.platform == "win32":
+        return [venv / "Scripts" / "python.exe"]
+    return [venv / "bin" / "python"]
+
+
 def _default_immutable_files() -> list[str]:
     """Return built-in immutable files for the bundled Phase 1 pipeline."""
     return [
@@ -253,6 +261,7 @@ class ExtensionDesign:
     harness_config_patch: Dict[str, Any] = field(
         default_factory=dict
     )
+    skill_source: str = ""
 
 
 @dataclass
@@ -262,6 +271,7 @@ class ExtensionDesignArtifact:
     designs: List["ExtensionDesign"] = field(
         default_factory=list
     )
+    package_name: str = ""  # Final package name
 
 
 @dataclass
@@ -499,6 +509,13 @@ class AutoHarnessConfig:
     skills_dirs: List[str] = field(
         default_factory=list
     )
+    community_skill_repos: List[str] = field(
+        default_factory=lambda: [
+            "https://github.com/anthropics/skills.git",
+            "https://github.com/JimLiu/baoyu-skills.git",
+        ]
+    )
+    community_skill_cache_dir: str = ""
     stage_registrars: List[str] = field(
         default_factory=list
     )
@@ -618,6 +635,17 @@ class AutoHarnessConfig:
             )
         return ".auto_harness/runtime_extensions/"
 
+    @property
+    def resolved_community_skill_cache_dir(self) -> str:
+        """Community skill repo cache directory."""
+        if self.community_skill_cache_dir:
+            return self.community_skill_cache_dir
+        if self.data_dir:
+            return str(
+                Path(self.data_dir) / "skills-cache"
+            )
+        return ".auto_harness/skills-cache/"
+
     def resolve_repo_name(self) -> str:
         """Resolve the repository directory name used for local cache paths."""
         for candidate in (
@@ -655,14 +683,14 @@ class AutoHarnessConfig:
         if self.ci_gate_python_executable:
             return self.ci_gate_python_executable
 
-        candidates = []
+        candidates: list[Path] = []
         if self.workspace:
-            candidates.append(
-                Path(self.workspace) / ".venv" / "bin" / "python"
+            candidates.extend(
+                _venv_python_candidates(self.workspace)
             )
         if self.local_repo:
-            candidates.append(
-                Path(self.local_repo) / ".venv" / "bin" / "python"
+            candidates.extend(
+                _venv_python_candidates(self.local_repo)
             )
 
         for candidate in candidates:
@@ -744,6 +772,16 @@ class AutoHarnessConfig:
             cfg.skills_dirs = [
                 str(v) for v in data["skills_dirs"]
             ]
+        if "community_skill_repos" in data and isinstance(
+            data["community_skill_repos"], list
+        ):
+            cfg.community_skill_repos = [
+                str(v) for v in data["community_skill_repos"]
+            ]
+        if "community_skill_cache_dir" in data:
+            cfg.community_skill_cache_dir = str(
+                data["community_skill_cache_dir"]
+            )
         if "stage_registrars" in data and isinstance(
             data["stage_registrars"], list
         ):

@@ -146,23 +146,6 @@ class SimpleAPIWrapperFromCallable:
                 "error": f"request invalid, error: {str(e)}", 
                 "response": ""
             }), 12
-        """
-        Initialize the wrapper with either a Python file or custom functions.
-        
-        Args:
-            tool_path: Path to Python file containing functions (optional)
-            custom_functions: Dictionary of custom functions to use (optional)
-        """
-        self.functions = {}
-        self.fn_call_name = fn_call_name
-
-        # Load from Python file if provided
-        if tool_path and os.path.exists(tool_path):
-            self._load_module(tool_path)
-        
-        # Add custom functions if provided
-        if custom_functions:
-            self.functions.update(custom_functions)
 
     def _load_module(self, tool_path: str):
         """Load functions from a Python module file"""

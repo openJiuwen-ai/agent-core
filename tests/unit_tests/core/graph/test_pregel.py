@@ -49,7 +49,7 @@ def basic_nodes_and_channels_direct():
     def fn_slow():
         return "slow_data"
 
-    a1bcd_to_collect = BarrierChannel("collect", expected={"a1", "b", "c", "d"})
+    a1bcd_to_collect = BarrierChannel("collect", expected_groups=[{"a1"}, {"b"}, {"c"}, {"d"}])
 
     # Define channels
     channels = [
@@ -205,9 +205,9 @@ def multi_routing_direct():
         return "E"
 
     # Define barrier channels
-    abc_to_d = BarrierChannel("D", expected={"A", "B", "C"})
-    ay_to_d = BarrierChannel("D", expected={"A", "Y"})
-    deg_to_end = BarrierChannel("END", expected={"D", "E", "G"})
+    abc_to_d = BarrierChannel("D", expected_groups=[{"A"}, {"B"}, {"C"}])
+    ay_to_d = BarrierChannel("D", expected_groups=[{"A"}, {"Y"}])
+    deg_to_end = BarrierChannel("END", expected_groups=[{"D"}, {"E"}, {"G"}])
 
     # Define channels
     channels = [

@@ -19,7 +19,7 @@ The core types of the memory engine are defined in the `openjiuwen.core.memory` 
   - `default_model_client_cfg: ModelClientConfig`: Default LLM client configuration (`client_provider/api_base/api_key/verify_ssl`, etc.).
   - `forbidden_variables: str`: Forbidden variables (e.g., "user_phone") that cannot be stored. Default: `""` (no forbidden variables).
   - `input_msg_max_len: int`: Maximum length of input messages (default: 8192).
-  - `crypto_key: bytes`: AES key for encrypting sensitive fields in storage (must be 32 bytes in length; empty means no encryption).
+  - `crypto_key: bytes`: AES-256-GCM encryption key (must be 32 bytes in length; empty means no encryption). When non-empty, `set_config` automatically injects an `AesStorageCodec` into `BaseMemoryIndex` for transparent storage-layer encryption/decryption of the memory `text` field.
 
 - **`MemoryScopeConfig`** (Scope-level Configuration)
   Used to define independent model/vector configurations for different `scope_id`:
@@ -232,7 +232,7 @@ async def create_memory_engine() -> LongTermMemory:
         verify_ssl=False,
     )
 
-    # crypto_key must be 32 bytes; empty means encryption is not enabled
+    # crypto_key must be 32 bytes; empty means encryption is not enabled (non-empty auto-encrypts memory text fields)
     crypto_key_env = os.getenv("SERVER_AES_MASTER_KEY_ENV", "")
     crypto_key = crypto_key_env.encode("utf-8")[:32].ljust(32, b"\0") if crypto_key_env else b""
 

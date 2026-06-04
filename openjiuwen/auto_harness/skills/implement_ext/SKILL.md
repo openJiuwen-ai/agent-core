@@ -18,12 +18,14 @@ tools:
 
 ## 固定工作流
 
-1. 理解任务：确认 ExtensionDesign 的 gap_id、extension_name、components、file_plan；严格按 components 实现，不要自动补充未声明组件
-2. 收集上下文：按 components 读取对应框架基类；只在包含 rail 时读取 rail 基类，只在包含 tool 时读取 tool 基类
-3. 生成代码：按 file_plan 创建目录结构和源文件
-4. 生成 harness_config.yaml 清单文件
-5. 局部验证：确认生成的文件语法正确（`python -c "import ast; ast.parse(open(...).read())"`)
-6. 停止在未提交状态，交还 orchestrator
+1. 理解任务：确认 ExtensionDesign 的 gap_id、extension_name、components、file_plan、skill_source；严格按 components 实现，不要自动补充未声明组件
+2. 检查 skill_source：如果 skill_source 非空（格式为 `community:<skill_name>`），说明 skill 已从社区源仓拷贝到扩展目录的 `skills/<skill_name>/` 下，**不要重新创建或修改 SKILL.md**，只需确保 harness_config.yaml 正确声明 skills.dirs 即可
+3. 收集上下文：按 components 读取对应框架基类；只在包含 rail 时读取 rail 基类，只在包含 tool 时读取 tool 基类；当 skill_source 非空时跳过 skill 基类收集
+4. **识别依赖**：检查 file_plan 和组件描述涉及的第三方库，创建 requirements.txt（详见"依赖声明规范"）
+5. 生成代码：按 file_plan 创建目录结构和源文件
+6. 生成 harness_config.yaml 清单文件
+7. 局部验证：确认生成的文件语法正确（`python -c "import ast; ast.parse(open(...).read())"`)
+8. 停止在未提交状态，交还 orchestrator
 
 ## 范围约束
 
@@ -58,6 +60,15 @@ tools:
 - Tool 必须在 `__init__` 内自己创建 `ToolCard`
 - `ToolCard.name` 是普通 query 中模型看到和调用的工具名，必须稳定、snake_case、语义明确
 - 禁止要求 harness_config 或加载器向 Tool 构造函数传入 `ToolCard`、rail 实例、agent、session 或其他运行时对象
+- 在结合 Skill 使用时，必须需配合对应 Skill 使用，在 description 中说明，不可以独立直接调用。
+
+**Tool + Skill 协作模式（重要）**
+- Tool 不应独立完成复杂任务，应作为 Skill 的执行层配合使用
+- 复杂任务（如 PPT 生成、文档创作）必须由 Skill 提供流程指导和领域知识，Tool 提供具体执行能力
+- ToolCard.description 应明确说明"需配合对应 Skill 使用"，例如："生成 PowerPoint 演示文稿；需配合 pptx skill 使用"
+- 示例：ppt_generate_tool 调用时，agent 应先激活 pptx skill 获取品牌规范、模板结构和生成流程，再调用 tool 执行文件生成
+- 禁止 Tool 尝试在单个 invoke 中完成品牌适配、模板选择、内容生成、格式校验等全部环节；这些职责应由 Skill 分步指导
+- 当扩展同时包含 tool 和 skill 时，harness_config.yaml 必须同时声明两者
 
 **Skill** — 知识注入与流程指导
 - 目录结构：`skills/<skill_name>/SKILL.md`（+ 可选辅助文件）
@@ -109,9 +120,10 @@ Tool 实现约束：
 - 不得用 JSON、Markdown、纯文本或“待下游转换”的中间结构冒充 PPTX/DOCX/PDF 等最终产物
 
 文件格式最低实现要求：
-- PPTX：优先使用 `python-pptx` 生成真实 `.pptx`；写入后用 `zipfile` 校验 `[Content_Types].xml`、`ppt/presentation.xml` 和至少一个 `ppt/slides/slide*.xml`
-- DOCX：写入后用 `zipfile` 校验 `[Content_Types].xml` 和 `word/document.xml`
-- PDF：写入后校验文件头以 `%PDF` 开始
+- PPTX：优先使用 `python-pptx` 生成真实 `.pptx`；写入后用 `zipfile` 校验 `[Content_Types].xml`、`ppt/presentation.xml` 和至少一个 `ppt/slides/slide*.xml`；**requirements.txt 必须包含 `python-pptx`**
+- DOCX：写入后用 `zipfile` 校验 `[Content_Types].xml` 和 `word/document.xml`；**requirements.txt 必须包含 `python-docx`**
+- XLSX：使用 `openpyxl` 生成；**requirements.txt 必须包含 `openpyxl`**
+- PDF：写入后校验文件头以 `%PDF` 开始；按需声明 `reportlab` 或 `pypdf`
 - JSON：写入后用 `json.load` 重新解析并校验关键字段
 
 Rail + Tool 分工约束：
@@ -224,7 +236,52 @@ Skill 实现要点：
 - 使用项目现有命名和缩进风格
 - 新增公共函数必须有类型注解和 docstring
 - 不添加不必要的注释
+- **只导入实际使用的模块和类**：
+  - 每个 import 语句必须在代码中有明确的调用位置
+  - 禁止保留未使用的 import（ruff F401 会报错）
+  - 禁止为了"可能的未来使用"而提前导入
+  - 自查方法：确认代码中每个导入的模块/类都被实际调用
+- **文件编码必须显式指定 UTF-8**：
+  - 写入文件：`Path.write_text(content, encoding='utf-8')`
+  - 读取文件：`Path.read_text(encoding='utf-8')`
+  - 禁止省略 encoding 参数，Windows 默认 GBK 会导致中文乱码
 - 生成的代码必须能通过 `ruff check` 和 `ruff format --check`
+
+## 依赖声明规范
+
+当 Tool/Rail 实现使用第三方库时，如存在当前env环境给不存在的依赖软件，必须在扩展根目录创建 `requirements.txt` 声明依赖。
+
+### 依赖识别规则
+
+以下情况需要声明依赖：
+- Tool/Rail import 了非 Python 标准库的第三方包（如 `openpyxl`, `python-pptx`, `defusedxml`）
+- 使用了 agent-core 环境未预装的库
+
+以下情况不需要声明：
+- Python 标准库（如 `json`, `pathlib`, `asyncio`, `zipfile`）
+- agent-core 已预装的库（如 `pydantic`, `loguru`, `aiofiles`）
+
+### requirements.txt 格式
+
+```
+openpyxl>=3.1.0
+defusedxml>=0.7.1
+```
+
+### 常见依赖参考
+
+| 场景 | 推荐库 | 需声明的依赖 |
+|------|--------|-------------|
+| Excel (.xlsx) | `openpyxl` | `openpyxl`, `defusedxml` |
+| PPT (.pptx) | `python-pptx` | `python-pptx`, `defusedxml` |
+| Word (.docx) | `python-docx` | `python-docx`, `defusedxml` |
+| PDF 生成 | `reportlab` | `reportlab` |
+| PDF 读取 | `pypdf` | `pypdf` |
+
+### 依赖声明要点
+
+- **版本格式**：使用 `>=最小版本`，避免过度约束
+- **注释说明**：对隐式依赖添加注释，说明其来源
 
 ## 提交规则
 

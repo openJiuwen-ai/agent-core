@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from openjiuwen.core.foundation.llm.model import Model
 
@@ -23,6 +23,9 @@ from openjiuwen.harness.security.models import PermissionsSection
 from openjiuwen.harness.workspace.workspace import (
     Workspace,
 )
+
+if TYPE_CHECKING:
+    from openjiuwen.harness.deep_agent import DeepAgent
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_OPENROUTER_VISION_MODEL = "google/gemini-2.5-pro"
@@ -227,6 +230,10 @@ class DeepAgentConfig:
     # Tool permission guardrail (tiered_policy / interrupt confirm)
     permissions: PermissionsSection | None = None
     permission_host: Any = None
+
+    # Filesystem sandbox: when True, file ops are restricted to workspace/project root.
+    # Subagents inherit the stricter of their own spec and this value.
+    restrict_to_work_dir: bool = True
 
 
 @dataclass

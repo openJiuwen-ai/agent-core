@@ -182,6 +182,8 @@ Register a custom `BaseMemoryIndex` plugin instance, used to replace or extend t
 >>> )
 ```
 
+> **Note**: Custom `BaseMemoryIndex` subclasses must implement the `set_storage_codec(codec)` abstract method to receive an `AesStorageCodec` instance. When `crypto_key` is non-empty during `set_config`, the codec is automatically injected; subclasses call `codec.encode()` on the `text` field before writing and `codec.decode()` after reading to achieve transparent encryption/decryption. See `BaseMemoryIndex` for reference.
+
 
 ### register_message_store
 
@@ -248,6 +250,7 @@ Set global memory engine configuration and initialize internal managers.
 **Behavior**:
 
 - Managers (`FragmentMemoryManager`, `SummaryManager`, `WriteManager`) uniformly use `memory_index` (`BaseMemoryIndex`) as the backend. The `UserMemStore` fallback path is no longer supported.
+- If `crypto_key` is non-empty, an `AesStorageCodec` is automatically created and injected via `memory_index.set_storage_codec()`, enabling transparent AES-256-GCM encryption/decryption of the memory content `text` field at the storage layer.
 
 **Exceptions**:
 

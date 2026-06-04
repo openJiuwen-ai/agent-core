@@ -13,6 +13,7 @@ from openjiuwen.core.session.stream import BaseStreamMode, OutputSchema
 from openjiuwen.core.workflow import Workflow, WorkflowExecutionState
 from openjiuwen.core.workflow import ComponentAbility
 from openjiuwen.core.workflow import WorkflowComponent
+from openjiuwen.core.session import END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY
 from tests.unit_tests.core.workflow.mock_nodes import (ComputeComponent2,
                                                        Node1, StreamCompNode)
 
@@ -261,13 +262,13 @@ async def test_end_no_streaming_no_template():
 async def test_end_template_001():
     """
     Test End component with responseTemplate in streaming mode using invoke().
-    
+
     Scenario:
         - Workflow: Start -> ComputeComponent2 -> End
         - End component has a responseTemplate: "输出:{{custom.result}}"
         - response_mode is set to "streaming"
         - The variable {{custom.result}} is not mapped in inputs_schema
-    
+
     Expected behavior:
         - The static text "输出:" should be rendered as the first frame
         - The workflow should complete successfully with COMPLETED state
@@ -283,7 +284,8 @@ async def test_end_template_001():
     flow.add_connection("custom", "end")
 
     user_input = {'user_input': {'a': 1, 'b': 2}}
-    result = await flow.invoke(user_input, create_workflow_session())
+    session = create_workflow_session(envs={END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY: 0.05})
+    result = await flow.invoke(user_input, session)
     
     assert len(result.result) > 0, f"Expected non-empty result, got: {result.result}"
     assert result.state == WorkflowExecutionState.COMPLETED, f"Expected COMPLETED state, got: {result.state}"
@@ -296,14 +298,14 @@ async def test_end_template_001():
 async def test_end_template_002():
     """
     Test End component with responseTemplate in streaming mode using stream().
-    
+
     Scenario:
         - Workflow: Start -> ComputeComponent2 -> End
         - End component has a responseTemplate: "输出是:{{custom.result}}"
         - response_mode is set to "streaming"
         - The variable {{custom.result}} is not mapped in inputs_schema
         - Using stream() method to consume output chunks
-    
+
     Expected behavior:
         - The static text "输出是:" should be rendered as the first chunk
         - At least one chunk should be yielded from the stream
@@ -319,8 +321,9 @@ async def test_end_template_002():
     flow.add_connection("custom", "end")
 
     user_input = {'user_input': {'a': 1, 'b': 2}}
+    session = create_workflow_session(envs={END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY: 0.05})
     stream_chunks = []
-    async for chunk in flow.stream(user_input, create_workflow_session(), stream_modes=[BaseStreamMode.OUTPUT]):
+    async for chunk in flow.stream(user_input, session, stream_modes=[BaseStreamMode.OUTPUT]):
         print(f"chunk: {chunk}")
         stream_chunks.append(chunk)
     

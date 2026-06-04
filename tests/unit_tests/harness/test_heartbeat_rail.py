@@ -33,10 +33,7 @@ from openjiuwen.harness.rails.heartbeat_rail import (
 from openjiuwen.harness.schema.config import (
     DeepAgentConfig,
 )
-from openjiuwen.harness.prompts.sections.heartbeat import (
-    _clean_heartbeat_content,
-    build_heartbeat_section,
-)
+from openjiuwen.harness.prompts.sections.heartbeat import build_heartbeat_section
 
 
 def _make_operation():
@@ -292,66 +289,10 @@ def test_run_context_defaults() -> None:
     assert context.extra == {}
 
 
-def test_clean_heartbeat_content_removes_html_comments() -> None:
-    """_clean_heartbeat_content removes HTML comment lines."""
-    content = """Valid line 1
-<!-- This is a comment -->
-Valid line 2
-<!-- Another comment -->
-Valid line 3"""
-
-    result = _clean_heartbeat_content(content)
-
-    assert "<!--" not in result
-    assert "-->" not in result
-    assert "Valid line 1" in result
-    assert "Valid line 2" in result
-    assert "Valid line 3" in result
-
-
-def test_clean_heartbeat_content_removes_empty_lines() -> None:
-    """_clean_heartbeat_content removes empty lines."""
-    content = """Line 1
-
-Line 2
-
-
-Line 3"""
-
-    result = _clean_heartbeat_content(content)
-
-    assert result == "Line 1\nLine 2\nLine 3"
-
-
-def test_clean_heartbeat_content_strips_whitespace() -> None:
-    """_clean_heartbeat_content strips leading/trailing whitespace from lines."""
-    content = """  Line 1  
-\tLine 2\t
-   Line 3   """
-
-    result = _clean_heartbeat_content(content)
-
-    assert result == "Line 1\nLine 2\nLine 3"
-
-
-def test_clean_heartbeat_content_mixed_content() -> None:
-    """_clean_heartbeat_content handles mixed content."""
-    content = """  Valid line 1  
-<!-- Comment -->
-\tValid line 2\t
-
-<!-- Another comment -->
-   Valid line 3   """
-
-    result = _clean_heartbeat_content(content)
-
-    assert result == "Valid line 1\nValid line 2\nValid line 3"
-
-
 def test_build_heartbeat_section_instructs_direct_return() -> None:
     """Heartbeat prompt should prevent writing heartbeat results to memory files."""
-    section_cn = build_heartbeat_section(language="cn", heartbeat_content="检查日历")
-    section_en = build_heartbeat_section(language="en", heartbeat_content="Check calendar")
+    section_cn = build_heartbeat_section(language="cn")
+    section_en = build_heartbeat_section(language="en")
 
     assert "心跳执行结果必须直接返回" in section_cn.render("cn")
     assert "不要写入 daily memory 或其他记忆文件" in section_cn.render("cn")

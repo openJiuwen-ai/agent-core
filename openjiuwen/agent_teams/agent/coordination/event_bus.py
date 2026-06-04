@@ -93,6 +93,11 @@ class EventBus:
         self._wake_callback: Optional[WakeCallback] = None
         self._running = False
         self._polls_paused = False
+        # Human-agent avatars never run periodic polls: their POLL_MAILBOX
+        # / POLL_TASK inner events are muted at the dispatcher, so a timer
+        # would only spin uselessly. Derive the capability from role once
+        # here so start() / resume_polls() share a single decision point.
+        self._periodic_poll_enabled = role != TeamRole.HUMAN_AGENT
         self._event_queue: asyncio.Queue[CoordinationEvent] = asyncio.Queue()
         self._loop_task: Optional[asyncio.Task[None]] = None
         self._mailbox_poll_task: Optional[asyncio.Task[None]] = None
@@ -138,12 +143,7 @@ class EventBus:
         team_logger.info("EventBus[{}] starting", self._role.value)
         self._running = True
         self._loop_task = asyncio.create_task(self._run_loop())
-        self._mailbox_poll_task = asyncio.create_task(
-            self._poll_loop(InnerEventType.POLL_MAILBOX, self._mailbox_poll_interval),
-        )
-        self._task_poll_task = asyncio.create_task(
-            self._poll_loop(InnerEventType.POLL_TASK, self._task_poll_interval),
-        )
+        self._start_poll_tasks()
 
     async def stop(self) -> None:
         """Stop loops, cancel poll timer, unsubscribe."""
@@ -208,16 +208,16 @@ class EventBus:
         self._polls_paused = True
 
     async def resume_polls(self) -> None:
-        """Restart periodic poll tasks after a pause."""
+        """Restart periodic poll tasks after a pause.
+
+        A no-op for roles with periodic polling disabled (human-agent
+        avatars): ``_start_poll_tasks`` skips the timers, the pause flag
+        still clears so the state machine stays consistent.
+        """
         if not self._polls_paused or not self._running:
             return
         team_logger.info("EventBus[{}] resuming polls", self._role.value)
-        self._mailbox_poll_task = asyncio.create_task(
-            self._poll_loop(InnerEventType.POLL_MAILBOX, self._mailbox_poll_interval),
-        )
-        self._task_poll_task = asyncio.create_task(
-            self._poll_loop(InnerEventType.POLL_TASK, self._task_poll_interval),
-        )
+        self._start_poll_tasks()
         self._polls_paused = False
 
     # ------------------------------------------------------
@@ -235,6 +235,25 @@ class EventBus:
     # ------------------------------------------------------
     # Internal
     # ------------------------------------------------------
+
+    def _start_poll_tasks(self) -> None:
+        """Spawn the periodic mailbox/task poll loops, if enabled.
+
+        Shared by ``start`` and ``resume_polls`` so the role gate lives
+        in one place. Human-agent avatars have ``_periodic_poll_enabled``
+        False (their POLL_* events are muted at the dispatcher and the
+        avatar is driven by its controller's Inbox plus team events
+        rendered as controller notifications, not by autonomous board /
+        mailbox sweeps), so this is a no-op for them.
+        """
+        if not self._periodic_poll_enabled:
+            return
+        self._mailbox_poll_task = asyncio.create_task(
+            self._poll_loop(InnerEventType.POLL_MAILBOX, self._mailbox_poll_interval),
+        )
+        self._task_poll_task = asyncio.create_task(
+            self._poll_loop(InnerEventType.POLL_TASK, self._task_poll_interval),
+        )
 
     async def _run_loop(self) -> None:
         """Background task: drain queue, invoke callback."""

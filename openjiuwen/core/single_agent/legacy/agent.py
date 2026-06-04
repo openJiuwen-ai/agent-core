@@ -575,11 +575,13 @@ class ControllerAgent(BaseAgent):
                 result = await self.controller.invoke(inputs, agent_session)
                 if session is None:
                     await self.context_engine.save_contexts(agent_session)
-                    await agent_session.post_run()
+                    await agent_session.close_stream()
+                    await agent_session.commit()
 
                 return result
             except Exception as e:
-                await agent_session.post_run()
+                await agent_session.close_stream()
+                await agent_session.commit()
                 raise
 
         return await _inner_invoke()
@@ -660,7 +662,8 @@ class ControllerAgent(BaseAgent):
             finally:
                 if need_cleanup:
                     await self.context_engine.save_contexts(session)
-                    await session.post_run()
+                    await session.close_stream()
+                    await session.commit()
 
         task = asyncio.create_task(stream_process())
 

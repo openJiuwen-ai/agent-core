@@ -1,8 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-
-"""TeamPolicyRail — injects team policy as ordered PromptSections.
+"""TeamPolicyRail injects team policy as ordered PromptSections.
 
 Decomposes the team's system prompt into one PromptSection per content
 category (role, workflow, lifecycle, persona, ...) and registers them
@@ -13,14 +12,15 @@ tools, memory, workspace, ...) by priority.
 Section layout owned by this rail (see ``prompts/sections.py`` for
 builders):
 
-  P:11  team_role        — member id + role policy (always)
-  P:12  team_hitt        — HITT collaboration rules (when human members exist)
-  P:13  team_workflow    — leader workflow (LEADER only)
-  P:14  team_lifecycle   — team lifecycle policy (LEADER only)
-  P:15  team_persona     — current persona (when persona is set)
-  P:16  team_extra       — user-supplied base prompt (when set)
-  P:65  team_info        — team metadata (after capabilities)
-  P:66  team_members     — relationships with peers
+  P:11  team_role        - member id + role policy (always)
+  P:12  team_hitt        - HITT collaboration rules (dynamic; refreshed
+                           from DB when member roster mtime changes)
+  P:13  team_workflow    - leader workflow (LEADER only)
+  P:14  team_lifecycle   - team lifecycle policy (LEADER only)
+  P:15  team_persona     - current persona (when persona is set)
+  P:16  team_extra       - user-supplied base prompt (when set)
+  P:65  team_info        - team metadata (after capabilities)
+  P:66  team_members     - relationships with peers
 """
 
 from __future__ import annotations
@@ -30,16 +30,13 @@ from typing import TYPE_CHECKING, Any, Optional
 from openjiuwen.agent_teams.prompts import (
     MtimeSectionCache,
     TeamSectionName,
-    build_team_extra_section,
     build_team_hitt_section,
     build_team_info_section,
-    build_team_lifecycle_section,
     build_team_members_section,
-    build_team_persona_section,
-    build_team_role_section,
-    build_team_workflow_section,
+    build_team_static_sections,
 )
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
@@ -49,6 +46,7 @@ if TYPE_CHECKING:
 
 
 _DYNAMIC_SECTION_NAMES: tuple[str, ...] = (
+    TeamSectionName.HITT,
     TeamSectionName.INFO,
     TeamSectionName.MEMBERS,
 )
@@ -62,12 +60,12 @@ class TeamPolicyRail(DeepAgentRail):
       * **Static** -- role, workflow, lifecycle, persona, extra. Built
         once at ``__init__`` from constructor arguments and re-added to
         the builder on every ``before_model_call`` (cheap dict insert).
-      * **Dynamic** -- ``team_info`` and ``team_members``. Backed by
-        :class:`MtimeSectionCache` instances that probe the team
-        database for an ``updated_at`` change before re-running the
-        full fetch. This lets the rail pick up newly spawned members
-        on the next LLM call without paying for a full table read on
-        every call.
+      * **Dynamic** -- ``team_hitt``, ``team_info`` and
+        ``team_members``. Backed by :class:`MtimeSectionCache` instances
+        that probe the team database for an ``updated_at`` change before
+        re-running the full fetch. This lets the rail pick up newly
+        spawned human agents or members on the next LLM call without
+        paying for a full table read on every call.
 
     When ``team_backend`` is ``None`` (e.g. unit tests that only care
     about static content) the dynamic caches are skipped entirely and
@@ -98,14 +96,14 @@ class TeamPolicyRail(DeepAgentRail):
         self._team_backend = team_backend
         self._team_workspace_mount = team_workspace_mount
         self._team_workspace_path = team_workspace_path
+        self._role = role
+        self._expose_human_agents_to_teammates = expose_human_agents_to_teammates
         self.system_prompt_builder = None
 
-        # Static sections built once and reused on every call. The HITT
-        # section receives the roster snapshot captured at rail-init
-        # time; dynamic additions to the human-agent set (rare — only
-        # the build_team path adds them) take effect on the next rail
-        # rebuild.
-        human_names: list[str] = sorted(team_backend.human_agent_names()) if team_backend else []
+        # Static sections built once and reused on every call. HITT is
+        # dynamic and refreshes from DB before model calls; bridge
+        # members remain static for one rail instance.
+        bridge_names: list[str] = sorted(team_backend.bridge_agent_names()) if team_backend else []
         self._static_sections: list[PromptSection] = self._build_static_sections(
             role=role,
             persona=persona,
@@ -114,25 +112,21 @@ class TeamPolicyRail(DeepAgentRail):
             teammate_mode=teammate_mode,
             team_mode=team_mode,
             base_prompt=base_prompt,
-            human_agent_names=human_names,
-            expose_human_agents_to_teammates=expose_human_agents_to_teammates,
+            bridge_agent_names=bridge_names,
         )
 
         # Dynamic section caches: keyed on table-level mtime probes so
         # repeated calls pay only for the cheap probe + dict insert.
         self._info_cache: MtimeSectionCache | None = None
-        self._members_cache: MtimeSectionCache | None = None
+        self._members_cached_mtime: int = 0
+        self._members_cache_initialized: bool = False
+        self._cached_hitt_section: Optional[PromptSection] = None
+        self._cached_members_section: Optional[PromptSection] = None
         if team_backend is not None:
             self._info_cache = MtimeSectionCache(
                 probe=team_backend.get_team_updated_at,
                 fetch_and_build=self._fetch_and_build_info_section,
             )
-            self._members_cache = MtimeSectionCache(
-                probe=team_backend.get_members_max_updated_at,
-                fetch_and_build=self._fetch_and_build_members_section,
-            )
-
-    # -- Lifecycle hooks ------------------------------------------------------
 
     def init(self, agent: Any) -> None:
         """Cache the agent's shared prompt builder."""
@@ -149,24 +143,24 @@ class TeamPolicyRail(DeepAgentRail):
         self.system_prompt_builder = None
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Inject static sections + refresh dynamic ones before each call."""
+        """Inject static sections and refresh dynamic sections before each call."""
         if self.system_prompt_builder is None:
             return
 
         for section in self._static_sections:
             self.system_prompt_builder.add_section(section)
 
+        if self._team_backend is not None:
+            hitt_section, members_section = await self._refresh_member_sections()
+            if hitt_section is not None:
+                self.system_prompt_builder.add_section(hitt_section)
+            if members_section is not None:
+                self.system_prompt_builder.add_section(members_section)
+
         if self._info_cache is not None:
             info_section = await self._info_cache.refresh()
             if info_section is not None:
                 self.system_prompt_builder.add_section(info_section)
-
-        if self._members_cache is not None:
-            members_section = await self._members_cache.refresh()
-            if members_section is not None:
-                self.system_prompt_builder.add_section(members_section)
-
-    # -- Internal -------------------------------------------------------------
 
     def _build_static_sections(
         self,
@@ -178,44 +172,54 @@ class TeamPolicyRail(DeepAgentRail):
         teammate_mode: str,
         team_mode: str,
         base_prompt: str | None,
-        human_agent_names: list[str],
-        expose_human_agents_to_teammates: bool,
+        bridge_agent_names: list[str],
     ) -> list[PromptSection]:
         """Construct the never-changing sections once at rail init time."""
-        builders = [
-            build_team_role_section(
-                role=role,
-                member_name=member_name,
-                teammate_mode=teammate_mode,
-                language=self._language,
-            ),
-            build_team_hitt_section(
-                role=role,
-                human_agent_names=human_agent_names,
-                language=self._language,
-                self_member_name=member_name,
-                expose_human_agents_to_teammates=expose_human_agents_to_teammates,
-            ),
-            build_team_workflow_section(
-                role=role,
-                team_mode=team_mode,
-                language=self._language,
-            ),
-            build_team_lifecycle_section(
-                role=role,
-                lifecycle=lifecycle,
-                language=self._language,
-            ),
-            build_team_persona_section(
-                persona=persona,
-                language=self._language,
-            ),
-            build_team_extra_section(
-                base_prompt=base_prompt,
-                language=self._language,
-            ),
-        ]
-        return [section for section in builders if section is not None]
+        sections = build_team_static_sections(
+            role=role,
+            persona=persona,
+            member_name=member_name,
+            lifecycle=lifecycle,
+            teammate_mode=teammate_mode,
+            team_mode=team_mode,
+            base_prompt=base_prompt,
+            language=self._language,
+            bridge_agent_names=bridge_agent_names,
+        )
+        team_logger.info(
+            "[{}] TeamPolicyRail static sections: section_names={}",
+            member_name or "?",
+            [s.name for s in sections],
+        )
+        return sections
+
+    async def _refresh_member_sections(self) -> tuple[Optional[PromptSection], Optional[PromptSection]]:
+        """Refresh HITT and members sections with one shared members mtime probe."""
+        mtime = await self._team_backend.get_members_max_updated_at()
+        if self._members_cache_initialized and mtime == self._members_cached_mtime:
+            return self._cached_hitt_section, self._cached_members_section
+
+        self._cached_hitt_section = await self._fetch_and_build_hitt_section()
+        self._cached_members_section = await self._fetch_and_build_members_section()
+        self._members_cached_mtime = mtime
+        self._members_cache_initialized = True
+        return self._cached_hitt_section, self._cached_members_section
+
+    async def _fetch_and_build_hitt_section(self) -> Optional[PromptSection]:
+        """Reload human-agent roster from DB and rebuild the HITT section."""
+        human_names = list(await self._team_backend.human_agent_names())
+        team_logger.info(
+            "[{}] HITT section refresh: human_agent_names={}",
+            self._member_name or "?",
+            human_names,
+        )
+        return build_team_hitt_section(
+            role=self._role,
+            human_agent_names=human_names,
+            language=self._language,
+            self_member_name=self._member_name,
+            expose_human_agents_to_teammates=self._expose_human_agents_to_teammates,
+        )
 
     async def _fetch_and_build_info_section(self) -> Optional[PromptSection]:
         """Reload team metadata from DB and rebuild the info section."""

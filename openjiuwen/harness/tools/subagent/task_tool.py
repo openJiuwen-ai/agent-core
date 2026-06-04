@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, AsyncIterator, List, Optional
 
 
 if TYPE_CHECKING:
-    pass
+    from openjiuwen.harness.deep_agent import DeepAgent
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error

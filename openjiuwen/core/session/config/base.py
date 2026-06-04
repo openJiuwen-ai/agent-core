@@ -4,7 +4,7 @@ import contextvars
 import os
 from abc import ABC
 from copy import deepcopy
-from typing import TypedDict, Any, Optional
+from typing import TYPE_CHECKING, TypedDict, Any, Optional
 
 from openjiuwen.core.common.logging import session_logger, LogEventType
 from openjiuwen.core.session.constants import COMP_STREAM_CALL_TIMEOUT_KEY, STREAM_INPUT_GEN_TIMEOUT_KEY, \
@@ -14,6 +14,10 @@ from openjiuwen.core.session.constants import COMP_STREAM_CALL_TIMEOUT_KEY, STRE
     WORKFLOW_STREAM_FIRST_FRAME_TIMEOUT, WORKFLOW_STREAM_FIRST_FRAME_TIMEOUT_ENV_KEY, \
     LOOP_NUMBER_MAX_LIMIT_KEY, LOOP_NUMBER_MAX_LIMIT_ENV_KEY, LOOP_NUMBER_MAX_LIMIT_DEFAULT, \
     FORCE_DEL_WORKFLOW_STATE_ENV_KEY, FORCE_DEL_WORKFLOW_STATE_KEY
+
+if TYPE_CHECKING:
+    from openjiuwen.core.single_agent.legacy.config import AgentConfig
+    from openjiuwen.core.workflow.workflow_config import WorkflowConfig
 
 workflow_session_vars: contextvars.ContextVar[dict] = contextvars.ContextVar("workflow_session_vars", default={})
 

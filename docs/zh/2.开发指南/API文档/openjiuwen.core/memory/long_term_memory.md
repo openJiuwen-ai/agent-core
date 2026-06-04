@@ -20,7 +20,7 @@ class openjiuwen.core.memory.long_term_memory.LongTermMemory(metaclass=Singleton
 > **说明**：与旧版 `MemoryEngine(config: SysMemConfig, ...)` 不同，`LongTermMemory` 采用**无参构造 + 分步初始化**的方式：
 > 1. 先调用 `await register_store(...)` 注册底层存储；
 > 2. 可选地调用 `register_message_store(...)` 注册自定义消息存储（如未调用，将根据已注册的 `db_store` 创建默认的 `SqlMessageStore`）；
-> 3. 再调用 `set_config(MemoryEngineConfig(...))` 设置全局配置；
+> 3. 再调用 `set_config(MemoryEngineConfig(...))` 设置全局配置，设置加密密钥（可选）和向量索引实现（可选）；
 > 4. 可选地通过 `set_scope_config(scope_id, MemoryScopeConfig(...))` 为不同业务场景配置独立的模型/向量参数。
 
 ```
@@ -182,6 +182,8 @@ async def register_plugin(
 >>> )
 ```
 
+> **说明**：自定义 `BaseMemoryIndex` 子类需实现 `set_storage_codec(codec)` 抽象方法，用于接收 `AesStorageCodec` 实例。`set_config` 时若 `crypto_key` 非空，会自动注入 codec；子类在写入前对 `text` 字段调用 `codec.encode()`，读取后调用 `codec.decode()` 即可实现透明加解密。详见 `BaseMemoryIndex` 实现。
+
 
 ### register_message_store
 
@@ -248,6 +250,7 @@ def set_config(self, config: MemoryEngineConfig) -> None
 **行为说明**：
 
 - 管理器（`FragmentMemoryManager`、`SummaryManager`、`WriteManager`）统一使用 `memory_index`（`BaseMemoryIndex`）作为后端，不再支持 `UserMemStore` 回退路径。
+- 若 `crypto_key` 非空，会自动创建 `AesStorageCodec` 并调用 `memory_index.set_storage_codec()`，对记忆内容 `text` 字段进行存储层透明 AES-256-GCM 加解密。
 
 **异常**：
 

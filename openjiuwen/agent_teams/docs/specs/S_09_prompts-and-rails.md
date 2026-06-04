@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订日期 | 2026-05-16 |
-| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md` |
+| 最近一次修订日期 | 2026-05-27 |
+| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md` |
 
 ## 范围 / 边界
 
@@ -55,7 +55,8 @@
 
 ### Rail 注入契约
 
-15. **Rail 通过 DeepAgent 的 rail registry 注入，不直接修改 `SystemPromptBuilder`**：`TeamPolicyRail` 在 `init(agent)` 里捕获 `agent.system_prompt_builder` 引用，于 `before_model_call` 写入 section；在 `uninit(agent)` 里按名移除。**禁止**绕过 rail 把 section 直接 `add_section` 到 builder 上。
+15. **Rail 通过 DeepAgent 的 rail registry 注入，不直接修改 `SystemPromptBuilder`**：`TeamPolicyRail` 在 `init(agent)` 里捕获 `agent.system_prompt_builder` 引用，于 `before_model_call` 写入 section；在 `uninit(agent)` 里按名移除。**禁止**绕过 rail 把 section 直接 `add_section` 到 *DeepAgent 的共享 builder* 上。**例外（外部 CLI 成员）**：非 DeepAgent 的外部 CLI 成员没有共享 builder，由 `sections.build_team_member_system_prompt(...)` 把同一批静态 section 装进一个**一次性 `SystemPromptBuilder`** 渲染成独立字符串(见不变量 18a / [[F_25_external-cli-hardening-and-gemini]])——这不违反本条，因为它不触碰任何 DeepAgent 的共享 builder，且**只装 team section、排除其它 rail**。
+    - 18a. **静态 section 的单一真相源是 `sections.build_team_static_sections(...)`**：`TeamPolicyRail._build_static_sections` 与 `build_team_member_system_prompt` 都委托它构建 role/hitt/bridge/workflow/lifecycle/persona/extra,保证进程内成员与外部 CLI 成员的团队 section 完全一致。dynamic 的 info/members section 不在其中(依赖 live DB,外部 CLI 成员经 MCP 工具自取)。
 16. **Mount order load-bearing**：`TeamHarness.build` 必须先挂 `TeamToolRail` 并 eager `init`，再挂 `TeamPolicyRail`。原因：policy 输出引用 ability 快照，能力必须先就位。Rail 顺序的修改必须同步检视 mount path。
 17. **`uninit` 必须把自己写入的 section 全部清掉**：`TeamPolicyRail.uninit` 删除 `_static_sections` 里的每个 section + 两个 dynamic section 名；rail 卸载后 builder 不得残留团队 section。
 18. **dynamic section 在 `team_backend is None` 时整体跳过**：单测可只关心 static 内容；`_info_cache` / `_members_cache` 在缺 backend 时不构造，rail 行为退化成纯静态。
@@ -165,6 +166,34 @@ def build_team_extra_section(
     base_prompt: str | None,
     language: str = "cn",
 ) -> PromptSection | None: ...    # None when base_prompt is empty/whitespace
+
+# Single source of truth for the static section set (role/hitt/bridge/workflow/
+# lifecycle/persona/extra). TeamPolicyRail._build_static_sections delegates here;
+# build_team_member_system_prompt (external CLI members) renders these into a
+# standalone string via a throwaway SystemPromptBuilder, excluding other rails.
+def build_team_static_sections(
+    *,
+    role: TeamRole,
+    persona: str,
+    member_name: str | None,
+    lifecycle: str = "temporary",
+    teammate_mode: str = "build_mode",
+    team_mode: str = "default",
+    base_prompt: str | None = None,
+    language: str = "cn",
+    human_agent_names: list[str] | None = None,
+    expose_human_agents_to_teammates: bool = False,
+    bridge_agent_names: list[str] | None = None,
+) -> list[PromptSection]: ...      # non-None sections, unsorted
+
+def build_team_member_system_prompt(  # same kwargs as build_team_static_sections
+    *,
+    role: TeamRole,
+    persona: str,
+    member_name: str | None,
+    # ... lifecycle / teammate_mode / team_mode / base_prompt / language /
+    # human_agent_names / expose_human_agents_to_teammates / bridge_agent_names
+) -> str: ...                      # priority-ordered, "\n\n"-joined; "" if empty
 
 def build_team_info_section(
     *,

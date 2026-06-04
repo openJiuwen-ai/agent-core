@@ -383,11 +383,12 @@ class HTTPRequestExecutable(ComponentExecutable):
         parsed_content = content
         if response_format == HttpResponseFormat.JSON:
             try:
-                parsed_content = json.loads(content.decode('utf-8'))
+                content_str = content if isinstance(content, str) else content.decode('utf-8')
+                parsed_content = json.loads(content_str)
             except json.JSONDecodeError:
                 parsed_content = content
         elif response_format == HttpResponseFormat.TEXT:
-            parsed_content = content.decode('utf-8')
+            parsed_content = content if isinstance(content, str) else content.decode('utf-8')
         elif response_format == HttpResponseFormat.BINARY:
             # Already in binary format
             pass

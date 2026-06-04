@@ -99,9 +99,8 @@ async def team_backend(db, messager):
     )
     # ``predefined_members`` is consumed by ``build_team``; this fixture
     # short-circuits that path by writing rows directly in the ``db``
-    # fixture, so seed the in-memory HITT roster from DB the same way
-    # cold-recovery does in production.
-    await backend.refresh_human_agent_roster()
+    # fixture, so human_agent_names/is_human_agent queries DB directly
+    # and find the rows without any cache-refresh step.
     yield backend
 
 
@@ -113,7 +112,7 @@ async def test_send_to_none_drives_avatar(team_backend):
     inbox = HumanAgentInbox(
         team_backend,
         team_backend.message_manager,
-        agent_lookup=lambda name: avatar if name == HUMAN else None,
+        agent_lookup=AsyncMock(return_value=avatar),
     )
 
     result = await inbox.send("read design.md and summarise it")
@@ -131,7 +130,7 @@ async def test_send_inbox_does_not_parse_at_in_body(team_backend):
     inbox = HumanAgentInbox(
         team_backend,
         team_backend.message_manager,
-        agent_lookup=lambda name: avatar if name == HUMAN else None,
+        agent_lookup=AsyncMock(return_value=avatar),
     )
 
     result = await inbox.send(f"@{TEAMMATE} ping me when done")
@@ -207,7 +206,7 @@ async def test_send_unknown_sender_raises(team_backend):
     inbox = HumanAgentInbox(
         team_backend,
         team_backend.message_manager,
-        agent_lookup=lambda name: avatar,
+        agent_lookup=AsyncMock(return_value=avatar),
     )
 
     with pytest.raises(UnknownHumanAgentError):
@@ -218,8 +217,13 @@ async def test_send_unknown_sender_raises(team_backend):
 @pytest.mark.level0
 async def test_send_no_human_agent_registered_raises(db, messager):
     """An empty human-agent roster makes any send call illegal."""
+    await db.team.create_team(
+        team_name="empty_hitt_team",
+        display_name="Empty HITT",
+        leader_member_name="team_leader",
+    )
     backend = TeamBackend(
-        team_name="hitt_team",
+        team_name="empty_hitt_team",
         member_name="team_leader",
         is_leader=True,
         db=db,
@@ -231,22 +235,24 @@ async def test_send_no_human_agent_registered_raises(db, messager):
         await inbox.send("hello")
 
 
+@pytest.mark.asyncio
 @pytest.mark.level0
-def test_register_human_agent_inbound_unknown_member_raises(team_backend):
+async def test_register_human_agent_inbound_unknown_member_raises(team_backend):
     """Registering against an unknown member must fail loudly."""
     with pytest.raises(KeyError):
-        team_backend.register_human_agent_inbound("ghost", lambda evt: None)
+        await team_backend.register_human_agent_inbound("ghost", lambda evt: None)
 
 
+@pytest.mark.asyncio
 @pytest.mark.level0
-def test_register_human_agent_inbound_clear(team_backend):
+async def test_register_human_agent_inbound_clear(team_backend):
     """Passing ``None`` clears a prior registration."""
 
     def cb(evt):
         return None
 
-    team_backend.register_human_agent_inbound(HUMAN, cb)
+    await team_backend.register_human_agent_inbound(HUMAN, cb)
     assert team_backend.get_human_agent_inbound(HUMAN) is cb
 
-    team_backend.register_human_agent_inbound(HUMAN, None)
+    await team_backend.register_human_agent_inbound(HUMAN, None)
     assert team_backend.get_human_agent_inbound(HUMAN) is None

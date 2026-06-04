@@ -122,29 +122,35 @@ class TestFlushTeamSession:
         await flush_team_session(None)
 
     @pytest.mark.asyncio
-    async def test_none_session_does_not_call_post_run(self):
+    async def test_none_session_does_not_commit(self):
         session = MagicMock()
-        session.post_run = AsyncMock()
+        session.close_stream = AsyncMock()
+        session.commit = AsyncMock()
         await flush_team_session(None)
-        session.post_run.assert_not_awaited()
+        session.close_stream.assert_not_awaited()
+        session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_post_run_called_once(self):
+    async def test_close_stream_and_commit_called_once(self):
         session = MagicMock()
-        session.post_run = AsyncMock(return_value=None)
+        session.close_stream = AsyncMock(return_value=None)
+        session.commit = AsyncMock(return_value=None)
         await flush_team_session(session)
-        session.post_run.assert_awaited_once()
+        session.close_stream.assert_awaited_once()
+        session.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_exception_does_not_propagate(self):
         session = MagicMock()
-        session.post_run = AsyncMock(side_effect=RuntimeError("checkpointer down"))
+        session.close_stream = AsyncMock(return_value=None)
+        session.commit = AsyncMock(side_effect=RuntimeError("checkpointer down"))
         await flush_team_session(session)
 
     @pytest.mark.asyncio
     async def test_warning_logged_on_failure(self):
         session = MagicMock()
-        session.post_run = AsyncMock(side_effect=OSError("storage unavailable"))
+        session.close_stream = AsyncMock(return_value=None)
+        session.commit = AsyncMock(side_effect=OSError("storage unavailable"))
         with patch("openjiuwen.core.multi_agent.teams.handoff.interrupt.logger") as mock_logger:
             await flush_team_session(session)
             mock_logger.warning.assert_called_once()
@@ -152,7 +158,8 @@ class TestFlushTeamSession:
     @pytest.mark.asyncio
     async def test_warning_logged_with_exc_info(self):
         session = MagicMock()
-        session.post_run = AsyncMock(side_effect=ConnectionError("redis timeout"))
+        session.close_stream = AsyncMock(return_value=None)
+        session.commit = AsyncMock(side_effect=ConnectionError("redis timeout"))
         with patch("openjiuwen.core.multi_agent.teams.handoff.interrupt.logger") as mock_logger:
             await flush_team_session(session)
             _, kwargs = mock_logger.warning.call_args
@@ -161,7 +168,8 @@ class TestFlushTeamSession:
     @pytest.mark.asyncio
     async def test_warning_message_contains_flush_or_checkpointer(self):
         session = MagicMock()
-        session.post_run = AsyncMock(side_effect=RuntimeError("fail"))
+        session.close_stream = AsyncMock(return_value=None)
+        session.commit = AsyncMock(side_effect=RuntimeError("fail"))
         with patch("openjiuwen.core.multi_agent.teams.handoff.interrupt.logger") as mock_logger:
             await flush_team_session(session)
             args, _ = mock_logger.warning.call_args
@@ -171,7 +179,8 @@ class TestFlushTeamSession:
     @pytest.mark.asyncio
     async def test_no_warning_on_success(self):
         session = MagicMock()
-        session.post_run = AsyncMock(return_value=None)
+        session.close_stream = AsyncMock(return_value=None)
+        session.commit = AsyncMock(return_value=None)
         with patch("openjiuwen.core.multi_agent.teams.handoff.interrupt.logger") as mock_logger:
             await flush_team_session(session)
             mock_logger.warning.assert_not_called()

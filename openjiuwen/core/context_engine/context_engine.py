@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from typing import List, Dict, Optional, Tuple
+import asyncio
 import functools
 
 from pydantic import BaseModel
@@ -14,6 +15,7 @@ from openjiuwen.core.session.agent import Session
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.context_engine.context.context import SessionModelContext
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.context_engine.processor.base import ContextProcessor
 from openjiuwen.core.runner.callback import trigger, lazy_callback_framework as _fw
@@ -97,6 +99,12 @@ class ContextEngine:
         if token_counter is None:
             from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
             token_counter = TiktokenCounter()
+
+        if self._config.enable_openrouter_model_context_window_tokens:
+            await asyncio.to_thread(
+                ContextUtils.fetch_openrouter_model_context_window_tokens,
+                self._config.openrouter_request_timeout,
+            )
 
         context = SessionModelContext(
             context_id,

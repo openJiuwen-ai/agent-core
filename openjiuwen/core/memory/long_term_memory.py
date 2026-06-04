@@ -18,7 +18,6 @@ from openjiuwen.core.memory.manage.index.write_manager import WriteManager
 from openjiuwen.core.memory.manage.index.summary_manager import SummaryManager
 from openjiuwen.core.memory.manage.mem_model.memory_unit import FragmentMemoryUnit, MemoryType,\
     SummaryUnit, VariableUnit
-from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.manage.search.search_manager import SearchManager, SearchParams
 from openjiuwen.core.foundation.store.base_db_store import BaseDbStore
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
@@ -39,6 +38,7 @@ from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
 from openjiuwen.core.memory.migration.run_migrations import run_kv_migrations,\
     run_vector_migrations, run_sql_migrations, run_message_migrations
+from openjiuwen.core.memory.codec.aes_storage_codec import AesStorageCodec
 from openjiuwen.core.runner.callback import trigger, lazy_callback_framework as _fw
 from openjiuwen.core.runner.callback.events import MemoryEvents
 
@@ -91,6 +91,7 @@ class LongTermMemory(metaclass=Singleton):
         self.message_store: BaseMessageStore | None = None
         # memory index
         self.memory_index: BaseMemoryIndex | None = None
+        self._storage_codec: AesStorageCodec | None = None
         # managers
         self.scope_user_mapping_manager = None
         self.message_manager: MessageManager | None = None
@@ -290,6 +291,12 @@ class LongTermMemory(metaclass=Singleton):
                 error_msg="memory_index must be provided (via register_plugin or register_store)",
             )
         self._sys_mem_config = config
+
+        codec = AesStorageCodec(config.crypto_key)
+        if self.memory_index:
+            self.memory_index.set_storage_codec(codec)
+        self._storage_codec = codec
+
         data_id_generator = DataIdManager()
 
         sql_db_store = SqlDbStore(self.db_store) if self.db_store else None
@@ -363,15 +370,13 @@ class LongTermMemory(metaclass=Singleton):
 
         # Encrypt API keys if they exist
         if encrypted_config.model_client_cfg and encrypted_config.model_client_cfg.api_key:
-            encrypted_config.model_client_cfg.api_key = BaseMemoryManager.encrypt_memory_if_needed(
-                key=self._sys_mem_config.crypto_key,
-                plaintext=encrypted_config.model_client_cfg.api_key
+            encrypted_config.model_client_cfg.api_key = self._storage_codec.encode(
+                encrypted_config.model_client_cfg.api_key
             )
 
         if encrypted_config.embedding_cfg and encrypted_config.embedding_cfg.api_key:
-            encrypted_config.embedding_cfg.api_key = BaseMemoryManager.encrypt_memory_if_needed(
-                key=self._sys_mem_config.crypto_key,
-                plaintext=encrypted_config.embedding_cfg.api_key
+            encrypted_config.embedding_cfg.api_key = self._storage_codec.encode(
+                encrypted_config.embedding_cfg.api_key
             )
 
         self._scope_config[scope_id] = encrypted_config
@@ -418,15 +423,13 @@ class LongTermMemory(metaclass=Singleton):
 
         # Decrypt API keys if they exist
         if encrypted_config.model_client_cfg and encrypted_config.model_client_cfg.api_key:
-            encrypted_config.model_client_cfg.api_key = BaseMemoryManager.decrypt_memory_if_needed(
-                key=self._sys_mem_config.crypto_key,
-                ciphertext=encrypted_config.model_client_cfg.api_key
+            encrypted_config.model_client_cfg.api_key = self._storage_codec.decode(
+                encrypted_config.model_client_cfg.api_key
             )
 
         if encrypted_config.embedding_cfg and encrypted_config.embedding_cfg.api_key:
-            encrypted_config.embedding_cfg.api_key = BaseMemoryManager.decrypt_memory_if_needed(
-                key=self._sys_mem_config.crypto_key,
-                ciphertext=encrypted_config.embedding_cfg.api_key
+            encrypted_config.embedding_cfg.api_key = self._storage_codec.decode(
+                encrypted_config.embedding_cfg.api_key
             )
 
         return encrypted_config
@@ -1331,15 +1334,13 @@ class LongTermMemory(metaclass=Singleton):
 
             # Decrypt API keys if they exist
             if decrypted_config.model_client_cfg and decrypted_config.model_client_cfg.api_key:
-                decrypted_config.model_client_cfg.api_key = BaseMemoryManager.decrypt_memory_if_needed(
-                    key=self._sys_mem_config.crypto_key,
-                    ciphertext=decrypted_config.model_client_cfg.api_key
+                decrypted_config.model_client_cfg.api_key = self._storage_codec.decode(
+                    decrypted_config.model_client_cfg.api_key
                 )
 
             if decrypted_config.embedding_cfg and decrypted_config.embedding_cfg.api_key:
-                decrypted_config.embedding_cfg.api_key = BaseMemoryManager.decrypt_memory_if_needed(
-                    key=self._sys_mem_config.crypto_key,
-                    ciphertext=decrypted_config.embedding_cfg.api_key
+                decrypted_config.embedding_cfg.api_key = self._storage_codec.decode(
+                    decrypted_config.embedding_cfg.api_key
                 )
 
             return decrypted_config

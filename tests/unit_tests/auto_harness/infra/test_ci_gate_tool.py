@@ -85,43 +85,75 @@ class TestCIGateRunnerMatchGates(IsolatedAsyncioTestCase):
         assert tool._match_gates("unknown") == []
 
     def test_normalize_make_test_uses_bash_shell(self):
-        tool = CIGateRunner(
-            "/tmp", python_executable="/tmp/python3.11"
-        )
+        # Mock shutil.which BEFORE creating CIGateRunner
         with patch(
-            "pathlib.Path.is_file",
-            return_value=True,
+            "shutil.which",
+            return_value=None,  # simulate make not available
         ):
-            normalized = tool._normalize_command("make test")
+            tool = CIGateRunner(
+                "/tmp", python_executable="/tmp/python3.11"
+            )
+            with patch(
+                "pathlib.Path.is_file",
+                return_value=True,
+            ):
+                normalized = tool._normalize_command("make test")
         assert normalized == "/tmp/python3.11 -m pytest"
 
-    def test_normalize_make_test_preserves_flags(self):
-        tool = CIGateRunner(
-            "/tmp", python_executable="/tmp/python3.11"
-        )
+    def test_normalize_make_test_keeps_original_when_make_available(self):
+        """When make is available, original command should be preserved."""
+        # Mock shutil.which BEFORE creating CIGateRunner
         with patch(
-            "pathlib.Path.is_file",
-            return_value=True,
+            "shutil.which",
+            return_value="/usr/bin/make",  # simulate make available
         ):
-            normalized = tool._normalize_command(
-                "make test TESTFLAGS=tests/unit_tests/harness/"
+            tool = CIGateRunner(
+                "/tmp", python_executable="/tmp/python3.11"
             )
+            with patch(
+                "pathlib.Path.is_file",
+                return_value=True,
+            ):
+                normalized = tool._normalize_command("make test")
+        assert normalized == "make test"  # unchanged
+
+    def test_normalize_make_test_preserves_flags(self):
+        # Mock shutil.which BEFORE creating CIGateRunner
+        with patch(
+            "shutil.which",
+            return_value=None,  # simulate make not available
+        ):
+            tool = CIGateRunner(
+                "/tmp", python_executable="/tmp/python3.11"
+            )
+            with patch(
+                "pathlib.Path.is_file",
+                return_value=True,
+            ):
+                normalized = tool._normalize_command(
+                    "make test TESTFLAGS=tests/unit_tests/harness/"
+                )
         assert normalized == (
             "/tmp/python3.11 -m pytest "
             "tests/unit_tests/harness/"
         )
 
     def test_normalize_shell_prefixed_make_test_uses_configured_python(self):
-        tool = CIGateRunner(
-            "/tmp", python_executable="/tmp/python3.11"
-        )
+        # Mock shutil.which BEFORE creating CIGateRunner
         with patch(
-            "pathlib.Path.is_file",
-            return_value=True,
+            "shutil.which",
+            return_value=None,  # simulate make not available
         ):
-            normalized = tool._normalize_command(
-                'PATH="/tmp/bin:$PATH" make test'
+            tool = CIGateRunner(
+                "/tmp", python_executable="/tmp/python3.11"
             )
+            with patch(
+                "pathlib.Path.is_file",
+                return_value=True,
+            ):
+                normalized = tool._normalize_command(
+                    'PATH="/tmp/bin:$PATH" make test'
+                )
         assert normalized == (
             'PATH="/tmp/bin:$PATH" '
             "/tmp/python3.11 -m pytest"
@@ -186,6 +218,7 @@ class TestCIGateRunnerInvoke(IsolatedAsyncioTestCase):
         tool._python_executable = ""
         tool._install_command = ""
         tool._prepared = True
+        tool._make_available = True  # initialize for test
         tool._gates = [
             {"name": "lint", "command": "echo ok"},
         ]
@@ -206,14 +239,18 @@ class TestCIGateRunnerInvoke(IsolatedAsyncioTestCase):
         tool._python_executable = ""
         tool._install_command = ""
         tool._prepared = True
+        tool._make_available = True  # initialize for test
         tool._gates = [
-            {"name": "lint", "command": "ruff check ."},
+            {"name": "lint", "command": "make check COMMITS=1"},
         ]
-        fake_proc = _FakeProc(1, b"E501 line too long")
         with patch(
-            "asyncio.create_subprocess_exec",
+            "openjiuwen.auto_harness.infra.ci_gate_runner.CIGateRunner._run_check_gate",
             new_callable=AsyncMock,
-            return_value=fake_proc,
+            return_value={
+                "name": "lint",
+                "passed": False,
+                "output": "E501 line too long",
+            },
         ):
             result = await tool.run("check")
         assert result["passed"] is False
@@ -226,6 +263,7 @@ class TestCIGateRunnerInvoke(IsolatedAsyncioTestCase):
         tool._python_executable = ""
         tool._install_command = ""
         tool._prepared = True
+        tool._make_available = True  # initialize for test
         tool._gates = []
         result = await tool.run("test")
         assert result["passed"] is False
@@ -237,6 +275,7 @@ class TestCIGateRunnerInvoke(IsolatedAsyncioTestCase):
         tool._python_executable = ""
         tool._install_command = ""
         tool._prepared = True
+        tool._make_available = True  # initialize for test
         tool._gates = [
             {"name": "lint", "command": "echo ok"},
         ]
@@ -255,6 +294,7 @@ class TestCIGateRunnerInvoke(IsolatedAsyncioTestCase):
         tool._python_executable = "/tmp/python3.11"
         tool._install_command = ""
         tool._prepared = True
+        tool._make_available = False  # simulate make not available
         fake_proc = _FakeProc(0, b"ok")
         with patch(
             "asyncio.create_subprocess_exec",
@@ -270,10 +310,18 @@ class TestCIGateRunnerInvoke(IsolatedAsyncioTestCase):
             })
         assert result["passed"] is True
         mock_exec.assert_awaited_once()
-        assert mock_exec.await_args.args[:2] == (
-            "bash",
-            "-c",
-        )
+        # Cross-platform shell: cmd.exe /c on Windows, bash -c on Unix
+        import sys
+        if sys.platform == "win32":
+            assert mock_exec.await_args.args[:2] == (
+                "cmd.exe",
+                "/c",
+            )
+        else:
+            assert mock_exec.await_args.args[:2] == (
+                "bash",
+                "-c",
+            )
         assert (
             mock_exec.await_args.args[2]
             == "/tmp/python3.11 -m pytest"
@@ -285,6 +333,7 @@ class TestCIGateRunnerInvoke(IsolatedAsyncioTestCase):
         tool._python_executable = "/tmp/python3.11"
         tool._install_command = ""
         tool._prepared = True
+        tool._make_available = False  # simulate make not available
         fake_proc = _FakeProc(0, b"ok")
         with patch(
             "asyncio.create_subprocess_exec",
@@ -312,6 +361,7 @@ class TestCIGateRunnerInvoke(IsolatedAsyncioTestCase):
             "uv sync --active --group dev --extra cli"
         )
         tool._prepared = False
+        tool._make_available = True  # initialize for test
         tool._gates = []
         fake_proc = _FakeProc(0, b"ok")
         with patch(
@@ -321,6 +371,14 @@ class TestCIGateRunnerInvoke(IsolatedAsyncioTestCase):
         ) as mock_exec, patch(
             "pathlib.Path.is_file",
             return_value=True,
+        ), patch(
+            "openjiuwen.auto_harness.infra.ci_gate_runner.CIGateRunner._run_check_gate",
+            new_callable=AsyncMock,
+            return_value={"name": "lint", "passed": True, "output": ""},
+        ), patch(
+            "openjiuwen.auto_harness.infra.ci_gate_runner.CIGateRunner._ensure_uv_available",
+            new_callable=AsyncMock,
+            return_value=None,
         ):
             await tool._run_gate({
                 "name": "test",
@@ -328,9 +386,9 @@ class TestCIGateRunnerInvoke(IsolatedAsyncioTestCase):
             })
             await tool._run_gate({
                 "name": "lint",
-                "command": "echo ok",
+                "command": "make check COMMITS=1",
             })
-        assert mock_exec.await_count == 3
+        assert mock_exec.await_count == 2
         assert mock_exec.await_args_list[0].args[2] == (
             "uv sync --active --group dev --extra cli"
         )
@@ -341,6 +399,7 @@ class TestCIGateRunnerInvoke(IsolatedAsyncioTestCase):
         tool._python_executable = ""
         tool._install_command = ""
         tool._prepared = True
+        tool._make_available = True  # initialize for test
         tool._gates = [
             {"name": "test", "command": "make test"},
         ]

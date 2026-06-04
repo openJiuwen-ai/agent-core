@@ -9,11 +9,18 @@ The phases tested are:
 """
 
 import asyncio
+import json
 import math
 from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
 import pytest
 
+from openjiuwen.core.common.security.crypt_utils import (
+    AesGcmCrypt,
+    CryptUtils,
+)
+from openjiuwen.core.common.utils.singleton import Singleton
 from openjiuwen.core.foundation.store.base_memory_index import MemoryDoc
 from openjiuwen.core.foundation.store.base_vector_store import (
     BaseVectorStore,
@@ -21,6 +28,7 @@ from openjiuwen.core.foundation.store.base_vector_store import (
 )
 from openjiuwen.core.foundation.store.index.simple_memory_index import SimpleMemoryIndex
 from openjiuwen.core.foundation.store.kv.in_memory_kv_store import InMemoryKVStore
+from openjiuwen.core.memory.codec.aes_storage_codec import AesStorageCodec
 from openjiuwen.core.memory.common.base import generate_idx_name
 from openjiuwen.core.memory.manage.mem_model.semantic_store import SemanticStore
 from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
@@ -174,6 +182,20 @@ _OLD_RECORDS = [
     (_make_id(3), "Charlie works on AI"),
 ]
 _MEM_TYPE = "user_profile"
+
+
+@pytest.fixture(autouse=True)
+def _clean_crypt():
+    Singleton._instances.pop(AesGcmCrypt, None)
+    CryptUtils._CRYPT_REGISTRY.clear()
+    yield
+    Singleton._instances.pop(AesGcmCrypt, None)
+    CryptUtils._CRYPT_REGISTRY.clear()
+
+
+@pytest.fixture
+def crypto_key():
+    return b"0123456789abcdef0123456789abcdef"
 
 
 async def _write_via_old_framework(kv_store, vec_store, emb):
@@ -435,6 +457,233 @@ class TestSimpleMemoryIndexWriteOperations:
         # Total count stays the same
         all_docs = await idx.list_memories(_UID, _SID, 0, 100)
         assert len(all_docs) == 3
+
+
+# ===========================================================================
+#  Phase 3: SimpleMemoryIndex with AesStorageCodec
+# ===========================================================================
+
+_CODEC_UID = "codec_user"
+_CODEC_SID = "codec_scope"
+_CODEC_TYPE = "user_profile"
+
+
+def _register_codec(codec_key):
+    crypt = AesGcmCrypt()
+    CryptUtils.register_crypt(CryptUtils.AES_GCM_CRYPT_NAME, crypt)
+    return AesStorageCodec(codec_key)
+
+
+class TestSimpleMemoryIndexWithCodec:
+    """Verify SimpleMemoryIndex encrypts/decrypts ``text`` field via codec."""
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_add_then_search_with_codec(kv, vec, emb, crypto_key):
+        codec = _register_codec(crypto_key)
+        idx = SimpleMemoryIndex(kv, vec, emb)
+        idx.set_storage_codec(codec)
+
+        doc = MemoryDoc(id="m1", text="sensitive data", type=_CODEC_TYPE,
+                        timestamp=datetime.now(timezone.utc).astimezone())
+        await idx.add_memories(_CODEC_UID, _CODEC_SID, [doc])
+
+        results = await idx.search(_CODEC_UID, _CODEC_SID, "sensitive", top_k=1)
+        assert len(results) == 1
+        assert results[0][0].text == "sensitive data"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_add_then_get_by_id_with_codec(kv, vec, emb, crypto_key):
+        codec = _register_codec(crypto_key)
+        idx = SimpleMemoryIndex(kv, vec, emb)
+        idx.set_storage_codec(codec)
+
+        doc = MemoryDoc(id="m1", text="confidential", type=_CODEC_TYPE,
+                        timestamp=datetime.now(timezone.utc).astimezone())
+        await idx.add_memories(_CODEC_UID, _CODEC_SID, [doc])
+
+        result = await idx.get_by_id(_CODEC_UID, _CODEC_SID, "m1")
+        assert result is not None
+        assert result.text == "confidential"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_add_then_list_memories_with_codec(kv, vec, emb, crypto_key):
+        codec = _register_codec(crypto_key)
+        idx = SimpleMemoryIndex(kv, vec, emb)
+        idx.set_storage_codec(codec)
+
+        ids = [f"test{i:022d}" for i in range(3)]
+        ts = datetime.now(timezone.utc).astimezone()
+        docs = [
+            MemoryDoc(id=ids[i], text=f"data_{i}", type=_CODEC_TYPE, timestamp=ts)
+            for i in range(3)
+        ]
+        await idx.add_memories(_CODEC_UID, _CODEC_SID, docs)
+
+        for i in range(3):
+            doc = await idx.get_by_id(_CODEC_UID, _CODEC_SID, ids[i])
+            assert doc is not None
+            assert doc.text == f"data_{i}"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_kv_stores_encrypted_with_codec(kv, vec, emb, crypto_key):
+        codec = _register_codec(crypto_key)
+        idx = SimpleMemoryIndex(kv, vec, emb)
+        idx.set_storage_codec(codec)
+
+        plaintext = "top secret"
+        doc = MemoryDoc(id="m1", text=plaintext, type=_CODEC_TYPE,
+                        timestamp=datetime.now(timezone.utc).astimezone())
+        await idx.add_memories(_CODEC_UID, _CODEC_SID, [doc])
+
+        raw_data = await kv.get_by_prefix("UMD")
+        raw_bytes = None
+        for raw in raw_data.values():
+            raw_bytes = raw
+            break
+        assert raw_bytes is not None
+        decoded = raw_bytes.decode("utf-8") if isinstance(raw_bytes, bytes) else raw_bytes
+        kv_json = json.loads(decoded)
+        assert kv_json["mem"] != plaintext
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_other_fields_not_encrypted(kv, vec, emb, crypto_key):
+        codec = _register_codec(crypto_key)
+        idx = SimpleMemoryIndex(kv, vec, emb)
+        idx.set_storage_codec(codec)
+
+        doc = MemoryDoc(id="m1", text="secret", type=_CODEC_TYPE,
+                        timestamp=datetime.now(timezone.utc).astimezone(),
+                        fields={"source_id": "src_1"})
+        await idx.add_memories(_CODEC_UID, _CODEC_SID, [doc])
+
+        raw_data = await kv.get_by_prefix("UMD")
+        raw_bytes = None
+        for raw in raw_data.values():
+            raw_bytes = raw
+            break
+        decoded = raw_bytes.decode("utf-8") if isinstance(raw_bytes, bytes) else raw_bytes
+        kv_json = json.loads(decoded)
+        assert kv_json["id"] == "m1"
+        assert kv_json["mem_type"] == _CODEC_TYPE
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_id_tracking_plaintext(kv, vec, emb, crypto_key):
+        codec = _register_codec(crypto_key)
+        idx = SimpleMemoryIndex(kv, vec, emb)
+        idx.set_storage_codec(codec)
+
+        doc = MemoryDoc(id="m1", text="data", type=_CODEC_TYPE,
+                        timestamp=datetime.now(timezone.utc).astimezone())
+        await idx.add_memories(_CODEC_UID, _CODEC_SID, [doc])
+
+        ids_raw = await kv.get(f"UMD/{_CODEC_UID}/{_CODEC_SID}/ids")
+        assert ids_raw is not None
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_without_codec_plaintext(kv, vec, emb):
+        idx = SimpleMemoryIndex(kv, vec, emb)
+
+        doc = MemoryDoc(id="m1", text="plain data", type=_CODEC_TYPE,
+                        timestamp=datetime.now(timezone.utc).astimezone())
+        await idx.add_memories(_CODEC_UID, _CODEC_SID, [doc])
+
+        raw_data = await kv.get_by_prefix("UMD")
+        raw_bytes = None
+        for raw in raw_data.values():
+            raw_bytes = raw
+            break
+        decoded = raw_bytes.decode("utf-8") if isinstance(raw_bytes, bytes) else raw_bytes
+        kv_json = json.loads(decoded)
+        assert kv_json["mem"] == "plain data"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_search_without_codec_still_works(kv, vec, emb):
+        idx = SimpleMemoryIndex(kv, vec, emb)
+
+        doc = MemoryDoc(id="m1", text="open data", type=_CODEC_TYPE,
+                        timestamp=datetime.now(timezone.utc).astimezone())
+        await idx.add_memories(_CODEC_UID, _CODEC_SID, [doc])
+
+        results = await idx.search(_CODEC_UID, _CODEC_SID, "open", top_k=1)
+        assert len(results) == 1
+        assert results[0][0].text == "open data"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_update_memories_with_codec(kv, vec, emb, crypto_key):
+        codec = _register_codec(crypto_key)
+        idx = SimpleMemoryIndex(kv, vec, emb)
+        idx.set_storage_codec(codec)
+
+        doc = MemoryDoc(id="m1", text="old text", type=_CODEC_TYPE,
+                        timestamp=datetime.now(timezone.utc).astimezone())
+        await idx.add_memories(_CODEC_UID, _CODEC_SID, [doc])
+
+        updated = MemoryDoc(id="m1", text="new text", type=_CODEC_TYPE,
+                            timestamp=datetime.now(timezone.utc).astimezone())
+        await idx.update_memories(_CODEC_UID, _CODEC_SID, [updated])
+
+        result = await idx.get_by_id(_CODEC_UID, _CODEC_SID, "m1")
+        assert result.text == "new text"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_delete_memories_with_codec(kv, vec, emb, crypto_key):
+        codec = _register_codec(crypto_key)
+        idx = SimpleMemoryIndex(kv, vec, emb)
+        idx.set_storage_codec(codec)
+
+        doc = MemoryDoc(id="m1", text="to delete", type=_CODEC_TYPE,
+                        timestamp=datetime.now(timezone.utc).astimezone())
+        await idx.add_memories(_CODEC_UID, _CODEC_SID, [doc])
+        await idx.delete_memories(_CODEC_UID, _CODEC_SID, ["m1"])
+
+        result = await idx.get_by_id(_CODEC_UID, _CODEC_SID, "m1")
+        assert result is None
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_delete_memories_extracts_mem_type_from_encrypted(kv, vec, emb, crypto_key):
+        codec = _register_codec(crypto_key)
+        idx = SimpleMemoryIndex(kv, vec, emb)
+        idx.set_storage_codec(codec)
+
+        doc = MemoryDoc(id="m1", text="delete me", type=_CODEC_TYPE,
+                        timestamp=datetime.now(timezone.utc).astimezone())
+        await idx.add_memories(_CODEC_UID, _CODEC_SID, [doc])
+
+        await idx.delete_memories(_CODEC_UID, _CODEC_SID, ["m1"])
+        result = await idx.get_by_id(_CODEC_UID, _CODEC_SID, "m1")
+        assert result is None
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_codec_decode_failure_fallback(kv, vec, emb, crypto_key):
+        crypt = AesGcmCrypt()
+        CryptUtils.register_crypt(CryptUtils.AES_GCM_CRYPT_NAME, crypt)
+        codec = AesStorageCodec(crypto_key)
+        idx = SimpleMemoryIndex(kv, vec, emb)
+        idx.set_storage_codec(codec)
+
+        doc = MemoryDoc(id="m1", text="legacy plain", type=_CODEC_TYPE,
+                        timestamp=datetime.now(timezone.utc).astimezone())
+        await idx.add_memories(_CODEC_UID, _CODEC_SID, [doc])
+
+        original_decrypt = crypt.decrypt
+        crypt.decrypt = MagicMock(side_effect=RuntimeError("decrypt failure"))
+        try:
+            result = await idx.search(_CODEC_UID, _CODEC_SID, "legacy", top_k=1)
+            assert len(result) == 1
+        finally:
+            crypt.decrypt = original_decrypt
 
 
 if __name__ == "__main__":

@@ -165,6 +165,8 @@ class TestRoundLevelCompressor:
 
         assert event is not None
         assert event.messages_to_modify == [0, 1, 2, 3]
+        assert event.compact_summary.startswith(ROUND_LEVEL_FALLBACK_MARKER)
+        assert "compressed" in event.compact_summary
         assert len(updated_context_window.context_messages) == 1
         assert updated_context_window.context_messages[0].content.startswith(ROUND_LEVEL_FALLBACK_MARKER)
         context.set_messages.assert_called_once_with(updated_context_window.context_messages)

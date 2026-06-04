@@ -63,6 +63,8 @@ class EvolutionPatch:
     script_filename: Optional[str] = None
     script_language: Optional[str] = None
     script_purpose: Optional[str] = None
+    keywords: Optional[List[str]] = None
+    summary: Optional[str] = None
 
     _OPTIONAL_FIELDS = ("skip_reason", "merge_target", "script_filename", "script_language", "script_purpose")
 

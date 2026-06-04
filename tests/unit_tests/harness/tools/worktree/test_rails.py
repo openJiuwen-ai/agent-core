@@ -34,9 +34,11 @@ from openjiuwen.harness.tools.worktree import (
     WorktreeRail,
     WorktreeSession,
     get_current_session,
+    get_default_worktree_name,
+    set_default_worktree_name,
     set_current_session,
 )
-from openjiuwen.harness.tools.worktree.rails import _SESSION_STATE_KEY
+from openjiuwen.harness.tools.worktree.rails import _DEFAULT_WORKTREE_NAME_KEY, _SESSION_STATE_KEY
 
 
 # --- Stubs --------------------------------------------------------------------
@@ -236,8 +238,10 @@ def _make_ctx(session: _StubSession | None) -> Any:
 def _reset_contextvar_session():
     """Ensure each test starts and ends with a clean ContextVar."""
     set_current_session(None)
+    set_default_worktree_name(None)
     yield
     set_current_session(None)
+    set_default_worktree_name(None)
 
 
 def test_before_invoke_restores_session_from_dict_state():
@@ -268,22 +272,22 @@ def test_before_invoke_resets_contextvar_when_state_missing():
     """No stashed state -> ContextVar is cleared, even if stale."""
     rail = WorktreeRail()
     set_current_session(_make_session("stale"))
+    set_default_worktree_name("stale-default")
     session = _StubSession({})
 
     asyncio.run(rail.before_invoke(_make_ctx(session)))
 
     assert get_current_session() is None
+    assert get_default_worktree_name() is None
 
 
 def test_before_invoke_noop_when_session_absent():
-    """``ctx.session=None`` must not crash; ContextVar untouched."""
+    """``ctx.session=None`` must not crash."""
     rail = WorktreeRail()
-    sentinel = _make_session("kept")
-    set_current_session(sentinel)
 
     asyncio.run(rail.before_invoke(_make_ctx(None)))
 
-    assert get_current_session() is sentinel
+    assert get_current_session() is None
 
 
 def test_after_invoke_persists_current_session_as_dict():
@@ -291,6 +295,7 @@ def test_after_invoke_persists_current_session_as_dict():
     rail = WorktreeRail()
     active = _make_session("beta")
     set_current_session(active)
+    set_default_worktree_name("default-beta")
     session = _StubSession()
 
     asyncio.run(rail.after_invoke(_make_ctx(session)))
@@ -298,16 +303,19 @@ def test_after_invoke_persists_current_session_as_dict():
     stored = session.get_state(_SESSION_STATE_KEY)
     assert isinstance(stored, dict)
     assert stored["worktree_name"] == "beta"
+    assert session.get_state(_DEFAULT_WORKTREE_NAME_KEY) == "default-beta"
 
 
 def test_after_invoke_persists_none_to_clear_state():
     """Exiting the worktree must propagate the clear to Session.state."""
     rail = WorktreeRail()
+    set_default_worktree_name("default-old")
     session = _StubSession({_SESSION_STATE_KEY: _make_session("old").model_dump()})
 
     asyncio.run(rail.after_invoke(_make_ctx(session)))
 
     assert session.get_state(_SESSION_STATE_KEY) is None
+    assert session.get_state(_DEFAULT_WORKTREE_NAME_KEY) == "default-old"
 
 
 def test_after_invoke_noop_when_session_absent():
@@ -326,10 +334,12 @@ def test_invoke_roundtrip_survives_a_simulated_resume():
 
     # Invoke 1: agent enters a worktree via tool, after_invoke persists.
     set_current_session(_make_session("resumable"))
+    set_default_worktree_name("resumable-default")
     asyncio.run(rail.after_invoke(_make_ctx(session)))
 
     # Simulate a new task/contextvar binding for the next invoke.
     set_current_session(None)
+    set_default_worktree_name(None)
     assert get_current_session() is None
 
     # Invoke 2: before_invoke restores from the same Session.
@@ -338,6 +348,7 @@ def test_invoke_roundtrip_survives_a_simulated_resume():
     restored = get_current_session()
     assert isinstance(restored, WorktreeSession)
     assert restored.worktree_name == "resumable"
+    assert get_default_worktree_name() == "resumable-default"
 
 
 # --- cwd sync on resume -------------------------------------------------------

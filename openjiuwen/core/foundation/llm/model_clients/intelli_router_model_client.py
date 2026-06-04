@@ -13,6 +13,7 @@ from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseM
 from openjiuwen.core.foundation.llm.schema.message import (
     BaseMessage, AssistantMessage, UserMessage
 )
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.foundation.tool import ToolInfo
@@ -360,8 +361,27 @@ class IntelliRouterModelClient(BaseModelClient):
         choices = response.get("choices", [])
         if not choices:
             content = ""
+            message = {}
         else:
-            content = choices[0].get("message", {}).get("content", "")
+            message = choices[0].get("message", {})
+            content = message.get("content", "") or ""
+
+        # Get reasoning_content (if exists, e.g. DeepSeek thinking mode)
+        reasoning_content = message.get("reasoning_content", None)
+
+        # Parse tool_calls
+        tool_calls = []
+        if message.get("tool_calls"):
+            for idx, tc in enumerate(message.get("tool_calls", [])):
+                function = tc.get("function", {})
+                tool_call = ToolCall(
+                    id=tc.get("id", "") or "",
+                    type="function",
+                    name=function.get("name", "") or "",
+                    arguments=function.get("arguments", "") or "",
+                    index=tc.get("index", idx)
+                )
+                tool_calls.append(tool_call)
 
         if output_parser and content:
             try:
@@ -379,7 +399,12 @@ class IntelliRouterModelClient(BaseModelClient):
                     exception=str(e),
                 )
 
-        return AssistantMessage(content=content)
+        return AssistantMessage(
+            content=content,
+            tool_calls=tool_calls if tool_calls else None,
+            finish_reason="tool_calls" if tool_calls else "stop",
+            reasoning_content=reasoning_content,
+        )
 
     def _convert_chunk(self, chunk: Dict[str, Any]) -> AssistantMessageChunk:
         """
@@ -396,7 +421,7 @@ class IntelliRouterModelClient(BaseModelClient):
             content = ""
         else:
             delta = choices[0].get("delta", {})
-            content = delta.get("content", "")
+            content = delta.get("content", "") or ""
 
         return AssistantMessageChunk(content=content)
 

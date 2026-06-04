@@ -25,6 +25,9 @@ class MockMemoryIndex(BaseMemoryIndex):
         self._schema_version = 0
         self._backups: dict[str, dict[str, Any]] = {}
 
+    def set_storage_codec(self, codec) -> None:
+        pass
+
     def _ensure_user_scope(self, user_id: str, scope_id: str):
         if user_id not in self._data:
             self._data[user_id] = {}

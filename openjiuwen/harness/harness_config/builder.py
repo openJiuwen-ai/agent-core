@@ -21,7 +21,7 @@ from openjiuwen.harness.harness_config.loader import ResolvedFileSection, Resolv
 from openjiuwen.harness.workspace.workspace import Workspace
 
 if TYPE_CHECKING:
-    pass
+    from openjiuwen.harness.deep_agent import DeepAgent
 
 # ---------------------------------------------------------------------------
 # Builtin tool group registry

@@ -21,6 +21,15 @@ class ParsedExperienceDraft:
 
     patch: EvolutionPatch
     summary: Optional[str] = None
+    keywords: Optional[list[str]] = None
+
+
+def normalize_keywords(raw: Any) -> Optional[list[str]]:
+    """Normalize optional keyword lists from LLM JSON."""
+    if not isinstance(raw, list):
+        return None
+    keywords = [str(item).strip() for item in raw if str(item).strip()]
+    return keywords or None
 
 
 def normalize_summary(raw: Any) -> Optional[str]:
@@ -61,18 +70,24 @@ def parse_experience_draft(data: dict) -> Optional[ParsedExperienceDraft]:
     if merge_target in ("null", None):
         merge_target = None
 
+    keywords = normalize_keywords(data.get("keywords"))
+    summary = normalize_summary(data.get("summary"))
+    patch = EvolutionPatch(
+        section=section,
+        action="append",
+        content=data.get("content", ""),
+        target=target,
+        merge_target=merge_target,
+        script_filename=data.get("script_filename"),
+        script_language=data.get("script_language"),
+        script_purpose=data.get("script_purpose"),
+        keywords=keywords,
+        summary=summary,
+    )
     return ParsedExperienceDraft(
-        patch=EvolutionPatch(
-            section=section,
-            action="append",
-            content=data.get("content", ""),
-            target=target,
-            merge_target=merge_target,
-            script_filename=data.get("script_filename"),
-            script_language=data.get("script_language"),
-            script_purpose=data.get("script_purpose"),
-        ),
-        summary=normalize_summary(data.get("summary")),
+        patch=patch,
+        summary=summary,
+        keywords=keywords,
     )
 
 

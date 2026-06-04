@@ -7,11 +7,39 @@ Base memory index module for managing and searching memory documents.
 This module provides abstract interfaces for memory storage and retrieval,
 including the MemoryDoc data model and BaseMemoryIndex abstract base class.
 """
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
+
+
+@runtime_checkable
+class StorageCodec(Protocol):
+    """
+    .. code-block:: python
+
+        class AesStorageCodec:
+            def __init__(self, key: bytes):
+                self._key = key
+
+            def encode(self, text: str) -> str:
+                return aes_encrypt(text)
+
+            def decode(self, data: str) -> str:
+                return aes_decrypt(data)
+
+        index = SimpleMemoryIndex(...)
+        index.set_storage_codec(AesStorageCodec(key=b"..."))
+    """
+
+    def encode(self, text: str) -> str:
+        ...
+
+    def decode(self, data: str) -> str:
+        ...
 
 
 class MemoryDoc(BaseModel):
@@ -43,6 +71,11 @@ class BaseMemoryIndex(ABC):
     Memory documents are scoped by user_id and scope_id, allowing for
     multi-tenant and multi-scenario memory management.
     """
+
+    @abstractmethod
+    def set_storage_codec(self, codec: StorageCodec) -> None:
+        pass
+
 
     @abstractmethod
     async def add_memories(self, user_id: str, scope_id: str, memories: list[MemoryDoc]):

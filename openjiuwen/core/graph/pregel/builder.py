@@ -28,16 +28,28 @@ class PregelBuilder:
     def add_edge(self, start: str | list[str] | set[str] | tuple[str, ...],
                  end: str | list[str] | set[str] | tuple[str, ...]):
         """
-        - N to 1 -> barrier
+        - N to 1 -> barrier (supports CNF groups: List[str | Set[str]])
         - 1 to N -> static
         """
         if isinstance(start, (list, set, tuple)) and isinstance(end, str):
-            # barrier
-            expected = set(start)
-            barrier = BarrierChannel(end, expected=expected)
+            # barrier: build CNF groups from start items
+            expected_groups = []
+            for item in start:
+                if isinstance(item, str):
+                    expected_groups.append({item})
+                elif isinstance(item, (set, frozenset)):
+                    expected_groups.append(set(item))
+                else:
+                    raise ValueError(f"Unsupported barrier source item type: {type(item)}")
+            barrier = BarrierChannel(end, expected_groups=expected_groups)
             self.channels.append(barrier)
-            for s in start:
-                self.nodes[s].routers.append(BarrierRouter([barrier.key]))
+            # Register BarrierRouter on all senders from start items
+            for item in start:
+                if isinstance(item, str):
+                    self.nodes[item].routers.append(BarrierRouter([barrier.key]))
+                elif isinstance(item, (set, frozenset)):
+                    for s in item:
+                        self.nodes[s].routers.append(BarrierRouter([barrier.key]))
 
         elif isinstance(start, str) and isinstance(end, (list, set, tuple)):
             # multi-static

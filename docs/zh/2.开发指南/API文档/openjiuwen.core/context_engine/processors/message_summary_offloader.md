@@ -2,19 +2,15 @@
 
 ## class openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.MessageSummaryOffloaderConfig
 
-`MessageSummaryOffloader` 的配置类。当消息数量或 token 数超过阈值时，对符合条件的大消息先经 LLM 生成摘要再 offload，相比 [MessageOffloader](message_offloader.md) 可保留更多语义。
+`MessageSummaryOffloader` 的配置类。对于每条新加入且大小超过 `large_message_threshold` 的候选消息，先经 LLM 生成摘要再 offload，相比 [MessageOffloader](message_offloader.md) 可保留更多语义。
 
-* **messages_threshold**(int | None，可选)：内存中消息数超过该值时触发 offload。默认值：`None`。
-* **tokens_threshold**(int，可选)：累计 token 数超过该值时触发 offload。默认值：`20000`。
 * **large_message_threshold**(int，可选)：单条消息 token 数超过该值时视为「大消息」，可被 offload。默认值：`1000`。
 * **offload_message_type**(list[Literal["user", "assistant", "tool"]]，可选)：可被 offload 的消息 role 列表。默认值：`["tool"]`。
-* **messages_to_keep**(int | None，可选)：保证保留的最新增消息数量。默认值：`None`。
-* **keep_last_round**(bool，可选)：是否始终保留最近一轮 user-assistant 对话。默认值：`True`。
 * **model**(ModelRequestConfig | None，可选)：用于执行摘要的模型请求配置。默认值：`None`。
 * **model_client**(ModelClientConfig | None，可选)：用于执行摘要的模型服务配置。默认值：`None`。
 * **customized_summary_prompt**(str | None，可选)：自定义摘要 prompt；为 `None` 时使用内置 prompt。默认值：`None`。
 
-**约束**：若同时设置 `messages_to_keep` 与 `messages_threshold`，则 `messages_to_keep` 必须小于 `messages_threshold`。进行摘要时需配置 `model` 与 `model_client`。
+**约束**：进行摘要时需配置 `model` 与 `model_client`。
 
 ## class openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.MessageSummaryOffloader
 
@@ -59,7 +55,6 @@ MessageSummaryOffloader(config: MessageSummaryOffloaderConfig)
 ...         api_key=API_KEY,
 ...     )
 ...     offloader_config = MessageSummaryOffloaderConfig(
-...         messages_threshold=3,
 ...         large_message_threshold=50,
 ...         offload_message_type=["tool"],
 ...         model=model_config,

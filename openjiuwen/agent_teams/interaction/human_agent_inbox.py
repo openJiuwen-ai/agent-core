@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.tools.team import TeamBackend
 
 
-AgentLookup = Callable[[str], Optional["TeamAgent"]]
+AgentLookup = Callable[[str], Awaitable[Optional["TeamAgent"]]]
 """Resolve a human-agent ``member_name`` to its live ``TeamAgent``
 runtime. Returns ``None`` when no live runtime is bound to that
 member (cold start, before spawn, or after shutdown)."""
@@ -113,14 +113,14 @@ class HumanAgentInbox:
         """Return the registered team→user notification callback, if any."""
         return self._on_inbound
 
-    def _resolve_sender(self, sender: Optional[str]) -> str:
+    async def _resolve_sender(self, sender: Optional[str]) -> str:
         """Pick a sender and verify it is a registered human-agent member.
 
         Defaults to the first registered human agent when ``sender`` is
         omitted so single-human teams keep the minimal call form
         ``inbox.send(body)`` working.
         """
-        names = self._team.human_agent_names()
+        names = await self._team.human_agent_names()
         if not names:
             raise HumanAgentNotEnabledError(
                 "No human-agent member is registered on this team; "
@@ -180,7 +180,7 @@ class HumanAgentInbox:
             UnknownHumanAgentError: When ``sender`` does not match any
                 registered human-agent member.
         """
-        resolved_sender = self._resolve_sender(sender)
+        resolved_sender = await self._resolve_sender(sender)
         team_logger.debug(
             "HumanAgentInbox: sender=%s, to=%s, body_len=%d",
             resolved_sender,
@@ -221,7 +221,7 @@ class HumanAgentInbox:
                 sender,
             )
             return DeliverResult.failure("agent_unavailable")
-        agent = self._agent_lookup(sender)
+        agent = await self._agent_lookup(sender)
         if agent is None:
             team_logger.warning("HumanAgentInbox: human agent %s has no live runtime", sender)
             return DeliverResult.failure("agent_unavailable")

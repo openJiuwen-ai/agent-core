@@ -227,14 +227,19 @@ class TeamMessageManager:
         """
         return await self.db.message.get_team_messages(team_name=team_name)
 
-    async def has_unread_messages(self) -> bool:
-        """Whether any team message (direct or broadcast) is still unread.
+    async def has_unread_messages(self, *, include_broadcast: bool = True) -> bool:
+        """Whether any team message is still unread by its intended reader.
+
+        Args:
+            include_broadcast: When False, only direct (point-to-point)
+                messages count toward the check; broadcast messages are
+                excluded. Defaults to True.
 
         Returns:
-            True if at least one direct or broadcast message has not been
-            read by its intended reader.
+            True if at least one matching message has not been read by its
+            intended reader.
         """
-        return await self.db.message.has_unread_messages(self.team_name)
+        return await self.db.message.has_unread_messages(self.team_name, include_broadcast=include_broadcast)
 
     async def mark_message_read(self, message_id: str, member_name: str) -> bool:
         """Mark a message as read by a member

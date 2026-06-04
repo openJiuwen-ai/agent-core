@@ -158,6 +158,8 @@ class MonitorEventType(str, Enum):
 
     # Task
     TASK_CREATED = "task_created"
+    TASK_PLAN_REQUEST = "task_plan_request"
+    TASK_PLAN_RESPONSE = "task_plan_response"
     TASK_UPDATED = "task_updated"
     TASK_CLAIMED = "task_claimed"
     TASK_COMPLETED = "task_completed"
@@ -195,6 +197,8 @@ class MonitorEvent(BaseModel):
     Task event fields:
         All TASK_*: task_id
         TASK_CREATED: task_id, status
+        TASK_PLAN_REQUEST: task_id, status, plan_id, member_plan_md
+        TASK_PLAN_RESPONSE: task_id, status, plan_id, approved
 
     Message event fields:
         MESSAGE: message_id, from_member_name, to_member_name
@@ -221,6 +225,9 @@ class MonitorEvent(BaseModel):
     # -- Task fields --
     task_id: str | None = None
     status: str | None = None
+    plan_id: str | None = None
+    member_plan_md: str | None = None
+    approved: bool | None = None
 
     # -- Message fields --
     message_id: str | None = None

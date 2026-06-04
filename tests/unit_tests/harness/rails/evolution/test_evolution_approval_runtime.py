@@ -71,9 +71,7 @@ class TestEvolutionApprovalRuntime(IsolatedAsyncioTestCase):
     async def test_approve_pending_request_delegates_to_manager(self):
         pending = SimpleNamespace(skill_name="skill-a")
         self.owner.pending_approval_snapshots["req-1"] = pending
-        self.owner.manager.approve_request = AsyncMock(
-            return_value=SimpleNamespace(pending_count=0, applied_count=1)
-        )
+        self.owner.manager.approve_request = AsyncMock(return_value=SimpleNamespace(pending_count=0, applied_count=1))
 
         resolved_pending, result = await self.runtime.approve_pending_request(
             "req-1",
@@ -117,9 +115,7 @@ class TestEvolutionApprovalRuntime(IsolatedAsyncioTestCase):
     async def test_reject_pending_request_delegates_to_manager(self):
         pending = SimpleNamespace(skill_name="skill-a")
         self.owner.pending_approval_snapshots["req-2"] = pending
-        self.owner.manager.reject_request = AsyncMock(
-            return_value=SimpleNamespace(rejected_count=1)
-        )
+        self.owner.manager.reject_request = AsyncMock(return_value=SimpleNamespace(rejected_count=1))
 
         resolved_pending, result = await self.runtime.reject_pending_request(
             "req-2",

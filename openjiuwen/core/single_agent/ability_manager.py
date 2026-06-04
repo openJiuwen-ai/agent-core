@@ -197,6 +197,13 @@ class AbilityManager:
             ),
         )
 
+    @staticmethod
+    def _get_stream_writer_manager(session: Session) -> Any:
+        try:
+            return session._inner.stream_writer_manager()  # pylint: disable=protected-access
+        except AttributeError:
+            return None
+
     def add(
             self,
             ability: Union[Ability, List[Ability]]
@@ -580,12 +587,24 @@ class AbilityManager:
 
         # Process results
         final_results: List[Tuple[Any, ToolMessage]] = []
+        force_finish_requests: Dict[int, Dict[str, Any]] = {}
         for i, result in enumerate(results):
             tool_ctx = tool_contexts[i]
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 # Handle exception
                 if isinstance(result, ToolInterruptException):
                     final_results.append((result, None))
+                    continue
+
+                if isinstance(result, asyncio.CancelledError):
+                    tc = tool_calls[i]
+                    error_msg = f"[Interrupted] Tool '{tc.name}' execution was cancelled by user."
+                    logger.warning(error_msg)
+                    tool_message = ToolMessage(
+                        content=error_msg,
+                        tool_call_id=tc.id,
+                    )
+                    final_results.append((None, tool_message))
                     continue
 
                 error_msg = f"Ability execution error: {str(result)}"
@@ -611,6 +630,46 @@ class AbilityManager:
                 final_results.append((tool_result, tool_message))
                 continue
 
+            if result is None and tool_ctx.has_force_finish_request:
+                finish = tool_ctx.consume_force_finish()
+                force_finish_result = finish.result if finish is not None else {}
+                force_finish_requests[i] = force_finish_result
+                tool_result = None
+                tool_msg = None
+                if isinstance(tool_ctx.inputs, ToolCallInputs):
+                    tool_result = (
+                        tool_ctx.inputs.tool_result
+                        if tool_ctx.inputs.tool_result is not None
+                        else force_finish_result
+                    )
+                    tool_msg = tool_ctx.inputs.tool_msg
+
+                if tool_msg is None:
+                    tool_msg = ToolMessage(
+                        content=str(force_finish_result),
+                        tool_call_id=tool_calls[i].id,
+                    )
+
+                final_results.append((tool_result, tool_msg))
+                continue
+
+            if isinstance(result, dict):
+                ff = tool_ctx.consume_force_finish()
+                force_finish_result = ff.result if ff is not None else result
+                force_finish_requests[i] = force_finish_result
+                tool_msg = ToolMessage(
+                    content=str(force_finish_result),
+                    tool_call_id=tool_calls[i].id,
+                )
+                tool_result = force_finish_result
+                if isinstance(tool_ctx.inputs, ToolCallInputs):
+                    if tool_ctx.inputs.tool_result is not None:
+                        tool_result = tool_ctx.inputs.tool_result
+                    if tool_ctx.inputs.tool_msg is not None:
+                        tool_msg = tool_ctx.inputs.tool_msg
+                final_results.append((tool_result, tool_msg))
+                continue
+
             # AFTER_TOOL_CALL rails can rewrite tool_result/tool_msg in ctx.inputs.
             if isinstance(tool_ctx.inputs, ToolCallInputs):
                 tool_result = (
@@ -628,12 +687,15 @@ class AbilityManager:
 
             final_results.append(result)
 
-        # Propagate force_finish signal from any tool_ctx back to the parent ctx.
-        for tool_ctx in tool_contexts:
+        # Propagate the first force_finish signal in tool-call order.
+        for i, tool_ctx in enumerate(tool_contexts):
             ff = tool_ctx.consume_force_finish()
             if ff is not None:
-                ctx.request_force_finish(ff.result)
-                break
+                force_finish_requests[i] = ff.result
+        if force_finish_requests:
+            ctx.request_force_finish(
+                force_finish_requests[min(force_finish_requests)]
+            )
 
         return final_results
 
@@ -777,9 +839,19 @@ class AbilityManager:
                 child_session_id = f"{session.get_session_id()}:{tool_call.id}"
                 tool_args["conversation_id"] = child_session_id
 
+                stream_writer_manager = self._get_stream_writer_manager(session)
+                child_session_kwargs = {}
+                if stream_writer_manager is not None:
+                    child_session_kwargs = {
+                        "stream_writer_manager": stream_writer_manager,
+                        "close_stream_on_post_run": False,
+                        "source_metadata": {"source_agent_id": agent.card.id},
+                    }
+
                 child_session = create_agent_session(
                     session_id=child_session_id,
                     card=agent.card,
+                    **child_session_kwargs,
                 )
 
                 auto_confirm_config = session.get_state(INTERRUPT_AUTO_CONFIRM_KEY)

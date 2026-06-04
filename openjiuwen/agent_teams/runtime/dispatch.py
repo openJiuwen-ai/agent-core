@@ -91,18 +91,11 @@ def decide_run_action(
     Returns:
         A :class:`RunAction` describing what the runtime should do.
     """
-    # Inconsistent: pool says active, DB says no row.
-    if not team_in_db and pool_entry is not None:
-        return RunAction(
-            kind=RunActionKind.REJECT_INCONSISTENT,
-            require_spec=False,
-            reason=(
-                f"team {target_team_name!r} present in pool but missing from DB"
-            ),
-        )
-
     # Re-creatable: the checkpoint bucket describes a team whose DB row
     # has not been created yet, or was intentionally cleaned.
+    # This check must come BEFORE the REJECT_INCONSISTENT check below,
+    # because a team in pending_create/cleaned state with a pool entry
+    # should be allowed to recreate, not rejected as inconsistent.
     if not team_in_db and team_in_session:
         if team_db_state in {
             TEAM_DB_STATE_PENDING_CREATE,
@@ -115,6 +108,17 @@ def decide_run_action(
             reason=(
                 f"team {target_team_name!r} not in DB but session bucket "
                 f"exists for {target_session_id!r}"
+            ),
+        )
+
+    # Inconsistent: pool says active, DB says no row.
+    # This is only reached when team_db_state is NOT pending_create/cleaned.
+    if not team_in_db and pool_entry is not None:
+        return RunAction(
+            kind=RunActionKind.REJECT_INCONSISTENT,
+            require_spec=False,
+            reason=(
+                f"team {target_team_name!r} present in pool but missing from DB"
             ),
         )
 

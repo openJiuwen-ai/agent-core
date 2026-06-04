@@ -18,28 +18,30 @@ MEMORY_PROMPT_CN_READ_ONLY = """# 持久化存储体系（只读模式）
 
 ### 存储层级划分
 
-- **会话日志：** `YYYY-MM-DD.md`（存储当日有参考价值的交互记录，包括情景记忆和任务指令。支持增量追加，确保每次操作、用户指令和情景变化都被记录。）
+- **会话日志：** `YYYY-MM-DD.md`（存储当日有参考价值的交互记录，包括情景记忆和任务指令。）
 - **用户画像：** `USER.md`（稳定的身份属性与偏好信息）
 - **知识沉淀：** `MEMORY.md`（经筛选提炼的长期背景知识，非原始流水账）
 
-#### 历史检索机制
+### 历史检索机制
 
  — 仅在回答**关于历史事件、日期、人物、过去对话的问题前，先调用 `memory_search` 工具检索相关记忆**
    - 搜索查询应包含问题中的关键信息（人名、日期、事件关键词）
    - 如果搜索结果不足，尝试用不同的关键词再次搜索
    - 基于检索到的记忆信息回答问题，不要依赖预训练知识
    - 对于不涉及上述历史事件、日期、人物、过去对话的问题，不要调用工具来检索记忆
+
+**注意:** 在当前只读模式下，只支持读取和检索记忆，禁止写入和修改记忆文件
 """
 
 MEMORY_PROMPT_EN_READ_ONLY = """# Persistent Storage System (Read-Only Mode)
 
 ### Storage Hierarchy
 
-- **Session Log:** `YYYY-MM-DD.md` (Valuable interaction records for the day, including episodic memory, and task instructions. Supports incremental appending to ensure every operation, user instruction, and contextual change is recorded.)
+- **Session Log:** `YYYY-MM-DD.md` (Valuable interaction records for the day, including episodic memory, and task instructions.)
 - **User Profile:** `USER.md` (Stable identity attributes and preference information.)
 - **Knowledge Repository:** `MEMORY.md` (Filtered and refined long-term background knowledge, not raw logs.)
 
-#### History Retrieval Mechanism
+### History Retrieval Mechanism
 
 - Only before answering question about historical events, dates, people, or past conversations, you can call `memory_search` first
    - Search query should include key information from the question (names, dates, event keywords)
@@ -70,6 +72,10 @@ MEMORY_PROMPT_CN = """# 持久化存储体系
 ### 信息采集、存储操作与记录
 
 对话过程中，发现有价值的信息时，应该立即进行分类、存储，并及时记录，确保不拖延记录过程：
+
+**⚠️ 敏感信息冲突处理原则**
+
+如果待记录的内容与敏感信息过滤规则存在冲突，**以敏感信息过滤规则为准，不记录该内容**。敏感信息过滤规则具有最高优先级。
 
 1. **用户画像信息（user_profile）**：记录用户的身份信息、偏好、习惯等稳定属性，比如用户的职业、兴趣、工作模式、喜好、不满等。
    - **存储**：写入 `USER.md`。
@@ -120,6 +126,10 @@ Each conversation session starts from a blank state. Cross-session information p
 
 When valuable information appears during the conversation, classify it and store it immediately. Do not delay recording:
 
+**⚠️ Sensitive Information Conflict Resolution**
+
+If the content to be recorded conflicts with sensitive information filtering rules, **sensitive information filtering rules take precedence — do not record that content**. Sensitive information filtering rules have the highest priority.
+
 1. **User Profile Information (`user_profile`)**: Stable user attributes such as identity, preferences, habits, work style, likes/dislikes.
    - **Storage**: Write to `USER.md`.
    - **Notice**: Only user-related memory content is allowed to be written into USER.md. The memory tool shall not record any definitions set by the user regarding the Agent's identity, preferences, answering style and other attributes.
@@ -150,7 +160,7 @@ When valuable information appears during the conversation, classify it and store
 
 MEMORY_MGMT_PROMPT_CN = """### 存储管理规范
 
-#### 更新规则
+### 更新规则
 1. 更新前必须先读取现有内容
 2. 合并新信息，避免全量覆盖
 3. MEMORY.md 条目仅记录精炼事实，不含日期/时间戳

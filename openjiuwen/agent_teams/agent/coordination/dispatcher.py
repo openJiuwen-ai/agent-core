@@ -94,14 +94,19 @@ class AgentRoundController(Protocol):
 class TeamLifecycleController(Protocol):
     """TeamAgent-level lifecycle effects that span multiple managers.
 
-    Currently only ``shutdown_self`` — invoked when the team has been
-    dissolved and a non-leader member must abandon its loop. Future
-    cross-manager orchestration (e.g. ``recover_team``) belongs here
-    rather than on the round controller.
+    ``shutdown_self`` is invoked when the team has been dissolved and a
+    non-leader member must abandon its loop. ``conclude_completed_round``
+    ends a completed persistent team's leader stream so the Runner finally
+    can pause it. Both coordinate across stream / session / member state,
+    so they belong here rather than on the round controller.
     """
 
     async def shutdown_self(self) -> None:
         """Force-shutdown this agent in response to team dissolution."""
+        ...
+
+    async def conclude_completed_round(self, member_count: int, task_count: int) -> None:
+        """Emit a team-completed marker chunk, then close the leader stream."""
         ...
 
 
@@ -228,20 +233,41 @@ class EventDispatcher:
             team_logger.debug("no member_name, skipping transport event")
             return
 
-        # Human agents are user avatars: only their corresponding user
-        # (via HumanAgentInbox) drives their LLM. All other team-side
-        # events (incoming messages, task assignments, stale-claim
-        # nudges) must NOT autonomously poke the LLM. The whitelist:
-        # CLEANED tears the agent down with the team; MEMBER_CANCELED
-        # routes to cancel_agent (no autonomous nudge); STANDBY pauses
-        # the periodic poll timers so a paused leader does not leave
-        # human-agent avatars polling forever. Everything else stays
-        # muted.
+        # Human agents are user avatars. Their LLM is driven by two
+        # input sources: (1) their controller's direct instructions via
+        # HumanAgentInbox, and (2) team events that concern the avatar,
+        # delivered into the harness and rendered as "notification for
+        # the controller" (see F_14). The avatar prompt strictly forbids
+        # autonomous action on the latter. The whitelist has two groups:
+        #
+        # Lifecycle (drive the avatar's own teardown / standby, no
+        # autonomous round involved): CLEANED tears the agent down with
+        # the team; MEMBER_SHUTDOWN tears the avatar down on its own
+        # shutdown request (a human agent has no autonomous round to
+        # consume the shutdown message the way a teammate does, so it
+        # must collapse directly); MEMBER_CANCELED routes to
+        # cancel_agent; STANDBY stays whitelisted for parity with the
+        # teammate path — its on_standby pause_polls is a no-op for a
+        # human agent, whose bus never starts periodic poll timers in
+        # the first place (see EventBus._start_poll_tasks).
+        #
+        # Team events rendered for the controller: MESSAGE / BROADCAST
+        # reach MessageHandler (role-aware hitt.msg_received_for_human),
+        # TASK_CLAIMED reaches TaskBoardHandler's self-assignment branch
+        # (hitt.task_assigned_to_self_human). Everything else stays muted
+        # — notably the task-board survey events (TASK_CREATED /
+        # TASK_UPDATED / ... → _nudge_idle_agent) and stale-claim /
+        # member-status nudges, which would push the avatar to
+        # autonomously scan the board for claimable work.
         if role == TeamRole.HUMAN_AGENT:
             if event.event_type not in (
                 TeamEvent.CLEANED,
+                TeamEvent.MEMBER_SHUTDOWN,
                 TeamEvent.MEMBER_CANCELED,
                 TeamEvent.STANDBY,
+                TeamEvent.MESSAGE,
+                TeamEvent.BROADCAST,
+                TeamEvent.TASK_CLAIMED,
             ):
                 return
 

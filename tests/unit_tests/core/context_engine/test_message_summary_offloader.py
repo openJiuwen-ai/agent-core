@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.processor.base import ContextEvent
 from openjiuwen.core.context_engine.processor.offloader.message_summary_offloader import (
@@ -40,12 +39,8 @@ class TestMessageSummaryOffloader:
     def custom_config(self):
         """Create a custom configuration for testing"""
         return MessageSummaryOffloaderConfig(
-            messages_threshold=100,
-            tokens_threshold=15000,
             large_message_threshold=500,
             offload_message_type=["user", "assistant"],
-            messages_to_keep=10,
-            keep_last_round=True,
         )
 
     @pytest.fixture
@@ -70,11 +65,8 @@ class TestMessageSummaryOffloader:
     async def test_streams_state_when_message_summary_offloader_triggers(self):
         session = Session(session_id="message-summary-offloader-stream-session")
         config = MessageSummaryOffloaderConfig(
-            messages_threshold=1,
             large_message_threshold=10,
             offload_message_type=["user"],
-            messages_to_keep=None,
-            keep_last_round=False,
         )
 
         with (patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model')
@@ -244,70 +236,6 @@ class TestMessageSummaryOffloader:
                 assert result.role == expected_role
                 assert summarized_content in result.content
                 assert original_message.content in reload_messages
-
-    @pytest.mark.asyncio
-    async def test_validate_config_valid(self):
-        """Test _validate_config with valid configuration"""
-        # Valid config: messages_to_keep < messages_threshold
-        config = MessageSummaryOffloaderConfig(
-            messages_to_keep=10,
-            messages_threshold=20
-        )
-        
-        with patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model'):
-            offloader = MessageSummaryOffloader(config)
-            # Should not raise any exception
-            assert offloader is not None
-
-    @pytest.mark.asyncio
-    async def test_validate_config_invalid_messages_to_keep_equals_threshold(self):
-        """Test _validate_config raises ValueError when messages_to_keep equals messages_threshold"""
-        config = MessageSummaryOffloaderConfig(
-            messages_to_keep=20,
-            messages_threshold=20
-        )
-        
-        with patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model'):
-            with pytest.raises(BaseError):
-                MessageSummaryOffloader(config)
-
-    @pytest.mark.asyncio
-    async def test_validate_config_invalid_messages_to_keep_greater_than_threshold(self):
-        """Test _validate_config raises ValueError when messages_to_keep > messages_threshold"""
-        config = MessageSummaryOffloaderConfig(
-            messages_to_keep=30,
-            messages_threshold=20
-        )
-        
-        with patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model'):
-            with pytest.raises(BaseError):
-                MessageSummaryOffloader(config)
-
-    @pytest.mark.asyncio
-    async def test_validate_config_no_messages_to_keep(self):
-        """Test _validate_config when messages_to_keep is None"""
-        config = MessageSummaryOffloaderConfig(
-            messages_to_keep=None,
-            messages_threshold=20
-        )
-        
-        with patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model'):
-            offloader = MessageSummaryOffloader(config)
-            # Should not raise any exception
-            assert offloader is not None
-
-    @pytest.mark.asyncio
-    async def test_validate_config_no_messages_threshold(self):
-        """Test _validate_config when messages_threshold is None"""
-        config = MessageSummaryOffloaderConfig(
-            messages_to_keep=10,
-            messages_threshold=None
-        )
-        
-        with patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model'):
-            offloader = MessageSummaryOffloader(config)
-            # Should not raise any exception
-            assert offloader is not None
 
     @pytest.mark.asyncio
     async def test_offload_message_empty_content(self, default_config):

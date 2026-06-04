@@ -29,7 +29,7 @@ from openjiuwen.core.session import BaseSession
 from openjiuwen.core.session import WorkflowSession
 
 from openjiuwen.core.graph.stream_actor.base import StreamGraph
-from openjiuwen.core.workflow.workflow_config import WorkflowConfig, CompIOConfig, NodeSpec
+from openjiuwen.core.workflow.workflow_config import WorkflowConfig, CompIOConfig, NodeSpec, ExceptionConfig
 from openjiuwen.core.workflow.components.base import ComponentAbility
 from openjiuwen.core.graph.graph import PregelGraph
 
@@ -172,7 +172,9 @@ class BaseWorkflow:
             stream_inputs_schema: dict | Transformer = None,
             stream_outputs_schema: dict | Transformer = None,
             comp_ability: list[ComponentAbility] = None,
-            max_retries: int = 0
+            max_retries: int = 0,
+            timeout: float = -1.0,
+            exception_config: "ExceptionConfig" = None,
     ) -> Self:
         self._validate_comp_id(comp_id)
         self._validate_schemas(comp_id, inputs_schema, outputs_schema, stream_inputs_schema, stream_outputs_schema)
@@ -181,7 +183,9 @@ class BaseWorkflow:
             io_configs=CompIOConfig(inputs_schema=inputs_schema, outputs_schema=outputs_schema),
             stream_io_configs=CompIOConfig(inputs_schema=stream_inputs_schema, outputs_schema=stream_outputs_schema),
             abilities=comp_ability if comp_ability is not None else [],
-            max_retries=max_retries)
+            max_retries=max_retries,
+            timeout=timeout,
+            exception_config=exception_config)
         self._workflow_spec.comp_configs[comp_id] = node_spec
         if wait_for_all is None:
             wait_for_all = False
@@ -266,6 +270,10 @@ class BaseWorkflow:
         if isinstance(router, BranchRouter):
             router.set_session(self._session)
             self._graph.add_conditional_edges(source_node_id=src_comp_id, router=router)
+            # Register branch target mapping for CNF barrier resolution at compile time
+            all_targets = router.all_targets
+            if len(all_targets) > 1:
+                self._graph.register_branch_targets(src_comp_id, all_targets)
         else:
             def new_router(state):
                 sig = inspect.signature(router)
@@ -333,6 +341,7 @@ class BaseWorkflow:
         self._complete_loop_node_abilities(edge_topology, user_provided)
         self._complete_stream_node_abilities(edge_topology, user_provided)
         self._complete_invoke_abilities(edge_topology, user_provided)
+        self._complete_stream_source_groups(edge_topology)
 
     def _build_edge_topology(self) -> EdgeTopology:
         """Build edge topology context for ability inference."""
@@ -430,6 +439,38 @@ class BaseWorkflow:
         abilities = self._workflow_spec.comp_configs[comp_id].abilities
         if ability not in abilities:
             abilities.append(ability)
+
+    def _complete_stream_source_groups(self, edge_topology: EdgeTopology) -> None:
+        """Build stream consumer source groups aligned with Pregel barrier groups."""
+        source_groups = {}
+        resolver = getattr(self._graph, "_resolve_barrier_groups", None)
+        for consumer_id, producer_ids in edge_topology.target_stream_map.items():
+            groups = [{producer_id} for producer_id in producer_ids]
+            if resolver:
+                groups = resolver(consumer_id, groups)
+
+            stream_groups = []
+            for group in groups:
+                if len(group) == 1:
+                    producer_id = next(iter(group))
+                    abilities = self._workflow_spec.comp_configs[producer_id].abilities
+                    for ability in abilities:
+                        if ability in [ComponentAbility.STREAM, ComponentAbility.TRANSFORM]:
+                            stream_groups.append([f"{producer_id}-{ability.name}"])
+                    continue
+
+                stream_group = []
+                for producer_id in group:
+                    abilities = self._workflow_spec.comp_configs[producer_id].abilities
+                    for ability in abilities:
+                        if ability in [ComponentAbility.STREAM, ComponentAbility.TRANSFORM]:
+                            stream_group.append(f"{producer_id}-{ability.name}")
+                if stream_group:
+                    stream_groups.append(sorted(stream_group))
+
+            if stream_groups:
+                source_groups[consumer_id] = stream_groups
+        self._workflow_spec.stream_source_groups = source_groups
 
     @staticmethod
     def _source_to_target_map(source_map: dict[str, list[str]]) -> dict[str, list[str]]:

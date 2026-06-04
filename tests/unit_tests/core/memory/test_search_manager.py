@@ -16,6 +16,9 @@ class MockMemoryIndex(BaseMemoryIndex):
     def __init__(self):
         self._data: dict[str, dict[str, dict[str, MemoryDoc]]] = {}
 
+    def set_storage_codec(self, codec) -> None:
+        pass
+
     def _ensure_user_scope(self, user_id: str, scope_id: str):
         if user_id not in self._data:
             self._data[user_id] = {}

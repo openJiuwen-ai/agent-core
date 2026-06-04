@@ -1,50 +1,98 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import Optional, List, Dict, Any
 import json
+import threading
+import time
 import uuid
+from typing import Any, Dict, List, Optional
+
+import requests
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, AssistantMessage
 
 
 CONTEXT_MESSAGE_ID_KEY = "context_message_id"
 DEFAULT_CONTEXT_MAX_TOKENS = 200000
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+OPENROUTER_MODEL_CACHE_TTL_SECONDS = 3600
+_OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS: Dict[str, int] = {}
+_OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS_FETCHED_AT = 0.0
+_OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS_LOCK = threading.Lock()
 
 MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS: Dict[str, int] = {
     # GLM
+    "glm-5.1": 200000,
     "glm-5": 200000,
-    "glm-4-long": 200000,
+    "glm-5-turbo": 200000,
+    "glm-4.7": 200000,
+    "glm-4.7-flash": 200000,
+    "glm-4.7-flashx": 200000,
+    "glm-4-long": 1000000,
     "glm-4": 128000,
     "glm-4-9b-chat-1m": 1048576,
     # OpenAI GPT
-    "gpt-5.4": 1100000,
+    "gpt-5.5": 1050000,
+    "gpt-5.4": 1050000,
+    "gpt-5.4-mini": 400000,
+    "gpt-5.4-nano": 400000,
+    "gpt-5": 400000,
+    "gpt-5-mini": 400000,
+    "gpt-5-nano": 400000,
+    "gpt-4.1": 1047576,
+    "gpt-4.1-mini": 1047576,
+    "gpt-4.1-nano": 1047576,
     "gpt-4o": 128000,
     "gpt-4o-mini": 128000,
     "gpt-4-turbo": 128000,
     "gpt-3.5-turbo": 16384,
     # DeepSeek
+    "deepseek-v4-pro": 1000000,
+    "deepseek-v4-flash": 1000000,
     "deepseek-v3": 128000,
     "deepseek-chat": 65536,
     # Anthropic Claude
+    "claude-opus-4-7": 1000000,
+    "claude-opus-4-6": 1000000,
+    "claude-sonnet-4-6": 1000000,
+    "claude-haiku-4-5": 200000,
     "claude-opus-4.6": 1000000,
     "claude-sonnet-4.6": 1000000,
-    "claude-haiku-4.6": 200000,
+    "claude-haiku-4.5": 200000,
     # Google Gemini
-    "gemini-3.1-pro": 2000000,
-    "gemini-2.5-pro": 1000000,
-    "gemini-2.5-flash": 1000000,
+    "gemini-3-pro-preview": 1048576,
+    "gemini-3-flash-preview": 1048576,
+    "gemini-2.5-pro": 1048576,
+    "gemini-2.5-flash": 1048576,
     # Meta Llama
     "llama-4-maverick": 1000000,
     "llama-4-scout": 10000000,
     # Qwen
-    "qwen-max": 32000,
-    "qwen-plus": 131072,
+    "qwen3-max": 262144,
+    "qwen3.5-plus": 1000000,
+    "qwen3.5-flash": 1000000,
+    "qwen3-coder-plus": 1000000,
+    "qwen3-coder-next": 262144,
+    "qwen-max": 262144,
+    "qwen-plus": 1000000,
+    "qwen-flash": 1000000,
     "qwen-turbo": 8192,
     "qwen-long": 1000000,
+    # Moonshot Kimi
+    "kimi-k2.5": 262144,
+    # MiniMax
+    "MiniMax-M2.7": 204800,
+    "MiniMax-M2.7-highspeed": 204800,
+    "MiniMax-M2.5": 204800,
+    "MiniMax-M2.5-highspeed": 204800,
+    # xAI Grok
+    "grok-4.3": 1000000,
+    "grok-4.3-latest": 1000000,
+    "grok-latest": 1000000,
 }
 
 
@@ -53,6 +101,107 @@ class ContextUtils:
     Utility helper functions for manipulating and parsing conversation contexts.
     All methods are static and stateless.
     """
+
+    @staticmethod
+    def _parse_openrouter_model(model: Any) -> Optional[tuple[str, int]]:
+        if not isinstance(model, dict):
+            return None
+
+        model_id = model.get("id")
+        context_length = model.get("context_length")
+        if not isinstance(model_id, str):
+            return None
+        if not isinstance(context_length, int) or context_length <= 0:
+            return None
+
+        return model_id, context_length
+
+    @staticmethod
+    def _parse_openrouter_model_context_window_tokens(models: List[Any]) -> Dict[str, int]:
+        """Parse OpenRouter model IDs and add unambiguous aliases without the provider prefix."""
+        fetched_tokens = {}
+        alias_tokens = {}
+        ambiguous_aliases = set()
+        for model in models:
+            parsed_model = ContextUtils._parse_openrouter_model(model)
+            if parsed_model is None:
+                continue
+
+            model_id, context_length = parsed_model
+            fetched_tokens[model_id] = context_length
+            if "/" not in model_id:
+                continue
+
+            alias = model_id.split("/", 1)[1]
+            if alias in alias_tokens:
+                ambiguous_aliases.add(alias)
+            else:
+                alias_tokens[alias] = context_length
+
+        fetched_tokens.update({
+            alias: context_length
+            for alias, context_length in alias_tokens.items()
+            if alias not in ambiguous_aliases
+        })
+        return fetched_tokens
+
+    @staticmethod
+    def fetch_openrouter_model_context_window_tokens(timeout: float = 3.0) -> Dict[str, int]:
+        """Fetch OpenRouter model context windows with a process-wide TTL cache."""
+        global _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS
+        global _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS_FETCHED_AT
+
+        now = time.monotonic()
+        cache_age = now - _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS_FETCHED_AT
+        if _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS_FETCHED_AT and cache_age < OPENROUTER_MODEL_CACHE_TTL_SECONDS:
+            return dict(_OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS)
+
+        with _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS_LOCK:
+            now = time.monotonic()
+            cache_age = now - _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS_FETCHED_AT
+            if _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS_FETCHED_AT and cache_age < OPENROUTER_MODEL_CACHE_TTL_SECONDS:
+                return dict(_OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS)
+
+            try:
+                response = requests.get(OPENROUTER_MODELS_URL, timeout=timeout)
+                response.raise_for_status()
+                payload = response.json()
+                if not isinstance(payload, dict):
+                    raise ValueError("response payload must be an object")
+                models = payload.get("data")
+                if not isinstance(models, list):
+                    raise ValueError("response data must be a list")
+
+                fetched_tokens = ContextUtils._parse_openrouter_model_context_window_tokens(models)
+                if not fetched_tokens:
+                    raise ValueError("response does not contain valid model context windows")
+
+                _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS = fetched_tokens
+            except (requests.RequestException, ValueError, TypeError) as exc:
+                logger.warning(
+                    f"failed to fetch OpenRouter model context windows, use cached or built-in values: {exc}"
+                )
+            finally:
+                _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS_FETCHED_AT = now
+
+        return dict(_OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS)
+
+    @staticmethod
+    def build_model_context_window_tokens(
+        model_context_window_tokens: Optional[Dict[str, int]] = None,
+        *,
+        enable_openrouter_model_context_window_tokens: bool = False,
+        openrouter_request_timeout: float = 3.0,
+    ) -> Dict[str, int]:
+        """Build model context windows, letting explicit user values override OpenRouter metadata."""
+        resolved_tokens = {}
+        if enable_openrouter_model_context_window_tokens:
+            resolved_tokens.update(
+                ContextUtils.fetch_openrouter_model_context_window_tokens(openrouter_request_timeout)
+            )
+        if model_context_window_tokens:
+            resolved_tokens.update(model_context_window_tokens)
+        return resolved_tokens
 
     @staticmethod
     def validate_messages(messages: BaseMessage | List[BaseMessage]) -> None:

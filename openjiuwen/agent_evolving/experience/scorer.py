@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -27,14 +28,14 @@ FRESHNESS_HALF_LIFE_DAYS = 90
 STALE_VERSION_PENALTY = 0.7
 
 EVALUATE_LLM_POLICY = LLMInvokePolicy(
-    attempt_timeout_secs=30,
-    total_budget_secs=90,
-    max_attempts=3,
+    attempt_timeout_secs=60,
+    total_budget_secs=120,
+    max_attempts=2,
 )
 SIMPLIFY_LLM_POLICY = LLMInvokePolicy(
-    attempt_timeout_secs=60,
-    total_budget_secs=180,
-    max_attempts=3,
+    attempt_timeout_secs=150,
+    total_budget_secs=300,
+    max_attempts=2,
 )
 
 
@@ -382,6 +383,7 @@ class ExperienceScorer:
             List of action dicts with action, record_id, reason, etc.
         """
         if not records:
+            logger.info("[ExperienceScorer] simplify skipped for skill=%s: no records", skill_name)
             return []
 
         formatted = self._format_scored_experiences(records)
@@ -393,6 +395,17 @@ class ExperienceScorer:
         if user_intent:
             prompt += f"\n\n**用户意图**: {user_intent}"
 
+        logger.info(
+            "[ExperienceScorer] simplify LLM call start: skill=%s records=%d prompt_chars=%d "
+            "attempt_timeout=%.1fs total_budget=%.1fs max_attempts=%d",
+            skill_name,
+            len(records),
+            len(prompt),
+            self._simplify_llm_policy.attempt_timeout_secs,
+            self._simplify_llm_policy.total_budget_secs,
+            self._simplify_llm_policy.max_attempts,
+        )
+        started_at = time.monotonic()
         try:
             raw = await invoke_text_with_retry(
                 llm=self._llm,
@@ -402,14 +415,38 @@ class ExperienceScorer:
                 is_result_usable=lambda text: self._parse_llm_json(text) is not None,
             )
         except BaseError as exc:
-            logger.error("[ExperienceScorer] simplify LLM call failed: %s", exc)
+            logger.error(
+                "[ExperienceScorer] simplify LLM call failed after %.1fs: skill=%s records=%d prompt_chars=%d error=%s",
+                time.monotonic() - started_at,
+                skill_name,
+                len(records),
+                len(prompt),
+                exc,
+            )
             return []
+
+        elapsed = time.monotonic() - started_at
+        logger.info(
+            "[ExperienceScorer] simplify LLM call done: skill=%s elapsed=%.1fs response_chars=%d",
+            skill_name,
+            elapsed,
+            len(raw),
+        )
 
         actions = self._parse_llm_json(raw)
         if actions is None:
-            logger.warning("[ExperienceScorer] simplify: failed to parse LLM response")
+            logger.warning(
+                "[ExperienceScorer] simplify: failed to parse LLM response for skill=%s response_chars=%d",
+                skill_name,
+                len(raw),
+            )
             return []
 
+        logger.info(
+            "[ExperienceScorer] simplify parsed actions: skill=%s actions=%d",
+            skill_name,
+            len(actions),
+        )
         return actions
 
     @staticmethod

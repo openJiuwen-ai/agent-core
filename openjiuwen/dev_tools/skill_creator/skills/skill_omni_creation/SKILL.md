@@ -1,11 +1,6 @@
-# Skill: generate_skill_from_url
-
-## Name
-generate_skill_from_url
-
-## Description
-Generates a multimodal Skill markdown file from a source URL. Use this Skill when a user wants to turn a web tutorial, product support article, or software guide into a reusable agent Skill with concise steps and embedded screenshots.
-
+---
+name: generate_skill_from_url
+description: Generates a multimodal Skill markdown file from a source URL. Use this Skill when a user wants to turn a web tutorial, product support article, or software guide into a reusable agent Skill with concise steps and embedded screenshots.
 ---
 
 ## 这个 Skill 做什么
@@ -128,32 +123,24 @@ python stage_01_scrape.py "<URL>" --slug <slug>
 # 第 2 步：下载并去重图片
 python stage_02_download.py work/<slug>/stage_01_scrape.json
 
-# 第 3 步：提取视频帧（无视频时快速跳过）
-python stage_02b_video.py work/<slug>/stage_02_download.json
+# 第 3 步：VLM 过滤
+python stage_03_filter.py work/<slug>/stage_02_download.json
 
-# 第 4 步：VLM 过滤
-python stage_03_filter.py work/<slug>/stage_02b_video.json
+# 第 4 步：保存图片，--skills-dir 必须传绝对路径
+python stage_04_save.py work/<slug>/stage_03_filter.json --skills-dir <skills_dir>
 
-# 第 5 步：保存图片并对齐文本上下文，--skills-dir 必须传绝对路径
-python stage_04_save_align.py work/<slug>/stage_03_filter.json --skills-dir <skills_dir>
-
-# 第 6 步：将对齐后的 records 聚类成 feature groups（单一流程页面会自动跳过分组）
-python stage_04b_group_features.py work/<slug>/stage_04_save_align.json
-
-# 第 7 步：生成 Skill markdown，--clean 表示成功后自动删除 work/<slug>/
-python stage_05_generate.py work/<slug>/stage_04b_group_features.json --clean
+# 第 5 步：生成 Skill markdown，--clean 表示成功后自动删除 work/<slug>/
+python stage_05_generate.py work/<slug>/stage_04_save.json --clean
 ```
 
 示例（URL 为 Figma 文章，slug 为 `067_advanced_prototyping_examples`，skills_dir 为 `/data/generated_skills`）：
 
 ```bash
 python stage_01_scrape.py "https://help.figma.com/hc/en-us/articles/17146044893591" --slug 067_advanced_prototyping_examples
-python stage_02_download.py      work/067_advanced_prototyping_examples/stage_01_scrape.json
-python stage_02b_video.py        work/067_advanced_prototyping_examples/stage_02_download.json
-python stage_03_filter.py        work/067_advanced_prototyping_examples/stage_02b_video.json
-python stage_04_save_align.py    work/067_advanced_prototyping_examples/stage_03_filter.json --skills-dir /data/generated_skills
-python stage_04b_group_features.py work/067_advanced_prototyping_examples/stage_04_save_align.json
-python stage_05_generate.py      work/067_advanced_prototyping_examples/stage_04b_group_features.json --clean
+python stage_02_download.py work/067_advanced_prototyping_examples/stage_01_scrape.json
+python stage_03_filter.py   work/067_advanced_prototyping_examples/stage_02_download.json
+python stage_04_save.py     work/067_advanced_prototyping_examples/stage_03_filter.json --skills-dir /data/generated_skills
+python stage_05_generate.py work/067_advanced_prototyping_examples/stage_04_save.json --clean
 ```
 
 ---

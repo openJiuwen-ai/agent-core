@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from typing import (
+    TYPE_CHECKING,
     Optional,
     Any,
     Dict,
@@ -14,6 +15,9 @@ from typing import (
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.status_mapping import build_status_exception_map
+
+if TYPE_CHECKING:
+    from openjiuwen.core.common.schema.card import BaseCard
 
 
 class BaseError(Exception):

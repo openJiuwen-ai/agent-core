@@ -80,7 +80,7 @@ async def test_commit_pending_change_clears_snapshot_on_success(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_commit_pending_change_retains_tail_on_partial_failure(tmp_path: Path):
+async def test_commit_pending_change_retains_unwritten_tail_on_record_failure(tmp_path: Path):
     root = tmp_path / "skills"
     _prepare_skill(root, "skill-a")
     store = EvolutionStore(str(root))
@@ -93,21 +93,25 @@ async def test_commit_pending_change_retains_tail_on_partial_failure(tmp_path: P
         change_id="pending-2",
     )
     pending_by_id = {pending.change_id: pending}
+
     original_append = store.append_record
 
-    async def _append_then_fail(skill_name: str, record: EvolutionRecord) -> None:
+    async def append_then_fail(skill_name: str, record: EvolutionRecord) -> None:
         if record.id == "ev_2":
             raise OSError("disk full")
         await original_append(skill_name, record)
 
-    store.append_record = _append_then_fail
+    store.append_record = append_then_fail
 
     result = await commit_pending_change(pending_by_id, pending.change_id, store=store)
 
     assert result.applied_count == 1
     assert result.pending_count == 1
+    assert result.errors == ["disk full"]
     assert pending_by_id[pending.change_id] is pending
     assert [record.id for record in pending.payload] == ["ev_2"]
+    log = await store.load_evolution_log("skill-a")
+    assert [record.id for record in log.entries] == ["ev_1"]
 
     store.append_record = original_append
     retried = await commit_pending_change(pending_by_id, pending.change_id, store=store)

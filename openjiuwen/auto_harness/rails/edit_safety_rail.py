@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 
 from openjiuwen.auto_harness.infra.edit_scope import (
     is_allowed_repo_edit_path,
@@ -21,6 +22,9 @@ from openjiuwen.core.foundation.llm import (
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ToolCallInputs,
+)
+from openjiuwen.core.sys_operation.cwd import (
+    get_cwd,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
 
@@ -128,9 +132,12 @@ class EditSafetyRail(DeepAgentRail):
         file_path: str,
     ) -> None:
         """Run ruff check on a Python file."""
+        cwd = get_cwd()
+        python_executable = sys.executable
         try:
             proc = await asyncio.create_subprocess_exec(
-                "ruff", "check", file_path,
+                python_executable, "-m", "ruff", "check", file_path,
+                cwd=cwd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )

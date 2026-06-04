@@ -7,10 +7,13 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, get_origin, get_args, Union, TypeVar, ForwardRef, Literal
+from typing import TYPE_CHECKING, Any, Dict, List, get_origin, get_args, Union, TypeVar, ForwardRef, Literal
 from types import UnionType
 from uuid import UUID
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from openjiuwen.core.foundation.tool.utils.callable_schema_extractor import CallableSchemaExtractor
 
 
 

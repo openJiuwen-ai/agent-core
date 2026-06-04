@@ -24,7 +24,7 @@ from openjiuwen.core.foundation.llm import (
 from openjiuwen.core.foundation.tool import Tool, ToolCard, McpServerConfig
 from openjiuwen.core.foundation.tool.schema import ToolInfo
 from openjiuwen.core.runner.resources_manager.base import Ok
-from openjiuwen.core.session.stream.base import StreamMode
+from openjiuwen.core.session.stream.base import OutputSchema, StreamMode
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgentConfig
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -149,6 +149,7 @@ class CountingRail(AgentRail):
         self.before_invoke_count = 0
         self.after_invoke_count = 0
         self.before_tool_call_count = 0
+        self.after_invoke_result: Optional[Dict[str, Any]] = None
 
     def init(self, agent):
         rail_tool = _build_tool_card("rail_tool")
@@ -162,8 +163,8 @@ class CountingRail(AgentRail):
         self.before_invoke_count += 1
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
-        _ = ctx
         self.after_invoke_count += 1
+        self.after_invoke_result = getattr(ctx.inputs, "result", None)
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         _ = ctx
@@ -340,6 +341,57 @@ async def test_stream_single_round_branch() -> None:
 
     assert [chunk["chunk"] for chunk in chunks] == [1, 2]
     assert fake_react.stream_calls[0]["inputs"] == {"query": "stream_input"}
+
+
+@pytest.mark.asyncio
+async def test_stream_sets_result_before_after_invoke() -> None:
+    class AnswerStreamingReactAgent(FakeReactAgent):
+        async def stream(
+            self,
+            inputs: Dict[str, Any],
+            session: Optional[Any] = None,
+            stream_modes: Optional[List[StreamMode]] = None,
+        ) -> AsyncIterator[OutputSchema]:
+            self.stream_calls.append(
+                {
+                    "inputs": inputs,
+                    "session": session,
+                    "stream_modes": stream_modes,
+                }
+            )
+            yield OutputSchema(
+                type="llm_output",
+                index=0,
+                payload={"content": "hello ", "result_type": "answer"},
+            )
+            yield OutputSchema(
+                type="llm_output",
+                index=1,
+                payload={"content": "world", "result_type": "answer"},
+            )
+            yield OutputSchema(
+                type="answer",
+                index=0,
+                payload={"output": "hello world", "result_type": "answer"},
+            )
+
+    agent = DeepAgent(
+        AgentCard(name="deep", description="test")
+    ).configure(
+        DeepAgentConfig(enable_task_loop=False)
+    )
+    rail = CountingRail()
+    agent.add_rail(rail)
+    agent.set_react_agent(AnswerStreamingReactAgent(), initialized=False)
+
+    chunks = [chunk async for chunk in agent.stream("stream_input")]
+
+    assert [chunk.type for chunk in chunks] == ["llm_output", "llm_output", "answer"]
+    assert rail.after_invoke_count == 1
+    assert rail.after_invoke_result == {
+        "output": "hello world",
+        "result_type": "answer",
+    }
 
 
 @pytest.mark.asyncio
@@ -1174,3 +1226,78 @@ async def test_stream_cancel_waits_for_cleanup() -> None:
         assert agent._loop_controller is None
     finally:
         await Runner.stop()
+
+
+def test_create_subagent_inherits_parent_restrict_to_work_dir(tmp_path) -> None:
+    """子代理的 restrict_to_work_dir 不能低于父代理的约束级别。
+
+    当父代理设置了 restrict_to_work_dir=True（默认），即使子代理 SubAgentConfig
+    中指定 restrict_to_work_dir=False（如 explore_agent），创建出的子代理也必须
+    继承父代理的 restrict_to_sandbox=True，防止通过子代理绕过沙箱限制。
+    """
+    from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
+
+    workspace_root = tmp_path / "parent_workspace"
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        workspace=Workspace(root_path=str(workspace_root)),
+        subagents=[build_explore_agent_config(model=_create_dummy_model())],
+        restrict_to_work_dir=True,
+    )
+    assert parent.deep_config.restrict_to_work_dir is True
+
+    # build_explore_agent_config 没有 factory_name，走 create_deep_agent 分支
+    with patch("openjiuwen.harness.factory.create_deep_agent", return_value=object()) as mock_create:
+        parent.create_subagent("explore_agent", "sub_session_id")
+
+    mock_create.assert_called_once()
+    call_kwargs = mock_create.call_args.kwargs
+    # 子代理 spec 的 restrict_to_work_dir=False，但父代理为 True，结果应为 True
+    assert call_kwargs["restrict_to_work_dir"] is True
+
+
+def test_create_subagent_respects_subagent_restrict_when_parent_unrestricted(tmp_path) -> None:
+    """父代理不限制时，子代理自身的 restrict_to_work_dir=True 仍然生效。"""
+    from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
+
+    workspace_root = tmp_path / "parent_workspace"
+    explore_spec = build_explore_agent_config(model=_create_dummy_model())
+    explore_spec.restrict_to_work_dir = True
+
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        workspace=Workspace(root_path=str(workspace_root)),
+        subagents=[explore_spec],
+        restrict_to_work_dir=False,
+    )
+    assert parent.deep_config.restrict_to_work_dir is False
+
+    with patch("openjiuwen.harness.factory.create_deep_agent", return_value=object()) as mock_create:
+        parent.create_subagent("explore_agent", "sub_session_id")
+
+    call_kwargs = mock_create.call_args.kwargs
+    # 子代理自己要求限制，即使父代理不限制，结果也应为 True
+    assert call_kwargs["restrict_to_work_dir"] is True
+
+
+def test_create_subagent_unrestricted_when_both_unrestricted(tmp_path) -> None:
+    """父子代理均不限制时，子代理可以无沙箱运行（CLI 宽松场景）。"""
+    from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
+
+    workspace_root = tmp_path / "parent_workspace"
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        workspace=Workspace(root_path=str(workspace_root)),
+        subagents=[build_explore_agent_config(model=_create_dummy_model())],
+        restrict_to_work_dir=False,
+    )
+
+    with patch("openjiuwen.harness.factory.create_deep_agent", return_value=object()) as mock_create:
+        parent.create_subagent("explore_agent", "sub_session_id")
+
+    call_kwargs = mock_create.call_args.kwargs
+    # 父子均不限制，保持 False
+    assert call_kwargs["restrict_to_work_dir"] is False

@@ -11,7 +11,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.foundation.llm import (
-    BaseMessage, UserMessage, ModelRequestConfig, ModelClientConfig, Model
+    AssistantMessage, BaseMessage, UserMessage, ModelRequestConfig, ModelClientConfig, Model
 )
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.processor.offloader.message_offloader import MessageOffloader
@@ -40,7 +40,7 @@ You are an adaptive information compression expert in a React Agent. Your task i
 
 ## Constraints
 - **Strictly prohibited from executing the step**: You are only responsible for compression; you must not execute any steps, calculations, or operations from the step.
-- **Based solely on provided information**: Only use the information in {tool_content} for compression.
+- **Based solely on provided information**: Only use the information in tool_content for compression.
 - **No speculative operations**: Do not perform additional queries, calculations, or analysis based on step content.
 
 # Compression Logic Flow
@@ -149,15 +149,7 @@ class MessageSummaryOffloaderConfig(BaseModel):
     `large_message_threshold`.
 
     Adaptive compression only evaluates newly added messages.
-    `messages_threshold`, `tokens_threshold`, `messages_to_keep`,
-    and `keep_last_round` do not affect triggering or candidate selection.
     """
-
-    messages_threshold: int | None = Field(default=None, gt=0)
-    """Compatibility field; adaptive compression does not use message-count triggering."""
-
-    tokens_threshold: int = Field(default=20000, gt=0)
-    """Compatibility field; adaptive compression uses per-message size checks."""
 
     large_message_threshold: int = Field(default=1000, gt=0)
     """Minimum message size for adaptive compression candidates."""
@@ -167,12 +159,6 @@ class MessageSummaryOffloaderConfig(BaseModel):
 
     protected_tool_names: list[str] = Field(default=["reload_original_context_messages"])
     """Tool messages produced by these tools are always kept in full in both modes."""
-
-    messages_to_keep: int | None = Field(default=None, gt=0)
-    """Compatibility field; adaptive compression does not preserve a tail by count."""
-
-    keep_last_round: bool = Field(default=True)
-    """Compatibility field; adaptive compression only evaluates newly added messages."""
 
     model: ModelRequestConfig | None = Field(default=None)
     """Supplies tokenizer and context-window limits for the summary/compression model."""
@@ -394,6 +380,8 @@ class MessageSummaryOffloader(MessageOffloader):
         if message.role not in self.config.offload_message_type:
             return False
         if isinstance(message, OffloadMixin):
+            return False
+        if isinstance(message, AssistantMessage) and message.tool_calls:
             return False
         if context_messages is None:
             context_messages = context.get_messages()
@@ -798,22 +786,5 @@ class MessageSummaryOffloader(MessageOffloader):
         return any(keyword in error_message for keyword in CONTEXT_OVERFLOW_KEYWORDS)
 
     def _validate_config(self):
-        """Validate configuration.
-
-        **Behavior:**
-        - Keeps only the validation rules that apply to summary-based offload.
-        - Does not validate truncation settings because this processor does not
-          expose or use truncation-based offload.
-        """
-        if not getattr(self, "_config", None):
-            return
-        if (
-                self.config.messages_to_keep
-                and self.config.messages_threshold
-                and self.config.messages_to_keep >= self.config.messages_threshold
-        ):
-            raise build_error(
-                StatusCode.CONTEXT_EXECUTION_ERROR,
-                error_msg=f"messages_to_keep {self.config.messages_to_keep} cannot larger than "
-                          f"messages_threshold {self.config.messages_threshold}"
-            )
+        """Skip truncation-specific parent validation."""
+        return

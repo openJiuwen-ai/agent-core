@@ -315,6 +315,7 @@ class FullCompactProcessor(ContextProcessor):
         **kwargs: Any,
     ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
         all_messages = context.get_messages() + list(messages_to_add or [])
+        self._reset_compression_usage()
         event, new_context_messages, session_memory_message = await self._build_replacement_messages(
             context,
             all_messages,
@@ -322,6 +323,8 @@ class FullCompactProcessor(ContextProcessor):
         if new_context_messages is None:
             return None, messages_to_add
         context.set_messages(new_context_messages)
+        if event is not None:
+            event.compression_usage = self._current_compression_usage()
         if session_memory_message is None:
             self._invalidate_session_memory_anchor(context)
         return event, []
@@ -359,6 +362,7 @@ class FullCompactProcessor(ContextProcessor):
                     ContextEvent(
                         event_type=self.processor_type(),
                         messages_to_modify=list(range(len(all_messages))),
+                        compact_summary=self._message_to_text(session_memory_message),
                     ),
                     session_memory_messages,
                     session_memory_message,
@@ -367,14 +371,15 @@ class FullCompactProcessor(ContextProcessor):
         else:
             logger.info("[FullCompact] session_memory candidate unavailable, fallback to full_compact")
 
-        new_context_messages = await self._build_full_compact_messages(
+        full_compact_result = await self._build_full_compact_messages(
             context=context,
             prefix=prefix,
             active_messages=active_messages,
         )
-        if new_context_messages is None:
+        if full_compact_result is None:
             logger.warning("[FullCompact] full_compact candidate build failed")
             return None, None, None
+        new_context_messages, compact_summary = full_compact_result
         logger.info(
             "[FullCompact] using full_compact replacement output_messages=%s",
             len(new_context_messages),
@@ -383,6 +388,7 @@ class FullCompactProcessor(ContextProcessor):
             ContextEvent(
                 event_type=self.processor_type(),
                 messages_to_modify=list(range(len(all_messages))),
+                compact_summary=compact_summary,
             ),
             new_context_messages,
             None,
@@ -394,7 +400,7 @@ class FullCompactProcessor(ContextProcessor):
         context: ModelContext,
         prefix: List[BaseMessage],
         active_messages: List[BaseMessage],
-    ) -> Optional[List[BaseMessage]]:
+    ) -> Optional[Tuple[List[BaseMessage], str]]:
 
         compact_source = self._prepare_messages_for_prompt(self._strip_media_messages(active_messages))
         if not compact_source:
@@ -425,7 +431,7 @@ class FullCompactProcessor(ContextProcessor):
                 builder_names=["plan", "plan_mode", "skills", "task_status"],
             )
         )
-        return new_context_messages
+        return new_context_messages, summary
 
     async def _build_session_memory_messages(
         self,
@@ -506,6 +512,7 @@ class FullCompactProcessor(ContextProcessor):
         ]
         try:
             response = await self._model.invoke(messages=prompt_messages, tools=None)
+            self._record_compression_usage(response)
             content = (response.content or "").strip()
             if not content:
                 logger.warning("[FullCompact] LLM returned empty summary, falling back")

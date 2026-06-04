@@ -8,8 +8,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/coordination/` |
-| 最近一次修订日期 | 2026-05-14 |
-| 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_07_team-completion-events.md` |
+| 最近一次修订日期 | 2026-05-26 |
+| 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_07_team-completion-events.md`、`F_14_human-agent-team-event-rendering.md` |
 
 ## 范围 / 边界
 
@@ -44,7 +44,7 @@
 7. **handler 之间不直接互调**。跨域响应必须通过让两个 handler 各自注册同一个 `event_key`、走 framework fan-out 实现。
 8. **`AsyncCallbackFramework.trigger` 的异常语义是吞 + 续跑**：普通 `Exception` 被框架 log + continue，仅 `AbortError` 上抛。handler 必须自己用 `team_logger.error("...", exc_info=True)` 记录关键失败，**禁止依赖 framework swallow 当作隐式错误处理**。
 9. **`MemberHandler` 与 `StaleTaskHandler` 共享同一个 `dict[str, float]` 引用作为 stale-claim throttle**（在 `EventDispatcher.__init__` 中创建一次、传两个 handler）。同一 task 在一个 stale 窗口内不会被两条路径重复 nudge。
-10. **`HUMAN_AGENT` 角色禁止自主轮询与自主响应**：`InnerEventType.POLL_TASK` / `InnerEventType.POLL_MAILBOX` 在 dispatch 入口直接短路；transport 事件仅放行 `TeamEvent.CLEANED` / `TeamEvent.MEMBER_CANCELED` / `TeamEvent.STANDBY` 三类。
+10. **`HUMAN_AGENT` 角色禁止自主轮询与自主任务板巡视，但接收针对自己的团队事件（渲染成给控制者的通知）**：human-agent 的 `EventBus` 自构造起就不启动周期 poll timer（`EventBus._start_poll_tasks` 按 `_periodic_poll_enabled = role != HUMAN_AGENT` 跳过），所以 `InnerEventType.POLL_TASK` / `InnerEventType.POLL_MAILBOX` 对 human-agent 根本不会被产生；dispatch 入口对这两个 inner event 的 human-agent 短路是双保险（防御性）。transport 事件白名单分两组：**生命周期组** `TeamEvent.CLEANED` / `TeamEvent.MEMBER_SHUTDOWN` / `TeamEvent.MEMBER_CANCELED` / `TeamEvent.STANDBY`（驱动 avatar 自身收摊 / standby，不涉自主 round）；**F_14 团队事件组** `TeamEvent.MESSAGE` / `TeamEvent.BROADCAST` / `TeamEvent.TASK_CLAIMED`（进 avatar harness 后由 `MessageHandler._format_message` / `TaskBoardHandler.on_task_claimed` 的 role-aware 分支渲染成 `hitt.msg_received_for_human` / `hitt.task_assigned_to_self_human`，即"给控制者的通知"，avatar prompt 严格禁止自主行动）。其余事件保持静音——尤其是任务板巡视事件（`TASK_CREATED` / `TASK_UPDATED` / ... → `_nudge_idle_agent`）和 stale-claim / member-status nudge，它们会驱使 avatar 自主扫描任务板找活。配套：`TASK_CLAIMED` 里"指派给别人"的认领对 human-agent **不** fall-through 到任务板 nudge（`TaskBoardHandler.on_task_claimed` 在 `is_self_human` 时早退），只有指派给 avatar 自己的认领才 deliver。其中 `MEMBER_SHUTDOWN` 放行是因为 human-agent 没有自主 round 去消费 shutdown 消息走 round-end `close_stream`（teammate 的路径）。`MemberHandler._shutdown_human_agent` 的收摊策略：**有 in-flight round 且非 `force` 则不打断**——`shutdown_member` 先写 `SHUTDOWN_REQUESTED` 再发事件，那一轮自然结束时 `_run_one_round` round-end 自检会 `close_stream`（与 teammate 同款，不打断控制者当前回合）；**空闲（无 round 可搭便车）或 `force=True` 才 `_lifecycle.shutdown_self()` 直接收摊**，否则成员永远卡在 `SHUTDOWN_REQUESTED`。
 11. **dispatch 前置检查 `is_agent_ready()`**：未就绪时直接 return，handler 不会被触发。
 12. **`SHUTDOWN` inner 事件是 EventBus 自身的停机信号**，仅由 `EventBus.stop()` 写入；handler 不监听该事件。
 13. **session 绑定状态机是三态**：未绑（id=None, ts=None）/ 完整（id=X, ts=session）/ 半绑（id=X, ts=None）。`bind_session(session)` 进完整态、`release_session()` 完整→半绑、`unbind_session()` 任意态→未绑。`kernel.start` 在调用面显式分流：session 非 None 走 bind，否则走 unbind；不依赖被调方分支。
@@ -77,6 +77,7 @@ class TeamLifecycleController(Protocol):
     """TeamAgent-level lifecycle effects that span multiple managers."""
 
     async def shutdown_self(self) -> None: ...
+    async def conclude_completed_round(self, member_count: int, task_count: int) -> None: ...
 
 
 @runtime_checkable
@@ -185,7 +186,7 @@ class EventDispatcher:
    - 否则 `await framework.trigger(event_type.value, event)`。
 3. transport `EventMessage` 分支：
    - `blueprint.member_name` 缺失 → return。
-   - `HUMAN_AGENT` 角色 + 不在 `{CLEANED, MEMBER_CANCELED, STANDBY}` 白名单 → return（机制 2）。
+   - `HUMAN_AGENT` 角色 + 不在 `{CLEANED, MEMBER_SHUTDOWN, MEMBER_CANCELED, STANDBY, MESSAGE, BROADCAST, TASK_CLAIMED}` 白名单 → return（机制 2；前四类是生命周期事件，后三类是 F_14 渲染成"给控制者通知"的团队事件）。
    - 否则 `await framework.trigger(event.event_type, event)`。
 
 handler 实例作为公共属性暴露（`dispatcher.lifecycle / .member / ...`），用于测试断言与调试访问。
@@ -226,11 +227,11 @@ class BaseCoordinationHandler:
 | handler | 监听 event_key | 共享 / 私有状态 | 关键方法 |
 |---|---|---|---|
 | `AgentLifecycleHandler` | `InnerEventType.USER_INPUT` / `TeamEvent.STANDBY` / `TeamEvent.CLEANED` / `TeamEvent.TOOL_APPROVAL_RESULT` | 无 | `on_user_input` → `_round.deliver_input`；`on_standby` → `_poll.pause_polls`；`on_cleaned` → `_lifecycle.shutdown_self`（leader 跳过）；`on_tool_approval_result` → 构造 `InteractiveInput` → `_round.resume_interrupt` |
-| `MemberHandler` | 6 个 `MEMBER_*`：`SPAWNED` / `RESTARTED` / `STATUS_CHANGED` / `EXECUTION_CHANGED` / `SHUTDOWN` / `CANCELED` | `_last_stale_nudge: dict[str, float]`（与 `StaleTaskHandler` 同一引用） | `on_member_event` 按 role 分流到 `_handle_leader_member_event` / `_handle_teammate_member_event`；leader 在 `MEMBER_STATUS_CHANGED` 且 `new_status ∈ {READY, ERROR}` 时 `_nudge_idle_member_with_stale_claims`；teammate 仅对自身 `MEMBER_CANCELED` 触发 `_round.cancel_agent` |
+| `MemberHandler` | 6 个 `MEMBER_*`：`SPAWNED` / `RESTARTED` / `STATUS_CHANGED` / `EXECUTION_CHANGED` / `SHUTDOWN` / `CANCELED` | `_last_stale_nudge: dict[str, float]`（与 `StaleTaskHandler` 同一引用） | `on_member_event` 按 role 分流到 `_handle_leader_member_event` / `_handle_teammate_member_event`；leader 在 `MEMBER_STATUS_CHANGED` 且 `new_status ∈ {READY, ERROR}` 时 `_nudge_idle_member_with_stale_claims`；非 leader 仅对自身事件反应：`MEMBER_CANCELED` 触发 `_round.cancel_agent`，且 `HUMAN_AGENT` 角色对自身 `MEMBER_SHUTDOWN` 走 `_shutdown_human_agent`（in-flight 且非 force 不打断、靠 round-end close；空闲或 force 才 `_lifecycle.shutdown_self`）。teammate 的 shutdown 不在此 teardown，走 drain → 末轮 → round-end close_stream |
 | `MessageHandler` | `TeamEvent.MESSAGE` / `TeamEvent.BROADCAST` / `InnerEventType.POLL_MAILBOX` / `TeamEvent.MEMBER_SHUTDOWN`（fan-out） | 无 | `on_message_or_broadcast`：leader 在 MESSAGE 上 `_ack_user_bound_message` + `_notify_human_agent_inbound`，所有 role 接着 `_poll.resume_polls` + `_process_unread_messages`；`on_poll_mailbox` 周期 sweep；`on_member_shutdown_drain` 仅 teammate 给自己 drain（`use_steer=True`） |
 | `TaskBoardHandler` | `TeamEvent.TASK_CLAIMED` + 5 个 `TASK_*`：`CREATED` / `UPDATED` / `COMPLETED` / `CANCELLED` / `UNBLOCKED` | 无 | `on_task_claimed`：targeted 自身 → `deliver_input`；非自身 → 走 `on_task_board_event` 兜底（防 idle leader 错过 board 变更）。`on_task_board_event` 在 `has_in_flight_round()` 否时 `_nudge_idle_agent`，向 idle agent 喂任务清单；leader 全部任务终结时按 lifecycle 喂 all-done prompt |
 | `StaleTaskHandler` | `InnerEventType.POLL_TASK` | `_last_stale_nudge`（共享）+ `_last_pending_nudge: dict[str, float]`（私有，仅 leader 用） | `on_poll_task` → `_check_stale_claimed_tasks` + `_check_stale_pending_tasks`。stale claim：`task.updated_at` 超过 `_STALE_CLAIM_SECONDS` (10min) 触发；自己持有 → `deliver_input`，leader 观察他人 → `message_manager.send_message`。stale pending（仅 leader）：超过 `_STALE_PENDING_SECONDS` (10min) 自喂 prompt、由 LLM 决定如何分派 |
-| `TeamCompletionHandler` | `InnerEventType.POLL_TASK` / `TeamEvent.TASK_LIST_DRAINED` / `TeamEvent.TEAM_COMPLETED` | `_team_completed_emitted: bool` + `_completion_callbacks: list`（私有） | `on_poll_task`：leader 且 idle 时评估 `TeamBackend.is_team_completed()`（成员全 settled + 任务全终态 + 无未读消息），按上升沿发 `TEAM_COMPLETED`、下降沿重新武装。`on_task_list_drained`：记日志 + fire `_completion_callbacks`（`TeamAgent` 在 deepagent 建好后经 `register_completion_callback` 把 `TeamSkillRail.notify_team_completed` 注册进来，注册表非空即 gate）。`on_team_completed`：消费记日志。`POLL_TASK` 与 `StaleTaskHandler` 共享 event_key，注册靠后 → fan-out 在其之后 |
+| `TeamCompletionHandler` | `InnerEventType.POLL_TASK` / `TeamEvent.TASK_LIST_DRAINED` / `TeamEvent.TEAM_COMPLETED` | `_team_completed_emitted: bool` + `_completion_callbacks: list`（私有） | `on_poll_task`：leader 且 idle 时评估 `TeamBackend.is_team_completed()`（任务全终态 + 成员全 settled + 无任何未读消息，含广播），按上升沿发 `TEAM_COMPLETED`、下降沿重新武装；**persistent 团队额外调 `self._lifecycle.conclude_completed_round(...)` 结束 leader 流触发 auto-pause（temporary 不调，靠 clean_team 收尾）**。`rearm()`：清上升沿幂等标志，`kernel.start`（冷启动 / resume / recover）每次调一次，使每个 run cycle 独立判定完成。`on_task_list_drained`：记日志 + fire `_completion_callbacks`（`TeamAgent` 在 deepagent 建好后经 `register_completion_callback` 把 `TeamSkillRail.notify_team_completed` 注册进来，注册表非空即 gate）。`on_team_completed`：消费记日志。`POLL_TASK` 与 `StaleTaskHandler` 共享 event_key，注册靠后 → fan-out 在其之后 |
 
 ### CoordinationKernel
 

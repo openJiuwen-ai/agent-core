@@ -189,6 +189,8 @@ class TestDialogueCompressor:
 
         assert_context_state_pair(states, processor_type="DialogueCompressor")
         assert "modified 3 messages" in states[1].summary
+        assert _DIALOGUE_MEMORY_BLOCK_MARKER in states[1].compact_summary
+        assert "Final Result: X." in states[1].compact_summary
 
     @pytest.mark.asyncio
     async def test_build_memory_message_offload_falls_back_to_plain_user_message(self):

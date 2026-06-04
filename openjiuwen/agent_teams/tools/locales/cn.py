@@ -50,7 +50,24 @@ STRINGS: dict[str, str] = {
         "'teammate'（默认）= 普通 LLM 队友，需提供 model_name/prompt；"
         "'human_agent' = 人类成员，由真人通过 HumanAgentInbox 驱动，"
         "**不接受** model_name 与 prompt（由框架内置模板托管），传入这两个字段会报错。"
-        "选用 'human_agent' 需要 spec.enable_hitt=True 且当前 build_team 实例未禁用 HITT"
+        "选用 'human_agent' 需要 spec.enable_hitt=True 且当前 build_team 实例未禁用 HITT。"
+        "'bridge_agent' = 桥接外部独立 agent（如 claudecode / codex / hermes 等）。"
+        "本地是完整 teammate（按 teammate 行为认领任务、收发消息），但具体工作产出由通过协议接入的"
+        "远程 agent 完成；本地 LLM 只做调度，原样转发远程结果。"
+        "选用 'bridge_agent' 时 'desc' 字段必填（同时作为团队 persona 和远程的 system prompt 核心）；"
+        "可选传入 mailbox_inject_mode / protocol / adapter_config / model_name。"
+        "选用 'bridge_agent' 需要 spec.enable_bridge=True 且当前 build_team 实例未禁用 Bridge。"
+        "'external_cli' = 直接拉起第三方 CLI agent（claudecode / codex 等）作为队友，"
+        "其大脑是 CLI 子进程而非本地 LLM，通过自动注入的团队 MCP 工具收发消息与认领任务。"
+        "选用 'external_cli' 时 'cli_agent' 字段必填（指定 CLI 类型），'desc' 必填（成员 persona），"
+        "禁止传入 model_name/prompt（模型与配置都在 CLI 侧）。"
+        "'cli_agent' 取值必须是 spec.external_cli_agents 中预先声明过的 CLI 类型"
+    ),
+    "spawn_member.cli_agent": (
+        "仅 role_type='external_cli' 时使用。要拉起的第三方 CLI agent 类型标识，"
+        "如 'claude'（claudecode）或 'codex'。取值必须命中 spec.external_cli_agents 中"
+        "预先声明的某条静态配置——具体启动命令、工作目录、MCP 注入等都在那条配置里，"
+        "本字段只负责按名引用"
     ),
     "spawn_member.prompt": (
         "[私有，仅该成员自己可见] 成员的长期工作约定，注入该成员自己的 system prompt："
@@ -61,7 +78,20 @@ STRINGS: dict[str, str] = {
     ),
     "spawn_member.model_name": (
         "可选。建议该成员使用的模型名称（如 gpt-4、claude-sonnet-4 等）；"
-        "未指定时由系统自动选择合适的模型。当 role_type='human_agent' 时禁止传入"
+        "未指定时由系统自动选择合适的模型。当 role_type='human_agent' 时禁止传入；"
+        "role_type='bridge_agent' 时为本地调度 LLM 的模型选择，可选"
+    ),
+    "spawn_member.mailbox_inject_mode": (
+        "仅 role_type='bridge_agent' 时使用。控制团队消息被自动转发给远程 agent 时的形态："
+        "'passthrough'（默认）= 仅加最简发送者前缀直传；'rephrase' = 包装完整发送者上下文（角色、人设、相关任务）"
+    ),
+    "spawn_member.protocol": (
+        "仅 role_type='bridge_agent' 时使用。协议标识（如 'a2a' / 'acp' / 'claudecode'）。"
+        "目前作为元数据保留，用于后续 BridgeProtocolAdapter 适配器查找；空字符串表示尚未绑定适配器"
+    ),
+    "spawn_member.adapter_config": (
+        "仅 role_type='bridge_agent' 时使用。协议适配器配置（如 endpoint、auth、relay_timeout_s 等），"
+        "原样透传给 BridgeProtocolAdapter.connect。结构由具体适配器实现自行定义"
     ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/cn/shutdown_member.md
@@ -69,9 +99,14 @@ STRINGS: dict[str, str] = {
     "shutdown_member.force": "是否强制关闭，默认 false。仅在成员卡死、长期无响应或无法正常收尾时使用",
     # ===== approve_plan ========================================================
     # approve_plan._desc lives in descs/cn/approve_plan.md
-    "approve_plan.member_name": "提交计划的成员 member_name（语义化 slug，不是显示名）",
+    "approve_plan.plan_id": "成员提交的一版执行计划 ID；Leader 使用该字段精确审批某一版计划",
     "approve_plan.approved": "是否批准当前计划。true 表示进入实施，false 表示退回修改",
     "approve_plan.feedback": "审批反馈。拒绝时应说明原因和修改方向；批准时可补充约束、提醒或额外要求",
+    # ===== submit_plan ==========================================================
+    "submit_plan._desc": "在 plan_mode 任务执行前提交已写好的执行计划 Markdown 文件",
+    "submit_plan.task_id": "执行前需要提交计划的任务 ID",
+    "submit_plan.plan_id": "可选。成员计划 ID；不传时系统自动生成。Leader 后续用该 plan_id 审批",
+    "submit_plan.plan_path": "成员已经写好的 Markdown 计划文件路径；系统会复制为受管快照供 Leader 审批",
     # ===== approve_tool ========================================================
     # approve_tool._desc lives in descs/cn/approve_tool.md
     "approve_tool.member_name": "发起该工具审批请求的成员 member_name（语义化 slug，不是显示名）",

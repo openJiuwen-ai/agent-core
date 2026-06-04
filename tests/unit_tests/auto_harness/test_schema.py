@@ -15,6 +15,7 @@ from openjiuwen.auto_harness.schema import (
     OptimizationTask,
     ResearchContext,
     TaskStatus,
+    _venv_python_candidates,
     is_placeholder_local_repo,
     load_auto_harness_config,
 )
@@ -280,6 +281,58 @@ class TestAutoHarnessConfig:
         assert cfg.resolve_ci_gate_python_executable() == (
             "/tmp/python3.11"
         )
+
+
+class TestVenvPythonCandidates:
+    """_venv_python_candidates returns platform-appropriate paths."""
+
+    def test_unix_candidates(self):
+        import sys
+
+        if sys.platform == "win32":
+            pytest.skip("Unix-only test")
+        candidates = _venv_python_candidates("/tmp/project")
+        assert len(candidates) == 1
+        assert str(candidates[0]) == (
+            "/tmp/project/.venv/bin/python"
+        )
+
+    def test_windows_candidates(self):
+        import sys
+
+        if sys.platform != "win32":
+            pytest.skip("Windows-only test")
+        candidates = _venv_python_candidates("/tmp/project")
+        assert len(candidates) == 1
+        # Windows uses backslash path from pathlib
+        assert candidates[0] == (
+            __import__("pathlib").Path("/tmp/project")
+            / ".venv" / "Scripts" / "python.exe"
+        )
+
+    def test_resolve_ci_gate_venv_found(
+        self, tmp_path
+    ):
+        """When the platform venv python exists, it is returned."""
+        import sys
+
+        cfg = AutoHarnessConfig(
+            workspace=str(tmp_path)
+        )
+        if sys.platform == "win32":
+            venv_python = (
+                tmp_path / ".venv" / "Scripts" / "python.exe"
+            )
+        else:
+            venv_python = (
+                tmp_path / ".venv" / "bin" / "python"
+            )
+        venv_python.parent.mkdir(
+            parents=True, exist_ok=True
+        )
+        venv_python.write_text("# mock python")
+        result = cfg.resolve_ci_gate_python_executable()
+        assert result == str(venv_python)
 
 
 class TestLoadFromDict:

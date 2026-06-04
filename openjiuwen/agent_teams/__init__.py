@@ -10,6 +10,11 @@ from openjiuwen.agent_teams.constants import (
     RESERVED_MEMBER_NAMES,
     USER_PSEUDO_MEMBER_NAME,
 )
+from openjiuwen.agent_teams.external import (
+    TEAM_JOIN_ENV,
+    ExternalTeamClient,
+    TeamJoinDescriptor,
+)
 from openjiuwen.agent_teams.interaction import (
     HumanAgentInbox,
     HumanAgentNotEnabledError,
@@ -55,7 +60,10 @@ from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 __all__ = [
     "DEFAULT_LEADER_MEMBER_NAME",
     "DeepAgentSpec",
+    "ExternalTeamClient",
     "HUMAN_AGENT_MEMBER_NAME",
+    "TEAM_JOIN_ENV",
+    "TeamJoinDescriptor",
     "HumanAgentInbox",
     "HumanAgentNotEnabledError",
     "UnknownHumanAgentError",

@@ -92,7 +92,7 @@ class TestEditSafetyRail(IsolatedAsyncioTestCase):
                 tool_args={"file_path": "src/foo.py"},
             ),
         )
-        fake_proc = _FakeProc(1, b"E501 line too long")
+        fake_proc = _FakeProc(1, b"src/foo.py:1:1: E501 line too long")
         with patch(
             "asyncio.create_subprocess_exec",
             new_callable=AsyncMock,

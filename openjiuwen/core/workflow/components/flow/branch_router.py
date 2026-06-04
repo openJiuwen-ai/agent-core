@@ -71,6 +71,15 @@ class BranchRouter:
     def get_drawable_branch_router(self):
         return self._drawable_branch_router
 
+    @property
+    def all_targets(self) -> set[str]:
+        """Return the set of all branch targets (mutually exclusive relationships)."""
+        targets = set()
+        for branch in self._branches:
+            if branch.target:
+                targets.update(branch.target)
+        return targets
+
     def set_session(self, session: Union[Session, BaseSession]):
         if isinstance(session, Session):
             self._session = getattr(session, "_inner")

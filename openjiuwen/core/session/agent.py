@@ -127,9 +127,13 @@ class Session:
             return self
         if self._close_stream_on_post_run:
             await self.close_stream()
-        await self._inner.checkpointer().post_agent_execute(self._inner)
+        await self.commit()
         self._post_run_done = True
         return self
+
+    async def commit(self):
+        """Persist the current session state without closing the stream."""
+        await self._inner.checkpointer().post_agent_execute(self._inner)
 
     def create_workflow_session(self) -> WorkflowSession:
         return WorkflowSession(parent=self._inner, session_id=self.get_session_id())

@@ -197,7 +197,7 @@ class OpenApiClient(McpClient):
                 name=tool_name,
                 server_name=self._name,
                 description=getattr(tool, "description", ""),
-                input_params=getattr(tool, "inputSchema", {}),
+                input_params=getattr(tool, "parameters", None) or getattr(tool, "input_schema", {}),
             )
             )
         return tools_info
@@ -218,7 +218,7 @@ class OpenApiClient(McpClient):
             name=tool_name,
             server_name=self._name,
             description=getattr(tool, "description", ""),
-            input_params=getattr(tool, "inputSchema", {}),
+            input_params=getattr(tool, "parameters", None) or getattr(tool, "input_schema", {}),
         )
 
     async def list_resources(self, *, timeout: float = NO_TIMEOUT) -> List[Any]:

@@ -71,6 +71,8 @@ class TeamEvent:
 
     # Task events
     TASK_CREATED = "task_created"
+    TASK_PLAN_REQUEST = "task_plan_request"
+    TASK_PLAN_RESPONSE = "task_plan_response"
     TASK_UPDATED = "task_updated"
     TASK_CLAIMED = "task_claimed"
     TASK_COMPLETED = "task_completed"
@@ -121,9 +123,10 @@ class TeamStandbyEvent(BaseEventMessage):
 class TeamCompletedEvent(BaseEventMessage):
     """Event published when the whole team has reached a completed state.
 
-    All three conditions hold at once: every member (including the leader)
-    is in a settled status, every task is terminal, and no direct or
-    broadcast message is left unread by any member. Team-scoped — member_name
+    All three conditions hold at once: every task is terminal, every member
+    (including the leader) is in a settled status, and no direct
+    (point-to-point) message is left unread by any member. Broadcast
+    messages are excluded from the unread check. Team-scoped — member_name
     stays at its default None.
     """
     member_count: int = Field(..., description="Total team member count at completion time")
@@ -191,6 +194,25 @@ class TaskCreatedEvent(BaseEventMessage):
     """Event published when a task is created"""
     task_id: str = Field(..., description="Task unique identifier")
     status: str = Field(..., description="Initial task status")
+
+
+class TaskPlanRequestEvent(BaseEventMessage):
+    """Event published when a member submits an execution plan for approval."""
+    task_id: str = Field(..., description="Task unique identifier")
+    status: str = Field(default="claimed", description="Task status after submission")
+    plan_id: Optional[str] = Field(default=None, description="Member plan submission identifier")
+    member_plan_md: Optional[str] = Field(default=None, description="Path to submitted member plan")
+    tool_call_id: str = Field(default="", description="submit_plan tool call ID when available")
+
+
+class TaskPlanResponseEvent(BaseEventMessage):
+    """Event published when the leader approves or rejects a member execution plan."""
+    task_id: str = Field(..., description="Task unique identifier")
+    approved: bool = Field(..., description="Whether the member plan was approved")
+    status: str = Field(..., description="Task status after approval decision")
+    plan_id: Optional[str] = Field(default=None, description="Member plan submission identifier")
+    feedback: str = Field(default="", description="Leader feedback")
+    tool_call_id: str = Field(default="", description="submit_plan tool call ID when available")
 
 
 class TaskUpdatedEvent(BaseEventMessage):
@@ -284,6 +306,8 @@ _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model cl
     TeamEvent.MESSAGE: MessageEvent,
     TeamEvent.BROADCAST: BroadcastEvent,
     TeamEvent.TASK_CREATED: TaskCreatedEvent,
+    TeamEvent.TASK_PLAN_REQUEST: TaskPlanRequestEvent,
+    TeamEvent.TASK_PLAN_RESPONSE: TaskPlanResponseEvent,
     TeamEvent.TASK_UPDATED: TaskUpdatedEvent,
     TeamEvent.TASK_CLAIMED: TaskClaimedEvent,
     TeamEvent.TASK_COMPLETED: TaskCompletedEvent,

@@ -5,8 +5,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard

@@ -12,9 +12,8 @@ from openjiuwen.agent_evolving.checkpointing.types import (
     EvolutionRecord,
     EvolutionTarget,
 )
-from openjiuwen.agent_evolving.experience.types import PendingChange
 from openjiuwen.agent_evolving.experience import ExperienceProposal
-from openjiuwen.agent_evolving.experience.lifecycle import PendingCommitResult
+from openjiuwen.agent_evolving.experience.types import PendingChange
 from openjiuwen.agent_evolving.experience.skill_experience_manager import ExperienceManager
 from openjiuwen.agent_evolving.types import ApplyResult, UpdateValue
 from openjiuwen.agent_evolving.update_execution import summarize_apply_results
@@ -36,6 +35,7 @@ def _make_record(*, content: str = "experience content") -> EvolutionRecord:
 
 def _make_manager(*, language: str = "cn") -> ExperienceManager:
     store = Mock()
+    store.append_record = AsyncMock()
     scorer = Mock()
     manager = ExperienceManager(
         store=store,
@@ -52,7 +52,6 @@ async def test_commit_proposal_uses_shared_lifecycle(monkeypatch):
     record = _make_record(content="commit")
     proposal = ExperienceProposal(skill_name="skill-a", records=[record], requires_approval=False)
     captured: dict[str, object] = {}
-    manager._store.append_record = AsyncMock()
 
     original_stage_records = manager.stage_records
     original_approve_request = manager.approve_request
@@ -275,7 +274,6 @@ async def test_approve_request_applies_pending_snapshot_and_clears_on_success():
     manager = _make_manager()
     record = _make_record()
     pending = manager.stage_records("skill-a", [record], requires_approval=True)
-    manager._store.append_record = AsyncMock()
 
     result = await manager.approve_request(pending.request_id)
 
@@ -288,7 +286,48 @@ async def test_approve_request_applies_pending_snapshot_and_clears_on_success():
 
 
 @pytest.mark.asyncio
-async def test_approve_request_retains_snapshot_on_partial_failure():
+async def test_approve_request_applies_only_approved_record_ids():
+    manager = _make_manager()
+    record_1 = _make_record(content="r1")
+    record_2 = _make_record(content="r2")
+    pending = manager.stage_records("skill-a", [record_1, record_2], requires_approval=True)
+
+    result = await manager.approve_request(pending.request_id, approved_record_ids=[record_1.id])
+
+    assert result.applied_count == 1
+    assert result.rejected_count == 1
+    assert result.pending_count == 0
+    assert pending.request_id not in manager.pending_approval_snapshots
+    manager._store.append_record.assert_awaited_once_with("skill-a", record_1)
+
+
+@pytest.mark.asyncio
+async def test_approve_request_failure_retries_only_approved_record_ids():
+    manager = _make_manager()
+    record_1 = _make_record(content="r1")
+    record_2 = _make_record(content="r2")
+    pending = manager.stage_records("skill-a", [record_1, record_2], requires_approval=True)
+    manager._store.append_record = AsyncMock(side_effect=OSError("disk full"))
+
+    result = await manager.approve_request(pending.request_id, approved_record_ids=[record_1.id])
+
+    assert result.applied_count == 0
+    assert result.rejected_count == 1
+    assert result.pending_count == 1
+    assert result.errors == ["disk full"]
+    assert manager.pending_approval_snapshots[pending.request_id].payload == [record_1]
+
+    manager._store.append_record = AsyncMock()
+    retry = await manager.retry_request(pending.request_id)
+
+    assert retry.applied_count == 1
+    assert retry.rejected_count == 0
+    assert retry.pending_count == 0
+    manager._store.append_record.assert_awaited_once_with("skill-a", record_1)
+
+
+@pytest.mark.asyncio
+async def test_approve_request_retains_snapshot_on_record_failure():
     manager = _make_manager()
     record_1 = _make_record(content="r1")
     record_2 = _make_record(content="r2")
@@ -299,6 +338,7 @@ async def test_approve_request_retains_snapshot_on_partial_failure():
 
     assert result.applied_count == 1
     assert result.pending_count == 1
+    assert result.errors == ["disk full"]
     host_result = result.to_host_result(request_id=pending.request_id)
     assert host_result.status == "partial"
     assert host_result.pending_count == 1
@@ -340,36 +380,11 @@ async def test_retry_request_reuses_unified_lifecycle_for_pending_batch():
 
 
 @pytest.mark.asyncio
-async def test_approve_request_delegates_to_internal_commit_helper(monkeypatch):
-    manager = _make_manager()
-    pending = manager.stage_records("skill-a", [_make_record()], requires_approval=True)
-    fake_commit = AsyncMock(return_value=PendingCommitResult(applied_count=1, pending_count=0))
-    monkeypatch.setattr(manager, "_commit_pending_change", fake_commit)
-
-    result = await manager.approve_request(pending.request_id)
-
-    assert result.applied_count == 1
-    fake_commit.assert_awaited_once_with(pending.request_id)
-
-
-@pytest.mark.asyncio
-async def test_retry_request_delegates_to_internal_commit_helper(monkeypatch):
-    manager = _make_manager()
-    pending = manager.stage_records("skill-a", [_make_record()], requires_approval=True)
-    fake_commit = AsyncMock(return_value=PendingCommitResult(applied_count=1, pending_count=0))
-    monkeypatch.setattr(manager, "_commit_pending_change", fake_commit)
-
-    result = await manager.retry_request(pending.request_id)
-
-    assert result.applied_count == 1
-    fake_commit.assert_awaited_once_with(pending.request_id)
-
-
-@pytest.mark.asyncio
 async def test_request_simplify_stages_governance_and_event():
     manager = _make_manager()
     record = _make_record()
     manager._store.skill_exists = Mock(return_value=True)
+    manager._store.skill_definition_exists = Mock(return_value=True)
     manager._store.load_full_evolution_log = AsyncMock(return_value=Mock(entries=[record]))
     manager._store.read_skill_content = AsyncMock(return_value="# skill")
     manager._store.extract_description_from_skill_md = Mock(return_value="summary")
@@ -381,6 +396,23 @@ async def test_request_simplify_stages_governance_and_event():
     assert request_id in manager.pending_governance
     assert manager.pending_governance[request_id]["kind"] == "simplify"
     assert not hasattr(manager, "pending_approval_events")
+
+
+@pytest.mark.asyncio
+async def test_request_simplify_skips_missing_skill_definition():
+    manager = _make_manager()
+    manager._store.skill_exists = Mock(return_value=True)
+    manager._store.skill_definition_exists = Mock(return_value=False)
+    manager._store.load_full_evolution_log = AsyncMock()
+    manager._store.read_skill_content = AsyncMock()
+    manager._scorer.simplify = AsyncMock()
+
+    request_id = await manager.request_simplify("skill-a")
+
+    assert request_id is None
+    manager._store.load_full_evolution_log.assert_not_awaited()
+    manager._store.read_skill_content.assert_not_awaited()
+    manager._scorer.simplify.assert_not_awaited()
 
 
 @pytest.mark.asyncio

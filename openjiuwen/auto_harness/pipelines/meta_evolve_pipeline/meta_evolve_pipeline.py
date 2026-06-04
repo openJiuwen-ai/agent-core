@@ -34,6 +34,9 @@ from openjiuwen.auto_harness.stages.learnings import (
 from openjiuwen.auto_harness.stages.plan import (
     MetaPlanStage,
 )
+from openjiuwen.core.common.logging import (
+    logger,
+)
 
 
 class _StopMetaEvolvePipeline(Exception):
@@ -116,6 +119,11 @@ class MetaEvolvePipeline(BasePipeline):
                 result_holder=assess_result_holder,
             ):
                 yield chunk
+            if ctx.orchestrator.should_cancel:
+                logger.info(
+                    "[MetaEvolvePipeline] cancellation requested after assess stage"
+                )
+                raise _StopMetaEvolvePipeline
             if self._did_stage_fail(
                 assess_stage, assess_result_holder
             ):
@@ -128,6 +136,11 @@ class MetaEvolvePipeline(BasePipeline):
                 result_holder=plan_result_holder,
             ):
                 yield chunk
+            if ctx.orchestrator.should_cancel:
+                logger.info(
+                    "[MetaEvolvePipeline] cancellation requested after plan stage"
+                )
+                raise _StopMetaEvolvePipeline
             if self._did_stage_fail(
                 plan_stage, plan_result_holder
             ):
@@ -142,6 +155,11 @@ class MetaEvolvePipeline(BasePipeline):
             : ctx.orchestrator.config.max_tasks_per_session
         ]
         for task in capped_tasks:
+            if ctx.orchestrator.should_cancel:
+                logger.info(
+                    "[MetaEvolvePipeline] cancellation requested, stopping task pipeline"
+                )
+                break
             if ctx.orchestrator.budget.should_stop:
                 break
             if not ctx.orchestrator.budget.check_task_budget():

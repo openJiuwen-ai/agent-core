@@ -4,6 +4,9 @@
 from openjiuwen.auto_harness.rails.budget_rail import (
     BudgetRail,
 )
+from openjiuwen.auto_harness.rails.cancellation_rail import (
+    CancellationRail,
+)
 from openjiuwen.auto_harness.rails.context_rail import (
     AutoHarnessContextRail,
 )
@@ -24,6 +27,7 @@ __all__ = [
     "AutoHarnessContextRail",
     "AutoHarnessExperienceRail",
     "BudgetRail",
+    "CancellationRail",
     "EditSafetyRail",
     "RevertOnFailureRail",
     "SecurityRail",

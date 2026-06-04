@@ -12,9 +12,6 @@ from openjiuwen.harness.prompts.sections import SectionName
 
 HEARTBEAT_SYSTEM_PROMPT_CN = """
 ## 心跳检测
-<heartbeat_user_task>
-{heartbeat_section}
-</heartbeat_user_task>
 
 判定规则：
 1. 若 `<heartbeat_user_task>` 与 `</heartbeat_user_task>` 之间仅有空白（含空行）或完全为空：视为**无心跳用户任务**。你必须且仅能输出一行，内容**精确**为 `HEARTBEAT_OK`（不要解释、不要前后缀、不要 Markdown、不要工具调用说明）。
@@ -32,9 +29,6 @@ HEARTBEAT_SYSTEM_PROMPT_CN = """
 
 HEARTBEAT_SYSTEM_PROMPT_EN = """
 ## Heartbeat
-<heartbeat_user_task>
-{heartbeat_section}
-</heartbeat_user_task>
 
 Decision rules:
 1. If between `<heartbeat_user_task>` and `</heartbeat_user_task>` there is only whitespace (including blank lines) or nothing: treat as **no heartbeat user task**. You MUST output exactly one line whose content is **precisely** `HEARTBEAT_OK` (no explanation, no prefix/suffix, no Markdown, no tool narration).
@@ -57,52 +51,23 @@ HEARTBEAT_SYSTEM_PROMPT: Dict[str, str] = {
 }
 
 
-def _clean_heartbeat_content(content: str) -> str:
-    """Clean HEARTBEAT.md content.
-
-    Args:
-        content: Raw content from HEARTBEAT.md file.
-
-    Returns:
-        Cleaned content with HTML comments and empty lines removed.
-    """
-    lines = content.splitlines()
-    cleaned_lines = []
-
-    for line in lines:
-        stripped_line = line.strip()
-
-        if stripped_line.startswith("<!--") and stripped_line.endswith("-->"):
-            continue
-
-        if stripped_line:
-            cleaned_lines.append(line.strip())
-
-    return "\n".join(cleaned_lines)
-
-
 def build_heartbeat_section(
     language: str = "cn",
-    heartbeat_content: Optional[str] = None,
-) -> Optional[PromptSection]:
+) -> PromptSection:
     """Build heartbeat system prompt section.
 
     Args:
         language: Language for prompts ('cn' or 'en').
-        heartbeat_content: Content from HEARTBEAT.md file.
 
     Returns:
-        PromptSection if heartbeat_content is not None, else None.
+        PromptSection with stable heartbeat system instructions.
     """
 
     prompt_content = HEARTBEAT_SYSTEM_PROMPT.get(language, HEARTBEAT_SYSTEM_PROMPT["cn"])
-    cleaned_content = _clean_heartbeat_content(heartbeat_content) if heartbeat_content else ""
-
-    heartbeat_section = cleaned_content if cleaned_content else ""
 
     return PromptSection(
         name=SectionName.HEARTBEAT,
-        content={language: prompt_content.format(heartbeat_section=heartbeat_section)},
+        content={language: prompt_content},
         priority=80,
     )
 

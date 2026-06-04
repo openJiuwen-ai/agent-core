@@ -17,6 +17,7 @@ from openjiuwen.agent_evolving.experience.types import EvolutionContext, OnlineE
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.optimizer.skill_call.team_skill_experience_optimizer import TeamSkillExperienceOptimizer
 from openjiuwen.agent_evolving.signal.base import EvolutionTarget, make_evolution_signal
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
 
 _TEAM_MODULE = import_module("openjiuwen.agent_evolving.optimizer.skill_call.team_skill_experience_optimizer")
@@ -596,6 +597,33 @@ class TestGenerateRecords:
         )
 
         assert records == []
+
+    @pytest.mark.asyncio
+    async def test_generate_reraises_llm_base_error(self):
+        optimizer = _make_optimizer(MagicMock())
+        optimizer._generate_drafts_with_retries = AsyncMock(
+            side_effect=BaseError(StatusCode.COMPONENT_LLM_INVOKE_CALL_FAILED, error_msg="network failed")
+        )
+
+        with pytest.raises(BaseError):
+            await optimizer.generate_records(
+                EvolutionContext(
+                    skill_name="test-skill",
+                    signals=[
+                        make_evolution_signal(
+                            signal_type="trajectory_issue",
+                            section="Workflow",
+                            excerpt="handoff gap",
+                            skill_name="test-skill",
+                            source="passive_trajectory",
+                        )
+                    ],
+                    skill_content="# Team Skill",
+                    messages=[],
+                    existing_desc_records=[],
+                    existing_body_records=[],
+                )
+            )
 
     @pytest.mark.asyncio
     async def test_aggregates_user_and_trajectory_records_from_context(self):

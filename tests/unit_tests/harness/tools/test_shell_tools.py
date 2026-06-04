@@ -65,9 +65,7 @@ async def test_bash_tool(sys_op):
 
     bash_res = await bash_tool.invoke({"command": "echo 你好"})
     assert bash_res.success is True
-    assert bash_res.data["exit_code"] == 0
-    assert bash_res.data["stderr"] == ""
-    assert "你好" in bash_res.data["stdout"]
+    assert "你好" in bash_res.data["content"]
     assert bash_res.error is None
 
 
@@ -85,9 +83,8 @@ async def test_bash_tool_ls_chinese_filename(sys_op, tmp_workspace):
 
         ls_res = await bash_tool.invoke({"command": f"ls -la \"{test_dir}\""})
         assert ls_res.success is True
-        assert ls_res.data["exit_code"] == 0
-        assert "测试文件.txt" in ls_res.data["stdout"]
-        assert "中文文件 - 副本.txt" in ls_res.data["stdout"]
+        assert "测试文件.txt" in ls_res.data["content"]
+        assert "中文文件 - 副本.txt" in ls_res.data["content"]
         assert ls_res.error is None
     finally:
         shutil.rmtree(test_dir, ignore_errors=True)
@@ -99,7 +96,7 @@ async def test_bash_tool_fail_command(sys_op):
 
     fail_res = await bash_tool.invoke({"command": "echo fail && exit 1"})
     assert fail_res.success is False
-    assert fail_res.data["exit_code"] == 1
+    assert fail_res.data["content"].startswith("Exit code")
 
 
 @pytest.mark.asyncio
@@ -200,7 +197,7 @@ async def test_workdir_from_contextvar(sys_op, tmp_workspace):
     cmd = "cd" if os.name == "nt" else "pwd"
     res = await bash_tool.invoke({"command": cmd})
     assert res.success is True
-    assert tmp_workspace in res.data["stdout"] or os.path.realpath(tmp_workspace) in res.data["stdout"]
+    assert tmp_workspace in res.data["content"] or os.path.realpath(tmp_workspace) in res.data["content"]
 
 
 # ────────────────────────────────────────────────────────────
@@ -221,7 +218,7 @@ async def test_default_workdir_prefers_current_cwd_over_workspace(sys_op, tmp_wo
     res = await bash_tool.invoke({"command": cmd})
 
     assert res.success is True
-    assert os.path.realpath(current_dir) in os.path.realpath(res.data["stdout"].strip())
+    assert os.path.realpath(current_dir) in os.path.realpath(res.data["content"].strip())
 
 
 @pytest.mark.asyncio
@@ -250,7 +247,7 @@ async def test_background_fast_fail_detected(sys_op):
 # ────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_output_truncated_when_over_limit(sys_op):
+async def test_output_persisted_when_over_limit(sys_op):
     bash_tool = BashTool(sys_op)
     # python must be available since we're running in a Python test environment
     py = "python" if os.name == "nt" else "python3"
@@ -259,7 +256,8 @@ async def test_output_truncated_when_over_limit(sys_op):
         "max_output_chars": 250,
     })
     assert res.success is True
-    assert "lines omitted" in res.data["stdout"]
+    # over-limit output is persisted and shown as a <persisted-output> preview.
+    assert "<persisted-output>" in res.data["content"]
 
 
 @pytest.mark.asyncio
@@ -267,7 +265,8 @@ async def test_output_not_truncated_within_limit(sys_op):
     bash_tool = BashTool(sys_op)
     res = await bash_tool.invoke({"command": "echo hello", "max_output_chars": 8000})
     assert res.success is True
-    assert "[truncated]" not in res.data["stdout"]
+    assert "hello" in res.data["content"]
+    assert "<persisted-output>" not in res.data["content"]
 
 
 @pytest.mark.asyncio
@@ -276,5 +275,5 @@ async def test_max_output_chars_clamped_to_minimum(sys_op):
     bash_tool = BashTool(sys_op)
     res = await bash_tool.invoke({"command": "echo hi", "max_output_chars": 1})
     assert res.success is True
-    # should not crash; output is short so no truncation
-    assert "hi" in res.data["stdout"]
+    # max_output_chars below 200 is clamped to 200; short output is not persisted.
+    assert "hi" in res.data["content"]

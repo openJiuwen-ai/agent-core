@@ -8,8 +8,11 @@ how to use async session tools (sessions_list, sessions_spawn).
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional
 from openjiuwen.harness.prompts.sections import SectionName
+
+if TYPE_CHECKING:
+    from openjiuwen.harness.prompts.builder import PromptSection
 
 # ---------------------------------------------------------------------------
 # Session tools system prompt (bilingual)

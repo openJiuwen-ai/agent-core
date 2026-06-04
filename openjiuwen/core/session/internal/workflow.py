@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openjiuwen.core.session.config.base import Config
 from openjiuwen.core.session.session import BaseSession
@@ -10,6 +10,9 @@ from openjiuwen.core.session.state.base import State
 from openjiuwen.core.session.state.workflow_state import InMemoryState
 from openjiuwen.core.session.stream.manager import StreamWriterManager
 from openjiuwen.core.session.tracer.tracer import Tracer
+
+if TYPE_CHECKING:
+    from openjiuwen.core.graph.stream_actor.manager import ActorManager
 
 
 class WorkflowSession(BaseSession):

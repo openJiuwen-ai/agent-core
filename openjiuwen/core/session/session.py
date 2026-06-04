@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright c) Huawei Technologies Co. Ltd. 2025-2025.
 from abc import ABC, abstractmethod
-from typing import Any, Union, Optional, List, Tuple
+from typing import TYPE_CHECKING, Any, Union, Optional, List, Tuple
 
 from openjiuwen.core.session.config.base import Config
 from openjiuwen.core.session.state.base import State
@@ -12,6 +12,9 @@ from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool import ToolInfo
+
+if TYPE_CHECKING:
+    from openjiuwen.core.graph.stream_actor.manager import ActorManager
 
 
 class BaseSession(ABC):

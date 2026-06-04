@@ -4,6 +4,8 @@
 """Unit tests for TeamTaskManager module"""
 
 import asyncio
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -24,6 +26,7 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
+from openjiuwen.agent_teams.tools.memory_database import InMemoryTeamDatabase
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.core.single_agent import AgentCard
 
@@ -1183,3 +1186,151 @@ async def test_empty_task_list_never_drains(task_manager, message_bus):
     await task_manager.cancel_all_tasks()
 
     assert _published_events(message_bus, TeamEvent.TASK_LIST_DRAINED) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_plan_mode_submit_approve_and_complete(message_bus, tmp_path):
+    db = InMemoryTeamDatabase()
+    await db.team.create_team(
+        team_name="plan_team",
+        display_name="Plan Team",
+        leader_member_name="leader",
+    )
+    await db.member.create_member(
+        member_name="member1",
+        team_name="plan_team",
+        display_name="member1",
+        agent_card=AgentCard().model_dump_json(),
+        status="BUSY",
+        mode=MemberMode.PLAN_MODE.value,
+    )
+    manager = TeamTaskManager(
+        team_name="plan_team",
+        member_name="member1",
+        db=db,
+        messager=message_bus,
+        plans_dir=tmp_path / "plans",
+        team_plan_id="plan_1",
+    )
+
+    task = await manager.add(title="Plan task", content="Do work")
+    assert task.ok
+    assert task.status == TaskStatus.PENDING.value
+
+    claim_result = await manager.claim(task.task_id)
+    assert not claim_result.ok
+    assert "submit_plan" in claim_result.reason
+
+    assign_result = await manager.assign(task.task_id, "member1")
+    assert assign_result.ok
+    approval_without_plan = await manager.approve_plan(
+        plan_id="missing-plan",
+        approved=True,
+        feedback="too early",
+        leader_name="leader",
+    )
+    assert not approval_without_plan.ok
+    assert "not found" in approval_without_plan.reason
+
+    before_missing_plan = await manager.get(task.task_id)
+    missing_plan_result = await manager.submit_plan(
+        task.task_id,
+        plan_path=str(tmp_path / "missing_member_plan.md"),
+    )
+    assert missing_plan_result["success"] is False
+    after_missing_plan = await manager.get(task.task_id)
+    assert after_missing_plan.status == before_missing_plan.status
+    plan_index_path = tmp_path / "plans" / "index.json"
+    if plan_index_path.exists():
+        plan_index = json.loads(plan_index_path.read_text(encoding="utf-8"))
+        assert task.task_id not in plan_index.get("tasks", {})
+
+    draft_plan_path = tmp_path / "draft_member_plan.md"
+    draft_plan_path.write_text("1. inspect\n2. implement\n", encoding="utf-8")
+    submit_result = await manager.submit_plan(
+        task.task_id,
+        plan_path=str(draft_plan_path),
+    )
+    assert submit_result["success"] is True
+    assert submit_result["status"] == TaskStatus.CLAIMED.value
+    first_plan_id = submit_result["plan_id"]
+    assert submit_result["leader_message_id"]
+    leader_messages = await db.message.get_messages("plan_team", "leader")
+    assert len(leader_messages) == 1
+    assert leader_messages[0].from_member_name == "member1"
+    assert f"Plan ID: {first_plan_id}" in leader_messages[0].content
+    assert submit_result["member_plan_md"] in leader_messages[0].content
+    assert Path(submit_result["member_plan_md"]).read_text(encoding="utf-8").startswith("1. inspect")
+    assert Path(submit_result["member_plan_md"]).resolve() != draft_plan_path.resolve()
+
+    claimed_task = await manager.get(task.task_id)
+    assert claimed_task.status == TaskStatus.CLAIMED.value
+    assert claimed_task.assignee == "member1"
+
+    before_approval = await manager.complete(task.task_id)
+    assert not before_approval.ok
+
+    rejection_result = await manager.approve_plan(
+        plan_id=first_plan_id,
+        approved=False,
+        feedback="revise",
+        leader_name="leader",
+    )
+    assert rejection_result.ok
+    rejected_task = await manager.get(task.task_id)
+    assert rejected_task.status == TaskStatus.CLAIMED.value
+    task_plan_dir = tmp_path / "plans" / "plan_1" / "tasks" / task.task_id
+    assert not (task_plan_dir / "approval.json").exists()
+    assert not (task_plan_dir / "manifest.json").exists()
+    plan_index = json.loads((tmp_path / "plans" / "index.json").read_text(encoding="utf-8"))
+    assert plan_index["tasks"][task.task_id]["decision"] == "reject"
+    assert plan_index["tasks"][task.task_id]["latest_plan_id"] == first_plan_id
+    assert plan_index["task_plans"][first_plan_id]["decision"] == "reject"
+
+    still_before_approval = await manager.complete(task.task_id)
+    assert not still_before_approval.ok
+
+    stale_approval_result = await manager.approve_plan(
+        plan_id=first_plan_id,
+        approved=True,
+        feedback="ok",
+        leader_name="leader",
+    )
+    assert not stale_approval_result.ok
+    assert "already reject" in stale_approval_result.reason
+
+    revised_plan_path = tmp_path / "revised_member_plan.md"
+    revised_plan_path.write_text("1. inspect deeper\n2. implement\n", encoding="utf-8")
+    resubmit_result = await manager.submit_plan(
+        task.task_id,
+        plan_path=str(revised_plan_path),
+    )
+    assert resubmit_result["success"] is True
+    assert resubmit_result["status"] == TaskStatus.CLAIMED.value
+    second_plan_id = resubmit_result["plan_id"]
+    assert second_plan_id != first_plan_id
+
+    approval_result = await manager.approve_plan(
+        plan_id=second_plan_id,
+        approved=True,
+        feedback="ok",
+        leader_name="leader",
+    )
+    assert approval_result.ok
+    plan_index = json.loads((tmp_path / "plans" / "index.json").read_text(encoding="utf-8"))
+    assert plan_index["tasks"][task.task_id]["decision"] == "approve"
+    assert plan_index["tasks"][task.task_id]["latest_plan_id"] == second_plan_id
+    assert plan_index["task_plans"][second_plan_id]["decision"] == "approve"
+
+    approved_task = await manager.get(task.task_id)
+    assert approved_task.status == TaskStatus.PLAN_APPROVED.value
+    assert approved_task.assignee == "member1"
+
+    complete_result = await manager.complete(task.task_id)
+    assert complete_result.ok
+    completed_task = await manager.get(task.task_id)
+    assert completed_task.status == TaskStatus.COMPLETED.value
+
+    index = json.loads((tmp_path / "plans" / "index.json").read_text(encoding="utf-8"))
+    assert index["tasks"][task.task_id]["status"] == TaskStatus.COMPLETED.value

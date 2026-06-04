@@ -271,7 +271,8 @@ class SessionMemoryUpdateAgent:
             await self._prime_inherited_context(session, full_context_messages)
             response = await self._agent.invoke(inputs, session=session)
         finally:
-            await session.post_run()
+            await session.close_stream()
+            await session.commit()
         _ = response
 
     async def _invoke_direct_replace(

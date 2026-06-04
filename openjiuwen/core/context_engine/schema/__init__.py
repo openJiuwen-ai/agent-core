@@ -3,6 +3,7 @@ from openjiuwen.core.context_engine.schema.context_state import (
     ContextCompressionMetric,
     ContextCompressionSaved,
     ContextCompressionState,
+    ContextCompressionUsage,
 )
 
 __all__ = [
@@ -10,4 +11,5 @@ __all__ = [
     "ContextCompressionMetric",
     "ContextCompressionSaved",
     "ContextCompressionState",
+    "ContextCompressionUsage",
 ]

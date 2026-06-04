@@ -15,13 +15,13 @@ restarted member came up with the wrong tool / rail / prompt profile.
 These tests pin the new behaviour:
 
 * ``spawn_member(role=HUMAN_AGENT)`` writes the role through to the DB
-  row, not just the in-memory cache.
-* A fresh ``TeamBackend`` instance can rebuild the HITT roster from DB
-  via ``refresh_human_agent_roster()`` — covering both dynamically and
-  predefined-spawned humans.
+  row.
+* ``is_human_agent`` / ``human_agent_names()`` query the DB directly,
+  so a fresh ``TeamBackend`` instance sees dynamically-spawned humans
+  immediately without any cache-refresh step.
 * ``SpawnManager.build_context_from_db`` reads the role straight off
-  the row, so it works even if the new backend's roster cache has not
-  been refreshed yet.
+  the row, so it works even if the new backend has not touched the
+  DB yet.
 * The SQLite migration step backfills the ``role`` column on legacy
   DB files that pre-date this change.
 """
@@ -168,7 +168,7 @@ async def test_spawn_member_default_role_is_teammate(db, messager):
 
 
 # ---------------------------------------------------------------------------
-# refresh_human_agent_roster rebuilds cache from DB after restart
+# is_human_agent / human_agent_names() query DB directly (no cache)
 # ---------------------------------------------------------------------------
 
 
@@ -178,10 +178,9 @@ async def test_dynamic_human_agent_survives_backend_restart(db, messager):
     """A human spawned dynamically on backend #1 is still recognised
     after backend #1 is discarded and backend #2 reads the DB.
 
-    Regression guard for the original bug: dynamic spawns are not in
-    ``predefined_members``, so the legacy cache had no chance of
-    seeing them after a leader cold restart and ``build_context_from_db``
-    fell through to ``TeamRole.TEAMMATE``.
+    Since ``is_human_agent`` queries the DB on every call, a fresh
+    ``TeamBackend`` sees dynamically-spawned humans immediately —
+    no cache-refresh step is needed.
     """
     await _seed_team(db)
     backend1 = _make_backend(db, messager)
@@ -192,20 +191,16 @@ async def test_dynamic_human_agent_survives_backend_restart(db, messager):
         desc="user avatar",
     )
     assert spawn_result.ok
-    assert backend1.is_human_agent("alice") is True
+    assert await backend1.is_human_agent("alice") is True
 
     # Simulate leader process restart: drop backend1, build a new
     # backend bound to the same DB.
     del backend1
     backend2 = _make_backend(db, messager)
 
-    # Before the refresh, backend2's cache is empty (DB is the source
-    # of truth — the cache exists only as a sync-lookup optimisation).
-    assert backend2.is_human_agent("alice") is False
-
-    await backend2.refresh_human_agent_roster()
-    assert backend2.is_human_agent("alice") is True
-    assert "alice" in backend2.human_agent_names()
+    # backend2 sees alice as human_agent immediately from DB.
+    assert await backend2.is_human_agent("alice") is True
+    assert "alice" in await backend2.human_agent_names()
 
 
 @pytest.mark.asyncio
@@ -235,13 +230,12 @@ async def test_predefined_human_agent_survives_backend_restart(db, messager):
         leader_display_name="Leader",
         leader_desc="p",
     )
-    assert predefined_backend.is_human_agent("alice") is True
+    assert await predefined_backend.is_human_agent("alice") is True
 
     del predefined_backend
     backend2 = _make_backend(db, messager)
-    await backend2.refresh_human_agent_roster()
 
-    assert backend2.is_human_agent("alice") is True
+    assert await backend2.is_human_agent("alice") is True
 
 
 # ---------------------------------------------------------------------------
@@ -266,14 +260,14 @@ async def test_build_context_reads_role_from_member_row(db, messager):
         role=TeamRole.HUMAN_AGENT,
     )
 
-    # Simulate a fresh leader process: build a brand-new backend without
-    # ever calling refresh_human_agent_roster() so the cache stays empty,
-    # then prove ``build_context_from_db`` still classifies the role
-    # correctly via the persisted row alone.
+    # Simulate a fresh leader process: build a brand-new backend, then
+    # prove ``build_context_from_db`` still classifies the role
+    # correctly via the persisted row alone — is_human_agent queries
+    # DB directly so the answer is always current.
     leader = _human_agent_spawn_team_spec().build()
     fresh_backend = _make_backend(db, messager)
     leader._configurator._infra.team_backend = fresh_backend
-    assert fresh_backend.is_human_agent("alice") is False
+    assert await fresh_backend.is_human_agent("alice") is True
 
     spawn_manager = SpawnManager(
         state=leader._state,

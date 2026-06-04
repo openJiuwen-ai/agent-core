@@ -7,7 +7,13 @@ import types
 from unittest.mock import Mock, AsyncMock, patch
 
 from openjiuwen.core.workflow import BranchRouter, WorkflowCard
-from openjiuwen.core.foundation.llm import ModelConfig, ModelRequestConfig, ModelClientConfig
+from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
+    ModelConfig,
+    ModelRequestConfig,
+    ModelClientConfig,
+    UserMessage,
+)
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import IntentDetectionCompConfig, \
     IntentDetectionComponent
@@ -149,6 +155,66 @@ class TestIntentDetectionExecutableInvoke:
 
         assert output["category_name"] == "weather"
         assert output["classification_id"] == 1
+
+    @pytest.mark.asyncio
+    async def test_invoke_uses_completed_history_before_writing_current_turn(self, fake_ctx):
+        """Current user input must not appear in the current-turn chat history."""
+        config = IntentDetectionCompConfig(
+            user_prompt="Determine user intent",
+            category_name_list=["weather", "travel"],
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
+            enable_history=True,
+            accept_language="en",
+        )
+        llm_mock = AsyncMock()
+        llm_mock.invoke.return_value = Mock(
+            content='{"class": "Category2", "reason": "travel intent"}'
+        )
+
+        class ContextWindow:
+            def __init__(self, messages):
+                self._messages = list(messages)
+
+            def get_messages(self):
+                return list(self._messages)
+
+        class RecordingContext:
+            def __init__(self):
+                self._messages = [
+                    UserMessage(content="previous weather query"),
+                    AssistantMessage(content='{"class": "Category1", "reason": "previous"}'),
+                ]
+
+            async def get_context_window(self, dialogue_round=None):
+                return ContextWindow(self._messages)
+
+            async def add_messages(self, messages):
+                self._messages.extend(messages)
+                return self._messages
+
+            def get_messages(self):
+                return list(self._messages)
+
+        context = RecordingContext()
+        with patch.object(IntentDetectionExecutable, "_create_llm_instance", return_value=llm_mock):
+            exe = IntentDetectionExecutable(config)
+            exe.set_router(BranchRouter())
+            output = await exe.invoke({"query": "current travel query"}, fake_ctx, context=context)
+
+        llm_messages = llm_mock.invoke.call_args.kwargs["messages"]
+        user_prompt = next(message.content for message in llm_messages if message.role == "user")
+        history_part = user_prompt.split("Current input:", 1)[0]
+
+        assert output["classification_id"] == 2
+        assert "previous weather query" in history_part
+        assert "current travel query" not in history_part
+        assert [message.content for message in context.get_messages()] == [
+            "previous weather query",
+            '{"class": "Category1", "reason": "previous"}',
+            "current travel query",
+            '{"class": "Category2", "reason": "travel intent"}',
+        ]
 
 
 class TestIntentDetectionComponent:

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
 
@@ -15,8 +16,8 @@ from openjiuwen.agent_evolving.experience.common import (
     commit_pending_change,
     execute_simplify_actions,
     make_pending_change,
-    request_rebuild_context,
     reject_pending_change,
+    request_rebuild_context,
 )
 from openjiuwen.agent_evolving.experience.lifecycle import LocalApplyPreview, PendingCommitResult, RebuildRequest
 from openjiuwen.agent_evolving.experience.scorer import ExperienceScorer
@@ -27,8 +28,8 @@ from openjiuwen.agent_evolving.experience.types import (
     PendingChange,
 )
 from openjiuwen.agent_evolving.protocols import (
-    APPROVE_ACTION,
     APPEND_MODE,
+    APPROVE_ACTION,
     EXPERIENCES_TARGET,
     LOCAL_APPLY_COMPLETED,
     PENDING_CHANGE_EFFECT,
@@ -167,6 +168,9 @@ class ExperienceManager:
         signal_source: Optional[str] = None,
         change_type: str = SKILL_EXPERIENCE_ENTRY,
         request_id_prefix: Optional[str] = None,
+        trajectory: Any | None = None,
+        messages: Optional[List[dict]] = None,
+        is_shared_records: bool = False,
     ) -> ExperienceApprovalRequest:
         """Snapshot one record batch into approval state."""
         proposal = ExperienceProposal(
@@ -183,6 +187,9 @@ class ExperienceManager:
             records=records,
             change_type=change_type,
             request_id_prefix=request_id_prefix,
+            trajectory=trajectory,
+            messages=messages,
+            is_shared_records=is_shared_records,
         )
 
     def stage_apply_results(
@@ -196,6 +203,7 @@ class ExperienceManager:
         user_query: str = "",
         signal_type: Optional[str] = None,
         signal_source: Optional[str] = None,
+        messages: Optional[List[dict]] = None,
     ) -> ExperienceApprovalRequest:
         """Stage already-generated online apply results through the shared lifecycle."""
         preview = self.build_local_apply_preview(skill_name, apply_results)
@@ -213,6 +221,7 @@ class ExperienceManager:
             proposal=proposal,
             preview=preview,
             request_id_prefix=request_id_prefix,
+            messages=messages,
         )
 
     def _stage_records(
@@ -222,6 +231,9 @@ class ExperienceManager:
         records: list[EvolutionRecord],
         change_type: str,
         request_id_prefix: Optional[str] = None,
+        trajectory: Any | None = None,
+        messages: Optional[List[dict]] = None,
+        is_shared_records: bool = False,
     ) -> ExperienceApprovalRequest:
         """Shared stage flow for skill/team-skill pending approval batches."""
         operator = self._skill_ops.get(proposal.skill_name)
@@ -244,6 +256,9 @@ class ExperienceManager:
             proposal=proposal,
             preview=self.build_local_apply_preview(proposal.skill_name, apply_results),
             request_id_prefix=request_id_prefix,
+            trajectory=trajectory,
+            messages=messages,
+            is_shared_records=is_shared_records,
         )
 
     def _stage_pending_request(
@@ -252,11 +267,17 @@ class ExperienceManager:
         proposal: ExperienceProposal,
         preview: LocalApplyPreview,
         request_id_prefix: Optional[str] = None,
+        trajectory: Any | None = None,
+        messages: Optional[List[dict]] = None,
+        is_shared_records: bool = False,
     ) -> ExperienceApprovalRequest:
         """Stage one pending request from previewed apply results."""
         pending = self._make_pending_change_from_preview(
             preview,
             request_id_prefix=request_id_prefix,
+            trajectory=trajectory,
+            messages=messages,
+            is_shared_records=is_shared_records,
         )
         staged_pending = self._stage_pending_change(pending)
         logger.info(
@@ -273,9 +294,18 @@ class ExperienceManager:
             apply_results=preview.apply_results,
         )
 
-    async def approve_request(self, request_id: str) -> ExperienceApplyResult:
+    async def approve_request(
+        self,
+        request_id: str,
+        *,
+        approved_record_ids: Optional[List[str]] = None,
+    ) -> ExperienceApplyResult:
         """Apply a staged approval batch to persistent storage."""
-        return await self._apply_request(request_id, action=APPROVE_ACTION)
+        return await self._apply_request(
+            request_id,
+            action=APPROVE_ACTION,
+            approved_record_ids=approved_record_ids,
+        )
 
     async def reject_request(self, request_id: str) -> ExperienceApplyResult:
         """Reject and discard a staged approval batch."""
@@ -290,6 +320,7 @@ class ExperienceManager:
         request_id: str,
         *,
         action: Literal["approve", "reject", "retry"],
+        approved_record_ids: Optional[List[str]] = None,
     ) -> ExperienceApplyResult:
         """Shared request lifecycle for approve / reject / retry."""
         pending = self._pending_approval_snapshots.get(request_id)
@@ -301,7 +332,10 @@ class ExperienceManager:
             self._reject_pending_change(request_id)
             return reject_pending_change(pending)
 
-        commit_result = await self._commit_pending_change(request_id)
+        commit_result = await self._commit_pending_change(
+            request_id,
+            approved_record_ids=approved_record_ids if action == APPROVE_ACTION else None,
+        )
         return self._to_apply_result(pending.skill_name, commit_result)
 
     async def commit_proposal(self, proposal: ExperienceProposal) -> ExperienceApplyResult:
@@ -357,11 +391,17 @@ class ExperienceManager:
         preview: LocalApplyPreview,
         *,
         request_id_prefix: Optional[str] = None,
+        trajectory: Any | None = None,
+        messages: Optional[List[dict]] = None,
+        is_shared_records: bool = False,
     ) -> PendingChange:
         pending = make_pending_change(
             preview.skill_name,
             preview.records,
             request_id_prefix=request_id_prefix,
+            trajectory=trajectory,
+            messages=messages,
+            is_shared_records=is_shared_records,
         )
         pending.change_type = preview.change_type
         return pending
@@ -405,12 +445,18 @@ class ExperienceManager:
             raise KeyError(change_id)
         return pending
 
-    async def _commit_pending_change(self, change_id: str) -> PendingCommitResult:
+    async def _commit_pending_change(
+        self,
+        change_id: str,
+        *,
+        approved_record_ids: Optional[List[str]] = None,
+    ) -> PendingCommitResult:
         """Persist a staged pending change, retaining the unwritten tail on partial failure."""
         return await commit_pending_change(
             self._pending_approval_snapshots,
             change_id,
             store=self._store,
+            approved_record_ids=approved_record_ids,
         )
 
     async def request_simplify(
@@ -419,16 +465,40 @@ class ExperienceManager:
         user_intent: Optional[str] = None,
     ) -> Optional[str]:
         """Stage simplify governance for a skill."""
+        started_at = time.monotonic()
         if not self._store.skill_exists(skill_name):
+            logger.info(
+                "[ExperienceManager] request_simplify skipped: kind=%s skill=%s reason=skill_not_found",
+                self._kind,
+                skill_name,
+            )
+            return None
+        if not self._store.skill_definition_exists(skill_name):
+            logger.info(
+                "[ExperienceManager] request_simplify skipped: kind=%s skill=%s reason=skill_definition_not_found",
+                self._kind,
+                skill_name,
+            )
             return None
 
         evo_log = await self._store.load_full_evolution_log(skill_name)
         records = evo_log.entries
         if not records:
+            logger.info(
+                "[ExperienceManager] request_simplify skipped: kind=%s skill=%s reason=no_records",
+                self._kind,
+                skill_name,
+            )
             return None
 
-        content = await self._store.read_skill_content(skill_name)
+        content = await self._store.read_skill_content(skill_name, strict=True)
         summary = self._store.extract_description_from_skill_md(content)
+        logger.info(
+            "[ExperienceManager] request_simplify loaded records: kind=%s skill=%s records=%d",
+            self._kind,
+            skill_name,
+            len(records),
+        )
         actions = await self._scorer.simplify(
             skill_name=skill_name,
             skill_summary=summary,
@@ -436,6 +506,12 @@ class ExperienceManager:
             user_intent=user_intent,
         )
         if not actions:
+            logger.info(
+                "[ExperienceManager] request_simplify finished without actions: kind=%s skill=%s elapsed=%.1fs",
+                self._kind,
+                skill_name,
+                time.monotonic() - started_at,
+            )
             return None
 
         request_id = f"evolve_simplify_{uuid.uuid4().hex[:8]}"
@@ -444,6 +520,14 @@ class ExperienceManager:
             "skill_name": skill_name,
             "actions": actions,
         }
+        logger.info(
+            "[ExperienceManager] request_simplify staged: kind=%s skill=%s request=%s actions=%d elapsed=%.1fs",
+            self._kind,
+            skill_name,
+            request_id,
+            len(actions),
+            time.monotonic() - started_at,
+        )
         return request_id
 
     async def approve_simplify(self, request_id: str) -> Dict[str, int]:
@@ -496,7 +580,9 @@ class ExperienceManager:
         return ExperienceApplyResult(
             skill_name=skill_name,
             applied_count=result.applied_count,
+            rejected_count=result.rejected_count,
             pending_count=result.pending_count,
+            errors=list(result.errors),
         )
 
     @staticmethod

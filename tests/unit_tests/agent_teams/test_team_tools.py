@@ -14,14 +14,18 @@ from openjiuwen.agent_teams.context import (
 )
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.status import (
+    MemberMode,
     MemberStatus,
+    TaskStatus,
 )
+from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
     TeamDatabase,
 )
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
+from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import (
     ApprovePlanTool,
@@ -247,8 +251,10 @@ class TestSpawnMemberTool:
         # role_type is exposed to the LLM with a default of teammate.
         props = tool.card.input_params["properties"]
         assert "role_type" in props
-        assert props["role_type"]["enum"] == ["teammate", "human_agent"]
+        assert props["role_type"]["enum"] == ["teammate", "human_agent", "bridge_agent", "external_cli"]
         assert props["role_type"]["default"] == "teammate"
+        # external_cli members reference a static spec config by name.
+        assert "cli_agent" in props
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -294,6 +300,71 @@ class TestSpawnMemberTool:
         )
         assert result.success is False
         assert "HITT capability is disabled" in (result.error or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_role_type_external_cli_requires_cli_agent(self, agent_team, t):
+        """role_type='external_cli' without cli_agent fails at the tool layer."""
+        tool = SpawnMemberTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "cli-1",
+                "display_name": "CLI One",
+                "desc": "external cli worker",
+                "role_type": "external_cli",
+            }
+        )
+        assert result.success is False
+        assert "cli_agent" in (result.error or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_role_type_external_cli_undeclared_fails(self, agent_team, t):
+        """A cli_agent absent from external_cli_agents is rejected (capability ceiling)."""
+        tool = SpawnMemberTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "cli-2",
+                "display_name": "CLI Two",
+                "desc": "external cli worker",
+                "role_type": "external_cli",
+                "cli_agent": "claude",
+            }
+        )
+        assert result.success is False
+        assert "not declared" in (result.error or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_role_type_external_cli_success(self, db, message_bus, t):
+        """role_type='external_cli' with a declared cli_agent registers the member."""
+        await db.team.create_team(
+            team_name="ext_cli_tools_team",
+            display_name="Ext",
+            leader_member_name="leader1",
+        )
+        team = TeamBackend(
+            team_name="ext_cli_tools_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")],
+        )
+        tool = SpawnMemberTool(team, t)
+        result = await tool.invoke(
+            {
+                "member_name": "claude-1",
+                "display_name": "Claude One",
+                "desc": "external cli reviewer",
+                "role_type": "external_cli",
+                "cli_agent": "claude",
+            }
+        )
+        assert result.success is True, result.error
+        assert result.data["role_type"] == "external_cli"
+        assert result.data["cli_agent"] == "claude"
+        assert team.is_external_cli_agent("claude-1")
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -403,7 +474,7 @@ class TestSpawnMemberTool:
         )
         assert result.success is True, result.error
         assert result.data["role_type"] == "human_agent"
-        assert team.is_human_agent("alice") is True
+        assert await team.is_human_agent("alice") is True
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -507,6 +578,31 @@ class TestShutdownMemberTool:
 class TestApprovePlanTool:
     """Test ApprovePlanTool"""
 
+    @staticmethod
+    async def _submit_member_plan(agent_team, member_name: str = "member1"):
+        task = await agent_team.task_manager.add(title="Plan task", content="Do work")
+        assert task.ok
+        assign_result = await agent_team.task_manager.assign(task.task_id, member_name)
+        assert assign_result.ok
+
+        member_task_manager = TeamTaskManager(
+            team_name=agent_team.team_name,
+            member_name=member_name,
+            db=agent_team.db,
+            messager=agent_team.messager,
+            plans_dir=agent_team.task_manager.plans_dir,
+            team_plan_id=agent_team.task_manager.team_plan_id,
+        )
+        plan_path = agent_team.task_manager.plans_dir / "draft-plan.md"
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        plan_path.write_text("1. inspect\n2. implement\n", encoding="utf-8")
+        submit_result = await member_task_manager.submit_plan(
+            task.task_id,
+            plan_path=str(plan_path),
+        )
+        assert submit_result["success"] is True
+        return task, submit_result["plan_id"]
+
     @pytest.mark.level0
     def test_initialization(self, agent_team, t):
         """Test tool initialization"""
@@ -519,31 +615,66 @@ class TestApprovePlanTool:
     @pytest.mark.level0
     async def test_invoke_approve(self, agent_team, t, sample_agent_card):
         """Test invoking approve plan tool to approve"""
-        await agent_team.spawn_member(member_name="member1", display_name="Member One", agent_card=sample_agent_card)
+        await agent_team.spawn_member(
+            member_name="member1",
+            display_name="Member One",
+            agent_card=sample_agent_card,
+            mode=MemberMode.PLAN_MODE,
+        )
+        task, plan_id = await self._submit_member_plan(agent_team)
 
         tool = ApprovePlanTool(agent_team, t)
-        result = await tool.invoke({"member_name": "member1", "approved": True, "feedback": "Great plan!"})
+        result = await tool.invoke({"plan_id": plan_id, "approved": True, "feedback": "Great plan!"})
 
         assert result.success is True
         assert result.error is None
+        approved_task = await agent_team.task_manager.get(task.task_id)
+        assert approved_task.status == TaskStatus.PLAN_APPROVED.value
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_requires_plan_id(self, agent_team, t, sample_agent_card):
+        """Test invoking approve plan tool requires plan_id."""
+        await agent_team.spawn_member(
+            member_name="member1",
+            display_name="Member One",
+            agent_card=sample_agent_card,
+            mode=MemberMode.PLAN_MODE,
+        )
+        task, _ = await self._submit_member_plan(agent_team)
+
+        tool = ApprovePlanTool(agent_team, t)
+        result = await tool.invoke({"task_id": task.task_id, "approved": True, "feedback": "Great plan!"})
+
+        assert result.success is False
+        approved_task = await agent_team.task_manager.get(task.task_id)
+        assert approved_task.status == TaskStatus.CLAIMED.value
 
     @pytest.mark.asyncio
     @pytest.mark.level0
     async def test_invoke_reject(self, agent_team, t, sample_agent_card):
         """Test invoking approve plan tool to reject"""
-        await agent_team.spawn_member(member_name="member1", display_name="Member One", agent_card=sample_agent_card)
+        await agent_team.spawn_member(
+            member_name="member1",
+            display_name="Member One",
+            agent_card=sample_agent_card,
+            mode=MemberMode.PLAN_MODE,
+        )
+        task, plan_id = await self._submit_member_plan(agent_team)
 
         tool = ApprovePlanTool(agent_team, t)
-        result = await tool.invoke({"member_name": "member1", "approved": False, "feedback": "Please revise"})
+        result = await tool.invoke({"plan_id": plan_id, "approved": False, "feedback": "Please revise"})
 
         assert result.success is True
+        rejected_task = await agent_team.task_manager.get(task.task_id)
+        assert rejected_task.status == TaskStatus.CLAIMED.value
 
     @pytest.mark.asyncio
     @pytest.mark.level0
     async def test_invoke_member_not_found(self, agent_team, t):
-        """Test invoking approve plan tool for non-existent member"""
+        """Test invoking approve plan tool for a non-existent plan."""
         tool = ApprovePlanTool(agent_team, t)
-        result = await tool.invoke({"member_name": "nonexistent", "approved": True})
+        result = await tool.invoke({"plan_id": "missing-plan", "approved": True})
 
         assert result.success is False
 
@@ -1155,6 +1286,7 @@ class TestMappedToolOutput:
                         "status": "claimed",
                         "assignee": "dev-1",
                         "blocked_by": ["t1"],
+                        "updated_at": 1_700_000_000_000,
                     },
                 ],
                 "count": 2,
@@ -1164,6 +1296,9 @@ class TestMappedToolOutput:
         assert "#t1 [pending] Fix bug" in result
         assert "(dev-1)" in result
         assert "[blocked by #t1]" in result
+        # t2 carries updated_at → its line shows the absolute local time;
+        # t1 has no updated_at → the None guard skips time rendering.
+        assert "2023-11-" in result
 
     @pytest.mark.level1
     def test_view_task_map_result_get(self, agent_team, t):
@@ -1179,12 +1314,14 @@ class TestMappedToolOutput:
                 "assignee": "dev-1",
                 "blocked_by": [],
                 "blocks": ["t2", "t3"],
+                "updated_at": 1_700_000_000_000,
             },
         )
         result = tool.map_result(output)
         assert "Task #t1: Fix bug" in result
         assert "Content: Fix the login bug" in result
         assert "Blocks: #t2, #t3" in result
+        assert "Updated:" in result
 
     @pytest.mark.level1
     def test_send_message_map_result(self, agent_team, t):
