@@ -41,6 +41,13 @@ from openjiuwen.harness.rails import (
 from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRail
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
+from openjiuwen.harness.schema.config import AudioModelConfig, VisionModelConfig
+from openjiuwen.harness.tools import (
+    WebPaidSearchTool,
+    create_audio_tools,
+    create_vision_tools,
+    is_paid_search_enabled,
+)
 from openjiuwen.harness.tools.web_tools import WebFetchWebpageTool, WebFreeSearchTool
 from openjiuwen.harness.tools.worktree import WorktreeConfig, WorktreeRail
 
@@ -62,6 +69,9 @@ ASK_USER = "core.ask_user"
 CONFIRM_INTERRUPT = "core.confirm_interrupt"
 WEB_SEARCH = "core.web_search"
 WEB_FETCH = "core.web_fetch"
+WEB_PAID_SEARCH = "core.web_paid_search"
+VISION = "core.vision"
+AUDIO = "core.audio"
 
 
 def _build_skill_use_rail(params: dict[str, Any], context: Any) -> SkillUseRail:
@@ -151,6 +161,126 @@ def _build_lsp_rail(params: dict[str, Any], context: Any) -> LspRail:
     return LspRail(InitializeOptions(cwd=inp.project_dir))
 
 
+class WebPaidSearchInput(ConstructionInput):
+    """Construction inputs for the paid web-search tool."""
+
+    language: str = context_field(
+        attr="language", default="cn", description="Member language code."
+    )
+    agent_id: str | None = context_field(
+        attr="member_card_id",
+        default=None,
+        description="Agent card id used to namespace tool ids.",
+    )
+
+
+def _build_web_paid_search(params: dict[str, Any], context: Any) -> list[Any]:
+    """Build the paid web-search tool when a paid-search key is configured.
+
+    Args:
+        params: Spec params (unused).
+        context: Per-member build context; supplies ``language`` / ``agent_id``.
+
+    Returns:
+        A single-element list with the paid search tool, or empty when disabled.
+    """
+    if not is_paid_search_enabled():
+        return []
+    inp = WebPaidSearchInput.resolve(params, context)
+    return [WebPaidSearchTool(language=inp.language, agent_id=inp.agent_id)]
+
+
+class VisionToolsInput(ConstructionInput):
+    """Construction inputs for the vision tool group."""
+
+    language: str = context_field(
+        attr="language", default="cn", description="Member language code."
+    )
+    agent_id: str | None = context_field(
+        attr="member_card_id",
+        default=None,
+        description="Agent card id used to namespace tool ids.",
+    )
+    vision_model_config: dict[str, Any] = param_field(
+        default_factory=dict,
+        description="VisionModelConfig constructor kwargs; empty disables the group.",
+    )
+
+
+def _build_vision_tool_group(params: dict[str, Any], context: Any) -> list[Any]:
+    """Build the vision tool group from a supplied VisionModelConfig.
+
+    Args:
+        params: Spec params carrying ``vision_model_config`` kwargs.
+        context: Per-member build context; supplies ``language`` / ``agent_id``.
+
+    Returns:
+        The vision tools, or empty when no config is supplied.
+    """
+    inp = VisionToolsInput.resolve(params, context)
+    if not inp.vision_model_config:
+        return []
+    return list(
+        create_vision_tools(
+            language=inp.language,
+            vision_model_config=VisionModelConfig(**inp.vision_model_config),
+            agent_id=inp.agent_id,
+        )
+    )
+
+
+class AudioToolsInput(ConstructionInput):
+    """Construction inputs for the audio tool group."""
+
+    language: str = context_field(
+        attr="language", default="cn", description="Member language code."
+    )
+    agent_id: str | None = context_field(
+        attr="member_card_id",
+        default=None,
+        description="Agent card id used to namespace tool ids.",
+    )
+    dedicated: bool = param_field(
+        default=False,
+        description="Whether a dedicated audio model is configured.",
+    )
+    audio_model_config: dict[str, Any] = param_field(
+        default_factory=dict,
+        description="AudioModelConfig kwargs; empty keeps only audio_metadata.",
+    )
+
+
+def _build_audio_tool_group(params: dict[str, Any], context: Any) -> list[Any]:
+    """Build the audio tool group from a supplied AudioModelConfig.
+
+    When a dedicated audio model is configured but the full config is incomplete,
+    only ``audio_metadata`` is kept (mirrors the legacy degraded fallback).
+
+    Args:
+        params: Spec params carrying ``dedicated`` and ``audio_model_config``.
+        context: Per-member build context; supplies ``language`` / ``agent_id``.
+
+    Returns:
+        The audio tools (full set, metadata-only, or empty).
+    """
+    inp = AudioToolsInput.resolve(params, context)
+    if not inp.dedicated:
+        return []
+    config = (
+        AudioModelConfig(**inp.audio_model_config) if inp.audio_model_config else None
+    )
+    tools = list(
+        create_audio_tools(
+            language=inp.language,
+            audio_model_config=config,
+            agent_id=inp.agent_id,
+        )
+    )
+    if config is None:
+        return [tool for tool in tools if tool.card.name == "audio_metadata"]
+    return tools
+
+
 harness_element(
     kind=ElementKind.RAIL,
     name=TASK_PLANNING,
@@ -238,6 +368,27 @@ harness_element(
     description="Web page fetch tool.",
     builder=WebFetchWebpageTool,
 )
+harness_element(
+    kind=ElementKind.TOOL,
+    name=WEB_PAID_SEARCH,
+    description="Paid web-search tool (built only when a paid-search key is set).",
+    input_model=WebPaidSearchInput,
+    builder=_build_web_paid_search,
+)
+harness_element(
+    kind=ElementKind.TOOL,
+    name=VISION,
+    description="Vision tool group built from a supplied VisionModelConfig.",
+    input_model=VisionToolsInput,
+    builder=_build_vision_tool_group,
+)
+harness_element(
+    kind=ElementKind.TOOL,
+    name=AUDIO,
+    description="Audio tool group built from a supplied AudioModelConfig.",
+    input_model=AudioToolsInput,
+    builder=_build_audio_tool_group,
+)
 
 
 __all__ = [
@@ -255,4 +406,7 @@ __all__ = [
     "CONFIRM_INTERRUPT",
     "WEB_SEARCH",
     "WEB_FETCH",
+    "WEB_PAID_SEARCH",
+    "VISION",
+    "AUDIO",
 ]
