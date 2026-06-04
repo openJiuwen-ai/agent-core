@@ -12,7 +12,7 @@ from openjiuwen.agent_teams.harness import HarnessState, NativeHarness
 from tests.unit_tests.agent_teams.harness.fixtures import (
     aborted_markers,
     drain_outputs,
-    make_provider,
+    make_spec,
     start_harness,
     wait_for_state,
     wait_invoke_running,
@@ -28,7 +28,7 @@ async def test_graceful_abort_finishes_current_round_then_stops() -> None:
     """
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         # Round runs long enough that abort lands while it is in-flight.
         fake = await start_harness(harness, sleep_seconds=0.1)
 
@@ -61,7 +61,7 @@ async def test_immediate_abort_cancels_invoke_and_returns_to_idle() -> None:
     """
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         fake = await start_harness(harness, sleep_seconds=5.0)  # long-running
 
         collected: list = []
@@ -92,7 +92,7 @@ async def test_immediate_abort_resets_coordinator_next_round_runs() -> None:
     """
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         fake = await start_harness(harness, sleep_seconds=5.0)
 
         collected: list = []
@@ -129,7 +129,7 @@ async def test_immediate_abort_rolls_back_to_last_safe_snapshot() -> None:
     """
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         fake = await start_harness(harness)  # round 1 is fast
 
         ctx = fake.context_engine.get_context(session_id=harness.session_id)
@@ -169,7 +169,7 @@ async def test_immediate_abort_no_completed_round_clears_to_baseline() -> None:
     """
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         fake = await start_harness(harness, sleep_seconds=5.0)
 
         ctx = fake.context_engine.get_context(session_id=harness.session_id)

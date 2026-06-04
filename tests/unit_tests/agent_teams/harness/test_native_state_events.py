@@ -24,7 +24,7 @@ from openjiuwen.core.session import InteractiveInput
 from openjiuwen.agent_teams.harness import HarnessState, NativeHarness
 from tests.unit_tests.agent_teams.harness.fixtures import (
     drain_outputs,
-    make_provider,
+    make_spec,
     start_harness,
     wait_for_state,
     wait_invoke_running,
@@ -36,7 +36,7 @@ async def test_state_and_round_events_single_round() -> None:
     """One round fires IDLE->RUNNING->IDLE and round started->finished, in order."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         await start_harness(harness, answer_output="hi")
 
         states: list = []
@@ -76,7 +76,7 @@ async def test_state_callback_receives_session_id_when_declared() -> None:
     """A callback declaring session_id receives it; the framework narrows kwargs."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         await start_harness(harness, answer_output="hi")
 
         seen: list = []
@@ -107,7 +107,7 @@ async def test_followup_round_emits_second_started_without_returning_to_idle() -
     """A follow-up keeps the harness RUNNING: round started fires twice, state stays."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         fake = await start_harness(harness, sleep_seconds=0.05)
 
         states: list = []
@@ -152,7 +152,7 @@ async def test_immediate_abort_emits_aborted_event() -> None:
     """Immediate abort fires round 'aborted' and walks state RUNNING->IDLE."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         fake = await start_harness(harness, sleep_seconds=30.0)
 
         states: list = []
@@ -189,7 +189,7 @@ async def test_pause_emits_paused_event() -> None:
     """Pause fires round 'paused' and walks state RUNNING->PAUSED."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         fake = await start_harness(harness, sleep_seconds=30.0)
 
         states: list = []
@@ -231,7 +231,7 @@ async def test_resume_round_via_send_interactive_input() -> None:
     """
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         fake = await start_harness(harness, answer_output="resumed")
 
         rounds: list = []
@@ -266,7 +266,7 @@ async def test_subscribers_cleared_on_stop() -> None:
     """stop() unregisters the harness-private namespace so no callbacks linger."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         await start_harness(harness)
 
         async def _on_state(old, new) -> None:

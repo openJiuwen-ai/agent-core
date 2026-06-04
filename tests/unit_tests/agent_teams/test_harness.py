@@ -28,7 +28,6 @@ import pytest
 
 from openjiuwen.agent_teams.harness import TeamHarness
 from openjiuwen.agent_teams.harness import team_harness as harness_module
-from openjiuwen.agent_teams.harness.team_harness import _MountedRails
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
@@ -37,20 +36,27 @@ from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 class _FakeNative:
     """Minimal stand-in for NativeHarness used by ``build`` tests.
 
-    ``prepare_config`` runs the provider (so the template's rails get mounted)
-    and adopts the template's ``deep_config`` — enough for ``build`` to read
-    ``deep_config.sys_operation`` / ``workspace`` when eager-initializing the
-    team-tool rail. The real native's async init / supervisor are out of scope.
+    Forward construction passes the team-side rails as ``extra_rails`` rather
+    than mounting them through a provider closure. ``prepare_config`` resolves
+    the spec's parts and adopts ``parts.config`` as ``deep_config`` — enough
+    for ``build`` to read ``deep_config.sys_operation`` / ``workspace`` when
+    eager-initializing the team-tool rail. The real native's async init /
+    supervisor are out of scope.
     """
 
-    def __init__(self, provider: Any) -> None:
-        self._provider = provider
-        self._template: Any = None
+    def __init__(
+        self,
+        agent_spec: Any,
+        build_context: Any = None,
+        extra_rails: Any = None,
+    ) -> None:
+        self.agent_spec = agent_spec
+        self.build_context = build_context
+        self.extra_rails = list(extra_rails) if extra_rails else []
         self.deep_config: Any = None
 
     def prepare_config(self) -> None:
-        self._template = self._provider()
-        self.deep_config = self._template.deep_config
+        self.deep_config = self.agent_spec.resolve_parts(self.build_context).config
 
 
 def _stub_native(
@@ -79,18 +85,29 @@ def _stub_native(
     return native
 
 
-def _stub_template(*, workspace: Any = None, sys_operation: Any = None) -> MagicMock:
-    """Return a MagicMock DeepAgent template produced by ``agent_spec.build``."""
-    template = MagicMock(name="DeepAgentTemplate")
-    template.add_rail = MagicMock()
-    template.deep_config = SimpleNamespace(workspace=workspace, sys_operation=sys_operation, model=None)
-    return template
+def _spec_with_parts(*, workspace: Any = None, sys_operation: Any = None) -> MagicMock:
+    """Return a DeepAgentSpec mock whose ``resolve_parts`` yields a config the
+    eager team-tool init can read (forward construction)."""
+    spec = MagicMock(name="DeepAgentSpec")
+    spec.resolve_parts.return_value = SimpleNamespace(
+        config=SimpleNamespace(
+            workspace=workspace,
+            sys_operation=sys_operation,
+            completion_timeout=600.0,
+        ),
+    )
+    return spec
 
 
 def _make_harness(native: MagicMock) -> TeamHarness:
     """Wire a TeamHarness whose runtime/native target is ``native``."""
-    rails = _MountedRails(team_tool=MagicMock(), team_policy=MagicMock())
-    return TeamHarness(lambda: native, native, rails, role=TeamRole.LEADER, member_name="leader")
+    return TeamHarness(
+        MagicMock(name="DeepAgentSpec"),
+        None,
+        native,
+        role=TeamRole.LEADER,
+        member_name="leader",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -98,152 +115,26 @@ def _make_harness(native: MagicMock) -> TeamHarness:
 # ---------------------------------------------------------------------------
 
 
-def test_build_mounts_rails_in_load_bearing_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The provider mounts all team rails in the documented order so the
-    LLM-visible ability snapshot matches the test-visible one."""
+def test_build_constructs_native_from_spec(monkeypatch: pytest.MonkeyPatch) -> None:
+    """build forwards the spec + context to NativeHarness (forward construction)
+    and prepares its config. The team rails ride in ``agent_spec.rails`` and
+    mount through the spec build + ensure_initialized path, not via build
+    params, so build no longer hand-mounts or eager-inits them."""
     monkeypatch.setattr(harness_module, "NativeHarness", _FakeNative)
-    template = _stub_template(workspace="WS", sys_operation="SYS")
-    spec = MagicMock(name="DeepAgentSpec")
-    spec.build.return_value = template
-
-    team_tool = MagicMock(name="TeamToolRail")
-    team_policy = MagicMock(name="TeamPolicyRail")
-    workspace_rail = MagicMock(name="TeamWorkspaceRail")
-    approval = MagicMock(name="TeamToolApprovalRail")
+    spec = _spec_with_parts(workspace="WS", sys_operation="SYS")
 
     harness = TeamHarness.build(
         agent_spec=spec,
         role=TeamRole.LEADER,
         member_name="leader",
-        team_tool_rail=team_tool,
-        team_policy_rail=team_policy,
-        team_workspace_rail=workspace_rail,
-        tool_approval_rail=approval,
     )
 
-    assert isinstance(harness.inner_agent, _FakeNative)
-    spec.build.assert_called_once()
-
-    mount_order = [call.args[0] for call in template.add_rail.call_args_list]
-    assert mount_order == [team_tool, team_policy, workspace_rail, approval]
-
-
-def test_build_eagerly_initializes_team_tool_rail(monkeypatch: pytest.MonkeyPatch) -> None:
-    """team_tool_rail.set_sys_operation / set_workspace / init run AFTER the
-    provider mounted the rails and the native adopted its config, so the tool
-    snapshot the LLM sees between configure() and the first run includes team
-    tools. init binds to the configured native (not the discarded template).
-    """
-    monkeypatch.setattr(harness_module, "NativeHarness", _FakeNative)
-    template = _stub_template(workspace="WS", sys_operation="SYS")
-    spec = MagicMock(name="DeepAgentSpec")
-    spec.build.return_value = template
-
-    call_log: list[str] = []
-    team_tool = MagicMock(name="TeamToolRail")
-    team_tool.set_sys_operation.side_effect = lambda *_: call_log.append("set_sys_operation")
-    team_tool.set_workspace.side_effect = lambda *_: call_log.append("set_workspace")
-    team_tool.init.side_effect = lambda *_: call_log.append("init")
-    team_policy = MagicMock(name="TeamPolicyRail")
-
-    def _track_add_rail(rail: Any) -> None:
-        if rail is team_tool:
-            call_log.append("add_rail:team_tool")
-        elif rail is team_policy:
-            call_log.append("add_rail:team_policy")
-        else:
-            call_log.append("add_rail:other")
-
-    template.add_rail.side_effect = _track_add_rail
-
-    harness = TeamHarness.build(
-        agent_spec=spec,
-        role=TeamRole.LEADER,
-        member_name="leader",
-        team_tool_rail=team_tool,
-        team_policy_rail=team_policy,
-    )
-
-    assert call_log == [
-        "add_rail:team_tool",
-        "add_rail:team_policy",
-        "set_sys_operation",
-        "set_workspace",
-        "init",
-    ]
-    team_tool.set_sys_operation.assert_called_once_with("SYS")
-    team_tool.set_workspace.assert_called_once_with("WS")
-    team_tool.init.assert_called_once_with(harness.inner_agent)
-
-
-def test_build_skips_optional_rails_when_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(harness_module, "NativeHarness", _FakeNative)
-    template = _stub_template()
-    spec = MagicMock(name="DeepAgentSpec")
-    spec.build.return_value = template
-
-    team_tool = MagicMock(name="TeamToolRail")
-    team_policy = MagicMock(name="TeamPolicyRail")
-
-    TeamHarness.build(
-        agent_spec=spec,
-        role=TeamRole.LEADER,
-        member_name="leader",
-        team_tool_rail=team_tool,
-        team_policy_rail=team_policy,
-    )
-
-    mounted = [call.args[0] for call in template.add_rail.call_args_list]
-    assert mounted == [team_tool, team_policy]
-
-
-def test_build_mounts_team_plan_mode_rail_when_provided(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(harness_module, "NativeHarness", _FakeNative)
-    template = _stub_template()
-    spec = MagicMock(name="DeepAgentSpec")
-    spec.build.return_value = template
-
-    team_tool = MagicMock(name="TeamToolRail")
-    team_policy = MagicMock(name="TeamPolicyRail")
-    team_plan_mode = MagicMock(name="TeamPlanModeRail")
-
-    harness = TeamHarness.build(
-        agent_spec=spec,
-        role=TeamRole.LEADER,
-        member_name="leader",
-        team_tool_rail=team_tool,
-        team_policy_rail=team_policy,
-        team_plan_mode_rail=team_plan_mode,
-    )
-
-    mounted = [call.args[0] for call in template.add_rail.call_args_list]
-    assert mounted == [team_tool, team_policy, team_plan_mode]
-    assert harness.rails.team_plan_mode is team_plan_mode
-
-
-def test_run_agent_customizer_invokes_with_native() -> None:
-    """Customizer must receive (native, member_name, role.value)."""
-    native = _stub_native()
-    harness = _make_harness(native)
-    captured: list[tuple[Any, ...]] = []
-
-    def _customizer(agent: Any, member_name: str, role: str) -> None:
-        captured.append((agent, member_name, role))
-
-    harness.run_agent_customizer(_customizer)
-
-    assert captured == [(native, "leader", "leader")]
-
-
-def test_run_agent_customizer_swallows_exceptions() -> None:
-    """A broken customizer must not abort team setup."""
-    native = _stub_native()
-    harness = _make_harness(native)
-
-    def _broken(*_: Any) -> None:
-        raise RuntimeError("boom")
-
-    harness.run_agent_customizer(_broken)
+    native = harness.inner_agent
+    assert isinstance(native, _FakeNative)
+    assert native.agent_spec is spec
+    spec.resolve_parts.assert_called_once()
+    # prepare_config ran (deep_config adopted from the spec's parts).
+    assert native.deep_config is not None
 
 
 # ---------------------------------------------------------------------------

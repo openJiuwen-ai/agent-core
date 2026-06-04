@@ -18,7 +18,7 @@ from tests.unit_tests.agent_teams.harness.fixtures import (
     aborted_markers,
     answer_outputs,
     drain_outputs,
-    make_provider,
+    make_spec,
     mock_chunks,
     start_harness,
     wait_for_state,
@@ -31,7 +31,7 @@ async def test_multi_round_second_round_receives_chunks() -> None:
     """Fatal #1: reusing one session must not close the stream between rounds."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         fake = await start_harness(harness, answer_output="r1")
 
         collected: list = []
@@ -57,7 +57,7 @@ async def test_immediate_abort_actually_stops_invoke() -> None:
     """Fatal #2: cancelling the round must stop the invoke work, not orphan it."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         fake = await start_harness(harness, sleep_seconds=5.0)
 
         collected: list = []
@@ -89,7 +89,7 @@ async def test_rollback_preserves_history_without_duplication() -> None:
     """Fatal #3: rollback must not duplicate the persisted history segment."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         fake = await start_harness(harness)  # round 1 fast
 
         ctx = fake.context_engine.get_context(session_id=harness.session_id)
@@ -125,7 +125,7 @@ async def test_supervisor_handler_crash_does_not_hang_caller() -> None:
     """Finding #4: a crashing handler must reject the caller's ack, not hang it."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         await start_harness(harness)
 
         def boom(session):  # noqa: ANN001, ANN202
@@ -148,7 +148,7 @@ async def test_graceful_abort_then_send_does_not_restart() -> None:
     """Finding #7: a send during graceful drain must not start a new round."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         fake = await start_harness(harness, sleep_seconds=0.1)
 
         collected: list = []
@@ -181,7 +181,7 @@ async def test_immediate_steer_reaches_invoke_steering_queue() -> None:
     """
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         # First round long enough to receive a steer; it will be cancelled so a
         # second send can re-run and drain the queue deterministically.
         fake = await start_harness(harness, sleep_seconds=5.0)

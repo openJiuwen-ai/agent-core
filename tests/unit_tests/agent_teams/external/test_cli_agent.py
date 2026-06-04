@@ -506,7 +506,6 @@ def test_team_harness_exposes_member_runtime_surface():
         "unregister_rail",
         "register_member_tools",
         "inject_member_memory",
-        "run_agent_customizer",
         "workspace",
         "sys_operation",
     ):

@@ -11,7 +11,7 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.agent_teams.harness import HarnessState, NativeHarness
 from tests.unit_tests.agent_teams.harness.fixtures import (
     drain_outputs,
-    make_provider,
+    make_spec,
     start_harness,
     wait_for_state,
     wait_invoke_running,
@@ -23,7 +23,7 @@ async def test_pause_caches_query_and_resume_merges() -> None:
     """pause caches the query; the next send restarts with the merged query."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         fake = await start_harness(harness, sleep_seconds=5.0)
 
         collected: list = []
@@ -55,7 +55,7 @@ async def test_paused_send_immediate_behaves_same_as_next_round() -> None:
     """In PAUSED the immediate flag is ignored — both concatenate + restart."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         fake = await start_harness(harness, sleep_seconds=5.0)
 
         collected: list = []
@@ -88,7 +88,7 @@ async def test_pause_rolls_back_to_pre_round_no_duplicate_query() -> None:
     """
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         fake = await start_harness(harness, sleep_seconds=5.0)
 
         ctx = fake.context_engine.get_context(session_id=harness.session_id)

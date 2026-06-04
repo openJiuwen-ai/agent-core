@@ -86,7 +86,7 @@ def test_team_plan_leader_mounts_team_plan_mode_rail() -> None:
         enable_team_plan=True,
     ).build()
 
-    assert isinstance(leader.harness.rails.team_plan_mode, TeamPlanModeRail)
+    assert leader.harness.find_rails(TeamPlanModeRail)
 
 
 @pytest.mark.level0
@@ -97,7 +97,7 @@ def test_team_normal_leader_does_not_mount_team_plan_mode_rail() -> None:
         enable_team_plan=False,
     ).build()
 
-    assert leader.harness.rails.team_plan_mode is None
+    assert not leader.harness.find_rails(TeamPlanModeRail)
 
 
 @pytest.mark.level0

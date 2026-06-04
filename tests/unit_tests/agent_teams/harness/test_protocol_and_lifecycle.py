@@ -19,7 +19,7 @@ from tests.unit_tests.agent_teams.harness.fixtures import (
     FakeReactAgent,
     drain_outputs,
     make_card,
-    make_provider,
+    make_spec,
     start_harness,
     wait_for_state,
 )
@@ -27,7 +27,7 @@ from tests.unit_tests.agent_teams.harness.fixtures import (
 
 def test_native_harness_is_a_deep_agent_and_satisfies_protocol() -> None:
     """NativeHarness IS a DeepAgent and structurally implements HarnessProtocol."""
-    harness = NativeHarness(make_provider())
+    harness = NativeHarness(make_spec())
     assert isinstance(harness, DeepAgent)
     assert isinstance(harness, HarnessProtocol)
 
@@ -37,7 +37,7 @@ async def test_session_id_none_before_start_then_set() -> None:
     """session_id is None before start() and resolves to the owned session after."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         assert harness.session_id is None
         assert harness.state is HarnessState.IDLE
 
@@ -55,7 +55,7 @@ async def test_injected_session_is_reused_and_not_owned() -> None:
     try:
         session = Session(card=make_card("injected_owner"), session_id="injected_sid")
         await session.pre_run()
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         await harness.start(session=session)
         fake = FakeReactAgent(harness.card)
         harness.set_react_agent(fake, initialized=True)
@@ -82,7 +82,7 @@ async def test_stop_leaves_no_lingering_harness_tasks() -> None:
     """After stop() the supervisor, forwarder, and round tasks are all done."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         fake = await start_harness(harness, sleep_seconds=0.02)
 
         collected: list = []
@@ -119,7 +119,7 @@ async def test_stop_is_idempotent() -> None:
     """Calling stop() twice is safe and stays TERMINATED."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         await start_harness(harness)
         await harness.stop()
         await harness.stop()  # second stop is a no-op
@@ -133,7 +133,7 @@ async def test_abort_while_idle_is_noop() -> None:
     """abort() while IDLE leaves the harness IDLE without error."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         await start_harness(harness)
         try:
             await harness.abort(immediate=True)

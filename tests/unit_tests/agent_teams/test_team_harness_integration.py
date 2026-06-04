@@ -32,14 +32,13 @@ from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
 from openjiuwen.agent_teams.agent.state import TeamAgentState
 from openjiuwen.agent_teams.agent.stream_controller import StreamController
 from openjiuwen.agent_teams.harness import HarnessState, NativeHarness, TeamHarness
-from openjiuwen.agent_teams.harness.team_harness import _MountedRails
 from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberStatus
 from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.runner import Runner
 from tests.unit_tests.agent_teams.harness.fixtures import (
     FakeReactAgent,
-    make_provider,
+    make_spec,
     wait_for_state,
     wait_invoke_running,
 )
@@ -52,11 +51,10 @@ def _make_team_harness(*, member_name: str, role: TeamRole = TeamRole.LEADER) ->
     chain without the team rail-mounting machinery; the rails are not exercised
     by the forward/mapping path under test.
     """
-    provider = make_provider()
-    native = NativeHarness(provider)
+    spec = make_spec()
+    native = NativeHarness(spec)
     native.prepare_config()
-    rails = _MountedRails(team_tool=MagicMock(), team_policy=MagicMock())
-    return TeamHarness(provider, native, rails, role=role, member_name=member_name)
+    return TeamHarness(spec, None, native, role=role, member_name=member_name)
 
 
 class _Recorder:

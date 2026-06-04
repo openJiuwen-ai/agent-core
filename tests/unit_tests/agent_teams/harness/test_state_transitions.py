@@ -13,7 +13,7 @@ from tests.unit_tests.agent_teams.harness.fixtures import (
     FakeReactAgent,
     answer_outputs,
     drain_outputs,
-    make_provider,
+    make_spec,
     mock_chunks,
     start_harness,
     wait_for_state,
@@ -25,7 +25,7 @@ async def test_idle_to_running_to_idle_single_round() -> None:
     """send() in IDLE runs one real round; completion returns to IDLE."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         fake = await start_harness(harness, answer_output="hi")
 
         collected: list = []
@@ -51,7 +51,7 @@ async def test_followup_runs_in_fifo_order_after_first_round() -> None:
     """send(immediate=False) while RUNNING buffers; the next round picks it up."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         # Slow first round so q2 enqueues as a follow-up while q1 is RUNNING.
         fake = await start_harness(harness, sleep_seconds=0.05)
 
@@ -77,7 +77,7 @@ async def test_stop_terminates_output_iterator() -> None:
     """stop() closes the stream; the outputs() iterator ends cleanly."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         await start_harness(harness, answer_output="x")
 
         collected: list = []
@@ -95,7 +95,7 @@ async def test_send_after_stop_raises() -> None:
     """send() on a terminated harness raises rather than hanging."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
         await start_harness(harness)
         await harness.stop()
 
@@ -110,7 +110,7 @@ async def test_concurrent_start_initializes_once() -> None:
     """Concurrent start() calls do not double-initialize the supervisor."""
     await Runner.start()
     try:
-        harness = NativeHarness(make_provider())
+        harness = NativeHarness(make_spec())
 
         await asyncio.gather(harness.start(), harness.start(), harness.start())
         harness.set_react_agent(FakeReactAgent(harness.card), initialized=True)

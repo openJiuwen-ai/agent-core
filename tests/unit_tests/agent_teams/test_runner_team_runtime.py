@@ -376,7 +376,6 @@ async def test_team_harness_seeds_team_plan_mode_on_start(
     from unittest.mock import MagicMock
 
     from openjiuwen.agent_teams.harness import TeamHarness
-    from openjiuwen.agent_teams.harness.team_harness import _MountedRails
     from openjiuwen.agent_teams.schema.team import TeamRole
     from openjiuwen.harness.factory import create_deep_agent
 
@@ -387,11 +386,10 @@ async def test_team_harness_seeds_team_plan_mode_on_start(
         workspace=str(tmp_path),
         enable_task_loop=True,
     )
-    rails = _MountedRails(team_tool=MagicMock(), team_policy=MagicMock())
     harness = TeamHarness(
-        lambda: deep_agent,
+        MagicMock(name="DeepAgentSpec"),
+        None,
         deep_agent,
-        rails,
         role=TeamRole.LEADER,
         member_name="team_leader",
         initial_plan_mode=True,
@@ -413,7 +411,6 @@ def test_team_harness_keeps_code_plan_prompt_when_not_team_plan(tmp_path):
     from unittest.mock import MagicMock
 
     from openjiuwen.agent_teams.harness import TeamHarness
-    from openjiuwen.agent_teams.harness.team_harness import _MountedRails
     from openjiuwen.agent_teams.schema.team import TeamRole
     from openjiuwen.harness.factory import create_deep_agent
     from openjiuwen.harness.schema.config import SubAgentConfig
@@ -433,11 +430,10 @@ def test_team_harness_keeps_code_plan_prompt_when_not_team_plan(tmp_path):
         enable_task_loop=True,
     )
 
-    rails = _MountedRails(team_tool=MagicMock(), team_policy=MagicMock())
     TeamHarness(
-        lambda: deep_agent,
+        MagicMock(name="DeepAgentSpec"),
+        None,
         deep_agent,
-        rails,
         role=TeamRole.LEADER,
         member_name="team_leader",
         initial_plan_mode=False,
@@ -463,7 +459,6 @@ async def test_team_harness_seeds_team_plan_mode_only_once():
     from unittest.mock import MagicMock
 
     from openjiuwen.agent_teams.harness import TeamHarness
-    from openjiuwen.agent_teams.harness.team_harness import _MountedRails
     from openjiuwen.agent_teams.schema.team import TeamRole
 
     state = SimpleNamespace(
@@ -487,11 +482,10 @@ async def test_team_harness_seeds_team_plan_mode_only_once():
             state.plan_mode.mode = mode
 
     deep_agent = FakeDeepAgent()
-    rails = _MountedRails(team_tool=MagicMock(), team_policy=MagicMock())
     harness = TeamHarness(
-        lambda: deep_agent,
+        MagicMock(name="DeepAgentSpec"),
+        None,
         deep_agent,
-        rails,
         role=TeamRole.LEADER,
         member_name="team_leader",
         initial_plan_mode=True,
@@ -520,15 +514,13 @@ async def test_team_harness_child_stream_close_does_not_close_team_stream(isolat
     from unittest.mock import MagicMock
 
     from openjiuwen.agent_teams.harness import TeamHarness
-    from openjiuwen.agent_teams.harness.team_harness import _MountedRails
     from openjiuwen.agent_teams.schema.team import TeamRole
 
     deep_agent = SimpleNamespace(card=AgentCard(id="leader", name="leader"))
-    rails = _MountedRails(team_tool=MagicMock(), team_policy=MagicMock())
     harness = TeamHarness(
-        lambda: deep_agent,
+        MagicMock(name="DeepAgentSpec"),
+        None,
         deep_agent,
-        rails,
         role=TeamRole.LEADER,
         member_name="leader",
     )
@@ -559,7 +551,6 @@ async def test_team_runtime_manager_cold_recover_reinjects_runtime_spec():
 
     session_id = f"cold_recover_{uuid.uuid4().hex}"
     spec = _runtime_spec("cold_recover_team")
-    spec.agent_customizer = lambda *_args, **_kwargs: None
     agent = FakeTeamAgent("cold_recover_team", stream_label="team.chunk")
 
     manager = TeamRuntimeManager()
@@ -1056,111 +1047,8 @@ def test_team_agent_recover_from_session_builds_leader_member_handle():
     assert handle.member_name == "leader"
 
 
-def test_team_agent_recover_from_session_reinjects_runtime_spec_customizer():
-    """``runtime_spec.agent_customizer`` must replace the persisted spec's
-    customizer slot.
-
-    ``agent_customizer`` is ``Field(exclude=True)``, so the persisted bucket
-    never carries it. Without the runtime override, every cold recover would
-    silently disable platform adapter callbacks.
-    """
-    from openjiuwen.agent_teams.runtime.metadata import write_team_namespace
-
-    session_id = f"recover_customizer_{uuid.uuid4().hex}"
-    session = create_agent_team_session(session_id=session_id, team_id="persistent_team")
-    write_team_namespace(
-        session,
-        "persistent_team",
-        {
-            "spec": {
-                "team_name": "persistent_team",
-                "agents": {
-                    "leader": {},
-                },
-            },
-            "context": {
-                "role": "leader",
-                "member_name": "leader",
-                "persona": "leader",
-                "team_spec": {
-                    "team_name": "persistent_team",
-                    "display_name": "persistent_team",
-                    "leader_member_name": "leader",
-                },
-                "messager_config": {},
-                "db_config": {},
-            },
-        },
-    )
-
-    customizer = lambda *_args, **_kwargs: None  # noqa: E731 — sentinel callable for identity check
-    runtime_spec = TeamAgentSpec.model_construct(team_name="persistent_team", agents={})
-    runtime_spec.agent_customizer = customizer
-
-    captured: dict[str, Any] = {}
-
-    def fake_configure(self, spec, context):
-        captured["spec"] = spec
-        captured["context"] = context
-        return self
-
-    with patch.object(TeamAgent, "configure", fake_configure):
-        agent = TeamAgent.recover_from_session(
-            session,
-            "persistent_team",
-            runtime_spec=runtime_spec,
-        )
-
-    assert captured["spec"].agent_customizer is customizer
-    assert agent.session_id == session_id
 
 
-def test_team_agent_recover_from_session_without_runtime_spec_keeps_customizer_none():
-    """Without ``runtime_spec`` the recovered spec keeps the persisted (None)
-    customizer slot.
-
-    Guards against accidental shadowing — the override path must only fire
-    when the caller explicitly supplies a runtime spec.
-    """
-    from openjiuwen.agent_teams.runtime.metadata import write_team_namespace
-
-    session_id = f"recover_no_runtime_{uuid.uuid4().hex}"
-    session = create_agent_team_session(session_id=session_id, team_id="persistent_team")
-    write_team_namespace(
-        session,
-        "persistent_team",
-        {
-            "spec": {
-                "team_name": "persistent_team",
-                "agents": {
-                    "leader": {},
-                },
-            },
-            "context": {
-                "role": "leader",
-                "member_name": "leader",
-                "persona": "leader",
-                "team_spec": {
-                    "team_name": "persistent_team",
-                    "display_name": "persistent_team",
-                    "leader_member_name": "leader",
-                },
-                "messager_config": {},
-                "db_config": {},
-            },
-        },
-    )
-
-    captured: dict[str, Any] = {}
-
-    def fake_configure(self, spec, context):
-        captured["spec"] = spec
-        return self
-
-    with patch.object(TeamAgent, "configure", fake_configure):
-        TeamAgent.recover_from_session(session, "persistent_team")
-
-    assert captured["spec"].agent_customizer is None
 
 
 @pytest.mark.asyncio

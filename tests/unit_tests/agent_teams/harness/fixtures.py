@@ -207,26 +207,35 @@ def make_card(name: str = "native_harness_test") -> AgentCard:
     return AgentCard(name=name, description="native-harness-test")
 
 
-def make_provider(card: AgentCard | None = None) -> Any:
-    """Build a zero-arg provider yielding a task-loop-enabled DeepAgent template.
+def make_spec(card: AgentCard | None = None) -> Any:
+    """Build a fake DeepAgentSpec whose ``resolve_parts`` yields task-loop parts.
 
-    The harness copies the template's config + rails onto itself, builds the
-    real task-loop kernel, then the test injects a FakeReactAgent. The template
-    needs no model: the real react_agent built by ``ensure_initialized`` is
-    immediately replaced by ``set_react_agent``.
+    Forward construction: NativeHarness configures itself from this spec's
+    parts (a task-loop-enabled config, no model, no rails), builds the real
+    task-loop kernel, then the test injects a FakeReactAgent via
+    ``set_react_agent`` — the react_agent ``ensure_initialized`` would build is
+    immediately replaced.
 
     Args:
-        card: Optional card for the template (and thus the harness).
+        card: Optional card for the spec (and thus the harness).
 
     Returns:
-        A zero-arg callable returning a configured DeepAgent.
+        A fake spec exposing ``resolve_parts(context) -> DeepAgentParts``.
     """
+    from openjiuwen.harness.factory import DeepAgentParts
+
     agent_card = card or make_card()
 
-    def _provider() -> DeepAgent:
-        return DeepAgent(agent_card).configure(DeepAgentConfig(enable_task_loop=True))
+    class _FakeSpec:
+        def resolve_parts(self, context: Any = None) -> DeepAgentParts:
+            return DeepAgentParts(
+                config=DeepAgentConfig(card=agent_card, enable_task_loop=True),
+                rails=[],
+                tool_cards=[],
+                tool_instances=[],
+            )
 
-    return _provider
+    return _FakeSpec()
 
 
 async def start_harness(

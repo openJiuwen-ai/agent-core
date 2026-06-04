@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
@@ -18,9 +20,14 @@ from openjiuwen.agent_teams.schema.team import (
 
 
 def _tool_names(agent) -> set[str]:
-    """Extract registered tool names from the agent's
-    ability manager."""
-    return set(agent.harness.inner_agent.ability_manager._tools.keys())
+    """Extract registered tool names from the agent's ability manager.
+
+    Team tools register during ``ensure_initialized`` (the rail init pass), so
+    drive it first — ``build`` only prepares the config and queues the rails.
+    """
+    native = agent.harness.inner_agent
+    asyncio.run(native.ensure_initialized())
+    return set(native.ability_manager._tools.keys())
 
 
 def _dummy_agents() -> dict[str, DeepAgentSpec]:
