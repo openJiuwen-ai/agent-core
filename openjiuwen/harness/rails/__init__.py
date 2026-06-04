@@ -23,20 +23,18 @@ from openjiuwen.harness.rails.memory_rail import MemoryRail
 from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
 from openjiuwen.harness.rails.security import (
     BaseSecurityRail,
+    SecurityAlert,
     SecurityAllow,
     SecurityCheckContext,
     SecurityDecision,
     SecurityInterrupt,
     SecurityReject,
-    SecurityAlert,
-    SecurityAlertLevel,
 )
 
 __all__ = [
     "BaseSecurityRail",
     "DeepAgentRail",
     "SecurityAlert",
-    "SecurityAlertLevel",
     "SecurityAllow",
     "SecurityCheckContext",
     "SecurityDecision",

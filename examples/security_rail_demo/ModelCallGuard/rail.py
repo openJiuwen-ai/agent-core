@@ -76,17 +76,17 @@ class ModelcallguardRail(BaseSecurityRail):
     def _check_input(self, inputs: ModelCallInputs, ctx):
         if ctx.context is None:
             return self.allow()
-        
+
         messages = ctx.context.get_messages(with_history=True)
-        
+
         for msg in messages:
             content = self._extract_message_content(msg)
             if content and self._contains_secret(content):
-                self._pop_matching_messages(ctx, self._compiled_patterns, with_history=True)
+                self._pop_matching_messages_local(ctx, with_history=True)
                 return self.reject(
                     message="API key/secret detected in conversation history. Operation blocked for security.",
                 )
-        
+
         return self.allow()
 
     def _check_output(self, inputs: ModelCallInputs, ctx):
@@ -97,7 +97,7 @@ class ModelcallguardRail(BaseSecurityRail):
         if isinstance(response, AssistantMessage):
             content = getattr(response, "content", "")
             if isinstance(content, str) and self._contains_secret(content):
-                self._pop_matching_messages(ctx, self._compiled_patterns, with_history=True)
+                self._pop_matching_messages_local(ctx, with_history=True)
                 return self.reject(
                     message="API key/secret detected in model response. Operation blocked for security.",
                 )
@@ -110,18 +110,58 @@ class ModelcallguardRail(BaseSecurityRail):
                         args_dict = json.loads(args_str)
                         args_json = json.dumps(args_dict)
                         if self._contains_secret(args_json):
-                            self._pop_matching_messages(ctx, self._compiled_patterns, with_history=True)
+                            self._pop_matching_messages_local(ctx, with_history=True)
                             return self.reject(
                                 message="API key/secret detected in tool arguments. Operation blocked for security.",
                             )
                     except json.JSONDecodeError:
                         if self._contains_secret(args_str):
-                            self._pop_matching_messages(ctx, self._compiled_patterns, with_history=True)
+                            self._pop_matching_messages_local(ctx, with_history=True)
                             return self.reject(
                                 message="API key/secret detected in tool arguments. Operation blocked for security.",
                             )
 
         return self.allow()
+
+    def _pop_matching_messages_local(self, ctx, with_history: bool = True) -> list:
+        if ctx.context is None:
+            return []
+        messages = ctx.context.get_messages(with_history=with_history)
+
+        kept = []
+        popped = []
+        for msg in messages:
+            content = self._extract_message_content(msg)
+            if content and self._contains_secret(content):
+                popped.append(msg)
+            else:
+                kept.append(msg)
+
+        if popped:
+            self._replace_messages(ctx, kept, with_history=with_history)
+
+        return popped
+
+    def _extract_message_content(self, msg) -> str:
+        if hasattr(msg, "content"):
+            content = msg.content
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                parts = []
+                for part in content:
+                    if isinstance(part, str):
+                        parts.append(part)
+                    elif isinstance(part, dict) and "text" in part:
+                        parts.append(str(part["text"]))
+                return " ".join(parts)
+            return str(content)
+        if isinstance(msg, dict) and "content" in msg:
+            content = msg["content"]
+            if isinstance(content, str):
+                return content
+            return str(content)
+        return ""
 
     def _contains_secret(self, text: str) -> bool:
         for pattern in self._compiled_patterns:

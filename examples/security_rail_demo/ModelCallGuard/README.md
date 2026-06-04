@@ -26,24 +26,19 @@ If check and pop use different patterns or scopes, you'll have inconsistent beha
 ```python
 # Use SAME patterns for check and pop
 if self._contains_secret(content):  # uses self._compiled_patterns
-    self._pop_matching_messages(ctx, self._compiled_patterns, ...)  # SAME patterns
+    self._pop_matching_messages_local(ctx, with_history=True)  # SAME patterns + SAME scope
 
 # Use SAME scope for check and pop
 messages = ctx.context.get_messages(with_history=True)  # check scope
-self._pop_matching_messages(ctx, patterns, with_history=True)  # SAME scope
+self._pop_matching_messages_local(ctx, with_history=True)  # SAME scope
 ```
 
 ### Incorrect Implementation (Examples)
 
 ```python
-# WRONG: Different patterns
-patterns_check = [r"sk-\w+", r"API_KEY=\S+"]
-patterns_pop = [r"sk-\w+"]  # Missing API_KEY pattern!
-# Result: API_KEY detected but not popped, remains in history
-
 # WRONG: Different scopes
 messages = ctx.context.get_messages(with_history=True)  # Check all history
-self._pop_matching_messages(ctx, patterns, with_history=False)  # Pop only current turn
+self._pop_matching_messages_local(ctx, with_history=False)  # Pop only current turn
 # Result: Secret in old history remains, triggers again next turn
 
 # WRONG: Overly broad pattern
@@ -77,59 +72,15 @@ API_KEY_PATTERNS = [
 
 ## Helper Methods
 
-`BaseSecurityRail` provides helpers that ensure consistency:
+This rail implements its own message filtering logic, then uses `_replace_messages` from `BaseSecurityRail` to apply changes:
 
-### Pop/Sanitize Helpers
+| Method | Purpose |
+|--------|---------|
+| `_pop_matching_messages_local(ctx, with_history)` | Pop messages containing secrets, call `_replace_messages` with kept messages |
+| `_extract_message_content(msg)` | Extract content from message types |
+| `_contains_secret(text)` | Check text against compiled patterns |
 
-| Helper | Purpose | Returns |
-|--------|---------|---------|
-| `_pop_matching_messages(ctx, patterns, with_history)` | Remove messages with secrets | List of popped messages |
-| `_sanitize_matching_messages(ctx, patterns, replacement, with_history)` | Replace secrets with `[REDACTED]` | List of sanitized messages |
-| `_extract_message_content(msg)` | Extract content from message types | String content |
-| `_contains_any_pattern(text, patterns)` | Check text against patterns | Boolean |
-
-### Interrupt Helpers
-
-| Helper | Purpose | Returns |
-|--------|---------|---------|
-| `_handle_interrupt_resume(security_ctx, auto_confirm_key)` | Handle interrupt resume flow | `SecurityAllow`, `SecurityReject`, or `None` |
-| `_is_auto_confirmed(config, key)` | Check if auto-approved | Boolean |
-| `_store_auto_confirm(ctx, key)` | Store auto-approval for future | None |
-
-### Interrupt Flow
-
-```python
-# Typical interrupt flow in run_security_check
-auto_confirm_key = f"rail_name:{tool_name}"
-
-# Handle resume (auto-confirm + user_input)
-resume_decision = self._handle_interrupt_resume(security_ctx, auto_confirm_key)
-if resume_decision is not None:
-    return resume_decision  # Allow or Reject
-
-# First call - check and interrupt if needed
-if self._contains_secret(content):
-    return self.interrupt(
-        InterruptRequest(
-            message="Approve execution?",
-            payload_schema={...},
-            auto_confirm_key=auto_confirm_key,
-        ),
-        subject_id=tool_call_id,
-    )
-```
-
-### Single Event Mode
-
-Rails can be configured to handle only one event:
-
-```python
-# Only check input (before model call)
-rail.supported_events = {AgentCallbackEvent.BEFORE_MODEL_CALL}
-
-# Only check output (after model call)
-rail.supported_events = {AgentCallbackEvent.AFTER_MODEL_CALL}
-```
+`_replace_messages(ctx, messages, with_history)` from `BaseSecurityRail` handles the final message list replacement.
 
 ## Installation
 

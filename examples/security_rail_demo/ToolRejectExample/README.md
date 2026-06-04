@@ -1,47 +1,15 @@
 # ToolRejectExample Rail
 
-Demonstrates the critical difference between BEFORE and AFTER tool reject behavior.
+Demonstrates tool reject behavior using _skip_tool for both BEFORE and AFTER events.
 
-## Reject Behavior Comparison
+## Reject Behavior
 
 | Event | When Detected | Reject Action | Agent Behavior |
 |-------|--------------|---------------|----------------|
 | **BEFORE_TOOL_CALL** | Secret in `tool_args` | `skip_tool` | Agent **continues** (tries other approach) |
-| **AFTER_TOOL_CALL** | Secret in `tool_result` | `force_finish` | Agent **terminates** (returns error) |
+| **AFTER_TOOL_CALL** | Secret in `tool_result` | `skip_tool` | Agent **continues** (tries other approach) |
 
-## Why Different Behavior?
-
-### BEFORE Reject: Agent Continues
-
-```
-User: "Find file containing sk-proj_secret123"
-LLM: ToolCall(glob, args="*sk-proj_secret123*")
-Rail: Reject "Secret in arguments"
-      → skip_tool
-      → ToolMessage = "Tool execution skipped"
-Agent: Continues...
-LLM: "I couldn't search for that pattern. Let me try a different approach."
-      → Asks user for safe filename
-```
-
-**Rationale:** Secret is in user input/args, tool hasn't executed yet. Agent can try alternative approach.
-
----
-
-### AFTER Reject: Agent Terminates
-
-```
-User: "Read file .env"
-Tool: Returns "API_KEY=sk-abc123..."
-Rail: Reject "Secret in result"
-      → force_finish
-      → Returns error to user
-Agent: Terminates, shows "Blocked by security rail"
-```
-
-**Rationale:** Secret has leaked into tool result. Continuing risks exposure. Must terminate.
-
----
+Both BEFORE and AFTER tool reject use `_skip_tool`, returning "blocked for security reason" as the tool result. The agent sees this message and can try an alternative approach.
 
 ## Flow Diagrams
 
@@ -63,7 +31,7 @@ Agent: Terminates, shows "Blocked by security rail"
 │  ✓ Secret detected in args                                      │
 │  → Reject                                                        │
 │  → _skip_tool (base behavior)                                   │
-│  → ToolMessage = "Tool execution skipped"                       │
+│  → ToolMessage = "blocked for security reason"                  │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
@@ -102,14 +70,14 @@ Agent: Terminates, shows "Blocked by security rail"
 │  AFTER_TOOL_CALL Rail                                           │
 │  ✓ Secret detected in result                                    │
 │  → Reject                                                        │
-│  → force_finish (base behavior)                                 │
-│  → Returns error to user                                        │
+│  → _skip_tool (base behavior)                                   │
+│  → ToolMessage = "blocked for security reason"                  │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│  Agent Terminates                                               │
-│  User sees: "Blocked by security rail"                          │
-│  Conversation ends                                              │
+│  Agent Continues                                                │
+│  LLM sees ToolMessage                                           │
+│  → "The result was blocked, let me try a different approach"    │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -151,7 +119,7 @@ SENSITIVE_PATTERNS = [
 | Interrupt | ✓ HITL approval | ✗ Direct reject |
 | User choice | Approve/Reject | No choice |
 | BEFORE reject | User rejects → skip | Auto reject → skip |
-| AFTER reject | User rejects → force_finish | Auto reject → force_finish |
+| AFTER reject | User rejects → skip | Auto reject → skip |
 
 **Use ApiKeyGuardInterrupt** when you want user approval before blocking.
 **Use ToolRejectExample** when you want automatic blocking without user interaction.
@@ -178,7 +146,7 @@ Test scenarios:
 
 2. **AFTER reject test:**
    - User: "read .env file containing API_KEY=sk-xxx"
-   - Expected: Agent terminates with error
+   - Expected: Tool result replaced with "blocked for security reason", agent continues
 
 ---
 
@@ -187,13 +155,8 @@ Test scenarios:
 The reject behavior is implemented in `BaseSecurityRail._apply_reject()`:
 
 ```python
-# BEFORE_TOOL_CALL reject
-if event == AgentCallbackEvent.BEFORE_TOOL_CALL:
+# Both BEFORE_TOOL_CALL and AFTER_TOOL_CALL reject
+if event in (AgentCallbackEvent.BEFORE_TOOL_CALL, AgentCallbackEvent.AFTER_TOOL_CALL):
     self._skip_tool(ctx, tool_call, ...)
     # Agent continues
-
-# AFTER_TOOL_CALL reject
-if event == AgentCallbackEvent.AFTER_TOOL_CALL:
-    ctx.request_force_finish(result)
-    # Agent terminates
 ```

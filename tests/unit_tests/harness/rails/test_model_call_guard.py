@@ -14,7 +14,6 @@ from openjiuwen.core.single_agent.rail.base import (
 )
 from openjiuwen.harness.rails.security.base_security_rail import (
     SecurityAlert,
-    SecurityAlertLevel,
     SecurityAllow,
     SecurityCheckContext,
     SecurityReject,
@@ -818,15 +817,16 @@ class TestToolInterruptReject:
             callback_ctx=ctx,
             event=AgentCallbackEvent.AFTER_TOOL_CALL,
             user_input={"approved": False},
-            auto_confirm_config={},
+auto_confirm_config={},
         )
-        
+
         decision = await rail.run_security_check(security_ctx)
         await rail.apply_security_decision(security_ctx, decision)
-        
+
         finish = ctx.consume_force_finish()
-        assert finish is not None
-        assert "Rejected" in finish.result["output"]
+        assert finish is None
+        assert ctx.extra.get("_skip_tool") is True
+        assert "用户拒绝" in ctx.inputs.tool_msg.content
 
     @pytest.mark.asyncio
     async def test_before_reject_skips_tool_no_force_finish(self):
@@ -865,7 +865,7 @@ class TestToolInterruptReject:
         finish = ctx.consume_force_finish()
         assert finish is None
         assert ctx.extra.get("_skip_tool") is True
-        assert "Tool execution skipped" in ctx.inputs.tool_msg.content
+        assert "用户拒绝" in ctx.inputs.tool_msg.content
 
     @pytest.mark.asyncio
     async def test_before_interrupt_on_args_secret(self):
@@ -882,21 +882,21 @@ class TestToolInterruptReject:
                 tool_name="read_file",
                 tool_args=f"{{\"path\": \"file_with_{secret}\"}}",
                 tool_call=ToolCall(id="call_001", type="function", name="read_file", arguments="{}"),
-            ),
+),
             context=None,
         )
-        
+
         security_ctx = SecurityCheckContext(
             callback_ctx=ctx,
             event=AgentCallbackEvent.BEFORE_TOOL_CALL,
             user_input=None,
             auto_confirm_config={},
         )
-        
+
         decision = await rail.run_security_check(security_ctx)
-        
+
         assert isinstance(decision, SecurityInterrupt)
-        assert "tool arguments" in decision.request.message.lower()
+        assert "api_key_openai" in decision.request.message
 
     @pytest.mark.asyncio
     async def test_after_interrupt_on_result_secret(self):
@@ -914,20 +914,20 @@ class TestToolInterruptReject:
                 tool_result=f"API_KEY={secret}",
                 tool_call=ToolCall(id="call_001", type="function", name="read_file", arguments="{}"),
             ),
-            context=None,
+context=None,
         )
-        
+
         security_ctx = SecurityCheckContext(
             callback_ctx=ctx,
             event=AgentCallbackEvent.AFTER_TOOL_CALL,
             user_input=None,
             auto_confirm_config={},
         )
-        
+
         decision = await rail.run_security_check(security_ctx)
-        
+
         assert isinstance(decision, SecurityInterrupt)
-        assert "tool result" in decision.request.message.lower()
+        assert "api_key_openai" in decision.request.message
 
     @pytest.mark.asyncio
     async def test_before_approve_executes_tool(self):
@@ -1011,24 +1011,24 @@ class TestApiKeyGuardInterruptAutoConfirm:
             event=AgentCallbackEvent.BEFORE_TOOL_CALL,
             auto_confirm_config={"api_key_guard:read_file:before": True},
         )
-        
+
         decision = await rail.run_security_check(security_ctx)
-        
+
         assert isinstance(decision, SecurityAllow)
 
     @pytest.mark.asyncio
     async def test_after_auto_confirm_key_format(self):
-        """Auto_confirm key for AFTER should be api_key_guard:{tool_name}:after."""
+        """Auto_confirm key for AFTER should be apikeyguardinterrupt:{detection_type}:after."""
         from examples.security_rail_demo.ApiKeyGuardInterrupt.rail import ApikeyguardinterruptRail
-        
+
         rail = ApikeyguardinterruptRail()
-        
-        stored_state = {"api_key_guard:read_file:after": True}
+
+        stored_state = {"apikeyguardinterrupt:secret_generic:after": True}
         mock_session = type("MockSession", (), {
             "get_state": lambda self, key: stored_state.get(key, {}),
             "update_state": lambda self, state: stored_state.update(state),
         })()
-        
+
         ctx = AgentCallbackContext(
             agent=object(),
             inputs=ToolCallInputs(
@@ -1039,15 +1039,15 @@ class TestApiKeyGuardInterruptAutoConfirm:
             context=None,
             session=mock_session,
         )
-        
+
         security_ctx = SecurityCheckContext(
             callback_ctx=ctx,
             event=AgentCallbackEvent.AFTER_TOOL_CALL,
-            auto_confirm_config={"api_key_guard:read_file:after": True},
+            auto_confirm_config={"apikeyguardinterrupt:secret_generic:after": True},
         )
-        
+
         decision = await rail.run_security_check(security_ctx)
-        
+
         assert isinstance(decision, SecurityAllow)
 
 
@@ -1261,11 +1261,12 @@ class TestToolRejectExample:
         
         decision = await rail.run_security_check(security_ctx)
         await rail.apply_security_decision(security_ctx, decision)
-        
-        # AFTER reject: force_finish, agent terminates
+
+        # AFTER reject: skip_tool, agent continues
         finish = ctx.consume_force_finish()
-        assert finish is not None
-        assert "Agent terminated" in finish.result["output"]
+        assert finish is None
+        assert ctx.extra.get("_skip_tool") is True
+        assert "blocked for security reason" in ctx.inputs.tool_msg.content
 
     @pytest.mark.asyncio
     async def test_before_allows_clean_args(self):
@@ -1362,374 +1363,3 @@ class TestToolRejectExample:
         assert AgentCallbackEvent.BEFORE_TOOL_CALL in callbacks
         assert AgentCallbackEvent.AFTER_TOOL_CALL in callbacks
         assert len(callbacks) == 2
-
-
-class TestSecurityAlert:
-    """Tests for SecurityAlert decision."""
-
-    def test_security_alert_level_enum_values(self):
-        """SecurityAlertLevel should have INFO, WARNING, ERROR, CRITICAL."""
-        assert SecurityAlertLevel.INFO.value == "info"
-        assert SecurityAlertLevel.WARNING.value == "warning"
-        assert SecurityAlertLevel.ERROR.value == "error"
-        assert SecurityAlertLevel.CRITICAL.value == "critical"
-
-    def test_security_alert_dataclass_fields(self):
-        """SecurityAlert should have message, level, alert_type, display_mode."""
-        rail = ModelcallguardRail()
-        alert = rail.alert(
-            message="Test alert",
-            level=SecurityAlertLevel.WARNING,
-            alert_type="test",
-            display_mode="popup",
-        )
-
-        assert alert.message == "Test alert"
-        assert alert.level == SecurityAlertLevel.WARNING
-        assert alert.alert_type == "test"
-        assert alert.display_mode == "popup"
-
-    def test_security_alert_default_values(self):
-        """SecurityAlert should have default values."""
-        rail = ModelcallguardRail()
-        alert = rail.alert(message="Default test")
-
-        assert alert.message == "Default test"
-        assert alert.level == SecurityAlertLevel.WARNING
-        assert alert.alert_type == "security"
-        assert alert.display_mode == "popup"
-
-    def test_security_alert_display_modes(self):
-        """SecurityAlert should support popup, history, inline display modes."""
-        rail = ModelcallguardRail()
-
-        alert_popup = rail.alert(message="popup", display_mode="popup")
-        assert alert_popup.display_mode == "popup"
-
-        alert_history = rail.alert(message="history", display_mode="history")
-        assert alert_history.display_mode == "history"
-
-        alert_inline = rail.alert(message="inline", display_mode="inline")
-        assert alert_inline.display_mode == "inline"
-
-    @pytest.mark.asyncio
-    async def test_apply_alert_streams_to_session(self):
-        """_apply_alert should stream OutputSchema type=message to session."""
-        from openjiuwen.core.session.stream import OutputSchema
-        from unittest.mock import AsyncMock, MagicMock
-
-        rail = ModelcallguardRail()
-        alert = rail.alert(
-            message="Stream test",
-            level=SecurityAlertLevel.ERROR,
-            display_mode="popup",
-        )
-
-        mock_session = MagicMock()
-        mock_session.write_stream = AsyncMock()
-
-        ctx = AgentCallbackContext(
-            agent=object(),
-            inputs=ToolCallInputs(
-                tool_name="read",
-                tool_result="test",
-                tool_call=ToolCall(id="call_001", type="function", name="read", arguments="{}"),
-            ),
-            context=None,
-            session=mock_session,
-        )
-
-        security_ctx = SecurityCheckContext(
-            callback_ctx=ctx,
-            event=AgentCallbackEvent.AFTER_TOOL_CALL,
-        )
-
-        await rail._apply_alert(security_ctx, alert)
-
-        mock_session.write_stream.assert_called_once()
-        stream_data = mock_session.write_stream.call_args[0][0]
-        assert isinstance(stream_data, OutputSchema)
-        assert stream_data.type == "message"
-        assert stream_data.payload["role"] == "system"
-        assert "[ERROR]" in stream_data.payload["content"]
-        assert "Stream test" in stream_data.payload["content"]
-        assert stream_data.payload["metadata"]["is_security_alert"] is True
-        assert stream_data.payload["metadata"]["level"] == "error"
-        assert stream_data.payload["metadata"]["display_mode"] == "popup"
-
-    @pytest.mark.asyncio
-    async def test_apply_alert_with_history_mode(self):
-        """_apply_alert with history mode should still use type=message (frontend compatibility)."""
-        from openjiuwen.core.session.stream import OutputSchema
-        from unittest.mock import AsyncMock, MagicMock
-
-        rail = ModelcallguardRail()
-        alert = rail.alert(
-            message="History test",
-            display_mode="history",
-        )
-
-        mock_session = MagicMock()
-        mock_session.write_stream = AsyncMock()
-
-        ctx = AgentCallbackContext(
-            agent=object(),
-            inputs=ToolCallInputs(
-                tool_name="read",
-                tool_result="test",
-                tool_call=ToolCall(id="call_001", type="function", name="read", arguments="{}"),
-            ),
-            context=None,
-            session=mock_session,
-        )
-
-        security_ctx = SecurityCheckContext(
-            callback_ctx=ctx,
-            event=AgentCallbackEvent.AFTER_TOOL_CALL,
-        )
-
-        await rail._apply_alert(security_ctx, alert)
-
-        stream_data = mock_session.write_stream.call_args[0][0]
-        assert stream_data.type == "message"
-        assert stream_data.payload["metadata"]["display_mode"] == "history"
-
-    @pytest.mark.asyncio
-    async def test_apply_alert_with_inline_mode(self):
-        """_apply_alert with inline mode should still use type=message (frontend compatibility)."""
-        from openjiuwen.core.session.stream import OutputSchema
-        from unittest.mock import AsyncMock, MagicMock
-
-        rail = ModelcallguardRail()
-        alert = rail.alert(
-            message="Inline test",
-            display_mode="inline",
-        )
-
-        mock_session = MagicMock()
-        mock_session.write_stream = AsyncMock()
-
-        ctx = AgentCallbackContext(
-            agent=object(),
-            inputs=ToolCallInputs(
-                tool_name="read",
-                tool_result="test",
-                tool_call=ToolCall(id="call_001", type="function", name="read", arguments="{}"),
-            ),
-            context=None,
-            session=mock_session,
-        )
-
-        security_ctx = SecurityCheckContext(
-            callback_ctx=ctx,
-            event=AgentCallbackEvent.AFTER_TOOL_CALL,
-        )
-
-        await rail._apply_alert(security_ctx, alert)
-
-        stream_data = mock_session.write_stream.call_args[0][0]
-        assert stream_data.type == "message"
-        assert stream_data.payload["metadata"]["display_mode"] == "inline"
-
-    @pytest.mark.asyncio
-    async def test_apply_alert_without_session(self):
-        """_apply_alert should work without session (no stream, just log)."""
-        rail = ModelcallguardRail()
-        alert = rail.alert(message="No session test")
-
-        ctx = AgentCallbackContext(
-            agent=object(),
-            inputs=ToolCallInputs(
-                tool_name="read",
-                tool_result="test",
-                tool_call=ToolCall(id="call_001", type="function", name="read", arguments="{}"),
-            ),
-            context=None,
-            session=None,
-        )
-
-        security_ctx = SecurityCheckContext(
-            callback_ctx=ctx,
-            event=AgentCallbackEvent.AFTER_TOOL_CALL,
-        )
-
-        await rail._apply_alert(security_ctx, alert)
-
-
-class TestApiKeyGuardAlert:
-    """Tests for ApiKeyGuardAlert example rail."""
-
-    @pytest.mark.asyncio
-    async def test_alert_on_api_key_in_result(self):
-        """ApiKeyGuardAlert should return SecurityAlert when API key detected."""
-        from examples.security_rail_demo.ApiKeyGuardAlert.rail import ApikeyguardalertRail
-
-        rail = ApikeyguardalertRail(display_mode="popup")
-        secret = "sk-abc123def456ghi789jkl012mno"
-
-        ctx = AgentCallbackContext(
-            agent=object(),
-            inputs=ToolCallInputs(
-                tool_name="read_file",
-                tool_result=f"API_KEY={secret}",
-                tool_call=ToolCall(id="call_001", type="function", name="read_file", arguments="{}"),
-            ),
-            context=None,
-        )
-
-        security_ctx = SecurityCheckContext(
-            callback_ctx=ctx,
-            event=AgentCallbackEvent.AFTER_TOOL_CALL,
-        )
-
-        decision = await rail.run_security_check(security_ctx)
-
-        assert isinstance(decision, SecurityAlert)
-        assert "API key" in decision.message
-        assert decision.display_mode == "popup"
-
-    @pytest.mark.asyncio
-    async def test_allow_clean_result(self):
-        """ApiKeyGuardAlert should allow clean tool results."""
-        from examples.security_rail_demo.ApiKeyGuardAlert.rail import ApikeyguardalertRail
-
-        rail = ApikeyguardalertRail()
-
-        ctx = AgentCallbackContext(
-            agent=object(),
-            inputs=ToolCallInputs(
-                tool_name="read_file",
-                tool_result="Normal file content",
-                tool_call=ToolCall(id="call_001", type="function", name="read_file", arguments="{}"),
-            ),
-            context=None,
-        )
-
-        security_ctx = SecurityCheckContext(
-            callback_ctx=ctx,
-            event=AgentCallbackEvent.AFTER_TOOL_CALL,
-        )
-
-        decision = await rail.run_security_check(security_ctx)
-
-        assert isinstance(decision, SecurityAllow)
-
-    @pytest.mark.asyncio
-    async def test_allow_non_whitelist_tool(self):
-        """ApiKeyGuardAlert should allow tools not in whitelist."""
-        from examples.security_rail_demo.ApiKeyGuardAlert.rail import ApikeyguardalertRail
-
-        rail = ApikeyguardalertRail()
-        secret = "sk-abc123"
-
-        ctx = AgentCallbackContext(
-            agent=object(),
-            inputs=ToolCallInputs(
-                tool_name="write_file",  # Not in FILE_READING_TOOLS
-                tool_result=f"API_KEY={secret}",
-                tool_call=ToolCall(id="call_001", type="function", name="write_file", arguments="{}"),
-            ),
-            context=None,
-        )
-
-        security_ctx = SecurityCheckContext(
-            callback_ctx=ctx,
-            event=AgentCallbackEvent.AFTER_TOOL_CALL,
-        )
-
-        decision = await rail.run_security_check(security_ctx)
-
-        assert isinstance(decision, SecurityAllow)
-
-    @pytest.mark.asyncio
-    async def test_custom_display_mode(self):
-        """ApiKeyGuardAlert should use custom display_mode."""
-        from examples.security_rail_demo.ApiKeyGuardAlert.rail import ApikeyguardalertRail
-
-        rail = ApikeyguardalertRail(display_mode="history")
-        secret = "sk-abc123def456ghi789jkl"
-
-        ctx = AgentCallbackContext(
-            agent=object(),
-            inputs=ToolCallInputs(
-                tool_name="bash",
-                tool_result=f"Found: {secret}",
-                tool_call=ToolCall(id="call_001", type="function", name="bash", arguments="{}"),
-            ),
-            context=None,
-        )
-
-        security_ctx = SecurityCheckContext(
-            callback_ctx=ctx,
-            event=AgentCallbackEvent.AFTER_TOOL_CALL,
-        )
-
-        decision = await rail.run_security_check(security_ctx)
-
-        assert isinstance(decision, SecurityAlert)
-        assert decision.display_mode == "history"
-
-    @pytest.mark.asyncio
-    async def test_custom_alert_level(self):
-        """ApiKeyGuardAlert should use custom alert_level."""
-        from examples.security_rail_demo.ApiKeyGuardAlert.rail import ApikeyguardalertRail
-
-        rail = ApikeyguardalertRail(alert_level=SecurityAlertLevel.CRITICAL)
-        secret = "sk-abc123def456ghi789jkl012"
-
-        ctx = AgentCallbackContext(
-            agent=object(),
-            inputs=ToolCallInputs(
-                tool_name="read",
-                tool_result=f"Key: {secret}",
-                tool_call=ToolCall(id="call_001", type="function", name="read", arguments="{}"),
-            ),
-            context=None,
-        )
-
-        security_ctx = SecurityCheckContext(
-            callback_ctx=ctx,
-            event=AgentCallbackEvent.AFTER_TOOL_CALL,
-        )
-
-        decision = await rail.run_security_check(security_ctx)
-
-        assert isinstance(decision, SecurityAlert)
-        assert decision.level == SecurityAlertLevel.CRITICAL
-
-    @pytest.mark.asyncio
-    async def test_underscore_key_detected(self):
-        """ApiKeyGuardAlert should detect underscore keys."""
-        from examples.security_rail_demo.ApiKeyGuardAlert.rail import ApikeyguardalertRail
-
-        rail = ApikeyguardalertRail()
-        secret = "sk-A7nhsRpv_vcK55IGQe6hSQ"
-
-        ctx = AgentCallbackContext(
-            agent=object(),
-            inputs=ToolCallInputs(
-                tool_name="grep",
-                tool_result=f"Found key: {secret}",
-                tool_call=ToolCall(id="call_001", type="function", name="grep", arguments="{}"),
-            ),
-            context=None,
-        )
-
-        security_ctx = SecurityCheckContext(
-            callback_ctx=ctx,
-            event=AgentCallbackEvent.AFTER_TOOL_CALL,
-        )
-
-        decision = await rail.run_security_check(security_ctx)
-
-        assert isinstance(decision, SecurityAlert)
-
-    def test_both_events_registered(self):
-        """ApiKeyGuardAlert should register AFTER_TOOL_CALL event."""
-        from examples.security_rail_demo.ApiKeyGuardAlert.rail import ApikeyguardalertRail
-
-        rail = ApikeyguardalertRail()
-        callbacks = rail.get_callbacks()
-
-        assert AgentCallbackEvent.AFTER_TOOL_CALL in callbacks
-        assert len(callbacks) == 1

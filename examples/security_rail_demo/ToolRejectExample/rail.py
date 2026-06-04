@@ -1,15 +1,15 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Tool Reject Example - Demonstrates BEFORE/AFTER reject behavior difference.
+"""Tool Reject Example - Demonstrates BEFORE/AFTER reject behavior.
 
-This rail shows the different reject behaviors for tool events:
-- BEFORE_TOOL_CALL: skip_tool, agent continues (can try other approach)
-- AFTER_TOOL_CALL: force_finish, agent terminates (data leaked)
+This rail shows the reject behavior for tool events:
+- BEFORE_TOOL_CALL: skip_tool, agent continues (tries other approach)
+- AFTER_TOOL_CALL: skip_tool, agent continues (tries other approach)
 
 NO INTERRUPT - Direct reject when secret detected.
 
 Use this for:
-1. Understanding reject behavior difference
+1. Understanding reject behavior
 2. Testing tool security without HITL
 3. Simple security enforcement without user approval
 
@@ -48,19 +48,19 @@ TOOL_WHITELIST = [
 
 
 class ToolrejectexampleRail(BaseSecurityRail):
-    """Example rail demonstrating BEFORE/AFTER reject behavior.
+    """Example rail demonstrating tool reject behavior.
 
     BEFORE_TOOL_CALL reject:
         - Secret detected in tool_args
         - Action: skip_tool (tool not executed)
-        - ToolMessage: "Tool execution skipped"
+        - ToolMessage: "blocked for security reason"
         - Agent continues (can try other tools/approach)
 
     AFTER_TOOL_CALL reject:
         - Secret detected in tool_result
-        - Action: force_finish (agent terminates)
-        - ToolMessage: "Blocked by security rail"
-        - Agent stops, returns error to user
+        - Action: skip_tool (result replaced)
+        - ToolMessage: "blocked for security reason"
+        - Agent continues (can try other approach)
 
     No interrupt - direct reject when secret found.
     """
@@ -122,8 +122,8 @@ class ToolrejectexampleRail(BaseSecurityRail):
         """Check tool result after execution.
 
         If secret found:
-        - Return reject (base will call force_finish)
-        - Agent terminates, returns error
+        - Return reject (base will call _skip_tool)
+        - Agent continues, can try other approach
         """
         if tool_name not in TOOL_WHITELIST:
             return self.allow()
@@ -138,7 +138,7 @@ class ToolrejectexampleRail(BaseSecurityRail):
 
         if self._contains_secret(content):
             return self.reject(
-                message=f"Secret detected in {tool_name} result. Agent terminated.",
+                message=f"Secret detected in {tool_name} result. Tool blocked for security reason.",
             )
 
         return self.allow()

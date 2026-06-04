@@ -10,7 +10,7 @@ Events:
 
 Reject behavior:
     BEFORE reject: Skip tool execution, agent continues
-    AFTER reject: Force finish agent, return error
+    AFTER reject: Skip tool execution, agent continues
 
 Copy this folder to: ~/guardrail/extensions/ApiKeyGuardInterrupt/
 """
@@ -39,11 +39,14 @@ FILE_READING_TOOLS: Set[str] = {
     "glob",
 }
 
-API_KEY_PATTERNS = [
-    r"(?:api_key|API_KEY|apikey|APIKEY|secret|SECRET|token|TOKEN|credential|CREDENTIAL)\s*[=:]\s*[\"']?\S+[\"']?",
-    r"sk-[a-zA-Z0-9_-]{20,}",
-    r"Bearer\s+[a-zA-Z0-9\-_]+",
-    r"AKIA[0-9A-Z]{16}",
+DETECTION_RULES = [
+    {"pattern": r"sk-[a-zA-Z0-9_-]{20,}", "type": "api_key_openai"},
+    {"pattern": r"AKIA[0-9A-Z]{16}", "type": "api_key_aws"},
+    {"pattern": r"Bearer\s+[a-zA-Z0-9\-_]+", "type": "bearer_token"},
+    {
+        "pattern": r"(?:api_key|API_KEY|apikey|APIKEY|secret|SECRET|token|TOKEN|credential|CREDENTIAL)\s*[=:]\s*[\"']?\S+[\"']?",
+        "type": "secret_generic",
+    },
 ]
 
 
@@ -57,7 +60,7 @@ class ApikeyguardinterruptRail(BaseSecurityRail):
 
     AFTER_TOOL_CALL: Check tool result for secrets
         - Interrupt if secret in result
-        - Reject: force finish agent (data leaked)
+        - Reject: skip tool, agent continues
         - Approve: continue with result
     """
 
@@ -69,7 +72,9 @@ class ApikeyguardinterruptRail(BaseSecurityRail):
 
     def __init__(self) -> None:
         super().__init__(tool_names=FILE_READING_TOOLS)
-        self._compiled_patterns = [re.compile(p, re.IGNORECASE) for p in API_KEY_PATTERNS]
+        self._compiled_rules = [
+            {"pattern": re.compile(r["pattern"], re.IGNORECASE), "type": r["type"]} for r in DETECTION_RULES
+        ]
 
     async def run_security_check(self, security_ctx: SecurityCheckContext):
         ctx = security_ctx.callback_ctx
@@ -101,13 +106,11 @@ class ApikeyguardinterruptRail(BaseSecurityRail):
         tool_call_id: str,
         security_ctx: SecurityCheckContext,
     ):
-        """Check tool arguments before execution."""
-        auto_confirm_key = f"api_key_guard:{tool_name}:before"
+        """Check tool arguments before execution.
 
-        resume_decision = self._handle_interrupt_resume(security_ctx, auto_confirm_key)
-        if resume_decision is not None:
-            return resume_decision
-
+        Multi-type handling: detect all types, separate confirmed/unconfirmed,
+        interrupt showing ALL unconfirmed types for batch approval.
+        """
         tool_args = inputs.tool_args
         if tool_args is None:
             return self.allow()
@@ -116,30 +119,60 @@ class ApikeyguardinterruptRail(BaseSecurityRail):
         if not content:
             return self.allow()
 
-        if self._contains_api_key(content):
-            return self.interrupt(
-                InterruptRequest(
-                    message="API key/secret detected in tool arguments. Approve execution?",
-                    payload_schema={
-                        "type": "object",
-                        "properties": {
-                            "approved": {"type": "boolean"},
-                            "feedback": {"type": "string"},
-                            "auto_confirm": {"type": "boolean", "description": "Remember approval for this tool"},
-                        },
-                        "required": ["approved"],
-                    },
-                    auto_confirm_key=auto_confirm_key,
-                    ui_options=[
-                        {"label": "Approve", "description": "Execute this tool call", "value": "approve"},
-                        {"label": "Always Allow", "description": "Remember approval for this tool", "value": "always_allow"},
-                        {"label": "Reject", "description": "Skip tool execution", "value": "reject"},
-                    ],
-                ),
-                subject_id=tool_call_id,
-            )
+        detected_types = self._detect_all_types(content)
+        if not detected_types:
+            return self.allow()
 
-        return self.allow()
+        auto_confirm_config = security_ctx.auto_confirm_config
+        unconfirmed_types = []
+
+        for detection_type in detected_types:
+            key = f"apikeyguardinterrupt:{detection_type}:before"
+            if not self._is_auto_confirmed(auto_confirm_config, key):
+                unconfirmed_types.append(detection_type)
+
+        if not unconfirmed_types:
+            return self.allow()
+
+        user_input = security_ctx.user_input
+        if user_input is not None:
+            approved = False
+            auto_confirm = False
+
+            if isinstance(user_input, dict):
+                approved = user_input.get("approved", False)
+                auto_confirm = user_input.get("auto_confirm", False)
+            elif hasattr(user_input, "approved"):
+                approved = user_input.approved
+                auto_confirm = getattr(user_input, "auto_confirm", False)
+
+            if approved:
+                if auto_confirm:
+                    for detection_type in unconfirmed_types:
+                        key = f"apikeyguardinterrupt:{detection_type}:before"
+                        self._store_auto_confirm(security_ctx.callback_ctx, key)
+                return self.allow()
+            else:
+                return self.reject(message="用户拒绝")
+
+        first_type_key = f"apikeyguardinterrupt:{unconfirmed_types[0]}:before"
+
+        return self.interrupt(
+            InterruptRequest(
+                message=f"检测到 {', '.join(unconfirmed_types)} 类敏感信息，是否允许继续？",
+                payload_schema={
+                    "type": "object",
+                    "properties": {
+                        "approved": {"type": "boolean"},
+                        "feedback": {"type": "string"},
+                        "auto_confirm": {"type": "boolean", "description": "Remember approval for ALL detected types"},
+                    },
+                    "required": ["approved"],
+                },
+                auto_confirm_key=first_type_key,
+            ),
+            subject_id=tool_call_id,
+        )
 
     def _check_after(
         self,
@@ -148,13 +181,11 @@ class ApikeyguardinterruptRail(BaseSecurityRail):
         tool_call_id: str,
         security_ctx: SecurityCheckContext,
     ):
-        """Check tool result after execution."""
-        auto_confirm_key = f"api_key_guard:{tool_name}:after"
+        """Check tool result after execution.
 
-        resume_decision = self._handle_interrupt_resume(security_ctx, auto_confirm_key)
-        if resume_decision is not None:
-            return resume_decision
-
+        Multi-type handling: detect all types, separate confirmed/unconfirmed,
+        interrupt showing ALL unconfirmed types for batch approval.
+        """
         tool_result = inputs.tool_result
         if tool_result is None:
             return self.allow()
@@ -163,30 +194,60 @@ class ApikeyguardinterruptRail(BaseSecurityRail):
         if not content:
             return self.allow()
 
-        if self._contains_api_key(content):
-            return self.interrupt(
-                InterruptRequest(
-                    message="API key/secret detected in tool result. Approve to continue?",
-                    payload_schema={
-                        "type": "object",
-                        "properties": {
-                            "approved": {"type": "boolean"},
-                            "feedback": {"type": "string"},
-                            "auto_confirm": {"type": "boolean", "description": "Remember approval for this tool"},
-                        },
-                        "required": ["approved"],
-                    },
-                    auto_confirm_key=auto_confirm_key,
-                    ui_options=[
-                        {"label": "Approve", "description": "Continue with this result", "value": "approve"},
-                        {"label": "Always Allow", "description": "Remember approval for this tool", "value": "always_allow"},
-                        {"label": "Reject", "description": "Stop execution and return error", "value": "reject"},
-                    ],
-                ),
-                subject_id=tool_call_id,
-            )
+        detected_types = self._detect_all_types(content)
+        if not detected_types:
+            return self.allow()
 
-        return self.allow()
+        auto_confirm_config = security_ctx.auto_confirm_config
+        unconfirmed_types = []
+
+        for detection_type in detected_types:
+            key = f"apikeyguardinterrupt:{detection_type}:after"
+            if not self._is_auto_confirmed(auto_confirm_config, key):
+                unconfirmed_types.append(detection_type)
+
+        if not unconfirmed_types:
+            return self.allow()
+
+        user_input = security_ctx.user_input
+        if user_input is not None:
+            approved = False
+            auto_confirm = False
+
+            if isinstance(user_input, dict):
+                approved = user_input.get("approved", False)
+                auto_confirm = user_input.get("auto_confirm", False)
+            elif hasattr(user_input, "approved"):
+                approved = user_input.approved
+                auto_confirm = getattr(user_input, "auto_confirm", False)
+
+            if approved:
+                if auto_confirm:
+                    for detection_type in unconfirmed_types:
+                        key = f"apikeyguardinterrupt:{detection_type}:after"
+                        self._store_auto_confirm(security_ctx.callback_ctx, key)
+                return self.allow()
+            else:
+                return self.reject(message="用户拒绝")
+
+        first_type_key = f"apikeyguardinterrupt:{unconfirmed_types[0]}:after"
+
+        return self.interrupt(
+            InterruptRequest(
+                message=f"检测到 {', '.join(unconfirmed_types)} 类敏感信息，是否允许继续？",
+                payload_schema={
+                    "type": "object",
+                    "properties": {
+                        "approved": {"type": "boolean"},
+                        "feedback": {"type": "string"},
+                        "auto_confirm": {"type": "boolean", "description": "Remember approval for ALL detected types"},
+                    },
+                    "required": ["approved"],
+                },
+                auto_confirm_key=first_type_key,
+            ),
+            subject_id=tool_call_id,
+        )
 
     def _extract_args_content(self, tool_args) -> str:
         """Extract content from tool arguments."""
@@ -210,12 +271,17 @@ class ApikeyguardinterruptRail(BaseSecurityRail):
                 return data.get("output", "") or data.get("content", "") or ""
         return str(tool_result) if tool_result else ""
 
-    def _contains_api_key(self, content: str) -> bool:
-        """Check if content contains API key patterns."""
-        for pattern in self._compiled_patterns:
-            if pattern.search(content):
-                return True
-        return False
+    def _detect_all_types(self, content: str) -> list[str]:
+        """Detect content and return ALL matching detection_types.
+
+        Security requirement: detect all types, not just the first one.
+        Prevents missing other types when one type is auto-confirmed.
+        """
+        detected_types = []
+        for rule in self._compiled_rules:
+            if rule["pattern"].search(content):
+                detected_types.append(rule["type"])
+        return detected_types
 
 
 __all__ = ["ApikeyguardinterruptRail"]

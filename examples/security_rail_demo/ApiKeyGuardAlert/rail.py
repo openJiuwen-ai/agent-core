@@ -3,7 +3,6 @@
 """API Key Guard Rail - ALERT mode.
 
 Allows execution but alerts user when API key detected.
-Demonstrates three display_mode options: popup, history, inline.
 
 Copy this folder to: ~/guardrail/extensions/ApiKeyGuardAlert/
 """
@@ -18,7 +17,6 @@ from openjiuwen.harness.rails.base import DeepAgentRail  # noqa: F401
 from openjiuwen.harness.rails.security.base_security_rail import (
     BaseSecurityRail,
     SecurityAlert,
-    SecurityAlertLevel,
     SecurityAllow,
     SecurityCheckContext,
 )
@@ -40,25 +38,13 @@ API_KEY_PATTERNS = [
 
 
 class ApikeyguardalertRail(BaseSecurityRail):
-    """Rail that alerts on API keys/secrets but allows execution (ALERT mode).
-
-    Demonstrates SecurityAlert with configurable display_mode:
-    - popup: Toast/popup notification (default)
-    - history: Insert into chat history
-    - inline: Stream output in real-time
-    """
+    """Rail that alerts on API keys/secrets but allows execution (ALERT mode)."""
 
     priority = 89
     supported_events = {AgentCallbackEvent.AFTER_TOOL_CALL}
 
-    def __init__(
-        self,
-        display_mode: str = "popup",
-        alert_level: SecurityAlertLevel = SecurityAlertLevel.WARNING,
-    ) -> None:
+    def __init__(self) -> None:
         super().__init__(tool_names=FILE_READING_TOOLS)
-        self._display_mode = display_mode
-        self._alert_level = alert_level
 
     async def run_security_check(self, security_ctx: SecurityCheckContext):
         ctx = security_ctx.callback_ctx
@@ -79,9 +65,7 @@ class ApikeyguardalertRail(BaseSecurityRail):
         if self._contains_api_key(content):
             return self.alert(
                 message=f"API key/secret detected in {tool_name} result. Execution allowed but flagged.",
-                level=self._alert_level,
                 alert_type="api_key_leakage",
-                display_mode=self._display_mode,
             )
 
         return self.allow()

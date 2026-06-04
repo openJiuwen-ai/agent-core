@@ -6,10 +6,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Iterable, Optional, Set
+from typing import Any, Iterable, List, Optional, Set
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.llm import ToolMessage
+from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.runner.callback import AbortError
 from openjiuwen.core.session import InteractiveInput
@@ -72,34 +72,17 @@ class SecurityInterrupt(SecurityDecision):
     subject_id: str = ""
 
 
-class SecurityAlertLevel(str, Enum):
-    """Alert severity levels for SecurityAlert."""
-
-    INFO = "info"
-    WARNING = "warning"
-    ERROR = "error"
-    CRITICAL = "critical"
-
-
 @dataclass
 class SecurityAlert(SecurityDecision):
     """Allow execution but alert user with a message.
 
     Unlike SecurityReject which blocks execution, SecurityAlert
     allows the operation to continue while notifying the user.
-
-    Display modes (frontend decides final presentation):
-    - popup: Toast/popup notification
-    - history: Insert into chat history as system message
-    - inline: Stream output in real-time
-
-    The display_mode is a hint for frontend, backend streams via OutputSchema.
     """
 
     message: str
-    level: SecurityAlertLevel = SecurityAlertLevel.WARNING
     alert_type: str = "security"
-    display_mode: str = "popup"
+    message_id: Optional[str] = None
 
 
 class BaseSecurityRail(AgentRail):
@@ -148,26 +131,20 @@ class BaseSecurityRail(AgentRail):
     def alert(
         self,
         message: str,
-        level: SecurityAlertLevel = SecurityAlertLevel.WARNING,
         alert_type: str = "security",
-        display_mode: str = "popup",
     ) -> SecurityAlert:
         """Create a SecurityAlert decision.
 
         Args:
             message: Alert message to display
-            level: Severity level (info/warning/error/critical)
             alert_type: Category for filtering (e.g., "security", "pii", "compliance")
-            display_mode: Display hint for frontend ("popup", "history", "inline")
 
         Returns:
             SecurityAlert decision that allows execution but alerts user.
         """
         return SecurityAlert(
             message=message,
-            level=level,
             alert_type=alert_type,
-            display_mode=display_mode,
         )
 
     def add_tool(self, tool_name: str) -> None:
@@ -311,8 +288,7 @@ class BaseSecurityRail(AgentRail):
         - Alert: log + stream to frontend, then continue execution
         - Reject:
           - MODEL events: request_force_finish
-          - BEFORE_TOOL_CALL: _skip_tool
-          - AFTER_TOOL_CALL: request_force_finish + set tool_result/msg
+          - TOOL events (both BEFORE and AFTER): _skip_tool (agent continues)
         - Interrupt:
           - MODEL events: auto-converted to Reject in _run_and_apply
           - TOOL events: _raise_tool_interrupt
@@ -327,7 +303,7 @@ class BaseSecurityRail(AgentRail):
             return
 
         if isinstance(decision, SecurityReject):
-            self._apply_reject(security_ctx, decision)
+            await self._apply_reject(security_ctx, decision)
             return
 
         if isinstance(decision, SecurityInterrupt):
@@ -339,26 +315,24 @@ class BaseSecurityRail(AgentRail):
             f"{type(decision).__name__}"
         )
 
-    def _apply_reject(
+    async def _apply_reject(
         self,
         security_ctx: SecurityCheckContext,
         decision: SecurityReject,
     ) -> None:
         """Default reject behavior based on event type.
 
-        MODEL events: force_finish
-        BEFORE_TOOL_CALL: skip_tool (agent continues)
-        AFTER_TOOL_CALL: force_finish + set tool_result/msg
+        MODEL events: send retract + force_finish
+        TOOL events (both BEFORE and AFTER): skip_tool (agent continues)
         """
         ctx = security_ctx.callback_ctx
         event = security_ctx.event
-        
-        if event == AgentCallbackEvent.BEFORE_TOOL_CALL:
-            error_msg = decision.message or "Tool execution skipped"
-        else:
-            error_msg = decision.message or "Blocked by security rail"
+
+        error_msg = decision.message or "blocked for security reason"
 
         if event in _MODEL_EVENTS:
+            retract_message = decision.message or "内容已因安全原因撤回"
+            await self._send_retract_event(ctx, retract_message)
             result = self._build_force_finish_result(decision)
             ctx.request_force_finish(result)
             return
@@ -367,7 +341,7 @@ class BaseSecurityRail(AgentRail):
         tool_call = getattr(inputs, "tool_call", None)
         tool_call_id = tool_call.id if tool_call else ""
 
-        if event == AgentCallbackEvent.BEFORE_TOOL_CALL:
+        if event in (AgentCallbackEvent.BEFORE_TOOL_CALL, AgentCallbackEvent.AFTER_TOOL_CALL):
             self._skip_tool(
                 ctx,
                 tool_call,
@@ -377,16 +351,6 @@ class BaseSecurityRail(AgentRail):
                     tool_call_id=tool_call_id,
                 ),
             )
-            return
-
-        if event == AgentCallbackEvent.AFTER_TOOL_CALL:
-            inputs.tool_result = error_msg
-            inputs.tool_msg = ToolMessage(
-                content=error_msg,
-                tool_call_id=tool_call_id,
-            )
-            result = self._build_force_finish_result(decision)
-            ctx.request_force_finish(result)
             return
 
     def _apply_interrupt(
@@ -423,39 +387,47 @@ class BaseSecurityRail(AgentRail):
     ) -> None:
         """Apply SecurityAlert: log and stream to frontend, then allow execution.
 
-        Logs alert at appropriate level and streams OutputSchema to frontend.
-        Uses type="message" for frontend compatibility (JiuClawStreamEventRail
-        only listens to tool_call, tool_result, tool_update, todo.updated, message).
-
-        Frontend can identify security alerts via payload.metadata.is_security_alert=True.
+        Logs alert at warning level and streams OutputSchema to frontend.
+        Uses type="security.alert" for frontend to handle specifically.
         """
-        log_method = getattr(logger, decision.level.value, logger.warning)
-        log_method(
-            "[SecurityAlert] rail=%s message=%s alert_type=%s level=%s display_mode=%s",
+        logger.warning(
+            "[SecurityAlert] rail=%s message=%s alert_type=%s",
             self.__class__.__name__,
             decision.message,
             decision.alert_type,
-            decision.level.value,
-            decision.display_mode,
         )
 
         ctx = security_ctx.callback_ctx
         if ctx.session is not None:
             try:
+                session_id = getattr(ctx.session, "session_id", "") or ""
+                tool_name = ""
+                tool_call_id = ""
+                message_id = ""
+                if hasattr(ctx.inputs, "tool_name"):
+                    tool_name = ctx.inputs.tool_name or ""
+                if hasattr(ctx.inputs, "tool_call") and ctx.inputs.tool_call:
+                    tool_call_id = getattr(ctx.inputs.tool_call, "id", "") or ""
+
+                if ctx.context is not None:
+                    messages = ctx.context.get_messages(size=1, with_history=False)
+                    if messages:
+                        last_msg = messages[0]
+                        metadata = getattr(last_msg, "metadata", None)
+                        if isinstance(metadata, dict):
+                            message_id = metadata.get("context_message_id", "") or ""
+
                 await ctx.session.write_stream(
                     OutputSchema(
-                        type="message",
+                        type="security.alert",
                         index=0,
                         payload={
-                            "role": "system",
-                            "content": f"[{decision.level.value.upper()}] {decision.message}",
-                            "metadata": {
-                                "is_security_alert": True,
-                                "level": decision.level.value,
-                                "alert_type": decision.alert_type,
-                                "display_mode": decision.display_mode,
-                                "rail": self.__class__.__name__,
-                            },
+                            "session_id": session_id,
+                            "message": decision.message,
+                            "alert_type": decision.alert_type,
+                            "tool_name": tool_name,
+                            "tool_call_id": tool_call_id,
+                            "message_id": message_id,
                         },
                     )
                 )
@@ -464,6 +436,45 @@ class BaseSecurityRail(AgentRail):
                     "[BaseSecurityRail] Failed to stream alert: %s",
                     exc_info=True,
                 )
+
+    async def _send_retract_event(
+        self,
+        ctx: AgentCallbackContext,
+        message: str,
+    ) -> None:
+        """Send chat.retract event to notify frontend to retract content."""
+        if ctx.session is None:
+            return
+        try:
+            message_id = ""
+            if ctx.context is not None:
+                messages = ctx.context.get_messages(size=1, with_history=False)
+                if messages:
+                    last_msg = messages[0]
+                    metadata = getattr(last_msg, "metadata", None)
+                    if isinstance(metadata, dict):
+                        message_id = metadata.get("context_message_id", "") or ""
+            
+            if not message_id:
+                import uuid
+                message_id = str(uuid.uuid4())
+            
+            await ctx.session.write_stream(
+                OutputSchema(
+                    type="chat.retract",
+                    index=0,
+                    payload={
+                        "session_id": getattr(ctx.session, 'session_id', "") or "",
+                        "message": message,
+                        "message_id": message_id,
+                    },
+                )
+            )
+        except Exception:
+            logger.debug(
+                "[BaseSecurityRail] Failed to send retract event: %s",
+                exc_info=True,
+            )
 
     @staticmethod
     def _build_force_finish_result(decision: SecurityReject) -> dict[str, Any]:
@@ -542,151 +553,100 @@ class BaseSecurityRail(AgentRail):
             auto_confirm_key,
         )
 
-    def _pop_last_user_message(self, ctx: AgentCallbackContext) -> list[Any]:
-        """Pop last user message from current turn.
+    def _replace_messages(
+        self,
+        ctx: AgentCallbackContext,
+        messages: List[BaseMessage],
+        with_history: bool = True,
+    ) -> None:
+        """Replace the entire message list with the provided one.
 
-        Used by BEFORE_MODEL_CALL to remove offending user message.
-        Only pops messages added in current turn (with_history=False).
+        Subclass handles message filtering/modification itself,
+        then passes the complete modified list here for replacement.
+        Gracefully returns if ctx.context is None.
 
         Args:
             ctx: Agent callback context with ModelContext
+            messages: Complete modified message list to set
+            with_history: If True, replace context + history messages;
+                          if False, replace only history messages
+        """
+        if ctx.context is None:
+            return
+        ctx.context.set_messages(messages, with_history=with_history)
+
+    def _pop_last_user_message(
+        self,
+        ctx: AgentCallbackContext,
+        with_history: bool = False,
+    ) -> List[Any]:
+        """Pop the last user message from context.
+
+        Args:
+            ctx: Agent callback context with ModelContext
+            with_history: If True, pop from full history; if False, only current turn
 
         Returns:
-            List of popped messages (empty if no user message in current turn)
+            List containing the popped user message (empty if not found)
         """
         if ctx.context is None:
             return []
-        messages = ctx.context.get_messages(with_history=False)
-        for msg in reversed(messages):
-            role = getattr(msg, "role", "")
-            if role == "user":
-                popped = ctx.context.pop_messages(1, with_history=False)
-                return popped
+        messages = ctx.context.get_messages(with_history=with_history)
+        for i in range(len(messages) - 1, -1, -1):
+            if getattr(messages[i], "role", None) == "user":
+                popped = messages[i]
+                ctx.context.set_messages(messages[:i] + messages[i + 1:], with_history=with_history)
+                return [popped]
         return []
 
-    def _pop_matching_messages(
+    def _pop_last_assistant_message(
         self,
         ctx: AgentCallbackContext,
-        patterns: list,
-        with_history: bool = True,
-    ) -> list[Any]:
-        """Pop all messages containing secrets.
-
-        Used by AFTER_MODEL_CALL to clean historical secrets (thorough cleanup).
-        Filters out offending messages and uses set_messages to rewrite history.
+        with_history: bool = False,
+    ) -> List[Any]:
+        """Pop the last assistant message from context.
 
         Args:
             ctx: Agent callback context with ModelContext
-            patterns: List of compiled regex patterns to match
-            with_history: If True, affect all history; if False, only current turn
+            with_history: If True, pop from full history; if False, only current turn
 
         Returns:
-            List of popped messages containing secrets
+            List containing the popped assistant message (empty if not found)
         """
         if ctx.context is None:
             return []
         messages = ctx.context.get_messages(with_history=with_history)
-        
-        kept = []
-        popped = []
-        for msg in messages:
-            content = self._extract_message_content(msg)
-            if content and self._contains_any_pattern(content, patterns):
-                popped.append(msg)
-            else:
-                kept.append(msg)
-        
-        if popped:
-            ctx.context.set_messages(kept, with_history=with_history)
-        
-        return popped
+        for i in range(len(messages) - 1, -1, -1):
+            if getattr(messages[i], "role", None) == "assistant":
+                popped = messages[i]
+                ctx.context.set_messages(messages[:i] + messages[i + 1:], with_history=with_history)
+                return [popped]
+        return []
 
-    def _extract_message_content(self, msg: Any) -> str:
-        """Extract string content from a message object.
-
-        Args:
-            msg: Message object (BaseMessage or dict)
-
-        Returns:
-            String content or empty string
-        """
-        if hasattr(msg, "content"):
-            content = msg.content
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                parts = []
-                for part in content:
-                    if isinstance(part, str):
-                        parts.append(part)
-                    elif isinstance(part, dict) and "text" in part:
-                        parts.append(str(part["text"]))
-                return " ".join(parts)
-            return str(content)
-        if isinstance(msg, dict) and "content" in msg:
-            content = msg["content"]
-            if isinstance(content, str):
-                return content
-            return str(content)
-        return ""
-
-    def _contains_any_pattern(self, text: str, patterns: list) -> bool:
-        """Check if text matches any pattern in the list.
-
-        Args:
-            text: String to check
-            patterns: List of compiled regex patterns
-
-        Returns:
-            True if any pattern matches
-        """
-        for pattern in patterns:
-            if pattern.search(text):
-                return True
-        return False
-
-    def _sanitize_matching_messages(
+    def _pop_last_tool_message(
         self,
         ctx: AgentCallbackContext,
-        patterns: list,
-        replacement: str = "[REDACTED]",
-        with_history: bool = True,
-    ) -> list[Any]:
-        """Sanitize secrets in messages by replacing with replacement string.
-
-        Used for data masking without blocking execution.
-        Iterates through messages and replaces pattern matches in content.
+        with_history: bool = False,
+    ) -> List[Any]:
+        """Pop the last tool message (tool result) from context.
 
         Args:
             ctx: Agent callback context with ModelContext
-            patterns: List of compiled regex patterns to match
-            replacement: String to replace matched secrets (default "[REDACTED]")
-            with_history: If True, affect all history; if False, only current turn
+            with_history: If True, pop from full history; if False, only current turn
 
         Returns:
-            List of messages that were sanitized (modified)
+            List containing the popped tool message (empty if not found)
         """
         if ctx.context is None:
             return []
         messages = ctx.context.get_messages(with_history=with_history)
-        
-        sanitized = []
-        for msg in messages:
-            content = self._extract_message_content(msg)
-            if content and self._contains_any_pattern(content, patterns):
-                new_content = content
-                for pattern in patterns:
-                    new_content = pattern.sub(replacement, new_content)
-                if hasattr(msg, "content"):
-                    msg.content = new_content
-                elif isinstance(msg, dict) and "content" in msg:
-                    msg["content"] = new_content
-                sanitized.append(msg)
-        
-        if sanitized:
-            ctx.context.set_messages(messages, with_history=with_history)
-        
-        return sanitized
+        for i in range(len(messages) - 1, -1, -1):
+            role = getattr(messages[i], "role", None)
+            if role == "tool":
+                popped = messages[i]
+                ctx.context.set_messages(messages[:i] + messages[i + 1:], with_history=with_history)
+                return [popped]
+        return []
 
     def _handle_interrupt_resume(
         self,
@@ -738,7 +698,6 @@ class BaseSecurityRail(AgentRail):
 __all__ = [
     "BaseSecurityRail",
     "SecurityAlert",
-    "SecurityAlertLevel",
     "SecurityAllow",
     "SecurityCheckContext",
     "SecurityDecision",

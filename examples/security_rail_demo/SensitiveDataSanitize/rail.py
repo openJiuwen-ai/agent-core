@@ -78,7 +78,7 @@ class SensitivedatasanitizeRail(BaseSecurityRail):
         if ctx.context is None:
             return self.allow()
 
-        sanitized = self._sanitize_matching_messages(
+        sanitized = self._sanitize_messages_inline(
             ctx,
             self._compiled_patterns,
             replacement=self._replacement,
@@ -134,7 +134,7 @@ class SensitivedatasanitizeRail(BaseSecurityRail):
         sanitized_history = 0
         if ctx.context is not None:
             sanitized_history = len(
-                self._sanitize_matching_messages(
+                self._sanitize_messages_inline(
                     ctx,
                     self._compiled_patterns,
                     replacement=self._replacement,
@@ -150,6 +150,93 @@ class SensitivedatasanitizeRail(BaseSecurityRail):
             )
 
         return self.allow()
+
+    def _sanitize_messages_inline(
+        self,
+        ctx,
+        patterns: list,
+        replacement: str = "[REDACTED]",
+        with_history: bool = True,
+    ):
+        """Sanitize secrets in messages by replacing with replacement string.
+
+        Used for data masking without blocking execution.
+        Iterates through messages and replaces pattern matches in content.
+
+        Args:
+            ctx: Agent callback context with ModelContext
+            patterns: List of compiled regex patterns to match
+            replacement: String to replace matched secrets (default "[REDACTED]")
+            with_history: If True, affect all history; if False, only current turn
+
+        Returns:
+            List of messages that were sanitized (modified)
+        """
+        if ctx.context is None:
+            return []
+        messages = ctx.context.get_messages(with_history=with_history)
+
+        sanitized = []
+        for msg in messages:
+            content = self._extract_message_content(msg)
+            if content and self._contains_any_pattern(content, patterns):
+                new_content = content
+                for pattern in patterns:
+                    new_content = pattern.sub(replacement, new_content)
+                if hasattr(msg, "content"):
+                    msg.content = new_content
+                elif isinstance(msg, dict) and "content" in msg:
+                    msg["content"] = new_content
+                sanitized.append(msg)
+
+        if sanitized:
+            ctx.context.set_messages(messages, with_history=with_history)
+
+        return sanitized
+
+    def _extract_message_content(self, msg):
+        """Extract string content from a message object.
+
+        Args:
+            msg: Message object (BaseMessage or dict)
+
+        Returns:
+            String content or empty string
+        """
+        if hasattr(msg, "content"):
+            content = msg.content
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                parts = []
+                for part in content:
+                    if isinstance(part, str):
+                        parts.append(part)
+                    elif isinstance(part, dict) and "text" in part:
+                        parts.append(str(part["text"]))
+                return " ".join(parts)
+            return str(content)
+        if isinstance(msg, dict) and "content" in msg:
+            content = msg["content"]
+            if isinstance(content, str):
+                return content
+            return str(content)
+        return ""
+
+    def _contains_any_pattern(self, text: str, patterns: list) -> bool:
+        """Check if text matches any pattern in the list.
+
+        Args:
+            text: String to check
+            patterns: List of compiled regex patterns
+
+        Returns:
+            True if any pattern matches
+        """
+        for pattern in patterns:
+            if pattern.search(text):
+                return True
+        return False
 
 
 __all__ = ["SensitivedatasanitizeRail"]

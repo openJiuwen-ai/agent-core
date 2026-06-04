@@ -6,7 +6,6 @@
 from openjiuwen.harness.rails.security.base_security_rail import (
     BaseSecurityRail,
     SecurityAlert,
-    SecurityAlertLevel,
     SecurityAllow,
     SecurityCheckContext,
     SecurityDecision,
@@ -17,7 +16,6 @@ from openjiuwen.harness.rails.security.base_security_rail import (
 __all__ = [
     "BaseSecurityRail",
     "SecurityAlert",
-    "SecurityAlertLevel",
     "SecurityAllow",
     "SecurityCheckContext",
     "SecurityDecision",
