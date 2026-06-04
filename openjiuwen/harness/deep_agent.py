@@ -119,6 +119,8 @@ _DEEP_EVENTS = frozenset(
     }
 )
 
+_SUB_AGENTS_DIR = "sub_agents"
+
 
 class DeepAgent(BaseAgent):
     """High-level agent that delegates to an internal ReActAgent."""
@@ -921,9 +923,9 @@ class DeepAgent(BaseAgent):
 
         if not self._deep_config.workspace or isinstance(self._deep_config.workspace, str):
             workspace_path = (
-                f"{self._deep_config.workspace}/{subsession_id}"
+                str(Path(self._deep_config.workspace) / _SUB_AGENTS_DIR / subsession_id)
                 if self._deep_config.workspace
-                else f"./{subsession_id}"
+                else str(Path(".") / _SUB_AGENTS_DIR / subsession_id)
             )
             workspace = Workspace(
                 root_path=workspace_path,
@@ -931,7 +933,7 @@ class DeepAgent(BaseAgent):
             )
         else:
             workspace = Workspace(
-                root_path=Path(self._deep_config.workspace.root_path) / subsession_id,
+                root_path=Path(self._deep_config.workspace.root_path) / _SUB_AGENTS_DIR / subsession_id,
                 language=self._deep_config.language
             )
 
