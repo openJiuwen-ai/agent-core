@@ -128,6 +128,7 @@ class AudioModelConfig:
             ),
             question_answering_model=(
                 os.getenv("AUDIO_QUESTION_ANSWERING_MODEL")
+                or os.getenv("AUDIO_MODEL_NAME")
                 or DEFAULT_OPENAI_AUDIO_QA_MODEL
             ),
             max_retries=_parse_int_from_env("AUDIO_MAX_RETRIES", 3),
