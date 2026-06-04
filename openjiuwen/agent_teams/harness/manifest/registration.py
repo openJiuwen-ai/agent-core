@@ -17,6 +17,7 @@ import inspect
 from openjiuwen.agent_teams.harness.manifest.catalog import get_catalog
 from openjiuwen.agent_teams.harness.manifest.introspect import (
     class_rail_adapter,
+    class_tool_adapter,
     resolve_factory,
 )
 from openjiuwen.agent_teams.harness.manifest.models import ElementKind
@@ -37,7 +38,8 @@ def register_from_catalog() -> None:
     for descriptor in get_catalog().values():
         target = resolve_factory(descriptor.factory_ref)
         if descriptor.kind is ElementKind.TOOL:
-            register_tool_provider(descriptor.name, target)
+            builder = target if not inspect.isclass(target) else class_tool_adapter(target)
+            register_tool_provider(descriptor.name, builder)
         elif descriptor.kind is ElementKind.RAIL:
             builder = target if not inspect.isclass(target) else class_rail_adapter(target)
             register_rail_provider(descriptor.name, builder)

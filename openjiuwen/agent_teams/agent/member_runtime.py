@@ -19,7 +19,7 @@ side fires phase/round events the StreamController maps onto
 MemberStatus / ExecutionStatus.
 
 Only members actually accessed on a runtime *instance* are declared. Rail /
-memory / customizer hooks are present because the default DeepAgent path uses
+memory hooks are present because the default DeepAgent path uses
 them; an external runtime that skips those features implements them as no-ops
 (the configurator never invokes them for such members).
 """
@@ -34,10 +34,6 @@ from typing import (
     Protocol,
     runtime_checkable,
 )
-
-# User-facing customizer hook: (agent, member_name, role_value) -> None.
-AgentCustomizer = Callable[[Any, Optional[str], str], None]
-
 
 @runtime_checkable
 class MemberRuntime(Protocol):
@@ -122,7 +118,7 @@ class MemberRuntime(Protocol):
         """Initialise the per-round working directory, if any."""
         ...
 
-    # ---- rail / memory / customizer hooks (default DeepAgent path) ----
+    # ---- rail / memory hooks (default DeepAgent path) ----
 
     def find_rails(self, rail_type: type) -> list[Any]:
         """Return mounted rails of ``rail_type`` (empty when unsupported)."""
@@ -144,10 +140,6 @@ class MemberRuntime(Protocol):
         """Inject loaded memory into the agent's system prompt."""
         ...
 
-    def run_agent_customizer(self, customizer: AgentCustomizer) -> None:
-        """Invoke a user-supplied customizer hook on the underlying agent."""
-        ...
-
     # ---- config snapshots ----
 
     @property
@@ -161,4 +153,4 @@ class MemberRuntime(Protocol):
         ...
 
 
-__all__ = ["AgentCustomizer", "MemberRuntime"]
+__all__ = ["MemberRuntime"]

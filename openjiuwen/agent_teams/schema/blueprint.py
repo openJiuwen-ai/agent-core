@@ -356,12 +356,6 @@ class TeamAgentSpec(BaseModel):
     at ``build()`` time via ``resolve_language()``.
     """
 
-    agent_customizer: Optional[Callable[..., None]] = Field(
-        default=None,
-        exclude=True,
-    )
-    """Optional callback invoked on each member's DeepAgent after creation."""
-
     build_context: Optional[Any] = Field(
         default=None,
         exclude=True,
@@ -369,8 +363,8 @@ class TeamAgentSpec(BaseModel):
     """Optional runtime carrier for provider-based capability assembly.
 
     Holds a ``BuildContext`` subclass with live, non-serializable handles
-    (excluded from JSON — same caveat as ``agent_customizer``). ``setup_agent``
-    derives a per-member view from it to thread into ``DeepAgentSpec.build``.
+    (excluded from JSON). ``setup_agent`` derives a per-member view from it to
+    thread into ``DeepAgentSpec.build``.
     Typed as ``Any`` so Pydantic does not attempt to build a schema for the
     opaque carrier. Across a serialization boundary it is rebuilt from
     ``build_context_seed`` via ``materialize_build_context`` rather than relying
@@ -384,7 +378,7 @@ class TeamAgentSpec(BaseModel):
     The platform fills it (a plain mapping of primitives) alongside
     ``build_context``; the receiving side calls ``materialize_build_context`` to
     turn it back into a live ``BuildContext`` through the registered factory
-    (``register_build_context_factory``). None for the legacy customizer path.
+    (``register_build_context_factory``).
     """
 
     memory: Optional[TeamMemoryConfig] = None
@@ -407,7 +401,7 @@ class TeamAgentSpec(BaseModel):
 
         Idempotent: acts only when ``build_context`` is None and a seed is
         present, so the in-process path (live context already set) and the
-        legacy customizer path (no seed) are both untouched. Called on the
+        legacy path (no seed) are both untouched. Called on the
         receiving side of a serialization boundary (``from_spawn_payload`` /
         ``recover_from_session``) before ``configure`` so provider-based members
         rebuild their capabilities declaratively from the registered factory.

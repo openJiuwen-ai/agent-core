@@ -8,7 +8,7 @@ implements it directly; ``TeamHarness`` composes a single ``NativeHarness`` and
 forwards this surface, so callers program against the contract rather than a
 concrete class. The broader brain seam the team coordination layer drives —
 :class:`~openjiuwen.agent_teams.agent.member_runtime.MemberRuntime` — supersets
-this contract with team-specific rail / memory / customizer hooks; CLI-backed
+this contract with team-specific rail / memory hooks; CLI-backed
 member runtimes implement that wider surface for non-DeepAgent brains.
 """
 from __future__ import annotations

@@ -139,3 +139,31 @@ def class_rail_adapter(cls: type) -> Callable[..., Any]:
         return cls(**kwargs)
 
     return _build
+
+
+def class_tool_adapter(cls: type) -> Callable[..., Any]:
+    """Adapt a no-factory tool class into a ``(params, context) -> tool`` factory.
+
+    Replicates the class branch of ``BuiltinToolSpec.build``: instantiate the
+    class with the spec params, auto-injecting ``language`` from the build
+    context when the constructor accepts it. This unifies class tools with
+    parameterized factory tools under the single tool-provider registration
+    path (mirrors :func:`class_rail_adapter`).
+
+    Args:
+        cls: The tool class to adapt.
+
+    Returns:
+        A provider factory that builds an instance of *cls*.
+    """
+    accepts_language = "language" in inspect.signature(cls.__init__).parameters
+
+    def _build(params: dict[str, Any], context: Any) -> Any:
+        kwargs = dict(params or {})
+        if accepts_language and "language" not in kwargs and context is not None:
+            language = getattr(context, "language", None)
+            if language is not None:
+                kwargs["language"] = language
+        return cls(**kwargs)
+
+    return _build

@@ -12,18 +12,17 @@ scheduling resource only requires re-implementing this module; business code in
 ``agent_teams`` keeps the same call surface.
 
 Lifecycle: the underlying DeepAgent is *configured* at build time
-(``native.prepare_config``) so the configurator can run an agent_customizer and
-read workspace/sys_operation before any run cycle. ``start(team_session)`` then
+(``native.prepare_config``) so the configurator can read workspace/sys_operation
+before any run cycle. ``start(team_session)`` then
 binds a child agent session (sharing the team session id, so DeepAgentState
 persists) and spins up the supervisor; the same native instance is reused across
 run cycles on the same session. A session switch tears the native down and
-rebuilds it for the new session (re-running the cached customizer); cross-cycle
-state is recovered from the persisted session id.
+rebuilds it for the new session; cross-cycle state is recovered from the
+persisted session id.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -34,50 +33,18 @@ from typing import (
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
-from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.agent_teams.harness.native_harness import NativeHarness
 from openjiuwen.agent_teams.harness.state import HarnessState
 
 if TYPE_CHECKING:
-    from openjiuwen.agent_teams.rails import (
-        TeamPolicyRail,
-        TeamPlanModeRail,
-        TeamToolApprovalRail,
-        TeamToolRail,
-    )
-    from openjiuwen.agent_teams.reliability.rail import ReliabilityRail
     from openjiuwen.agent_teams.schema.build_context import BuildContext
     from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
     from openjiuwen.agent_teams.schema.team import TeamRole
-    from openjiuwen.agent_teams.team_workspace.rails import TeamWorkspaceRail
     from openjiuwen.core.single_agent.rail.base import AgentRail
     from openjiuwen.harness.deep_agent import DeepAgent
     from openjiuwen.harness.schema.config import DeepAgentConfig
-
-
-# Public type alias for the agent_customizer hook signature. Stays
-# ``(DeepAgent, member_name, role_value)`` because it is a user-facing
-# extension point; this alias documents that contract in one place.
-AgentCustomizer = Callable[[Any, Optional[str], str], None]
-
-
-@dataclass
-class _MountedRails:
-    """Handles to the team-side rails mounted onto the DeepAgent.
-
-    Kept as a dataclass to make the rail lineup (and which ones are optional)
-    explicit to readers and tests. Order of the fields mirrors the order rails
-    are mounted in :meth:`TeamHarness.build`.
-    """
-
-    team_tool: "TeamToolRail"
-    team_policy: "TeamPolicyRail"
-    team_workspace: Optional["TeamWorkspaceRail"] = None
-    tool_approval: Optional["TeamToolApprovalRail"] = None
-    team_plan_mode: Optional["TeamPlanModeRail"] = None
-    reliability: Optional["ReliabilityRail"] = None
 
 
 class TeamHarness:
@@ -85,25 +52,23 @@ class TeamHarness:
 
     def __init__(
         self,
-        deep_provider: Callable[[], "DeepAgent"],
+        agent_spec: "DeepAgentSpec",
+        build_context: "BuildContext | None",
         native: NativeHarness,
-        rails: _MountedRails,
         *,
         role: "TeamRole",
         member_name: Optional[str],
         initial_plan_mode: bool = False,
     ) -> None:
-        self._deep_provider = deep_provider
+        self._agent_spec = agent_spec
+        self._build_context = build_context
         self._native: Optional[NativeHarness] = native
-        self._rails = rails
         self._role = role
         self._member_name = member_name
         self._initial_plan_mode = initial_plan_mode
         self._initial_plan_mode_seeded = False
         self._active_agent_session: Optional[Any] = None
         self._native_session_id: Optional[str] = None
-        # Cached so a session-switch rebuild can re-run it on the new native.
-        self._customizer: Optional[AgentCustomizer] = None
 
     # ------------------------------------------------------------------
     # Construction
@@ -116,92 +81,31 @@ class TeamHarness:
         agent_spec: "DeepAgentSpec",
         role: "TeamRole",
         member_name: Optional[str],
-        team_tool_rail: "TeamToolRail",
-        team_policy_rail: "TeamPolicyRail",
-        team_workspace_rail: Optional["TeamWorkspaceRail"] = None,
-        tool_approval_rail: Optional["TeamToolApprovalRail"] = None,
-        team_plan_mode_rail: Optional["TeamPlanModeRail"] = None,
-        reliability_rail: Optional["ReliabilityRail"] = None,
         initial_plan_mode: bool = False,
         build_context: "BuildContext | None" = None,
     ) -> "TeamHarness":
-        """Build the deep-agent provider, construct the native, and configure it.
+        """Construct the native via forward construction and configure it.
 
-        The provider materializes a DeepAgent and mounts all team rails on every
-        call (mount order load-bearing: TeamToolRail eagerly initialized before
-        TeamPolicyRail so the ability snapshot the LLM sees matches what tests
-        observe). ``native.prepare_config()`` runs the provider once at build
-        time so the configurator can run an ``agent_customizer`` and read
-        ``workspace`` / ``sys_operation`` before any run cycle.
-
-        ``agent_customizer`` is intentionally NOT a parameter: callers run it
-        via :meth:`run_agent_customizer` after constructing dependencies (e.g.,
-        team memory manager) the customizer may rely on.
+        The native materializes itself directly from ``agent_spec`` (no
+        throwaway template). The team rails are declared in ``agent_spec.rails``
+        (provider-resolved from the build context's extras), so they mount and
+        initialize through the spec build + ``ensure_initialized`` path like
+        every other rail — no hand-mounting here. ``native.prepare_config()``
+        runs once at build time so the configurator can read ``workspace`` /
+        ``sys_operation`` before any run cycle.
         """
-        def _deep_provider() -> "DeepAgent":
-            deep_agent = agent_spec.build(context=build_context)
-            deep_agent.add_rail(team_tool_rail)
-            deep_agent.add_rail(team_policy_rail)
-            if team_workspace_rail is not None:
-                deep_agent.add_rail(team_workspace_rail)
-            if tool_approval_rail is not None:
-                deep_agent.add_rail(tool_approval_rail)
-            if team_plan_mode_rail is not None:
-                deep_agent.add_rail(team_plan_mode_rail)
-            if reliability_rail is not None:
-                deep_agent.add_rail(reliability_rail)
-            return deep_agent
-
-        rails = _MountedRails(
-            team_tool=team_tool_rail,
-            team_policy=team_policy_rail,
-            team_workspace=team_workspace_rail,
-            tool_approval=tool_approval_rail,
-            team_plan_mode=team_plan_mode_rail,
-            reliability=reliability_rail,
-        )
-        native = NativeHarness(_deep_provider)
-        # Sync configure so the configurator's customizer / workspace read work
-        # before any async init or run cycle.
+        native = NativeHarness(agent_spec, build_context)
+        # Sync configure so the configurator's workspace read works before any
+        # async init or run cycle.
         native.prepare_config()
-        # Eager-init the tool rail on the *configured native* (not the discarded
-        # provider template): configure copies deep_config, not the template's
-        # runtime ability registry, so the team tool snapshot must be registered
-        # here to be visible before any run (mirrors the pre-adoption build).
-        team_tool_rail.set_sys_operation(native.deep_config.sys_operation)
-        team_tool_rail.set_workspace(native.deep_config.workspace)
-        team_tool_rail.init(native)
         return cls(
-            _deep_provider,
+            agent_spec,
+            build_context,
             native,
-            rails,
             role=role,
             member_name=member_name,
             initial_plan_mode=initial_plan_mode,
         )
-
-    def run_agent_customizer(self, customizer: AgentCustomizer) -> None:
-        """Invoke a user-supplied customizer hook on the underlying agent.
-
-        Runs immediately on the configured native and caches the hook so a
-        session-switch rebuild can re-apply it. Swallows exceptions to keep a
-        broken hook from killing team setup; failures are logged.
-        """
-        self._customizer = customizer
-        self._apply_customizer(self._native)
-
-    def _apply_customizer(self, native: Optional[NativeHarness]) -> None:
-        """Run the cached customizer on ``native`` (no-op when either is unset)."""
-        if native is None or self._customizer is None:
-            return
-        try:
-            self._customizer(native, self._member_name, self._role.value)
-        except Exception as exc:
-            team_logger.warning(
-                "[{}] agent_customizer failed: {}",
-                self._member_name or "?",
-                exc,
-            )
 
     # ------------------------------------------------------------------
     # Lifecycle (HarnessProtocol-aligned, one cycle per coordination.start)
@@ -211,14 +115,13 @@ class TeamHarness:
         """Bind a child session and start the supervisor for one run cycle.
 
         The native is torn down at ``stop`` (round-end) and rebuilt here for the
-        next cycle — re-running the cached customizer — because a stopped native
-        is terminal. Cross-cycle state (task plan, history, plan mode) recovers
-        from the persisted session id shared by the child session.
+        next cycle because a stopped native is terminal. Cross-cycle state (task
+        plan, history, plan mode) recovers from the persisted session id shared
+        by the child session.
         """
         if self._native is None or self._native.state is HarnessState.TERMINATED:
-            self._native = NativeHarness(self._deep_provider)
+            self._native = NativeHarness(self._agent_spec, self._build_context)
             self._native.prepare_config()
-            self._apply_customizer(self._native)
         child = self._make_child_session(team_session)
         await child.pre_run()
         await self._native.start(session=child)
@@ -455,10 +358,5 @@ class TeamHarness:
         """
         return self._native
 
-    @property
-    def rails(self) -> _MountedRails:
-        """Return handles to the team-side rails mounted on the agent."""
-        return self._rails
 
-
-__all__ = ["AgentCustomizer", "TeamHarness"]
+__all__ = ["TeamHarness"]

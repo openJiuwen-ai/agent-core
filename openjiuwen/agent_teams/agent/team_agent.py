@@ -481,8 +481,8 @@ class TeamAgent(BaseAgent):
     def _register_team_completion_callbacks(self) -> None:
         """Wire optional team-completion callbacks into the coordination layer.
 
-        Runs once, after the DeepAgent is fully built (rails mounted,
-        ``agent_customizer`` applied) and the dispatcher exists. Extracts
+        Runs once, after the DeepAgent is fully built (rails mounted) and the
+        dispatcher exists. Extracts
         any ``TeamSkillRail`` mounted on the agent and registers its
         ``notify_team_completed`` hook with the ``TeamCompletionHandler``
         so a drained task board triggers skill evolution — no per-event
@@ -838,7 +838,7 @@ class TeamAgent(BaseAgent):
         # Rebuild the provider-based build context from its serializable seed:
         # ``build_context`` is excluded from JSON and is None after validation,
         # so without this a spawned member loses every provider-assembled
-        # capability. No-op for the legacy customizer path (no seed).
+        # capability. No-op for the legacy path (no seed).
         spec.materialize_build_context()
 
         agent_spec = spec.agents.get(context.role.value) or spec.agents["leader"]
@@ -1113,10 +1113,9 @@ class TeamAgent(BaseAgent):
             team_name: Identifies which team's bucket to load. A session can
                 hold state for multiple teams; the caller must specify which.
             runtime_spec: Optional live spec from the current process. Used to
-                reinject non-serializable fields (currently ``agent_customizer``,
-                which is ``Field(exclude=True)`` and never survives the
-                checkpoint round-trip). When omitted the recovered spec is
-                used as-is.
+                reinject ``build_context``, which is ``Field(exclude=True)`` and
+                never survives the checkpoint round-trip. When omitted the
+                recovered spec is used as-is (rebuilding context from its seed).
 
         Raises:
             ValueError: When the session has no bucket for ``team_name`` or
@@ -1132,17 +1131,10 @@ class TeamAgent(BaseAgent):
         if spec_data is None:
             raise ValueError(f"No leader spec found for team '{team_name}'")
         spec = TeamAgentSpec.model_validate(spec_data)
-        # agent_customizer is a Callable marked Field(exclude=True); it is
-        # dropped on serialization and always None after model_validate. Cold
-        # recover must reinject it from the live runtime spec, otherwise
-        # platform adapters that hook rails/tools through this callback get
-        # silently disabled across process restarts.
-        if runtime_spec is not None and runtime_spec.agent_customizer is not None:
-            spec.agent_customizer = runtime_spec.agent_customizer
-        # build_context is likewise Field(exclude=True) and dropped on the
-        # checkpoint round-trip. Prefer the live runtime spec's context on warm
-        # recovery; otherwise rebuild it from the serializable seed so
-        # provider-based members survive a cold restart. No-op for legacy.
+        # build_context is Field(exclude=True) and dropped on the checkpoint
+        # round-trip. Prefer the live runtime spec's context on warm recovery;
+        # otherwise rebuild it from the serializable seed so provider-based
+        # members survive a cold restart. No-op for legacy.
         if runtime_spec is not None and runtime_spec.build_context is not None:
             spec.build_context = runtime_spec.build_context
         spec.materialize_build_context()

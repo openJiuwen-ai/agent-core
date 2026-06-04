@@ -9,7 +9,6 @@ Call ``build()`` on a spec to materialize the corresponding runtime object.
 """
 from __future__ import annotations
 
-import inspect
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -32,7 +31,6 @@ from openjiuwen.core.foundation.tool import (
     McpServerConfig,
     ToolCard,
 )
-from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.config import (
@@ -55,112 +53,15 @@ from openjiuwen.harness.schema.config import (
 from openjiuwen.harness.workspace.workspace import Workspace
 
 # ---------------------------------------------------------------------------
-# Rail type registry
-# ---------------------------------------------------------------------------
-
-_RAIL_TYPE_REGISTRY: dict[str, type[AgentRail]] = {}
-
-
-def register_rail_type(name: str, cls: type[AgentRail]) -> None:
-    """Register a rail class so it can be referenced by name in RailSpec."""
-    _RAIL_TYPE_REGISTRY[name] = cls
-
-
-def _ensure_builtin_rails_registered() -> None:
-    """Lazily populate the registry with built-in DeepAgent rails."""
-    if _RAIL_TYPE_REGISTRY:
-        return
-    from openjiuwen.harness.rails import (
-        TaskPlanningRail,
-        SkillUseRail,
-        SubagentRail,
-    )
-    from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
-
-    _RAIL_TYPE_REGISTRY.update({
-        "task_planning": TaskPlanningRail,
-        "skill_use": SkillUseRail,
-        "subagent": SubagentRail,
-        "filesystem": SysOperationRail,
-    })
-
-    # Optional rails: only register when importable.
-    _optional = {
-        "context_engineering": (
-            "openjiuwen.harness.rails.context_engineering_rail",
-            "ContextEngineeringRail",
-        ),
-        "token_tracking": (
-            "openjiuwen.harness.cli.rails.token_tracker",
-            "TokenTrackingRail",
-        ),
-        "tool_tracking": (
-            "openjiuwen.harness.cli.rails.tool_tracker",
-            "ToolTrackingRail",
-        ),
-        "ask_user": (
-            "openjiuwen.harness.rails.interrupt.ask_user_rail",
-            "AskUserRail",
-        ),
-        "confirm_interrupt": (
-            "openjiuwen.harness.rails.interrupt.confirm_rail",
-            "ConfirmInterruptRail",
-        ),
-    }
-    import importlib
-    for name, (mod_path, cls_name) in _optional.items():
-        try:
-            mod = importlib.import_module(mod_path)
-            _RAIL_TYPE_REGISTRY[name] = getattr(mod, cls_name)
-        except (ImportError, AttributeError):
-            pass
-
-
-# ---------------------------------------------------------------------------
-# Tool type registry
-# ---------------------------------------------------------------------------
-
-_TOOL_TYPE_REGISTRY: dict[str, type] = {}
-
-
-def register_tool_type(name: str, cls: type) -> None:
-    """Register a tool class so it can be referenced by name in BuiltinToolSpec."""
-    _TOOL_TYPE_REGISTRY[name] = cls
-
-
-def _ensure_builtin_tools_registered() -> None:
-    """Lazily populate the tool registry with built-in tool types."""
-    if _TOOL_TYPE_REGISTRY:
-        return
-    _optional = {
-        "web_search": (
-            "openjiuwen.harness.tools.web_tools",
-            "WebFreeSearchTool",
-        ),
-        "web_fetch": (
-            "openjiuwen.harness.tools.web_tools",
-            "WebFetchWebpageTool",
-        ),
-    }
-    import importlib
-    for name, (mod_path, cls_name) in _optional.items():
-        try:
-            mod = importlib.import_module(mod_path)
-            _TOOL_TYPE_REGISTRY[name] = getattr(mod, cls_name)
-        except (ImportError, AttributeError):
-            pass
-
-
-# ---------------------------------------------------------------------------
 # Capability provider registries
 # ---------------------------------------------------------------------------
 
 # A provider is a factory that resolves ``(params, context)`` into a live
-# instance (or a list of instances). Unlike the class registries above, a
-# provider receives the runtime ``BuildContext`` and can therefore build
-# capabilities that depend on live, non-serializable handles. Providers take
-# precedence over the same-named class registry, so platforms can override or
-# extend built-ins without touching this module.
+# instance (or a list of instances). A provider receives the runtime
+# ``BuildContext`` and can therefore build capabilities that depend on live,
+# non-serializable handles. Every rail / tool / sub-agent — built-in and
+# platform — registers here through the manifest catalog; there is no longer a
+# separate class registry.
 _RAIL_PROVIDER_REGISTRY: dict[str, Callable[..., Any]] = {}
 _TOOL_PROVIDER_REGISTRY: dict[str, Callable[..., Any]] = {}
 _SUBAGENT_PROVIDER_REGISTRY: dict[str, Callable[..., Any]] = {}
@@ -170,8 +71,8 @@ def register_rail_provider(name: str, factory: Callable[..., Any]) -> None:
     """Register a rail provider factory referenced by name in ``RailSpec``.
 
     The factory is invoked as ``factory(params, context)`` and may return a
-    single rail or a list of rails. Takes precedence over ``register_rail_type``
-    for the same name.
+    single rail or a list of rails. Built-in rails register here too via the
+    manifest catalog; a later registration for the same name overrides it.
     """
     _RAIL_PROVIDER_REGISTRY[name] = factory
 
@@ -180,8 +81,8 @@ def register_tool_provider(name: str, factory: Callable[..., Any]) -> None:
     """Register a tool provider factory referenced by name in ``BuiltinToolSpec``.
 
     The factory is invoked as ``factory(params, context)`` and may return a
-    single tool or a list of tools. Takes precedence over ``register_tool_type``
-    for the same name.
+    single tool or a list of tools. Built-in tools register here too via the
+    manifest catalog; a later registration for the same name overrides it.
     """
     _TOOL_PROVIDER_REGISTRY[name] = factory
 
@@ -316,7 +217,7 @@ class SysOperationSpec(BaseModel):
 
 
 class RailSpec(BaseModel):
-    """Declarative rail reference resolved via the rail type registry."""
+    """Declarative rail reference resolved via the rail provider registry."""
 
     type: str
     params: dict[str, Any] = {}
@@ -328,53 +229,44 @@ class RailSpec(BaseModel):
         workspace: Optional[Workspace] = None,
         context: "BuildContext | None" = None,
     ) -> Any:
-        """Build a rail instance (or a list of rails).
+        """Build a rail instance (or a list of rails) via its registered provider.
 
         Args:
-            language: Auto-injected if the constructor accepts it.
-            workspace: Used by ``skill_use`` to resolve default skills_dir
-                from workspace's ``skills/`` node when not explicitly provided.
-            context: Runtime carrier forwarded to a registered rail provider.
+            language: Forwarded on the build context so the provider / class
+                adapter injects it when the constructor accepts it.
+            workspace: Forwarded on the build context (used by ``skill_use`` to
+                resolve a default skills_dir from the workspace ``skills/`` node).
+            context: Runtime carrier forwarded to the rail provider. When None,
+                a minimal context carrying ``language`` + ``workspace`` is
+                synthesized so providers still observe them.
 
         Returns:
             A rail, a list of rails, or ``None``; callers flatten the result.
         """
-        _ensure_builtin_rails_registered()
+        from openjiuwen.agent_teams.rails.registration import (
+            ensure_harness_elements_registered,
+        )
+
+        ensure_harness_elements_registered()
         factory = _RAIL_PROVIDER_REGISTRY.get(self.type)
-        if factory is not None:
-            return factory(dict(self.params), context)
-        cls = _RAIL_TYPE_REGISTRY.get(self.type)
-        if cls is None:
+        if factory is None:
             raise ValueError(
                 f"Unknown rail type '{self.type}'. "
-                f"Registered types: {list(_RAIL_TYPE_REGISTRY)}"
+                f"Registered types: {list(_RAIL_PROVIDER_REGISTRY)}"
             )
-        kw = dict(self.params)
-        sig = inspect.signature(cls.__init__)
-        if "language" in sig.parameters:
-            kw.setdefault("language", language)
-        # skill_use: resolve skills_dir from workspace when not explicit.
-        if self.type == "skill_use" and "skills_dir" not in kw:
-            dirs: list[str] = []
-            if workspace:
-                skills_base = workspace.get_node_path("skills")
-                if skills_base:
-                    dirs.append(str(skills_base))
-            # Also scan default CLI skill directories.
-            dirs.extend([
-                "~/.openjiuwen/workspace/skills",
-                "~/.claude/skills",
-            ])
-            kw["skills_dir"] = dirs
-        return cls(**kw)
+        if context is None:
+            from openjiuwen.agent_teams.schema.build_context import BuildContext
+
+            context = BuildContext(language=language, workspace=workspace)
+        return factory(dict(self.params), context)
 
 
 class BuiltinToolSpec(BaseModel):
-    """Declarative tool reference resolved via the tool type registry.
+    """Declarative tool reference resolved via the tool provider registry.
 
-    Mirrors RailSpec: ``type`` selects a registered tool class,
-    ``params`` are forwarded to its constructor.  If the constructor
-    accepts a ``language`` parameter it is auto-injected.
+    Mirrors RailSpec: ``type`` selects a registered tool provider,
+    ``params`` are forwarded to it. A class-based tool gets ``language``
+    auto-injected by the class adapter when its constructor accepts it.
     """
 
     type: str
@@ -387,32 +279,32 @@ class BuiltinToolSpec(BaseModel):
         tool_id: str | None = None,
         context: "BuildContext | None" = None,
     ) -> Any:
-        """Construct a live Tool instance (or a list of tools).
+        """Construct a live Tool instance (or list) via its registered provider.
 
         Args:
-            language: Auto-injected if constructor accepts it.
-            tool_id: Auto-injected if constructor accepts it.
-                Callers can pass e.g. ``f"{member_name}.{type}"``
-                to namespace tools per member.
-            context: Runtime carrier forwarded to a registered tool provider.
+            language: Forwarded on the build context so the provider / class
+                adapter injects it when the constructor accepts it.
+            tool_id: Reserved for per-member tool-id namespacing; no built-in
+                tool consumes it today, so it is not forwarded to the provider.
+            context: Runtime carrier forwarded to the tool provider. When None,
+                a minimal context carrying ``language`` is synthesized.
         """
-        _ensure_builtin_tools_registered()
+        from openjiuwen.agent_teams.rails.registration import (
+            ensure_harness_elements_registered,
+        )
+
+        ensure_harness_elements_registered()
         factory = _TOOL_PROVIDER_REGISTRY.get(self.type)
-        if factory is not None:
-            return factory(dict(self.params), context)
-        cls = _TOOL_TYPE_REGISTRY.get(self.type)
-        if cls is None:
+        if factory is None:
             raise ValueError(
                 f"Unknown tool type '{self.type}'. "
-                f"Registered types: {list(_TOOL_TYPE_REGISTRY)}"
+                f"Registered types: {list(_TOOL_PROVIDER_REGISTRY)}"
             )
-        kw = dict(self.params)
-        sig = inspect.signature(cls.__init__)
-        if "language" in sig.parameters:
-            kw.setdefault("language", language)
-        if tool_id and "tool_id" in sig.parameters:
-            kw.setdefault("tool_id", tool_id)
-        return cls(**kw)
+        if context is None:
+            from openjiuwen.agent_teams.schema.build_context import BuildContext
+
+            context = BuildContext(language=language)
+        return factory(dict(self.params), context)
 
 
 # ---------------------------------------------------------------------------
@@ -562,8 +454,15 @@ class DeepAgentSpec(BaseModel):
                 resolved.append(item)
         return resolved or None
 
-    def build(self, context: "BuildContext | None" = None) -> "DeepAgent":
-        """Materialize a live DeepAgent from this spec.
+    def resolve_parts(self, context: "BuildContext | None" = None) -> Any:
+        """Assemble this spec's DeepAgent parts without creating an instance.
+
+        The provider-resolution half of :meth:`build`: resolves the model,
+        rails (via provider + per-member ``BuildContext``), sub-agents, tools,
+        and sys_operation, then delegates to ``resolve_deep_agent_parts``.
+        Returns a ``DeepAgentParts``. A ``NativeHarness`` uses this to configure
+        itself directly (forward construction, no throwaway template);
+        :meth:`build` uses it to materialize a fresh ``DeepAgent``.
 
         Args:
             context: Optional runtime carrier forwarded to capability providers.
@@ -571,7 +470,7 @@ class DeepAgentSpec(BaseModel):
                 id before rails / tools / sub-agents are built.
         """
         from openjiuwen.core.runner.runner import Runner
-        from openjiuwen.harness.factory import create_deep_agent
+        from openjiuwen.harness.factory import resolve_deep_agent_parts
         from openjiuwen.harness.prompts import resolve_language
 
         llm_model = self.model.build() if self.model else None
@@ -615,8 +514,8 @@ class DeepAgentSpec(BaseModel):
             Runner.resource_mgr.add_sys_operation(card)
             sys_operation = Runner.resource_mgr.get_sys_operation(card.id)
 
-        return create_deep_agent(
-            model=llm_model,
+        return resolve_deep_agent_parts(
+            llm_model,
             card=self.card,
             system_prompt=self.system_prompt,
             tools=self._resolve_tools(language, self.card.id if self.card else None, context=build_ctx),
@@ -642,6 +541,25 @@ class DeepAgentSpec(BaseModel):
             **self._progressive_tool_kwargs(),
         )
 
+    def build(self, context: "BuildContext | None" = None) -> "DeepAgent":
+        """Materialize a live DeepAgent from this spec.
+
+        Resolves the construction parts via :meth:`resolve_parts` and applies
+        them onto a fresh ``DeepAgent`` instance.
+
+        Args:
+            context: Optional runtime carrier forwarded to capability providers.
+                A per-build view is derived with the resolved workspace and card
+                id before rails / tools / sub-agents are built.
+        """
+        from openjiuwen.harness.deep_agent import DeepAgent
+        from openjiuwen.harness.factory import apply_deep_agent_parts
+
+        parts = self.resolve_parts(context)
+        agent = DeepAgent(parts.config.card)
+        apply_deep_agent_parts(agent, parts)
+        return agent
+
     def _progressive_tool_kwargs(self) -> dict[str, Any]:
         if self.progressive_tool is None:
             return {}
@@ -666,8 +584,6 @@ __all__ = [
     "VisionModelSpec",
     "WorkspaceSpec",
     "register_rail_provider",
-    "register_rail_type",
     "register_subagent_provider",
     "register_tool_provider",
-    "register_tool_type",
 ]

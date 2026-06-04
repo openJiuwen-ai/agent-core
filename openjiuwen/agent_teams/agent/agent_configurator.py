@@ -308,7 +308,7 @@ class AgentConfigurator:
         The default path builds a ``TeamHarness`` over DeepAgent. When
         ``member_runtime`` is supplied (e.g. an ``ExternalCliRuntime`` for an
         external CLI member), it is adopted as-is and the DeepAgent / rail /
-        memory / customizer setup is skipped — coordination still drives it
+        memory setup is skipped — coordination still drives it
         through the same :class:`MemberRuntime` surface.
         """
         if member_runtime is not None:
@@ -365,78 +365,83 @@ class AgentConfigurator:
             team_workspace_mount = f".team/{resolved_team_name}/"
             team_workspace_path = self.workspace_manager.workspace_path
 
-        from openjiuwen.agent_teams.rails import TeamPolicyRail, TeamToolRail
+        # Decide which team rails this member gets, as declarative RailSpecs.
+        # Live handles ride on the build context's extras (injected below); only
+        # serializable static config goes in params. Decisions that depend on
+        # team config (predefined roster, plan-mode, reliability gating) stay
+        # here; "can it build" gates (a missing handle) live in the factories.
+        from openjiuwen.agent_teams.rails.elements import (
+            TEAM_PLAN_MODE,
+            TEAM_POLICY,
+            TEAM_RELIABILITY,
+            TEAM_TOOL,
+            TEAM_TOOL_APPROVAL,
+            TEAM_WORKSPACE,
+        )
+        from openjiuwen.agent_teams.rails.registration import (
+            ensure_harness_elements_registered,
+        )
+        from openjiuwen.agent_teams.rails.team_context import inject_team_handles
+        from openjiuwen.agent_teams.schema.build_context import BuildContext
+        from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
+
+        ensure_harness_elements_registered()
 
         # Predefined teams pin their roster — strip every dynamic spawn tool
         # (one per role_type) from the leader's tool set.
         exclude = (
-            {"spawn_teammate", "spawn_human_agent", "spawn_bridge_agent", "spawn_external_cli"}
+            ["spawn_teammate", "spawn_human_agent", "spawn_bridge_agent", "spawn_external_cli"]
             if _resolve_team_mode(spec) == "predefined"
-            else None
-        )
-        team_tool_rail = TeamToolRail(
-            team_backend=self.team_backend,
-            role=ctx.role.value,
-            teammate_mode=teammate_mode,
-            lifecycle=spec.lifecycle,
-            language=resolved_language,
-            on_teammate_created=self._on_teammate_created,
-            model_config_allocator=self.model_allocator.allocate if self.model_allocator else None,
-            exclude_tools=exclude,
-            workspace_manager=self.workspace_manager,
-            worktree_manager=self.worktree_manager,
-            qualify_ids=spec.spawn_mode == "inprocess",
-            team_name=resolved_team_name,
-            member_name=member_name or "",
-            swarmflow_launcher=swarmflow_launcher,
+            else []
         )
 
-        team_policy_rail = TeamPolicyRail(
-            role=ctx.role,
-            persona=ctx.persona,
-            member_name=member_name,
-            lifecycle=spec.lifecycle,
-            teammate_mode=teammate_mode,
-            language=resolved_language,
-            team_mode=_resolve_team_mode(spec),
-            base_prompt=agent_spec.system_prompt,
-            team_workspace_mount=team_workspace_mount,
-            team_workspace_path=team_workspace_path,
-            team_backend=self.team_backend,
-            expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
-            enable_swarmflow=spec.enable_swarmflow,
-        )
-
-        team_workspace_rail = None
+        team_rail_specs: list[RailSpec] = [
+            RailSpec(
+                type=TEAM_TOOL,
+                params={
+                    "teammate_mode": teammate_mode,
+                    "lifecycle": spec.lifecycle,
+                    "exclude_tools": exclude,
+                    "qualify_ids": spec.spawn_mode == "inprocess",
+                    "team_name": resolved_team_name,
+                },
+            ),
+            RailSpec(
+                type=TEAM_POLICY,
+                params={
+                    "persona": ctx.persona or "",
+                    "lifecycle": spec.lifecycle,
+                    "teammate_mode": teammate_mode,
+                    "team_mode": _resolve_team_mode(spec),
+                    "base_prompt": agent_spec.system_prompt,
+                    "team_workspace_mount": team_workspace_mount,
+                    "team_workspace_path": team_workspace_path,
+                    "expose_human_agents_to_teammates": spec.expose_human_agents_to_teammates,
+                    "enable_swarmflow": spec.enable_swarmflow,
+                },
+            ),
+        ]
         if self.workspace_manager:
-            from openjiuwen.agent_teams.team_workspace.rails import TeamWorkspaceRail
+            team_rail_specs.append(RailSpec(type=TEAM_WORKSPACE, params={}))
 
-            team_workspace_rail = TeamWorkspaceRail(self.workspace_manager, member_name or "")
-
-        tool_approval_rail = None
         is_coordinated_teammate = ctx.role == TeamRole.TEAMMATE and ctx.team_spec
-        if is_coordinated_teammate and self.team_backend and self.messager:
-            from openjiuwen.agent_teams.rails import TeamToolApprovalRail
+        approval_tools = agent_spec.approval_required_tools or []
+        if is_coordinated_teammate and self.team_backend and self.messager and approval_tools:
+            team_rail_specs.append(
+                RailSpec(
+                    type=TEAM_TOOL_APPROVAL,
+                    params={
+                        "team_name": ctx.team_spec.team_name,
+                        "leader_member_name": ctx.team_spec.leader_member_name or "",
+                        "tool_names": list(approval_tools),
+                    },
+                ),
+            )
 
-            approval_tools = agent_spec.approval_required_tools or []
-            if approval_tools:
-                tool_approval_rail = TeamToolApprovalRail(
-                    team_name=ctx.team_spec.team_name,
-                    member_name=member_name or "",
-                    db=self.team_backend.db,
-                    messager=self.messager,
-                    leader_member_name=ctx.team_spec.leader_member_name or "",
-                    tool_names=approval_tools,
-                )
-
-        team_plan_mode_rail = None
         is_team_plan_leader = ctx.role == TeamRole.LEADER and is_team_plan_enabled(spec)
         if is_team_plan_leader:
-            from openjiuwen.agent_teams.rails import TeamPlanModeRail
+            team_rail_specs.append(RailSpec(type=TEAM_PLAN_MODE, params={}))
 
-            team_plan_mode_rail = TeamPlanModeRail(language=resolved_language)
-
-        reliability_rail = None
         reliability_cfg = spec.reliability
         if reliability_cfg and reliability_cfg.enabled and member_name:
             role_value = ctx.role.value
@@ -444,21 +449,22 @@ class AgentConfigurator:
             # Leader uses a LocalAnomalyReporter (no messager needed); teammates
             # need one for the cross-process EventAnomalyReporter.
             if role_value in reliability_cfg.monitor_roles and (is_leader or self.messager):
-                from openjiuwen.agent_teams.reliability.factory import build_reliability_rail
-
-                reliability_rail = build_reliability_rail(
-                    reliability_cfg,
-                    member_name=member_name,
-                    messager=self.messager,
-                    team_name=resolved_team_name,
-                    sender_id=member_name,
-                    is_leader=is_leader,
+                team_rail_specs.append(
+                    RailSpec(
+                        type=TEAM_RELIABILITY,
+                        params={
+                            "reliability_cfg": reliability_cfg.model_dump(),
+                            "team_name": resolved_team_name,
+                            "sender_id": member_name,
+                            "is_leader": is_leader,
+                        },
+                    ),
                 )
 
-        # Derive a per-member view of the platform-supplied build context
-        # (provider-based assembly). None when no platform attached one, so
-        # the customizer path is unaffected.
-        member_build_context = None
+        # Build the per-member context that carries the team live handles in
+        # extras. With a platform-supplied build_context, derive a per-member
+        # view and decouple its extras (so members never share handles /
+        # caches); otherwise synthesize a minimal context.
         if spec.build_context is not None:
             member_build_context = spec.build_context.derive(
                 member_name=member_name,
@@ -466,28 +472,41 @@ class AgentConfigurator:
                 language=resolved_language,
                 member_card_id=self._card.id,
             )
+            member_build_context.extras = dict(member_build_context.extras)
+        else:
+            member_build_context = BuildContext(
+                language=resolved_language,
+                member_name=member_name,
+                role=ctx.role.value,
+                member_card_id=self._card.id,
+            )
+        inject_team_handles(
+            member_build_context.extras,
+            team_backend=self.team_backend,
+            workspace_manager=self.workspace_manager,
+            worktree_manager=self.worktree_manager,
+            model_allocator=self.model_allocator,
+            messager=self.messager,
+            on_teammate_created=self._on_teammate_created,
+            swarmflow_launcher=swarmflow_launcher,
+        )
+
+        # Fold the team rails into the spec rails (after the user rails, to keep
+        # the init order consistent with the legacy mount order).
+        build_spec = build_spec.model_copy(
+            update={"rails": list(build_spec.rails or []) + team_rail_specs},
+        )
 
         self.harness = TeamHarness.build(
             agent_spec=build_spec,
             role=ctx.role,
             member_name=member_name,
-            team_tool_rail=team_tool_rail,
-            team_policy_rail=team_policy_rail,
-            team_workspace_rail=team_workspace_rail,
-            tool_approval_rail=tool_approval_rail,
-            team_plan_mode_rail=team_plan_mode_rail,
-            reliability_rail=reliability_rail,
             initial_plan_mode=is_team_plan_leader,
             build_context=member_build_context,
         )
 
         # Team memory manager (only when explicitly enabled in the spec).
-        # Construction must happen before agent_customizer so platform
-        # adapters that touch memory tools can see them.
         self.memory_manager = self._build_memory_manager(spec, ctx, agent_spec, resolved_language, member_name)
-
-        if spec.agent_customizer:
-            self.harness.run_agent_customizer(spec.agent_customizer)
 
         return self.harness
 

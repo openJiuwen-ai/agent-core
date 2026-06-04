@@ -18,7 +18,7 @@ surface, picked by the adapter's ``supports_stdin_injection``:
 
 In both cases the CLI's *actions* (messages, task ops) flow out-of-process
 through the team CLI/MCP tools, so the CLI's stdout stays internal and is
-not surfaced as team-stream chunks. Rail / memory / customizer hooks are
+not surfaced as team-stream chunks. Rail / memory hooks are
 no-ops (the configurator skips those features for external CLI members).
 
 Both flavours implement the :class:`MemberRuntime` interaction surface
@@ -43,7 +43,6 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator, Callable, Optional
 
-from openjiuwen.agent_teams.agent.member_runtime import AgentCustomizer
 from openjiuwen.agent_teams.external.cli_agent.adapters import CliAgentAdapter
 from openjiuwen.agent_teams.external.cli_agent.injector import Injector
 from openjiuwen.agent_teams.harness.outputs import _END, _OutputIterator
@@ -386,10 +385,6 @@ class _CliRuntimeBase(ABC):
 
     async def inject_member_memory(self, memory_manager: Any, query: str) -> None:
         """No-op: external CLI members do not use team memory injection."""
-        return None
-
-    def run_agent_customizer(self, customizer: AgentCustomizer) -> None:
-        """No-op: the agent_customizer hook targets a local DeepAgent."""
         return None
 
     @property

@@ -138,7 +138,7 @@ class TeamSkillEvolutionRail(EvolutionRail):
     SkillEvolutionRail handles 1D skill experience records;
     TeamSkillRail handles team skill experience records.
     New team skill creation is handled by TeamSkillCreateRail.
-    Both can coexist on the same agent via agent_customizer.
+    Both can coexist on the same agent.
     """
 
     priority = 80

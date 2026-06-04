@@ -618,10 +618,10 @@ class _TeamRunnerMixin:
         through to a clearer error message rather than re-raising a
         cryptic checkpoint failure.
 
-        ``agent_customizer`` is dropped by serialization
+        ``build_context`` is dropped by serialization
         (``Field(exclude=True)``) and is not reinjected here because no
         live ``runtime_spec`` is available on the ``name`` path; callers
-        relying on a customizer must use the explicit ``spec`` form.
+        relying on a provider build context must use the explicit ``spec`` form.
         """
         from openjiuwen.agent_teams.runtime.metadata import read_team_namespace
         from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec

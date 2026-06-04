@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Any, AsyncIterator, Callable
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error, raise_error
@@ -78,6 +78,11 @@ from openjiuwen.agent_teams.harness.state import (
     SafeStateSnapshot,
 )
 
+if TYPE_CHECKING:
+    from openjiuwen.agent_teams.schema.build_context import BuildContext
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+    from openjiuwen.core.single_agent.rail.base import AgentRail
+
 # Events fired on the harness-private callback framework so a consumer (e.g. the
 # team StreamController) can map harness lifecycle onto its own status machines
 # without polling. Both fire inside the supervisor coroutine, so their ordering
@@ -94,10 +99,11 @@ _EVENT_NAMESPACE = "native_harness"
 class NativeHarness(DeepAgent):
     """Concurrent-safe multi-round interaction wrapper that is itself a DeepAgent.
 
-    A template DeepAgent is produced lazily by ``deep_agent_provider`` on the
-    first ``start()`` call; its config + rails are copied onto this instance,
-    which then runs as the real DeepAgent. The harness owns one ``Session``
-    (auto-created or injected) reused across all rounds.
+    The harness configures itself directly from a ``DeepAgentSpec`` (forward
+    construction): ``prepare_config`` resolves its construction parts and
+    applies them onto this instance, which then runs as the real DeepAgent. The
+    harness owns one ``Session`` (auto-created or injected) reused across all
+    rounds.
 
     All external API methods push a control event onto an internal channel; the
     supervisor coroutine consumes events serially, mutating
@@ -107,17 +113,32 @@ class NativeHarness(DeepAgent):
     Structurally implements ``HarnessProtocol`` (verified via ``isinstance``).
     """
 
-    def __init__(self, deep_agent_provider: Callable[[], DeepAgent]) -> None:
-        """Initialize a NativeHarness over a DeepAgent provider.
+    def __init__(
+        self,
+        agent_spec: "DeepAgentSpec",
+        build_context: "BuildContext | None" = None,
+        extra_rails: "list[AgentRail] | None" = None,
+    ) -> None:
+        """Initialize a NativeHarness that configures itself from a spec.
+
+        Forward construction: rather than building a throwaway template
+        DeepAgent and copying its config + rails across, the harness resolves
+        its own construction parts from ``agent_spec`` and applies them onto
+        itself in ``prepare_config``.
 
         Args:
-            deep_agent_provider: Zero-arg callable producing a configured
-                DeepAgent template. Invoked exactly once on the first
-                ``start()``; its config + rails are copied onto this instance.
+            agent_spec: The DeepAgentSpec this harness materializes itself from.
+            build_context: Optional runtime carrier forwarded to capability
+                providers during ``resolve_parts``.
+            extra_rails: Additional rails not declared in ``agent_spec.rails``
+                (transitional team-side rails; folded into the spec later).
+                Re-mounted after the spec rails on every (re)build.
         """
-        # Placeholder card; replaced by the template's card in start().
+        # Placeholder card; replaced by the spec's resolved card in prepare_config.
         super().__init__(AgentCard(name="native_harness"))
-        self._provider = deep_agent_provider
+        self._agent_spec = agent_spec
+        self._build_context = build_context
+        self._extra_rails: list[AgentRail] = list(extra_rails) if extra_rails else []
         self._session: Session | None = None
         self._owns_session: bool = False
         self._timeout: float = 600.0
@@ -131,7 +152,7 @@ class NativeHarness(DeepAgent):
         self._started_event = asyncio.Event()
         self._starting: bool = False
         # ``_config_prepared``: sync configure (card/config/rails) done, so a
-        # host can run an agent_customizer / read workspace off ``deep_config``
+        # host can read workspace off ``deep_config``
         # before any async init. ``_prepared``: configure + ensure_initialized
         # done. Splitting them lets ``start`` only spin up supervisor + session.
         self._config_prepared: bool = False
@@ -156,32 +177,31 @@ class NativeHarness(DeepAgent):
     # ------------------------------------------------------------------
 
     def prepare_config(self) -> None:
-        """Configure from the provider synchronously, without async init.
+        """Configure self directly from the spec synchronously, without async init.
 
-        Adopts the template's identity + config + rails so a host can run an
-        agent_customizer or read ``workspace`` / ``sys_operation`` off
-        ``deep_config`` before any run cycle. Rail registration is queued; rails
-        actually initialize during ``prepare`` / ``start``. Idempotent.
+        Forward construction: resolves construction parts from ``agent_spec``
+        and applies them onto this instance (configure + tools + rails), so a
+        host can read ``workspace`` / ``sys_operation`` off ``deep_config``
+        before any run cycle. Rail registration is queued; rails actually
+        initialize during ``prepare`` / ``start``. Idempotent.
         """
         if self._config_prepared:
             return
-        template = self._provider()
-        if template is None:
-            raise_error(
-                StatusCode.DEEPAGENT_RUNTIME_ERROR,
-                error_msg="deep_agent_provider returned None.",
-            )
-        # Adopt the template's identity + config, then inherit its rails so this
-        # instance behaves exactly like the configured template.
-        self.card = template.card
-        self.configure(template.deep_config)
-        for rail in template.configured_rails():
+        from openjiuwen.harness.factory import apply_deep_agent_parts
+
+        parts = self._agent_spec.resolve_parts(self._build_context)
+        # Apply config + tools + spec rails directly onto this instance — no
+        # throwaway template DeepAgent.
+        apply_deep_agent_parts(self, parts)
+        # Transitional team-side rails not yet declared in ``agent_spec.rails``.
+        # Mounted after the spec rails so init order matches the legacy path.
+        for rail in self._extra_rails:
             self.add_rail(rail)
         # Round-boundary snapshot rail (AFTER_TASK_ITERATION is a deep event, so
         # add_rail/register_rail routes it onto this outer DeepAgent).
         self.add_rail(self._snapshot_rail)
-        if template.deep_config is not None:
-            self._timeout = template.deep_config.completion_timeout
+        if parts.config is not None:
+            self._timeout = parts.config.completion_timeout
         self._config_prepared = True
 
     async def prepare(self) -> None:
