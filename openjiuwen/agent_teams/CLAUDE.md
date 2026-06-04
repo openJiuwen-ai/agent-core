@@ -40,7 +40,7 @@ agent_teams/
 ├── models/              # 多模型部署原语（ModelPoolEntry / 池继承 / Allocator）
 ├── agent/               # 核心运行时（TeamAgent 本体 + 装配链）
 ├── prompts/             # 系统提示词模板、加载器、PromptSection 构造与缓存
-├── rails/               # 团队相关 Rail（系统提示词注入 / 工具审批）
+├── rails/               # 团队 Rail + manifest 元素声明（team rail / 内置 rail·tool / context handle）
 ├── runtime/             # Runner 进程内 TeamAgent 对象池 + 派发决策 + Run/Interact 并发门禁
 ├── interaction/         # 外部交互入口（UserInbox / HumanAgentInbox / @ 路由）
 ├── tools/               # 团队工具（Leader / Teammate / Human Agent 可调用的原子操作）
@@ -76,18 +76,29 @@ agent_teams/
 
 **两条装配路径（`policy.build_system_prompt` vs `sections.build_team_*_section`）读的是同一批 `.md`**。改正文自动同时生效；结构性变更（占位符、section 拆分）要明确落到哪条路径。详见 `prompts/CLAUDE.md`。
 
-### rails/ — 团队 Rail 注入
+### rails/ — 团队 Rail 注入 + manifest 声明
+
+team rail 全部经 **manifest 声明式装配**（`@harness_element` provider），不再手搓 `new` —— 见
+`docs/features/F_32_declarative-harness-assembly.md`。`AgentConfigurator` 把 team rail 作为
+`RailSpec` 注入 `build_spec.rails`，live handle 经 `BuildContext.extras` 传给工厂，rail 随
+`spec.build` + `ensure_initialized` 自动挂载 / init（不再有 `_MountedRails` / 手动 set/init /
+customizer 后处理）。
 
 | 文件 | 职责 |
 |---|---|
 | `team_policy_rail.py` | `TeamPolicyRail`：把 prompts/sections 的 `PromptSection` 注入 `SystemPromptBuilder`；含 `MtimeSectionCache` 驱动的 dynamic section 刷新 |
 | `tool_approval_rail.py` | `TeamToolApprovalRail`：teammate 调工具时通过消息向 leader 申请审批的中断 rail |
+| `team_tool_rail.py` / `team_plan_mode_rail.py` | `TeamToolRail`（协同工具注册）/ `TeamPlanModeRail`（plan mode 提示叠加） |
+| `elements.py` | 6 个 team rail 的 `@harness_element` 工厂 + `ConstructionInput`（`team.tool`/`team.policy`/`team.workspace`/`team.tool_approval`/`team.plan_mode`/`team.reliability`） |
+| `team_context.py` | `TeamHandleKey` + accessor + `inject_team_handles` + `team_rail_cache`：team live handle 经 `BuildContext.extras` 的 key 常量 + 类型化读取 |
+| `builtin_elements.py` | openjiuwen 内置 rail/tool（`task_planning`/`skill_use`/`web_search` 等）的 `@harness_element` 声明——取代已删的 class registry |
+| `registration.py` | `ensure_harness_elements_registered()`：import elements → `register_from_catalog()`，spec build 路径的统一注册入口 |
 
 ### schema/ — 数据模型分层
 
 ```
 blueprint.py       # TeamAgentSpec / LeaderSpec / TransportSpec / StorageSpec —— 顶层装配蓝图
-deep_agent_spec.py # DeepAgentSpec / SubAgentSpec / RailSpec 等 —— DeepAgent 侧的 Spec
+deep_agent_spec.py # DeepAgentSpec / SubAgentSpec / RailSpec 等 —— DeepAgent 侧的 Spec。RailSpec/BuiltinToolSpec 只走 provider（class registry _RAIL_TYPE_REGISTRY/_TOOL_TYPE_REGISTRY 已删，见 F_32）；DeepAgentSpec.resolve_parts/build 分离
 team.py            # TeamSpec / TeamRole / TeamLifecycle / TeamRuntimeContext / TeamMemberSpec
 events.py          # EventMessage / TeamTopic —— 跨进程事件
 status.py          # MemberStatus / ExecutionStatus —— 状态机枚举

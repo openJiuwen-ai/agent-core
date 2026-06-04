@@ -20,7 +20,7 @@
 | 文件 | 类 | 职责 |
 |---|---|---|
 | `team_agent.py` | `TeamAgent(BaseAgent)` | 唯一对外类。leader / teammate 都是它，行为由 `blueprint.role` 切。`auto_start_member` / `auto_start_all` 用于 interact dispatch 层 best-effort lazy startup |
-| `agent_configurator.py` | `AgentConfigurator` | DeepAgent 装配，挂 prompts/ 与 rails/ 子模块（spawn 时复用 `models/` 的 allocator 回调）；`_resolve_team_mode` 在这里 |
+| `agent_configurator.py` | `AgentConfigurator` | DeepAgent 装配：team rail 经 `RailSpec` 声明式注入 `build_spec.rails` + live handle 注入 `BuildContext.extras`（不再手动 `new` rail / 不再有 customizer，见 `docs/features/F_32`）；`_resolve_team_mode` 在这里 |
 | `member.py` | `TeamMember` | 成员状态机封装 |
 | `member_factory.py` | `create_member_handle(...)` | 集中 TeamMember 构造，leader / teammate 路径共用一份实现 |
 | `payload.py` | `SpawnPayloadBuilder` | spawn teammate 时的**跨进程 wire 格式**。输出键是 `TeamAgent.from_spawn_payload` 的公共契约——改这里的字段要同步改子进程入口 |
