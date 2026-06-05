@@ -14,7 +14,6 @@ workflow/
 │   ├── journal.py       # content-addressed resume（结构化 call-path 键 + sig）
 │   ├── loader.py        # AST 提取 META + 确定性 lint + importlib 导入
 │   ├── schema.py        # agent(schema=) 解析/校验（dict / pydantic / None）
-│   ├── aliases.py       # 把 `swarmflow` 名字运行时映射到 facade（引用计数）
 │   ├── progress.py      # WorkflowProgressEvent（业务无关、无时间戳）+ ProgressSink
 │   ├── runtime.py       # Runtime：backend / journal / log_sink / progress_sink / 并发 cap
 │   ├── runner.py        # run_workflow：装 provider、建 Runtime、发 workflow 起止事件
