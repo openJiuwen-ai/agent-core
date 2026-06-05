@@ -51,7 +51,7 @@ class _FakeCoordination:
         self.enqueued_inputs.append(inputs)
         await self._agent._stream_controller.stream_queue.put(None)
 
-    async def enqueue_mailbox_after_first_iteration(self) -> None:
+    async def enqueue_initial_mailbox_poll(self) -> None:
         self.mailbox_enqueued = True
 
     async def finalize_round(self) -> None:
