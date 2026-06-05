@@ -23,7 +23,7 @@ no-ops (the configurator skips those features for external CLI members).
 
 Both flavours implement the :class:`MemberRuntime` interaction surface
 (``start`` / ``stop`` / ``outputs`` / ``send`` / ``abort`` / ``pause`` /
-``on_state_changed`` / ``on_round`` / ``state`` / ``session_id``) through the
+``subscribe`` / ``state`` / ``session_id``) through the
 shared :class:`_CliRuntimeBase` adapter, which wraps each flavour's single-turn
 ``_drive`` async generator: ``send`` starts a turn when IDLE (or steers /
 buffers a follow-up when RUNNING), ``outputs`` exposes the turn's narration
@@ -54,9 +54,9 @@ from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.stream.base import OutputSchema
 
 # Harness-private event topics + namespace, mirroring NativeHarness so the team
-# StreamController can subscribe to a CLI runtime with the same on_state_changed
-# / on_round contract. ``kind`` is one of started / finished / aborted / failed
-# (a CLI turn has no ``paused`` phase).
+# StreamController can subscribe to a CLI runtime with the same
+# ``subscribe(on_state=, on_round=)`` contract. ``kind`` is one of started /
+# finished / aborted / failed (a CLI turn has no ``paused`` phase).
 _EVENT_STATE = "harness.state"
 _EVENT_ROUND = "harness.round"
 _EVENT_NAMESPACE = "cli_runtime"
@@ -140,8 +140,9 @@ class _CliRuntimeBase(ABC):
         # Queue-backed output channel for the current run cycle; ``stop`` pushes
         # the ``_END`` sentinel so ``outputs`` terminates. Recreated per start.
         self._output_queue: asyncio.Queue = asyncio.Queue()
-        # Harness-private event bus; consumers subscribe via on_state_changed /
-        # on_round. Metrics/logging off — fired on the turn-driver hot path.
+        # Harness-private event bus; consumers subscribe via
+        # ``subscribe(on_state=, on_round=)``. Metrics/logging off — fired on the
+        # turn-driver hot path.
         self._events = AsyncCallbackFramework(enable_metrics=False, enable_logging=False)
         # The asyncio.Task driving the in-flight turn, or None when IDLE.
         self._turn_task: Optional[asyncio.Task] = None
@@ -259,13 +260,23 @@ class _CliRuntimeBase(ABC):
         team_logger.debug("[{}] pause is a no-op for a CLI-backed runtime", self._member_name)
         return None
 
-    async def on_state_changed(self, callback: Callable[..., Any]) -> None:
-        """Register a callback fired on every phase transition (kwargs narrowed)."""
-        await self._events.register(_EVENT_STATE, callback, namespace=_EVENT_NAMESPACE)
+    async def subscribe(
+        self,
+        *,
+        on_state: Callable[..., Any] | None = None,
+        on_round: Callable[..., Any] | None = None,
+    ) -> None:
+        """Register optional phase/round callbacks (same contract as NativeHarness).
 
-    async def on_round(self, callback: Callable[..., Any]) -> None:
-        """Register a callback fired on every round lifecycle transition."""
-        await self._events.register(_EVENT_ROUND, callback, namespace=_EVENT_NAMESPACE)
+        Both keyword-only and optional; only the non-None callbacks are
+        registered. ``on_state`` receives ``old`` / ``new`` / ``session_id``;
+        ``on_round`` receives ``kind`` / ``round_id`` / ``result`` (kwargs
+        narrowed to each callback's declared parameters).
+        """
+        if on_state is not None:
+            await self._events.register(_EVENT_STATE, on_state, namespace=_EVENT_NAMESPACE)
+        if on_round is not None:
+            await self._events.register(_EVENT_ROUND, on_round, namespace=_EVENT_NAMESPACE)
 
     # ------------------------------------------------------------------
     # Turn driving (single-turn ``_drive`` → multi-round surface)

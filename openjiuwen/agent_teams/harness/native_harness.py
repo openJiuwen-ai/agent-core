@@ -100,10 +100,9 @@ class NativeHarness(DeepAgent):
     """Concurrent-safe multi-round interaction wrapper that is itself a DeepAgent.
 
     The harness configures itself directly from a ``DeepAgentSpec`` (forward
-    construction): ``prepare_config`` resolves its construction parts and
-    applies them onto this instance, which then runs as the real DeepAgent. The
-    harness owns one ``Session`` (auto-created or injected) reused across all
-    rounds.
+    construction): the constructor resolves its construction parts and applies
+    them onto this instance, which then runs as the real DeepAgent. The harness
+    owns one ``Session`` (auto-created or injected) reused across all rounds.
 
     All external API methods push a control event onto an internal channel; the
     supervisor coroutine consumes events serially, mutating
@@ -124,7 +123,7 @@ class NativeHarness(DeepAgent):
         Forward construction: rather than building a throwaway template
         DeepAgent and copying its config + rails across, the harness resolves
         its own construction parts from ``agent_spec`` and applies them onto
-        itself in ``prepare_config``.
+        itself synchronously in this constructor (via ``_prepare_config``).
 
         Args:
             agent_spec: The DeepAgentSpec this harness materializes itself from.
@@ -134,7 +133,7 @@ class NativeHarness(DeepAgent):
                 (transitional team-side rails; folded into the spec later).
                 Re-mounted after the spec rails on every (re)build.
         """
-        # Placeholder card; replaced by the spec's resolved card in prepare_config.
+        # Placeholder card; replaced by the spec's resolved card in _prepare_config.
         super().__init__(AgentCard(name="native_harness"))
         self._agent_spec = agent_spec
         self._build_context = build_context
@@ -144,8 +143,9 @@ class NativeHarness(DeepAgent):
         self._timeout: float = 600.0
         self._st = HarnessInternalState()
         self._control: asyncio.Queue = asyncio.Queue()
-        # Harness-private event bus; consumers subscribe via on_state_changed /
-        # on_round. Metrics/logging off — these fire on the supervisor hot path.
+        # Harness-private event bus; consumers subscribe via
+        # ``subscribe(on_state=, on_round=)``. Metrics/logging off — these fire
+        # on the supervisor hot path.
         self._events = AsyncCallbackFramework(enable_metrics=False, enable_logging=False)
         self._snapshot_rail = SnapshotRail()
         self._forwarder_task: asyncio.Task | None = None
@@ -157,6 +157,10 @@ class NativeHarness(DeepAgent):
         # done. Splitting them lets ``start`` only spin up supervisor + session.
         self._config_prepared: bool = False
         self._prepared: bool = False
+        # Forward construction: configure synchronously at construction so a host
+        # can read workspace / sys_operation off ``deep_config`` immediately.
+        # Must be the last statement — it reads the fields assigned above.
+        self._prepare_config()
 
     # ------------------------------------------------------------------
     # Read-only accessors
@@ -176,14 +180,15 @@ class NativeHarness(DeepAgent):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def prepare_config(self) -> None:
+    def _prepare_config(self) -> None:
         """Configure self directly from the spec synchronously, without async init.
 
-        Forward construction: resolves construction parts from ``agent_spec``
-        and applies them onto this instance (configure + tools + rails), so a
-        host can read ``workspace`` / ``sys_operation`` off ``deep_config``
-        before any run cycle. Rail registration is queued; rails actually
-        initialize during ``prepare`` / ``start``. Idempotent.
+        Called once at the end of ``__init__``. Forward construction: resolves
+        construction parts from ``agent_spec`` and applies them onto this
+        instance (configure + tools + rails), so a host can read ``workspace`` /
+        ``sys_operation`` off ``deep_config`` before any run cycle. Rail
+        registration is queued; rails actually initialize during ``_prepare`` /
+        ``start``. Idempotent.
         """
         if self._config_prepared:
             return
@@ -204,15 +209,15 @@ class NativeHarness(DeepAgent):
             self._timeout = parts.config.completion_timeout
         self._config_prepared = True
 
-    async def prepare(self) -> None:
-        """Configure (``prepare_config``) then run ``ensure_initialized``.
+    async def _prepare(self) -> None:
+        """Configure (``_prepare_config``) then run ``ensure_initialized``.
 
-        Idempotent. ``start`` calls this first, so a standalone ``start`` is
-        unchanged.
+        Idempotent. ``start`` calls this first. ``_prepare_config`` already ran
+        in ``__init__``; the guarded call here is a defensive no-op.
         """
         if self._prepared:
             return
-        self.prepare_config()
+        self._prepare_config()
         await self.ensure_initialized()
         self._prepared = True
 
@@ -232,7 +237,7 @@ class NativeHarness(DeepAgent):
             return
         self._starting = True
         try:
-            await self.prepare()
+            await self._prepare()
 
             if session is None:
                 self._session = Session(card=self.card)
@@ -342,30 +347,31 @@ class NativeHarness(DeepAgent):
     # Event subscription
     # ------------------------------------------------------------------
 
-    async def on_state_changed(self, callback: Callable[..., Any]) -> None:
-        """Register a callback fired on every phase transition.
+    async def subscribe(
+        self,
+        *,
+        on_state: Callable[..., Any] | None = None,
+        on_round: Callable[..., Any] | None = None,
+    ) -> None:
+        """Register optional lifecycle callbacks on the harness event bus.
 
-        The callback is invoked with ``old`` / ``new`` (``HarnessState``) and
-        ``session_id``; the framework narrows kwargs to the callback's declared
-        parameters, so a consumer may accept only the subset it needs. Callbacks
-        run inside the supervisor coroutine and must be cheap and non-blocking.
-
-        Args:
-            callback: Async callable receiving the ``harness.state`` payload.
-        """
-        await self._events.register(_EVENT_STATE, callback, namespace=_EVENT_NAMESPACE)
-
-    async def on_round(self, callback: Callable[..., Any]) -> None:
-        """Register a callback fired on every round lifecycle transition.
-
-        The callback is invoked with ``kind`` (str) / ``round_id`` (int) /
-        ``result`` (dict | None); kwargs are narrowed to the callback's declared
-        parameters. Callbacks run inside the supervisor coroutine.
+        ``on_state`` fires on every phase transition (kwargs ``old`` / ``new``
+        (``HarnessState``) / ``session_id``); ``on_round`` fires on every round
+        transition (kwargs ``kind`` (str) / ``round_id`` (int) / ``result``
+        (dict | None)). Both are keyword-only and optional; only the non-None
+        callbacks are registered. The framework narrows kwargs to each
+        callback's declared parameters, so a consumer may accept only the subset
+        it needs. Callbacks run inside the supervisor coroutine and must be cheap
+        and non-blocking.
 
         Args:
-            callback: Async callable receiving the ``harness.round`` payload.
+            on_state: Async callable receiving the ``harness.state`` payload.
+            on_round: Async callable receiving the ``harness.round`` payload.
         """
-        await self._events.register(_EVENT_ROUND, callback, namespace=_EVENT_NAMESPACE)
+        if on_state is not None:
+            await self._events.register(_EVENT_STATE, on_state, namespace=_EVENT_NAMESPACE)
+        if on_round is not None:
+            await self._events.register(_EVENT_ROUND, on_round, namespace=_EVENT_NAMESPACE)
 
     # ------------------------------------------------------------------
     # External API: send / abort / pause

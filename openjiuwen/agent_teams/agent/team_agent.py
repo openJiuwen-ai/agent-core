@@ -568,8 +568,9 @@ class TeamAgent(BaseAgent):
         team_logger.info("[{}] invoke start, role={}", self._member_name() or "?", self.role.value)
         self._stream_controller.stream_queue = asyncio.Queue()
         # Cache the user query so CoordinationManager can pass it to the
-        # memory pipeline during start().
-        raw_query = inputs.get("query", "") if isinstance(inputs, dict) else str(inputs)
+        # memory pipeline during start(). ``.get`` default does not cover a
+        # present-but-None value, so normalize an empty/None query to "".
+        raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
         self._state.pending_user_query = raw_query
         routed_payloads = self._initial_leader_route_payloads(raw_query)
         await self._coordination.start(session)
@@ -577,7 +578,12 @@ class TeamAgent(BaseAgent):
             if routed_payloads is not None:
                 await self._dispatch_initial_leader_route(routed_payloads)
             else:
-                await self._coordination.enqueue_user_input(inputs)
+                # Only drive a first round when there is an actual message.
+                # Spawn / recover / resume with no input must not fabricate a
+                # round; the mailbox poll below delivers only real pending
+                # messages (no-op when the inbox is empty).
+                if raw_query:
+                    await self._coordination.enqueue_user_input(inputs)
                 await self._coordination.enqueue_mailbox_after_first_iteration()
             last_result = None
             while True:
@@ -617,7 +623,9 @@ class TeamAgent(BaseAgent):
     async def stream(self, inputs, session=None, stream_modes=None):
         team_logger.info("[{}] stream start, role={}", self._member_name() or "?", self.role.value)
         self._stream_controller.stream_queue = asyncio.Queue()
-        raw_query = inputs.get("query", "") if isinstance(inputs, dict) else str(inputs)
+        # ``.get`` default does not cover a present-but-None value, so
+        # normalize an empty/None query to "".
+        raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
         self._state.pending_user_query = raw_query
         routed_payloads = self._initial_leader_route_payloads(raw_query)
 
@@ -626,7 +634,12 @@ class TeamAgent(BaseAgent):
             if routed_payloads is not None:
                 await self._dispatch_initial_leader_route(routed_payloads)
             else:
-                await self._coordination.enqueue_user_input(inputs)
+                # Only drive a first round when there is an actual message.
+                # Spawn / recover / resume with no input must not fabricate a
+                # round; the mailbox poll below delivers only real pending
+                # messages (no-op when the inbox is empty).
+                if raw_query:
+                    await self._coordination.enqueue_user_input(inputs)
                 await self._coordination.enqueue_mailbox_after_first_iteration()
             while True:
                 chunk = await self._stream_controller.stream_queue.get()

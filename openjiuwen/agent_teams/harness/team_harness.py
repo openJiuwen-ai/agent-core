@@ -6,14 +6,14 @@
 TeamHarness composes a single :class:`NativeHarness` (which IS-A DeepAgent and
 drives the full task loop under one supervisor) and exposes the concurrent-safe
 interaction surface (``start`` / ``stop`` / ``outputs`` / ``send`` / ``abort`` /
-``pause`` / ``on_state_changed`` / ``on_round``) plus the team capability hooks
-the configurator / coordination need. Replacing DeepAgent with a remote
-scheduling resource only requires re-implementing this module; business code in
-``agent_teams`` keeps the same call surface.
+``pause`` / ``subscribe``) plus the team capability hooks the configurator /
+coordination need. Replacing DeepAgent with a remote scheduling resource only
+requires re-implementing this module; business code in ``agent_teams`` keeps the
+same call surface.
 
-Lifecycle: the underlying DeepAgent is *configured* at build time
-(``native.prepare_config``) so the configurator can read workspace/sys_operation
-before any run cycle. ``start(team_session)`` then
+Lifecycle: the underlying DeepAgent *configures itself* synchronously in its
+constructor so the configurator can read workspace/sys_operation before any run
+cycle. ``start(team_session)`` then
 binds a child agent session (sharing the team session id, so DeepAgentState
 persists) and spins up the supervisor; the same native instance is reused across
 run cycles on the same session. A session switch tears the native down and
@@ -90,14 +90,11 @@ class TeamHarness:
         throwaway template). The team rails are declared in ``agent_spec.rails``
         (provider-resolved from the build context's extras), so they mount and
         initialize through the spec build + ``ensure_initialized`` path like
-        every other rail — no hand-mounting here. ``native.prepare_config()``
-        runs once at build time so the configurator can read ``workspace`` /
-        ``sys_operation`` before any run cycle.
+        every other rail — no hand-mounting here. The native configures itself
+        synchronously in its constructor, so the configurator can read
+        ``workspace`` / ``sys_operation`` right after construction.
         """
         native = NativeHarness(agent_spec, build_context)
-        # Sync configure so the configurator's workspace read works before any
-        # async init or run cycle.
-        native.prepare_config()
         return cls(
             agent_spec,
             build_context,
@@ -121,7 +118,6 @@ class TeamHarness:
         """
         if self._native is None or self._native.state is HarnessState.TERMINATED:
             self._native = NativeHarness(self._agent_spec, self._build_context)
-            self._native.prepare_config()
         child = self._make_child_session(team_session)
         await child.pre_run()
         await self._native.start(session=child)
@@ -232,15 +228,15 @@ class TeamHarness:
         """
         return self._native is not None and self._active_agent_session is not None
 
-    async def on_state_changed(self, callback: Callable[..., Any]) -> None:
-        """Register a phase-transition callback on the native."""
+    async def subscribe(
+        self,
+        *,
+        on_state: Callable[..., Any] | None = None,
+        on_round: Callable[..., Any] | None = None,
+    ) -> None:
+        """Register phase/round callbacks on the native (no-op before start)."""
         if self._native is not None:
-            await self._native.on_state_changed(callback)
-
-    async def on_round(self, callback: Callable[..., Any]) -> None:
-        """Register a round-lifecycle callback on the native."""
-        if self._native is not None:
-            await self._native.on_round(callback)
+            await self._native.subscribe(on_state=on_state, on_round=on_round)
 
     # ------------------------------------------------------------------
     # Interrupt-resume helpers

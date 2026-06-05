@@ -502,8 +502,6 @@ def _hitt_section_human_agent_cn(names: list[str], self_name: str | None) -> str
         "**只有**控制者在 Inbox 里下达明确指令时才能行动。\n"
         "- 如果控制者的指令需要文件读写、查看任务、提交结果，立即调用对应工具完成；"
         "完成后简洁地把结果回给控制者即可（你的回应只对控制者可见）。\n"
-        "- 第一次启动时如果只收到「Join the team and wait...」之类的占位消息，"
-        "**直接静默等待**，不要调用任何工具，不要广播任何文字。\n"
     )
 
 
@@ -663,10 +661,6 @@ def _hitt_section_human_agent_en(names: list[str], self_name: str | None) -> str
         "lookup, or completion, call the right tool immediately, then "
         "reply to the controller with a concise result. Your reply is "
         "visible to the controller only.\n"
-        "- If the only input you ever received is a placeholder like "
-        '"Join the team and wait for your first assignment.", '
-        "**stay silent** — make no tool calls and emit no broadcast "
-        "text.\n"
     )
 
 

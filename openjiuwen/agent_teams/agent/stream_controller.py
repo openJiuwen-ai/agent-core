@@ -180,8 +180,7 @@ class StreamController:
             return
         self._retry_attempt = 0
         self._swallow_failed_round = False
-        await harness.on_state_changed(self._map_state)
-        await harness.on_round(self._map_round)
+        await harness.subscribe(on_state=self._map_state, on_round=self._map_round)
         if self._forward_task is None or self._forward_task.done():
             self._forward_task = asyncio.create_task(self._forward_outputs())
 

@@ -234,8 +234,12 @@ class SpawnManager:
         if team_backend is None:
             return False
 
-        teammate = await team_backend.get_member(member_name)
-        initial_message = teammate.prompt if teammate else None
+        # Restart / recover must not replay the member's first-start
+        # instruction: ``initial_message`` stays None so no harness.send is
+        # triggered. The member re-subscribes and recovers via its mailbox;
+        # only real pending messages drive a round. The member's existence is
+        # already validated by ``build_context_from_db`` above.
+        initial_message = None
         spawn_config = SpawnConfig(health_check_timeout=30, health_check_interval=50)
 
         for attempt in range(1, max_retries + 1):

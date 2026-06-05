@@ -12,7 +12,7 @@ be swapped without business-code changes.
 
 The interaction surface mirrors :class:`~openjiuwen.agent_teams.harness.HarnessProtocol`
 (``start`` / ``stop`` / ``outputs`` / ``send`` / ``abort`` / ``pause`` /
-``on_state_changed`` / ``on_round`` / ``state`` / ``session_id``): one cycle is
+``subscribe`` / ``state`` / ``session_id``): one cycle is
 started per ``coordination.start`` and torn down at ``finalize_round``. Inputs
 arrive through ``send`` (``immediate`` steers the active round); the producing
 side fires phase/round events the StreamController maps onto
@@ -88,19 +88,18 @@ class MemberRuntime(Protocol):
         """Pause the in-flight round; the next send restarts it."""
         ...
 
-    async def on_state_changed(self, callback: Callable[..., Any]) -> None:
-        """Register a callback fired on every phase transition.
+    async def subscribe(
+        self,
+        *,
+        on_state: Callable[..., Any] | None = None,
+        on_round: Callable[..., Any] | None = None,
+    ) -> None:
+        """Register optional phase/round callbacks; both keyword-only and optional.
 
-        The callback receives ``old`` / ``new`` (phase) and ``session_id``;
-        kwargs are narrowed to the callback's declared parameters.
-        """
-        ...
-
-    async def on_round(self, callback: Callable[..., Any]) -> None:
-        """Register a callback fired on every round lifecycle transition.
-
-        The callback receives ``kind`` (started/finished/aborted/paused/failed),
-        ``round_id`` and ``result``; kwargs are narrowed to declared parameters.
+        ``on_state`` receives ``old`` / ``new`` (phase) and ``session_id``;
+        ``on_round`` receives ``kind`` (started/finished/aborted/paused/failed),
+        ``round_id`` and ``result``. Only the non-None callbacks are registered;
+        kwargs are narrowed to each callback's declared parameters.
         """
         ...
 
