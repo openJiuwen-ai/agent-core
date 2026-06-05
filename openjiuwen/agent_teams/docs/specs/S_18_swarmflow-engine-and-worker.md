@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `workflow/`（engine / backends / observer / schema / runner / tool_swarmflow）、`schema/team.py`、`schema/events.py`、`schema/blueprint.py`、`agent/team_agent.py`、`agent/coordination/handlers/workflow.py`、`rails/team_policy_rail.py`、`prompts/sections.py` |
 | 最近一次修订日期 | 2026-06-05 |
-| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md` |
+| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md` |
 
 ## 范围 / 边界
 
@@ -38,7 +38,7 @@
 1. **单轮、无状态、用完即弃**：一个 `agent()` 调用对应一个 worker；worker 跑一轮 DeepAgent 即销毁，上下文每次全新。
 2. **不进 coordination 协作循环**：worker 不订阅消息总线、不认领任务、不多轮、不被 dispatcher 唤醒。它由 `TeamWorkerBackend` 直接 `create_deep_agent` + `Runner.run_agent` 执行，**不经** `TeamAgent.invoke` / `CoordinationKernel.start`。
 3. **有 roster 身份**：`TeamWorkerBackend` 经 `spawn_member(role=WORKER, status=BUSY)` 开 DB row（member_name 形如 `wf-<label-slug>-<n>`，满足 `_MEMBER_NAME_PATTERN`），完成标 `SHUTDOWN`。row 操作 best-effort，失败不阻断执行。
-4. **model**：worker 默认复用 leader 的 model（`TeamWorkerBackend(model=leader_agent.harness.model)`）。`agent(model="X")` 的 per-call hint 经注入的 `model_resolver` 回调解析——`run_swarmflow_background` 用 `resolve_member_model(team_spec, model_name="X", model_index=None)` 对 team model pool 做**纯位置查找**（无 allocator 轮转、无状态），命中则该 worker 用 pool 条目的 model。pool 未配 / 名字缺失 / 无 hint 一律回退 leader model。解析逻辑留在 team 层（`run_swarmflow_background`），`TeamWorkerBackend` 只持 `(name) -> Model | None` 回调，engine 对接层不耦合 pool/allocator 结构。
+4. **model**：worker 默认复用 leader 的 model（`TeamWorkerBackend(model=parent_agent.model)`，`parent_agent` 即 leader 的 NativeHarness）。`agent(model="X")` 的 per-call hint 经注入的 `model_resolver` 回调解析——`agent_configurator` 在 leader+`enable_swarmflow` 时构造闭包，用 `resolve_member_model(ctx.team_spec, model_name="X", model_index=None)` 对 team model pool 做**纯位置查找**（无 allocator 轮转、无状态），命中则该 worker 用 pool 条目的 model。pool 未配 / 名字缺失 / 无 hint 一律回退 leader model。resolver 经 `BuildContext.extras` 的 `SWARMFLOW_MODEL_RESOLVER` 注入 `SwarmflowTool`，`TeamWorkerBackend` 只持 `(name) -> Model | None` 回调，engine 对接层不耦合 pool/allocator 结构。
 
 ## 结构化输出工具协议（`SubmitResultTool`）
 
@@ -50,8 +50,8 @@
 ## 进度事件与 leader 旁观（`WORKFLOW_PROGRESS`）
 
 - 单一事件类型 `TeamEvent.WORKFLOW_PROGRESS` + `WorkflowProgressTeamEvent(kind, workflow_name, phase, label, outcome, text)`，`kind` 取引擎 `ProgressKind` 字符串值（一个 handler 方法渲染全部）。
-- swarmflow 在 leader 进程内后台跑；`run_swarmflow_background` 的 observer 把进度 republish 成该事件，`sender_id="swarmflow"`（≠ leader member_name），故 `kernel` 的 self-filter 不拦截，leader 自己的 coordination 循环收到。
-- `WorkflowHandler`（coordination 第 7 个 handler，仅监听 `WORKFLOW_PROGRESS`，leader-only）只渲染**里程碑**（`workflow_started` / `phase` / `workflow_completed`）→ `deliver_input(use_steer=True)`；per-agent 事件不播报（太频繁，归 4 层结构）。符合 coordination 铁律：事件只作为 leader 输入，不做决策。
+- swarmflow 在 leader 进程内后台跑（NativeHarness 异步工具框架的后台任务，见 `S_20`）；`SwarmflowTool.run_background` 的 observer 把进度 republish 成该事件，`sender_id="swarmflow"`（≠ leader member_name），故 `kernel` 的 self-filter 不拦截，leader 自己的 coordination 循环收到。
+- `WorkflowHandler`（coordination 第 7 个 handler，仅监听 `WORKFLOW_PROGRESS`，leader-only）只渲染**中途里程碑**（`workflow_started` / `phase`）→ `deliver_input(use_steer=True)`；per-agent 事件不播报（太频繁，归 4 层结构）。符合 coordination 铁律：事件只作为 leader 输入，不做决策。**完成 / 失败结果不在此叙述**——`SwarmflowTool.run_background` 返回 `summarize_run(observer.run) + render_result_text(脚本返回值)`，由异步工具框架经 `harness.send(immediate=False)` 回灌 leader（完整、不截断；失败回灌错误文本，见 `S_20`）。
 - **leader stream 生命周期**：swarmflow 场景 leader 不建任务 → `is_team_completed` 首条「无任务返回 None」→ team 永不 auto-complete → leader stream 保持 idle 等 event，直到外部停止。
 
 ## 4 层数据模型（`WorkflowRun`）

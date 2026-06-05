@@ -24,7 +24,7 @@ workflow/
 ├── schema.py            # 4 层 WorkflowRun → PhaseRecord → AgentActivity{prompt,activity,outcome}
 ├── observer.py          # WorkflowObserver：累积 4 层 + 可选 on_event 回调（republish team 事件）；to_frontend stub
 ├── runner.py            # run_swarmflow（真实 worker）/ preprocess_swarmflow（MockBackend 预演）
-└── tool_swarmflow.py    # SwarmflowTool：leader 工具，异步启动 + 立即返回
+└── tool_swarmflow.py    # SwarmflowTool：leader 工具，NativeHarness 异步工具框架的第一个实现（AsyncTool 子类，启动即闭合 + 完成回灌）
 ```
 
 ## 三条铁律
@@ -33,10 +33,10 @@ workflow/
 
 **铁律 2：结构化输出走工具，不靠提示词解析。** harness 无原生 `response_format`。worker 装 `SubmitResultTool`（`input_params=schema_json`），单轮完成后调它提交结果，backend 读 `captured`。引擎的 `retries` 兜底未调用/不合规的情况。
 
-**铁律 3：worker 单轮、无协作、用完即弃。** WORKER 不进 coordination 循环（不订阅消息、不认领任务、不多轮）。`TeamWorkerBackend` 直接 `create_deep_agent` + `Runner.run_agent` 跑一轮，**不经** `TeamAgent.invoke`。leader 旁观靠「无任务→不 auto-complete→stream 保持」+ `WORKFLOW_PROGRESS` 事件唤醒播报。
+**铁律 3：worker 单轮、无协作、用完即弃。** WORKER 不进 coordination 循环（不订阅消息、不认领任务、不多轮）。`TeamWorkerBackend` 直接 `create_deep_agent` + `Runner.run_agent` 跑一轮，**不经** `TeamAgent.invoke`。leader 旁观靠「无任务→不 auto-complete→stream 保持」：**中途** phase 进度走 `WORKFLOW_PROGRESS` 事件唤醒播报（`WorkflowHandler` 只渲染 `workflow_started` / `phase`）；**最终结果 / 失败**经 NativeHarness 异步工具框架（`harness/async_tools.py`）的完成注入回灌——不再由 `workflow_completed` 叙述承担。
 
 ## 跟其它子目录的边界
 
 - 进度事件类型 `WORKFLOW_PROGRESS` / `WorkflowProgressTeamEvent` 在 `schema/events.py`；leader 播报由 `agent/coordination/handlers/workflow.py:WorkflowHandler` 消费。
 - `TeamRole.WORKER` 在 `schema/team.py`；`enable_swarmflow` 在 `schema/blueprint.py`；leader 子模式提示词在 `prompts/{cn,en}/leader_swarmflow.md`（经 `sections.build_team_swarmflow_section` 注入）。
-- swarmflow 工具的运行时依赖（leader model/messager/state）由 `TeamAgent.run_swarmflow_background` 封装，经 `_launch_swarmflow` 回调 thread 到 `SwarmflowTool`（不让工具层耦合 TeamAgent）。
+- `SwarmflowTool` 是 `harness/async_tools.py` 框架的第一个实现：持 `parent_agent`(NativeHarness) 引用，后台执行 + 完成/失败回灌全部走框架（NativeHarness 的 `launch_async_tool` + `send`），**不经 TeamAgent**。worker model 解析（`model_resolver`）、`messager`、`team_backend` 等 team 资源由装配（`agent_configurator` → `BuildContext.extras` → `TeamToolRail` → `create_team_tools`）注入工具。详见 `harness/CLAUDE.md`、`F_35` / `S_20`。
