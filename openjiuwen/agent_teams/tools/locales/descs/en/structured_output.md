@@ -1,0 +1,1 @@
+Submit your final structured result. Call this EXACTLY ONCE when the task is complete, passing the result object that conforms to this tool's input schema. Do not emit the result as plain text — it is only captured through this tool call. After calling it, stop.

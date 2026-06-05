@@ -32,6 +32,7 @@ from typing import (
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.messager import Messager
     from openjiuwen.agent_teams.models.allocator import ModelAllocator
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
     from openjiuwen.agent_teams.reliability.factory import ReliabilityComponents
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tools.team import TeamBackend
@@ -48,6 +49,7 @@ class TeamHandleKey:
     MESSAGER = "team.messager"
     ON_TEAMMATE_CREATED = "team.on_teammate_created"
     SWARMFLOW_MODEL_RESOLVER = "team.swarmflow_model_resolver"
+    SWARMFLOW_WORKER_BASE_SPEC = "team.swarmflow_worker_base_spec"
     RELIABILITY_COMPONENTS = "team.reliability_components"
 
 
@@ -61,6 +63,7 @@ def inject_team_handles(
     messager: Optional["Messager"] = None,
     on_teammate_created: Optional[Callable[[str], Awaitable[None]]] = None,
     swarmflow_model_resolver: Optional[Callable[[str], Any]] = None,
+    swarmflow_worker_base_spec: Optional["DeepAgentSpec"] = None,
     reliability_components: Optional["ReliabilityComponents"] = None,
 ) -> None:
     """Write the team live handles into ``extras`` (configurator-side).
@@ -78,6 +81,11 @@ def inject_team_handles(
         on_teammate_created: The leader's spawn-on-created callback, if any.
         swarmflow_model_resolver: The leader's swarmflow worker-model resolver, if
             any (non-None only for a leader with ``enable_swarmflow``).
+        swarmflow_worker_base_spec: The base ``DeepAgentSpec`` swarmflow workers
+            derive from (the team's teammate spec, or the leader spec when no
+            teammate is configured). Non-None only for a swarmflow leader; carries
+            teammate capabilities (model / tools / skills / workspace) WITHOUT the
+            team rails, so each worker is a teammate-equivalent without team tools.
         reliability_components: The member's reused reliability core (detectors /
             remediator / local reporter), if reliability is enabled. Built once
             and wrapped by a fresh rail each cycle so its state outlives rebuilds.
@@ -89,6 +97,7 @@ def inject_team_handles(
     extras[TeamHandleKey.MESSAGER] = messager
     extras[TeamHandleKey.ON_TEAMMATE_CREATED] = on_teammate_created
     extras[TeamHandleKey.SWARMFLOW_MODEL_RESOLVER] = swarmflow_model_resolver
+    extras[TeamHandleKey.SWARMFLOW_WORKER_BASE_SPEC] = swarmflow_worker_base_spec
     extras[TeamHandleKey.RELIABILITY_COMPONENTS] = reliability_components
 
 
@@ -133,6 +142,11 @@ def get_swarmflow_model_resolver(context: Any) -> Optional[Callable[[str], Any]]
     return _get(context, TeamHandleKey.SWARMFLOW_MODEL_RESOLVER)
 
 
+def get_swarmflow_worker_base_spec(context: Any) -> Optional["DeepAgentSpec"]:
+    """Return the swarmflow worker base spec (teammate/leader spec), or None."""
+    return _get(context, TeamHandleKey.SWARMFLOW_WORKER_BASE_SPEC)
+
+
 def get_reliability_components(context: Any) -> Optional["ReliabilityComponents"]:
     """Return the reused reliability components handle, or None.
 
@@ -152,5 +166,6 @@ __all__ = [
     "get_messager",
     "get_on_teammate_created",
     "get_swarmflow_model_resolver",
+    "get_swarmflow_worker_base_spec",
     "get_reliability_components",
 ]

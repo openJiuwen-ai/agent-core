@@ -57,6 +57,7 @@ def create_team_tools(
     messager: Any = None,
     team_name: str = "default",
     swarmflow_model_resolver: Callable[[str], Any] | None = None,
+    swarmflow_worker_base_spec: Any = None,
 ) -> list[Tool]:
     """Create role-appropriate tool instances filtered by permission sets.
 
@@ -133,6 +134,8 @@ def create_team_tools(
             team_backend=agent_team,
             team_name=team_name,
             model_resolver=swarmflow_model_resolver,
+            worker_base_spec=swarmflow_worker_base_spec,
+            t=t,
             language=lang,
         ),
     }

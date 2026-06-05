@@ -207,6 +207,53 @@ class NativeHarness(DeepAgent):
         await self.ensure_initialized()
         self._prepared = True
 
+    async def run_once(self, content: "str | InteractiveInput", *, session: Session | None = None) -> dict[str, Any]:
+        """Run one non-streaming execution and return the ``Runner.run_agent`` dict.
+
+        Bypasses the supervisor entirely: there is no steering, no external
+        multi-round interaction, and no ``outputs()`` stream. The execution is a
+        plain ``DeepAgent.invoke`` — the spec's ``enable_task_loop`` decides
+        whether it runs a single ReAct round or self-drives the full task loop
+        (so DeepAgent's todo planning is preserved). Used by single-shot callers
+        (e.g. swarmflow workers) that want a teammate-equivalent agent without the
+        streaming interaction model.
+
+        Args:
+            content: The query for this execution (an ``InteractiveInput`` resumes
+                a pending interrupt, mirroring ``invoke``).
+            session: Optional externally-managed session. When omitted the harness
+                creates and tears down its own session.
+
+        Returns:
+            The invoke result dict, e.g. ``{"output": ..., "result_type": ...}``.
+        """
+        if self._st.supervisor_task is not None:
+            raise_error(
+                StatusCode.DEEPAGENT_RUNTIME_ERROR,
+                error_msg="run_once cannot run while the supervisor is active (use send()).",
+            )
+        await self._prepare()
+        owns_session = session is None
+        if owns_session:
+            sess = Session(card=self.card)
+            await sess.pre_run()
+        else:
+            sess = session
+        self._session = sess
+        self._owns_session = owns_session
+        try:
+            return await self.invoke({"query": content}, sess)
+        finally:
+            if owns_session:
+                try:
+                    await sess.post_run()
+                except Exception:
+                    logger.exception("[NativeHarness] run_once session post_run failed")
+            try:
+                self.ability_manager.teardown_tools()
+            except Exception:
+                logger.exception("[NativeHarness] run_once tool teardown failed")
+
     async def start(self, *, session: Session | None = None) -> None:
         """Configure self from the provider, build the task-loop kernel, start supervisor.
 

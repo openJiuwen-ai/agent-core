@@ -136,6 +136,37 @@ class TeamHarness:
         self._native_session_id = None
         self._active_agent_session = None
 
+    async def run_once(self, content: Any, *, team_session: Optional[Any] = None) -> dict[str, Any]:
+        """Run one non-streaming execution; returns the ``Runner.run_agent`` dict.
+
+        Single-shot counterpart to the streaming ``start`` / ``send`` / ``outputs``
+        cycle: builds (or reuses) the native, binds a child session, and runs one
+        ``NativeHarness.run_once`` (DeepAgent invoke — task loop preserved, no
+        supervisor / steer). Used by swarmflow workers so each worker is a
+        teammate-equivalent harness driven for exactly one execution.
+
+        Args:
+            content: The query for this execution.
+            team_session: Optional team session to derive the child session from;
+                when omitted a standalone child session is created.
+
+        Returns:
+            The invoke result dict (same shape as ``Runner.run_agent``).
+        """
+        if self._native is None or self._native.state is HarnessState.TERMINATED:
+            self._native = NativeHarness(self._agent_spec, self._build_context)
+        child = self._make_child_session(team_session)
+        await child.pre_run()
+        self._active_agent_session = child
+        try:
+            return await self._native.run_once(content, session=child)
+        finally:
+            try:
+                await child.post_run()
+            except Exception:
+                pass
+            self._active_agent_session = None
+
     async def dispose(self) -> None:
         """Permanently destroy the native and release its process-global resources.
 

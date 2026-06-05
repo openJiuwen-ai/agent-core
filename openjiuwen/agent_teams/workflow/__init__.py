@@ -14,7 +14,7 @@ Layering:
   in isolation with ``MockBackend``.
 * ``backends/`` — the team integration backend (``TeamWorkerBackend``) that maps
   each engine ``agent()`` call onto a single-shot ``WORKER`` member, plus the
-  structured-output tool (``SubmitResultTool``) the worker must call.
+  structured-output tool (``StructuredOutputTool``) the worker must call.
 * ``observer`` / ``schema`` / ``runner`` — the progress observer, the 4-layer
   ``WorkflowRun`` model, and the ``run_swarmflow`` / ``preprocess_swarmflow``
   entrypoints.
@@ -28,7 +28,7 @@ from openjiuwen.agent_teams.workflow.backends import (
     AgentBackend,
     AgentResult,
     MockBackend,
-    SubmitResultTool,
+    StructuredOutputTool,
     TeamWorkerBackend,
 )
 from openjiuwen.agent_teams.workflow.engine import WorkflowProgressEvent, run_workflow
@@ -51,7 +51,7 @@ __all__ = [
     "AgentResult",
     "MockBackend",
     "TeamWorkerBackend",
-    "SubmitResultTool",
+    "StructuredOutputTool",
     # observability + 4-layer model
     "WorkflowObserver",
     "WorkflowProgressEvent",

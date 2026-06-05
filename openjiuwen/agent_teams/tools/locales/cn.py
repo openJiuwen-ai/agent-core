@@ -204,4 +204,9 @@ STRINGS: dict[str, str] = {
     # workspace_meta._desc lives in descs/cn/workspace_meta.md
     "workspace_meta.action": "操作类型：lock（获取文件锁）、unlock（释放文件锁）、locks（列出所有活跃锁）、history（查看文件版本历史）",
     "workspace_meta.path": "目标文件的相对路径（lock/unlock/history 时必填）",
+    # ===== swarmflow / structured_output ======================================
+    # swarmflow._desc lives in descs/cn/swarmflow.md
+    # structured_output._desc lives in descs/cn/structured_output.md (无固定参数，schema 动态)
+    "swarmflow.script_path": "swarmflow 脚本文件路径（一个含 META 与 async def run(args) 的 Python 模块）。",
+    "swarmflow.args": "传给脚本 run(args) 的可选参数值（如研究问题、目标路径）。",
 }

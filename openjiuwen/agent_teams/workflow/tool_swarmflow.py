@@ -21,60 +21,23 @@ import asyncio
 from typing import Any, Callable
 
 from openjiuwen.agent_teams.harness.async_tools import AsyncTool, render_result_text
+from openjiuwen.agent_teams.tools.locales import Translator, make_translator
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
-# Resolve an ``agent(model=...)`` name hint to a concrete ``Model`` (or None to
-# fall back to the leader's model). Built by the configurator from the team spec.
+# Resolve an ``agent(model=...)`` name hint to a worker ``TeamModelConfig`` (or
+# None to fall back to the worker base spec's model). Built by the configurator.
 WorkerModelResolver = Callable[[str], Any]
-
-_DESC: dict[str, str] = {
-    "cn": (
-        "运行一个 swarmflow 编排脚本（多 agent 工作流）。\n\n"
-        "## 何时调用\n"
-        "- 用户要求用 swarmflow / workflow 跑一个脚本，或给出了脚本路径；\n"
-        "- 用户描述的任务需要多个 agent 并行 / 流水线编排，且已指定脚本。\n\n"
-        "## 行为契约\n"
-        "- 该工具**立即返回**——工作流在后台异步执行，**不要轮询**等待结果。\n"
-        "- 各阶段（phase）进展会**自动**作为通知流式进入你的上下文。\n"
-        "- 工作流**完成或失败时，最终结果会自动回灌**给你，无需主动查询。\n"
-        "- 你处于**旁观角色**：脚本自主编排 worker 完成工作，你只需在收到阶段"
-        "进展通知时，用简洁自然语言向用户汇报当前进展。\n"
-        "- **不要**自己 spawn 成员、创建任务或尝试代替脚本编排——编排完全由脚本负责。"
-    ),
-    "en": (
-        "Run a swarmflow orchestration script (a multi-agent workflow).\n\n"
-        "## When to call\n"
-        "- The user asks to run a swarmflow / workflow script, or gives a script path;\n"
-        "- The task needs multiple agents orchestrated in parallel / pipeline and a "
-        "script is specified.\n\n"
-        "## Behavior contract\n"
-        "- This tool **returns immediately** — the workflow runs asynchronously in the "
-        "background; **do not poll** for the result.\n"
-        "- Phase progress arrives **automatically** as notifications in your context.\n"
-        "- When the workflow **completes or fails, the final result is fed back to you "
-        "automatically** — no need to query.\n"
-        "- You are a **spectator**: the script orchestrates workers on its own; your job "
-        "is to relay each reported phase to the user in brief natural language.\n"
-        "- **Do not** spawn members, create tasks, or try to orchestrate yourself — the "
-        "script owns all orchestration."
-    ),
-}
-
-_SCRIPT_PARAM: dict[str, str] = {
-    "cn": "swarmflow 脚本文件路径（一个含 META 与 async def run(args) 的 Python 模块）。",
-    "en": "Path to the swarmflow script file (a Python module with META and async def run(args)).",
-}
-
-_ARGS_PARAM: dict[str, str] = {
-    "cn": "传给脚本 run(args) 的可选参数值（如研究问题、目标路径）。",
-    "en": "Optional argument value passed to the script's run(args) (e.g. a question, a target path).",
-}
 
 
 class SwarmflowTool(AsyncTool):
-    """Leader tool that launches a swarmflow script as a background async tool."""
+    """Leader tool that launches a swarmflow script as a background async tool.
+
+    Follows the team tools' conventions: description and parameter strings are
+    resolved through the shared i18n ``Translator`` (``descs/<lang>/swarmflow.md``
+    + ``swarmflow.*`` STRINGS) so the surface honours the leader's language.
+    """
 
     def __init__(
         self,
@@ -84,14 +47,17 @@ class SwarmflowTool(AsyncTool):
         team_backend: Any,
         team_name: str,
         model_resolver: WorkerModelResolver | None,
+        worker_base_spec: Any = None,
+        t: Translator | None = None,
         language: str = "cn",
     ) -> None:
-        lang = language if language in _DESC else "cn"
+        lang = language if language in ("cn", "en") else "cn"
+        translator = t if t is not None else make_translator(lang)
         super().__init__(
             ToolCard(
                 id="team.swarmflow",
                 name="swarmflow",
-                description=_DESC[lang],
+                description=translator("swarmflow"),
             ),
             parent_agent,
             language=lang,
@@ -100,11 +66,12 @@ class SwarmflowTool(AsyncTool):
         self._team_backend = team_backend
         self._team_name = team_name or "swarmflow"
         self._model_resolver = model_resolver
+        self._worker_base_spec = worker_base_spec
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "script_path": {"type": "string", "description": _SCRIPT_PARAM[lang]},
-                "args": {"type": "string", "description": _ARGS_PARAM[lang]},
+                "script_path": {"type": "string", "description": translator("swarmflow", "script_path")},
+                "args": {"type": "string", "description": translator("swarmflow", "args")},
             },
             "required": ["script_path"],
         }
@@ -175,6 +142,7 @@ class SwarmflowTool(AsyncTool):
             team_name=team_name,
             language=self._language,
             model_resolver=self._model_resolver,
+            worker_base_spec=self._worker_base_spec,
         )
         parts = [summarize_run(observer.run)]
         body = render_result_text(result)

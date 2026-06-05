@@ -500,17 +500,31 @@ class AgentConfigurator:
         # team spec is absent so the worker falls back to the leader's model. The
         # leader-only async ``swarmflow`` tool is gated on this being non-None.
         swarmflow_model_resolver: Optional[Callable[[str], Any]] = None
+        swarmflow_worker_base_spec = None
         if ctx.role == TeamRole.LEADER and spec.enable_swarmflow:
             team_spec_for_models = ctx.team_spec
 
             def swarmflow_model_resolver(model_name: str, _spec=team_spec_for_models) -> Any:
-                """Resolve an ``agent(model=...)`` name hint to a worker ``Model``."""
+                """Resolve an ``agent(model=...)`` name hint to a worker ``TeamModelConfig``.
+
+                Returns a model *config* (not a built ``Model``): swarmflow workers
+                go through the spec build path, where ``DeepAgentSpec.model`` is a
+                ``TeamModelConfig`` resolved at construction. ``None`` falls back to
+                the worker base spec's own model.
+                """
                 if _spec is None:
                     return None
                 from openjiuwen.agent_teams.models.allocator import resolve_member_model
 
-                config = resolve_member_model(_spec, model_name=model_name, model_index=None)
-                return config.build() if config is not None else None
+                return resolve_member_model(_spec, model_name=model_name, model_index=None)
+
+            # Workers are "a teammate without team tools": derive each worker from
+            # the team's teammate spec (or the leader spec when no teammate exists).
+            # The raw agents[...] spec carries teammate capabilities but NOT the
+            # team rails (those are injected here, per member), so a worker built
+            # straight from it has no team tools by construction.
+            base_specs = spec.agents
+            swarmflow_worker_base_spec = base_specs.get("teammate") or base_specs.get("leader")
 
         inject_team_handles(
             member_build_context.extras,
@@ -521,6 +535,7 @@ class AgentConfigurator:
             messager=self.messager,
             on_teammate_created=self._on_teammate_created,
             swarmflow_model_resolver=swarmflow_model_resolver,
+            swarmflow_worker_base_spec=swarmflow_worker_base_spec,
             reliability_components=reliability_components,
         )
 

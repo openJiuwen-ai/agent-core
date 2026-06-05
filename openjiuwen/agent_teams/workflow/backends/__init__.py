@@ -5,20 +5,20 @@
 
 Re-exports the engine's business-agnostic ``AgentBackend`` / ``AgentResult`` /
 ``MockBackend`` alongside the team-specific ``TeamWorkerBackend`` (maps engine
-``agent()`` calls onto single-shot WORKER members) and ``SubmitResultTool`` (the
-structured-output tool a worker calls to return its result).
+``agent()`` calls onto single-shot WORKER members) and ``StructuredOutputTool``
+(the structured-output tool a worker calls to return its result).
 """
 from __future__ import annotations
 
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 from openjiuwen.agent_teams.workflow.engine.backends.mock import MockBackend
-from openjiuwen.agent_teams.workflow.backends.submit_result_tool import SubmitResultTool
+from openjiuwen.agent_teams.workflow.backends.structured_output_tool import StructuredOutputTool
 from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
 
 __all__ = [
     "AgentBackend",
     "AgentResult",
     "MockBackend",
-    "SubmitResultTool",
+    "StructuredOutputTool",
     "TeamWorkerBackend",
 ]

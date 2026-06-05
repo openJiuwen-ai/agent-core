@@ -33,6 +33,7 @@ async def run_swarmflow(
     language: str = "cn",
     log_sink: Callable[[str], None] | None = None,
     model_resolver: Callable[[str], Any] | None = None,
+    worker_base_spec: Any = None,
 ) -> Any:
     """Execute a swarmflow script with real LLM workers.
 
@@ -48,8 +49,11 @@ async def run_swarmflow(
         language: Prompt language hint.
         log_sink: Optional plain-text diagnostics sink.
         model_resolver: Optional callback resolving an ``agent(model=...)`` name
-            hint to a concrete ``Model``; ``None`` (default) means every worker
-            uses ``model``.
+            hint to a worker ``TeamModelConfig``; ``None`` means the worker
+            inherits its base spec's model.
+        worker_base_spec: Base ``DeepAgentSpec`` each worker derives from (the
+            team's teammate spec, or the leader spec) — gives workers
+            teammate-equivalent capabilities without the team tools.
 
     Returns:
         Whatever the script's ``run(args)`` returned.
@@ -60,6 +64,7 @@ async def run_swarmflow(
         team_name=team_name,
         language=language,
         model_resolver=model_resolver,
+        worker_base_spec=worker_base_spec,
     )
     return await run_workflow(
         script_path,

@@ -303,4 +303,9 @@ STRINGS: dict[str, str] = {
         "history (view file version history)"
     ),
     "workspace_meta.path": "Relative path of the target file (required for lock/unlock/history)",
+    # ===== swarmflow / structured_output ======================================
+    # swarmflow._desc lives in descs/en/swarmflow.md
+    # structured_output._desc lives in descs/en/structured_output.md (dynamic schema, no fixed params)
+    "swarmflow.script_path": "Path to the swarmflow script file (a Python module with META and async def run(args)).",
+    "swarmflow.args": "Optional argument value passed to the script's run(args) (e.g. a question, a target path).",
 }

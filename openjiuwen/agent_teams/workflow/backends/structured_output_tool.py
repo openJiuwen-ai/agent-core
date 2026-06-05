@@ -6,9 +6,9 @@
 The harness has no native structured-output / ``response_format`` mechanism, so
 a worker that must produce schema-conforming output is given this tool with its
 ``ToolCard.input_params`` set to the exact JSON Schema the engine requested. The
-LLM is instructed to finish by calling ``submit_result`` with the result object;
-the call's arguments — validated against the schema by the model's tool-use
-machinery — are captured here for the worker backend to read back.
+LLM is instructed to finish by calling ``structured_output`` with the result
+object; the call's arguments — validated against the schema by the model's
+tool-use machinery — are captured here for the worker backend to read back.
 
 One instance is constructed per ``agent()`` call (the schema differs each time),
 so the captured value is single-use and lives on the instance.
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator
 
+from openjiuwen.agent_teams.tools.locales import Translator, make_translator
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -31,38 +32,41 @@ _DEFAULT_SCHEMA: dict[str, Any] = {
     "required": ["result"],
 }
 
-_DESCRIPTION = (
-    "Submit your final structured result. Call this EXACTLY ONCE when the task "
-    "is complete, passing the result object that conforms to this tool's input "
-    "schema. Do not emit the result as plain text — it is only captured through "
-    "this tool call. After calling it, stop."
-)
 
-
-class SubmitResultTool(Tool):
+class StructuredOutputTool(Tool):
     """A single-use tool that captures a worker's structured result.
+
+    Follows the team tools' conventions: the description is resolved through the
+    shared i18n ``Translator`` (``descs/<lang>/structured_output.md``) so it
+    honours the worker's language, and the requested JSON Schema becomes the
+    tool's ``input_params``.
 
     Args:
         schema_json: The JSON Schema the engine requested for this ``agent()``
             call. Becomes the tool's ``input_params`` so the model's tool-use
             layer constrains the arguments to the schema. ``None`` falls back to
             a generic ``{"result": str}`` schema.
-        tool_id: Resource-manager id for the tool. Defaults to a stable id; the
-            worker backend qualifies it per call to avoid collisions when many
-            workers run concurrently in one process.
+        t: The language-bound translator used to resolve the description. When
+            omitted a default (``cn``) translator is created.
+        tool_id: Resource-manager id for the tool. Defaults to a stable id; when
+            mounted on a harness the ability manager re-qualifies it per owner
+            (``structured_output_{owner_id}``), so concurrent workers never
+            collide — no per-call id is needed.
     """
 
     def __init__(
         self,
         schema_json: dict[str, Any] | None,
+        t: Translator | None = None,
         *,
-        tool_id: str = "swarmflow.submit_result",
+        tool_id: str = "swarmflow.structured_output",
     ) -> None:
+        translator = t if t is not None else make_translator("cn")
         super().__init__(
             ToolCard(
                 id=tool_id,
-                name="submit_result",
-                description=_DESCRIPTION,
+                name="structured_output",
+                description=translator("structured_output"),
             )
         )
         self.card.input_params = schema_json or _DEFAULT_SCHEMA
@@ -77,7 +81,7 @@ class SubmitResultTool(Tool):
 
     async def stream(self, inputs: dict[str, Any], **kwargs: Any) -> AsyncIterator[ToolOutput]:
         """Streaming is not supported; workers call ``invoke`` once."""
-        raise NotImplementedError("SubmitResultTool does not support streaming")
+        raise NotImplementedError("StructuredOutputTool does not support streaming")
 
 
-__all__ = ["SubmitResultTool"]
+__all__ = ["StructuredOutputTool"]
