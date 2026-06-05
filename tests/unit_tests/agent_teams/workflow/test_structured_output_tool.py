@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 
-from openjiuwen.agent_teams.workflow.backends.submit_result_tool import SubmitResultTool
+from openjiuwen.agent_teams.workflow.backends.structured_output_tool import StructuredOutputTool
 
 
 def test_input_params_mirror_requested_schema():
@@ -20,9 +20,9 @@ def test_input_params_mirror_requested_schema():
         "properties": {"answer": {"type": "string"}, "score": {"type": "integer"}},
         "required": ["answer"],
     }
-    tool = SubmitResultTool(schema, tool_id="swarmflow.submit_result.t1")
-    assert tool.card.name == "submit_result"
-    assert tool.card.id == "swarmflow.submit_result.t1"
+    tool = StructuredOutputTool(schema, tool_id="swarmflow.structured_output.t1")
+    assert tool.card.name == "structured_output"
+    assert tool.card.id == "swarmflow.structured_output.t1"
     assert tool.card.input_params == schema
     assert tool.called is False
     assert tool.captured is None
@@ -31,7 +31,7 @@ def test_input_params_mirror_requested_schema():
 def test_invoke_captures_arguments():
     """Calling the tool latches the structured arguments for the backend."""
     schema = {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
-    tool = SubmitResultTool(schema)
+    tool = StructuredOutputTool(schema)
     out = asyncio.run(tool.invoke({"answer": "42"}))
     assert out.success is True
     assert tool.called is True
@@ -40,7 +40,7 @@ def test_invoke_captures_arguments():
 
 def test_default_schema_when_none():
     """Constructing without a schema yields a well-formed generic fallback."""
-    tool = SubmitResultTool(None)
+    tool = StructuredOutputTool(None)
     params = tool.card.input_params
     assert params["type"] == "object"
     assert params["required"] == ["result"]

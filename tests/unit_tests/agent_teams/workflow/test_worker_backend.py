@@ -3,10 +3,12 @@
 
 """TeamWorkerBackend + preprocessing tests (no real LLM).
 
-The real worker DeepAgent turn lives in ``_execute_worker``; here a subclass
-overrides it to simulate the worker calling ``submit_result`` (schema path) or
-returning free text, so the backend's run/result/4-layer flow is exercised
+The real worker harness execution lives in ``_execute_worker``; here a subclass
+overrides it to simulate the worker calling ``structured_output`` (schema path)
+or returning free text, so the backend's run/result/4-layer flow is exercised
 deterministically. Preprocessing is verified against the offline MockBackend.
+A separate test exercises the real ``_execute_worker`` spec-derivation path with
+``TeamHarness.build`` patched, to assert worker = "teammate without team tools".
 """
 from __future__ import annotations
 
@@ -59,14 +61,14 @@ def _write(tmp_path, src: str) -> str:
 
 
 def test_schema_path_returns_structured_and_free_path_returns_text(tmp_path):
-    """Schema agent() -> submit_result capture; no-schema agent() -> free text."""
+    """Schema agent() -> structured_output capture; no-schema agent() -> free text."""
     script = _write(tmp_path, _SCRIPT)
     backend = _FakeWorkerBackend(model=None, team_backend=None)
     events: list = []
 
     result = asyncio.run(run_workflow(str(script), backend=backend, progress_sink=events.append))
 
-    # Structured result came through submit_result and validated against SCHEMA.
+    # Structured result came through structured_output and validated against SCHEMA.
     assert isinstance(result["a"], dict) and result["a"]["answer"].startswith("done::wf-compute-")
     # Free-text result came through the worker's final message.
     assert isinstance(result["b"], str) and result["b"].startswith("freetext::wf-free-")
@@ -81,7 +83,7 @@ def test_schema_path_returns_structured_and_free_path_returns_text(tmp_path):
 
 
 def test_missing_submit_makes_agent_return_none(tmp_path):
-    """A worker that never calls submit_result -> backend raises -> agent()=None.
+    """A worker that never calls structured_output -> backend raises -> agent()=None.
 
     The engine retries on the backend error and, after exhaustion, yields
     ``None`` for that call (a value dw control-flow already tolerates).
@@ -89,7 +91,7 @@ def test_missing_submit_makes_agent_return_none(tmp_path):
 
     class _SilentWorker(TeamWorkerBackend):
         async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model):
-            return ""  # never fills submit_result
+            return ""  # never fills structured_output
 
     script = _write(tmp_path, _SCRIPT)
     backend = _SilentWorker(model=None, team_backend=None)
@@ -99,7 +101,11 @@ def test_missing_submit_makes_agent_return_none(tmp_path):
 
 
 def test_per_call_model_hint_routes_through_resolver(tmp_path):
-    """agent(model=X): known name -> resolved model; unknown / no hint -> default."""
+    """agent(model=X): known name -> resolved config; unknown / no hint -> None.
+
+    The resolver returns a worker ``TeamModelConfig`` (not a built model); a miss
+    or absent hint yields ``None`` so the worker inherits its base spec's model.
+    """
     script = '''
 from swarmflow import agent
 
@@ -121,13 +127,14 @@ async def run(args):
     backend = _RecordingBackend(
         model="leader-model",
         team_backend=None,
-        model_resolver=lambda name: "fast-model" if name == "fast" else None,
+        model_resolver=lambda name: "fast-cfg" if name == "fast" else None,
     )
     result = asyncio.run(run_workflow(_write(tmp_path, script), backend=backend))
 
-    # "fast" resolves; "unknown" misses -> default; no hint -> default.
-    assert result == ["ran::fast-model", "ran::leader-model", "ran::leader-model"]
-    assert seen == ["fast-model", "leader-model", "leader-model"]
+    # "fast" resolves to its config; "unknown" and no-hint miss -> None (the
+    # worker then inherits its base spec's model, not exercised by this stub).
+    assert result == ["ran::fast-cfg", "ran::None", "ran::None"]
+    assert seen == ["fast-cfg", None, None]
 
 
 def test_preprocess_builds_four_layer_offline(tmp_path):
@@ -139,3 +146,53 @@ def test_preprocess_builds_four_layer_offline(tmp_path):
     assert len(do.agents) == 2
     assert all(a.status == "completed" for a in do.agents)
     assert do.agents[0].prompt == "compute the answer"
+
+
+def test_execute_worker_derives_teammate_spec_without_team_tools(tmp_path, monkeypatch):
+    """_execute_worker derives a WORKER spec from the base spec: a teammate
+    without team tools — todo planning preserved, structured_output appended,
+    role=WORKER, swarmflow worker system prompt."""
+    from openjiuwen.agent_teams.harness import team_harness as th_mod
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+    from openjiuwen.agent_teams.schema.team import TeamRole
+
+    base = DeepAgentSpec(enable_task_loop=True, enable_task_planning=True, tools=[])
+    captured: dict = {}
+
+    class _FakeHarness:
+        async def run_once(self, content, **kw):
+            return {"output": "ok", "result_type": "answer"}
+
+        async def dispose(self):
+            return None
+
+    def _fake_build(*, agent_spec, role, member_name, build_context=None, **kw):
+        captured["spec"] = agent_spec
+        captured["role"] = role
+        captured["member_name"] = member_name
+        return _FakeHarness()
+
+    monkeypatch.setattr(th_mod.TeamHarness, "build", _fake_build)
+
+    backend = TeamWorkerBackend(model=None, team_backend=None, worker_base_spec=base)
+    schema = {"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]}
+
+    # Free path: no structured_output tool, base capabilities preserved.
+    asyncio.run(backend._execute_worker("t", [], member_name="wf-w-0", has_schema=False, model=None))
+    spec = captured["spec"]
+    assert captured["role"] == TeamRole.WORKER
+    assert spec.enable_task_loop is True  # todo planning / task loop preserved
+    assert spec.enable_task_planning is True
+    assert spec.card.name == "wf-w-0"
+    assert "single-shot swarmflow worker" in (spec.system_prompt or "")
+    assert spec.tools == []  # no team tools
+
+    # Schema path: the structured_output tool instance is appended to spec.tools.
+    from openjiuwen.agent_teams.workflow.backends.structured_output_tool import StructuredOutputTool
+
+    tool = StructuredOutputTool(schema)
+    asyncio.run(
+        backend._execute_worker("t", [tool], member_name="wf-w-1", has_schema=True, model=None)
+    )
+    assert captured["spec"].tools == [tool]
+    assert captured["spec"].tools[0].card.name == "structured_output"
