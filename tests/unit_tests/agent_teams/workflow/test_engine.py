@@ -64,6 +64,15 @@ async def run(args):
 '''
 
 
+_LAZY_IMPORT_SCRIPT = '''
+META = {"name": "lazy", "description": "import inside run body", "phases": []}
+
+async def run(args):
+    from swarmflow import agent  # lazy: not a top-level import
+    return await agent("hi", label="lazy")
+'''
+
+
 def _write(tmp_path, name: str, src: str) -> str:
     path = tmp_path / name
     path.write_text(src, encoding="utf-8")
@@ -149,3 +158,14 @@ def test_nested_parallel_does_not_deadlock_under_cap_one(tmp_path):
     result = asyncio.run(run_workflow(script, backend=MockBackend(), cap=1))
     assert len(result) == 2
     assert all(len(inner) == 2 for inner in result)
+
+
+def test_lazy_import_inside_run_resolves(tmp_path):
+    """`from swarmflow import ...` resolves in run's body, not only at module top.
+
+    The facade alias is kept installed for the whole run, so a primitive imported
+    lazily inside ``run`` works the same as a top-level import.
+    """
+    script = _write(tmp_path, "lazy.py", _LAZY_IMPORT_SCRIPT)
+    result = asyncio.run(run_workflow(script, backend=MockBackend()))
+    assert isinstance(result, str) and "lazy" in result
