@@ -1785,3 +1785,104 @@ class TestTranslator:
         msg = str(excinfo.value)
         assert "nonexistent_tool_for_translator_test" in msg
         assert "cn" in msg
+
+
+# ========== Team rails are provider-built fresh each cycle (never cached) ==========
+
+
+class _FakeCtx:
+    """Minimal build-context stand-in: context_field attrs + an extras dict."""
+
+    def __init__(self, extras, *, role="leader", member_name="leader1", language="cn"):
+        self.extras = extras
+        self.role = role
+        self.member_name = member_name
+        self.language = language
+
+
+class _FakeAgentCard:
+    def __init__(self, agent_id: str):
+        self.id = agent_id
+
+
+class _FakeAgent:
+    """Minimal agent exposing a fresh AbilityManager, as a native rebuild does."""
+
+    def __init__(self, agent_id: str):
+        from openjiuwen.core.single_agent.ability_manager import AbilityManager
+
+        self.card = _FakeAgentCard(agent_id)
+        self.ability_manager = AbilityManager(owner_id=agent_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_team_tool_factory_mints_fresh_rail_and_binds_each_agent(agent_team):
+    """The team.tool factory is not cached: each call builds a fresh rail, and
+    each rail's init binds team tools onto its own agent's ability_manager.
+
+    This is the regression guard for the send_message-not-found crash, where a
+    cached rail skipped re-binding onto the second cycle's fresh ability_manager.
+    """
+    from openjiuwen.agent_teams.rails.elements import build_team_tool_rail
+    from openjiuwen.agent_teams.rails.team_context import inject_team_handles
+    from openjiuwen.core.runner import Runner
+
+    extras: dict = {}
+    inject_team_handles(extras, team_backend=agent_team)
+    ctx = _FakeCtx(extras)
+
+    rail_cycle1 = build_team_tool_rail({}, ctx)
+    rail_cycle2 = build_team_tool_rail({}, ctx)
+    assert rail_cycle1 is not rail_cycle2  # provider-built fresh, never cached
+
+    await Runner.start()
+    agent1 = _FakeAgent("leader1_cycle1")
+    agent2 = _FakeAgent("leader1_cycle2")
+    try:
+        rail_cycle1.init(agent1)
+        rail_cycle2.init(agent2)
+        assert agent1.ability_manager.get("send_message") is not None
+        assert agent2.ability_manager.get("send_message") is not None
+    finally:
+        rail_cycle1.uninit(agent1)
+        rail_cycle2.uninit(agent2)
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_reliability_factory_reuses_injected_components_across_cycles(agent_team):
+    """The reliability factory builds a fresh rail per cycle but wraps the same
+    injected (stateful) components, so detector windows survive native rebuilds.
+    """
+    from openjiuwen.agent_teams.reliability.config import ReliabilityConfig
+    from openjiuwen.agent_teams.reliability.factory import build_reliability_components
+    from openjiuwen.agent_teams.rails.elements import build_team_reliability_rail
+    from openjiuwen.agent_teams.rails.team_context import inject_team_handles
+
+    cfg = ReliabilityConfig()
+    components = build_reliability_components(
+        cfg,
+        member_name="leader1",
+        messager=None,
+        team_name="test_team",
+        sender_id="leader1",
+        is_leader=True,
+    )
+    extras: dict = {}
+    inject_team_handles(extras, team_backend=agent_team, reliability_components=components)
+    ctx = _FakeCtx(extras)
+    params = {
+        "reliability_cfg": cfg.model_dump(),
+        "team_name": "test_team",
+        "sender_id": "leader1",
+        "is_leader": True,
+    }
+
+    rail_cycle1 = build_team_reliability_rail(params, ctx)
+    rail_cycle2 = build_team_reliability_rail(params, ctx)
+    assert rail_cycle1 is not rail_cycle2  # fresh rail each cycle
+    # ...wrapping the one reused stateful core.
+    assert rail_cycle1._monitor is rail_cycle2._monitor
+    assert rail_cycle1._monitor is components.monitor
