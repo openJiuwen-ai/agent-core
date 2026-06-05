@@ -15,7 +15,7 @@
 
 - swarmflow 引擎的分层契约（facade / seam / provider / primitives / backend）与移植边界。
 - `TeamRole.WORKER` 的不变量与单轮执行契约。
-- 结构化输出工具（`SubmitResultTool`）协议。
+- 结构化输出工具（`StructuredOutputTool`）协议。
 - 进度事件分类（`WORKFLOW_PROGRESS`）与 leader 旁观播报路径。
 - 4 层 `WorkflowRun` 数据模型。
 - 错误边界（引擎错误 vs 仓库 `StatusCode`）。
@@ -35,16 +35,17 @@
 
 ## WORKER 不变量（`TeamRole.WORKER`）
 
-1. **单轮、无状态、用完即弃**：一个 `agent()` 调用对应一个 worker；worker 跑一轮 DeepAgent 即销毁，上下文每次全新。
-2. **不进 coordination 协作循环**：worker 不订阅消息总线、不认领任务、不多轮、不被 dispatcher 唤醒。它由 `TeamWorkerBackend` 直接 `create_deep_agent` + `Runner.run_agent` 执行，**不经** `TeamAgent.invoke` / `CoordinationKernel.start`。
-3. **有 roster 身份**：`TeamWorkerBackend` 经 `spawn_member(role=WORKER, status=BUSY)` 开 DB row（member_name 形如 `wf-<label-slug>-<n>`，满足 `_MEMBER_NAME_PATTERN`），完成标 `SHUTDOWN`。row 操作 best-effort，失败不阻断执行。
-4. **model**：worker 默认复用 leader 的 model（`TeamWorkerBackend(model=parent_agent.model)`，`parent_agent` 即 leader 的 NativeHarness）。`agent(model="X")` 的 per-call hint 经注入的 `model_resolver` 回调解析——`agent_configurator` 在 leader+`enable_swarmflow` 时构造闭包，用 `resolve_member_model(ctx.team_spec, model_name="X", model_index=None)` 对 team model pool 做**纯位置查找**（无 allocator 轮转、无状态），命中则该 worker 用 pool 条目的 model。pool 未配 / 名字缺失 / 无 hint 一律回退 leader model。resolver 经 `BuildContext.extras` 的 `SWARMFLOW_MODEL_RESOLVER` 注入 `SwarmflowTool`，`TeamWorkerBackend` 只持 `(name) -> Model | None` 回调，engine 对接层不耦合 pool/allocator 结构。
+1. **单轮、无状态、用完即弃**：一个 `agent()` 调用对应一个 worker；worker 跑一次即销毁，上下文每次全新。
+2. **worker = 没有团队工具的 teammate**：`TeamWorkerBackend` 从 team 的 **teammate spec**（缺失则 leader spec，经 `agent_configurator` → `inject_team_handles` 的 `SWARMFLOW_WORKER_BASE_SPEC` 注入）`model_copy` 派生 worker `DeepAgentSpec`——保留 teammate 能力（model / tools / skills / workspace / sys_operation / **todo 规划 `enable_task_planning` / `enable_task_loop`**），但因 team rail 是装配期注入、原始 spec 不含，worker 天然无团队协作工具。每个 worker 是一个 `TeamHarness(role=WORKER)`。
+3. **不进 coordination 协作循环**：worker 不订阅消息总线、不认领任务、不被 dispatcher 唤醒。它经 **`TeamHarness.run_once`** 执行——`run_once` = `DeepAgent.invoke`（按 spec 的 `enable_task_loop` 自动单轮或自驱 task-loop），**不开 supervisor → 无 steer / 无 outputs 流**，返回值与 `Runner.run_agent` 一致；**不经** `TeamAgent.invoke` / `CoordinationKernel.start`。结束 `harness.dispose()` 释放 sys_operation（工具由 `run_once` 的 `teardown_tools` 自动清理）。
+4. **有 roster 身份**：`TeamWorkerBackend` 经 `spawn_member(role=WORKER, status=BUSY)` 开 DB row（member_name 形如 `wf-<label-slug>-<n>`，满足 `_MEMBER_NAME_PATTERN`，也用作 worker card / owner id），完成标 `SHUTDOWN`。row 操作 best-effort，失败不阻断执行。
+5. **model**：worker 默认继承 base spec（teammate/leader）的 `model`（`TeamModelConfig`）。`agent(model="X")` 的 per-call hint 经注入的 `model_resolver` 回调解析为**配置而非实例**——`agent_configurator` 在 leader+`enable_swarmflow` 时构造闭包，用 `resolve_member_model(ctx.team_spec, model_name="X", model_index=None)` 对 team model pool 做**纯位置查找**（无 allocator 轮转、无状态），返回 `TeamModelConfig`；命中则覆盖 worker spec.model，未命中（pool 未配 / 名字缺失 / 无 hint）返回 `None` → 继承 base spec model。resolver 经 `BuildContext.extras` 的 `SWARMFLOW_MODEL_RESOLVER` 注入，`TeamWorkerBackend` 只持 `(name) -> TeamModelConfig | None` 回调，engine 对接层不耦合 pool/allocator 结构。
 
-## 结构化输出工具协议（`SubmitResultTool`）
+## 结构化输出工具协议（`StructuredOutputTool`）
 
-- harness 无原生结构化输出。当 `agent(prompt, schema=...)` 的 `schema_json` 非空：worker 装一个 `SubmitResultTool`，其 `ToolCard.input_params == schema_json`，`id = swarmflow.submit_result.<member_name>`（唯一，避免 `resource_mgr` 冲突）。
-- worker system prompt 要求「完成后必须调用 `submit_result` 提交结构化结果」。工具 `invoke(inputs)` 捕获 `inputs` 到 `self.captured` 并标 `called`。
-- `TeamWorkerBackend.run` 读 `submit_tool.captured` → `AgentResult(structured=...)`；若 worker 未调用工具则抛 `BackendError` → 引擎按 `retries` 重试 → 耗尽后 `agent()` 返回 `None`（dw 控制流容忍）。
+- harness 无原生结构化输出。当 `agent(prompt, schema=...)` 的 `schema_json` 非空：backend 构造一个 `StructuredOutputTool` **对象**，其 `ToolCard.input_params == schema_json`，描述经 `tools/locales` i18n 解析（`descs/<lang>/structured_output.md`），**作为实例追加进 worker spec.tools**（`DeepAgentSpec._resolve_tools` 原样透传实例）。挂上 harness 时 ability_manager 把 id re-qualify 为 `structured_output_{owner_id}`（owner = worker card id，并发 worker 不撞），无需 backend 指定 per-call id。
+- worker system prompt 要求「完成后必须调用 `structured_output` 提交结构化结果」。工具 `invoke(inputs)` 捕获 `inputs` 到 `self.captured` 并标 `called`。
+- `TeamWorkerBackend.run` 读 `submit_tool.captured` → `AgentResult(structured=...)`；若 worker 未调用工具则抛 `BackendError` → 引擎按 `retries` 重试 → 耗尽后 `agent()` 返回 `None`（dw 控制流容忍）。工具的注册/清理全由 harness 的 ability_manager + `run_once` 的 `teardown_tools` 负责，backend **不手动** `resource_mgr.add/remove`。
 - `schema_json` 为空时：worker 不装该工具，取最终自由文本 → `AgentResult(text=...)`。
 
 ## 进度事件与 leader 旁观（`WORKFLOW_PROGRESS`）

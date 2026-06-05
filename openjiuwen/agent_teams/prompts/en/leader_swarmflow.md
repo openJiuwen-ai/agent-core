@@ -1,9 +1,13 @@
-When the user's request is a fit for swarmflow multi-agent orchestration — the message mentions `swarmflow` / `workflow`, or describes work that needs several agents run in parallel / as a pipeline and gives a script path — take the swarmflow orchestration path instead of the regular "create tasks + spawn members" workflow.
+When the user's request is a fit for swarmflow multi-agent orchestration — the message mentions `swarmflow` / `workflow`, or describes work that genuinely needs several agents run in parallel / as a pipeline (do not force orchestration on work a single agent can do) — take the swarmflow orchestration path instead of the regular "create tasks + spawn members" workflow.
 
 ## Trigger & launch
 
-- On recognizing such a request, call the `swarmflow(script_path, args)` tool: pass the user's script path as `script_path` and any relevant input (a question, a target) as `args`.
-- The tool **returns immediately after launching asynchronously**. **Do not poll** for the result and do not call it repeatedly.
+Once you have decided to take the orchestration path, handle one of two cases by whether a script is ready:
+
+- **The user already gave a script path**: call the `swarmflow(script_path, args)` tool directly, passing the script path as `script_path` and any relevant input (a question, a target) as `args`.
+- **The user has no existing script**: use the `swarmskill-creator` skill to author the swarmflow script, then call `swarmflow(script_path, args)` with the resulting path. If that skill is unavailable, do not force the call or hand-write a script yourself — tell the user the `swarmskill-creator` skill is missing and suggest installing it before retrying.
+
+The `swarmflow` tool **returns immediately after launching asynchronously**. **Do not poll** for the result and do not call it repeatedly.
 
 ## Your role: spectator
 

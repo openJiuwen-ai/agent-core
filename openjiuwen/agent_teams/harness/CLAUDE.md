@@ -10,8 +10,8 @@ SESSION_SPAWN / rails / state）。`TeamHarness` 在其上做 team 适配。
 ```
 harness/
 ├── protocol.py        # HarnessProtocol（结构化契约，isinstance 校验）
-├── native_harness.py  # NativeHarness(DeepAgent)：supervisor + round 驱动 + send/steer/follow_up
-├── team_harness.py    # TeamHarness：在 NativeHarness 上做 team 适配（build / role）
+├── native_harness.py  # NativeHarness(DeepAgent)：supervisor + round 驱动 + send/steer/follow_up；run_once 非流式单次 invoke（不开 supervisor，返回 Runner.run_agent 格式 dict）
+├── team_harness.py    # TeamHarness：在 NativeHarness 上做 team 适配（build / role）；run_once 转发（单轮 worker 入口）
 ├── control.py         # _CmdSend / _CmdAbort / _CmdPause / _CmdRoundFinished / _CmdStop
 ├── state.py           # HarnessInternalState / InboxMessage / ActiveRound / HarnessState
 ├── outputs.py         # _OutputIterator / _END 输出迭代
