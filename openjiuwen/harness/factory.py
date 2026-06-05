@@ -223,18 +223,25 @@ def resolve_deep_agent_parts(
         workspace_obj = workspace
 
     if not isinstance(sys_operation, SysOperation):
-        sysop_card = SysOperationCard(
-                id=f"{card.name}_{card.id}",
+        sysop_id = f"{card.name}_{card.id}"
+        # Get-or-create: the id is stable across rebuilds (a member harness is
+        # reconstructed on every team resume), and add_sys_operation is a strict
+        # add that errors on a duplicate id. Resolve the existing instance first
+        # so a rebuild does not log a spurious "resource already exist" error.
+        sys_operation_obj = Runner.resource_mgr.get_sys_operation(sysop_id)
+        if sys_operation_obj is None:
+            sysop_card = SysOperationCard(
+                id=sysop_id,
                 mode=OperationMode.LOCAL,
                 work_config=LocalWorkConfig(
                     shell_allowlist=None,
                     restrict_to_sandbox=restrict_to_work_dir,
                 ),
             )
-        add_result = Runner.resource_mgr.add_sys_operation(sysop_card)
-        if add_result.is_err():
-            logger.error(f"add_sys_operation failed: {add_result.msg()}")
-        sys_operation_obj = Runner.resource_mgr.get_sys_operation(f"{card.name}_{card.id}")
+            add_result = Runner.resource_mgr.add_sys_operation(sysop_card)
+            if add_result.is_err():
+                logger.error(f"add_sys_operation failed: {add_result.msg()}")
+            sys_operation_obj = Runner.resource_mgr.get_sys_operation(sysop_id)
     else:
         sys_operation_obj = sys_operation
 
@@ -291,10 +298,19 @@ def resolve_deep_agent_parts(
         for _team_id, target_path in workspace_obj.list_team_links():
             skills_dirs.append(str(Path(target_path) / "skills"))
         disabled_skills = _collect_disabled_skills_from_state(skills_dirs)
+        # ``include_tools`` registers read_file / code / bash so skills can do
+        # file/shell ops. When a SysOperationRail is already mounted it owns
+        # those tools (and refresh-binds them to the live sys_operation), so
+        # re-registering here only double-registers over its ids — every build
+        # then logs a refresh + duplicate-ability warning per overlapping tool.
+        # Defer to SysOperationRail when present; only include the fallback set
+        # when no fs rail provides them.
+        include_tools = not _already_provided(SysOperationRail)
         return SkillUseRail(
             skills_dir=skills_dirs,
             skill_mode="all",
             disabled_skills=disabled_skills or None,
+            include_tools=include_tools,
         )
 
     def _make_task_planning_rail() -> TaskPlanningRail:

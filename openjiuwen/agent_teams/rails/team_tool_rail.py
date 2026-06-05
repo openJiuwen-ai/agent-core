@@ -30,7 +30,6 @@ from typing import (
 from openjiuwen.agent_teams.tools.team_tools import create_team_tools
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool.base import Tool
-from openjiuwen.core.runner import Runner
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 if TYPE_CHECKING:
@@ -140,22 +139,21 @@ class TeamToolRail(DeepAgentRail):
             tools.append(ExitWorktreeTool(self._worktree_manager, language=self._language))
             init_session_state()
 
-        if self._qualify_ids:
-            qualify_team_tool_ids(
-                tools,
-                team_name=self._team_name,
-                member_name=self._member_name,
-            )
-
-        try:
-            Runner.resource_mgr.add_tool(tools, refresh=True)
-        except Exception:
-            team_logger.debug("Runner.resource_mgr not available, skipping tool registration")
-
+        # Register through the unified ``add_ability`` entry point. It qualifies
+        # each stateful tool id to ``{name}_{owner_id}`` (owner_id is this
+        # member's agent id, so ids stay unique across members sharing one
+        # process — superseding the old ``qualify_ids`` suffixing), binds the
+        # instance in the resource manager, and — crucially — registers the tool
+        # the same way ``ability_manager.teardown_tools`` expects, so the team
+        # tools are dropped at round-end stop. The previous bespoke path
+        # (``qualify_team_tool_ids`` + ``add_tool(refresh=True)`` +
+        # ``ability_manager.add``) produced ``team.<tool>.<session>.<member>``
+        # ids that teardown_tools did not match, so they leaked across native
+        # rebuilds and refresh-warned every cycle.
         ability_manager = getattr(agent, "ability_manager", None)
         if ability_manager is not None:
             for tool in tools:
-                ability_manager.add(tool.card)
+                ability_manager.add_ability(tool.card, tool)
 
         self._tools = tools
 
@@ -165,16 +163,13 @@ class TeamToolRail(DeepAgentRail):
             return
 
         ability_manager = getattr(agent, "ability_manager", None)
-        for tool in self._tools:
-            name = getattr(tool.card, "name", None)
-            if ability_manager is not None and name:
-                ability_manager.remove(name)
-            tool_id = getattr(tool.card, "id", None)
-            if tool_id:
-                try:
-                    Runner.resource_mgr.remove_tool(tool_id)
-                except Exception:
-                    team_logger.debug("Runner.resource_mgr removal failed for {}", tool_id)
+        if ability_manager is not None:
+            for tool in self._tools:
+                name = getattr(tool.card, "name", None)
+                if name:
+                    # Mirror ``add_ability``: removes the agent-qualified id from
+                    # both this manager and the shared resource manager.
+                    ability_manager.remove_ability(name)
 
         self._tools = None
 

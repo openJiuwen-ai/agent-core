@@ -576,7 +576,10 @@ async def test_team_runtime_manager_cold_recover_reinjects_runtime_spec():
     # Call site: TeamAgent.recover_from_session(team_session, team_name, runtime_spec=spec)
     assert args[1] == "cold_recover_team"
     assert kwargs["runtime_spec"] is spec
-    assert agent.recover_calls == 1
+    # COLD_RECOVER recovers only the leader here; teammate recovery is owned by
+    # the leader's coordination.start (the activation is streamed right after),
+    # so the manager no longer eagerly calls recover_team.
+    assert agent.recover_calls == 0
 
 
 @pytest.mark.asyncio

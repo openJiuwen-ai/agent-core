@@ -136,6 +136,17 @@ class TeamHarness:
         self._native_session_id = None
         self._active_agent_session = None
 
+    async def dispose(self) -> None:
+        """Permanently destroy the native and release its process-global resources.
+
+        Called on permanent teardown (coordination stop / session discard /
+        member shutdown), not on round-end :meth:`stop`: it stops the native
+        (idempotent) and drops its ``sys_operation`` so a discarded
+        member/session does not leak it. No-op when no native was ever built.
+        """
+        if self._native is not None:
+            await self._native.dispose()
+
     @staticmethod
     def _session_id_of(team_session: Optional[Any]) -> Optional[str]:
         """Extract the session id from a team session, or None."""

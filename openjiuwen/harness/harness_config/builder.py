@@ -122,15 +122,24 @@ def _resolve_tools(resources_schema: Any, sys_operation: SysOperation) -> List[A
 
 
 def _create_sys_operation(card: AgentCard) -> SysOperation:
-    """Create and register a local ``SysOperation`` keyed by the agent card."""
+    """Get-or-create a local ``SysOperation`` keyed by the agent card.
+
+    The id is stable for a given card, and ``add_sys_operation`` errors on a
+    duplicate id, so resolve any existing instance first and only add when
+    absent — a rebuild then reuses the resource instead of logging a spurious
+    "resource already exist" error.
+    """
     sysop_id = f"{card.name}_{card.id}" if card.id else f"{card.name}_harness_config"
-    sysop_card = SysOperationCard(
-        id=sysop_id,
-        mode=OperationMode.LOCAL,
-        work_config=LocalWorkConfig(),
-    )
-    Runner.resource_mgr.add_sys_operation(sysop_card)
-    return Runner.resource_mgr.get_sys_operation(sysop_id)
+    sys_operation = Runner.resource_mgr.get_sys_operation(sysop_id)
+    if sys_operation is None:
+        sysop_card = SysOperationCard(
+            id=sysop_id,
+            mode=OperationMode.LOCAL,
+            work_config=LocalWorkConfig(),
+        )
+        Runner.resource_mgr.add_sys_operation(sysop_card)
+        sys_operation = Runner.resource_mgr.get_sys_operation(sysop_id)
+    return sys_operation
 
 
 def _resolve_rails(resources_schema: Any) -> List[Any]:

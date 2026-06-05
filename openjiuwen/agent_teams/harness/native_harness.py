@@ -323,6 +323,40 @@ class NativeHarness(DeepAgent):
             logger.exception("[NativeHarness] tool teardown failed during stop")
         logger.info("[NativeHarness] stopped session=%s", self.session_id)
 
+    async def dispose(self) -> None:
+        """Permanently destroy this native: stop it, then release its resources.
+
+        Distinct from :meth:`stop`, which is round-end teardown — the native is
+        rebuilt next cycle on the same session, so its ``sys_operation`` (id
+        stable per session) is deliberately kept alive for reuse. ``dispose`` is
+        the destruction hook the permanent-teardown path (coordination stop /
+        session discard / member shutdown) calls instead: it drops this agent's
+        ``sys_operation`` from the process-global resource manager so a shut-down
+        member or discarded session does not leak it. Nothing else removes it
+        individually — only ``Runner.stop`` would otherwise clear it at process
+        exit.
+
+        The supervisor is stopped first because the permanent-teardown path does
+        not always run round-end ``finalize_round`` beforehand (e.g. an external
+        ``stop_team`` or a session switch): the native may still be alive with
+        its ``ContextEngine`` reading/writing through ``sys_operation``, so
+        removing it under a live supervisor would yank a resource still in use.
+        ``stop`` is idempotent, so this is a no-op when ``finalize_round`` already
+        stopped the native. Idempotent overall and safe to call more than once.
+        """
+        await self.stop()
+
+        from openjiuwen.core.runner import Runner
+
+        config = self.deep_config
+        sys_op = config.sys_operation if config is not None else None
+        if sys_op is None:
+            return
+        # Quiet idempotence: only remove when still present, so a second dispose
+        # (or a dispose after Runner.stop already cleared everything) is a no-op.
+        if Runner.resource_mgr.get_sys_operation(sys_op.id) is not None:
+            Runner.resource_mgr.remove_sys_operation(sys_op.id)
+
     def outputs(self) -> AsyncIterator[Any]:
         """Return an AsyncIterator over output chunks.
 

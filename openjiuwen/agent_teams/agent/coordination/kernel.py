@@ -326,6 +326,15 @@ class CoordinationKernel:
         if self._event_bus is not None:
             await self._event_bus.stop()
         self.close_stream()
+        # Permanent teardown (not round-end): stop the native and drop its
+        # process-global sys_operation so a stopped/discarded member does not
+        # leak it. The round-end ``finalize_round`` path only calls
+        # ``harness.stop`` (kept for reuse on the same session); this stop is
+        # where the runtime goes away. Done before ``release_session`` because
+        # ``dispose`` tears the native down over its bound session, and it does
+        # not always follow a ``finalize_round`` (e.g. external stop_team).
+        if host.resources.harness is not None:
+            await host.resources.harness.dispose()
         host.session_manager.release_session()
         # See pause(): team_member status update for the agent's own
         # ``team_member`` handle is owned by

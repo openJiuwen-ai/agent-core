@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.build_context import BuildContext
+    from openjiuwen.core.sys_operation.sys_operation import SysOperation
     from openjiuwen.harness.deep_agent import DeepAgent
 
 from openjiuwen.core.foundation.llm import (
@@ -215,6 +216,29 @@ class SysOperationSpec(BaseModel):
             gateway_config=self.gateway_config,
         )
 
+    def resolve(self) -> "SysOperation":
+        """Get-or-create the live SysOperation for this spec.
+
+        Idempotent across harness restarts. A member's sys_operation id is
+        stable for the lifetime of the session, so when a team pauses and a new
+        message rebuilds every member harness, the fresh build re-resolves the
+        same resource id. ``add_sys_operation`` is a strict add that errors on a
+        duplicate id, so resolve the existing instance first and only add when
+        absent — otherwise each resume logs a spurious "resource already exist"
+        error per member.
+
+        Returns:
+            The live SysOperation registered under this spec's id.
+        """
+        from openjiuwen.core.runner.runner import Runner
+
+        card = self.build_card()
+        sys_operation = Runner.resource_mgr.get_sys_operation(card.id)
+        if sys_operation is None:
+            Runner.resource_mgr.add_sys_operation(card)
+            sys_operation = Runner.resource_mgr.get_sys_operation(card.id)
+        return sys_operation
+
 
 class RailSpec(BaseModel):
     """Declarative rail reference resolved via the rail provider registry."""
@@ -363,13 +387,7 @@ class SubAgentSpec(BaseModel):
                     ),
                 )
 
-        resolved_sys_op = None
-        if self.sys_operation:
-            from openjiuwen.core.runner.runner import Runner
-
-            card = self.sys_operation.build_card()
-            Runner.resource_mgr.add_sys_operation(card)
-            resolved_sys_op = Runner.resource_mgr.get_sys_operation(card.id)
+        resolved_sys_op = self.sys_operation.resolve() if self.sys_operation else None
 
         # Resolve tools: BuiltinToolSpec → Tool instance, ToolCard passes through.
         sa_prefix = self.agent_card.id or self.agent_card.name
@@ -472,7 +490,6 @@ class DeepAgentSpec(BaseModel):
                 A per-build view is derived with the resolved workspace and card
                 id before rails / tools / sub-agents are built.
         """
-        from openjiuwen.core.runner.runner import Runner
         from openjiuwen.harness.factory import resolve_deep_agent_parts
         from openjiuwen.harness.prompts import resolve_language
 
@@ -511,11 +528,7 @@ class DeepAgentSpec(BaseModel):
                     ),
                 )
 
-        sys_operation = None
-        if self.sys_operation:
-            card = self.sys_operation.build_card()
-            Runner.resource_mgr.add_sys_operation(card)
-            sys_operation = Runner.resource_mgr.get_sys_operation(card.id)
+        sys_operation = self.sys_operation.resolve() if self.sys_operation else None
 
         return resolve_deep_agent_parts(
             llm_model,
