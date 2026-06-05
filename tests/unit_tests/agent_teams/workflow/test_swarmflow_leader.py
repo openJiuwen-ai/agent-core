@@ -3,9 +3,11 @@
 
 """Leader-side swarmflow wiring: WorkflowHandler narration + SwarmflowTool launch.
 
-No real LLM / team: a fake round captures ``deliver_input`` and a spy captures
-the launcher, so the progress-event → narration path and the tool → background
-launch path are verified deterministically.
+No real LLM / team: a fake round captures ``deliver_input`` and a fake harness
+captures ``launch_async_tool``, so the progress-event → narration path and the
+tool → background-launch path are verified deterministically. Completion is fed
+back by the async-tool framework (not narrated by the handler), so the handler
+only narrates mid-run milestones (started / phase).
 """
 from __future__ import annotations
 
@@ -37,6 +39,32 @@ class _FakeBlueprint:
         self.role = role
 
 
+class _FakeRuntime:
+    """Stand-in for AsyncToolRuntime exposing only ``has_running``."""
+
+    def __init__(self) -> None:
+        self.running: set[str] = set()
+
+    def has_running(self, tool_name: str) -> bool:
+        return tool_name in self.running
+
+
+class _FakeHarness:
+    """Stand-in for NativeHarness: captures launch_async_tool, exposes runtime."""
+
+    def __init__(self) -> None:
+        self.model = None
+        self.launched: list[tuple] = []
+        self._runtime = _FakeRuntime()
+
+    @property
+    def async_tool_runtime(self) -> _FakeRuntime:
+        return self._runtime
+
+    def launch_async_tool(self, task_id, coro_factory, *, tool_name, description) -> None:
+        self.launched.append((task_id, tool_name, description))
+
+
 def _handler(role: TeamRole) -> tuple[WorkflowHandler, _FakeRound]:
     host = _FakeRound()
     handler = WorkflowHandler(host, _FakeBlueprint(role), infra=None, poll_ctrl=None)
@@ -49,13 +77,24 @@ def _event(kind: str, *, phase: str | None = None, name: str | None = None) -> E
     )
 
 
-def test_leader_narrates_phase_and_lifecycle_milestones():
-    """phase / started / completed produce a narration line for the leader."""
+def _tool(harness: _FakeHarness, language: str = "cn") -> SwarmflowTool:
+    return SwarmflowTool(
+        parent_agent=harness,
+        messager=None,
+        team_backend=None,
+        team_name="t",
+        model_resolver=None,
+        language=language,
+    )
+
+
+def test_leader_narrates_started_and_phase_but_not_completion():
+    """started / phase narrate; completion is fed back by the framework, not here."""
     handler, host = _handler(TeamRole.LEADER)
     asyncio.run(handler.on_workflow_progress(_event("workflow_started", name="research")))
     asyncio.run(handler.on_workflow_progress(_event("phase", phase="Search")))
     asyncio.run(handler.on_workflow_progress(_event("workflow_completed", name="research")))
-    assert len(host.delivered) == 3
+    assert len(host.delivered) == 2
     assert "research" in host.delivered[0]
     assert "Search" in host.delivered[1]
 
@@ -76,21 +115,34 @@ def test_non_leader_never_narrates():
 
 
 def test_swarmflow_tool_launches_and_returns_immediately():
-    """The tool fires the launcher (fire-and-forget) and reports 'started'."""
-    calls: list[tuple] = []
-    tool = SwarmflowTool(launcher=lambda sp, a: calls.append((sp, a)), language="cn")
+    """The tool launches in the background and reports 'launched' with a task id."""
+    harness = _FakeHarness()
+    tool = _tool(harness)
     out = asyncio.run(tool.invoke({"script_path": "/tmp/flow.py", "args": "question"}))
     assert out.success is True
-    assert out.data["status"] == "started"
-    assert calls == [("/tmp/flow.py", "question")]
+    assert out.data["status"] == "launched"
+    assert "task_id" in out.data
+    assert len(harness.launched) == 1
+    assert harness.launched[0][1] == "swarmflow"
 
 
 def test_swarmflow_tool_requires_script_path():
     """Missing script_path fails fast at the tool boundary."""
-    tool = SwarmflowTool(launcher=lambda sp, a: None, language="en")
+    tool = _tool(_FakeHarness(), language="en")
     out = asyncio.run(tool.invoke({}))
     assert out.success is False
     assert "script_path" in (out.error or "")
+
+
+def test_swarmflow_tool_refuses_concurrent_run():
+    """A second launch is refused while one swarmflow is already running."""
+    harness = _FakeHarness()
+    harness.async_tool_runtime.running.add("swarmflow")
+    tool = _tool(harness)
+    out = asyncio.run(tool.invoke({"script_path": "/tmp/flow.py"}))
+    assert out.success is False
+    assert "in progress" in (out.error or "")
+    assert harness.launched == []
 
 
 def _section_names(role: TeamRole, *, enable_swarmflow: bool) -> list[str]:
