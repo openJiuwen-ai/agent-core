@@ -395,7 +395,7 @@ class CoordinationKernel:
             )
         )
 
-    async def enqueue_mailbox_after_first_iteration(self) -> None:
+    async def enqueue_initial_mailbox_poll(self) -> None:
         host = self._host
         if host.role == TeamRole.LEADER:
             return

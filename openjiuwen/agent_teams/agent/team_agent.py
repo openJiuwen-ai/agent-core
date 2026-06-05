@@ -584,7 +584,7 @@ class TeamAgent(BaseAgent):
                 # messages (no-op when the inbox is empty).
                 if raw_query:
                     await self._coordination.enqueue_user_input(inputs)
-                await self._coordination.enqueue_mailbox_after_first_iteration()
+                await self._coordination.enqueue_initial_mailbox_poll()
             last_result = None
             while True:
                 chunk = await self._stream_controller.stream_queue.get()
@@ -640,7 +640,7 @@ class TeamAgent(BaseAgent):
                 # messages (no-op when the inbox is empty).
                 if raw_query:
                     await self._coordination.enqueue_user_input(inputs)
-                await self._coordination.enqueue_mailbox_after_first_iteration()
+                await self._coordination.enqueue_initial_mailbox_poll()
             while True:
                 chunk = await self._stream_controller.stream_queue.get()
                 if chunk is None:
