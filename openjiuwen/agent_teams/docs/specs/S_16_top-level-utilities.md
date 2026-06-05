@@ -11,7 +11,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/paths.py` · `context.py` · `i18n.py` · `timefmt.py` · `constants.py` · `worktree_remote.py` · `harness.py` |
-| 最近一次修订日期 | 2026-06-03 |
+| 最近一次修订日期 | 2026-06-05 |
 | 关联 feature | F_24_agent-time-awareness.md |
 
 ## 范围 / 边界
@@ -313,8 +313,12 @@ class TeamHarness:
     async def send(self, content: Any, *, immediate: bool = False) -> Any
     async def abort(self, *, immediate: bool = False) -> None
     async def pause(self) -> None
-    async def on_state_changed(self, callback: Callable[..., Any]) -> None
-    async def on_round(self, callback: Callable[..., Any]) -> None
+    async def subscribe(
+        self,
+        *,
+        on_state: Callable[..., Any] | None = None,
+        on_round: Callable[..., Any] | None = None,
+    ) -> None
 
     # rail / tool registration
     async def register_rail(self, rail: AgentRail) -> None
