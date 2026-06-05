@@ -35,6 +35,7 @@ from typing import (
     runtime_checkable,
 )
 
+
 @runtime_checkable
 class MemberRuntime(Protocol):
     """The brain a team member's coordination layer drives."""

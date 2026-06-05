@@ -33,6 +33,7 @@ from typing import (
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.agent_teams.harness.native_harness import NativeHarness
@@ -164,7 +165,7 @@ class TeamHarness:
             try:
                 await child.post_run()
             except Exception:
-                pass
+                logger.debug("[TeamHarness] post_run raised during teardown, ignoring", exc_info=True)
             self._active_agent_session = None
 
     async def dispose(self) -> None:

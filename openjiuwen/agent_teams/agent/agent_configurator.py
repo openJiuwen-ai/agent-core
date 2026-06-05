@@ -425,7 +425,8 @@ class AgentConfigurator:
 
         is_coordinated_teammate = ctx.role == TeamRole.TEAMMATE and ctx.team_spec
         approval_tools = agent_spec.approval_required_tools or []
-        if is_coordinated_teammate and self.team_backend and self.messager and approval_tools:
+        can_request_approval = is_coordinated_teammate and self.team_backend and self.messager
+        if can_request_approval and approval_tools:
             team_rail_specs.append(
                 RailSpec(
                     type=TEAM_TOOL_APPROVAL,
