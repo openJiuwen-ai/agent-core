@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 from openjiuwen.agent_teams.reliability.config import DetectorsConfig, ReliabilityConfig
@@ -81,7 +82,24 @@ def build_remediation_policy(config: ReliabilityConfig) -> RemediationPolicy:
     return RemediationPolicy(config.policy.severity_actions)
 
 
-def build_reliability_rail(
+@dataclass
+class ReliabilityComponents:
+    """The stateful core of a member's reliability rail.
+
+    These objects accumulate cross-cycle state (detector sliding windows, the
+    restart-intensity rate limiter, the leader's bound local sink) and must
+    survive native rebuilds. They are built once and passed into a freshly
+    constructed :class:`ReliabilityRail` each run cycle, so the rail instance
+    itself stays stateless and provider-built — never cached.
+    """
+
+    monitor: ReliabilityMonitor
+    member_name: str
+    auto_remediator: LocalAutoRemediator | None = None
+    local_reporter: LocalAnomalyReporter | None = None
+
+
+def build_reliability_components(
     config: ReliabilityConfig,
     *,
     member_name: str,
@@ -89,8 +107,8 @@ def build_reliability_rail(
     team_name: str,
     sender_id: str,
     is_leader: bool = False,
-) -> ReliabilityRail:
-    """Assemble the per-member reliability rail (detectors + reporter + local remediator).
+) -> ReliabilityComponents:
+    """Assemble the stateful reliability core (detectors + reporter + remediator).
 
     The leader gets a ``LocalAnomalyReporter`` — its own anomalies route
     in-process, bypassing the messager self-filter — while other roles get an
@@ -106,12 +124,48 @@ def build_reliability_rail(
         intensity=config.restart_intensity.intensity,
         period_seconds=config.restart_intensity.period_seconds,
     )
-    return ReliabilityRail(
+    return ReliabilityComponents(
         monitor=monitor,
         member_name=member_name,
         auto_remediator=auto,
         local_reporter=local_reporter,
     )
+
+
+def reliability_rail_from_components(components: ReliabilityComponents) -> ReliabilityRail:
+    """Construct a fresh rail wrapping the reused (stateful) components."""
+    return ReliabilityRail(
+        monitor=components.monitor,
+        member_name=components.member_name,
+        auto_remediator=components.auto_remediator,
+        local_reporter=components.local_reporter,
+    )
+
+
+def build_reliability_rail(
+    config: ReliabilityConfig,
+    *,
+    member_name: str,
+    messager: "Messager | None",
+    team_name: str,
+    sender_id: str,
+    is_leader: bool = False,
+) -> ReliabilityRail:
+    """Build components and wrap them in a rail in one shot (no cross-cycle reuse).
+
+    Convenience for callers that build and use the rail within a single lifetime
+    (tests, the cross-process fallback). Warm in-process rebuilds instead build
+    the components once and reuse them via :func:`reliability_rail_from_components`.
+    """
+    components = build_reliability_components(
+        config,
+        member_name=member_name,
+        messager=messager,
+        team_name=team_name,
+        sender_id=sender_id,
+        is_leader=is_leader,
+    )
+    return reliability_rail_from_components(components)
 
 
 def build_pingpong_detector(config: ReliabilityConfig) -> PingPongDetector:

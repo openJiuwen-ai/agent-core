@@ -12,9 +12,11 @@ the ``TeamHandleKey`` namespace; team rail provider factories read them directly
 swarm passes ``trajectory_registry`` / ``_parent_model`` through extras).
 
 ``inject_team_handles`` is the single writer (the configurator); the ``get_*``
-accessors are the readers (the provider factories). ``team_rail_cache`` is a
-per-member instance cache so a rail keeps its state across native rebuilds —
-each ``spec.build`` would otherwise mint a fresh instance.
+accessors are the readers (the provider factories). Rails are never cached:
+every native rebuild mints a fresh rail through its provider factory. State that
+must outlive a rebuild lives in a reused object injected here and passed into the
+fresh rail's constructor — e.g. ``reliability_components`` carries the detector
+sliding windows and the leader's bound anomaly sink across cycles.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from typing import (
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.messager import Messager
     from openjiuwen.agent_teams.models.allocator import ModelAllocator
+    from openjiuwen.agent_teams.reliability.factory import ReliabilityComponents
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tools.team import TeamBackend
     from openjiuwen.harness.tools.worktree import WorktreeManager
@@ -45,7 +48,7 @@ class TeamHandleKey:
     MESSAGER = "team.messager"
     ON_TEAMMATE_CREATED = "team.on_teammate_created"
     SWARMFLOW_LAUNCHER = "team.swarmflow_launcher"
-    RAIL_CACHE = "team._rail_cache"
+    RELIABILITY_COMPONENTS = "team.reliability_components"
 
 
 def inject_team_handles(
@@ -58,6 +61,7 @@ def inject_team_handles(
     messager: Optional["Messager"] = None,
     on_teammate_created: Optional[Callable[[str], Awaitable[None]]] = None,
     swarmflow_launcher: Optional[Callable[[str, Any], None]] = None,
+    reliability_components: Optional["ReliabilityComponents"] = None,
 ) -> None:
     """Write the team live handles into ``extras`` (configurator-side).
 
@@ -73,6 +77,9 @@ def inject_team_handles(
         messager: The member's messager, if any.
         on_teammate_created: The leader's spawn-on-created callback, if any.
         swarmflow_launcher: The leader's swarmflow launcher, if any.
+        reliability_components: The member's reused reliability core (detectors /
+            remediator / local reporter), if reliability is enabled. Built once
+            and wrapped by a fresh rail each cycle so its state outlives rebuilds.
     """
     extras[TeamHandleKey.TEAM_BACKEND] = team_backend
     extras[TeamHandleKey.WORKSPACE_MANAGER] = workspace_manager
@@ -81,6 +88,7 @@ def inject_team_handles(
     extras[TeamHandleKey.MESSAGER] = messager
     extras[TeamHandleKey.ON_TEAMMATE_CREATED] = on_teammate_created
     extras[TeamHandleKey.SWARMFLOW_LAUNCHER] = swarmflow_launcher
+    extras[TeamHandleKey.RELIABILITY_COMPONENTS] = reliability_components
 
 
 def _get(context: Any, key: str) -> Any:
@@ -124,22 +132,13 @@ def get_swarmflow_launcher(context: Any) -> Optional[Callable[[str, Any], None]]
     return _get(context, TeamHandleKey.SWARMFLOW_LAUNCHER)
 
 
-def team_rail_cache(context: Any) -> dict[str, Any]:
-    """Return the per-member rail instance cache on the build context.
+def get_reliability_components(context: Any) -> Optional["ReliabilityComponents"]:
+    """Return the reused reliability components handle, or None.
 
-    Provider factories cache their built rail here so repeated ``spec.build``
-    calls (native rebuilds across run cycles) reuse the same instance and keep
-    its state. Returns an empty throwaway dict when the context has no extras
-    (defensive; such a context never survives a rebuild anyway).
+    Present only for members with reliability enabled. The provider factory
+    wraps these reused (stateful) components in a fresh rail each cycle.
     """
-    extras = getattr(context, "extras", None) if context is not None else None
-    if extras is None:
-        return {}
-    cache = extras.get(TeamHandleKey.RAIL_CACHE)
-    if cache is None:
-        cache = {}
-        extras[TeamHandleKey.RAIL_CACHE] = cache
-    return cache
+    return _get(context, TeamHandleKey.RELIABILITY_COMPONENTS)
 
 
 __all__ = [
@@ -152,5 +151,5 @@ __all__ = [
     "get_messager",
     "get_on_teammate_created",
     "get_swarmflow_launcher",
-    "team_rail_cache",
+    "get_reliability_components",
 ]

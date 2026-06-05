@@ -443,12 +443,28 @@ class AgentConfigurator:
             team_rail_specs.append(RailSpec(type=TEAM_PLAN_MODE, params={}))
 
         reliability_cfg = spec.reliability
+        reliability_components = None
         if reliability_cfg and reliability_cfg.enabled and member_name:
             role_value = ctx.role.value
             is_leader = role_value == "leader"
             # Leader uses a LocalAnomalyReporter (no messager needed); teammates
             # need one for the cross-process EventAnomalyReporter.
             if role_value in reliability_cfg.monitor_roles and (is_leader or self.messager):
+                from openjiuwen.agent_teams.reliability.factory import (
+                    build_reliability_components,
+                )
+
+                # Build the stateful core once here (single writer of extras) and
+                # inject it below; each native rebuild wraps it in a fresh rail so
+                # detector windows / the leader sink survive across run cycles.
+                reliability_components = build_reliability_components(
+                    reliability_cfg,
+                    member_name=member_name,
+                    messager=self.messager,
+                    team_name=resolved_team_name,
+                    sender_id=member_name,
+                    is_leader=is_leader,
+                )
                 team_rail_specs.append(
                     RailSpec(
                         type=TEAM_RELIABILITY,
@@ -489,6 +505,7 @@ class AgentConfigurator:
             messager=self.messager,
             on_teammate_created=self._on_teammate_created,
             swarmflow_launcher=swarmflow_launcher,
+            reliability_components=reliability_components,
         )
 
         # Fold the team rails into the spec rails (after the user rails, to keep

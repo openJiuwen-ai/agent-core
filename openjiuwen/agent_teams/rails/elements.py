@@ -19,9 +19,10 @@ Construction split (mirrors swarm's param-vs-context convention):
   ``context.extras``; the factories read them directly via the
   ``team_context`` accessors and do NOT model them in the input schema.
 
-Each factory caches its instance on the per-member ``team_rail_cache`` so a
-native rebuild across run cycles reuses the same rail (keeping its state).
-Returning ``None`` gates the rail out for this member.
+Each factory mints a fresh rail on every native rebuild — rails are never
+cached. State that must survive a rebuild lives in a reused object injected on
+the build context (e.g. ``reliability_components``) and passed into the fresh
+rail's constructor. Returning ``None`` gates the rail out for this member.
 """
 
 from __future__ import annotations
@@ -39,11 +40,11 @@ from openjiuwen.agent_teams.rails.team_context import (
     get_messager,
     get_model_allocator,
     get_on_teammate_created,
+    get_reliability_components,
     get_swarmflow_launcher,
     get_team_backend,
     get_workspace_manager,
     get_worktree_manager,
-    team_rail_cache,
 )
 
 # Element names (the RailSpec ``type`` values). The team rails live under the
@@ -86,16 +87,12 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
     backend = get_team_backend(context)
     if backend is None:
         return None
-    cache = team_rail_cache(context)
-    cached = cache.get(TEAM_TOOL)
-    if cached is not None:
-        return cached
     from openjiuwen.agent_teams.rails.team_tool_rail import TeamToolRail
 
     inp = TeamToolInput.resolve(params, context)
     allocator = get_model_allocator(context)
     model_config_allocator = allocator.allocate if allocator is not None else None
-    rail = TeamToolRail(
+    return TeamToolRail(
         team_backend=backend,
         role=inp.role,
         teammate_mode=inp.teammate_mode,
@@ -111,8 +108,6 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
         member_name=inp.member_name,
         swarmflow_launcher=get_swarmflow_launcher(context),
     )
-    cache[TEAM_TOOL] = rail
-    return rail
 
 
 # ---------------------------------------------------------------------------
@@ -148,15 +143,11 @@ class TeamPolicyInput(ConstructionInput):
 )
 def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
     """Build the team policy rail (always mounted)."""
-    cache = team_rail_cache(context)
-    cached = cache.get(TEAM_POLICY)
-    if cached is not None:
-        return cached
     from openjiuwen.agent_teams.rails.team_policy_rail import TeamPolicyRail
     from openjiuwen.agent_teams.schema.team import TeamRole
 
     inp = TeamPolicyInput.resolve(params, context)
-    rail = TeamPolicyRail(
+    return TeamPolicyRail(
         role=TeamRole(inp.role),
         persona=inp.persona,
         member_name=inp.member_name or None,
@@ -171,8 +162,6 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
         expose_human_agents_to_teammates=inp.expose_human_agents_to_teammates,
         enable_swarmflow=inp.enable_swarmflow,
     )
-    cache[TEAM_POLICY] = rail
-    return rail
 
 
 # ---------------------------------------------------------------------------
@@ -197,16 +186,10 @@ def build_team_workspace_rail(params: dict[str, Any], context: Any) -> Any:
     workspace_manager = get_workspace_manager(context)
     if workspace_manager is None:
         return None
-    cache = team_rail_cache(context)
-    cached = cache.get(TEAM_WORKSPACE)
-    if cached is not None:
-        return cached
     from openjiuwen.agent_teams.team_workspace.rails import TeamWorkspaceRail
 
     inp = TeamWorkspaceInput.resolve(params, context)
-    rail = TeamWorkspaceRail(workspace_manager, inp.member_name)
-    cache[TEAM_WORKSPACE] = rail
-    return rail
+    return TeamWorkspaceRail(workspace_manager, inp.member_name)
 
 
 # ---------------------------------------------------------------------------
@@ -236,13 +219,9 @@ def build_team_tool_approval_rail(params: dict[str, Any], context: Any) -> Any:
     inp = TeamToolApprovalInput.resolve(params, context)
     if backend is None or messager is None or not inp.tool_names:
         return None
-    cache = team_rail_cache(context)
-    cached = cache.get(TEAM_TOOL_APPROVAL)
-    if cached is not None:
-        return cached
     from openjiuwen.agent_teams.rails.tool_approval_rail import TeamToolApprovalRail
 
-    rail = TeamToolApprovalRail(
+    return TeamToolApprovalRail(
         team_name=inp.team_name,
         member_name=inp.member_name,
         db=backend.db,
@@ -250,8 +229,6 @@ def build_team_tool_approval_rail(params: dict[str, Any], context: Any) -> Any:
         leader_member_name=inp.leader_member_name,
         tool_names=inp.tool_names,
     )
-    cache[TEAM_TOOL_APPROVAL] = rail
-    return rail
 
 
 # ---------------------------------------------------------------------------
@@ -273,16 +250,10 @@ class TeamPlanModeInput(ConstructionInput):
 )
 def build_team_plan_mode_rail(params: dict[str, Any], context: Any) -> Any:
     """Build the team plan-mode rail."""
-    cache = team_rail_cache(context)
-    cached = cache.get(TEAM_PLAN_MODE)
-    if cached is not None:
-        return cached
     from openjiuwen.agent_teams.rails.team_plan_mode_rail import TeamPlanModeRail
 
     inp = TeamPlanModeInput.resolve(params, context)
-    rail = TeamPlanModeRail(language=inp.language)
-    cache[TEAM_PLAN_MODE] = rail
-    return rail
+    return TeamPlanModeRail(language=inp.language)
 
 
 # ---------------------------------------------------------------------------
@@ -307,28 +278,33 @@ class TeamReliabilityInput(ConstructionInput):
     input_model=TeamReliabilityInput,
 )
 def build_team_reliability_rail(params: dict[str, Any], context: Any) -> Any:
-    """Build the reliability rail from a serialized config (gated on it)."""
+    """Build the reliability rail, wrapping the reused components when present."""
     inp = TeamReliabilityInput.resolve(params, context)
     if not inp.reliability_cfg:
         return None
-    cache = team_rail_cache(context)
-    cached = cache.get(TEAM_RELIABILITY)
-    if cached is not None:
-        return cached
-    from openjiuwen.agent_teams.reliability.config import ReliabilityConfig
-    from openjiuwen.agent_teams.reliability.factory import build_reliability_rail
-
-    cfg = ReliabilityConfig.model_validate(inp.reliability_cfg)
-    rail = build_reliability_rail(
-        cfg,
-        member_name=inp.member_name,
-        messager=get_messager(context),
-        team_name=inp.team_name,
-        sender_id=inp.sender_id,
-        is_leader=inp.is_leader,
+    from openjiuwen.agent_teams.reliability.factory import (
+        build_reliability_components,
+        reliability_rail_from_components,
     )
-    cache[TEAM_RELIABILITY] = rail
-    return rail
+
+    # The stateful core (detector windows, remediator, leader sink) is built once
+    # by the configurator and injected; wrap it in a fresh rail each cycle. The
+    # fallback rebuilds from params for contexts without injected components
+    # (e.g. a cross-process member configured outside this build context).
+    components = get_reliability_components(context)
+    if components is None:
+        from openjiuwen.agent_teams.reliability.config import ReliabilityConfig
+
+        cfg = ReliabilityConfig.model_validate(inp.reliability_cfg)
+        components = build_reliability_components(
+            cfg,
+            member_name=inp.member_name,
+            messager=get_messager(context),
+            team_name=inp.team_name,
+            sender_id=inp.sender_id,
+            is_leader=inp.is_leader,
+        )
+    return reliability_rail_from_components(components)
 
 
 __all__ = [
