@@ -360,7 +360,7 @@ class AbilityManager:
 
         if self._owner_id:
             card.id = f"{card.name}_{self._owner_id}"
-        Runner.resource_mgr.add_tool(resource, tag=self._owner_id, refresh=True)
+        Runner.resource_mgr.add_tool(resource, refresh=True)
         return self.add(card)
 
     def remove_ability(self, name: Union[str, List[str]]) -> None:
