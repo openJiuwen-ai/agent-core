@@ -55,10 +55,13 @@ NativeHarness.prepare_config = spec.resolve_parts(ctx) + apply_deep_agent_parts(
 
 **③ team live handle 经 `BuildContext.extras`**：`TeamHandleKey` 命名空间下的 `team_backend` /
 `workspace_manager` / `model_allocator` / `messager` / `on_teammate_created` / `swarmflow_launcher`
-+ `RAIL_CACHE`。`AgentConfigurator` 是唯一写入者（`inject_team_handles`），team rail 工厂经
-accessor 直读（运行时句柄，不进 ConstructionInput schema——对齐 swarm 把 `trajectory_registry`
-塞 extras 的范式）。`team_rail_cache` 让一个 rail 实例跨 native 重建复用（保 ReliabilityRail
-monitor 状态 / TeamPolicyRail mtime cache / TeamToolRail 已注册 tools）。
++ `reliability_components`。`AgentConfigurator` 是唯一写入者（`inject_team_handles`），team rail
+工厂经 accessor 直读（运行时句柄，不进 ConstructionInput schema——对齐 swarm 把
+`trajectory_registry` 塞 extras 的范式）。**rail 不缓存**：每次 native 重建都经工厂新建 rail
+（对齐 provider 注册范式）；需跨重建存活的状态作为复用对象注入、由 fresh rail 在构造时包装——
+ReliabilityRail 的探测器滑窗 / 自愈限流 / leader sink 收敛进 `reliability_components`（configurator
+构造一次），TeamPolicyRail 的 mtime cache 与 TeamToolRail 的 tools 改为每轮从真相源（DB /
+`create_team_tools`）重建。
 
 ## 决策
 

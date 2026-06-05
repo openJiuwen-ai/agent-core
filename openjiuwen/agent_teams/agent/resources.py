@@ -20,7 +20,7 @@ from typing import (
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.member_runtime import MemberRuntime
     from openjiuwen.agent_teams.models.allocator import ModelAllocator
-    from openjiuwen.core.memory.team.manager import TeamMemoryManager
+    from openjiuwen.agent_teams.memory.manager import TeamMemoryManager
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
