@@ -37,7 +37,7 @@ recover/resume/restart 等流程**不**自动 send 触发底层 harness send；
 
 - teammate 的总线订阅、`READY` 状态、协调循环都在
   `CoordinationKernel.start()` 完成，**不依赖**首轮 send；
-- `enqueue_mailbox_after_first_iteration` 触发的 `POLL_MAILBOX` 走
+- `enqueue_initial_mailbox_poll` 触发的 `POLL_MAILBOX` 走
   `MessageHandler._process_unread_messages`，其中 `if not new_messages: break`
   ——**收件箱为空就不 send**。
 
@@ -53,7 +53,7 @@ recover/resume/restart 等流程**不**自动 send 触发底层 harness send；
    - `raw_query` 取值改为 `(inputs.get("query") or "")`，正确处理
      `{"query": None}`（`.get` 默认值对「键存在但值 None」不生效）。
    - 非 leader-routing 分支：`if raw_query: enqueue_user_input(inputs)`；
-     `enqueue_mailbox_after_first_iteration` 保持无条件——它是「只有有消息才 send」
+     `enqueue_initial_mailbox_poll` 保持无条件——它是「只有有消息才 send」
      的兑现点。
    - 该门控对 leader 同样成立：leader 冷启动 query 必非空（用户任务）→ 照常 send；
      leader resume/recover 透传空 inputs 时跳过无意义的空首轮（严格更优）。
@@ -86,7 +86,7 @@ recover/resume/restart 等流程**不**自动 send 触发底层 harness send；
 - 更新契约测试 `test_spawn_payload_contract.py`：无 `initial_message` 时
   `payload["query"] == ""`（原断言占位符字符串）。
 - 新增 `test_team_agent_coordination.py`：空 query / `{"query": None}` 不
-  `enqueue_user_input`、仍 `enqueue_mailbox_after_first_iteration`；非空 query 照常
+  `enqueue_user_input`、仍 `enqueue_initial_mailbox_poll`；非空 query 照常
   send；stream 路径同此门控。
 - 新增 `test_spawn_manager_restart.py`：`restart_teammate` 以 `initial_message=None`
   re-spawn，且不读 `teammate.prompt`。

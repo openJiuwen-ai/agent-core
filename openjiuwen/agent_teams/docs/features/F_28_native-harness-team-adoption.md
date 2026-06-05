@@ -75,7 +75,7 @@ CLI 成员也实现同一抽象。
    不续 task_plan。StreamController 仅校验 `is_pending_interrupt_resume_valid` 后转发，
    不再 client 侧排队。
 
-6. **删 FirstIterationGate**：`kernel.enqueue_mailbox_after_first_iteration` 改直接
+6. **删 FirstIterationGate**：`kernel.enqueue_initial_mailbox_poll` 改直接
    enqueue POLL_MAILBOX（native start 完成即 ready）；kernel `start` 在 bind_session 后
    `harness.start(team_session)`+`stream_controller.start()`，`finalize_round` 加
    `stream_controller.stop()`+`harness.stop()`。
