@@ -16,7 +16,6 @@ from typing import Optional, Set
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.lite.coding_memory_tool_context import CodingMemoryToolContext
 from openjiuwen.core.memory.lite.config import create_memory_settings
-from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     InvokeInputs,
@@ -78,7 +77,6 @@ class CodingMemoryRail(DeepAgentRail):
         
         # 工具管理
         self._owned_tool_names: Set[str] = set()
-        self._owned_tool_ids: Set[str] = set()
         
         # SystemPromptBuilder 引用
         self.system_prompt_builder = None
@@ -112,23 +110,13 @@ class CodingMemoryRail(DeepAgentRail):
         if hasattr(agent, "ability_manager"):
             for tool_name in list(self._owned_tool_names):
                 try:
-                    agent.ability_manager.remove(tool_name)
+                    agent.ability_manager.remove_ability(tool_name)
                 except Exception as exc:
                     logger.warning(
                         f"[CodingMemoryRail] Failed to remove tool '{tool_name}' "
                         f"from ability_manager: {exc}"
                     )
-        
-        for tool_id in list(self._owned_tool_ids):
-            try:
-                Runner.resource_mgr.remove_tool(tool_id)
-            except Exception as exc:
-                logger.warning(
-                    f"[CodingMemoryRail] Failed to remove tool '{tool_id}' "
-                    f"from resource_mgr: {exc}"
-                )
-        
-        self._owned_tool_ids.clear()
+
         self._owned_tool_names.clear()
         self._manager_initialized = False
         self._tool_ctx = None
@@ -184,14 +172,9 @@ class CodingMemoryRail(DeepAgentRail):
                         logger.warning(f"[CodingMemoryRail] Tool {tool.__name__} has no card")
                         continue
                     
-                    # 使用 Runner.resource_mgr 注册工具
-                    existing_tool = Runner.resource_mgr.get_tool(tool_card.id)
-                    if existing_tool is None:
-                        Runner.resource_mgr.add_tool(tool)
-                        self._owned_tool_ids.add(tool_card.id)
-                    
-                    # 使用 ability_manager 添加工具能力
-                    result = agent.ability_manager.add(tool_card)
+                    # 经 ability_manager 统一注册工具能力（card + 资源），
+                    # 按 stateless 决定 id 是否限定 agent。
+                    result = agent.ability_manager.add_ability(tool_card, tool)
                     if result.added:
                         self._owned_tool_names.add(tool_card.name)
                         logger.info(f"[CodingMemoryRail] Registered tool: {tool_card.name}")

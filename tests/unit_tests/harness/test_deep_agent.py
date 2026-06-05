@@ -711,25 +711,32 @@ def test_create_deep_agent_reuses_same_tool_instance_across_agents() -> None:
         Runner.resource_mgr.remove_tool(tool.card.id)
 
 
-def test_create_deep_agent_rejects_conflicting_tool_instances_with_same_id() -> None:
+def test_create_deep_agent_qualifies_conflicting_tool_ids_per_agent() -> None:
+    # Two distinct (stateful) instances share a bare id; per-agent id
+    # qualification at registration keeps them distinct instead of raising.
     first_tool = DummyTool("tool_a", tool_id="shared_tool_id")
     second_tool = DummyTool("tool_b", tool_id="shared_tool_id")
 
-    try:
-        create_deep_agent(
-            model=_create_dummy_model(),
-            tools=[first_tool],
-            auto_create_workspace=False,
-        )
+    first_agent = create_deep_agent(
+        model=_create_dummy_model(),
+        tools=[first_tool],
+        auto_create_workspace=False,
+    )
+    second_agent = create_deep_agent(
+        model=_create_dummy_model(),
+        tools=[second_tool],
+        auto_create_workspace=False,
+    )
 
-        with pytest.raises(ValueError, match="different tool instance"):
-            create_deep_agent(
-                model=_create_dummy_model(),
-                tools=[second_tool],
-                auto_create_workspace=False,
-            )
+    try:
+        assert first_agent.ability_manager.get("tool_a") is first_tool.card
+        assert second_agent.ability_manager.get("tool_b") is second_tool.card
+        assert first_tool.card.id != second_tool.card.id
+        assert first_tool.card.id.endswith(first_agent.card.id)
+        assert second_tool.card.id.endswith(second_agent.card.id)
     finally:
         Runner.resource_mgr.remove_tool(first_tool.card.id)
+        Runner.resource_mgr.remove_tool(second_tool.card.id)
 
 
 @pytest.mark.asyncio

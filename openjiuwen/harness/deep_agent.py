@@ -238,6 +238,7 @@ class DeepAgent(BaseAgent):
         self._deep_config = config
         if config.card is not None:
             self.card = config.card
+            self.ability_manager.set_owner_id(self.card.id)
 
         self._react_agent = self._create_react_agent()
         self._queue_pending_rails(config)
@@ -248,6 +249,7 @@ class DeepAgent(BaseAgent):
         self._deep_config = config
         if config.card is not None:
             self.card = config.card
+            self.ability_manager.set_owner_id(self.card.id)
 
         self._hot_reload_rails(config)
 

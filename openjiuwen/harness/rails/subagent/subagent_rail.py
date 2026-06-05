@@ -7,7 +7,6 @@ from __future__ import annotations
 from typing import List, TYPE_CHECKING
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails.base import DeepAgentRail
@@ -73,9 +72,8 @@ class SubagentRail(DeepAgentRail):
                 agent_id=agent_id,
             )
 
-        Runner.resource_mgr.add_tool(list(self.tools))
         for tool in self.tools:
-            agent.ability_manager.add(tool.card)
+            agent.ability_manager.add_ability(tool.card, tool)
 
         mode = "async session" if self.enable_async_subagent else "sync task"
         logger.info(f"[SubagentRail] Registered {mode} tool with {len(agent.deep_config.subagents)} subagent(s)")
@@ -90,10 +88,7 @@ class SubagentRail(DeepAgentRail):
             for tool in self.tools:
                 name = getattr(tool.card, "name", None)
                 if name:
-                    agent.ability_manager.remove(name)
-                tool_id = tool.card.id
-                if tool_id:
-                    Runner.resource_mgr.remove_tool(tool_id)
+                    agent.ability_manager.remove_ability(name)
 
         if self.enable_async_subagent:
             agent.set_session_toolkit(None)

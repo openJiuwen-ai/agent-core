@@ -284,8 +284,11 @@ class BuiltinToolSpec(BaseModel):
         Args:
             language: Forwarded on the build context so the provider / class
                 adapter injects it when the constructor accepts it.
-            tool_id: Reserved for per-member tool-id namespacing; no built-in
-                tool consumes it today, so it is not forwarded to the provider.
+            tool_id: Reserved for per-member tool-id namespacing; not forwarded
+                to the provider. Per-agent id qualification now happens at
+                registration time in ``AbilityManager.add_ability`` (stateful
+                tools get an agent-qualified id; stateless tools keep a shared
+                bare id), so providers need not consume it.
             context: Runtime carrier forwarded to the tool provider. When None,
                 a minimal context carrying ``language`` is synthesized.
         """

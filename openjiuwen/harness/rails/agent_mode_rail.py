@@ -160,8 +160,7 @@ class AgentModeRail(DeepAgentRail):
             ExitPlanModeTool(agent_ref=agent, language=language),
         ]
         for tool in self._tools:
-            Runner.resource_mgr.add_tool(tool)
-            agent.ability_manager.add(tool.card)
+            agent.ability_manager.add_ability(tool.card, tool)
 
         logger.info("[AgentModeRail] Registered enter/exit plan mode tools")
 
@@ -244,8 +243,7 @@ class AgentModeRail(DeepAgentRail):
         """
         for tool in self._tools:
             try:
-                agent.ability_manager.remove(tool.name)
-                Runner.resource_mgr.remove_tool(tool.card.id)
+                agent.ability_manager.remove_ability(tool.card.name)
             except Exception as exc:
                 logger.warning(
                     f"[AgentModeRail] Failed to remove tool '{tool.name}': {exc}"
@@ -592,9 +590,8 @@ class AgentModeRail(DeepAgentRail):
             tool.card.name for tool in (self._task_tools or [])
             if getattr(getattr(tool, "card", None), "name", None)
         }
-        Runner.resource_mgr.add_tool(list(self._task_tools))
         for tool in self._task_tools:
-            agent.ability_manager.add(tool.card)
+            agent.ability_manager.add_ability(tool.card, tool)
         self._owns_task_tool = True
         logger.info("[AgentModeRail] Registered task_tool for plan mode")
 
@@ -609,8 +606,7 @@ class AgentModeRail(DeepAgentRail):
             return
         for tool in self._task_tools:
             try:
-                agent.ability_manager.remove(tool.card.name)
-                Runner.resource_mgr.remove_tool(tool.card.id)
+                agent.ability_manager.remove_ability(tool.card.name)
                 logger.info("[AgentModeRail] Unregistered plan-mode task_tool")
             except Exception as exc:
                 logger.warning(

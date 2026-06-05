@@ -10,7 +10,6 @@ from typing import Optional, Set
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.foundation.tool.function.function import LocalFunction
-from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunKind
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.core.memory.external.provider import MemoryProvider
@@ -47,7 +46,6 @@ class ExternalMemoryRail(DeepAgentRail):
         self._session_id = session_id
         self._initialized = False
         self._owned_tool_names: Set[str] = set()
-        self._owned_tool_ids: Set[str] = set()
         self.system_prompt_builder = None
         # Per-invoke prefetch cache
         self._prefetch_cache: Optional[str] = None
@@ -75,18 +73,9 @@ class ExternalMemoryRail(DeepAgentRail):
         if hasattr(agent, "ability_manager"):
             for tool_name in list(self._owned_tool_names):
                 try:
-                    agent.ability_manager.remove(tool_name)
+                    agent.ability_manager.remove_ability(tool_name)
                 except Exception as exc:
                     logger.warning(f"[ExternalMemoryRail] remove tool '{tool_name}' failed: {exc}")
-        for tool_id in list(self._owned_tool_ids):
-            try:
-                Runner.resource_mgr.remove_tool(tool_id)
-            except Exception as exc:
-                logger.warning(
-                    f"[ExternalMemoryRail] Failed to remove tool '{tool_id}' "
-                    f"from resource_mgr: {exc}"
-                )
-        self._owned_tool_ids.clear()
         self._owned_tool_names.clear()
         
         # Remove prompt sections
@@ -262,16 +251,8 @@ class ExternalMemoryRail(DeepAgentRail):
                         return {"result": result_str}
                 
                 local_func = LocalFunction(card=tool_card, func=_tool_func)
-                
-                existing = Runner.resource_mgr.get_tool(tool_id)
-                if existing is None:
-                    add_result = Runner.resource_mgr.add_tool(local_func)
-                    if add_result.is_err():
-                        logger.warning(f"[ExternalMemoryRail] add_tool failed: {add_result.msg()}")
-                        continue
-                    self._owned_tool_ids.add(tool_id)
-                
-                result = agent.ability_manager.add(tool_card)
+
+                result = agent.ability_manager.add_ability(tool_card, local_func)
                 if result.added:
                     self._owned_tool_names.add(tool_name)
                     logger.info(f"[ExternalMemoryRail] Registered tool: {tool_name}")

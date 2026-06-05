@@ -19,12 +19,29 @@ from openjiuwen.harness.tools.filesystem import ReadFileTool
 class _AbilityManager:
     def __init__(self) -> None:
         self.cards = {}
+        self._owner_id = None
 
     def add(self, card):
         self.cards[card.name] = card
+        return type("_AddResult", (), {"name": card.name, "added": True})()
 
     def remove(self, name: str):
         self.cards.pop(name, None)
+
+    def add_ability(self, card, resource):
+        if card.stateless:
+            Runner.resource_mgr.add_tool(resource, skip_if_exists=True)
+        else:
+            if self._owner_id:
+                card.id = f"{card.name}_{self._owner_id}"
+            Runner.resource_mgr.add_tool(resource, tag=self._owner_id, refresh=True)
+        return self.add(card)
+
+    def remove_ability(self, name: str):
+        card = self.cards.get(name)
+        self.remove(name)
+        if card is not None and not card.stateless:
+            Runner.resource_mgr.remove_tool(card.id)
 
 
 class _Agent:

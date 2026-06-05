@@ -12,7 +12,6 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 
 if TYPE_CHECKING:
     from openjiuwen.core.foundation.tool.base import Tool
-    from openjiuwen.harness.deep_agent import DeepAgent
     from openjiuwen.harness.lsp import InitializeOptions
 
 
@@ -181,9 +180,7 @@ class LspRail(DeepAgentRail):
 
         # 注册到 ability_manager
         try:
-            from openjiuwen.core.runner import Runner
-            Runner.resource_mgr.add_tool(self._lsp_tool)
-            agent.ability_manager.add(self._lsp_tool.card)
+            agent.ability_manager.add_ability(self._lsp_tool.card, self._lsp_tool)
             self._initialized = True
             logger.info(
                 "LspRail: initialized LSP subsystem and registered LspTool (cwd=%s)",
@@ -224,10 +221,7 @@ class LspRail(DeepAgentRail):
                 name = self._lsp_tool.card.name
                 tool_id = self._lsp_tool.card.id
 
-                agent.ability_manager.remove(name)
-
-                from openjiuwen.core.runner import Runner
-                Runner.resource_mgr.remove_tool(tool_id)
+                agent.ability_manager.remove_ability(name)
 
                 logger.info("LspRail: removed LspTool (name=%s, id=%s)", name, tool_id)
             except Exception as exc:

@@ -125,8 +125,7 @@ class TaskPlanningRail(DeepAgentRail):
             for tool_class, found in tool_configs:
                 if not found:
                     new_tool = tool_class(self.sys_operation, workspace_dir, language, agent_id)
-                    Runner.resource_mgr.add_tool(new_tool)
-                    agent.ability_manager.add(new_tool.card)
+                    agent.ability_manager.add_ability(new_tool.card, new_tool)
                     tools.append(new_tool)
             self.tools = tools
         except Exception as exc:
@@ -141,10 +140,7 @@ class TaskPlanningRail(DeepAgentRail):
                 for tool in self.tools:
                     name = getattr(tool.card, "name", None)
                     if name:
-                        agent.ability_manager.remove(name)
-                    tool_id = tool.card.id
-                    if tool_id:
-                        Runner.resource_mgr.remove_tool(tool_id)
+                        agent.ability_manager.remove_ability(name)
         except Exception as exc:
             logger.warning("TaskPlanningRail: failed to remove tool, error: %s", exc)
 

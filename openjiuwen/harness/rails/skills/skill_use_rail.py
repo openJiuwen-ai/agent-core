@@ -11,7 +11,6 @@ import yaml
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
-from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
 from openjiuwen.harness.prompts.sections import SectionName
@@ -91,7 +90,6 @@ class SkillUseRail(DeepAgentRail):
 
         # Track tools added by this rail only.
         self._owned_tool_names: Set[str] = set()
-        self._owned_tool_ids: Set[str] = set()
 
     @property
     def skills_meta(self) -> List[Skill]:
@@ -280,29 +278,15 @@ class SkillUseRail(DeepAgentRail):
                 )
             )
 
-        for tool in tools:
-            try:
-                existing_tool = Runner.resource_mgr.get_tool(tool.card.id)
-                if existing_tool is not None:
-                    Runner.resource_mgr.remove_tool(tool.card.id)
-                Runner.resource_mgr.add_tool(tool)
-                self._owned_tool_ids.add(tool.card.id)
-            except Exception as exc:
-                logger.warning(
-                    f"[SkillUseRail] failed to add tool resource '{tool.card.id}' "
-                    f"to resource_mgr: {exc}"
-                )
-
         if hasattr(agent, "ability_manager"):
             for tool in tools:
                 try:
-                    result = agent.ability_manager.add(tool.card)
+                    result = agent.ability_manager.add_ability(tool.card, tool)
                     if result.added:
                         self._owned_tool_names.add(tool.card.name)
                 except Exception as exc:
                     logger.warning(
-                        f"[SkillUseRail] failed to add tool card '{tool.card.name}' "
-                        f"to ability_manager: {exc}"
+                        f"[SkillUseRail] failed to register tool '{tool.card.name}': {exc}"
                     )
 
     def uninit(self, agent):
@@ -310,7 +294,7 @@ class SkillUseRail(DeepAgentRail):
         if hasattr(agent, "ability_manager"):
             for tool_name in list(self._owned_tool_names):
                 try:
-                    agent.ability_manager.remove(tool_name)
+                    agent.ability_manager.remove_ability(tool_name)
                 except Exception as exc:
                     logger.warning(
                         f"[SkillUseRail] failed to remove tool '{tool_name}' "
@@ -318,7 +302,6 @@ class SkillUseRail(DeepAgentRail):
                     )
 
         self._owned_tool_names.clear()
-        self._owned_tool_ids.clear()
 
     async def refresh_skill_prompt(self, ctx: AgentCallbackContext) -> None:
         """Regenerate the skills system prompt"""

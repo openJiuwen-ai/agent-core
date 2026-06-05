@@ -87,31 +87,6 @@ def _normalize_tools(
     return normalized_cards, tool_instances
 
 
-def _register_tool_instances(
-    tool_instances: List[Tool],
-    *,
-    tag: str,
-) -> None:
-    """Register concrete tool instances so ToolCards become executable."""
-    for tool in tool_instances:
-        existing_tool = Runner.resource_mgr.get_tool(tool.card.id)
-        if existing_tool is not None:
-            if existing_tool is not tool:
-                raise ValueError(
-                    "Tool id is already registered with a different tool instance: "
-                    f"tool_id='{tool.card.id}', tool_name='{tool.card.name}'"
-                )
-
-            tag_result = Runner.resource_mgr.add_resource_tag(tool.card.id, tag)
-            if tag_result.is_err():
-                raise tag_result.msg()
-            continue
-
-        result = Runner.resource_mgr.add_tool(tool, tag=tag)
-        if result.is_err():
-            raise result.msg()
-
-
 def _inject_general_purpose_subagent(
     subagents: Optional[List[SubAgentConfig | DeepAgent]],
     *,
@@ -356,12 +331,24 @@ def apply_deep_agent_parts(agent: DeepAgent, parts: DeepAgentParts) -> None:
     """
     agent.configure(parts.config)
 
+    # Register concrete tool instances through the ability manager so the card
+    # id and the resource-manager key stay consistent and get agent-qualified
+    # (stateful) or shared by bare id (stateless). The instance cards are the
+    # same objects carried in ``parts.tool_cards`` (see ``_normalize_tools``),
+    # so track them to avoid double-adding below.
+    instance_card_ids: set[int] = set()
     if parts.tool_instances:
-        _register_tool_instances(parts.tool_instances, tag=parts.config.card.id)
+        for tool in parts.tool_instances:
+            agent.ability_manager.add_ability(tool.card, tool)
+            if tool.card is not None:
+                instance_card_ids.add(id(tool.card))
 
-    # Register tools on the shared ability manager
+    # Register the remaining pure ToolCards (references to globally-registered
+    # tools) on the shared ability manager; instance cards are already added.
     if parts.tool_cards:
         for tool_card in parts.tool_cards:
+            if id(tool_card) in instance_card_ids:
+                continue
             agent.ability_manager.add(tool_card)
 
     # Queue rails for lazy async registration (user rails + default rails)

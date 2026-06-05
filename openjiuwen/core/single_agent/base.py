@@ -104,7 +104,7 @@ class BaseAgent(metaclass=_AgentMeta):
             card: Agent card (required)
         """
         self.card = card
-        self._ability_manager = AbilityManager()
+        self._ability_manager = AbilityManager(owner_id=card.id)
         self._agent_callback_manager = AgentCallbackManager(card.id)
         self._skill_util = None
         self.lazy_init_skill()
