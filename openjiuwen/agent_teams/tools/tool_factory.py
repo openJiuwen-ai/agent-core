@@ -53,7 +53,10 @@ def create_team_tools(
     model_config_allocator: Callable[[str | None], "Allocation | None"] | None = None,
     exclude_tools: set[str] | None = None,
     lang: str = "cn",
-    swarmflow_launcher: Callable[[str, Any], None] | None = None,
+    parent_agent: Any = None,
+    messager: Any = None,
+    team_name: str = "default",
+    swarmflow_model_resolver: Callable[[str], Any] | None = None,
 ) -> list[Tool]:
     """Create role-appropriate tool instances filtered by permission sets.
 
@@ -78,10 +81,16 @@ def create_team_tools(
             ``ByModelNameAllocator`` requires it.
         exclude_tools: Tool names to exclude from the allowed set.
         lang: Locale code ("cn" or "en") for tool descriptions.
-        swarmflow_launcher: Synchronous ``(script_path, args) -> None`` callback
-            that schedules a background swarmflow run. When None (default) the
-            leader-only ``swarmflow`` tool is gated out — the hosting TeamAgent
-            supplies it only for a leader whose spec has ``enable_swarmflow``.
+        parent_agent: The owning ``NativeHarness`` (a ``DeepAgent``) that the
+            leader-only async ``swarmflow`` tool launches background work on.
+            Supplied at rail-init time; None for callers without a harness
+            (e.g. external CLI members), which never get ``swarmflow`` anyway.
+        messager: The member's messager — the ``swarmflow`` tool uses it to
+            publish phase-progress events for the spectator leader.
+        team_name: Team name used for swarmflow event routing / worker ids.
+        swarmflow_model_resolver: Resolves an ``agent(model=...)`` name hint to a
+            worker ``Model``. Non-None only for a leader whose spec has
+            ``enable_swarmflow``; when None the ``swarmflow`` tool is gated out.
     """
     from openjiuwen.agent_teams.tools.locales import make_translator
     from openjiuwen.agent_teams.workflow.tool_swarmflow import SwarmflowTool
@@ -117,8 +126,15 @@ def create_team_tools(
             team=agent_team,
             on_teammate_created=on_teammate_created,
         ),
-        # Swarmflow orchestration (leader-only, gated by swarmflow_launcher).
-        "swarmflow": SwarmflowTool(launcher=swarmflow_launcher, language=lang),
+        # Swarmflow orchestration (leader-only, gated by swarmflow_model_resolver).
+        "swarmflow": SwarmflowTool(
+            parent_agent=parent_agent,
+            messager=messager,
+            team_backend=agent_team,
+            team_name=team_name,
+            model_resolver=swarmflow_model_resolver,
+            language=lang,
+        ),
     }
 
     if role == "human_agent":
@@ -153,9 +169,10 @@ def create_team_tools(
         allowed = allowed - {"spawn_bridge_agent"}
     if not agent_team.external_cli_kinds():
         allowed = allowed - {"spawn_external_cli"}
-    # Swarmflow is wired only when the host supplied a launcher (leader +
-    # enable_swarmflow). Same idempotent-subtraction gate as the spawn tools.
-    if swarmflow_launcher is None:
+    # Swarmflow is wired only when the host supplied a worker-model resolver
+    # (leader + enable_swarmflow). Same idempotent-subtraction gate as the
+    # spawn tools.
+    if swarmflow_model_resolver is None:
         allowed = allowed - {"swarmflow"}
     if exclude_tools:
         allowed = allowed - exclude_tools

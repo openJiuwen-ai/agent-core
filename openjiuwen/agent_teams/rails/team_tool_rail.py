@@ -75,7 +75,8 @@ class TeamToolRail(DeepAgentRail):
         qualify_ids: bool = False,
         team_name: str = "default",
         member_name: str = "",
-        swarmflow_launcher: Optional[Callable[[str, Any], None]] = None,
+        messager: Optional[Any] = None,
+        swarmflow_model_resolver: Optional[Callable[[str], Any]] = None,
     ) -> None:
         super().__init__()
         self._team_backend = team_backend
@@ -91,7 +92,8 @@ class TeamToolRail(DeepAgentRail):
         self._qualify_ids = qualify_ids
         self._team_name = team_name or "default"
         self._member_name = member_name or "unknown"
-        self._swarmflow_launcher = swarmflow_launcher
+        self._messager = messager
+        self._swarmflow_model_resolver = swarmflow_model_resolver
         self._tools: list[Tool] | None = None
 
     def init(self, agent: Any) -> None:
@@ -114,7 +116,10 @@ class TeamToolRail(DeepAgentRail):
             model_config_allocator=self._model_config_allocator,
             exclude_tools=self._exclude_tools,
             lang=self._language,
-            swarmflow_launcher=self._swarmflow_launcher,
+            parent_agent=agent,
+            messager=self._messager,
+            team_name=self._team_name,
+            swarmflow_model_resolver=self._swarmflow_model_resolver,
         )
 
         if self._workspace_manager is not None:

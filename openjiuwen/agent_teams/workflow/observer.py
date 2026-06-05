@@ -60,4 +60,23 @@ class WorkflowObserver:
         return self.run.model_dump()
 
 
-__all__ = ["WorkflowObserver"]
+def summarize_run(run: WorkflowRun) -> str:
+    """Render a one-line run summary for the leader-facing completion message.
+
+    Folds the 4-layer run into a compact "N phases, M agents" line so the
+    spectator leader can report orchestration scale alongside the script's
+    return value. Swarmflow-specific (depends on ``WorkflowRun``); the generic
+    result rendering lives in the async-tool framework.
+
+    Args:
+        run: The accumulated 4-layer run snapshot.
+
+    Returns:
+        A single line such as ``"3 phases, 7 agents"``.
+    """
+    phase_count = len(run.phases)
+    agent_count = sum(len(phase.agents) for phase in run.phases)
+    return f"{phase_count} phases, {agent_count} agents"
+
+
+__all__ = ["WorkflowObserver", "summarize_run"]

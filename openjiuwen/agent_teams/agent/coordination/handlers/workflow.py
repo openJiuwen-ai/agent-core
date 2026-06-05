@@ -30,9 +30,10 @@ from openjiuwen.core.common.logging import team_logger
 # Progress kinds we narrate. These mirror ``workflow.engine.progress.ProgressKind``
 # string values but are duplicated as literals so coordination does not import
 # the workflow engine package (one-way dependency: workflow -> agent_teams core).
+# Completion is NOT narrated here: the final result (and failures) are fed back
+# by the NativeHarness async-tool framework, so only mid-run milestones remain.
 _KIND_WORKFLOW_STARTED = "workflow_started"
 _KIND_PHASE = "phase"
-_KIND_WORKFLOW_COMPLETED = "workflow_completed"
 
 
 class WorkflowHandler(BaseCoordinationHandler):
@@ -64,6 +65,4 @@ class WorkflowHandler(BaseCoordinationHandler):
             return t("workflow.started", name=name)
         if kind == _KIND_PHASE:
             return t("workflow.phase", phase=phase or "?")
-        if kind == _KIND_WORKFLOW_COMPLETED:
-            return t("workflow.completed", name=name)
         return None

@@ -41,7 +41,7 @@ from openjiuwen.agent_teams.rails.team_context import (
     get_model_allocator,
     get_on_teammate_created,
     get_reliability_components,
-    get_swarmflow_launcher,
+    get_swarmflow_model_resolver,
     get_team_backend,
     get_workspace_manager,
     get_worktree_manager,
@@ -106,7 +106,8 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
         qualify_ids=inp.qualify_ids,
         team_name=inp.team_name,
         member_name=inp.member_name,
-        swarmflow_launcher=get_swarmflow_launcher(context),
+        messager=get_messager(context),
+        swarmflow_model_resolver=get_swarmflow_model_resolver(context),
     )
 
 

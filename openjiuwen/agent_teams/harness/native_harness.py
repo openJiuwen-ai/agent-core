@@ -63,6 +63,7 @@ from openjiuwen.agent_teams.harness.control import (
     _CmdSend,
     _CmdStop,
 )
+from openjiuwen.agent_teams.harness.async_tools import AsyncToolRuntime
 from openjiuwen.agent_teams.harness.outputs import _END, _OutputIterator
 from openjiuwen.agent_teams.harness.snapshot_rail import (
     _ACTIVE_ROUND,
@@ -161,6 +162,10 @@ class NativeHarness(DeepAgent):
         # config below already ran, so ``start`` only spins up supervisor +
         # session.
         self._prepared: bool = False
+        # Async background-tool runtime (lazy): tracks two-phase async tools and
+        # injects their completion via this harness's ``send``. None until first
+        # async tool launches; ``stop`` cancels any in-flight tasks.
+        self._async_tool_runtime: "AsyncToolRuntime | None" = None
 
         # Apply config + tools + spec rails directly onto this instance — no
         # throwaway template DeepAgent.
@@ -255,6 +260,10 @@ class NativeHarness(DeepAgent):
         """
         if self._st.supervisor_task is None or self._st.phase is HarnessState.TERMINATED:
             return
+        # Cancel in-flight async background tasks before teardown so their
+        # completion injection does not race a stopping harness.
+        if self._async_tool_runtime is not None:
+            self._async_tool_runtime.cancel_all()
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
         await self._control.put(_CmdStop(ack=ack))
         try:
@@ -464,6 +473,49 @@ class NativeHarness(DeepAgent):
             await ack
         except Exception:
             logger.debug("[NativeHarness] auto-invoke send rejected", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Async background tools
+    # ------------------------------------------------------------------
+
+    @property
+    def async_tool_runtime(self) -> AsyncToolRuntime:
+        """The per-harness async-tool runtime (lazily created).
+
+        Completion is injected through ``send(text, immediate=False)`` so the
+        result reaches the model on the next round (IDLE) or as a follow-up
+        (RUNNING) — never as a suspended ``tool_result``.
+        """
+        if self._async_tool_runtime is None:
+            self._async_tool_runtime = AsyncToolRuntime(inject=self._inject_async_completion)
+        return self._async_tool_runtime
+
+    async def _inject_async_completion(self, text: str) -> None:
+        """Feed an async tool's completion text back as a non-immediate send."""
+        await self.send(text, immediate=False)
+
+    def launch_async_tool(
+        self,
+        task_id: str,
+        coro_factory: "Callable[[], Any]",
+        *,
+        tool_name: str,
+        description: str,
+    ) -> None:
+        """Launch a background async-tool task tracked by this harness.
+
+        Args:
+            task_id: Caller-generated unique id for this run.
+            coro_factory: Zero-arg factory returning the coroutine to run.
+            tool_name: The launching tool's name (for the completion message).
+            description: Human-readable task description (for the registry).
+        """
+        self.async_tool_runtime.launch(
+            task_id,
+            coro_factory,
+            tool_name=tool_name,
+            description=description,
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -301,7 +301,6 @@ class AgentConfigurator:
         ctx: TeamRuntimeContext,
         *,
         member_runtime: Optional["MemberRuntime"] = None,
-        swarmflow_launcher: Optional[Callable[[str, Any], None]] = None,
     ) -> "MemberRuntime":
         """Phase 2: build the member runtime and set up coordination.
 
@@ -496,6 +495,23 @@ class AgentConfigurator:
                 role=ctx.role.value,
                 member_card_id=self._card.id,
             )
+        # Swarmflow worker-model resolver (leader + enable_swarmflow only). A
+        # positional pool lookup by ``agent(model=...)`` name hint; None when the
+        # team spec is absent so the worker falls back to the leader's model. The
+        # leader-only async ``swarmflow`` tool is gated on this being non-None.
+        swarmflow_model_resolver: Optional[Callable[[str], Any]] = None
+        if ctx.role == TeamRole.LEADER and spec.enable_swarmflow:
+            team_spec_for_models = ctx.team_spec
+
+            def swarmflow_model_resolver(model_name: str, _spec=team_spec_for_models) -> Any:
+                """Resolve an ``agent(model=...)`` name hint to a worker ``Model``."""
+                if _spec is None:
+                    return None
+                from openjiuwen.agent_teams.models.allocator import resolve_member_model
+
+                config = resolve_member_model(_spec, model_name=model_name, model_index=None)
+                return config.build() if config is not None else None
+
         inject_team_handles(
             member_build_context.extras,
             team_backend=self.team_backend,
@@ -504,7 +520,7 @@ class AgentConfigurator:
             model_allocator=self.model_allocator,
             messager=self.messager,
             on_teammate_created=self._on_teammate_created,
-            swarmflow_launcher=swarmflow_launcher,
+            swarmflow_model_resolver=swarmflow_model_resolver,
             reliability_components=reliability_components,
         )
 

@@ -151,7 +151,13 @@ STRINGS: dict[str, dict[str, str]] = {
         # agent/coordination/handlers/workflow.py — swarmflow spectator broadcast
         "workflow.started": "[工作流] 「{name}」编排已启动，我将在每个阶段向你汇报进展。",
         "workflow.phase": "[工作流] 进入阶段：{phase}",
-        "workflow.completed": "[工作流] 「{name}」编排已全部完成。",
+        # harness/async_tools.py — async background-tool framework feedback
+        "async_tool.launched": (
+            "[后台任务] {tool} 已启动（task_id={task_id}）。完成后结果会自动回灌给你，"
+            "无需轮询；你可以继续处理其他输入。"
+        ),
+        "async_tool.completed": "[后台任务完成] 工具={tool}\n{result}",
+        "async_tool.failed": "[后台任务失败] 工具={tool}，错误={error}",
     },
     "en": {
         # timefmt.py — relative-time buckets ({value} is the bucket count)
@@ -304,7 +310,14 @@ STRINGS: dict[str, dict[str, str]] = {
             "report progress to you at each phase."
         ),
         "workflow.phase": "[Workflow] Entering phase: {phase}",
-        "workflow.completed": "[Workflow] Orchestration of '{name}' is complete.",
+        # harness/async_tools.py — async background-tool framework feedback
+        "async_tool.launched": (
+            "[Background task] {tool} started (task_id={task_id}). The result will be "
+            "fed back to you automatically on completion — do not poll; you may "
+            "continue handling other input."
+        ),
+        "async_tool.completed": "[Background task completed] tool={tool}\n{result}",
+        "async_tool.failed": "[Background task failed] tool={tool}, error={error}",
     },
 }
 

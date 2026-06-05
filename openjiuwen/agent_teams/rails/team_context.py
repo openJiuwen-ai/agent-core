@@ -47,7 +47,7 @@ class TeamHandleKey:
     MODEL_ALLOCATOR = "team.model_allocator"
     MESSAGER = "team.messager"
     ON_TEAMMATE_CREATED = "team.on_teammate_created"
-    SWARMFLOW_LAUNCHER = "team.swarmflow_launcher"
+    SWARMFLOW_MODEL_RESOLVER = "team.swarmflow_model_resolver"
     RELIABILITY_COMPONENTS = "team.reliability_components"
 
 
@@ -60,7 +60,7 @@ def inject_team_handles(
     model_allocator: Optional["ModelAllocator"] = None,
     messager: Optional["Messager"] = None,
     on_teammate_created: Optional[Callable[[str], Awaitable[None]]] = None,
-    swarmflow_launcher: Optional[Callable[[str, Any], None]] = None,
+    swarmflow_model_resolver: Optional[Callable[[str], Any]] = None,
     reliability_components: Optional["ReliabilityComponents"] = None,
 ) -> None:
     """Write the team live handles into ``extras`` (configurator-side).
@@ -76,7 +76,8 @@ def inject_team_handles(
         model_allocator: The team model allocator, if any.
         messager: The member's messager, if any.
         on_teammate_created: The leader's spawn-on-created callback, if any.
-        swarmflow_launcher: The leader's swarmflow launcher, if any.
+        swarmflow_model_resolver: The leader's swarmflow worker-model resolver, if
+            any (non-None only for a leader with ``enable_swarmflow``).
         reliability_components: The member's reused reliability core (detectors /
             remediator / local reporter), if reliability is enabled. Built once
             and wrapped by a fresh rail each cycle so its state outlives rebuilds.
@@ -87,7 +88,7 @@ def inject_team_handles(
     extras[TeamHandleKey.MODEL_ALLOCATOR] = model_allocator
     extras[TeamHandleKey.MESSAGER] = messager
     extras[TeamHandleKey.ON_TEAMMATE_CREATED] = on_teammate_created
-    extras[TeamHandleKey.SWARMFLOW_LAUNCHER] = swarmflow_launcher
+    extras[TeamHandleKey.SWARMFLOW_MODEL_RESOLVER] = swarmflow_model_resolver
     extras[TeamHandleKey.RELIABILITY_COMPONENTS] = reliability_components
 
 
@@ -127,9 +128,9 @@ def get_on_teammate_created(context: Any) -> Optional[Callable[[str], Awaitable[
     return _get(context, TeamHandleKey.ON_TEAMMATE_CREATED)
 
 
-def get_swarmflow_launcher(context: Any) -> Optional[Callable[[str, Any], None]]:
-    """Return the swarmflow launcher callback, or None."""
-    return _get(context, TeamHandleKey.SWARMFLOW_LAUNCHER)
+def get_swarmflow_model_resolver(context: Any) -> Optional[Callable[[str], Any]]:
+    """Return the swarmflow worker-model resolver, or None."""
+    return _get(context, TeamHandleKey.SWARMFLOW_MODEL_RESOLVER)
 
 
 def get_reliability_components(context: Any) -> Optional["ReliabilityComponents"]:
@@ -150,6 +151,6 @@ __all__ = [
     "get_model_allocator",
     "get_messager",
     "get_on_teammate_created",
-    "get_swarmflow_launcher",
+    "get_swarmflow_model_resolver",
     "get_reliability_components",
 ]

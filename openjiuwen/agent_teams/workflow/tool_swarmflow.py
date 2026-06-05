@@ -1,31 +1,33 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""The leader-facing ``swarmflow()`` tool.
+"""The leader-facing ``swarmflow()`` tool — first async background tool.
 
-Launches a swarmflow orchestration script in the background and returns
-immediately. The actual run (worker spawning + phase narration) is driven by
-the injected ``launcher`` — a synchronous fire-and-forget callback the hosting
-``TeamAgent`` provides (``_launch_swarmflow``) that schedules
-``run_swarmflow_background`` as a tracked asyncio task. Keeping the tool's only
-dependency a single callback avoids threading the leader's model / messager /
-state through the tool layer.
+Built on the NativeHarness async-tool framework (:class:`AsyncTool`): ``invoke``
+launches the orchestration in the background and returns immediately (the
+``tool_use`` closes at once, the leader's round is not blocked); the real result
+is injected back as a follow-up message when the run finishes — never as a
+suspended ``tool_result``.
 
-The leader is a spectator: after calling this tool it does not poll — phase
-progress arrives as ``WORKFLOW_PROGRESS`` events the ``WorkflowHandler`` feeds
-back as narration input.
+The leader is a spectator: phase progress arrives as ``WORKFLOW_PROGRESS`` events
+the ``WorkflowHandler`` narrates; the final result (or failure) is fed back by
+the framework through the harness's own ``send``. The tool holds the team
+resources it needs (messager for phase events, team backend / name, worker model
+resolver) and reaches the harness via ``parent_agent`` — never through TeamAgent.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Callable
 
-from openjiuwen.agent_teams.tools.tool_base import TeamTool
+from openjiuwen.agent_teams.harness.async_tools import AsyncTool, render_result_text
+from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
-# Launcher: ``(script_path, args) -> None``. Synchronous; schedules the
-# background run and returns immediately.
-SwarmflowLauncher = Callable[[str, Any], None]
+# Resolve an ``agent(model=...)`` name hint to a concrete ``Model`` (or None to
+# fall back to the leader's model). Built by the configurator from the team spec.
+WorkerModelResolver = Callable[[str], Any]
 
 _DESC: dict[str, str] = {
     "cn": (
@@ -36,6 +38,7 @@ _DESC: dict[str, str] = {
         "## 行为契约\n"
         "- 该工具**立即返回**——工作流在后台异步执行，**不要轮询**等待结果。\n"
         "- 各阶段（phase）进展会**自动**作为通知流式进入你的上下文。\n"
+        "- 工作流**完成或失败时，最终结果会自动回灌**给你，无需主动查询。\n"
         "- 你处于**旁观角色**：脚本自主编排 worker 完成工作，你只需在收到阶段"
         "进展通知时，用简洁自然语言向用户汇报当前进展。\n"
         "- **不要**自己 spawn 成员、创建任务或尝试代替脚本编排——编排完全由脚本负责。"
@@ -50,6 +53,8 @@ _DESC: dict[str, str] = {
         "- This tool **returns immediately** — the workflow runs asynchronously in the "
         "background; **do not poll** for the result.\n"
         "- Phase progress arrives **automatically** as notifications in your context.\n"
+        "- When the workflow **completes or fails, the final result is fed back to you "
+        "automatically** — no need to query.\n"
         "- You are a **spectator**: the script orchestrates workers on its own; your job "
         "is to relay each reported phase to the user in brief natural language.\n"
         "- **Do not** spawn members, create tasks, or try to orchestrate yourself — the "
@@ -68,19 +73,33 @@ _ARGS_PARAM: dict[str, str] = {
 }
 
 
-class SwarmflowTool(TeamTool):
-    """Leader tool that launches a swarmflow script in the background."""
+class SwarmflowTool(AsyncTool):
+    """Leader tool that launches a swarmflow script as a background async tool."""
 
-    def __init__(self, *, launcher: SwarmflowLauncher, language: str = "cn") -> None:
+    def __init__(
+        self,
+        *,
+        parent_agent: Any,
+        messager: Any,
+        team_backend: Any,
+        team_name: str,
+        model_resolver: WorkerModelResolver | None,
+        language: str = "cn",
+    ) -> None:
         lang = language if language in _DESC else "cn"
         super().__init__(
             ToolCard(
                 id="team.swarmflow",
                 name="swarmflow",
                 description=_DESC[lang],
-            )
+            ),
+            parent_agent,
+            language=lang,
         )
-        self._launcher = launcher
+        self._messager = messager
+        self._team_backend = team_backend
+        self._team_name = team_name or "swarmflow"
+        self._model_resolver = model_resolver
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -90,24 +109,78 @@ class SwarmflowTool(TeamTool):
             "required": ["script_path"],
         }
 
+    def launched_description(self, inputs: dict[str, Any]) -> str:
+        return f"swarmflow: {(inputs.get('script_path') or '').strip()}"
+
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
+        """Validate, guard against a concurrent run, then launch in background."""
         script_path = (inputs.get("script_path") or "").strip()
         if not script_path:
             return ToolOutput(success=False, error="'script_path' is required")
-        try:
-            self._launcher(script_path, inputs.get("args"))
-        except Exception as exc:  # never let a launch error escape as an exception
-            return ToolOutput(success=False, error=f"Internal error: {exc}")
-        return ToolOutput(success=True, data={"status": "started", "script_path": script_path})
+        if self._parent_agent.async_tool_runtime.has_running(self.card.name):
+            return ToolOutput(success=False, error="A swarmflow run is already in progress")
+        return await super().invoke(inputs, **kwargs)
 
-    def map_result(self, output: ToolOutput) -> str:
-        if not output.success:
-            return output.error or "Failed to start swarmflow"
-        return (
-            f"Swarmflow started: {output.data['script_path']}. It runs in the background; "
-            "phase progress will stream to you automatically — do not poll. You are a "
-            "spectator: relay each reported phase to the user."
+    async def run_background(self, task_id: str, inputs: dict[str, Any]) -> str:
+        """Run the swarmflow and return its final result as model-facing text."""
+        from openjiuwen.agent_teams.context import get_session_id
+        from openjiuwen.agent_teams.schema.events import (
+            EventMessage,
+            TeamEvent,
+            TeamTopic,
+            WorkflowProgressTeamEvent,
         )
+        from openjiuwen.agent_teams.workflow.observer import WorkflowObserver, summarize_run
+        from openjiuwen.agent_teams.workflow.runner import run_swarmflow
+
+        script_path = (inputs.get("script_path") or "").strip()
+        args = inputs.get("args")
+        model = self._parent_agent.model
+        messager = self._messager
+        team_name = self._team_name
+        name_box: dict[str, Any] = {"name": None}
+
+        def _publish(progress: Any) -> None:
+            if messager is None:
+                return
+            if progress.kind == "workflow_started":
+                name_box["name"] = progress.message
+            team_event = WorkflowProgressTeamEvent(
+                team_name=team_name,
+                kind=progress.kind,
+                workflow_name=name_box["name"],
+                phase=progress.phase,
+                label=progress.label,
+                outcome=progress.outcome,
+                text=progress.message,
+            )
+            message = EventMessage(
+                event_type=TeamEvent.WORKFLOW_PROGRESS,
+                payload=team_event.model_dump(),
+                sender_id="swarmflow",  # non-leader sender so kernel does not self-filter
+            )
+            topic = TeamTopic.TEAM.build(get_session_id(), team_name)
+            try:
+                asyncio.create_task(messager.publish(topic_id=topic, message=message))
+            except RuntimeError:
+                team_logger.debug("[swarmflow] no running loop to publish workflow progress")
+
+        observer = WorkflowObserver(on_event=_publish)
+        result = await run_swarmflow(
+            script_path,
+            model=model,
+            observer=observer,
+            args=args,
+            team_backend=self._team_backend,
+            team_name=team_name,
+            language=self._language,
+            model_resolver=self._model_resolver,
+        )
+        parts = [summarize_run(observer.run)]
+        body = render_result_text(result)
+        if body:
+            parts.append(body)
+        return "\n".join(parts)
 
 
-__all__ = ["SwarmflowTool", "SwarmflowLauncher"]
+__all__ = ["SwarmflowTool", "WorkerModelResolver"]
