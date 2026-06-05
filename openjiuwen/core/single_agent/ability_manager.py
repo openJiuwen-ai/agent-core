@@ -381,6 +381,30 @@ class AbilityManager:
                 continue
             Runner.resource_mgr.remove_tool(card.id)
 
+    def teardown_tools(self) -> None:
+        """Drop this owner's agent-qualified stateful tools from the resource manager.
+
+        Round-end teardown calls this so a stopped agent does not leave its
+        per-agent (stateful) tool instances registered in the process-global
+        resource manager. Without it the next run cycle rebuilds a fresh agent
+        and re-registers every tool over the stale id, and :meth:`add_ability`'s
+        refresh path then logs a warning per residual id.
+
+        Only tools this manager qualified with its own owner id
+        (``card.id == f"{name}_{owner_id}"``) are removed; stateless shared
+        singletons and externally-scoped tools (e.g. MCP server-scoped ids) are
+        left in place for other agents still using them.
+        """
+        from openjiuwen.core.runner import Runner
+
+        if not self._owner_id:
+            return
+        for name, card in list(self._tools.items()):
+            if card.stateless or card.id != f"{name}_{self._owner_id}":
+                continue
+            self.remove(name)
+            Runner.resource_mgr.remove_tool(card.id)
+
     def remove(self, name: Union[str, List[str]]) -> Union[None, Ability, List[Ability]]:
         """Remove an ability by name
 

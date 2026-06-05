@@ -317,6 +317,15 @@ class NativeHarness(DeepAgent):
         # Drop all subscriber callbacks so a stopped harness holds no references
         # to consumer closures (the supervisor no longer fires events).
         await self._events.unregister_namespace(_EVENT_NAMESPACE)
+        # Round-end teardown: remove this agent's per-agent (stateful) tools from
+        # the process-global resource manager. The native is rebuilt every run
+        # cycle (TeamHarness.start), so without this each cycle re-registers every
+        # tool over a stale id and add_ability's refresh path logs a warning per
+        # tool. Stateless shared tools are left in place for other agents.
+        try:
+            self.ability_manager.teardown_tools()
+        except Exception:
+            logger.exception("[NativeHarness] tool teardown failed during stop")
         logger.info("[NativeHarness] stopped session=%s", self.session_id)
 
     def outputs(self) -> AsyncIterator[Any]:

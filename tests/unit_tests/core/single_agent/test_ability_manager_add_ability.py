@@ -61,6 +61,35 @@ def test_stateful_add_ability_refreshes_on_same_id() -> None:
     asyncio.run(_run())
 
 
+def test_teardown_tools_removes_only_owned_stateful_tools() -> None:
+    async def _run():
+        await Runner.start()
+        am = AbilityManager(owner_id="agent-3")
+        stateful = _make_tool("write_file")
+        shared = _make_tool("clock", stateless=True)
+        # An externally-scoped tool the manager did not qualify (e.g. MCP id).
+        external = _make_tool("ext")
+        try:
+            am.add_ability(stateful.card, stateful)
+            am.add_ability(shared.card, shared)
+            am.add(external.card)  # registered as a bare reference, id stays "ext"
+
+            am.teardown_tools()
+
+            # Owned stateful tool is dropped from both the manager and resource_mgr.
+            assert am.get("write_file") is None
+            assert Runner.resource_mgr.get_tool("write_file_agent-3") is None
+            # Stateless shared tool and the non-qualified reference are left intact.
+            assert am.get("clock").id == "clock"
+            assert Runner.resource_mgr.get_tool("clock") is shared
+            assert am.get("ext").id == "ext"
+        finally:
+            Runner.resource_mgr.remove_tool("clock")
+            await Runner.stop()
+
+    asyncio.run(_run())
+
+
 def test_stateless_add_ability_keeps_bare_id_and_is_shared() -> None:
     async def _run():
         await Runner.start()
