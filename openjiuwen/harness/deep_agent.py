@@ -188,38 +188,19 @@ class DeepAgent(BaseAgent):
             return
         if Runner.resource_mgr.get_tool(card.id) is None:
             return
-        tags = Runner.resource_mgr.get_resource_tag(card.id) or []
-        if self.card.id in tags and len(tags) > 1:
-            result = Runner.resource_mgr.remove_resource_tag(
-                card.id,
-                self.card.id,
-                skip_if_tag_not_exists=True,
+        result = Runner.resource_mgr.remove_tool(card.id)
+        if result.is_err():
+            logger.warning(
+                "[DeepAgent] Failed to unregister tool during hot reload: %s",
+                result.msg(),
             )
-            if result.is_err():
-                logger.warning(
-                    "[DeepAgent] Failed to remove tool tag during hot reload: %s",
-                    result.msg(),
-                )
-            return
-        if self.card.id in tags or not tags:
-            result = Runner.resource_mgr.remove_tool(card.id)
-            if result.is_err():
-                logger.warning(
-                    "[DeepAgent] Failed to unregister tool during hot reload: %s",
-                    result.msg(),
-                )
 
     def _ensure_builtin_tool_resource(self, card: ToolCard, config: DeepAgentConfig) -> None:
         if card.name not in {"free_search", "paid_search"}:
             return
-        existing_tool = Runner.resource_mgr.get_tool(card.id)
-        if existing_tool is not None:
-            tag_result = Runner.resource_mgr.add_resource_tag(card.id, self.card.id)
-            if tag_result.is_err():
-                logger.warning(
-                    "[DeepAgent] Failed to tag existing free_search during hot reload: %s",
-                    tag_result.msg(),
-                )
+        # Builtin search tools are not shared across agents; a hit here means
+        # this agent already registered the same card on a prior reconfigure.
+        if Runner.resource_mgr.get_tool(card.id) is not None:
             return
 
         from openjiuwen.harness.tools import WebFreeSearchTool, WebPaidSearchTool

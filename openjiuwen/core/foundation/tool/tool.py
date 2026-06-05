@@ -94,14 +94,23 @@ def tool(
 
     def decorator(func_: Callable) -> LocalFunction:
         if card is not None:
-            return _handle_prebuilt_card(func_,
-                                         card,
-                                         final_name=name,
-                                         description=description,
-                                         input_params=input_params,
-                                         stateless=stateless)
+            return _handle_prebuilt_card(
+                func_,
+                card=card,
+                name=name,
+                description=description,
+                input_params=input_params,
+                stateless=stateless,
+            )
         final_name = name if name is not None else func_.__name__
-        return _create_new_tool_card(func_, final_name, description, input_params, auto_extract, stateless)
+        return _create_new_tool_card(
+            func_,
+            final_name=final_name,
+            description=description,
+            input_params=input_params,
+            auto_extract=auto_extract,
+            stateless=stateless,
+        )
 
     if func is not None:
         return decorator(func)
@@ -110,19 +119,20 @@ def tool(
 
 def _handle_prebuilt_card(
         func: Callable,
+        *,
         card: ToolCard,
-        final_name: str,
+        name: Optional[str],
         description: Optional[str],
         input_params: Optional[Union[Dict[str, Any], Type[BaseModel]]],
         stateless: bool = False,
 ) -> LocalFunction:
     """Handle case where a pre-built ToolCard is provided."""
     overrides = {}
-    if final_name is not None and final_name != card.name:
-        overrides['name'] = final_name
-        if final_name != func.__name__:
+    if name is not None and name != card.name:
+        overrides['name'] = name
+        if name != func.__name__:
             logger.warning(
-                f"Overriding card name '{card.name}' with '{final_name}'"
+                f"Overriding card name '{card.name}' with '{name}'"
             )
 
     if description is not None and description != card.description:
@@ -149,6 +159,7 @@ def _handle_prebuilt_card(
 
 def _create_new_tool_card(
         func: Callable,
+        *,
         final_name: str,
         description: Optional[str],
         input_params: Optional[Union[Dict[str, Any], Type[BaseModel]]],
