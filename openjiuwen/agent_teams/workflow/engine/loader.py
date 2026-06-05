@@ -70,13 +70,12 @@ def load_workflow_source(path: str) -> LoadedWorkflow:
 def _import_module(path: str):
     """Import a workflow file as a fresh, real module (re-imported each load).
 
-    The script's ``from swarmflow import ...`` runs during ``exec_module``; there
-    is no on-disk ``swarmflow`` package, so we map that name onto the facade
-    (:mod:`workflow.engine.facade`) just for the import. The mapping is
-    reference-counted, so it composes with any extra ``import_as`` names
-    installed by the caller.
+    The script's ``from swarmflow import ...`` resolves because the facade is
+    registered in ``sys.modules`` under that name at facade import time; there
+    is no on-disk ``swarmflow`` package. Importing the facade here ensures that
+    registration has run before the script's imports execute.
     """
-    from .aliases import facade_aliases  # lazy: avoids an import cycle at module load
+    from . import facade  # noqa: F401  # lazy: triggers _register_aliases, avoids a cycle
 
     name = "wf_flow__" + re.sub(r"\W", "_", str(Path(path).resolve()))
     sys.modules.pop(name, None)  # ensure a fresh import (re-runs top-level)
@@ -85,8 +84,7 @@ def _import_module(path: str):
         raise MetaError(f"{path}: cannot import as a module")
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
-    with facade_aliases(["swarmflow"]):
-        spec.loader.exec_module(module)
+    spec.loader.exec_module(module)
     return module
 
 

@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Callable
 
-from .aliases import facade_aliases
 from .backends import MockBackend
 from .backends.base import AgentBackend
 from .journal import Journal
@@ -66,39 +65,32 @@ async def run_workflow(
     progress_sink: ProgressSink | None = None,
     cap: int | None = None,
     budget_total: int | None = None,
-    import_as: str | list[str] | None = None,
 ) -> Any:
-    # The name a script imports the primitives under is a runtime mapping onto
-    # the facade. ``load_workflow_source`` already maps the default ``swarmflow``
-    # while it imports the module; here we additionally map any ``import_as``
-    # names (e.g. ``jiuwenswarm.swarmflow``). There is no on-disk package.
+    # The ``swarmflow`` name a script imports the primitives under is registered
+    # in ``sys.modules`` once at facade import time; the mapping is fixed for the
+    # process and there is nothing to install or tear down per run. See
+    # ``workflow.engine.facade._register_aliases``.
     log = log_sink or _silent
-    extra = [
-        n
-        for n in ([import_as] if isinstance(import_as, str) else list(import_as or []))
-        if n != "swarmflow"
-    ]
-    with facade_aliases(extra):
-        loaded = load_workflow_source(path)
-        for w in loaded.warnings:
-            log(f"[lint] {w}")
-        if strict and loaded.warnings:
-            from .errors import LintError
+    loaded = load_workflow_source(path)
+    for w in loaded.warnings:
+        log(f"[lint] {w}")
+    if strict and loaded.warnings:
+        from .errors import LintError
 
-            raise LintError(f"{len(loaded.warnings)} lint warning(s) in strict mode")
+        raise LintError(f"{len(loaded.warnings)} lint warning(s) in strict mode")
 
-        rt = Runtime(
-            backend=backend or MockBackend(),
-            journal=Journal.load(resume),
-            args=args,
-            log_sink=log,
-            progress_sink=progress_sink or noop_progress_sink,
-            strict=strict,
-            cap_override=cap,
-            budget_total=budget_total,
-        )
-        rt.sem = asyncio.Semaphore(rt.make_cap())  # created inside the running loop
-        result = await _exec_loaded(loaded, rt)
+    rt = Runtime(
+        backend=backend or MockBackend(),
+        journal=Journal.load(resume),
+        args=args,
+        log_sink=log,
+        progress_sink=progress_sink or noop_progress_sink,
+        strict=strict,
+        cap_override=cap,
+        budget_total=budget_total,
+    )
+    rt.sem = asyncio.Semaphore(rt.make_cap())  # created inside the running loop
+    result = await _exec_loaded(loaded, rt)
     if journal_path:
         rt.journal.save(journal_path)
     return result

@@ -4,10 +4,12 @@
 """The SwarmFlow facade — the stable surface workflow scripts bind to.
 
 This module lives **inside the engine package** and is the canonical home of
-the public primitives. There is no physical ``swarmflow`` package: the bare
-name ``swarmflow`` is a *runtime mapping* onto this module, installed in
-``sys.modules`` by :func:`workflow.engine.runner.run_workflow` for the duration
-of a run (``run_workflow(import_as=...)`` maps additional names too).
+the public primitives. There is no physical ``swarmflow`` package: the name
+``swarmflow`` is mapped onto this module in ``sys.modules`` once, at import
+time (see :func:`_register_aliases`). The mapping is fixed for the process and
+always points here, so there is no per-run install/teardown — a lazy
+``from swarmflow import ...`` inside ``run`` resolves just like a top-level
+import.
 
 A workflow file imports the primitives by whatever name is mapped::
 
@@ -200,3 +202,21 @@ __all__ = [
     "LintError",
     "SchemaError",
 ]
+
+
+def _register_aliases() -> None:
+    """Map the ``swarmflow`` import name onto this module, once per process.
+
+    A workflow file's ``from swarmflow import agent`` resolves because this
+    module is registered in ``sys.modules`` under that name — there is no
+    on-disk ``swarmflow`` package. The mapping is fixed and always points to
+    this one module, so registration happens at import time rather than per run;
+    that is what lets a lazy ``from swarmflow import ...`` inside ``run``'s body
+    resolve too.
+    """
+    import sys
+
+    sys.modules.setdefault("swarmflow", sys.modules[__name__])
+
+
+_register_aliases()

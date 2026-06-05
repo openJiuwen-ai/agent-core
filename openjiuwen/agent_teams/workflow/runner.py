@@ -21,8 +21,6 @@ from openjiuwen.agent_teams.workflow.engine import MockBackend, run_workflow
 from openjiuwen.agent_teams.workflow.observer import WorkflowObserver
 from openjiuwen.agent_teams.workflow.schema import WorkflowRun
 
-_IMPORT_AS = "jiuwenswarm.swarmflow"
-
 
 async def run_swarmflow(
     script_path: str,
@@ -69,7 +67,6 @@ async def run_swarmflow(
         backend=backend,
         progress_sink=observer.emit,
         log_sink=log_sink,
-        import_as=_IMPORT_AS,
     )
 
 
@@ -90,7 +87,6 @@ async def preprocess_swarmflow(
         args=args,
         backend=MockBackend(),
         progress_sink=obs.emit,
-        import_as=_IMPORT_AS,
     )
     return obs.run
 
