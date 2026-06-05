@@ -78,10 +78,12 @@ class _RetryRuntime:
 
         return _gen()
 
-    async def on_state_changed(self, callback: Callable[..., Any]) -> None:
-        return None
-
-    async def on_round(self, callback: Callable[..., Any]) -> None:
+    async def subscribe(
+        self,
+        *,
+        on_state: Callable[..., Any] | None = None,
+        on_round: Callable[..., Any] | None = None,
+    ) -> None:
         return None
 
     async def send(self, content: Any, *, immediate: bool = False) -> Any:

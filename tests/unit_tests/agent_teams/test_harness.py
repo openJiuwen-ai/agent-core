@@ -10,7 +10,7 @@ DeepAgent brain. These tests cover its three contracts:
    rails in a load-bearing order, then eagerly initializes the team-tool rail
    on the configured native so the LLM-visible ability snapshot is populated.
 2. The interaction surface (``send`` / ``abort`` / ``outputs`` /
-   ``on_state_changed`` / ``on_round`` / ``register_rail`` / ``find_rails``)
+   ``subscribe`` / ``register_rail`` / ``find_rails``)
    forwards to the native.
 3. State queries (``has_pending_interrupt`` /
    ``is_pending_interrupt_resume_valid``) tolerate a missing session and missing
@@ -37,11 +37,11 @@ class _FakeNative:
     """Minimal stand-in for NativeHarness used by ``build`` tests.
 
     Forward construction passes the team-side rails as ``extra_rails`` rather
-    than mounting them through a provider closure. ``prepare_config`` resolves
-    the spec's parts and adopts ``parts.config`` as ``deep_config`` — enough
-    for ``build`` to read ``deep_config.sys_operation`` / ``workspace`` when
-    eager-initializing the team-tool rail. The real native's async init /
-    supervisor are out of scope.
+    than mounting them through a provider closure. The constructor configures
+    itself synchronously (resolving the spec's parts and adopting
+    ``parts.config`` as ``deep_config``) — enough for ``build`` to read
+    ``deep_config.sys_operation`` / ``workspace`` when eager-initializing the
+    team-tool rail. The real native's async init / supervisor are out of scope.
     """
 
     def __init__(
@@ -54,8 +54,9 @@ class _FakeNative:
         self.build_context = build_context
         self.extra_rails = list(extra_rails) if extra_rails else []
         self.deep_config: Any = None
+        self._prepare_config()
 
-    def prepare_config(self) -> None:
+    def _prepare_config(self) -> None:
         self.deep_config = self.agent_spec.resolve_parts(self.build_context).config
 
 
@@ -74,8 +75,7 @@ def _stub_native(
     native.send = AsyncMock()
     native.abort = AsyncMock()
     native.pause = AsyncMock()
-    native.on_state_changed = AsyncMock()
-    native.on_round = AsyncMock()
+    native.subscribe = AsyncMock()
     native.deep_config = SimpleNamespace(
         workspace=workspace,
         sys_operation=sys_operation,
@@ -133,7 +133,7 @@ def test_build_constructs_native_from_spec(monkeypatch: pytest.MonkeyPatch) -> N
     assert isinstance(native, _FakeNative)
     assert native.agent_spec is spec
     spec.resolve_parts.assert_called_once()
-    # prepare_config ran (deep_config adopted from the spec's parts).
+    # Constructor config ran (deep_config adopted from the spec's parts).
     assert native.deep_config is not None
 
 
@@ -202,17 +202,15 @@ def test_outputs_delegates_to_native() -> None:
 
 
 @pytest.mark.asyncio
-async def test_on_state_changed_and_on_round_forward() -> None:
+async def test_subscribe_forwards_to_native() -> None:
     native = _stub_native()
     harness = _make_harness(native)
     state_cb = MagicMock(name="state_cb")
     round_cb = MagicMock(name="round_cb")
 
-    await harness.on_state_changed(state_cb)
-    await harness.on_round(round_cb)
+    await harness.subscribe(on_state=state_cb, on_round=round_cb)
 
-    native.on_state_changed.assert_awaited_once_with(state_cb)
-    native.on_round.assert_awaited_once_with(round_cb)
+    native.subscribe.assert_awaited_once_with(on_state=state_cb, on_round=round_cb)
 
 
 @pytest.mark.asyncio

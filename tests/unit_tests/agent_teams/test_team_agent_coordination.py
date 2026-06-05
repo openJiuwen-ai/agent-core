@@ -1352,6 +1352,81 @@ async def test_teammate_round_completion_wakes_mailbox_after_interrupt_clears():
     assert event.event_type == InnerEventType.POLL_MAILBOX
 
 
+def _stub_coordination_for_invoke(agent: TeamAgent) -> None:
+    """Stub the coordination seams so invoke/stream run without a real round.
+
+    ``start`` / ``finalize_round`` are no-ops; ``enqueue_user_input`` is a
+    spy; ``enqueue_mailbox_after_first_iteration`` closes the stream so the
+    consume loop terminates on the None sentinel.
+    """
+    agent._coordination.start = AsyncMock()
+    agent._coordination.finalize_round = AsyncMock()
+    agent._coordination.enqueue_user_input = AsyncMock()
+
+    async def _close_stream() -> None:
+        await agent._stream_controller.stream_queue.put(None)
+
+    agent._coordination.enqueue_mailbox_after_first_iteration = AsyncMock(side_effect=_close_stream)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_invoke_skips_first_round_when_query_empty():
+    """An empty query must not drive a first round (no enqueue_user_input).
+
+    Spawn / recover / resume with no input come up, subscribe, and idle —
+    the mailbox poll still runs and delivers only real pending messages.
+    """
+    agent = _make_teammate()
+    _stub_coordination_for_invoke(agent)
+
+    await agent.invoke({"query": ""})
+
+    agent._coordination.enqueue_user_input.assert_not_awaited()
+    agent._coordination.enqueue_mailbox_after_first_iteration.assert_awaited_once()
+    assert agent.pending_user_query == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_invoke_drives_first_round_when_query_present():
+    """A genuine first-start instruction drives the first round."""
+    agent = _make_teammate()
+    _stub_coordination_for_invoke(agent)
+
+    await agent.invoke({"query": "do the work"})
+
+    agent._coordination.enqueue_user_input.assert_awaited_once()
+    agent._coordination.enqueue_mailbox_after_first_iteration.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_invoke_normalizes_none_query_to_empty():
+    """A present-but-None query normalizes to "" and skips the first round."""
+    agent = _make_teammate()
+    _stub_coordination_for_invoke(agent)
+
+    await agent.invoke({"query": None})
+
+    agent._coordination.enqueue_user_input.assert_not_awaited()
+    assert agent.pending_user_query == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_stream_skips_first_round_when_query_empty():
+    """The streaming path applies the same empty-query gate as invoke."""
+    agent = _make_teammate()
+    _stub_coordination_for_invoke(agent)
+
+    chunks = [chunk async for chunk in agent.stream({"query": ""})]
+
+    assert chunks == []
+    agent._coordination.enqueue_user_input.assert_not_awaited()
+    agent._coordination.enqueue_mailbox_after_first_iteration.assert_awaited_once()
+
+
 @pytest.mark.level0
 def test_streaming_session_id_reads_from_contextvar():
     """Regression: StreamController must read session_id from the

@@ -53,7 +53,6 @@ def _make_team_harness(*, member_name: str, role: TeamRole = TeamRole.LEADER) ->
     """
     spec = make_spec()
     native = NativeHarness(spec)
-    native.prepare_config()
     return TeamHarness(spec, None, native, role=role, member_name=member_name)
 
 

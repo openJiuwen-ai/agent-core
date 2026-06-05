@@ -54,11 +54,16 @@ class _FakeRuntime:
 
         return _gen()
 
-    async def on_state_changed(self, callback: Callable[..., Any]) -> None:
-        self._state_cbs.append(callback)
-
-    async def on_round(self, callback: Callable[..., Any]) -> None:
-        self._round_cbs.append(callback)
+    async def subscribe(
+        self,
+        *,
+        on_state: Callable[..., Any] | None = None,
+        on_round: Callable[..., Any] | None = None,
+    ) -> None:
+        if on_state is not None:
+            self._state_cbs.append(on_state)
+        if on_round is not None:
+            self._round_cbs.append(on_round)
 
     async def send(self, content: Any, *, immediate: bool = False) -> Any:
         self.sent.append((content, immediate))

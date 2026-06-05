@@ -412,8 +412,7 @@ async def test_member_runtime_surface_drives_turn_and_emits_events():
         rounds.append(kind)
 
     await runtime.start()
-    await runtime.on_state_changed(_on_state)
-    await runtime.on_round(_on_round)
+    await runtime.subscribe(on_state=_on_state, on_round=_on_round)
 
     collected: list = []
 
@@ -459,7 +458,7 @@ async def test_member_runtime_abort_emits_aborted_round():
         rounds.append(kind)
 
     await runtime.start()
-    await runtime.on_round(_on_round)
+    await runtime.subscribe(on_round=_on_round)
     await runtime.send("go")
     turn_task = runtime._turn_task
     await asyncio.sleep(0.05)  # let the first line flow before aborting
@@ -496,8 +495,7 @@ def test_team_harness_exposes_member_runtime_surface():
         "send",
         "abort",
         "pause",
-        "on_state_changed",
-        "on_round",
+        "subscribe",
         "init_cwd_for_round",
         "has_pending_interrupt",
         "is_pending_interrupt_resume_valid",

@@ -48,8 +48,7 @@ async def test_state_and_round_events_single_round() -> None:
         async def _on_round(kind) -> None:
             rounds.append(kind)
 
-        await harness.on_state_changed(_on_state)
-        await harness.on_round(_on_round)
+        await harness.subscribe(on_state=_on_state, on_round=_on_round)
 
         collected: list = []
         consumer = asyncio.create_task(drain_outputs(harness, collected))
@@ -84,7 +83,7 @@ async def test_state_callback_receives_session_id_when_declared() -> None:
         async def _on_state(old, new, session_id) -> None:
             seen.append((new, session_id))
 
-        await harness.on_state_changed(_on_state)
+        await harness.subscribe(on_state=_on_state)
 
         collected: list = []
         consumer = asyncio.create_task(drain_outputs(harness, collected))
@@ -119,8 +118,7 @@ async def test_followup_round_emits_second_started_without_returning_to_idle() -
         async def _on_round(kind) -> None:
             rounds.append(kind)
 
-        await harness.on_state_changed(_on_state)
-        await harness.on_round(_on_round)
+        await harness.subscribe(on_state=_on_state, on_round=_on_round)
 
         collected: list = []
         consumer = asyncio.create_task(drain_outputs(harness, collected))
@@ -164,8 +162,7 @@ async def test_immediate_abort_emits_aborted_event() -> None:
         async def _on_round(kind) -> None:
             rounds.append(kind)
 
-        await harness.on_state_changed(_on_state)
-        await harness.on_round(_on_round)
+        await harness.subscribe(on_state=_on_state, on_round=_on_round)
 
         collected: list = []
         consumer = asyncio.create_task(drain_outputs(harness, collected))
@@ -201,8 +198,7 @@ async def test_pause_emits_paused_event() -> None:
         async def _on_round(kind) -> None:
             rounds.append(kind)
 
-        await harness.on_state_changed(_on_state)
-        await harness.on_round(_on_round)
+        await harness.subscribe(on_state=_on_state, on_round=_on_round)
 
         collected: list = []
         consumer = asyncio.create_task(drain_outputs(harness, collected))
@@ -239,7 +235,7 @@ async def test_resume_round_via_send_interactive_input() -> None:
         async def _on_round(kind) -> None:
             rounds.append(kind)
 
-        await harness.on_round(_on_round)
+        await harness.subscribe(on_round=_on_round)
 
         collected: list = []
         consumer = asyncio.create_task(drain_outputs(harness, collected))
@@ -272,7 +268,7 @@ async def test_subscribers_cleared_on_stop() -> None:
         async def _on_state(old, new) -> None:
             return None
 
-        await harness.on_state_changed(_on_state)
+        await harness.subscribe(on_state=_on_state)
         assert harness._events.callbacks.get("harness.state")
 
         await harness.stop()
