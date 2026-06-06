@@ -157,13 +157,13 @@ class TestCodingMemoryRailLifecycle:
         mock_agent.card = Mock()
         mock_agent.card.id = "test-agent"
         mock_agent.ability_manager = Mock()
-        mock_agent.ability_manager.add = Mock(return_value=Mock(added=True))
+        mock_agent.ability_manager.add_ability = Mock(return_value=Mock(added=True))
         mock_agent.system_prompt_builder = Mock()
         
         rail.init(mock_agent)
         
         # 验证工具被注册
-        assert mock_agent.ability_manager.add.called
+        assert mock_agent.ability_manager.add_ability.called
         rail.uninit(mock_agent)
     
     @pytest.mark.asyncio
@@ -186,7 +186,7 @@ class TestCodingMemoryRailLifecycle:
         mock_agent.card = Mock()
         mock_agent.card.id = "test-agent"
         mock_agent.ability_manager = Mock()
-        mock_agent.ability_manager.add = Mock(return_value=Mock(added=True))
+        mock_agent.ability_manager.add_ability = Mock(return_value=Mock(added=True))
         mock_agent.ability_manager.remove = Mock()
         mock_agent.system_prompt_builder = Mock()
         mock_agent.system_prompt_builder.remove_section = Mock()
