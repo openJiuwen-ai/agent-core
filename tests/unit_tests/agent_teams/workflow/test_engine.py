@@ -20,6 +20,8 @@ from openjiuwen.agent_teams.workflow.engine import (
 )
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 
+import pytest
+
 _FANOUT_SCRIPT = '''
 from swarmflow import agent, parallel, phase, log
 
@@ -70,6 +72,13 @@ META = {"name": "lazy", "description": "import inside run body", "phases": []}
 async def run(args):
     from swarmflow import agent  # lazy: not a top-level import
     return await agent("hi", label="lazy")
+'''
+
+_CRASH_SCRIPT = '''
+META = {"name": "crash", "description": "raises inside run", "phases": []}
+
+async def run(args):
+    raise RuntimeError("boom")
 '''
 
 
@@ -169,3 +178,19 @@ def test_lazy_import_inside_run_resolves(tmp_path):
     script = _write(tmp_path, "lazy.py", _LAZY_IMPORT_SCRIPT)
     result = asyncio.run(run_workflow(script, backend=MockBackend()))
     assert isinstance(result, str) and "lazy" in result
+
+
+def test_workflow_failed_emitted_on_crash(tmp_path):
+    """A workflow that raises emits WORKFLOW_FAILED, not WORKFLOW_COMPLETED."""
+    script = _write(tmp_path, "crash.py", _CRASH_SCRIPT)
+    events: list[WorkflowProgressEvent] = []
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(run_workflow(str(script), backend=MockBackend(), progress_sink=events.append))
+
+    kinds = [e.kind for e in events]
+    assert kinds[0] == ProgressKind.WORKFLOW_STARTED
+    assert ProgressKind.WORKFLOW_FAILED in kinds
+    assert ProgressKind.WORKFLOW_COMPLETED not in kinds
+    failed = [e for e in events if e.kind == ProgressKind.WORKFLOW_FAILED]
+    assert "boom" in failed[0].message

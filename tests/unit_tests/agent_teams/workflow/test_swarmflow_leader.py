@@ -71,9 +71,16 @@ def _handler(role: TeamRole) -> tuple[WorkflowHandler, _FakeRound]:
     return handler, host
 
 
-def _event(kind: str, *, phase: str | None = None, name: str | None = None) -> EventMessage:
+def _event(kind: str, *, phase: str | None = None, name: str | None = None,
+           prompt: str | None = None, model: str | None = None,
+           phases: list[str] | None = None, label: str | None = None,
+           outcome: str | None = None, text: str | None = None) -> EventMessage:
     return EventMessage.from_event(
-        WorkflowProgressTeamEvent(team_name="t", kind=kind, phase=phase, workflow_name=name)
+        WorkflowProgressTeamEvent(
+            team_name="t", kind=kind, phase=phase, workflow_name=name,
+            prompt=prompt, model=model, phases=phases, label=label,
+            outcome=outcome, text=text,
+        )
     )
 
 
@@ -162,3 +169,63 @@ def test_swarmflow_section_only_for_enabled_leader():
     assert TeamSectionName.SWARMFLOW in _section_names(TeamRole.LEADER, enable_swarmflow=True)
     assert TeamSectionName.SWARMFLOW not in _section_names(TeamRole.LEADER, enable_swarmflow=False)
     assert TeamSectionName.SWARMFLOW not in _section_names(TeamRole.TEAMMATE, enable_swarmflow=True)
+
+
+def test_workflow_started_payload_carries_phases():
+    """The workflow_started event payload includes the META phases plan."""
+    msg = _event("workflow_started", name="research", phases=["Search", "Analyze", "Report"])
+    payload = msg.get_payload()
+    assert isinstance(payload, WorkflowProgressTeamEvent)
+    assert payload.phases == ["Search", "Analyze", "Report"]
+
+
+def test_agent_started_payload_carries_prompt_and_model():
+    """The agent_started event payload includes prompt and model hint."""
+    msg = _event("agent_started", phase="Search", prompt="Find recent papers", model="claude-opus")
+    payload = msg.get_payload()
+    assert isinstance(payload, WorkflowProgressTeamEvent)
+    assert payload.prompt == "Find recent papers"
+    assert payload.model == "claude-opus"
+
+
+def test_payload_backward_compatible_without_new_fields():
+    """Events without prompt/model/phases still deserialize correctly."""
+    msg = _event("phase", phase="Search")
+    payload = msg.get_payload()
+    assert isinstance(payload, WorkflowProgressTeamEvent)
+    assert payload.prompt is None
+    assert payload.model is None
+    assert payload.phases is None
+
+
+def test_workflow_failed_payload_carries_error():
+    """The workflow_failed event payload carries the error in the text field."""
+    msg = _event("workflow_failed", name="research", text="RuntimeError: boom")
+    payload = msg.get_payload()
+    assert isinstance(payload, WorkflowProgressTeamEvent)
+    assert payload.kind == "workflow_failed"
+    assert payload.text == "RuntimeError: boom"
+
+
+def test_agent_failed_payload_carries_error():
+    """The agent_failed event payload carries the failure reason in text."""
+    msg = _event("agent_failed", phase="Search", label="search-agent", text="failed after 3 attempts")
+    payload = msg.get_payload()
+    assert isinstance(payload, WorkflowProgressTeamEvent)
+    assert payload.kind == "agent_failed"
+    assert payload.label == "search-agent"
+    assert payload.text == "failed after 3 attempts"
+
+
+def test_workflow_failed_not_narrated_by_handler():
+    """WORKFLOW_FAILED is not narrated by the handler — fed back by async_tool framework."""
+    handler, host = _handler(TeamRole.LEADER)
+    asyncio.run(handler.on_workflow_progress(_event("workflow_failed", name="research", text="error")))
+    assert host.delivered == []
+
+
+def test_agent_failed_not_narrated_by_handler():
+    """AGENT_FAILED is not narrated by the handler — per-agent progress is too chatty."""
+    handler, host = _handler(TeamRole.LEADER)
+    asyncio.run(handler.on_workflow_progress(_event("agent_failed", phase="Search", label="agent-1", text="failed")))
+    assert host.delivered == []

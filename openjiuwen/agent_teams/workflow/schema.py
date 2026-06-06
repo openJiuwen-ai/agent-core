@@ -72,6 +72,8 @@ def build_workflow_run_from_events(events: list[WorkflowProgressEvent]) -> Workf
             run.name = ev.message
         elif ev.kind == ProgressKind.WORKFLOW_COMPLETED:
             run.status = "completed"
+        elif ev.kind == ProgressKind.WORKFLOW_FAILED:
+            run.status = "failed"
         elif ev.kind == ProgressKind.PHASE:
             phase_for(ev.phase)
         elif ev.kind == ProgressKind.AGENT_STARTED:
@@ -83,6 +85,11 @@ def build_workflow_run_from_events(events: list[WorkflowProgressEvent]) -> Workf
             if activity is not None:
                 activity.outcome = ev.outcome
                 activity.status = "completed"
+        elif ev.kind == ProgressKind.AGENT_FAILED:
+            activity = _latest_running(phase_for(ev.phase), ev.label)
+            if activity is not None:
+                activity.outcome = ev.message
+                activity.status = "failed"
         elif ev.kind == ProgressKind.LOG:
             rec = phase_for(ev.phase)
             target = _latest_running(rec, None) or (rec.agents[-1] if rec.agents else None)

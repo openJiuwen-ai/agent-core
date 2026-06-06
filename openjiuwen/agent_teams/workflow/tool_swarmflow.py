@@ -118,8 +118,11 @@ class SwarmflowTool(AsyncTool):
                 workflow_name=name_box["name"],
                 phase=progress.phase,
                 label=progress.label,
+                prompt=progress.prompt,
+                model=progress.model,
                 outcome=progress.outcome,
                 text=progress.message,
+                phases=progress.phases,
             )
             message = EventMessage(
                 event_type=TeamEvent.WORKFLOW_PROGRESS,
@@ -128,6 +131,7 @@ class SwarmflowTool(AsyncTool):
             )
             topic = TeamTopic.TEAM.build(get_session_id(), team_name)
             try:
+                team_logger.debug("[swarmflow] workflow progress message: {}", message)
                 asyncio.create_task(messager.publish(topic_id=topic, message=message))
             except RuntimeError:
                 team_logger.debug("[swarmflow] no running loop to publish workflow progress")

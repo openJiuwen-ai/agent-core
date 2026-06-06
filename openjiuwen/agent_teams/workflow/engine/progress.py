@@ -27,8 +27,10 @@ class ProgressKind:
     PHASE = "phase"
     AGENT_STARTED = "agent_started"
     AGENT_COMPLETED = "agent_completed"
+    AGENT_FAILED = "agent_failed"
     LOG = "log"
     WORKFLOW_COMPLETED = "workflow_completed"
+    WORKFLOW_FAILED = "workflow_failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,22 +40,28 @@ class WorkflowProgressEvent:
     Fields are populated per ``kind``:
 
     * ``phase``               — set by ``PHASE`` (the new phase title) and echoed
-      on ``AGENT_STARTED`` / ``AGENT_COMPLETED`` so a consumer can group agents
-      under their phase without tracking state.
+      on ``AGENT_STARTED`` / ``AGENT_COMPLETED`` / ``AGENT_FAILED`` so a consumer
+      can group agents under their phase without tracking state.
     * ``label``               — the ``agent()`` call's label (``AGENT_*``).
     * ``prompt``              — the agent's rendered prompt (``AGENT_STARTED``).
+    * ``model``               — the ``agent(model=...)`` name hint (``AGENT_STARTED``).
     * ``outcome``             — a short preview of the agent's result
-      (``AGENT_COMPLETED``); ``None`` when the call was skipped/failed.
+      (``AGENT_COMPLETED``); absent on ``AGENT_FAILED`` (use ``message`` instead).
     * ``message``             — free narration text (``LOG``); also carries the
-      workflow name on ``WORKFLOW_STARTED`` / ``WORKFLOW_COMPLETED``.
+      workflow name on ``WORKFLOW_STARTED`` / ``WORKFLOW_COMPLETED``, and the
+      error description on ``WORKFLOW_FAILED`` / ``AGENT_FAILED``.
+    * ``phases``              — the static phase plan from the script's ``META``
+      dict (``WORKFLOW_STARTED``); ``None`` on all other kinds.
     """
 
     kind: str
     phase: str | None = None
     label: str | None = None
     prompt: str | None = None
+    model: str | None = None
     outcome: str | None = None
     message: str | None = None
+    phases: list[str] | None = None
 
 
 #: Signature of ``Runtime.progress_sink``. Default is a no-op so the engine has

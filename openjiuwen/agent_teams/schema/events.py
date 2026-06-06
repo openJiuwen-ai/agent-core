@@ -266,12 +266,18 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
     ``member_name`` stays None (the run is team-scoped, not member-scoped).
     """
 
-    kind: str = Field(..., description="Progress kind: phase / agent_started / agent_completed / ...")
+    kind: str = Field(..., description="Progress kind: workflow_started / phase / "
+                                       "agent_started / agent_completed / agent_failed / "
+                                       "workflow_completed / workflow_failed / "
+                                       "log / ...")
     workflow_name: Optional[str] = Field(default=None, description="The swarmflow script's META name")
     phase: Optional[str] = Field(default=None, description="Current phase title, when applicable")
     label: Optional[str] = Field(default=None, description="Agent call label, on agent_* kinds")
+    prompt: Optional[str] = Field(default=None, description="Rendered agent prompt, on agent_started")
+    model: Optional[str] = Field(default=None, description="Model hint for the agent call, on agent_started")
     outcome: Optional[str] = Field(default=None, description="Short result preview, on agent_completed")
     text: Optional[str] = Field(default=None, description="Free narration text, on log kind")
+    phases: Optional[list[str]] = Field(default=None, description="Static phase plan from META, on workflow_started")
 
 
 class WorktreeCreatedEvent(BaseEventMessage):

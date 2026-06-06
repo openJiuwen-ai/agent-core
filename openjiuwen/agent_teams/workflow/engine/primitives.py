@@ -137,6 +137,7 @@ def _emit_agent_started(rt, opts: dict, prompt: str) -> None:
             phase=opts.get("phase") or rt.current_phase,
             label=opts.get("label"),
             prompt=prompt,
+            model=opts.get("model"),
         )
     )
 
@@ -148,6 +149,17 @@ def _emit_agent_completed(rt, opts: dict, result: Any) -> None:
             phase=opts.get("phase") or rt.current_phase,
             label=opts.get("label"),
             outcome=_preview(result),
+        )
+    )
+
+
+def _emit_agent_failed(rt, opts: dict, message: str) -> None:
+    rt.progress_sink(
+        WorkflowProgressEvent(
+            kind=ProgressKind.AGENT_FAILED,
+            phase=opts.get("phase") or rt.current_phase,
+            label=opts.get("label"),
+            message=message,
         )
     )
 
@@ -220,7 +232,7 @@ async def agent(
 
     if rt.spawn_count >= rt.spawn_limit:
         rt.log_sink(f"[wf] spawn limit {rt.spawn_limit} reached; skipping {opts.get('label')!r}")
-        _emit_agent_completed(rt, opts, None)
+        _emit_agent_failed(rt, opts, f"spawn limit {rt.spawn_limit} reached; skipping {opts.get('label')!r}")
         return None
 
     if rt.sem is None:  # safety net; normally created in run_workflow
@@ -229,6 +241,10 @@ async def agent(
     async with rt.sem:
         rt.spawn_count += 1
         result = await _call_backend(rt, prompt, opts, json_schema, model_cls)
+
+    if result is None:
+        _emit_agent_failed(rt, opts, f"agent {opts.get('label')!r} failed after {rt.retries + 1} attempts")
+        return None
 
     rt.journal.use(ks, _make_record(ks, sig, opts, result, model_cls))
     _emit_agent_completed(rt, opts, result)

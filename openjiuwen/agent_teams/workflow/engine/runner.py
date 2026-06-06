@@ -41,11 +41,15 @@ async def _exec_loaded(loaded, rt: Runtime) -> Any:
     tok_p = _path.set(())
     tok_s = _seq.set(_fresh_holder())
     name = loaded.meta.get("name") if isinstance(loaded.meta, dict) else None
+    phases = loaded.meta.get("phases") if isinstance(loaded.meta, dict) else None
     try:
-        rt.progress_sink(WorkflowProgressEvent(kind=ProgressKind.WORKFLOW_STARTED, message=name))
+        rt.progress_sink(WorkflowProgressEvent(kind=ProgressKind.WORKFLOW_STARTED, message=name, phases=phases))
         result = await _invoke_loaded(loaded, rt.args)
         rt.progress_sink(WorkflowProgressEvent(kind=ProgressKind.WORKFLOW_COMPLETED, message=name))
         return result
+    except Exception as exc:
+        rt.progress_sink(WorkflowProgressEvent(kind=ProgressKind.WORKFLOW_FAILED, message=str(exc)))
+        raise
     finally:
         _seq.reset(tok_s)
         _path.reset(tok_p)
