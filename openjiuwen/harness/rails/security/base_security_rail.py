@@ -287,7 +287,8 @@ class BaseSecurityRail(AgentRail):
         - Allow: return (continue execution)
         - Alert: log + stream to frontend, then continue execution
         - Reject:
-          - MODEL events: request_force_finish
+          - AFTER_MODEL_CALL: send retract + request_force_finish (撤回已生成的LLM内容)
+          - BEFORE_MODEL_CALL: request_force_finish only (LLM还未调用)
           - TOOL events (both BEFORE and AFTER): _skip_tool (agent continues)
         - Interrupt:
           - MODEL events: auto-converted to Reject in _run_and_apply
@@ -322,7 +323,8 @@ class BaseSecurityRail(AgentRail):
     ) -> None:
         """Default reject behavior based on event type.
 
-        MODEL events: send retract + force_finish
+        AFTER_MODEL_CALL: send retract + force_finish (撤回已生成的LLM内容)
+        BEFORE_MODEL_CALL: force_finish only (LLM还未调用，无需撤回)
         TOOL events (both BEFORE and AFTER): skip_tool (agent continues)
         """
         ctx = security_ctx.callback_ctx
@@ -330,9 +332,14 @@ class BaseSecurityRail(AgentRail):
 
         error_msg = decision.message or "blocked for security reason"
 
-        if event in _MODEL_EVENTS:
+        if event == AgentCallbackEvent.AFTER_MODEL_CALL:
             retract_message = decision.message or "内容已因安全原因撤回"
             await self._send_retract_event(ctx, retract_message)
+            result = self._build_force_finish_result(decision)
+            ctx.request_force_finish(result)
+            return
+
+        if event == AgentCallbackEvent.BEFORE_MODEL_CALL:
             result = self._build_force_finish_result(decision)
             ctx.request_force_finish(result)
             return
@@ -431,9 +438,11 @@ class BaseSecurityRail(AgentRail):
                         },
                     )
                 )
-            except Exception:
-                logger.debug(
-                    "[BaseSecurityRail] Failed to stream alert: %s",
+            except Exception as e:
+                logger.error(
+                    "[BaseSecurityRail] Failed to stream alert (event=%s): %s",
+                    security_ctx.event.value,
+                    e,
                     exc_info=True,
                 )
 
