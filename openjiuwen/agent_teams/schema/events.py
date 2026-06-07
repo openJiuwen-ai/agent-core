@@ -277,7 +277,7 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
     model: Optional[str] = Field(default=None, description="Model hint for the agent call, on agent_started")
     outcome: Optional[str] = Field(default=None, description="Short result preview, on agent_completed")
     text: Optional[str] = Field(default=None, description="Free narration text, on log kind")
-    phases: Optional[list[str]] = Field(default=None, description="Static phase plan from META, on workflow_started")
+    phases: Optional[list[Any]] = Field(default=None, description="Static phase plan from META, on workflow_started")
 
 
 class WorktreeCreatedEvent(BaseEventMessage):

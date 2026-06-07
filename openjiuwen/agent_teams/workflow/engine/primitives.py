@@ -240,10 +240,17 @@ async def agent(
 
     async with rt.sem:
         rt.spawn_count += 1
-        result = await _call_backend(rt, prompt, opts, json_schema, model_cls)
+        result, call_succeeded, error_detail = await _call_backend(
+            rt, prompt, opts, json_schema, model_cls
+        )
 
-    if result is None:
-        _emit_agent_failed(rt, opts, f"agent {opts.get('label')!r} failed after {rt.retries + 1} attempts")
+    if not call_succeeded:
+        attempts = rt.retries + 1
+        label = opts.get("label") or "agent"
+        msg = f"agent {label!r} failed after {attempts} attempts"
+        if error_detail:
+            msg = f"{msg}: {error_detail}"
+        _emit_agent_failed(rt, opts, msg)
         return None
 
     rt.journal.use(ks, _make_record(ks, sig, opts, result, model_cls))
@@ -251,11 +258,13 @@ async def agent(
     return result
 
 
-async def _call_backend(rt, prompt, opts, json_schema, model) -> Any:
+async def _call_backend(rt, prompt, opts, json_schema, model) -> tuple[Any, bool, str | None]:
+    """Call the backend with retries. Returns ``(result, succeeded, error_detail)``."""
     timeout = opts.get("timeout")
     attempts = rt.retries + 1
     last_err: Exception | None = None
-    for _ in range(attempts):
+    label = opts.get("label") or "agent"
+    for attempt in range(1, attempts + 1):
         try:
             if timeout is not None:
                 async with asyncio.timeout(timeout):  # py3.11+
@@ -264,19 +273,29 @@ async def _call_backend(rt, prompt, opts, json_schema, model) -> Any:
                 res = await rt.backend.run(prompt, opts, json_schema)
         except Exception as e:  # backend / timeout error -> retry, then skip
             last_err = e
+            rt.log_sink(
+                f"[wf] agent {label!r} attempt {attempt}/{attempts} failed: {str(e)}"
+            )
             continue
         rt.tokens_spent += res.tokens
         if res.skipped:
-            return None
+            detail = "backend declined (skipped)"
+            rt.log_sink(f"[wf] agent {label!r} skipped")
+            return None, False, detail
         if json_schema is not None:
             try:
-                return coerce(res.structured, json_schema, model)
+                return coerce(res.structured, json_schema, model), True, None
             except Exception as e:  # validation failure -> retry
                 last_err = e
+                rt.log_sink(
+                    f"[wf] agent {label!r} attempt {attempt}/{attempts} "
+                    f"validation failed: {str(e)}"
+                )
                 continue
-        return res.text
-    rt.log_sink(f"[wf] agent {opts.get('label')!r} failed after {attempts} attempts: {last_err}")
-    return None
+        return res.text, True, None
+    detail = str(last_err) if last_err else "unknown error"
+    rt.log_sink(f"[wf] agent {label!r} failed after {attempts} attempts: {detail}")
+    return None, False, detail
 
 
 def _rehydrate(rec: dict, model) -> Any:

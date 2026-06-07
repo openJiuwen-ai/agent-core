@@ -185,7 +185,8 @@ class WorkspaceSpec(BaseModel):
     """When True, workspace path is anchored under .agent_teams/workspaces/."""
 
     def build(self) -> Workspace:
-        return Workspace(root_path=self.root_path, language=self.language)
+        root_path = self.root_path or "./"
+        return Workspace(root_path=root_path, language=self.language)
 
 
 class ProgressiveToolSpec(BaseModel):

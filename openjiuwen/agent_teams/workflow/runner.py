@@ -20,6 +20,11 @@ from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWor
 from openjiuwen.agent_teams.workflow.engine import MockBackend, run_workflow
 from openjiuwen.agent_teams.workflow.observer import WorkflowObserver
 from openjiuwen.agent_teams.workflow.schema import WorkflowRun
+from openjiuwen.core.common.logging import team_logger
+
+
+def _team_log_sink(message: str) -> None:
+    team_logger.warning("{}", message)
 
 
 async def run_swarmflow(
@@ -34,6 +39,7 @@ async def run_swarmflow(
     log_sink: Callable[[str], None] | None = None,
     model_resolver: Callable[[str], Any] | None = None,
     worker_base_spec: Any = None,
+    build_context: Any = None,
 ) -> Any:
     """Execute a swarmflow script with real LLM workers.
 
@@ -54,6 +60,8 @@ async def run_swarmflow(
         worker_base_spec: Base ``DeepAgentSpec`` each worker derives from (the
             team's teammate spec, or the leader spec) — gives workers
             teammate-equivalent capabilities without the team tools.
+        build_context: Optional ``BuildContext`` from the leader harness,
+            forwarded to each worker's ``NativeHarness`` build.
 
     Returns:
         Whatever the script's ``run(args)`` returned.
@@ -65,13 +73,14 @@ async def run_swarmflow(
         language=language,
         model_resolver=model_resolver,
         worker_base_spec=worker_base_spec,
+        build_context=build_context,
     )
     return await run_workflow(
         script_path,
         args=args,
         backend=backend,
         progress_sink=observer.emit,
-        log_sink=log_sink,
+        log_sink=log_sink or _team_log_sink,
     )
 
 

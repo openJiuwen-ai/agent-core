@@ -196,30 +196,47 @@ class TeamWorkerBackend(AgentBackend):
                 "TeamWorkerBackend requires a worker_base_spec to build a worker harness"
             )
 
-        worker_spec = self._worker_base_spec.model_copy(
-            update={
-                "card": AgentCard(
-                    id=f"{self._team_name}_{member_name}",
-                    name=member_name,
-                    description="swarmflow worker",
-                ),
-                # Per-call model config when resolved, else inherit teammate's.
-                "model": model or self._worker_base_spec.model,
-                "system_prompt": _SYS_PROMPT_SCHEMA if has_schema else _SYS_PROMPT_FREE,
-                # Append the per-call structured_output instance; the base spec
-                # already carries teammate tools/skills. enable_task_loop /
-                # enable_task_planning are inherited (DeepAgent todo planning kept).
-                "tools": list(self._worker_base_spec.tools or []) + list(tools),
-            }
-        )
-        harness = TeamHarness.build(
-            agent_spec=worker_spec,
-            role=TeamRole.WORKER,
-            member_name=member_name,
-            build_context=self._build_context,
-        )
+        try:
+            worker_spec = self._worker_base_spec.model_copy(
+                update={
+                    "card": AgentCard(
+                        id=f"{self._team_name}_{member_name}",
+                        name=member_name,
+                        description="swarmflow worker",
+                    ),
+                    # Per-call model config when resolved, else inherit teammate's.
+                    "model": model or self._worker_base_spec.model,
+                    "system_prompt": _SYS_PROMPT_SCHEMA if has_schema else _SYS_PROMPT_FREE,
+                    # Append the per-call structured_output instance; the base spec
+                    # already carries teammate tools/skills. enable_task_loop /
+                    # enable_task_planning are inherited (DeepAgent todo planning kept).
+                    "tools": list(self._worker_base_spec.tools or []) + list(tools),
+                }
+            )
+            worker_build_context = None
+            if self._build_context is not None:
+                worker_build_context = self._build_context.derive(
+                    member_name=member_name,
+                    role=TeamRole.WORKER.value,
+                    member_card_id=f"{self._team_name}_{member_name}",
+                    language=self._language,
+                )
+                worker_build_context.extras = dict(worker_build_context.extras)
+            harness = TeamHarness.build(
+                agent_spec=worker_spec,
+                role=TeamRole.WORKER,
+                member_name=member_name,
+                build_context=worker_build_context,
+            )
+        except Exception as e:
+            team_logger.exception("worker harness build failed for %s", member_name)
+            raise BackendError(f"worker harness build failed for {member_name}: {e}") from e
+
         try:
             result = await harness.run_once(prompt)
+        except Exception as e:
+            team_logger.exception("worker harness run_once failed for %s", member_name)
+            raise BackendError(f"worker harness run_once failed for {member_name}: {e}") from e
         finally:
             # Single-shot worker teardown. The harness owns its tool lifecycle:
             # ``run_once`` already dropped the worker's owner-qualified tools (the

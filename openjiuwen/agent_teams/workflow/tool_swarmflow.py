@@ -147,6 +147,7 @@ class SwarmflowTool(AsyncTool):
             language=self._language,
             model_resolver=self._model_resolver,
             worker_base_spec=self._worker_base_spec,
+            build_context=getattr(self._parent_agent, "build_context", None),
         )
         parts = [summarize_run(observer.run)]
         body = render_result_text(result)

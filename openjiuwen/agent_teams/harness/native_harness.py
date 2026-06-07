@@ -183,6 +183,18 @@ class NativeHarness(DeepAgent):
     # ------------------------------------------------------------------
 
     @property
+    def model(self) -> str | None:
+        """The harness's model name (from ``deep_config → react_agent config``)."""
+        if self._react_agent is not None:
+            return self._react_agent.config.model_name
+        return None
+
+    @property
+    def build_context(self) -> "BuildContext | None":
+        """Runtime carrier forwarded to capability providers at build time."""
+        return self._build_context
+
+    @property
     def state(self) -> HarnessState:
         """Current lifecycle phase."""
         return self._st.phase

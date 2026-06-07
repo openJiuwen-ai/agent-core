@@ -12,6 +12,7 @@ only narrates mid-run milestones (started / phase).
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from openjiuwen.agent_teams.agent.coordination.handlers.workflow import WorkflowHandler
 from openjiuwen.agent_teams.schema.events import (
@@ -73,7 +74,7 @@ def _handler(role: TeamRole) -> tuple[WorkflowHandler, _FakeRound]:
 
 def _event(kind: str, *, phase: str | None = None, name: str | None = None,
            prompt: str | None = None, model: str | None = None,
-           phases: list[str] | None = None, label: str | None = None,
+           phases: list[Any] | None = None, label: str | None = None,
            outcome: str | None = None, text: str | None = None) -> EventMessage:
     return EventMessage.from_event(
         WorkflowProgressTeamEvent(
@@ -177,6 +178,19 @@ def test_workflow_started_payload_carries_phases():
     payload = msg.get_payload()
     assert isinstance(payload, WorkflowProgressTeamEvent)
     assert payload.phases == ["Search", "Analyze", "Report"]
+
+
+def test_workflow_started_payload_accepts_meta_dict_phases():
+    """META phases may be dicts with title/description — passed through for downstream normalization."""
+    meta_phases = [
+        {"title": "发牌", "description": "分配身份"},
+        {"title": "游戏进行"},
+        "结算",
+    ]
+    msg = _event("workflow_started", name="werewolf", phases=meta_phases)
+    payload = msg.get_payload()
+    assert isinstance(payload, WorkflowProgressTeamEvent)
+    assert payload.phases == meta_phases
 
 
 def test_agent_started_payload_carries_prompt_and_model():

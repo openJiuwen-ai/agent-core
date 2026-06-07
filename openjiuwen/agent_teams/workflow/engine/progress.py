@@ -17,7 +17,7 @@ the engine when it emits one.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 
 class ProgressKind:
@@ -61,7 +61,7 @@ class WorkflowProgressEvent:
     model: str | None = None
     outcome: str | None = None
     message: str | None = None
-    phases: list[str] | None = None
+    phases: list[Any] | None = None
 
 
 #: Signature of ``Runtime.progress_sink``. Default is a no-op so the engine has

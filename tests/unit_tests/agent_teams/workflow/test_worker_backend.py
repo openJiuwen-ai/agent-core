@@ -170,6 +170,7 @@ def test_execute_worker_derives_teammate_spec_without_team_tools(tmp_path, monke
         captured["spec"] = agent_spec
         captured["role"] = role
         captured["member_name"] = member_name
+        captured["build_context"] = build_context
         return _FakeHarness()
 
     monkeypatch.setattr(th_mod.TeamHarness, "build", _fake_build)
@@ -181,6 +182,7 @@ def test_execute_worker_derives_teammate_spec_without_team_tools(tmp_path, monke
     asyncio.run(backend._execute_worker("t", [], member_name="wf-w-0", has_schema=False, model=None))
     spec = captured["spec"]
     assert captured["role"] == TeamRole.WORKER
+    assert captured["build_context"] is None
     assert spec.enable_task_loop is True  # todo planning / task loop preserved
     assert spec.enable_task_planning is True
     assert spec.card.name == "wf-w-0"
@@ -196,3 +198,52 @@ def test_execute_worker_derives_teammate_spec_without_team_tools(tmp_path, monke
     )
     assert captured["spec"].tools == [tool]
     assert captured["spec"].tools[0].card.name == "structured_output"
+
+
+def test_execute_worker_derives_build_context_from_leader_base(monkeypatch):
+    """_execute_worker derives a per-worker BuildContext from the leader base."""
+    from openjiuwen.agent_teams.harness import team_harness as th_mod
+    from openjiuwen.agent_teams.schema.build_context import BuildContext
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+    from openjiuwen.agent_teams.schema.team import TeamRole
+
+    base = DeepAgentSpec(enable_task_loop=True, tools=[])
+    leader_ctx = BuildContext(
+        language="cn",
+        member_name="leader",
+        role="leader",
+        extras={"team_key": "leader-only"},
+    )
+    captured: dict = {}
+
+    class _FakeHarness:
+        async def run_once(self, content, **kw):
+            return {"output": "ok", "result_type": "answer"}
+
+        async def dispose(self):
+            return None
+
+    def _fake_build(*, agent_spec, role, member_name, build_context=None, **kw):
+        captured["build_context"] = build_context
+        return _FakeHarness()
+
+    monkeypatch.setattr(th_mod.TeamHarness, "build", _fake_build)
+
+    backend = TeamWorkerBackend(
+        model=None,
+        team_backend=None,
+        worker_base_spec=base,
+        build_context=leader_ctx,
+        language="en",
+        team_name="myteam",
+    )
+    asyncio.run(backend._execute_worker("t", [], member_name="wf-w-0", has_schema=False, model=None))
+
+    ctx = captured["build_context"]
+    assert ctx is not None
+    assert ctx.member_name == "wf-w-0"
+    assert ctx.role == TeamRole.WORKER.value
+    assert ctx.member_card_id == "myteam_wf-w-0"
+    assert ctx.language == "en"
+    assert ctx.extras == {"team_key": "leader-only"}
+    assert ctx is not leader_ctx
