@@ -76,12 +76,13 @@ def _handler(role: TeamRole) -> tuple[WorkflowHandler, _FakeRound]:
 def _event(kind: str, *, phase: str | None = None, name: str | None = None,
            prompt: str | None = None, model: str | None = None,
            phases: list[PhasePlan] | None = None, label: str | None = None,
-           outcome: str | None = None, text: str | None = None) -> EventMessage:
+           outcome: str | None = None, text: str | None = None,
+           correlation_id: str | None = None) -> EventMessage:
     return EventMessage.from_event(
         WorkflowProgressTeamEvent(
             team_name="t", kind=kind, phase=phase, workflow_name=name,
             prompt=prompt, model=model, phases=phases, label=label,
-            outcome=outcome, text=text,
+            outcome=outcome, text=text, correlation_id=correlation_id,
         )
     )
 
@@ -114,6 +115,19 @@ def test_per_agent_events_are_not_narrated():
     asyncio.run(handler.on_workflow_progress(_event("agent_started", phase="Search")))
     asyncio.run(handler.on_workflow_progress(_event("agent_completed", phase="Search")))
     assert host.delivered == []
+
+
+def test_leader_narrates_human_prompt_with_correlation_id():
+    """A human_prompt is narrated with the question and the reply correlation id."""
+    handler, host = _handler(TeamRole.LEADER)
+    asyncio.run(
+        handler.on_workflow_progress(
+            _event("human_prompt", label="oncall", prompt="approve rollout?", correlation_id="c-42")
+        )
+    )
+    assert len(host.delivered) == 1
+    line = host.delivered[0]
+    assert "approve rollout?" in line and "oncall" in line and "c-42" in line
 
 
 def test_non_leader_never_narrates():

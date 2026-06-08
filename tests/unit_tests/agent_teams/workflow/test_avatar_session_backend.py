@@ -230,6 +230,93 @@ def test_human_session_times_out_to_skipped(monkeypatch):
     assert res.skipped is True
 
 
+class _FakeMessager:
+    """Minimal messager: publish fans out to the topic's subscribed handler."""
+
+    def __init__(self) -> None:
+        self.handlers: dict = {}
+        self.unsubscribed: list[str] = []
+
+    async def subscribe(self, topic_id: str, handler) -> None:
+        self.handlers[topic_id] = handler
+
+    async def unsubscribe(self, topic_id: str) -> None:
+        self.unsubscribed.append(topic_id)
+        self.handlers.pop(topic_id, None)
+
+    async def publish(self, topic_id: str, message) -> None:
+        handler = self.handlers.get(topic_id)
+        if handler is not None:
+            await handler(message)
+
+
+def test_human_round_trip_via_messager(monkeypatch):
+    """Full inbound path: subscribe on open, a published reply resolves the turn."""
+    from openjiuwen.agent_teams.schema.events import (
+        EventMessage,
+        TeamEvent,
+        swarmflow_human_reply_topic,
+    )
+
+    harnesses: list = []
+    _patch_build(monkeypatch, harnesses)
+    base = DeepAgentSpec(tools=[])
+    messager = _FakeMessager()
+    captured: dict = {}
+
+    def on_prompt(member_name, corr, prompt):
+        captured["corr"] = corr
+
+    async def scenario():
+        mgr = AvatarSessionManager(
+            worker_base_spec=base, human_base_spec=base, team_name="t",
+            session_id="s1", messager=messager, on_human_prompt=on_prompt,
+        )
+        sid = await mgr.open_session(kind="human", instructions=None, opts={"label": "lead"})
+        topic = swarmflow_human_reply_topic("s1", "t")
+        assert topic in messager.handlers  # subscribed lazily on the human open
+
+        async def reply_soon():
+            for _ in range(1000):
+                if "corr" in captured:
+                    break
+                await asyncio.sleep(0)
+            # Simulate interact_agent_team publishing the person's reply.
+            await messager.publish(
+                topic,
+                EventMessage(
+                    event_type=TeamEvent.WORKFLOW_HUMAN_REPLY,
+                    payload={"correlation_id": captured["corr"], "answer": "approved"},
+                    sender_id="user",
+                ),
+            )
+
+        send_task = asyncio.create_task(mgr.send_turn(sid, "approve?", {"label": "lead"}, None))
+        await reply_soon()
+        res = await send_task
+        await mgr.aclose()
+        return res
+
+    res = asyncio.run(scenario())
+    assert "approved" in res.text  # avatar formatted the person's reply
+    assert messager.unsubscribed  # aclose unsubscribed from the reply topic
+
+
+def test_reply_event_for_unknown_correlation_is_ignored(monkeypatch):
+    """A reply with no matching pending turn is dropped (late / duplicate)."""
+    from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
+
+    base = DeepAgentSpec(tools=[])
+    mgr = AvatarSessionManager(worker_base_spec=base, human_base_spec=base, team_name="t", session_id="s1")
+    msg = EventMessage(
+        event_type=TeamEvent.WORKFLOW_HUMAN_REPLY,
+        payload={"correlation_id": "nope", "answer": "x"},
+        sender_id="user",
+    )
+    # No pending turn registered -> handler is a no-op, must not raise.
+    asyncio.run(mgr._on_reply_event(msg))
+
+
 def test_aclose_disposes_all_open_sessions(monkeypatch):
     """Run-end aclose disposes every avatar that was opened."""
     harnesses: list = []
