@@ -43,12 +43,13 @@ from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.schema.config import AudioModelConfig, VisionModelConfig
 from openjiuwen.harness.tools import (
+    WebFetchWebpageTool,
+    WebFreeSearchTool,
     WebPaidSearchTool,
     create_audio_tools,
     create_vision_tools,
     is_paid_search_enabled,
 )
-from openjiuwen.harness.tools.web_tools import WebFetchWebpageTool, WebFreeSearchTool
 from openjiuwen.harness.tools.worktree import WorktreeConfig, WorktreeRail
 
 # Element name constants — the RailSpec / BuiltinToolSpec ``type`` values. Every
