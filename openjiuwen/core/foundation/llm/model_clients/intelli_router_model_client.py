@@ -11,7 +11,7 @@ from typing import List, Optional, AsyncIterator, Union, Dict, Any
 
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.schema.message import (
-    BaseMessage, AssistantMessage, UserMessage
+    BaseMessage, AssistantMessage, UserMessage, UsageMetadata
 )
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
@@ -383,6 +383,17 @@ class IntelliRouterModelClient(BaseModelClient):
                 )
                 tool_calls.append(tool_call)
 
+        usage_metadata = None
+        usage = response.get("usage")
+        if usage:
+            usage_metadata = UsageMetadata(
+                model_name=self.model_config.model_name,
+                input_tokens=usage.get("prompt_tokens", 0) or 0,
+                output_tokens=usage.get("completion_tokens", 0) or 0,
+                total_tokens=usage.get("total_tokens", 0) or 0,
+                cache_tokens=self._extract_cache_tokens(usage),
+            )
+
         if output_parser and content:
             try:
                 parsed = await output_parser.parse(content)
@@ -402,6 +413,7 @@ class IntelliRouterModelClient(BaseModelClient):
         return AssistantMessage(
             content=content,
             tool_calls=tool_calls if tool_calls else None,
+            usage_metadata=usage_metadata,
             finish_reason="tool_calls" if tool_calls else "stop",
             reasoning_content=reasoning_content,
         )
@@ -423,7 +435,18 @@ class IntelliRouterModelClient(BaseModelClient):
             delta = choices[0].get("delta", {})
             content = delta.get("content", "") or ""
 
-        return AssistantMessageChunk(content=content)
+        usage_metadata = None
+        usage = chunk.get("usage")
+        if usage:
+            usage_metadata = UsageMetadata(
+                model_name=self.model_config.model_name,
+                input_tokens=usage.get("prompt_tokens", 0) or 0,
+                output_tokens=usage.get("completion_tokens", 0) or 0,
+                total_tokens=usage.get("total_tokens", 0) or 0,
+                cache_tokens=self._extract_cache_tokens(usage),
+            )
+
+        return AssistantMessageChunk(content=content, usage_metadata=usage_metadata)
 
     async def generate_image(
         self,
