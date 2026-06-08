@@ -36,6 +36,7 @@ class _RecordingBackend(AgentBackend):
     def __init__(self) -> None:
         self.opened: list[tuple[str, str, str | None]] = []  # (sid, kind, instructions)
         self.turns: list[tuple[str, str, int]] = []  # (sid, prompt, prior_history_len)
+        self.correlations: list[str | None] = []  # correlation_id per send_turn
         self.closed: list[str] = []
         self.aclosed = 0
         self._sid_n = 0
@@ -51,8 +52,9 @@ class _RecordingBackend(AgentBackend):
         self.opened.append((sid, kind, instructions))
         return sid
 
-    async def send_turn(self, session_id, prompt, opts, schema_json, *, history=()) -> AgentResult:
+    async def send_turn(self, session_id, prompt, opts, schema_json, *, history=(), correlation_id=None) -> AgentResult:
         self.turns.append((session_id, prompt, len(history)))
+        self.correlations.append(correlation_id)
         if schema_json is not None:
             return AgentResult(structured={"echo": prompt, "n": len(history)})
         return AgentResult(text=f"turn:{prompt}:{len(history)}")
@@ -153,6 +155,41 @@ def test_human_session_routes_kind_human_and_keeps_context(tmp_path):
     assert len(backend.opened) == 1 and backend.opened[0][1] == "human"
     assert [t[2] for t in backend.turns] == [0, 2]
     assert result == ["turn:approve?:0", "turn:and the budget?:2"]
+
+
+_HUMAN_CORR_SCRIPT = '''
+from swarmflow import human_session, phase
+
+META = {"name": "hc", "description": "human correlation ids", "phases": []}
+
+async def run(args):
+    phase("review")
+    h = human_session(label="lead")
+    a = await h.send("q1")
+    b = await h.send("q2")
+    return [a, b]
+'''
+
+
+def test_human_correlation_id_is_deterministic_phase_label_turn(tmp_path):
+    """A human turn's correlation id is deterministic (phase:label:turn), not a uuid."""
+    script = _write(tmp_path, "hc.py", _HUMAN_CORR_SCRIPT)
+    backend = _RecordingBackend()
+
+    asyncio.run(run_workflow(script, backend=backend))
+
+    # Deterministic, human-readable, stable across a replay — never random.
+    assert backend.correlations == ["review:lead:0", "review:lead:1"]
+
+
+def test_agent_turn_correlation_id_is_none(tmp_path):
+    """Agent turns carry no correlation id (only human turns do)."""
+    script = _write(tmp_path, "sess.py", _MULTI_TURN_SCRIPT)
+    backend = _RecordingBackend()
+
+    asyncio.run(run_workflow(script, backend=backend))
+
+    assert backend.correlations == [None, None, None]
 
 
 _HUMAN_ONESHOT_SCRIPT = '''
