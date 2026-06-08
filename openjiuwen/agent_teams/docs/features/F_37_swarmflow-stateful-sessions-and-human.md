@@ -5,8 +5,8 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-06-08 |
-| 范围 | `workflow/engine/`（`primitives` / `backends/base` / `backends/mock` / `journal` / `runtime` / `runner` / `facade` / `provider` / `seam` / `__init__`）、`workflow/backends/`（新增 `avatar_session_backend.py` / `_member_spec.py`，改 `team_worker_backend.py`）、`harness/team_harness.py` |
-| 测试基线 | 新增 `test_session_primitives.py`(10) + `test_avatar_session_backend.py`(7)；`tests/unit_tests/agent_teams/` 全套 1411 passed / 16 skipped / 0 failed（排除预存缺 `prompt_toolkit` 的 cli/observability 模块）|
+| 范围 | `workflow/engine/`（`primitives` / `backends/base` / `backends/mock` / `journal` / `runtime` / `runner` / `progress` / `facade` / `provider` / `seam` / `__init__`）、`workflow/`（`runner.py` / `tool_swarmflow.py`，新增 `backends/avatar_session_backend.py` / `backends/_member_spec.py`，改 `backends/team_worker_backend.py`）、`harness/team_harness.py`；human 外部 wiring：`schema/events.py`、`agent/agent_configurator.py`、`rails/{team_context,elements,team_tool_rail}.py`、`tools/tool_factory.py`、`runtime/manager.py`、`agent/coordination/handlers/workflow.py`、`i18n.py` |
+| 测试基线 | 新增 `test_session_primitives.py`(10) + `test_avatar_session_backend.py`(9) + `test_swarmflow_human_routing.py`(4) + `test_swarmflow_leader.py` human_prompt 用例；`tests/unit_tests/agent_teams/` 全套 1418 passed / 16 skipped / 0 failed（排除预存缺 `prompt_toolkit` 的 cli/observability 模块）|
 | Refs | #751 |
 
 ## 背景
@@ -95,21 +95,36 @@ swarmflow 此前只有一种执行单位：单轮 worker（`agent()` → `TeamWo
 - 全 `tests/unit_tests/agent_teams/` 1411 passed / 0 failed，worker 重构（共享 `_member_spec`
   helper）零回归。
 
+## human 外部 wiring（seam B，已接线）
+
+后续接续时已完成的外部链路，与上文决策一致：
+
+- **出向**：`engine/progress.py` 加 `HUMAN_PROMPT`/`HUMAN_REPLIED` + `correlation_id`；manager
+  的 `on_human_prompt(member, corr, prompt)` 由 `run_swarmflow` 接到 `observer.emit
+  (WorkflowProgressEvent(kind=HUMAN_PROMPT, ...))` → `_publish` → `WorkflowProgressTeamEvent`
+  （加 `correlation_id`）→ leader `WorkflowHandler` 渲染 `workflow.human_prompt`/`human_replied`
+  文案（i18n cn/en）。corr 由 backend 生成（非确定 IO，progress 不进 journal）。
+- **装配**：`agent_configurator` 计算 `swarmflow_human_base_spec`（`base_specs.get
+  ("human_agent")` 缺省回退 worker spec），经 `inject_team_handles` →
+  `SWARMFLOW_HUMAN_BASE_SPEC` handle → `elements`/`team_tool_rail`/`tool_factory` →
+  `SwarmflowTool` → `run_swarmflow` → `TeamWorkerBackend` → `AvatarSessionManager`。messager +
+  session_id 同链路下发。
+- **入向（seam B）**：`schema/events.py` 加 `TeamEvent.WORKFLOW_HUMAN_REPLY` + 专用
+  `swarmflow_human_reply_topic(session_id, team_name)`（独立于 `TeamTopic.TEAM`，不与 leader 订阅
+  冲突）。`runtime/manager.py:interact` 在 `resolve_targets` 之前用
+  `_as_swarmflow_human_reply` 识别 `HumanAgentMessage(target="swarmflow:<corr>")` →
+  `_route_swarmflow_human_reply` publish 到 reply topic（绕过 gate / roster）。
+  `AvatarSessionManager` 在首个 human open 时 `messager.subscribe(reply_topic, _on_reply_event)`，
+  handler 过滤 `WORKFLOW_HUMAN_REPLY` → `submit_human_reply`；`aclose` 退订。
+
 ## 已知遗留
 
-- **human 外部 wiring（seam B 已定）尚未接线**：① 出向 progress 事件 `HUMAN_PROMPT`/
-  `HUMAN_REPLIED` + `correlation_id`（manager `on_human_prompt` → `observer.emit`）；
-  ② `agent_configurator` 注入 `swarmflow_human_base_spec`（`base_specs.get("human_agent")`
-  缺省回退）+ messager 句柄，沿 `SWARMFLOW_WORKER_BASE_SPEC` handle 链下发；③ `run_swarmflow`/
-  `tool_swarmflow` 透传 + manager `messager.subscribe(TeamTopic.TEAM)` 过滤
-  `WORKFLOW_HUMAN_REPLY` → `submit_human_reply`；④ `runtime/manager.py` 的
-  `HumanAgentMessage` 分支加薄路由（`target="swarmflow:<corr>"` → publish 而非走
-  `HumanAgentInbox`）。当前 `human_session`/`human` 缺 `human_base_spec` 时清晰报错（不静默）。
-  human 全链路需真实 LLM 做系统测试验证。
+- **human 全链路系统测试**：单测覆盖了 manager turn 逻辑、messager 往返、interact 路由检测、
+  leader 播报；但"真实 LLM avatar 把真人输入结构化 + 跨进程 messager"的端到端需一个
+  system test 验证（无 LLM 环境跑不了）。
+- **CLI `$` 回复语法**：UI 目前需用 `interact_agent_team(HumanAgentMessage(target=
+  "swarmflow:<corr>"))` 回复；交互式 CLI 的 `$swarmflow:<corr> <answer>` 解析（`parse_interact_str`
+  是否允许 `:`）未验证，作为 UI 侧 follow-up。
 - **resume 部分-hit 续跑**：依赖 avatar session checkpoint 持久化分桶（复用 team 的
   `session.state["teams"]` 机制）；首期保证"冷启动多轮 + 全-hit 纯重放"。
 - **`fork`**：本期不做。
-- **leader/TUI 对 `HUMAN_PROMPT` 的播报文案**（`coordination/handlers/workflow.py` + i18n）。
-- **治理文档不一致（待用户裁决）**：`docs/CLAUDE.md` 的「提交约定」写两提交（代码+单测合一 +
-  文档），而 `CLAUDE.local.md` 与 `agent_teams/CLAUDE.md` 写三提交（代码 / 单测 / 文档分开）；
-  本特性按三提交落地。
