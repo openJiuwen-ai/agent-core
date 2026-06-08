@@ -568,7 +568,12 @@ class AgentSession:
                 _emit_agent_completed(rt, opts, result)
                 return None if notify else result
 
-            result, ok, err = await self._drive(rt, prompt, opts, json_schema, model_cls)
+            # A human turn carries a deterministic correlation id (phase:label:turn)
+            # so a person's reply matches even across a resume — never a uuid.
+            correlation_id = self._correlation_id(opts) if self._human else None
+            result, ok, err = await self._drive(
+                rt, prompt, opts, json_schema, model_cls, correlation_id
+            )
             if not ok:
                 attempts = rt.retries + 1
                 who = "human" if self._human else "agent"
@@ -594,7 +599,7 @@ class AgentSession:
         sid, self._sid = self._sid, None
         await rt.backend.close_session(sid)
 
-    async def _drive(self, rt, prompt, opts, json_schema, model_cls):
+    async def _drive(self, rt, prompt, opts, json_schema, model_cls, correlation_id):
         """Open the session lazily, then run one turn through the retry helper.
 
         Agent turns mirror ``agent()`` (spawn-budget gate + LLM permit); human
@@ -602,7 +607,7 @@ class AgentSession:
         """
         if self._human:
             await self._ensure_open(rt, opts)
-            return await self._turn(rt, prompt, opts, json_schema, model_cls)
+            return await self._turn(rt, prompt, opts, json_schema, model_cls, correlation_id)
         if rt.spawn_count >= rt.spawn_limit:
             detail = f"spawn limit {rt.spawn_limit} reached"
             rt.log_sink(f"[wf] {detail}; skipping {opts.get('label')!r}")
@@ -611,16 +616,32 @@ class AgentSession:
             rt.sem = asyncio.Semaphore(rt.make_cap())
         async with rt.sem:
             await self._ensure_open(rt, opts)
-            return await self._turn(rt, prompt, opts, json_schema, model_cls)
+            return await self._turn(rt, prompt, opts, json_schema, model_cls, correlation_id)
 
-    async def _turn(self, rt, prompt, opts, json_schema, model_cls):
+    async def _turn(self, rt, prompt, opts, json_schema, model_cls, correlation_id):
         """Run one ``send_turn`` (the prior history is what the backend may replay)."""
         hist = list(self._history)
         sid = self._sid
         return await _attempt_calls(
             rt, opts, json_schema, model_cls,
-            lambda: rt.backend.send_turn(sid, prompt, opts, json_schema, history=hist),
+            lambda: rt.backend.send_turn(
+                sid, prompt, opts, json_schema, history=hist, correlation_id=correlation_id
+            ),
         )
+
+    def _correlation_id(self, opts: dict) -> str:
+        """Deterministic id for a human turn: ``{phase}:{label}:{turn}``.
+
+        The script flow is deterministic, so this is stable across a resume — the
+        same interaction point yields the same id, which keeps a person's reply
+        valid even if the run was interrupted while waiting. ``turn`` is this
+        session's send index (``len(history) // 2``); it advances on every send
+        (hit or miss) because history is appended each turn, so replay matches.
+        """
+        phase = opts.get("phase") or "_"
+        label = opts.get("label") or "human"
+        turn = len(self._history) // 2
+        return f"{phase}:{label}:{turn}"
 
     async def _ensure_open(self, rt, opts) -> None:
         """Open the backend session on the first real turn (one avatar per session)."""

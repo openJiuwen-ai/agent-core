@@ -176,6 +176,7 @@ class MockBackend(AgentBackend):
         schema_json: dict | None,
         *,
         history: Sequence[dict] = (),
+        correlation_id: str | None = None,
     ) -> AgentResult:
         # Folding history into the seed makes each turn deterministically distinct,
         # so a multi-turn session does not echo the same synthetic answer.

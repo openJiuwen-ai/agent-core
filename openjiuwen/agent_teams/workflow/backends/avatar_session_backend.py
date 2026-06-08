@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
@@ -197,19 +196,21 @@ class AvatarSessionManager:
         schema_json: dict | None,
         *,
         history: Sequence[dict] = (),
+        correlation_id: str | None = None,
     ) -> AgentResult:
         """Advance one turn on a session (serialised per session by its lock).
 
         ``history`` is unused on the live (cold-run) path — the avatar harness
         keeps its own context across rounds. It is the seam a later stage uses to
-        rebuild context after a partial-hit resume.
+        rebuild context after a partial-hit resume. ``correlation_id`` is the
+        engine's deterministic id for a human turn (matches a person's reply).
         """
         state = self._sessions.get(session_id)
         if state is None:
             raise BackendError(f"unknown session {session_id!r}")
         async with state.lock:
             if state.kind == "human":
-                return await self._human_turn(state, prompt, opts, schema_json)
+                return await self._human_turn(state, prompt, opts, schema_json, correlation_id)
             return await self._agent_turn(state, prompt, schema_json)
 
     async def close_session(self, session_id: str) -> None:
@@ -244,11 +245,16 @@ class AvatarSessionManager:
 
         The inbound seam: whatever transport carries a real person's answer
         (messager round-trip from ``interact_agent_team``) calls this with the
-        ``correlation_id`` from the outbound prompt. Returns ``False`` when the
-        correlation is unknown or already resolved (late / duplicate reply).
+        ``correlation_id`` from the outbound prompt. An unknown / already-resolved
+        correlation is rejected (returns ``False``) — an illegal id from an
+        external caller is dropped, not applied to some other turn.
         """
         fut = self._pending_human.get(correlation_id)
         if fut is None or fut.done():
+            team_logger.warning(
+                "[swarmflow] rejected human reply for unknown/closed correlation_id %r",
+                correlation_id,
+            )
             return False
         fut.set_result(answer)
         return True
@@ -399,6 +405,7 @@ class AvatarSessionManager:
         prompt: str,
         opts: dict,
         schema_json: dict | None,
+        correlation_id: str | None,
     ) -> AgentResult:
         """Human-session turn: push the question to a person, format their reply.
 
@@ -407,7 +414,7 @@ class AvatarSessionManager:
         answer (structured when a schema is requested). A timeout / no answer
         yields ``skipped`` so the engine returns ``None`` for the turn.
         """
-        raw = await self._await_human_reply(state, prompt, opts)
+        raw = await self._await_human_reply(state, prompt, opts, correlation_id)
         if raw is None:  # timed out / no answer
             return AgentResult(skipped=True)
         format_prompt = (
@@ -420,14 +427,24 @@ class AvatarSessionManager:
         # path so schema capture / round settling work identically.
         return await self._agent_turn(state, format_prompt, schema_json)
 
-    async def _await_human_reply(self, state: _SessionState, prompt: str, opts: dict) -> str | None:
+    async def _await_human_reply(
+        self,
+        state: _SessionState,
+        prompt: str,
+        opts: dict,
+        correlation_id: str | None,
+    ) -> str | None:
         """Register a pending turn, signal the prompt out, await the person's reply.
 
         Returns the raw reply text, or ``None`` on timeout. Only the manager's own
         ``wait_for`` timeout is caught — an outer cancellation (e.g. the engine's
         per-call ``timeout``) propagates so it is handled where it belongs.
+
+        ``correlation_id`` is the engine's deterministic id for this turn; a
+        person's reply carries it back. It is stable across a resume, so a reply
+        issued for an interrupted-then-resumed turn still matches.
         """
-        corr = uuid.uuid4().hex
+        corr = correlation_id or f"{state.member_name}:{state.turns_executed}"
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         self._pending_human[corr] = fut

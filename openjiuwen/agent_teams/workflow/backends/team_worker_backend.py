@@ -189,10 +189,11 @@ class TeamWorkerBackend(AgentBackend):
         schema_json: dict | None,
         *,
         history: Sequence[dict] = (),
+        correlation_id: str | None = None,
     ) -> AgentResult:
         """Advance one turn on an open session."""
         return await self._sessions().send_turn(
-            session_id, prompt, opts, schema_json, history=history
+            session_id, prompt, opts, schema_json, history=history, correlation_id=correlation_id
         )
 
     async def close_session(self, session_id: str) -> None:

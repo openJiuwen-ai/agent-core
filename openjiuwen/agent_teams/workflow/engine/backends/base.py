@@ -80,6 +80,7 @@ class AgentBackend(abc.ABC):
         schema_json: dict | None,
         *,
         history: Sequence[dict] = (),
+        correlation_id: str | None = None,
     ) -> AgentResult:
         """Advance one turn on an open session and return its result.
 
@@ -87,6 +88,11 @@ class AgentBackend(abc.ABC):
         (``[{"role", "content"}, ...]``). A live backend that keeps its own
         session state uses it only to rebuild context once after a resume; in the
         normal path it is redundant with the backend's own state.
+
+        ``correlation_id`` is a deterministic id for a human turn
+        (``{phase}:{label}:{turn}``, set by the engine) used to match a person's
+        reply back to this turn; ``None`` for agent turns. Being deterministic
+        (not a uuid) it stays valid across a resume.
         """
         raise NotImplementedError("backend does not support stateful sessions")
 
