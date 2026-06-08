@@ -40,7 +40,7 @@ import inspect
 import json
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Sequence, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence, TypeVar, overload
 
 from .errors import WorkflowError
 from .journal import call_signature, key_str
@@ -194,6 +194,48 @@ def _emit_agent_failed(rt, opts: dict, message: str) -> None:
     )
 
 
+# ─────────────────────────── options bag ───────────────────────────
+#: Engine-owned ``options`` keys. A backend may widen this via its
+#: ``KNOWN_OPTIONS``; anything outside the union is a typo and fails fast.
+_ENGINE_OPTIONS = frozenset({"label", "phase", "schema", "model", "timeout"})
+
+
+def _build_opts(rt, explicit: dict, options: dict | None = None) -> dict:
+    """Merge explicit kwargs over an ``options`` bag, drop ``None``, validate keys.
+
+    The session primitives accept tuning knobs through a single ``options`` dict
+    (so new knobs need no signature change), with explicit keyword arguments
+    taking precedence. Every resulting key must be in
+    ``_ENGINE_OPTIONS | rt.backend.KNOWN_OPTIONS`` — an unknown key raises rather
+    than silently no-opping, which is the whole point of the bag.
+
+    Args:
+        rt: The active runtime (its ``backend`` declares extra allowed keys).
+        explicit: Keyword arguments passed directly to the primitive.
+        options: The optional ``options`` bag.
+
+    Returns:
+        The merged, validated, ``None``-stripped options dict.
+
+    Raises:
+        WorkflowError: If any key is outside the allowed set.
+    """
+    merged: dict = {}
+    for key, value in (options or {}).items():
+        if value is not None:
+            merged[key] = value
+    for key, value in explicit.items():
+        if value is not None:
+            merged[key] = value
+    allowed = _ENGINE_OPTIONS | getattr(rt.backend, "KNOWN_OPTIONS", frozenset())
+    unknown = sorted(k for k in merged if k not in allowed)
+    if unknown:
+        raise WorkflowError(
+            f"unknown option(s) {unknown}; allowed: {sorted(allowed)}"
+        )
+    return merged
+
+
 # ─────────────────────────── agent ───────────────────────────
 # Typed return per schema kind:
 #   schema=MyModel (pydantic) -> MyModel | None   (attribute access, static types)
@@ -311,7 +353,23 @@ async def agent(
 
 
 async def _call_backend(rt, prompt, opts, json_schema, model) -> _BackendCallResult:
-    """Call the backend with retries. Returns a ``_BackendCallResult``."""
+    """Run the single-shot ``agent()`` call (``backend.run``) with retries."""
+    return await _attempt_calls(
+        rt, opts, json_schema, model,
+        lambda: rt.backend.run(prompt, opts, json_schema),
+    )
+
+
+async def _attempt_calls(rt, opts, json_schema, model, make_call) -> tuple[Any, bool, str | None]:
+    """Run ``make_call()`` with retries + schema validation.
+
+    Shared by the single-shot ``agent()`` path (``backend.run``) and the stateful
+    session path (``backend.send_turn``); the only difference between them is the
+    bound ``make_call`` closure. Returns a ``_BackendCallResult``: a
+    backend/timeout error or schema-validation failure retries up to
+    ``rt.retries`` extra times; a ``skipped`` result short-circuits to a
+    non-success with no retry.
+    """
     timeout = opts.get("timeout")
     attempts = rt.retries + 1
     last_err: Exception | None = None
@@ -320,9 +378,9 @@ async def _call_backend(rt, prompt, opts, json_schema, model) -> _BackendCallRes
         try:
             if timeout is not None:
                 async with asyncio.timeout(timeout):  # py3.11+
-                    res = await rt.backend.run(prompt, opts, json_schema)
+                    res = await make_call()
             else:
-                res = await rt.backend.run(prompt, opts, json_schema)
+                res = await make_call()
         except Exception as e:  # backend / timeout error -> retry, then skip
             last_err = e
             rt.log_sink(
@@ -389,6 +447,256 @@ def _make_record(spec: _JournalRecordInput) -> dict:
         "result": payload,
         "raw_text": spec.raw_text,
     }
+
+
+# ─────────────────────── stateful sessions ───────────────────────
+def _jsonable(result: Any, model) -> Any:
+    """A JSON-able form of a turn result for the history mirror (cf. ``_make_record``)."""
+    if result is None:
+        return None
+    if model is not None and isinstance(result, model):
+        return result.model_dump(mode="json")
+    return result
+
+
+def _warn_concurrent_session(rt) -> None:
+    """Emitted once if a single session object receives overlapping ``send()``s."""
+    if getattr(rt, "warned_concurrent_session", False):
+        return
+    rt.warned_concurrent_session = True
+    rt.log_sink(
+        "[wf] WARNING: a single session received concurrent send()s (e.g. the same "
+        "session used from two parallel() branches). A session is a serial "
+        "conversation — await its turns in order, or use one session per entity."
+    )
+
+
+class AgentSession:
+    """A stateful, multi-turn handle over one agent — or one human.
+
+    Created by :func:`agent_session` / :func:`human_session`; scripts never
+    construct it directly. Each :meth:`send` advances the conversation and keeps
+    context across turns. The backend owns the real state (a long-lived avatar
+    harness); this object keeps a light ``(user, assistant)`` history mirror used
+    for the resume signature and lazy-open bookkeeping.
+
+    A human session (``_human=True``) sources each turn's input from a real
+    person (the backend formats it into the requested shape) and does not hold
+    the LLM concurrency permit while waiting; it is otherwise identical to an
+    agent session.
+    """
+
+    __slots__ = (
+        "_label", "_phase", "_instructions", "_options", "_human",
+        "_history", "_sid", "_in_flight",
+    )
+
+    def __init__(
+        self,
+        *,
+        label: str | None = None,
+        phase: str | None = None,
+        instructions: str | None = None,
+        options: dict | None = None,
+        _human: bool = False,
+    ) -> None:
+        self._label = label
+        self._phase = phase
+        self._instructions = instructions
+        self._options = dict(options or {})
+        self._human = _human
+        self._history: list[dict] = []
+        self._sid: str | None = None
+        self._in_flight = False
+
+    @overload
+    async def send(self, prompt: str, *, notify: Literal[True], options: dict | None = ...) -> None:
+        """Overload: ``notify=True`` is a one-way push and returns ``None``."""
+        ...
+
+    @overload
+    async def send(self, prompt: str, *, schema: type[M], options: dict | None = ...) -> "M | None":
+        """Overload: ``schema=<pydantic model>`` narrows the reply to that model."""
+        ...
+
+    @overload
+    async def send(self, prompt: str, *, schema: dict, options: dict | None = ...) -> "dict | None":
+        """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
+        ...
+
+    @overload
+    async def send(self, prompt: str, *, schema: None = ..., options: dict | None = ...) -> "str | None":
+        """Overload: no ``schema`` returns the reply's raw text."""
+        ...
+
+    async def send(self, prompt, *, schema=None, notify=False, options=None):
+        """Advance the conversation one turn (or push a one-way ``notify``).
+
+        With ``schema`` the reply is validated/coerced to it (``MyModel | None``
+        for a pydantic model, ``dict | None`` for a JSON-Schema dict); without,
+        the raw text (``str | None``). ``notify=True`` pushes a one-way message
+        (still recorded so context continues, still journaled for resume) and
+        returns ``None``; it is text-only and rejects a ``schema``.
+        """
+        rt = _rt.get()
+        if notify and schema is not None:
+            raise WorkflowError("send(notify=True) is text-only; don't also pass a schema")
+        # Phase is run-global orchestration state: the active phase() wins, so a
+        # session naturally spans phases; fall back to the session's own default.
+        phase_val = rt.current_phase if rt.current_phase is not None else self._phase
+        opts = _build_opts(
+            rt,
+            {"label": self._label, "phase": phase_val, "schema": schema},
+            {**self._options, **(options or {})},
+        )
+        json_schema, model_cls = resolve_schema(opts.get("schema"))
+
+        ks = key_str(_path.get() + (("call", _next_ordinal()),))
+        sig = call_signature(prompt, opts, json_schema, history=self._history)
+
+        if self._in_flight:
+            _warn_concurrent_session(rt)
+        self._in_flight = True
+        try:
+            _emit_agent_started(rt, opts, prompt)
+
+            cached = rt.journal.get_cached(ks, sig)
+            if cached is not None:  # resume hit — no backend, no harness, no person
+                rt.journal.use(ks, cached)
+                result = _rehydrate(cached, model_cls)
+                self._append_history(prompt, result, model_cls)
+                _emit_agent_completed(rt, opts, result)
+                return None if notify else result
+
+            result, ok, err = await self._drive(rt, prompt, opts, json_schema, model_cls)
+            if not ok:
+                attempts = rt.retries + 1
+                who = "human" if self._human else "agent"
+                label = opts.get("label") or who
+                msg = f"{who} session {label!r} failed after {attempts} attempts"
+                if err:
+                    msg = f"{msg}: {err}"
+                _emit_agent_failed(rt, opts, msg)
+                return None
+
+            rt.journal.use(ks, _make_record(ks, sig, opts, result, model_cls))
+            self._append_history(prompt, result, model_cls)
+            _emit_agent_completed(rt, opts, result)
+            return None if notify else result
+        finally:
+            self._in_flight = False
+
+    async def aclose(self) -> None:
+        """Close the backing session if it was ever opened (idempotent)."""
+        if self._sid is None:
+            return
+        rt = _rt.get()
+        sid, self._sid = self._sid, None
+        await rt.backend.close_session(sid)
+
+    async def _drive(self, rt, prompt, opts, json_schema, model_cls):
+        """Open the session lazily, then run one turn through the retry helper.
+
+        Agent turns mirror ``agent()`` (spawn-budget gate + LLM permit); human
+        turns skip both — waiting on a person must not hold a concurrency permit.
+        """
+        if self._human:
+            await self._ensure_open(rt, opts)
+            return await self._turn(rt, prompt, opts, json_schema, model_cls)
+        if rt.spawn_count >= rt.spawn_limit:
+            detail = f"spawn limit {rt.spawn_limit} reached"
+            rt.log_sink(f"[wf] {detail}; skipping {opts.get('label')!r}")
+            return None, False, detail
+        if rt.sem is None:  # safety net; normally created in run_workflow
+            rt.sem = asyncio.Semaphore(rt.make_cap())
+        async with rt.sem:
+            await self._ensure_open(rt, opts)
+            return await self._turn(rt, prompt, opts, json_schema, model_cls)
+
+    async def _turn(self, rt, prompt, opts, json_schema, model_cls):
+        """Run one ``send_turn`` (the prior history is what the backend may replay)."""
+        hist = list(self._history)
+        sid = self._sid
+        return await _attempt_calls(
+            rt, opts, json_schema, model_cls,
+            lambda: rt.backend.send_turn(sid, prompt, opts, json_schema, history=hist),
+        )
+
+    async def _ensure_open(self, rt, opts) -> None:
+        """Open the backend session on the first real turn (one avatar per session)."""
+        if self._sid is not None:
+            return
+        if not self._human:
+            rt.spawn_count += 1  # the avatar is this session's one spawned agent
+        self._sid = await rt.backend.open_session(
+            kind="human" if self._human else "agent",
+            instructions=self._instructions,
+            opts=opts,
+        )
+
+    def _append_history(self, prompt: str, result: Any, model_cls) -> None:
+        """Append the ``(user, assistant)`` pair so the next turn carries context."""
+        self._history.append({"role": "user", "content": prompt})
+        self._history.append({"role": "assistant", "content": _jsonable(result, model_cls)})
+
+
+def agent_session(
+    *,
+    label: str | None = None,
+    phase: str | None = None,
+    instructions: str | None = None,
+    options: dict | None = None,
+) -> AgentSession:
+    """Open a stateful, multi-turn agent — ``send()`` it repeatedly; context persists."""
+    return AgentSession(label=label, phase=phase, instructions=instructions, options=options)
+
+
+def human_session(
+    *,
+    label: str | None = None,
+    phase: str | None = None,
+    instructions: str | None = None,
+    options: dict | None = None,
+) -> AgentSession:
+    """Open a stateful, multi-turn human participant (each turn's input from a person)."""
+    return AgentSession(
+        label=label, phase=phase, instructions=instructions, options=options, _human=True
+    )
+
+
+#: Annotation alias: ``human_session()`` returns the same class with ``_human`` set.
+HumanSession = AgentSession
+
+
+@overload
+async def human(prompt: str, *, schema: type[M], options: dict | None = ...) -> "M | None":
+    """Overload: ``schema=<pydantic model>`` narrows the answer to that model."""
+    ...
+
+
+@overload
+async def human(prompt: str, *, schema: dict, options: dict | None = ...) -> "dict | None":
+    """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
+    ...
+
+
+@overload
+async def human(prompt: str, *, schema: None = ..., options: dict | None = ...) -> "str | None":
+    """Overload: no ``schema`` returns the person's answer as raw text."""
+    ...
+
+
+async def human(prompt, *, schema=None, options=None):
+    """One-shot human turn: ask a person once, return their (typed) answer.
+
+    Sugar over an ephemeral :func:`human_session` opened, asked once, and closed —
+    use :func:`human_session` when you need multiple turns with memory.
+    """
+    s = AgentSession(_human=True)
+    try:
+        return await s.send(prompt, schema=schema, options=options)
+    finally:
+        await s.aclose()
 
 
 # ─────────────────────── parallel (barrier) ───────────────────────

@@ -21,7 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 
 def key_str(key: tuple) -> str:
@@ -29,19 +29,32 @@ def key_str(key: tuple) -> str:
     return json.dumps(key, ensure_ascii=False)
 
 
-def call_signature(prompt: str, opts: dict, json_schema: dict | None) -> str:
-    """SHA-256 over the call's *content* (prompt + identity opts + schema)."""
-    blob = "\x00".join(
-        [
-            prompt,
-            json.dumps(
-                {k: opts.get(k) for k in ("label", "phase", "model")},
-                sort_keys=True,
-                ensure_ascii=False,
-            ),
-            json.dumps(json_schema, sort_keys=True, ensure_ascii=False),
-        ]
-    )
+def call_signature(
+    prompt: str,
+    opts: dict,
+    json_schema: dict | None,
+    history: Sequence[dict] | None = None,
+) -> str:
+    """SHA-256 over the call's *content* (prompt + identity opts + schema [+ history]).
+
+    ``history`` participates **only when non-empty**: a stateless ``agent()``
+    call (whose history is always empty) yields a byte-identical signature to
+    before this parameter existed, so worker resume is unaffected. A stateful
+    session turn folds its prior turns in, so a changed upstream turn cascades a
+    re-run of every turn that depends on it.
+    """
+    parts = [
+        prompt,
+        json.dumps(
+            {k: opts.get(k) for k in ("label", "phase", "model")},
+            sort_keys=True,
+            ensure_ascii=False,
+        ),
+        json.dumps(json_schema, sort_keys=True, ensure_ascii=False),
+    ]
+    if history:
+        parts.append(json.dumps(list(history), sort_keys=True, ensure_ascii=False))
+    blob = "\x00".join(parts)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 

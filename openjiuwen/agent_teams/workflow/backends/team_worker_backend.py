@@ -85,6 +85,7 @@ class TeamWorkerBackend(AgentBackend):
         max_iterations: int = 6,
         model_resolver: Callable[[str], Any] | None = None,
         worker_base_spec: Any = None,
+        human_base_spec: Any = None,
         build_context: Any = None,
     ) -> None:
         self._model = model
@@ -94,10 +95,14 @@ class TeamWorkerBackend(AgentBackend):
         self._max_iterations = max_iterations
         self._model_resolver = model_resolver
         self._worker_base_spec = worker_base_spec
+        self._human_base_spec = human_base_spec
         self._build_context = build_context
         self._worktrees = SwarmflowWorkerWorktrees(team_name=team_name, build_context=build_context)
         self._t = make_translator(language if language in ("cn", "en") else "cn")
         self._counter = 0
+        # Stateful agent_session / human_session manager, built on first use so a
+        # workflow that only uses single-shot agent() never pays for it.
+        self._session_mgr: Any = None
 
     async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
         member_name = self._next_member_name(opts)
@@ -137,6 +142,56 @@ class TeamWorkerBackend(AgentBackend):
         finally:
             await self._worktrees.finalize(member_name)
             await self._close_worker_row(member_name)
+
+    # ------------------------------------------------------------------
+    # Stateful sessions (agent_session / human_session) — delegated
+    # ------------------------------------------------------------------
+
+    def _sessions(self) -> Any:
+        """Lazily build the avatar-session manager (only when a session is opened)."""
+        if self._session_mgr is None:
+            from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import (
+                AvatarSessionManager,
+            )
+
+            self._session_mgr = AvatarSessionManager(
+                worker_base_spec=self._worker_base_spec,
+                human_base_spec=self._human_base_spec,
+                team_name=self._team_name,
+                language=self._language,
+                model_resolver=self._model_resolver,
+                build_context=self._build_context,
+                t=self._t,
+            )
+        return self._session_mgr
+
+    async def open_session(self, *, kind: str, instructions: str | None, opts: dict) -> str:
+        """Open a stateful session (see :class:`AvatarSessionManager`)."""
+        return await self._sessions().open_session(kind=kind, instructions=instructions, opts=opts)
+
+    async def send_turn(
+        self,
+        session_id: str,
+        prompt: str,
+        opts: dict,
+        schema_json: dict | None,
+        *,
+        history: Sequence[dict] = (),
+    ) -> AgentResult:
+        """Advance one turn on an open session."""
+        return await self._sessions().send_turn(
+            session_id, prompt, opts, schema_json, history=history
+        )
+
+    async def close_session(self, session_id: str) -> None:
+        """Close one open session (no-op when no session was ever opened)."""
+        if self._session_mgr is not None:
+            await self._session_mgr.close_session(session_id)
+
+    async def aclose(self) -> None:
+        """Dispose every session opened during the run (run-end teardown)."""
+        if self._session_mgr is not None:
+            await self._session_mgr.aclose()
 
     def _resolve_model(self, model_name: str | None) -> Any:
         """Resolve a per-call ``model`` hint to a worker ``TeamModelConfig``.
@@ -184,7 +239,10 @@ class TeamWorkerBackend(AgentBackend):
             ``StructuredOutputTool`` instance by :meth:`run`, not from this value.
         """
         from openjiuwen.agent_teams.harness.team_harness import TeamHarness
-        from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+        from openjiuwen.agent_teams.workflow.backends._member_spec import (
+            derive_member_build_context,
+            derive_member_spec,
+        )
 
         if self._worker_base_spec is None:
             raise BackendError(
@@ -192,39 +250,32 @@ class TeamWorkerBackend(AgentBackend):
             )
 
         try:
-            worker_workspace = self._setup_worker_workspace(member_name)
-
-            worker_spec = self._worker_base_spec.model_copy(
-                update={
-                    "card": AgentCard(
-                        id=f"{self._team_name}_{member_name}",
-                        name=member_name,
-                        description="swarmflow worker",
-                    ),
-                    # Per-call model config when resolved, else inherit teammate's.
-                    "model": model or self._worker_base_spec.model,
-                    "system_prompt": (
-                        self._t("swarmflow_worker", key="schema")
-                        if has_schema
-                        else self._t("swarmflow_worker", key="free")
-                    ),
-                    # Append the per-call structured_output instance; the base spec
-                    # already carries teammate tools/skills. enable_task_loop /
-                    # enable_task_planning are inherited (DeepAgent todo planning kept).
-                    "tools": list(self._worker_base_spec.tools or []) + list(tools),
-                    # Worker gets its own workspace, not the teammate's.
-                    "workspace": worker_workspace,
-                }
+            # Worker = teammate without team tools: per-call model (else inherit),
+            # single-shot prompt, base tools + the per-call structured_output
+            # instance. enable_task_loop / enable_task_planning ride along from
+            # the base spec, so DeepAgent todo planning is preserved.
+            worker_spec = derive_member_spec(
+                self._worker_base_spec,
+                team_name=self._team_name,
+                member_name=member_name,
+                system_prompt=(
+                    self._t("swarmflow_worker", key="schema")
+                    if has_schema
+                    else self._t("swarmflow_worker", key="free")
+                ),
+                model=model,
+                extra_tools=tools,
+                description="swarmflow worker",
             )
-            worker_build_context = None
-            if self._build_context is not None:
-                worker_build_context = self._build_context.derive(
-                    member_name=member_name,
-                    role=TeamRole.WORKER.value,
-                    member_card_id=f"{self._team_name}_{member_name}",
-                    language=self._language,
-                )
-                worker_build_context.extras = dict(worker_build_context.extras)
+            # Worker gets its own workspace, not the teammate's.
+            worker_workspace = self._setup_worker_workspace(member_name)
+            worker_spec = worker_spec.model_copy(update={"workspace": worker_workspace})
+            worker_build_context = derive_member_build_context(
+                self._build_context,
+                team_name=self._team_name,
+                member_name=member_name,
+                language=self._language,
+            )
             harness = TeamHarness.build(
                 agent_spec=worker_spec,
                 role=TeamRole.WORKER,

@@ -64,6 +64,33 @@ class EngineProvider:
     async def workflow(self, name_or_path: str, args: Any = None) -> Any:
         return await _p.workflow(name_or_path, args)
 
+    @staticmethod
+    def agent_session(
+        *,
+        label: str | None = None,
+        phase: str | None = None,
+        instructions: str | None = None,
+        options: dict | None = None,
+    ) -> Any:
+        return _p.agent_session(
+            label=label, phase=phase, instructions=instructions, options=options
+        )
+
+    @staticmethod
+    def human_session(
+        *,
+        label: str | None = None,
+        phase: str | None = None,
+        instructions: str | None = None,
+        options: dict | None = None,
+    ) -> Any:
+        return _p.human_session(
+            label=label, phase=phase, instructions=instructions, options=options
+        )
+
+    async def human(self, prompt: str, *, schema: Any = None, options: dict | None = None) -> Any:
+        return await _p.human(prompt, schema=schema, options=options)
+
     @property
     def budget(self) -> Any:
         return _p.budget

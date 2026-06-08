@@ -135,7 +135,15 @@ async def run_workflow(
         budget_total=budget_total,
     )
     rt.sem = asyncio.Semaphore(rt.make_cap())  # created inside the running loop
-    result = await _exec_loaded(loaded, rt)
+    try:
+        result = await _exec_loaded(loaded, rt)
+    finally:
+        # Close any stateful sessions the backend opened during the run. Best
+        # effort — a teardown error must never mask the run's own outcome.
+        try:
+            await rt.backend.aclose()
+        except Exception as exc:  # noqa: BLE001 - teardown is best-effort
+            log(f"[wf] backend.aclose() failed: {exc}")
     if journal_path:
         rt.journal.save(journal_path)
     return result

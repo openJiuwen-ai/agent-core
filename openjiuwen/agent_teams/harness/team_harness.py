@@ -374,6 +374,22 @@ class TeamHarness:
         if self._native is not None:
             await self._native.unregister_rail(rail)
 
+    def add_tool(self, tool: Any) -> None:
+        """Register one extra tool instance on the running native (idempotent per id).
+
+        Used for per-turn tools a long-lived session needs transiently — e.g. the
+        ``structured_output`` tool an ``agent_session`` turn mounts only while a
+        schema is requested. The ability manager re-qualifies the id per owner, so
+        concurrent sessions never collide; pair with :meth:`remove_tool` at turn end.
+        """
+        if self._native is not None:
+            self._native.ability_manager.add_ability(tool.card, tool)
+
+    def remove_tool(self, name: str) -> None:
+        """Drop a previously :meth:`add_tool`-ed tool by its (unqualified) name."""
+        if self._native is not None:
+            self._native.ability_manager.remove_ability(name)
+
     def register_member_tools(self, memory_manager: Any) -> None:
         """Register the team memory toolkit on the underlying agent."""
         if self._native is not None:

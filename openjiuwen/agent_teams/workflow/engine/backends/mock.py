@@ -32,7 +32,8 @@ from __future__ import annotations
 import hashlib
 import json
 import random
-from typing import Any, Callable
+from dataclasses import dataclass
+from typing import Any, Callable, Sequence
 
 from .base import AgentBackend, AgentResult
 
@@ -48,14 +49,16 @@ def _opt_sig(opts: dict) -> dict:
     return {k: opts[k] for k in ("label", "phase", "model", "isolation") if k in opts}
 
 
-def _seed(prompt: str, opts: dict, schema_json: dict | None) -> int:
-    blob = "\x00".join(
-        [
-            prompt,
-            json.dumps(_opt_sig(opts), sort_keys=True, ensure_ascii=False),
-            json.dumps(schema_json, sort_keys=True, ensure_ascii=False),
-        ]
-    )
+def _seed(prompt: str, opts: dict, schema_json: dict | None, history: Sequence[dict] | None = None) -> int:
+    parts = [
+        prompt,
+        json.dumps(_opt_sig(opts), sort_keys=True, ensure_ascii=False),
+        json.dumps(schema_json, sort_keys=True, ensure_ascii=False),
+    ]
+    if history:
+        # Fold prior turns so each turn of a session is deterministically distinct.
+        parts.append(json.dumps(list(history), sort_keys=True, ensure_ascii=False, default=str))
+    blob = "\x00".join(parts)
     return int(hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16], 16)
 
 
@@ -132,6 +135,15 @@ def synth(schema_json: dict, rng: random.Random) -> Any:
     return _synth(schema_json, rng, schema_json, None, 0)
 
 
+@dataclass
+class _MockSession:
+    """In-memory mock session row (mirrors the real backend's session state)."""
+
+    kind: str
+    instructions: str | None
+    turns: int = 0
+
+
 class MockBackend(AgentBackend):
     def __init__(
         self,
@@ -140,28 +152,76 @@ class MockBackend(AgentBackend):
     ) -> None:
         self.fixtures = fixtures or {}
         self.responder = responder
+        self._sessions: dict[str, _MockSession] = {}
 
     async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
         rng = random.Random(_seed(prompt, opts, schema_json))
-        label = opts.get("label")
+        raw = self._pick_raw(prompt, opts, schema_json, rng)
+        return self._result(prompt, opts.get("label"), raw, schema_json, rng)
 
-        raw: Any = None
+    # ------------------------------------------------------------------
+    # Stateful sessions (deterministic; a "human" session answers like an agent)
+    # ------------------------------------------------------------------
+
+    async def open_session(self, *, kind: str, instructions: str | None, opts: dict) -> str:
+        sid = f"mock-sess-{len(self._sessions)}"  # deterministic by open order
+        self._sessions[sid] = _MockSession(kind=kind, instructions=instructions)
+        return sid
+
+    async def send_turn(
+        self,
+        session_id: str,
+        prompt: str,
+        opts: dict,
+        schema_json: dict | None,
+        *,
+        history: Sequence[dict] = (),
+    ) -> AgentResult:
+        # Folding history into the seed makes each turn deterministically distinct,
+        # so a multi-turn session does not echo the same synthetic answer.
+        rng = random.Random(_seed(prompt, opts, schema_json, history))
+        raw = self._pick_raw(prompt, opts, schema_json, rng)
+        result = self._result(prompt, opts.get("label"), raw, schema_json, rng)
+        sess = self._sessions.get(session_id)
+        if sess is not None:
+            sess.turns += 1
+        return result
+
+    async def close_session(self, session_id: str) -> None:
+        self._sessions.pop(session_id, None)
+
+    async def aclose(self) -> None:
+        self._sessions.clear()
+
+    # ------------------------------------------------------------------
+    # Shared synthesis (used by ``run`` and ``send_turn``)
+    # ------------------------------------------------------------------
+
+    def _pick_raw(self, prompt: str, opts: dict, schema_json: dict | None, rng: random.Random) -> Any:
+        """Resolve a fixture/responder override, or ``None`` to fall through to synth."""
+        label = opts.get("label")
         if label in self.fixtures:
             raw = self.fixtures[label]
-            if callable(raw):
-                raw = raw(prompt, opts, schema_json, rng)
-        elif self.responder is not None:
-            raw = self.responder(prompt, opts, schema_json, rng)
+            return raw(prompt, opts, schema_json, rng) if callable(raw) else raw
+        if self.responder is not None:
+            return self.responder(prompt, opts, schema_json, rng)
+        return None
 
+    @staticmethod
+    def _result(
+        prompt: str,
+        label: str | None,
+        raw: Any,
+        schema_json: dict | None,
+        rng: random.Random,
+    ) -> AgentResult:
+        """Turn a raw override (or synth fallback) into an :class:`AgentResult`."""
         if raw is SKIP:
             return AgentResult(skipped=True)
-
         if raw is None:
             raw = synth(schema_json, rng) if schema_json is not None else _synth_string(label, rng)
-
         if schema_json is not None:
             payload = json.dumps(raw, ensure_ascii=False)
             return AgentResult(structured=raw, tokens=len(prompt) // 4 + len(payload) // 4)
-
         text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
         return AgentResult(text=text, tokens=len(prompt) // 4 + len(text) // 4)

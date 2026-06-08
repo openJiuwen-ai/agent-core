@@ -69,6 +69,32 @@ class Provider(Protocol):
         """Run another workflow inline (one level deep)."""
         ...
 
+    def agent_session(
+        self,
+        *,
+        label: str | None = ...,
+        phase: str | None = ...,
+        instructions: str | None = ...,
+        options: dict | None = ...,
+    ) -> Any:
+        """Open a stateful, multi-turn agent session (returns an ``AgentSession``)."""
+        ...
+
+    def human_session(
+        self,
+        *,
+        label: str | None = ...,
+        phase: str | None = ...,
+        instructions: str | None = ...,
+        options: dict | None = ...,
+    ) -> Any:
+        """Open a stateful, multi-turn human session (returns an ``AgentSession``)."""
+        ...
+
+    async def human(self, prompt: str, *, schema: Any = ..., options: dict | None = ...) -> Any:
+        """One-shot human turn: ask a person once and return the (typed) answer."""
+        ...
+
     @property
     def budget(self) -> "BudgetView":
         """The active run's budget view."""

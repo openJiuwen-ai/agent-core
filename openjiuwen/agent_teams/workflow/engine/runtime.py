@@ -50,6 +50,7 @@ class Runtime:
     current_phase: str | None = None
     wf_depth: int = 0
     warned_concurrent_scope: bool = False  # one-shot guard for the raw-gather warning
+    warned_concurrent_session: bool = False  # one-shot guard for overlapping session sends
 
     def make_cap(self) -> int:
         """Concurrent ``agent()`` calls allowed. Clamped to >= 1."""

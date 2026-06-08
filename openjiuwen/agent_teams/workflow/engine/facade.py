@@ -39,6 +39,7 @@ from .backends import AgentBackend, AgentResult, MockBackend
 from .errors import LintError, MetaError, SchemaError, WorkflowError
 from .journal import Journal
 from .loader import LoadedWorkflow, load_workflow_source
+from .primitives import AgentSession, HumanSession
 from .runner import run_workflow
 from .runtime import Runtime
 
@@ -142,6 +143,55 @@ async def workflow(name_or_path: str, args: Any = None) -> Any:
     return await current_provider().workflow(name_or_path, args)
 
 
+def agent_session(
+    *,
+    label: str | None = None,
+    phase: str | None = None,
+    instructions: str | None = None,
+    options: dict | None = None,
+) -> AgentSession:
+    """Open a stateful, multi-turn agent. Delegates to the current provider."""
+    return current_provider().agent_session(
+        label=label, phase=phase, instructions=instructions, options=options
+    )
+
+
+def human_session(
+    *,
+    label: str | None = None,
+    phase: str | None = None,
+    instructions: str | None = None,
+    options: dict | None = None,
+) -> AgentSession:
+    """Open a stateful, multi-turn human participant. Delegates to the current provider."""
+    return current_provider().human_session(
+        label=label, phase=phase, instructions=instructions, options=options
+    )
+
+
+@overload
+async def human(prompt: str, *, schema: type[M], options: dict | None = ...) -> "M | None":
+    """Overload: ``schema=<pydantic model>`` narrows the answer to that model."""
+    ...
+
+
+@overload
+async def human(prompt: str, *, schema: dict, options: dict | None = ...) -> "dict | None":
+    """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
+    ...
+
+
+@overload
+async def human(prompt: str, *, schema: None = ..., options: dict | None = ...) -> "str | None":
+    """Overload: no ``schema`` returns the person's answer as raw text."""
+    ...
+
+
+async def human(prompt: str, *, schema: Any = None, options: dict | None = None) -> Any:
+    """One-shot human turn. Delegates to the current provider."""
+    return await current_provider().human(prompt, schema=schema, options=options)
+
+
 class _BudgetProxy:
     """Public ``budget``: proxies to ``current_provider().budget`` per access."""
 
@@ -182,6 +232,11 @@ def flatten_filter(xs: Sequence) -> list:
 __all__ = [
     # script-facing primitives (the contract)
     "agent",
+    "agent_session",
+    "human_session",
+    "human",
+    "AgentSession",
+    "HumanSession",
     "parallel",
     "pipeline",
     "map_parallel",
