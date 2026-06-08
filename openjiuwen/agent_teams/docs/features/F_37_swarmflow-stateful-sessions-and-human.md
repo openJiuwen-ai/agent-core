@@ -80,9 +80,11 @@ swarmflow 此前只有一种执行单位：单轮 worker（`agent()` → `TeamWo
   改为 harness `start(session=)` 由 session 恢复。
 - **human 做成完整 human_agent 团队成员（spawn/roster/HITT 全套）**：对一个瞬时问答点过度
   设计。只复用 human_agent 的"avatar 格式化 + 通知外部"语义。
-- **HUMAN_PROMPT 作为引擎 `progress_sink` 事件并带 corr**：corr 由 uuid 生成是非确定 IO，
-  引擎层禁用以保 resume 确定性。corr 由 backend 生成，"等真人"信号走 backend 回调/messager；
-  human turn 本身仍以 `AGENT_STARTED/COMPLETED` 落进 4 层。
+- **随机 uuid 作 correlation_id**：被拒——uuid 在"等真人期间中断 → resume"时会变，UI 上已显示
+  的旧 corr 失效、真人回复被拒，破坏人机交互可重放。改为引擎确定性生成 `{phase}:{label}:{turn}`
+  （与 agent 的结构化 journal key 同源思想），脚本流程确定故重放一致；外部回复带非法 corr（不匹配
+  任何 pending）则 `submit_human_reply` 拒绝 + 告警。HUMAN_PROMPT 仍从 backend 等待路径发（只在
+  实际等人时），human turn 本身以 `AGENT_STARTED/COMPLETED` 落进 4 层。
 - **真人回复专用 facade `answer_swarmflow_human`**：评估后选了"复用 `interact_agent_team`
   薄路由"（seam B），不新增公共表面（详见已知遗留）。
 
@@ -103,7 +105,9 @@ swarmflow 此前只有一种执行单位：单轮 worker（`agent()` → `TeamWo
   的 `on_human_prompt(member, corr, prompt)` 由 `run_swarmflow` 接到 `observer.emit
   (WorkflowProgressEvent(kind=HUMAN_PROMPT, ...))` → `_publish` → `WorkflowProgressTeamEvent`
   （加 `correlation_id`）→ leader `WorkflowHandler` 渲染 `workflow.human_prompt`/`human_replied`
-  文案（i18n cn/en）。corr 由 backend 生成（非确定 IO，progress 不进 journal）。
+  文案（i18n cn/en）。**corr 由引擎确定性生成 `{phase}:{label}:{turn}`**（`turn = len(history)//2`，
+  hit/miss 都推进），跨 resume 稳定；HUMAN_PROMPT 事件只从 backend 等待路径发（实际等人时），
+  故不在 cache-hit 重放上出现，progress 也不进 journal。
 - **装配**：`agent_configurator` 计算 `swarmflow_human_base_spec`（`base_specs.get
   ("human_agent")` 缺省回退 worker spec），经 `inject_team_handles` →
   `SWARMFLOW_HUMAN_BASE_SPEC` handle → `elements`/`team_tool_rail`/`tool_factory` →
